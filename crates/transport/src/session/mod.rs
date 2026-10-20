@@ -902,6 +902,13 @@ fn initialize_route_safety_metric_series(
             .copied()
             .filter_map(configured_exact_export_family_label),
     );
+    if families.contains(&(Afi::Ipv6, Safi::Unicast)) {
+        metrics.initialize_export_family_suppressed_series(
+            peer_label,
+            "ipv6_unicast",
+            rustbgpd_telemetry::reason_labels::ExactExportReason::MissingIpv6NextHop,
+        );
+    }
     metrics.initialize_update_malformed_series(peer_label);
 }
 

@@ -280,9 +280,19 @@ Edges:
 - **Bounded work per tick.** The tick does O(live owners) table work and
   sends one message. The RIB applies it in one turn, the same way it applies
   a peer-down of the same size (`crates/rib/src/manager/peer_lifecycle.rs:121`).
-  There is no per-owner route cap: an owner's routes grow only through
-  `operator_only` adds. If measurement shows that a large owner stalls the
-  actor, expiry adopts the peer-down chunking rather than adding a new
+  One owner holds at most 16,384 keys, unicast and FlowSpec together, so a
+  batch for all 64 owners withdraws at most about one full table, the size
+  of a full-table peer-down. A leased add of a new key past that cap returns
+  `RESOURCE_EXHAUSTED` and changes nothing; keys awaiting expiry still count.
+  Measured on a development host (release build, one eBGP receiving peer,
+  three interleaved runs each, the `expiry_batch_turn` and `peer_down_turn`
+  measurements in the RIB tests): one owner at the cap expires in a turn of
+  about 22 ms, against about 20 ms for a peer-down of the same size. All 64
+  owners at the cap expire in 2.9-3.2 s, against 2.2-2.6 s for a 1,048,576
+  route peer-down. Source peer-down services the readiness lane during that
+  turn; the expiry batch does not yet, so a batch that large can hold
+  readiness answers until it finishes. Bringing the batch under the same
+  readiness ownership as peer-down is the planned fix, rather than a new
   mechanism.
 - **Graceful Restart selection deferral** delays distribution of the expiry
   withdrawal exactly as it delays an injected add today.
@@ -325,7 +335,7 @@ generation. Tests use `#[tokio::test(start_paused = true)]` and
 - `lease_seconds` is 5..=3600; 0 and out-of-range values are rejected. The
   floor stops a renewal interval shorter than one RIB turn under load. The
   ceiling keeps a forgotten controller's blast radius to about an hour.
-- There are at most 64 live owners.
+- There are at most 64 live owners, and each holds at most 16,384 keys.
 - These are constants, not config. A knob is added only when an operator
   needs a different value.
 
@@ -388,7 +398,9 @@ generation. Tests use `#[tokio::test(start_paused = true)]` and
 - **Expiry task failure:** if the task exits unexpectedly, leases stop
   expiring and owned state becomes permanent without anyone seeing it.
   `main` supervises the task beside the RIB handle (`src/main.rs:6445`), and
-  an unexpected exit starts shutdown as a component failure.
+  an unexpected exit starts shutdown as a component failure. When the task
+  exits because the RIB's receiver is gone, `main` joins the RIB handle and
+  reports the RIB failure instead.
 
 ### 10. Observability
 
@@ -427,7 +439,8 @@ removed.
 - Validation: owner length 0/1/64/65 and illegal bytes; `lease_seconds`
   0/4/5/3600/3601; with each, the RIB and table are unchanged.
 - Owner cap: the 65th owner gets `RESOURCE_EXHAUSTED` and no route is
-  inserted.
+  inserted. Key cap: an owner's 16,385th key gets `RESOURCE_EXHAUSTED`, while
+  replacing a held key and other owners' adds still succeed.
 - Mismatch matrix: owned onto another owner, owned onto unowned, unowned onto
   owned, delete with the wrong owner, delete with `""` on owned, and
   `override_owner` succeeding. Each rejection leaves the RIB, table and

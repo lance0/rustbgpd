@@ -815,6 +815,33 @@ fn modification_actions_lower_to_route_modifications() {
 }
 
 #[test]
+fn set_next_hop_refuses_unspecified_and_multicast() {
+    for addr in ["0.0.0.0", "::", "224.0.0.5", "ff02::1"] {
+        let (_, rendered) = diagnostics_of(&format!(
+            "policy p {{ term t {{ set next-hop {addr}; accept }} }}"
+        ));
+        assert!(
+            rendered.contains(&format!("invalid `set next-hop {addr}`")),
+            "{rendered}"
+        );
+    }
+    for addr in ["192.0.2.1", "2001:db8::1", "fe80::1", "169.254.0.1"] {
+        let chain = compile_ok(&format!(
+            "policy p {{ term t {{ set next-hop {addr}; accept }} }}"
+        ));
+        let TermAction::Permit(mods) = &chain.policies[0].terms[0].action else {
+            panic!("expected permit")
+        };
+        assert_eq!(
+            mods.set_next_hop,
+            Some(crate::engine::NextHopAction::Specific(
+                addr.parse().unwrap()
+            ))
+        );
+    }
+}
+
+#[test]
 fn route_community_actions_lower_to_exact_rfc_bytes() {
     // Red proof: changing `.rpol` lowering to select type from only the numeric
     // global value makes the dotted-IPv4 rows type 0x02; forcing type 0x00,

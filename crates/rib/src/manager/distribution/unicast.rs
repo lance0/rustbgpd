@@ -12,6 +12,7 @@ use super::{
     rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
     validate_route_aspa, validate_route_rpki,
 };
+use crate::injection_lease::{InjectedKey, LeaseGeneration};
 use crate::update::InjectOutcome;
 
 /// Gate code and message for an export-policy deny.
@@ -1744,9 +1745,43 @@ impl RibManager {
         route: crate::route::Route,
         reply: tokio::sync::oneshot::Sender<Result<InjectOutcome, RibCommandError>>,
     ) {
+        let result = self
+            .inject_local_route(route, None)
+            .map(|(outcome, _)| outcome);
+        let _ = reply.send(result);
+    }
+
+    pub(in crate::manager) fn handle_inject_leased_route(
+        &mut self,
+        route: crate::route::Route,
+        owner: &str,
+        lease_seconds: u32,
+        reply: tokio::sync::oneshot::Sender<
+            Result<(InjectOutcome, LeaseGeneration), RibCommandError>,
+        >,
+    ) {
+        let result = self
+            .inject_local_route(route, Some((owner, lease_seconds)))
+            .map(|(outcome, generation)| {
+                (
+                    outcome,
+                    generation.expect("a leased add returns its generation"),
+                )
+            });
+        let _ = reply.send(result);
+    }
+
+    /// Insert a local route, unowned or under `lease`. The ownership check
+    /// and the lease join or start happen in this turn, before anything
+    /// changes; a rejection leaves the RIB, the lease table and the wire as
+    /// they were (ADR-0141).
+    pub(in crate::manager) fn inject_local_route(
+        &mut self,
+        route: crate::route::Route,
+        lease: Option<(&str, u32)>,
+    ) -> Result<(InjectOutcome, Option<LeaseGeneration>), RibCommandError> {
         let prefix = route.prefix;
         let mut route = route;
-        self.attr_intern.intern(&mut route.attributes);
         // Validate against the current VRP table, as session routes are on
         // insert and as cache revalidation later does for the local
         // Adj-RIB-In; otherwise a replacement would reset the origin state to
@@ -1754,6 +1789,24 @@ impl RibManager {
         if let Some(table) = self.vrp_table.as_deref() {
             route.validation_state = validate_route_rpki(&route, table);
         }
+        let key = InjectedKey::Unicast(prefix, route.path_id);
+        let present = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get(&prefix, route.path_id).is_some());
+        // Ownership and capacity are decided before anything changes, so a
+        // refused add leaves the RIB, the lease table and the attribute
+        // intern table as they were.
+        let generation = if let Some((owner, lease_seconds)) = lease {
+            Some(
+                self.admit_injected_lease(&key, present, owner, lease_seconds)?
+                    .generation,
+            )
+        } else {
+            self.check_injected_owner(&key, "")?;
+            None
+        };
+        self.attr_intern.intern(&mut route.attributes);
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
@@ -1777,8 +1830,7 @@ impl RibManager {
         };
         if outcome == InjectOutcome::Unchanged {
             debug!(%prefix, ?outcome, "injected local route");
-            let _ = reply.send(Ok(outcome));
-            return;
+            return Ok((outcome, generation));
         }
         let replaced = rib.insert(route);
         debug!(%prefix, ?outcome, "injected local route");
@@ -1797,8 +1849,7 @@ impl RibManager {
         self.distribute_changes(&changed, &affected);
         self.defer_unicast_attr_gc(usize::from(replaced));
         self.sync_attr_intern_gauge();
-
-        let _ = reply.send(Ok(outcome));
+        Ok((outcome, generation))
     }
 
     pub(in crate::manager) fn handle_withdraw_injected(
@@ -1806,41 +1857,70 @@ impl RibManager {
         prefix: Prefix,
         path_id: u32,
         allow_missing: bool,
-        reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
+        owner: &str,
+        override_owner: bool,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::update::InjectedRemoval, RibCommandError>,
+        >,
     ) {
+        let key = InjectedKey::Unicast(prefix, path_id);
+        let present = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get(&prefix, path_id).is_some());
+        if !override_owner
+            && present
+            && let Err(rejection) = self.check_injected_owner(&key, owner)
+        {
+            let _ = reply.send(Err(rejection));
+            return;
+        }
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw(&prefix, path_id) {
+            let unicast_lens = rib.unicast_lens();
+            let tag = self.forget_injected(&key);
             debug!(%prefix, "withdrawn injected route");
-            let rib_len = rib.unicast_lens();
-            crate::manager::helpers::set_rib_prefixes(
-                &self.metrics,
-                &LOCAL_PEER.to_string(),
-                crate::manager::helpers::UNICAST_FAMILIES,
-                rib_len,
-            );
-            let mut affected = HashSet::new();
-            affected.insert(prefix);
-            let changed = self.recompute_best(&affected);
-            self.distribute_changes(&changed, &affected);
-            // Same rule as a session withdrawal: the final source withdrawal
-            // collects immediately; anything else stays bounded and deferred.
-            if rib_len == [0, 0] {
-                self.gc_attr_intern();
-            } else {
-                self.defer_unicast_attr_gc(1);
-            }
-            self.sync_attr_intern_gauge();
-            let _ = reply.send(Ok(true));
+            self.finish_local_unicast_withdrawals(&HashSet::from([prefix]), unicast_lens);
+            let _ = reply.send(Ok(crate::update::InjectedRemoval { removed: true, tag }));
         } else if allow_missing {
-            let _ = reply.send(Ok(false));
+            let _ = reply.send(Ok(crate::update::InjectedRemoval {
+                removed: false,
+                tag: None,
+            }));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
                 "prefix {prefix} not found"
             ))));
         }
+    }
+
+    /// Publish the local Adj-RIB-In size and select and distribute after
+    /// local unicast withdrawals.
+    pub(in crate::manager) fn finish_local_unicast_withdrawals(
+        &mut self,
+        affected: &HashSet<Prefix>,
+        unicast_lens: [usize; 2],
+    ) {
+        crate::manager::helpers::set_rib_prefixes(
+            &self.metrics,
+            &LOCAL_PEER.to_string(),
+            crate::manager::helpers::UNICAST_FAMILIES,
+            unicast_lens,
+        );
+        let withdrawn = affected.len();
+        let changed = self.recompute_best(affected);
+        self.distribute_changes(&changed, affected);
+        // Same rule as a session withdrawal: the final source withdrawal
+        // collects immediately; anything else stays bounded and deferred.
+        if unicast_lens == [0, 0] {
+            self.gc_attr_intern();
+        } else {
+            self.defer_unicast_attr_gc(withdrawn);
+        }
+        self.sync_attr_intern_gauge();
     }
 
     /// Multi-path distribution for a single prefix to a single peer.
@@ -3097,6 +3177,23 @@ impl RibManager {
             if path_id != 0 {
                 result.withdraw.push((*prefix, path_id));
             }
+        }
+    }
+}
+
+/// Map an ADR-0141 ownership or capacity rejection to its command error.
+pub(in crate::manager) fn lease_rejection(
+    rejection: crate::injection_lease::LeaseRejection,
+) -> RibCommandError {
+    match rejection {
+        crate::injection_lease::LeaseRejection::OwnerMismatch(message) => {
+            RibCommandError::FailedPrecondition(message)
+        }
+        crate::injection_lease::LeaseRejection::OwnerCap => {
+            RibCommandError::ResourceExhausted(format!(
+                "at most {} owners can hold a live injection lease",
+                crate::injection_lease::MAX_LIVE_OWNERS
+            ))
         }
     }
 }

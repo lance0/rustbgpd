@@ -203,7 +203,7 @@ fn unicast_withdraw_injected_reclaims_attr_intern_after_loc_rib_recompute() {
     assert_eq!(manager.attr_intern.len(), 1);
 
     let (reply_tx, _reply_rx) = oneshot::channel();
-    manager.handle_withdraw_injected(Prefix::V4(prefix), 0, false, reply_tx);
+    manager.handle_withdraw_injected(Prefix::V4(prefix), 0, false, "", false, reply_tx);
 
     assert!(
         manager.loc_rib.get(&Prefix::V4(prefix)).is_none(),
@@ -905,7 +905,7 @@ fn withdraw_injected(manager: &mut RibManager, count: usize) {
     for index in 0..count {
         let prefix = diverse_injected_route(index, 0).prefix;
         let (reply, mut response) = oneshot::channel();
-        manager.handle_withdraw_injected(prefix, 0, false, reply);
+        manager.handle_withdraw_injected(prefix, 0, false, "", false, reply);
         response.try_recv().unwrap().unwrap();
         assert!(manager.ribs[&LOCAL_PEER].get(&prefix, 0).is_none());
         assert!(manager.loc_rib.get(&prefix).is_none());
@@ -960,7 +960,14 @@ async fn injected_attr_gc_final_withdrawal_collects_immediately() {
         gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]).abs() < f64::EPSILON
     );
     let (reply, mut response) = oneshot::channel();
-    manager.handle_withdraw_injected(diverse_injected_route(0, 0).prefix, 0, false, reply);
+    manager.handle_withdraw_injected(
+        diverse_injected_route(0, 0).prefix,
+        0,
+        false,
+        "",
+        false,
+        reply,
+    );
     assert!(matches!(
         response.try_recv().unwrap(),
         Err(crate::RibCommandError::NotFound(_))

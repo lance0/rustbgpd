@@ -65,3 +65,6 @@ remote_asn = 65002
 description = "frr-peer"
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
+# IPv6 routes need an IPv6 next hop, and this session runs over IPv4. Without
+# this, the session withholds every IPv6 unicast route from FRR.
+local_ipv6_nexthop = "fd99::10"

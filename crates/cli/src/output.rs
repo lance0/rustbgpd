@@ -1113,6 +1113,7 @@ fn render_route_table_at(
         origin: String,
         path_id: String,
         age: Option<String>,
+        lease: Option<String>,
     }
 
     // GR stale flag column ("S" = stale per RFC 4724, "L" = LLGR stale
@@ -1162,6 +1163,8 @@ fn render_route_table_at(
                     0 => "-".to_string(),
                     received_at => format_duration(now_epoch_seconds.saturating_sub(received_at)),
                 }),
+                lease: (!r.injection_owner.is_empty())
+                    .then(|| lease_text(&r.injection_owner, r.lease_remaining_ms)),
             }
         })
         .collect();
@@ -1192,19 +1195,45 @@ fn render_route_table_at(
         .max()
         .unwrap_or(0)
         .max(6);
+    // ADR-0141 lease column, appended only when some row is owned so the
+    // everyday table is unchanged.
+    let any_lease = rows.iter().any(|r| r.lease.is_some());
+    let w_age = rows
+        .iter()
+        .filter_map(|r| r.age.as_ref().map(String::len))
+        .max()
+        .unwrap_or(0)
+        .max(3);
     let mut out = String::new();
     let header_pad = if any_stale { "    " } else { "   " };
     if show_age {
         let _ = writeln!(
             out,
-            "{header_pad}{:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {:<6} Age",
-            "Prefix", "Next Hop", "AS Path", "LP", "MED", "Origin", "PathID",
+            "{header_pad}{:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {:<6} {}",
+            "Prefix",
+            "Next Hop",
+            "AS Path",
+            "LP",
+            "MED",
+            "Origin",
+            "PathID",
+            if any_lease {
+                format!("{:<w_age$} Lease", "Age")
+            } else {
+                "Age".to_string()
+            },
         );
     } else {
         let _ = writeln!(
             out,
-            "{header_pad}{:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} PathID",
-            "Prefix", "Next Hop", "AS Path", "LP", "MED", "Origin",
+            "{header_pad}{:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {}",
+            "Prefix",
+            "Next Hop",
+            "AS Path",
+            "LP",
+            "MED",
+            "Origin",
+            if any_lease { "PathID Lease" } else { "PathID" },
         );
     }
 
@@ -1223,9 +1252,14 @@ fn render_route_table_at(
                 row.med,
                 row.origin,
                 row.path_id,
-                row.age
-                    .as_deref()
-                    .expect("age is populated when the column is enabled"),
+                lease_tail(
+                    row.age
+                        .as_deref()
+                        .expect("age is populated when the column is enabled"),
+                    w_age,
+                    any_lease,
+                    row.lease.as_deref(),
+                ),
             );
         } else {
             let _ = writeln!(
@@ -1238,11 +1272,48 @@ fn render_route_table_at(
                 row.lp,
                 row.med,
                 row.origin,
-                row.path_id,
+                lease_tail(&row.path_id, 6, any_lease, row.lease.as_deref()),
             );
         }
     }
     out
+}
+
+/// The table's last column, padded and followed by the lease when the lease
+/// column is shown; unpadded otherwise, as before.
+fn lease_tail(last: &str, width: usize, any_lease: bool, lease: Option<&str>) -> String {
+    if any_lease {
+        format!("{last:<width$} {}", lease.unwrap_or("-"))
+    } else {
+        last.to_string()
+    }
+}
+
+/// ADR-0141 lease read-back for an owned injected entry. The incarnation is a
+/// string so JSON consumers that read numbers as doubles keep it exact.
+pub(crate) fn lease_json(
+    owner: &str,
+    generation: Option<&proto::LeaseGeneration>,
+    remaining_ms: Option<u32>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "owner": owner,
+        "generation": generation.map(|generation| serde_json::json!({
+            "incarnation": generation.incarnation.to_string(),
+            "sequence": generation.sequence,
+        })),
+        "remaining_ms": remaining_ms,
+    })
+}
+
+/// Human lease read-back: the owner and the time left, or `expired` while the
+/// withdrawal is pending.
+pub(crate) fn lease_text(owner: &str, remaining_ms: Option<u32>) -> String {
+    match remaining_ms {
+        Some(0) => format!("{owner} expired"),
+        Some(ms) => format!("{owner} {}", format_duration(u64::from(ms.div_ceil(1000)))),
+        None => owner.to_string(),
+    }
 }
 
 /// Print a mutating command result, either as JSON or plain text.
@@ -2512,6 +2583,37 @@ Neighbor    AS    State       Uptime   Rx Pfx Tx Pfx Description    Source      
             concat!(
                 "   Prefix      Next Hop  AS Path  LP MED  Origin PathID\n",
                 "*> 10.0.0.0/24 192.0.2.1 65001   100   -  igp    \n",
+            )
+        );
+    }
+
+    /// ADR-0141 lease column: appended only when some row is owned, with
+    /// `-` for unowned rows and `expired` while a withdrawal is pending.
+    #[test]
+    fn route_table_shows_lease_column_only_for_owned_routes() {
+        owo_colors::set_override(false);
+        let mut owned = route_fixture(false, false);
+        owned.prefix = "10.0.1.0".to_string();
+        owned.injection_owner = "rtbh-pop1".to_string();
+        owned.lease_remaining_ms = Some(12_001);
+        let mut expired = route_fixture(false, false);
+        expired.prefix = "10.0.2.0".to_string();
+        expired.injection_owner = "rtbh-pop1".to_string();
+        expired.lease_remaining_ms = Some(0);
+        assert_eq!(
+            render_route_table(&[route_fixture(false, false), owned.clone(), expired]),
+            concat!(
+                "   Prefix      Next Hop  AS Path  LP MED  Origin PathID Lease\n",
+                "*> 10.0.0.0/24 192.0.2.1 65001   100   -  igp           -\n",
+                "*> 10.0.1.0/24 192.0.2.1 65001   100   -  igp           rtbh-pop1 00:00:13\n",
+                "*> 10.0.2.0/24 192.0.2.1 65001   100   -  igp           rtbh-pop1 expired\n",
+            )
+        );
+        assert_eq!(
+            render_route_table_at(&[owned], true, 0),
+            concat!(
+                "   Prefix      Next Hop  AS Path  LP MED  Origin PathID Age Lease\n",
+                "*> 10.0.1.0/24 192.0.2.1 65001   100   -  igp           -   rtbh-pop1 00:00:13\n",
             )
         );
     }

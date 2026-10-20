@@ -61,7 +61,7 @@ fn format_action(a: &FlowSpecAction) -> String {
 }
 
 fn route_to_json(route: &crate::proto::FlowSpecRouteEntry) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "components": route.components.iter().map(format_component).collect::<Vec<_>>(),
         "component_details": route.components.iter().map(|component| serde_json::json!({
             "type": component.r#type,
@@ -75,7 +75,15 @@ fn route_to_json(route: &crate::proto::FlowSpecRouteEntry) -> serde_json::Value 
         "as_path": route.as_path,
         "communities": route.communities.iter().map(|c| output::format_community(*c)).collect::<Vec<_>>(),
         "extended_communities": route.extended_communities,
-    })
+    });
+    if !route.injection_owner.is_empty() {
+        value["lease"] = output::lease_json(
+            &route.injection_owner,
+            route.lease_generation.as_ref(),
+            route.lease_remaining_ms,
+        );
+    }
+    value
 }
 
 fn validation_name(validation: i32) -> &'static str {
@@ -104,8 +112,16 @@ fn received_route_to_json(row: &crate::proto::ReceivedFlowSpecRouteEntry) -> ser
 fn print_route(route: &crate::proto::FlowSpecRouteEntry) -> Result<(), CliError> {
     let components: Vec<String> = route.components.iter().map(format_component).collect();
     let actions: Vec<String> = route.actions.iter().map(format_action).collect();
+    let lease = if route.injection_owner.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " lease {}",
+            output::lease_text(&route.injection_owner, route.lease_remaining_ms)
+        )
+    };
     outln!(
-        "  match [{}] action [{}] from {} ({})",
+        "  match [{}] action [{}] from {} ({}){lease}",
         components.join(", "),
         actions.join(", "),
         route.peer_address,
@@ -345,6 +361,7 @@ pub async fn delete(
     family: i32,
     components: &[String],
     allow_missing: bool,
+    owner: super::InjectedOwner,
     json: bool,
 ) -> Result<(), CliError> {
     let parsed_components: Vec<FlowSpecComponent> = components
@@ -363,9 +380,12 @@ pub async fn delete(
             afi_safi: family,
             components: parsed_components,
             allow_missing,
+            owner: owner.owner,
+            override_owner: owner.override_owner,
         }),
     )
-    .await?
+    .await
+    .map_err(super::InjectedOwner::delete_error)?
     .into_inner();
     let outcome = delete_outcome_name(response.outcome);
     if json {

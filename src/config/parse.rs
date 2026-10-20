@@ -575,6 +575,11 @@ fn parse_modifications(
                         "invalid set_next_hop {other:?}: expected \"self\" or an IP address"
                     ),
                 })?;
+                NextHopAction::check_specific(addr).map_err(|why| {
+                    ConfigError::InvalidPolicyEntry {
+                        reason: format!("invalid set_next_hop {other:?}: {why}"),
+                    }
+                })?;
                 Some(NextHopAction::Specific(addr))
             }
         }

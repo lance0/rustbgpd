@@ -3389,9 +3389,13 @@ impl PeerManager {
             Ok(Err(error @ RibCommandError::NotFound(_))) => Err(DatasetRefreshFailure::Rejected(
                 format!("dataset export re-evaluation: {error}"),
             )),
-            Ok(Err(error @ RibCommandError::Internal(_))) => Err(DatasetRefreshFailure::Ambiguous(
-                format!("dataset export re-evaluation: {error}"),
-            )),
+            Ok(Err(
+                error @ (RibCommandError::Internal(_)
+                | RibCommandError::FailedPrecondition(_)
+                | RibCommandError::ResourceExhausted(_)),
+            )) => Err(DatasetRefreshFailure::Ambiguous(format!(
+                "dataset export re-evaluation: {error}"
+            ))),
             Err(_) => Err(DatasetRefreshFailure::Ambiguous(
                 "dataset export RIB dropped acknowledgement".to_string(),
             )),

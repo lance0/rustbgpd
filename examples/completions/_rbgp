@@ -1744,6 +1744,7 @@ _arguments "${_arguments_options[@]}" : \
 (delete)
 _arguments "${_arguments_options[@]}" : \
 '--path-id=[Path ID for Add-Path]:PATH_ID:_default' \
+'(--override-owner)--owner=[Lease owner the injected route belongs to; without it only an unowned route is deleted]:NAME:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1752,6 +1753,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'--override-owner[Delete the injected route whatever its lease owner, for example a stuck blackhole whose controller is gone]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
@@ -2317,6 +2319,7 @@ _arguments "${_arguments_options[@]}" : \
 '-a+[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
 '--family=[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
 '*--match=[Match components identifying the rule]:COMPONENTS:_default' \
+'(--override-owner)--owner=[Lease owner the injected rule belongs to; without it only an unowned rule is deleted]:NAME:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -2326,6 +2329,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--allow-missing[Succeed and report "not present" when no injected rule matches]' \
+'--override-owner[Delete the injected rule whatever its lease owner, for example a stuck filter whose controller is gone]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \

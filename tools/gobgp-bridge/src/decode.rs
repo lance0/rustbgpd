@@ -125,6 +125,8 @@ pub fn decode(request: &gobgp::AddPathRequest) -> Result<Decoded, Status> {
                 // A withdraw of a route the daemon no longer holds (a
                 // duplicate unban, or one after a daemon restart) is OK.
                 allow_missing: true,
+                owner: String::new(),
+                override_owner: false,
             }),
             uuid,
         });
@@ -489,6 +491,8 @@ mod tests {
                 prefix_length: 32,
                 path_id: 0,
                 allow_missing: true,
+                owner: String::new(),
+                override_owner: false,
             })
         );
         let mp = mp_reach_v6([0; 16], NLRI_V6_HOST);

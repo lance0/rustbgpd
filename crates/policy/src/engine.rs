@@ -289,6 +289,27 @@ pub enum NextHopAction {
     Specific(IpAddr),
 }
 
+impl NextHopAction {
+    /// Refuse an operator-supplied `set next-hop` address that can never be
+    /// a usable BGP next hop: unspecified (`0.0.0.0`, `::`) or multicast.
+    /// Link-local addresses stay accepted (RFC 2545 §3 link-local next hops,
+    /// RFC 3927 IPv4 link-local peerings). Every policy frontend (TOML,
+    /// `.rpol`) calls this before building [`Self::Specific`].
+    ///
+    /// # Errors
+    ///
+    /// Returns why `addr` is refused.
+    pub fn check_specific(addr: IpAddr) -> Result<(), &'static str> {
+        if addr.is_unspecified() {
+            Err("an unspecified address is not a usable next hop")
+        } else if addr.is_multicast() {
+            Err("a multicast address is never a valid BGP next hop")
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Computed `AS_PATH` prepend operand (LAN-296): `.rpol`
 /// `prepend as self|peer|origin|path-first <count>`.
 ///

@@ -1186,6 +1186,8 @@ pub struct ServeConfig {
     pub import_roster: crate::import_roster::ImportRosterReader,
     /// The RIB manager's published export roster (`GetPolicyStats`).
     pub export_roster: rustbgpd_rib::export_roster::ExportRosterReader,
+    /// The RIB manager's ADR-0141 injection lease table.
+    pub injection_leases: Arc<rustbgpd_rib::injection_lease::InjectionLeases>,
     /// Dedicated type-narrow RIB lane used only by core readiness.
     pub rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     /// Bounded RIB summary lane served during synchronous policy replacement.
@@ -1780,6 +1782,7 @@ async fn run_listener(
     let peer_mgr_operator_tx = config.peer_mgr_operator_tx;
     let import_roster = config.import_roster;
     let export_roster = config.export_roster;
+    let injection_leases = config.injection_leases;
     let rib_readiness_tx = config.rib_readiness_tx;
     let rib_summary_tx = config.rib_summary_tx;
     let validation_snapshot = config.validation_snapshot;
@@ -1856,6 +1859,7 @@ async fn run_listener(
                 peer_mgr_operator_tx,
                 import_roster.clone(),
                 export_roster.clone(),
+                Arc::clone(&injection_leases),
                 asn,
                 router_id,
                 listen_port,
@@ -1930,6 +1934,7 @@ async fn run_listener(
                 peer_mgr_operator_tx,
                 import_roster.clone(),
                 export_roster.clone(),
+                Arc::clone(&injection_leases),
                 asn,
                 router_id,
                 listen_port,
@@ -2011,6 +2016,7 @@ async fn run_tcp_listener(
     peer_mgr_operator_tx: mpsc::Sender<EnqueuedOperatorQuery>,
     import_roster: crate::import_roster::ImportRosterReader,
     export_roster: rustbgpd_rib::export_roster::ExportRosterReader,
+    injection_leases: Arc<rustbgpd_rib::injection_lease::InjectionLeases>,
     asn: u32,
     router_id: String,
     listen_port: u32,
@@ -2151,7 +2157,8 @@ async fn run_tcp_listener(
             fib_route_snapshot.clone(),
         )
         .with_fib_table_control(access_mode, fib_table_control.clone())
-        .with_known_peer_queries(known_peers.clone()),
+        .with_known_peer_queries(known_peers.clone())
+        .with_injection_leases(Arc::clone(&injection_leases)),
         interceptor.clone(),
     ));
     routes.add_service(EventServiceServer::with_interceptor(
@@ -2176,7 +2183,8 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
-        InjectionService::new(rib_tx, access_mode),
+        InjectionService::new(rib_tx, access_mode)
+            .with_injection_leases(Arc::clone(&injection_leases)),
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(
@@ -2336,6 +2344,7 @@ async fn run_uds_listener(
     peer_mgr_operator_tx: mpsc::Sender<EnqueuedOperatorQuery>,
     import_roster: crate::import_roster::ImportRosterReader,
     export_roster: rustbgpd_rib::export_roster::ExportRosterReader,
+    injection_leases: Arc<rustbgpd_rib::injection_lease::InjectionLeases>,
     asn: u32,
     router_id: String,
     listen_port: u32,
@@ -2433,7 +2442,8 @@ async fn run_uds_listener(
             fib_route_snapshot.clone(),
         )
         .with_fib_table_control(access_mode, fib_table_control.clone())
-        .with_known_peer_queries(known_peers.clone()),
+        .with_known_peer_queries(known_peers.clone())
+        .with_injection_leases(Arc::clone(&injection_leases)),
         interceptor.clone(),
     ));
     routes.add_service(EventServiceServer::with_interceptor(
@@ -2458,7 +2468,8 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
-        InjectionService::new(rib_tx, access_mode),
+        InjectionService::new(rib_tx, access_mode)
+            .with_injection_leases(Arc::clone(&injection_leases)),
         interceptor.clone(),
     ));
     routes.add_service(NeighborServiceServer::with_interceptor(

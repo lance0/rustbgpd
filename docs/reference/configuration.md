@@ -1726,7 +1726,12 @@ advertises the Extended Next Hop capability. If negotiated, IPv4 unicast
 routes may be exchanged via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` using an
 IPv6 next hop. For eBGP exports, `local_ipv6_nexthop` (if configured) is
 used as the IPv6 self next-hop; otherwise the local IPv6 socket address is
-used when available.
+used when available. An eBGP session with neither (for example IPv6 unicast
+over IPv4 transport) withholds the IPv6 unicast family from export for the
+whole session. It logs one WARN and counts the session in
+`bgp_export_family_suppressed_total`, and `rustbgpd --check` warns about the
+neighbor. Route-server-client sessions keep the family and instead refuse such
+routes one at a time (`bgp_exact_export_rejections_total`).
 
 Configuring `"l3vpn_ipv4_unicast"` also advertises IPv6 next-hop receive
 support for VPNv4 (AFI 1, SAFI 128, next-hop AFI 2), independently of the
@@ -3494,6 +3499,10 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_community_add`    | [string]    | Communities to add (standard, EC, or LC format)    |
 | `set_community_remove` | [string]    | Communities to remove                              |
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
+
+`set_next_hop` refuses an unspecified (`0.0.0.0`, `::`) or multicast address
+at config load, reload and API policy edits; IPv4 and IPv6 link-local
+addresses are accepted. `.rpol` `set next-hop` applies the same rule.
 
 `set_next_hop` follows the route's address family. An IPv6 address on an IPv4
 unicast route is an RFC 8950 next hop. An IPv4 address does not apply to an

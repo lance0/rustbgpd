@@ -1435,6 +1435,7 @@ mod flowspec;
 mod flowspec_advertised;
 mod gr_llgr;
 mod incremental_best;
+mod injection_lease;
 mod join_cohort;
 mod labeled;
 mod lifecycle;

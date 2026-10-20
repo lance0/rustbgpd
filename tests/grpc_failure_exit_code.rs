@@ -785,6 +785,10 @@ fn operations_key_log_table_covers_supervised_failures() {
             "metrics_handle",
             "metrics/readiness server exited unexpectedly",
         ),
+        (
+            "lease_expiry_handle",
+            "injection lease expiry task exited unexpectedly",
+        ),
     ] {
         let arm_header = format!("            result = &mut {handle} => {{");
         assert_eq!(
@@ -979,6 +983,67 @@ fn peer_manager_panic_uses_common_shutdown_and_exits_nonzero() {
         .collect::<Vec<_>>();
     assert_eq!(reports.len(), 1, "one durable panic report: {reports:?}");
     assert!(reports[0].contains("injected peer manager task panic"));
+}
+
+/// An unexpected exit of the ADR-0141 lease expiry task is a component
+/// failure: leases would otherwise stop expiring unseen.
+///
+/// Break-to-red: without its supervision arm the daemon keeps running.
+#[test]
+fn lease_expiry_panic_uses_common_shutdown_and_exits_nonzero() {
+    let temp = private_tempdir();
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_LEASE_EXPIRY_PANIC", "1")),
+    );
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "lease expiry task panic must exit 1\n{logs}"
+    );
+    for message in [
+        "injected lease expiry task panic",
+        "injection lease expiry task exited unexpectedly",
+        "initiating shutdown due to injection lease expiry failure",
+        "initiating coordinated shutdown",
+        "rustbgpd exiting",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    assert!(!logs.contains("RIB manager exited unexpectedly"), "{logs}");
+    assert!(
+        !logs.contains("JoinHandle polled after completion"),
+        "{logs}"
+    );
+}
+
+/// The lease expiry arm reports a closed RIB channel as the RIB's failure by
+/// joining the RIB handle, as the dampening adapter arm does.
+#[test]
+fn lease_expiry_arm_attributes_a_closed_rib_channel_to_the_rib() {
+    let source = include_str!("../src/main.rs");
+    let arm_start = source
+        .find("            result = &mut lease_expiry_handle => {")
+        .expect("shutdown select must supervise the lease expiry task");
+    let arm = &source[arm_start..];
+    let arm = &arm[..arm.find("\n            }").unwrap()];
+    let closed = arm
+        .find("ExpiryExit::RibChannelClosed")
+        .expect("the arm must distinguish a closed RIB channel");
+    let join = arm
+        .find("(&mut rib_handle).await")
+        .expect("the arm must join the RIB handle");
+    let rib_error = arm
+        .find("error!(?result, \"RIB manager exited unexpectedly\");")
+        .expect("the arm must report the RIB failure");
+    let own_error = arm
+        .find("error!(?result, \"injection lease expiry task exited unexpectedly\");")
+        .expect("the arm must report its own failure otherwise");
+    assert!(closed < join && join < rib_error && rib_error < own_error);
 }
 
 #[test]
@@ -1391,10 +1456,10 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
     assert!(help.contains("or unexpected RIB manager, peer manager, RPKI subsystem,"));
     assert!(help.contains("gRPC server, BGP listener task, BGP accept-forwarding task,"));
-    assert!(help.contains("or metrics/readiness server exit)"));
+    assert!(help.contains("metrics/readiness server, or injection lease expiry task exit)"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, BGP accept-forwarding task, or metrics/readiness\nserver exited unexpectedly"));
+    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, BGP accept-forwarding task, metrics/readiness\nserver, or injection lease expiry task exited unexpectedly"));
 }
 
 #[test]

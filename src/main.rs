@@ -1867,7 +1867,7 @@ fn family_partitioned_listener_mss(
 fn check_warnings(config: &Config, listeners: &[GrpcListenerConfig]) -> usize {
     let mut warnings = warn_unpoliced_ebgp(config) + check_tls_expiry_warnings(listeners);
     for advisory in config.advisories() {
-        print_framed_warning(advisory.headline, advisory.detail);
+        print_framed_warning(advisory.headline, &advisory.detail);
         warnings += 1;
     }
     warnings
@@ -2369,8 +2369,8 @@ neither family; explicit
 .B listen_addresses
 mode could not bind every configured endpoint; a configured metrics/readiness
 listener failed to bind; or the RIB manager, peer manager, RPKI subsystem,
-gRPC server, BGP listener task, BGP accept-forwarding task, or metrics/readiness
-server exited unexpectedly),
+gRPC server, BGP listener task, BGP accept-forwarding task, metrics/readiness
+server, or injection lease expiry task exited unexpectedly),
 so that a supervisor configured
 with
 .B Restart=on\-failure
@@ -2466,7 +2466,7 @@ fn main() -> ExitCode {
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
                   or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
                   gRPC server, BGP listener task, BGP accept-forwarding task,\n     \
-                  or metrics/readiness server exit)\n  \
+                  metrics/readiness server, or injection lease expiry task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument).\n     \
                   For --diff: also a config that could not be loaded\n  \
                   --release-core-isolation exits 0 only when no owned link is left\n     \
@@ -3235,6 +3235,11 @@ const TEST_INITIAL_ROSTER_HOLD_ENV: &str = "RUSTBGPD_TEST_INITIAL_ROSTER_HOLD";
 const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
 
 /// Test-only fault injection; never set this in production. The only accepted
+/// value is `1`, which panics the ADR-0141 lease expiry task as it starts; all
+/// others are ignored with a sanitized warning.
+const TEST_LEASE_EXPIRY_PANIC_ENV: &str = "RUSTBGPD_TEST_LEASE_EXPIRY_PANIC";
+
+/// Test-only fault injection; never set this in production. The only accepted
 /// value is `1`, which shuts down the bound metrics/readiness listening socket
 /// so its accept loop takes the unusable-socket exit; all others are ignored
 /// with a sanitized warning.
@@ -3260,6 +3265,17 @@ fn resolve_test_peer_manager_panic() -> bool {
         Ok(value) if value == "1" => true,
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
             warn!("ignoring invalid {TEST_PEER_MANAGER_PANIC_ENV}; expected 1");
+            false
+        }
+    }
+}
+
+fn resolve_test_lease_expiry_panic() -> bool {
+    match std::env::var(TEST_LEASE_EXPIRY_PANIC_ENV) {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "1" => true,
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring invalid {TEST_LEASE_EXPIRY_PANIC_ENV}; expected 1");
             false
         }
     }
@@ -3877,6 +3893,7 @@ async fn run<T>(
     let test_peer_manager_panic = resolve_test_peer_manager_panic();
     let test_rpki_task_exit = resolve_test_rpki_task_exit();
     let test_metrics_listener_unusable = resolve_test_metrics_listener_unusable();
+    let test_lease_expiry_panic = resolve_test_lease_expiry_panic();
 
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
@@ -4543,6 +4560,7 @@ async fn run<T>(
     // GetPolicyStats reads the RIB's published export roster (ADR-0136)
     // instead of queueing on the RIB.
     let export_roster = rib_manager.export_roster();
+    let injection_leases = rib_manager.injection_leases();
     if config.flowspec.validation == config::FlowSpecValidationMode::Rfc9117 {
         rib_manager = rib_manager.with_flowspec_validation(config.global.asn);
     }
@@ -4585,6 +4603,17 @@ async fn run<T>(
         rib_manager = rib_manager.with_bmp_tx(tx);
     }
     let mut rib_handle = tokio::spawn(rib_manager.run());
+    // ADR-0141 lease expiry. It holds a RIB sender, so teardown cancels and
+    // joins it explicitly; an unexpected exit would leave owned injected
+    // state permanent, so it is supervised like the RIB.
+    let (lease_expiry_cancel, lease_expiry_cancel_rx) = tokio::sync::oneshot::channel();
+    let lease_expiry =
+        Arc::clone(&injection_leases).run_expiry(rib_tx.clone(), lease_expiry_cancel_rx);
+    let mut lease_expiry_handle = tokio::spawn(async move {
+        assert!(!test_lease_expiry_panic, "injected lease expiry task panic");
+        lease_expiry.await
+    });
+    let mut lease_expiry_exited = false;
 
     // Validation snapshot channel: broadcast VRP + ASPA tables to transport
     // sessions for import-time route validation.  Starts empty — sessions fall
@@ -5730,6 +5759,7 @@ async fn run<T>(
         peer_mgr_operator_tx: peer_mgr_operator_tx.clone(),
         import_roster,
         export_roster,
+        injection_leases: Arc::clone(&injection_leases),
         rib_readiness_tx: rib_readiness_tx.clone(),
         rib_summary_tx,
         validation_snapshot: {
@@ -6450,6 +6480,25 @@ async fn run<T>(
                 component_failed = true;
                 break;
             }
+            result = &mut lease_expiry_handle => {
+                lease_expiry_exited = true;
+                if matches!(
+                    result,
+                    Ok(rustbgpd_rib::injection_lease::ExpiryExit::RibChannelClosed)
+                ) {
+                    // The RIB dropped its receiver while a batch was pending.
+                    // Join it to report the original failure.
+                    let result = (&mut rib_handle).await;
+                    error!(?result, "RIB manager exited unexpectedly");
+                    info!("initiating shutdown due to RIB manager failure");
+                    component_failed = true;
+                    break;
+                }
+                error!(?result, "injection lease expiry task exited unexpectedly");
+                info!("initiating shutdown due to injection lease expiry failure");
+                component_failed = true;
+                break;
+            }
             result = &mut metrics_handle => {
                 error!(?result, "metrics/readiness server exited unexpectedly");
                 info!("initiating shutdown due to metrics/readiness server failure");
@@ -7042,6 +7091,15 @@ async fn run<T>(
         .ok();
     }
     let _evpn_apply_fence_guard = evpn_apply_fence;
+
+    // 1.9a-pre-lease Cancel and join the ADR-0141 lease expiry task, out of
+    // its sleep or its RIB queue wait, before any teardown that depends on
+    // the RIB. A cancelled expiry withdraws nothing; closing sessions
+    // withdraw the routes at peers.
+    let _ = lease_expiry_cancel.send(());
+    if !lease_expiry_exited && let Err(error) = lease_expiry_handle.await {
+        error!(%error, "injection lease expiry task panicked");
+    }
 
     // 1.9a-pre Stop the ADR-0085 link-drain coordinator before the
     // EVPN actors drain: a carrier edge arriving mid-teardown must

@@ -6824,7 +6824,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__flowspec__subcmd__delete)
-            opts="-a -s -j -h --family --match --allow-missing --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            opts="-a -s -j -h --family --match --allow-missing --owner --override-owner --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6839,6 +6839,10 @@ _rbgp() {
                     return 0
                     ;;
                 --match)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --owner)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -12711,13 +12715,17 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__delete)
-            opts="-s -j -h --path-id --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            opts="-s -j -h --path-id --owner --override-owner --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --path-id)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --owner)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

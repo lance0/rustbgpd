@@ -21,6 +21,7 @@ mod export_chains;
 mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
+mod lease_expiry;
 mod outbound_prefix_limits;
 mod peer_lifecycle;
 mod queries;
@@ -1051,6 +1052,19 @@ pub struct RibManager {
     /// re-arm) becomes deterministically observable. `None` in
     /// production — the only cost when unset is an `is_some()` check.
     test_ingest_stall: Option<std::time::Duration>,
+    /// Daemon-wide ADR-0141 lease table, shared with every injection
+    /// service and the expiry task.
+    injection_leases: Arc<crate::injection_lease::InjectionLeases>,
+    /// ADR-0141 ownership index for `LOCAL_PEER` keys: the tag of each owned
+    /// key and each owner's keys. Changed only in the RIB turn that changes
+    /// the local Adj-RIB-In, and swept here on expiry, never under the
+    /// shared lease-table lock.
+    injected_owners:
+        HashMap<crate::injection_lease::InjectedKey, crate::injection_lease::InjectionTag>,
+    owner_keys: HashMap<Arc<str>, HashSet<crate::injection_lease::InjectedKey>>,
+    /// Owner label values already used on the lease-expiry counter; at most
+    /// [`crate::injection_lease::MAX_LIVE_OWNERS`], then `_other`.
+    lease_metric_owners: HashSet<Arc<str>>,
     /// Test-only fail-stop probe. Captured once at construction so a live
     /// process cannot change supervision behavior by mutating its environment.
     test_panic_on_peer_up: Option<()>,
@@ -2462,6 +2476,10 @@ impl RibManager {
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
             test_ingest_stall,
+            injection_leases: Arc::new(crate::injection_lease::InjectionLeases::new()),
+            lease_metric_owners: HashSet::new(),
+            injected_owners: HashMap::new(),
+            owner_keys: HashMap::new(),
             test_panic_on_peer_up: test_panic_on_peer_up.then_some(()),
         }
     }
@@ -3045,6 +3063,13 @@ impl RibManager {
         self.export_chains.reader()
     }
 
+    /// The daemon-wide ADR-0141 lease table. Injection services read and
+    /// renew through it; the expiry task drives it with a RIB sender.
+    #[must_use]
+    pub fn injection_leases(&self) -> Arc<crate::injection_lease::InjectionLeases> {
+        Arc::clone(&self.injection_leases)
+    }
+
     /// Resolve the export policy for a peer: per-peer if set, else global.
     fn export_policy_for(&self, peer: IpAddr) -> Option<&PolicyChain> {
         self.export_chains.for_peer(peer)
@@ -3173,7 +3198,9 @@ impl RibManager {
             RibUpdate::PeerUp { .. }
             | RibUpdate::PeerDeleted { .. }
             | RibUpdate::InjectRoute { .. }
+            | RibUpdate::InjectLeasedRoute { .. }
             | RibUpdate::WithdrawInjected { .. }
+            | RibUpdate::ExpireInjectionLeases { .. }
             | RibUpdate::RpkiCacheUpdate { .. }
             | RibUpdate::AspaTableUpdate { .. } => self.advance_all_route_pages(),
             _ => {}
@@ -4089,14 +4116,32 @@ impl RibManager {
                 );
             }
             RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
+            RibUpdate::InjectLeasedRoute {
+                route,
+                owner,
+                lease_seconds,
+                reply,
+            } => self.handle_inject_leased_route(route, &owner, lease_seconds, reply),
             RibUpdate::WithdrawInjected {
                 prefix,
                 path_id,
                 allow_missing,
+                owner,
+                override_owner,
                 reply,
             } => {
-                self.handle_withdraw_injected(prefix, path_id, allow_missing, reply);
+                self.handle_withdraw_injected(
+                    prefix,
+                    path_id,
+                    allow_missing,
+                    &owner,
+                    override_owner,
+                    reply,
+                );
                 self.retire_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
+            }
+            RibUpdate::ExpireInjectionLeases { leases } => {
+                self.handle_expire_injection_leases(&leases);
             }
             RibUpdate::QueryRoutesPage {
                 scope,
@@ -4587,13 +4632,21 @@ impl RibManager {
                 self.handle_aspa_cache_update(table, changed_customer_asns);
             }
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
+            RibUpdate::InjectLeasedFlowSpec {
+                route,
+                owner,
+                lease_seconds,
+                reply,
+            } => self.handle_inject_leased_flowspec(route, &owner, lease_seconds, reply),
             RibUpdate::WithdrawFlowSpec {
                 key,
                 allow_missing,
+                owner,
+                override_owner,
                 reply,
             } => {
                 let retired = ExactExportKey::FlowSpec(key.clone());
-                self.handle_withdraw_flowspec(key, allow_missing, reply);
+                self.handle_withdraw_flowspec(key, allow_missing, &owner, override_owner, reply);
                 self.retire_exact_export_rejections([retired]);
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),

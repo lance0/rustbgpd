@@ -4848,7 +4848,8 @@ log_format = "json"
         let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
-            (concat!("write_tier", "_test_config("), 35),
+            // +1: the unspecified set_next_hop reload test writes its candidate.
+            (concat!("write_tier", "_test_config("), 36),
             (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
@@ -11086,6 +11087,46 @@ hold_time = 90
         assert!(error.contains("neighbor 10.0.0.2"), "{error}");
         assert!(
             accepted.config_ref().policy.definitions["shared"]
+                .statements
+                .is_empty(),
+            "the running snapshot keeps its policy"
+        );
+    }
+
+    /// A SIGHUP that sets an unspecified next hop fails the candidate load and
+    /// names the value; the running snapshot keeps its policy.
+    #[test]
+    fn reload_refuses_unspecified_set_next_hop_at_candidate_load() {
+        let initial = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 90\nimport_policy_chain = [\"nh\"]",
+        ) + "\n[policy.definitions.nh]\ndefault_action = \"permit\"\n";
+        let current = load_config_from_toml("reload-unspecified-nh-live", &initial);
+        let accepted = AcceptedConfigSnapshot::from_config_for_test(current.clone());
+        for next_hop in ["0.0.0.0", "::"] {
+            let path = unique_temp_path("reload-unspecified-nh-desired");
+            write_tier_test_config(
+                &path,
+                &format!(
+                    "{initial}\n[[policy.definitions.nh.statements]]\naction = \"permit\"\n\
+                     match_as_path_length_ge = 0\nset_next_hop = \"{next_hop}\"\n"
+                ),
+            );
+            let Err(error) = AcceptedConfigSnapshot::load_for_reload(
+                &path,
+                &accepted,
+                &current.policy.dataset_bindings,
+            ) else {
+                panic!("set_next_hop = {next_hop:?} must be refused");
+            };
+            std::fs::remove_file(&path).ok();
+            assert!(
+                error.contains(&format!("invalid set_next_hop \"{next_hop}\"")),
+                "{error}"
+            );
+        }
+        assert!(
+            accepted.config_ref().policy.definitions["nh"]
                 .statements
                 .is_empty(),
             "the running snapshot keeps its policy"
