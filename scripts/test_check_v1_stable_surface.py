@@ -484,6 +484,74 @@ class MetricFloorTests(unittest.TestCase):
                 sources[path] = self.replaced(sources[path], old, new)
                 self.rejected(lambda sources=sources: self.check(self.inventory, sources), expected)
 
+    def test_export_family_suppression_values_are_traced_to_their_variant(self):
+        series = {entry["name"]: entry for entry in self.inventory["metrics"]["stable_series"]}
+        self.assertEqual(
+            series["bgp_export_family_suppressed_total"]["label_values"],
+            {"family": ["ipv6_unicast"], "reason": ["missing_ipv6_next_hop"]},
+        )
+        reasons = "crates/telemetry/src/reason_labels.rs"
+        callers = ["crates/transport/src/session/fsm.rs", "crates/transport/src/session/mod.rs"]
+        reason = "pinned metric bgp_export_family_suppressed_total label reason values"
+        family = "pinned metric bgp_export_family_suppressed_total label family values"
+
+        def edited(edits):
+            sources = dict(self.emission_sources)
+            for path, old, new in edits:
+                sources[path] = self.replaced(sources[path], old, new)
+            return sources
+
+        cases = [
+            # The variant's arm returns a renamed value.
+            ([(reasons, 'Self::MissingIpv6NextHop => "missing_ipv6_next_hop"',
+               'Self::MissingIpv6NextHop => "no_ipv6_next_hop"')], reason),
+            # Every emitter passes another variant: its arm, not the whole match, counts.
+            ([(path, "ExactExportReason::MissingIpv6NextHop,\n", "ExactExportReason::Encoding,\n")
+              for path in callers], reason),
+            # The arm no longer returns a literal.
+            ([(reasons, 'Self::MissingIpv6NextHop => "missing_ipv6_next_hop"',
+               "Self::MissingIpv6NextHop => Self::Encoding.as_str()")], reason),
+            # A guarded arm may never run; a later catch-all would return another value.
+            ([(reasons, 'Self::MissingIpv6NextHop => "missing_ipv6_next_hop"',
+               'Self::MissingIpv6NextHop if false => "missing_ipv6_next_hop",\n'
+               '            _ => "renamed"')], reason),
+            # A wildcard arm ahead of the variant's makes it unreachable.
+            ([(reasons, "            Self::Encoding => \"encoding\",",
+               "            _ => \"renamed\",\n            Self::Encoding => \"encoding\",")], reason),
+            # A second same-named enum makes the variant ambiguous.
+            ([(reasons, "pub enum ExactExportReason {",
+               "pub enum ExactExportReason {}\npub enum ExactExportReason {")], reason),
+            # Every emitter passes another family.
+            ([(path, f'"ipv6_unicast",\n{indent}', f'"ipv6",\n{indent}')
+              for path, indent in zip(callers, [" " * 32 + "ExactExportReason", " " * 12 + "rustbgpd_"])],
+             family),
+        ]
+        for edits, expected in cases:
+            with self.subTest(edits=edits):
+                sources = edited(edits)
+                self.rejected(lambda sources=sources: self.check(self.inventory, sources), expected)
+        # The setter element stops being the traced parameter.
+        source = self.replaced(
+            self.metric_source,
+            ".export_family_suppressed\n            .with_label_values(&[peer, family, reason.as_str()])",
+            ".export_family_suppressed\n            .with_label_values(&[peer, family, other.as_str()])", 2,
+        )
+        self.rejected(
+            lambda: checker.check_metrics(self.inventory, source, self.emission_sources), reason
+        )
+        # A renamed label fails against the definition.
+        inventory = copy.deepcopy(self.inventory)
+        entry = next(
+            s for s in inventory["metrics"]["stable_series"]
+            if s["name"] == "bgp_export_family_suppressed_total"
+        )
+        entry["labels"] = ["cause", "family", "peer"]
+        entry["label_values"] = {"family": ["ipv6_unicast"]}
+        self.rejected(
+            lambda: self.check(inventory),
+            "pinned metric bgp_export_family_suppressed_total changed labels",
+        )
+
     def test_floor_series_drift_fails(self):
         inventory = copy.deepcopy(self.inventory)
         series = inventory["metrics"]["stable_series"]
@@ -584,6 +652,22 @@ class PassThroughEmissionTests(unittest.TestCase):
         emitted = self.emitted(caller, **{"crates/fixture/src/wrapper.rs": renamed})
         self.assertEqual(emitted, {"new_a", "new_b"})
 
+    def test_rebound_wrapper_parameter_is_no_evidence(self):
+        # The wrapper's caller passes PAIR, but the value reaching the setter
+        # is rebound or reassigned first: the call emits something else.
+        caller = 'fn caller(m: &M) { crate::wrapper::publish(m, "p", crate::wrapper::PAIR, [1, 2]); }'
+        for old, new in (
+            ("    for (family, count)", '    let families = ["fam_z", "fam_y"];\n    for (family, count)'),
+            ("        metrics.set_x(", '        let family = "fam_z";\n        metrics.set_x('),
+            ("        metrics.set_x(", '        family = "fam_z";\n        metrics.set_x('),
+        ):
+            with self.subTest(new=new):
+                self.assertEqual(self.WRAPPER.count(old), 1)
+                wrapper = self.WRAPPER.replace(old, new)
+                self.assertEqual(
+                    self.emitted(caller, **{"crates/fixture/src/wrapper.rs": wrapper}), set()
+                )
+
     def test_ambiguous_or_unresolvable_constant_is_no_evidence(self):
         caller = 'fn caller(m: &M) { crate::wrapper::publish(m, "p", PAIR, [1, 2]); }'
         # Bare PAIR is neither declared in the caller nor imported.
@@ -593,6 +677,64 @@ class PassThroughEmissionTests(unittest.TestCase):
         self.assertEqual(
             self.emitted(qualified, **{"crates/fixture/src/wrapper.rs": twice}), set()
         )
+
+
+class VariantEmissionTests(unittest.TestCase):
+    """A `param.as_str()` label counts the arm of the variant each caller passes."""
+
+    METRIC = (
+        'let counter = IntCounterVec::new(Opts::new("bgp_y", "help"), &["peer", "reason"]).unwrap();\n'
+        "pub fn record(&self, peer: &str, reason: Reason) {\n"
+        "    self.0.counter.with_label_values(&[peer, reason.as_str()]).inc();\n"
+        "}\n"
+    )
+    REASON = (
+        "pub enum Reason { A, B }\n"
+        "impl Reason {\n"
+        "    pub const fn as_str(self) -> &'static str {\n"
+        "        match self {\n"
+        '            Self::A => "a",\n'
+        '            Self::B => "b",\n'
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    CALLER = "fn caller(m: &M) { m.record(\"p\", crate::reason::Reason::A); }"
+
+    def emitted(self, metric, caller=CALLER, **extra):
+        sources = {
+            "crates/fixture/src/reason.rs": self.REASON,
+            "crates/fixture/src/caller.rs": caller,
+            **extra,
+        }
+        return checker.emitted_label_values(metric, sources, "bgp_y", "reason", ["peer", "reason"])
+
+    def test_wrapper_passes_its_callers_variant_unless_shadowed(self):
+        caller = "fn caller(m: &M) { crate::wrap::emit(m, crate::reason::Reason::A); }"
+        plain = "pub fn emit(m: &M, reason: Reason) {\n    m.record(\"p\", reason);\n}\n"
+        self.assertEqual(
+            self.emitted(self.METRIC, caller, **{"crates/fixture/src/wrap.rs": plain}), {"a"}
+        )
+        shadowed = (
+            "pub fn emit(m: &M, reason: Reason) {\n"
+            "    for reason in [Reason::B] {\n        m.record(\"p\", reason);\n    }\n}\n"
+        )
+        self.assertEqual(
+            self.emitted(self.METRIC, caller, **{"crates/fixture/src/wrap.rs": shadowed}), set()
+        )
+
+    def test_passed_variant_counts_only_its_arm(self):
+        self.assertEqual(self.emitted(self.METRIC), {"a"})
+
+    def test_shadowed_receiver_is_no_evidence(self):
+        # The setter emits B's label whatever its caller passes.
+        call = "    self.0.counter.with_label_values(&[peer, reason.as_str()]).inc();\n"
+        for shadow in (
+            f"    for reason in [Reason::B] {{\n    {call}    }}\n",
+            f"    let reason = Reason::B;\n{call}",
+        ):
+            with self.subTest(shadow=shadow):
+                self.assertEqual(self.emitted(self.METRIC.replace(call, shadow)), set())
 
 
 class RoleFamilyTests(unittest.TestCase):

@@ -628,7 +628,7 @@ pub struct RibManager {
     pending_peer_export_context: HashMap<(IpAddr, u64), Option<BgpRole>>,
     /// Session-stamped negotiated-but-withheld families staged before
     /// `PeerUp` (`RibUpdate::SetPeerWithheldFamilies`).
-    pending_peer_withheld_families: HashMap<(IpAddr, u64), Vec<(Afi, Safi)>>,
+    pending_peer_withheld_families: HashMap<(IpAddr, u64), Vec<crate::update::WithheldFamily>>,
     /// Session-stamped RFC 7947 §2.3.2 control-community context staged
     /// before `PeerUp` (the RS-side local ASN when the session interprets
     /// route-server control communities).
@@ -1752,9 +1752,9 @@ pub(super) struct LiveSessionRecord {
     peer_router_id: Ipv4Addr,
     export_policy: Option<PolicyChain>,
     sendable_families: Vec<(Afi, Safi)>,
-    /// Negotiated families withheld from `sendable_families`; each gets an
-    /// empty `EoR` with the initial dump.
-    withheld_families: Vec<(Afi, Safi)>,
+    /// Negotiated families withheld from `sendable_families`, with the
+    /// session's reason; each gets an empty `EoR` with the initial dump.
+    withheld_families: Vec<crate::update::WithheldFamily>,
     is_ebgp: bool,
     route_reflector_client: bool,
     local_role: Option<BgpRole>,
@@ -4270,6 +4270,13 @@ impl RibManager {
                 source,
                 reply,
             } => self.handle_explain_advertised_route(peer, prefix, rd, labeled, source, reply),
+            RibUpdate::QueryLocalRouteExport {
+                prefix,
+                path_id,
+                after,
+                page_size,
+                reply,
+            } => self.handle_query_local_route_export(prefix, path_id, after, page_size, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
             }

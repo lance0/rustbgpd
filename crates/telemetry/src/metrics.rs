@@ -1891,7 +1891,7 @@ impl BgpMetrics {
         let export_family_suppressed = IntCounterVec::new(
             Opts::new(
                 "bgp_export_family_suppressed_total",
-                "Established sessions on which a negotiated address family is withheld from export for the whole session, by peer, family, and bounded reason. Counted once per session, not per route.",
+                "Session establishments at which a negotiated address family was withheld from export, by peer, family, and bounded reason. Counted once per establishment, not per route; a reload that restores the family's export does not reset the session or move the counter.",
             ),
             &["peer", "family", "reason"],
         )
@@ -5241,24 +5241,23 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Record an established session that withholds a negotiated family from
-    /// export for its whole lifetime, e.g. eBGP IPv6 unicast over IPv4
-    /// transport with no usable IPv6 next hop. The routes are never offered
-    /// to the exact-export probe, so [`Self::record_exact_export_rejection`]
-    /// does not see them.
+    /// Record a session establishment that withholds a negotiated family from
+    /// export, e.g. eBGP IPv6 unicast over IPv4 transport with no usable IPv6
+    /// next hop. The family stays withheld until a reload supplies what it
+    /// lacks, which restores export without a session reset. The routes are
+    /// never offered to the exact-export probe, so
+    /// [`Self::record_exact_export_rejection`] does not see them.
     pub fn record_export_family_suppressed(
         &self,
         peer: &str,
         family: &str,
         reason: crate::reason_labels::ExactExportReason,
     ) {
+        // Callers pass a canonical family literal; the v1 checker traces it.
+        debug_assert_eq!(Self::exact_export_family_label(family), family);
         self.0
             .export_family_suppressed
-            .with_label_values(&[
-                peer,
-                Self::exact_export_family_label(family),
-                reason.as_str(),
-            ])
+            .with_label_values(&[peer, family, reason.as_str()])
             .inc();
     }
 
@@ -5270,13 +5269,11 @@ impl BgpMetrics {
         family: &str,
         reason: crate::reason_labels::ExactExportReason,
     ) {
+        // Callers pass a canonical family literal; the v1 checker traces it.
+        debug_assert_eq!(Self::exact_export_family_label(family), family);
         self.0
             .export_family_suppressed
-            .with_label_values(&[
-                peer,
-                Self::exact_export_family_label(family),
-                reason.as_str(),
-            ])
+            .with_label_values(&[peer, family, reason.as_str()])
             .inc_by(0);
     }
 

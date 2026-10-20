@@ -348,6 +348,8 @@ and series. Metrics fall into three classes:
   - session state, flaps, teardown reasons, messages and NOTIFICATIONs;
   - received, selected and advertised prefixes per canonical family;
   - max-prefix usage, limits and actions per `family` and `stage`;
+  - families withheld from export at session establishment, whose bounded
+    `family` and `reason` values can grow;
   - RPKI cache and VRP state;
   - reload and confirmed-transaction outcomes;
   - readiness probe failures.

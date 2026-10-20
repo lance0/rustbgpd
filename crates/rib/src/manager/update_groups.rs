@@ -3075,7 +3075,7 @@ impl RibManager {
         record.sendable_families.push(family);
         record
             .withheld_families
-            .retain(|withheld| *withheld != family);
+            .retain(|(withheld, _)| *withheld != family);
         if let Some(limit) = add_path_send_limit {
             record.add_path_send_families.push(family);
             record.add_path_send_limits.insert(family, limit);

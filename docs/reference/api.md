@@ -96,7 +96,7 @@ and RPCs in it stay alpha; the
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases |
+| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
@@ -271,7 +271,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `BfdService` | `GetBfdSessions` | None |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
-| `InjectionService` | `ListInjectionLeases` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `InjectionService` | `ListInjectionLeases`, `ListPathExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
@@ -3023,6 +3023,7 @@ export policy).
 |-----|-------------|
 | `AddPath` | Inject a route with specified attributes |
 | `DeletePath` | Withdraw a previously injected route |
+| `ListPathExportDispositions` | Per-peer export disposition of one injected unicast route; see [export read-back](#export-read-back) |
 | `AddFlowSpec` | Inject a FlowSpec rule with actions |
 | `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
 | `AddLeasedPath` / `AddLeasedFlowSpec` | Inject a route or FlowSpec rule under an owner's lease; see [leased injection](#leased-injection) |
@@ -3088,7 +3089,11 @@ self.
 An IPv6 route on a session with neither, for example IPv6 unicast over an
 IPv4-only session without `local_ipv6_nexthop`, is not sent to that peer.
 `AddPath` still succeeds and the local read-back still shows the route: it was
-accepted locally, and only the export to that peer is withheld. The daemon
+accepted locally, and only the export to that peer is withheld.
+[`ListPathExportDispositions`](#export-read-back) reports the peer as
+withheld with reason `family_suppressed:missing_ipv6_next_hop` (eBGP) or
+`exact_export_rejected:missing_ipv6_next_hop` (iBGP and route-server
+clients). The daemon
 never sends an unspecified next hop. How the suppression shows depends on the
 session:
 
@@ -3212,6 +3217,61 @@ uptime has already passed the previous reading. A
 lease generation from before the restart fails. To list exactly the injected
 routes, call `RibService.ListReceivedRoutes` with
 `neighbor_address: "0.0.0.0"`.
+
+#### Export read-back
+
+`AddPath` confirms local acceptance only. To learn which peers the route was
+exported to, call `ListPathExportDispositions` with the same
+`(prefix, prefix_length, path_id)` key. It returns one row per peer with an
+Established session, in peer-address order, and each row has exactly one
+disposition. Rows cover Established peers only: a configured peer without a
+session is absent from the list. Absent does not mean withheld, it means no
+session exists to export to, so cross-check `NeighborService.ListNeighbors`
+to find configured peers that are not Established.
+
+| `disposition` | Meaning |
+|---|---|
+| `PATH_EXPORT_DISPOSITION_COMMITTED` | This exact route sits in the peer's Adj-RIB-Out, committed to its outbound path. `advertised_path_id` is its outbound Add-Path identifier, 0 on single-best. |
+| `PATH_EXPORT_DISPOSITION_WITHHELD` | The route is not exported to this peer; `reason` says why. |
+| `PATH_EXPORT_DISPOSITION_PENDING` | Export has not settled; `reason` names what is outstanding. |
+
+Committed is local send-side state. BGP carries no acceptance signal, so it
+does not mean the peer received, accepted or installed the route. A route for
+the same prefix from another peer, or under another local `path_id`, never
+counts as this route's export: when another path is a peer's selected route,
+this route is `WITHHELD` with reason `not_selected`, even though the peer has
+a route for the prefix.
+
+| `reason` | Disposition | Meaning |
+|---|---|---|
+| `family_suppressed:<reason>` | Withheld | The session negotiated the family but withholds it from export, for example `family_suppressed:missing_ipv6_next_hop` for eBGP IPv6 unicast without an IPv6 next hop. A reload that supplies `local_ipv6_nexthop` restores it. |
+| `family_not_negotiated` | Withheld | The session did not negotiate the route's family. This takes precedence over any pending reason. |
+| `not_selected` | Withheld | Another path is this peer's selected route, or the route ranks beyond the peer's Add-Path `send_max`. |
+| `export_policy` | Withheld | Export policy, or the RFC 8212 default deny, rejects the route; for a per-client-best peer, the policy denies every candidate. |
+| `outbound_prefix_limit` | Withheld | The peer's outbound prefix limit is reached. |
+| `exact_export_rejected:<reason>` | Withheld | The session's encoder refuses the route's exact wire form, for example `exact_export_rejected:missing_ipv6_next_hop`. A bare `exact_export_rejected` means a fresh probe no longer reproduces the refusal. |
+| `export_rule` | Withheld | Another export gate stops the route, such as split horizon, `NO_ADVERTISE`, LLGR, an ORF filter, OTC or conditional advertisement. |
+| `selection_deferred` | Pending | Graceful Restart selection deferral holds the family. |
+| `outbound_resync` | Pending | Outbound delivery to the peer is resynchronizing. |
+| `orf_pending` | Pending | The peer negotiated ORF and has not sent its first ROUTE-REFRESH. |
+| `not_yet_committed` | Pending | The route is staged but the Adj-RIB-Out does not hold it yet. |
+
+New reason codes may be added. `explain_code` gives the stop code of the
+[export explain](#explain-one-advertised-route-decision) ladder behind a
+reason, the same vocabulary as `ExplainAdvertisedRoute`, and `detail` is
+human-readable text that may change. A key with no local route returns
+`NOT_FOUND`.
+
+`page_size` 0 returns up to 100 peers, and larger values are capped at 1000.
+A non-empty `next_page_token` continues after the last peer returned. The
+call is a `sensitive_read`, served on read-only listeners, and each page costs
+one single-prefix export explain per peer.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "2001:db8::7", "prefix_length": 128}' \
+  localhost:50051 rustbgpd.v1.InjectionService/ListPathExportDispositions
+```
 
 #### Leased injection
 

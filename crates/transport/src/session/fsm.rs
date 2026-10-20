@@ -4,6 +4,7 @@ use super::{
     SessionDownReason, SessionLifecycleNotification, SessionNotification,
     SessionNotificationDirection, SessionState, cease_subcode, debug, info, mpsc, warn,
 };
+use rustbgpd_rib::update::ExactExportErrorCode;
 use rustbgpd_telemetry::reason_labels::ExactExportReason;
 
 pub(super) fn notification_description(
@@ -840,6 +841,9 @@ impl PeerSession {
                             .extended_nexthop_families
                             .get(&(Afi::Ipv4, Safi::Unicast))
                             .is_some_and(|afi| *afi == Afi::Ipv6);
+                    // Negotiated families this session will not export, each
+                    // with the reason export explain reports for it.
+                    let mut withheld_families = Vec::new();
                     let mut sendable_families = if is_ebgp {
                         let withhold_v6 = self.withholds_ipv6_unicast_export(neg);
                         self.ipv6_unicast_withheld = withhold_v6;
@@ -859,6 +863,10 @@ impl PeerSession {
                                 "ipv6_unicast",
                                 ExactExportReason::MissingIpv6NextHop,
                             );
+                            withheld_families.push((
+                                (Afi::Ipv6, Safi::Unicast),
+                                ExactExportErrorCode::MissingIpv6NextHop,
+                            ));
                         }
                         neg.negotiated_families
                             .iter()
@@ -869,15 +877,15 @@ impl PeerSession {
                         self.ipv6_unicast_withheld = false;
                         neg.negotiated_families.clone()
                     };
-                    if unnumbered_ipv4_without_enhe {
+                    if unnumbered_ipv4_without_enhe
+                        && sendable_families.contains(&(Afi::Ipv4, Safi::Unicast))
+                    {
                         sendable_families.retain(|family| *family != (Afi::Ipv4, Safi::Unicast));
+                        withheld_families.push((
+                            (Afi::Ipv4, Safi::Unicast),
+                            ExactExportErrorCode::Ipv4RequiresExtendedNextHop,
+                        ));
                     }
-                    let withheld_families: Vec<_> = neg
-                        .negotiated_families
-                        .iter()
-                        .filter(|family| !sendable_families.contains(family))
-                        .copied()
-                        .collect();
                     // RFC 8654 §2: OUR advertised Extended Message capability
                     // governs what we accept INBOUND; the peer's capability
                     // (neg.peer_extended_message) only governs what we may
