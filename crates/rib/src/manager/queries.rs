@@ -1951,20 +1951,8 @@ impl RibManager {
             detail,
             advertised_path_id: 0,
         };
-        if let Some((_, code)) = self
-            .registered_withheld_families(peer)
-            .iter()
-            .find(|(withheld, _)| *withheld == family)
-        {
-            return row(
-                Withheld,
-                &format!("family_suppressed:{}", code.as_str()),
-                "family_not_sendable",
-                format!(
-                    "the session negotiated {} but withholds the family from export",
-                    rustbgpd_wire::family_label(family.0, family.1).unwrap_or("this family")
-                ),
-            );
+        if let Some((reason, detail)) = self.unexported_family(peer, family) {
+            return row(Withheld, &reason, "family_not_sendable", detail);
         }
         if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
             return row(
@@ -2041,6 +2029,33 @@ impl RibManager {
         export
     }
 
+    /// Reason and detail when the peer's session does not export `family`
+    /// at all: withheld by the session, or never negotiated. No resync or
+    /// selection deferral can change either, so they are checked first.
+    fn unexported_family(&self, peer: IpAddr, family: (Afi, Safi)) -> Option<(String, String)> {
+        let label = rustbgpd_wire::family_label(family.0, family.1).unwrap_or("this family");
+        if let Some((_, code)) = self
+            .registered_withheld_families(peer)
+            .iter()
+            .find(|(withheld, _)| *withheld == family)
+        {
+            return Some((
+                format!("family_suppressed:{}", code.as_str()),
+                format!("the session negotiated {label} but withholds the family from export"),
+            ));
+        }
+        (!self
+            .peer_sendable_families
+            .get(&peer)
+            .is_some_and(|families| families.contains(&family)))
+        .then(|| {
+            (
+                "family_not_negotiated".to_string(),
+                format!("the session did not negotiate {label}"),
+            )
+        })
+    }
+
     /// The bounded disposition reason for an export explain that stopped
     /// this route at the gate named `code`.
     fn stopped_export_reason(
@@ -2053,7 +2068,10 @@ impl RibManager {
         let reason = match code {
             "orf_pending" => return (RouteExportDisposition::Pending, code.to_string()),
             "family_not_sendable" => "family_not_negotiated".to_string(),
-            "policy_denied" | "rfc8212_missing_export_policy" => "export_policy".to_string(),
+            // A per-client-best peer's export policy denied every candidate.
+            "policy_denied" | "rfc8212_missing_export_policy" | "per_client_all_denied" => {
+                "export_policy".to_string()
+            }
             crate::update::OUTBOUND_PREFIX_LIMIT_REACHED => "outbound_prefix_limit".to_string(),
             "exact_export_rejected" => self
                 .exact_export_rejection_reason(peer, route, explanation)

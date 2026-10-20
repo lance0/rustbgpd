@@ -3207,9 +3207,9 @@ a route for the prefix.
 | `reason` | Disposition | Meaning |
 |---|---|---|
 | `family_suppressed:<reason>` | Withheld | The session negotiated the family but withholds it from export, for example `family_suppressed:missing_ipv6_next_hop` for eBGP IPv6 unicast without an IPv6 next hop. A reload that supplies `local_ipv6_nexthop` restores it. |
-| `family_not_negotiated` | Withheld | The session did not negotiate the route's family. |
+| `family_not_negotiated` | Withheld | The session did not negotiate the route's family. This takes precedence over any pending reason. |
 | `not_selected` | Withheld | Another path is this peer's selected route, or the route ranks beyond the peer's Add-Path `send_max`. |
-| `export_policy` | Withheld | Export policy, or the RFC 8212 default deny, rejects the route. |
+| `export_policy` | Withheld | Export policy, or the RFC 8212 default deny, rejects the route; for a per-client-best peer, the policy denies every candidate. |
 | `outbound_prefix_limit` | Withheld | The peer's outbound prefix limit is reached. |
 | `exact_export_rejected:<reason>` | Withheld | The session's encoder refuses the route's exact wire form, for example `exact_export_rejected:missing_ipv6_next_hop`. A bare `exact_export_rejected` means a fresh probe no longer reproduces the refusal. |
 | `export_rule` | Withheld | Another export gate stops the route, such as split horizon, `NO_ADVERTISE`, LLGR, an ORF filter, OTC or conditional advertisement. |

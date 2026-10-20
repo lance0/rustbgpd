@@ -21,6 +21,26 @@ fn peer_up(
     add_path_send_max: u32,
     capacity: usize,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    peer_up_with(
+        manager,
+        peer,
+        sendable_families,
+        export_policy,
+        add_path_send_max,
+        capacity,
+        false,
+    )
+}
+
+fn peer_up_with(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    sendable_families: Vec<(Afi, Safi)>,
+    export_policy: Option<rustbgpd_policy::PolicyChain>,
+    add_path_send_max: u32,
+    capacity: usize,
+    per_client_best: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(capacity);
     let add_path_send_families = if add_path_send_max > 0 {
         sendable_families.clone()
@@ -38,7 +58,7 @@ fn peer_up(
         is_ebgp: true,
         route_reflector_client: false,
         orr_vantage: None,
-        per_client_best: false,
+        per_client_best,
         interpret_rfc1997: true,
         add_path_send_families,
         add_path_send_max,
@@ -252,6 +272,48 @@ fn add_path_rank_and_export_policy() {
     assert_eq!(export.disposition, RouteExportDisposition::Withheld);
     assert_eq!(export.reason, "export_policy");
     assert_eq!(export.explain_code, "policy_denied");
+}
+
+/// A per-client-best peer whose export policy denies every candidate,
+/// including the lone injected route, reports the policy reason.
+#[test]
+fn per_client_best_policy_deny_is_export_policy() {
+    let (mut manager, _tx) = manager();
+    let target = v4(6);
+    let prefix = v4_prefix();
+    let _rx = peer_up_with(
+        &mut manager,
+        target,
+        ipv4_sendable(),
+        Some(deny_prefixes_chain(&[prefix])),
+        0,
+        64,
+        true,
+    );
+    inject(&mut manager, local_route(prefix, 0));
+
+    let page = query(&mut manager, prefix, 0, None, 10).unwrap();
+    let export = row(&page, target);
+    assert_eq!(export.disposition, RouteExportDisposition::Withheld);
+    assert_eq!(export.reason, "export_policy");
+    assert_eq!(export.explain_code, "per_client_all_denied");
+}
+
+/// A family the session did not negotiate stays withheld while that peer
+/// resynchronizes another family: no resync can export it.
+#[test]
+fn unnegotiated_family_is_withheld_not_pending() {
+    let (mut manager, _tx) = manager();
+    let v4_only = v4(3);
+    let _rx = peer_up(&mut manager, v4_only, ipv4_sendable(), None, 0, 64);
+    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8::7".parse().unwrap(), 128));
+    inject(&mut manager, local_route(prefix, 0));
+    manager.dirty_peers.insert(v4_only);
+
+    let page = query(&mut manager, prefix, 0, None, 10).unwrap();
+    let export = row(&page, v4_only);
+    assert_eq!(export.disposition, RouteExportDisposition::Withheld);
+    assert_eq!(export.reason, "family_not_negotiated");
 }
 
 /// A peer whose outbound delivery failed is pending, not committed or
