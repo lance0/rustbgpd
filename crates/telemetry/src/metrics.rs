@@ -687,7 +687,7 @@ struct BgpMetricsInner {
     gr_active_peers: IntGaugeVec,
     gr_stale_routes: IntGaugeVec,
     gr_timer_expired: IntCounterVec,
-    gr_eor_grace_expired: IntCounterVec,
+    gr_eor_grace_released: IntCounterVec,
     selection_deferral_active: IntGaugeVec,
     selection_deferral_waiters: IntGaugeVec,
     selection_deferral_releases: IntCounterVec,
@@ -2193,12 +2193,12 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
-        let gr_eor_grace_expired = IntCounterVec::new(
+        let gr_eor_grace_released = IntCounterVec::new(
             Opts::new(
-                "bgp_gr_eor_grace_expired_total",
-                "End-of-RIB grace windows that reached their deadline after a planned restart and released any held End-of-RIB toward the peer.",
+                "bgp_gr_eor_grace_released_total",
+                "End-of-RIB grace windows that ended after a planned restart and released any held End-of-RIB toward the peer, by bounded reason (deadline).",
             ),
-            &["peer"],
+            &["peer", "reason"],
         )
         .expect("valid metric definition");
 
@@ -3346,7 +3346,7 @@ impl BgpMetrics {
             .register(Box::new(gr_timer_expired.clone()))
             .expect("metric not already registered");
         registry
-            .register(Box::new(gr_eor_grace_expired.clone()))
+            .register(Box::new(gr_eor_grace_released.clone()))
             .expect("metric not already registered");
         registry
             .register(Box::new(selection_deferral_active.clone()))
@@ -3742,7 +3742,7 @@ impl BgpMetrics {
             gr_active_peers,
             gr_stale_routes,
             gr_timer_expired,
-            gr_eor_grace_expired,
+            gr_eor_grace_released,
             selection_deferral_active,
             selection_deferral_waiters,
             selection_deferral_releases,
@@ -3999,7 +3999,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.gr_active_peers, peer);
         Self::reap_peer_series_from_vec(&self.0.gr_stale_routes, peer);
         Self::reap_peer_series_from_vec(&self.0.gr_timer_expired, peer);
-        Self::reap_peer_series_from_vec(&self.0.gr_eor_grace_expired, peer);
+        Self::reap_peer_series_from_vec(&self.0.gr_eor_grace_released, peer);
         Self::reap_peer_series_from_vec(&self.0.route_refresh_in_progress, peer);
         Self::reap_peer_series_from_vec(&self.0.route_refresh_stale_entries, peer);
         Self::reap_peer_series_from_vec(&self.0.bmp_source_drops, peer);
@@ -5827,9 +5827,16 @@ impl BgpMetrics {
         self.0.gr_timer_expired.with_label_values(&[peer]).inc();
     }
 
-    /// Record a peer's End-of-RIB grace window reaching its deadline.
-    pub fn record_gr_eor_grace_expired(&self, peer: &str) {
-        self.0.gr_eor_grace_expired.with_label_values(&[peer]).inc();
+    /// Record a peer's End-of-RIB grace window releasing its held markers.
+    pub fn record_gr_eor_grace_released(
+        &self,
+        peer: &str,
+        reason: crate::reason_labels::GrEorGraceReleaseReason,
+    ) {
+        self.0
+            .gr_eor_grace_released
+            .with_label_values(&[peer, reason.as_str()])
+            .inc();
     }
 
     /// Set whether restarting-speaker route selection is deferred for a family.
@@ -10093,7 +10100,10 @@ mod tests {
         m.set_gr_active(peer, true);
         m.set_gr_stale_routes(peer, 5);
         m.record_gr_timer_expired(peer);
-        m.record_gr_eor_grace_expired(peer);
+        m.record_gr_eor_grace_released(
+            peer,
+            crate::reason_labels::GrEorGraceReleaseReason::Deadline,
+        );
         m.set_route_refresh_in_progress(peer, "ipv4_unicast", true);
         m.set_route_refresh_stale_entries(peer, "ipv4_unicast", 9);
         m.record_bmp_source_drop(peer, "channel_full");
@@ -10481,7 +10491,7 @@ mod tests {
         "bgp_export_family_suppressed_total",
         "bgp_fsm_stale_timer_events_total",
         "bgp_gr_active_peers",
-        "bgp_gr_eor_grace_expired_total",
+        "bgp_gr_eor_grace_released_total",
         "bgp_gr_stale_routes",
         "bgp_gr_timer_expired_total",
         "bgp_hold_timer_rearmed_pending_input_total",

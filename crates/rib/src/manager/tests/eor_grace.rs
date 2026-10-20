@@ -246,16 +246,19 @@ fn eor_count(metrics: &BgpMetrics, peer: IpAddr) -> f64 {
         .registry()
         .gather()
         .into_iter()
-        .find(|family| family.name() == "bgp_gr_eor_grace_expired_total")
+        .find(|family| family.name() == "bgp_gr_eor_grace_released_total")
         .and_then(|family| {
             family
                 .get_metric()
                 .iter()
                 .find(|metric| {
-                    metric
-                        .get_label()
+                    let labels = metric.get_label();
+                    labels
                         .iter()
                         .any(|label| label.name() == "peer" && label.value() == peer.to_string())
+                        && labels
+                            .iter()
+                            .any(|label| label.name() == "reason" && label.value() == "deadline")
                 })
                 .map(|metric| metric.get_counter().get_value())
         })
