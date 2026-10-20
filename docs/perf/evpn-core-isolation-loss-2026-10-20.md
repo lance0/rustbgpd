@@ -65,15 +65,20 @@ the 8 s window ended, so ≥8,030 ms is a lower bound, not a measured window.
 - The action arm must bound that loss to a finite window ending with the
   flow on FRR's member, in every valid cycle, with no censored cycle. **Met**
   (58 of 58 valid action cycles across both nights, 0 censored).
-- The bound is accepted only if a same-night A/B shows no change between the
-  two builds. **Met**: medians 15 and 15.5 ms with overlapping ranges.
+- A same-night A/B of the two builds must show no difference before the
+  bound is accepted. **No difference detected** at n=24 per build in six
+  alternating deployment blocks each: medians 15 and 15.5 ms, per-block
+  medians 14.5–15.75 ms (`ac5a1b8d5`) and 15.25–19.5 ms (`090022493`), ranges
+  4–35.5 and 14.5–30.5 ms overlapping. This is not an equivalence test, and
+  no margin was set. It is enough to show that the move from 4–5 ms to about
+  15 ms is not tied to the build.
 
 ## Results
 
 - **Per position.** The first cycle of each 2026-10-20 block, which follows
   no reset, had a median loss window of 14.5 ms (`ac5a1b8d5`) and 14.75 ms
-  (`090022493`); later cycles 15.25 and 15.75 ms. The v2 reset does not carry
-  state into the next cut.
+  (`090022493`); later cycles 15.25 and 15.75 ms. No difference was detected
+  between cycles that follow a v2 reset and cycles that do not.
 - **Invalid cycles.** 2026-10-19 action cycles 4 and 6 each had one sent frame
   missing from the member captures; control cycle 3 had a 2.9 s sender stall.
   None were excluded on 2026-10-20.
@@ -89,9 +94,11 @@ the 8 s window ended, so ≥8,030 ms is a lower bound, not a measured window.
   configured, waits for the BGP hold timer and was not measured.
 - An earlier 2026-10-14 run under the v1 harness (n=5, no control arm)
   measured 4–5 ms windows. That run differs from these in the harness and
-  environment; the same-night A/B rules out a change between the two builds,
-  and the `ac5a1b8d5` image still produced a 4 ms cycle. The difference is
-  not chased further. Under the v2 harness the bound is about 15 ms typical.
+  environment. The same-night A/B detected no difference between the two
+  builds (see Bars; not an equivalence test), so the shift is not tied to the
+  build, and the `ac5a1b8d5` image still produced a 4 ms cycle. The
+  difference is not chased further. Under the v2 harness the bound is about
+  15 ms typical.
 
 ## Evidence
 
