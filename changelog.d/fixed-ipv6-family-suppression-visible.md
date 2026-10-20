@@ -9,6 +9,6 @@
   (`family="ipv6_unicast"`, `reason="missing_ipv6_next_hop"`), and
   `rustbgpd --check` warns about static neighbors in that shape.
   **Operator-visible:** an injected IPv6 RTBH route toward such a peer still
-  returns success from `AddPath`; set `local_ipv6_nexthop` and reset the
-  session to export it. See the
+  returns success from `AddPath`; set `local_ipv6_nexthop` and reload to
+  export it. See the
   [next-hop self notes](../docs/reference/api.md#next-hop-self).

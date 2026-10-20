@@ -484,6 +484,67 @@ class MetricFloorTests(unittest.TestCase):
                 sources[path] = self.replaced(sources[path], old, new)
                 self.rejected(lambda sources=sources: self.check(self.inventory, sources), expected)
 
+    def test_export_family_suppression_values_are_traced_to_their_variant(self):
+        series = {entry["name"]: entry for entry in self.inventory["metrics"]["stable_series"]}
+        self.assertEqual(
+            series["bgp_export_family_suppressed_total"]["label_values"],
+            {"family": ["ipv6_unicast"], "reason": ["missing_ipv6_next_hop"]},
+        )
+        reasons = "crates/telemetry/src/reason_labels.rs"
+        callers = ["crates/transport/src/session/fsm.rs", "crates/transport/src/session/mod.rs"]
+        reason = "pinned metric bgp_export_family_suppressed_total label reason values"
+        family = "pinned metric bgp_export_family_suppressed_total label family values"
+
+        def edited(edits):
+            sources = dict(self.emission_sources)
+            for path, old, new in edits:
+                sources[path] = self.replaced(sources[path], old, new)
+            return sources
+
+        cases = [
+            # The variant's arm returns a renamed value.
+            ([(reasons, 'Self::MissingIpv6NextHop => "missing_ipv6_next_hop"',
+               'Self::MissingIpv6NextHop => "no_ipv6_next_hop"')], reason),
+            # Every emitter passes another variant: its arm, not the whole match, counts.
+            ([(path, "ExactExportReason::MissingIpv6NextHop,\n", "ExactExportReason::Encoding,\n")
+              for path in callers], reason),
+            # The arm no longer returns a literal.
+            ([(reasons, 'Self::MissingIpv6NextHop => "missing_ipv6_next_hop"',
+               "Self::MissingIpv6NextHop => Self::Encoding.as_str()")], reason),
+            # A second same-named enum makes the variant ambiguous.
+            ([(reasons, "pub enum ExactExportReason {",
+               "pub enum ExactExportReason {}\npub enum ExactExportReason {")], reason),
+            # Every emitter passes another family.
+            ([(path, f'"ipv6_unicast",\n{indent}', f'"ipv6",\n{indent}')
+              for path, indent in zip(callers, [" " * 32 + "ExactExportReason", " " * 12 + "rustbgpd_"])],
+             family),
+        ]
+        for edits, expected in cases:
+            with self.subTest(edits=edits):
+                sources = edited(edits)
+                self.rejected(lambda sources=sources: self.check(self.inventory, sources), expected)
+        # The setter element stops being the traced parameter.
+        source = self.replaced(
+            self.metric_source,
+            ".export_family_suppressed\n            .with_label_values(&[peer, family, reason.as_str()])",
+            ".export_family_suppressed\n            .with_label_values(&[peer, family, other.as_str()])", 2,
+        )
+        self.rejected(
+            lambda: checker.check_metrics(self.inventory, source, self.emission_sources), reason
+        )
+        # A renamed label fails against the definition.
+        inventory = copy.deepcopy(self.inventory)
+        entry = next(
+            s for s in inventory["metrics"]["stable_series"]
+            if s["name"] == "bgp_export_family_suppressed_total"
+        )
+        entry["labels"] = ["cause", "family", "peer"]
+        entry["label_values"] = {"family": ["ipv6_unicast"]}
+        self.rejected(
+            lambda: self.check(inventory),
+            "pinned metric bgp_export_family_suppressed_total changed labels",
+        )
+
     def test_floor_series_drift_fails(self):
         inventory = copy.deepcopy(self.inventory)
         series = inventory["metrics"]["stable_series"]
