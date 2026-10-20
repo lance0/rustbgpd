@@ -29,8 +29,9 @@ use crate::engine::{
     RouteContext, RouteModifications,
 };
 use crate::ir::{
-    ArithOp, Cmp, CompiledChain, CompiledPolicy, DatasetProbe, ForEachNode, LoopSource, MatchExpr,
-    TermAction, TermActionView, ValueCmpOp, ValueExpr, ValueField,
+    ArithOp, Cmp, CommunityAttribute, CommunityAttributes, CompiledChain, CompiledPolicy,
+    DatasetProbe, ForEachNode, LoopSource, MatchExpr, TermAction, TermActionView, ValueCmpOp,
+    ValueExpr, ValueField,
 };
 use crate::sets::prefix_entry_matches;
 
@@ -100,6 +101,26 @@ pub(crate) const MAX_EVAL_COST: u64 = 1_000_000;
 /// Conservative upper bound derived from a 16-bit attribute-value length and
 /// 12-octet RFC 8092 values. Wildcard removal pre-pays this full scan.
 pub(crate) const MAX_LARGE_COMMUNITIES_PER_ROUTE: u64 = 5_461;
+
+/// The same 16-bit bound for 4-octet RFC 1997 values (`remove community *`).
+pub(crate) const MAX_COMMUNITIES_PER_ROUTE: u64 = 16_383;
+
+/// The same 16-bit bound for 8-octet RFC 4360 values (`remove ext-community *`).
+pub(crate) const MAX_EXT_COMMUNITIES_PER_ROUTE: u64 = 8_191;
+
+/// The wire bound on one route's values of `attribute`, which a strip-all
+/// scan pre-pays at compile time and fails closed above at run time.
+pub(crate) fn max_communities_per_route(attribute: CommunityAttribute) -> u64 {
+    match attribute {
+        CommunityAttribute::Standard => MAX_COMMUNITIES_PER_ROUTE,
+        CommunityAttribute::Extended => MAX_EXT_COMMUNITIES_PER_ROUTE,
+        CommunityAttribute::Large => MAX_LARGE_COMMUNITIES_PER_ROUTE,
+    }
+}
+
+fn saturating_len(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
 
 /// Hard per-loop iteration cap (ADR-0103 Decision 3,
 /// `MAX_LOOP_ITERATIONS`): a loop whose source still has elements
@@ -343,6 +364,9 @@ pub(crate) fn eval_value(
             // Wire-bounded far below u32::MAX; saturate rather than
             // invent an error kind for an impossible input.
             ValueField::AsPathLen => Ok(u32::try_from(ctx.as_path_len).unwrap_or(u32::MAX)),
+            ValueField::CommunitiesLen => Ok(saturating_len(ctx.communities.len())),
+            ValueField::LargeCommunitiesLen => Ok(saturating_len(ctx.large_communities.len())),
+            ValueField::ExtCommunitiesLen => Ok(saturating_len(ctx.extended_communities.len())),
             ValueField::OriginAs => ctx
                 .origin_asn
                 .ok_or(EvalErrorKind::AbsentField(ValueField::OriginAs)),
@@ -700,6 +724,63 @@ pub(crate) fn exec_remove_large_community_admin(
         }
     }
     if !mods.large_communities_remove.is_empty() {
+        continued
+            .get_or_insert_with(RouteModifications::default)
+            .merge_from(mods);
+    }
+    true
+}
+
+/// Stage a removal of every arrived community of each listed attribute not
+/// already staged for removal. Like [`exec_remove_large_community_admin`], a
+/// route carrying more values of a listed attribute than its wire bound fails
+/// closed (`false`) before any scan, so the compile-time pre-payment holds.
+pub(crate) fn exec_remove_all_communities(
+    attributes: CommunityAttributes,
+    ctx: &RouteContext<'_>,
+    continued: &mut Option<RouteModifications>,
+) -> bool {
+    fn stage<T: Copy + Eq + std::hash::Hash>(arrived: &[T], staged: &[T], out: &mut Vec<T>) {
+        if arrived.is_empty() {
+            return;
+        }
+        let mut seen: HashSet<T> = staged.iter().copied().collect();
+        out.extend(arrived.iter().copied().filter(|value| seen.insert(*value)));
+    }
+    let arrived = |attribute| match attribute {
+        CommunityAttribute::Standard => ctx.communities.len(),
+        CommunityAttribute::Extended => ctx.extended_communities.len(),
+        CommunityAttribute::Large => ctx.large_communities.len(),
+    };
+    if attributes.iter().any(|attribute| {
+        u64::try_from(arrived(attribute)).unwrap_or(u64::MAX) > max_communities_per_route(attribute)
+    }) {
+        return false;
+    }
+    let staged = continued.as_ref();
+    let mut mods = RouteModifications::default();
+    if attributes.standard {
+        stage(
+            ctx.communities,
+            staged.map_or(&[], |mods| &mods.communities_remove),
+            &mut mods.communities_remove,
+        );
+    }
+    if attributes.extended {
+        stage(
+            ctx.extended_communities,
+            staged.map_or(&[], |mods| &mods.extended_communities_remove),
+            &mut mods.extended_communities_remove,
+        );
+    }
+    if attributes.large {
+        stage(
+            ctx.large_communities,
+            staged.map_or(&[], |mods| &mods.large_communities_remove),
+            &mut mods.large_communities_remove,
+        );
+    }
+    if !mods.is_empty() {
         continued
             .get_or_insert_with(RouteModifications::default)
             .merge_from(mods);
@@ -1187,6 +1268,12 @@ impl CompiledChain {
                                 break;
                             }
                         }
+                        TermActionView::RemoveAllCommunities { attributes } => {
+                            if !exec_remove_all_communities(attributes, ctx, &mut continued) {
+                                denied = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1377,6 +1464,13 @@ impl CompiledChain {
                             };
                         }
                     }
+                    TermActionView::RemoveAllCommunities { attributes } => {
+                        if !exec_remove_all_communities(attributes, ctx, &mut continued) {
+                            return PolicyDecision::Deny {
+                                term_index: Some(term_index),
+                            };
+                        }
+                    }
                 }
             }
         }
@@ -1501,6 +1595,15 @@ impl CompiledChain {
                     }
                     TermAction::RemoveLargeCommunityAdmin { global_admin } => {
                         if !exec_remove_large_community_admin(*global_admin, ctx, continued) {
+                            return Ok(LoopOutcome {
+                                iterations,
+                                decided_at: Some(iterations - 1),
+                                flow: LoopFlow::Deny,
+                            });
+                        }
+                    }
+                    TermAction::RemoveAllCommunities { attributes } => {
+                        if !exec_remove_all_communities(*attributes, ctx, continued) {
                             return Ok(LoopOutcome {
                                 iterations,
                                 decided_at: Some(iterations - 1),

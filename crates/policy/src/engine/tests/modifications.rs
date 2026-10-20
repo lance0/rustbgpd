@@ -811,3 +811,100 @@ fn set_next_hop_applies_by_family() {
         );
     }
 }
+
+/// The pairwise extended-community equivalence the identity replaced:
+/// Route Target and Route Origin by decoded pair, everything else raw.
+fn pairwise_equivalent(a: ExtendedCommunity, b: ExtendedCommunity) -> bool {
+    match (a.route_target(), b.route_target()) {
+        (Some(x), Some(y)) => x == y,
+        _ => match (a.route_origin(), b.route_origin()) {
+            (Some(x), Some(y)) => x == y,
+            _ => a == b,
+        },
+    }
+}
+
+#[test]
+fn ext_community_identity_matches_pairwise_equivalence() {
+    let values = [
+        // RT 65000:1 as 2-octet AS, 4-octet AS and IPv4 (0.0.253.232).
+        0x0002_FDE8_0000_0001,
+        0x0202_0000_FDE8_0001,
+        0x0102_0000_FDE8_0001,
+        // RO with the same pair, and the RT with another local value.
+        0x0003_FDE8_0000_0001,
+        0x0103_0000_FDE8_0001,
+        0x0002_FDE8_0000_0002,
+        // Non-RT/RO values, including one sharing the RT's value bytes.
+        0x0006_FDE8_0000_0001,
+        0x4300_0000_0000_0000,
+        0x4300_0000_0000_0002,
+        0x0302_0000_0000_000C,
+    ]
+    .map(ExtendedCommunity::new);
+    let mut equivalent_pairs = 0;
+    for a in values {
+        for b in values {
+            let pairwise = pairwise_equivalent(a, b);
+            assert_eq!(
+                ext_community_identity(a) == ext_community_identity(b),
+                pairwise,
+                "{a} vs {b}"
+            );
+            equivalent_pairs += usize::from(pairwise && a != b);
+        }
+    }
+    assert!(equivalent_pairs >= 6, "{equivalent_pairs}");
+}
+
+/// A strip-all stages one removal per arrived value, up to 8,191 extended
+/// communities. Applying and merging those removals derives each value's
+/// identity a constant number of times; a pairwise scan would derive it
+/// about 2 x 8,191^2 times.
+#[test]
+fn extended_strip_apply_and_merge_are_linear_at_the_wire_bound() {
+    let n: u64 = 8_191;
+    let arrived: Vec<ExtendedCommunity> = (0..n)
+        .map(|i| ExtendedCommunity::new(0x0002_FDE8_0000_0000 | i))
+        .collect();
+    let calls = || EXT_IDENTITY_CALLS.with(std::cell::Cell::get);
+    let bound = 3 * n;
+
+    let mut attrs = vec![PathAttribute::ExtendedCommunities(arrived.clone())];
+    let strip = RouteModifications {
+        extended_communities_remove: arrived.clone(),
+        ..RouteModifications::default()
+    };
+    let before = calls();
+    apply_modifications(&mut attrs, &strip);
+    assert!(
+        calls() - before <= bound,
+        "{} identity derivations",
+        calls() - before
+    );
+    assert!(attrs.is_empty(), "{attrs:?}");
+
+    // A later add of an arrived value cancels its staged removal; the
+    // IPv4-administrator encoding of the same RT is the same community.
+    let same_rt_ipv4 = ExtendedCommunity::new(0x0102_0000_FDE8_0007);
+    let mut merged = strip.clone();
+    let before = calls();
+    merged.merge_from(RouteModifications {
+        extended_communities_add: vec![same_rt_ipv4],
+        ..RouteModifications::default()
+    });
+    assert!(
+        calls() - before <= bound,
+        "{} identity derivations",
+        calls() - before
+    );
+    assert_eq!(merged.extended_communities_remove.len(), arrived.len() - 1);
+    let mut attrs = vec![PathAttribute::ExtendedCommunities(arrived)];
+    apply_modifications(&mut attrs, &merged);
+    assert_eq!(
+        attrs,
+        vec![PathAttribute::ExtendedCommunities(vec![
+            ExtendedCommunity::new(0x0002_FDE8_0000_0007)
+        ])]
+    );
+}

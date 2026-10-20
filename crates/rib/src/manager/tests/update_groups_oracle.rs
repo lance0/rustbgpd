@@ -6777,3 +6777,106 @@ async fn oracle_action_only_refusal_regroup_and_replay() {
         }
     }
 }
+
+/// An export chain stripping communities once a route carries 100 of them
+/// is route-only: members sharing it stay in one update group, grouped and
+/// forced-ungrouped distribution emit identical streams (the grouped path
+/// shares one export-memo outcome per source attribute set), and only the
+/// routes at or over the threshold leave without communities.
+#[tokio::test]
+async fn oracle_strip_many_communities_export_parity() {
+    use std::sync::Arc;
+
+    use rustbgpd_policy::NamedPolicy;
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+
+    let strip = || {
+        let compiled = RpolFile::parse(
+            "policy strip {
+                term too-many { if route.communities.len >= 100 { remove community * } }
+                term rest { accept }
+            }",
+        )
+        .expect("clean rpol")
+        .compile_policy("strip", &[], &mut SetStore::new())
+        .expect("policy exists");
+        assert!(!compiled.requires_peer_context());
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "strip".to_string(),
+            Arc::new(compiled),
+        )])
+    };
+    let communities = |n: u32| (1..=n).map(|i| 0xFDE8_0000 | i).collect::<Vec<_>>();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+
+    let mut oracle = Oracle::spawn(false, cluster);
+    oracle.peer_up(C, false, true, Some(strip()), 64).await;
+    oracle.peer_up(D, false, true, Some(strip()), 64).await;
+    let label = oracle.group_label(C).await;
+    assert!(label.starts_with("group:"), "{label}");
+    assert_eq!(oracle.group_label(D).await, label);
+    oracle.finish().await;
+
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(C, false, true, Some(strip()), 64).await;
+        o.peer_up(D, false, true, Some(strip()), 64).await;
+        o.routes(
+            A,
+            vec![
+                ibgp_route(pfx(1, 0), A, 100, communities(99)),
+                ibgp_route(pfx(2, 0), A, 100, communities(100)),
+                ibgp_route(pfx(3, 0), A, 100, communities(101)),
+            ],
+            vec![],
+        )
+        .await;
+        // Crossing the threshold on an implicit replace strips the update.
+        o.routes(
+            A,
+            vec![ibgp_route(pfx(1, 0), A, 100, communities(100))],
+            vec![],
+        )
+        .await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_route_parity(&grouped, &ungrouped);
+
+    let last_communities = |streams: &Streams, peer: Ipv4Addr, prefix: Ipv4Prefix| {
+        streams[&IpAddr::V4(peer)]
+            .iter()
+            .flat_map(|msg| &msg.announce)
+            .rfind(|announce| announce.0 == Prefix::V4(prefix))
+            .map(|announce| {
+                announce
+                    .4
+                    .iter()
+                    .find_map(|attr| match attr {
+                        PathAttribute::Communities(values) => Some(values.len()),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            })
+    };
+    for peer in [C, D] {
+        for (prefix, expected) in [(pfx(2, 0), 0), (pfx(3, 0), 0), (pfx(1, 0), 0)] {
+            assert_eq!(
+                last_communities(&grouped, peer, prefix),
+                Some(expected),
+                "{peer} {prefix}"
+            );
+        }
+        let first_p1 = grouped[&IpAddr::V4(peer)]
+            .iter()
+            .flat_map(|msg| &msg.announce)
+            .find(|announce| announce.0 == Prefix::V4(pfx(1, 0)))
+            .expect("p1 announced");
+        assert!(
+            first_p1
+                .4
+                .contains(&PathAttribute::Communities(communities(99))),
+            "a 99-community route keeps its communities"
+        );
+    }
+}
