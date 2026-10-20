@@ -191,13 +191,20 @@ The manifest freezes these bars before any result:
 
 - **Fail-stop:** the daemon runs through both reloads. Any exit, including
   fail-stop exit 70, is FAIL. The controller watches the daemon and every
-  receiver through the finish boundary: a daemon exit or receiver failure that
-  interrupts any later step (the `last-reload` query, the next arm, the exit
-  record) is the same FAIL, and only an instrument error is INVALID.
+  receiver from daemon startup through the finish boundary: a daemon exit or
+  receiver failure that interrupts any step (startup, the baseline table load,
+  the `last-reload` query, the next arm, the exit record) is the same FAIL. So
+  is a live daemon that stops answering: a metrics scrape that fails or a
+  `last-reload` query that times out, or startup or the baseline load not
+  finishing by the leg deadline. INVALID is kept for an instrument error, even
+  one that interrupts a step after a bar was breached, and for an exit before
+  the owned PID is first seen running the daemon binary, which cannot be told
+  from a launcher failure.
 - **Applied:** each SIGHUP adds exactly one `complete` to
   `bgp_sighup_reload_outcomes_total` and nothing to any other outcome, and
   `rbgp config last-reload` reports outcome `complete` with nothing unapplied.
-  Otherwise FAIL.
+  Otherwise FAIL, including an outcome that lands after the reload wait but
+  before the post-reload scrape. A counter that decreases is INVALID.
 - **Exact fold:** every receiver reaches the table a fresh start with the new
   dataset would send. A wrong verdict, a return to the prior value after the
   new one, a withdrawal or a session loss is FAIL. A prior-value replay before

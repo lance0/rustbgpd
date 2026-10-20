@@ -3725,8 +3725,10 @@ message FlowSpecAction {
     FlowSpecTrafficAction traffic_action = 2;
     FlowSpecTrafficMarking traffic_marking = 3;
     FlowSpecRedirect redirect = 4;
-    // Outside the v1 inventory: a v1 client that does not know this
-    // variant still sees the action in FlowSpecRouteEntry.extended_communities.
+    // In the v1 FlowSpec controller inventory (API shape only; no forwarding
+    // or enforcement guarantee). A client built against an older proto
+    // still finds the action community in
+    // FlowSpecRouteEntry.extended_communities.
     FlowSpecTrafficRatePackets traffic_rate_packets = 5;
   }
 }
@@ -3760,9 +3762,9 @@ message FlowSpecTrafficMarking {
 //   "ASN:value", ASN <= 65535, 32-bit value: 2-octet AS (type 0x8008)
 //   "a.b.c.d:value", 16-bit value: IPv4 address (type 0x8108)
 //   "ASN:value", ASN > 65535, 16-bit value: 4-octet AS (type 0x8208)
-//   "high.low:value" (RFC 5396 asdot), 16-bit value: 4-octet AS for any ASN
-// Listings render a 4-octet-AS redirect whose ASN fits in 16 bits as
-// "0.ASN:value", so the string read back always selects the same form.
+//   "high.low:value" (RFC 5396 asdot+), 16-bit value: 4-octet AS for any ASN
+// Listings render a 4-octet-AS redirect whose ASN fits in 16 bits in asdot+
+// as "0.ASN:value", so a read and re-inject keeps the 4-octet-AS encoding.
 // Any other string returns INVALID_ARGUMENT.
 message FlowSpecRedirect {
   string route_target = 1;

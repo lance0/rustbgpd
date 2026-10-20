@@ -76,6 +76,16 @@ the local mutation stage confirmed by `OK`. An RPC timeout or lost response
 does not prove that an admitted mutation was canceled; reconcile retained
 intent before deciding what to retry.
 
+`FlowSpecAction` is inventoried in both directions: `AddFlowSpec` accepts it
+and `ListFlowSpecRoutes` returns it typed. That includes traffic-rate-bytes,
+traffic-rate-packets (`traffic_rate_packets`), traffic-action,
+traffic-marking and the three redirect forms. Every action community is also
+echoed raw in `FlowSpecRouteEntry.extended_communities`, and that echo stays.
+A redirect read back as `0.ASN:value` uses RFC 5396 asdot+, which keeps the
+4-octet-AS encoding when the rule is re-injected. This pins the API shape
+only: it adds no forwarding, installation or enforcement guarantee for any
+action.
+
 The following shared surfaces remain **outside v1**:
 
 - `ListFlowSpecRequest.received_peer_address` selecting any source other than
@@ -85,9 +95,6 @@ The following shared surfaces remain **outside v1**:
   and `FlowSpecValidationStatus`: these diagnostic fields and enum are
   explicitly excluded even in a local-intent response. Controllers reconcile
   using `route` and `selected`, not validation diagnostics.
-- `FlowSpecAction.traffic_rate_packets`: the typed traffic-rate-packets action
-  is excluded from both FlowSpec method sets. A client that does not read it
-  still finds the action community in `FlowSpecRouteEntry.extended_communities`.
 - `Config.flowspec` and RFC 9117 receive-side validation: validation remains
   opt-in and disabled by default. Local injection remains trusted origination.
 - FlowSpec CLI commands and output, GR/LLGR retention guarantees, remote
