@@ -3317,6 +3317,14 @@ run out. SIGHUP does not touch leases. A daemon that predates these RPCs
 answers `UNIMPLEMENTED` and creates nothing, so never retry a failed leased
 add through `AddPath` or `AddFlowSpec`.
 
+The lease RPCs, the delete `owner` and `override_owner` fields and the
+read-back below are part of the v1 inventory. A daemon restart invalidates
+every generation: injected state is process-local, so after a restart the
+first renewal returns `FAILED_PRECONDITION` and the controller re-adds. The
+[v1 contract](v1-stable-contract.md#injection-lease-lifecycle) lists the
+pinned semantics. When peers withdraw an expired entry, and whether a
+dataplane stops enforcing it, are outside the guarantee.
+
 `RibService.ListReceivedRoutes` with `neighbor_address: "0.0.0.0"` and
 `ListFlowSpecRoutes` with `received_peer_address: "0.0.0.0"` report each
 owned entry's `injection_owner`, `lease_generation` and `lease_remaining_ms`

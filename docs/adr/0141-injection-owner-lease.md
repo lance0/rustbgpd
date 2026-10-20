@@ -430,6 +430,9 @@ no existing client. The new delete fields and RPCs change the
 `InjectionService` signature and message-graph hashes in the v1 inventory.
 That hash update lands in its own commit, and the surface enters the
 inventory with its implementation and the interop evidence below.
+The lifecycle entered the v1 inventory once prefixd exercised the leased
+calls and the M22 lease-expiry leg ran in hosted CI; see the
+[v1 contract](../reference/v1-stable-contract.md#injection-lease-lifecycle).
 
 ### 12. Test plan
 
