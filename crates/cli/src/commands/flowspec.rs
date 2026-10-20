@@ -4,7 +4,8 @@ use crate::output::{self, outln};
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::{
     AddFlowSpecRequest, DeleteFlowSpecRequest, FlowSpecAction, FlowSpecComponent, FlowSpecRedirect,
-    FlowSpecTrafficAction, FlowSpecTrafficMarking, FlowSpecTrafficRate, ListFlowSpecRequest,
+    FlowSpecTrafficAction, FlowSpecTrafficMarking, FlowSpecTrafficRate, FlowSpecTrafficRatePackets,
+    ListFlowSpecRequest,
 };
 
 fn format_component(c: &FlowSpecComponent) -> String {
@@ -37,7 +38,7 @@ fn format_action(a: &FlowSpecAction) -> String {
             if r.rate == 0.0 {
                 "drop".into()
             } else {
-                format!("rate={:.0}", r.rate)
+                format!("rate={}", r.rate)
             }
         }
         Some(crate::proto::flow_spec_action::Action::TrafficAction(a)) => {
@@ -55,6 +56,9 @@ fn format_action(a: &FlowSpecAction) -> String {
         }
         Some(crate::proto::flow_spec_action::Action::Redirect(r)) => {
             format!("redirect={}", r.route_target)
+        }
+        Some(crate::proto::flow_spec_action::Action::TrafficRatePackets(r)) => {
+            format!("rate-pps={}", r.rate)
         }
         None => "none".into(),
     }
@@ -246,7 +250,8 @@ fn parse_component(s: &str) -> Result<FlowSpecComponent, String> {
     }
 }
 
-/// Parse an action like "drop", "rate=1000", "redirect=65001:100", "mark-dscp=46".
+/// Parse an action like "drop", "rate=1000", "rate-pps=500", "redirect=65001:100",
+/// "mark-dscp=46".
 fn parse_action(s: &str) -> Result<FlowSpecAction, String> {
     if s == "drop" {
         return Ok(FlowSpecAction {
@@ -260,6 +265,14 @@ fn parse_action(s: &str) -> Result<FlowSpecAction, String> {
         return Ok(FlowSpecAction {
             action: Some(crate::proto::flow_spec_action::Action::TrafficRate(
                 FlowSpecTrafficRate { rate },
+            )),
+        });
+    }
+    if let Some(val) = s.strip_prefix("rate-pps=") {
+        let rate: f32 = val.parse().map_err(|_| format!("invalid rate: {val}"))?;
+        return Ok(FlowSpecAction {
+            action: Some(crate::proto::flow_spec_action::Action::TrafficRatePackets(
+                FlowSpecTrafficRatePackets { rate },
             )),
         });
     }
@@ -396,7 +409,7 @@ pub async fn delete(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_action;
+    use super::{format_action, parse_action};
 
     #[test]
     fn parse_action_rejects_out_of_range_dscp() {
@@ -406,5 +419,40 @@ mod tests {
     #[test]
     fn parse_action_accepts_max_dscp() {
         assert!(parse_action("mark-dscp=63").is_ok());
+    }
+
+    /// A displayed rate parses back to the same action: rounding a fractional
+    /// rate to 0 would turn a rate limit into discard (RFC 8955 §7.3).
+    #[test]
+    fn rate_actions_round_trip_through_display() {
+        for text in [
+            "rate=0.25",
+            "rate=1.5",
+            "rate=1000",
+            "rate=3.4028235e38",
+            "rate-pps=0.25",
+            "rate-pps=1.5",
+            "rate-pps=500",
+            "rate-pps=3.4028235e38",
+            "rate-pps=0",
+            "drop",
+        ] {
+            let action = parse_action(text).unwrap();
+            let shown = format_action(&action);
+            assert_eq!(
+                parse_action(&shown).unwrap(),
+                action,
+                "{text} shown as {shown}"
+            );
+        }
+        assert_eq!(
+            format_action(&parse_action("rate=0.25").unwrap()),
+            "rate=0.25"
+        );
+        assert_eq!(
+            format_action(&parse_action("rate-pps=1.5").unwrap()),
+            "rate-pps=1.5"
+        );
+        assert!(parse_action("rate-pps=fast").is_err());
     }
 }
