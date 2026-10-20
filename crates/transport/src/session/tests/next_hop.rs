@@ -2194,6 +2194,47 @@ async fn ebgp_ipv6_without_next_hop_is_suppressed_visibly_once_per_session() {
     assert_eq!(v6_suppressed_count(&control.metrics), 0.0);
 }
 
+/// A withheld family is staged for its empty `EoR` before `PeerUp`; a
+/// session that withholds nothing stages nothing.
+#[tokio::test]
+async fn withheld_ipv6_unicast_is_staged_before_peer_up() {
+    async fn staged(
+        session: &mut PeerSession,
+        rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    ) -> Vec<String> {
+        let mut neg = negotiated_session(65002, false);
+        neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        session
+            .execute_actions(vec![Action::SessionEstablished(Box::new(neg))])
+            .await;
+        std::iter::from_fn(|| rib_rx.try_recv().ok())
+            .filter_map(|message| match message {
+                RibUpdate::SetPeerWithheldFamilies { families, .. } => {
+                    Some(format!("withheld {families:?}"))
+                }
+                RibUpdate::PeerUp { .. } => Some("peer_up".to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    assert_eq!(
+        staged(&mut session, &mut rib_rx).await,
+        vec![
+            "withheld [(Ipv6, Unicast)]".to_string(),
+            "peer_up".to_string()
+        ]
+    );
+
+    let (mut control, mut control_rx) = make_test_session_with_rib(65001, 65002);
+    control.config.local_ipv6_nexthop = Some("2001:db8:0:1::1".parse().unwrap());
+    assert_eq!(
+        staged(&mut control, &mut control_rx).await,
+        vec!["peer_up".to_string()]
+    );
+}
+
 /// Hot-apply `local_ipv6_nexthop`, keeping every other runtime knob as is.
 async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<Ipv6Addr>) {
     let config = &session.config;

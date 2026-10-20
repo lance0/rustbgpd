@@ -872,6 +872,12 @@ impl PeerSession {
                     if unnumbered_ipv4_without_enhe {
                         sendable_families.retain(|family| *family != (Afi::Ipv4, Safi::Unicast));
                     }
+                    let withheld_families: Vec<_> = neg
+                        .negotiated_families
+                        .iter()
+                        .filter(|family| !sendable_families.contains(family))
+                        .copied()
+                        .collect();
                     // RFC 8654 §2: OUR advertised Extended Message capability
                     // governs what we accept INBOUND; the peer's capability
                     // (neg.peer_extended_message) only governs what we may
@@ -1041,6 +1047,20 @@ impl PeerSession {
                             }),
                         })
                         .await;
+
+                    // Negotiated families this session will not export
+                    // still get an empty EoR with the initial dump (RFC 4724
+                    // §4.1), so stage them before `PeerUp` builds it.
+                    if !withheld_families.is_empty() {
+                        let _ = self
+                            .rib_tx
+                            .send(RibUpdate::SetPeerWithheldFamilies {
+                                peer: self.peer_ip,
+                                session_id: self.session_identity.id,
+                                families: withheld_families,
+                            })
+                            .await;
+                    }
 
                     // Register with RIB manager for outbound updates
                     let _ = self

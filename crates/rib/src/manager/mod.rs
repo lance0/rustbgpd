@@ -626,6 +626,9 @@ pub struct RibManager {
     /// Session-stamped local role staged before `PeerUp`, so the initial
     /// Adj-RIB-Out build can enforce RFC 9234 OTC egress rules.
     pending_peer_export_context: HashMap<(IpAddr, u64), Option<BgpRole>>,
+    /// Session-stamped negotiated-but-withheld families staged before
+    /// `PeerUp` (`RibUpdate::SetPeerWithheldFamilies`).
+    pending_peer_withheld_families: HashMap<(IpAddr, u64), Vec<(Afi, Safi)>>,
     /// Session-stamped RFC 7947 §2.3.2 control-community context staged
     /// before `PeerUp` (the RS-side local ASN when the session interprets
     /// route-server control communities).
@@ -1743,6 +1746,9 @@ pub(super) struct LiveSessionRecord {
     peer_router_id: Ipv4Addr,
     export_policy: Option<PolicyChain>,
     sendable_families: Vec<(Afi, Safi)>,
+    /// Negotiated families withheld from `sendable_families`; each gets an
+    /// empty `EoR` with the initial dump.
+    withheld_families: Vec<(Afi, Safi)>,
     is_ebgp: bool,
     route_reflector_client: bool,
     local_role: Option<BgpRole>,
@@ -2322,6 +2328,7 @@ impl RibManager {
             live_sessions: HashMap::new(),
             evpn_feed_receipt_count: 0,
             pending_peer_export_context: HashMap::new(),
+            pending_peer_withheld_families: HashMap::new(),
             pending_peer_rs_control: HashMap::new(),
             pending_peer_export_encoders: HashMap::new(),
             pending_peer_gr_context: HashMap::new(),
@@ -4067,6 +4074,14 @@ impl RibManager {
             } => {
                 self.pending_peer_source_context
                     .insert((peer, session_id), context);
+            }
+            RibUpdate::SetPeerWithheldFamilies {
+                peer,
+                session_id,
+                families,
+            } => {
+                self.pending_peer_withheld_families
+                    .insert((peer, session_id), families);
             }
             RibUpdate::SetPeerExportContext {
                 peer,

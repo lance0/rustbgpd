@@ -905,6 +905,98 @@ fn dirty_resync_sends_ready_eor_and_retains_held_family() {
     assert_eq!(outbound_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
 }
 
+/// A withheld family's empty `EoR` obeys our own RFC 4724 convergence hold
+/// like a sendable family's: queued at registration while the family is
+/// gated, sent when selection releases, with no route for that family.
+#[test]
+fn withheld_family_eor_waits_for_selection_release() {
+    let source = peer(1);
+    let target = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 254)),
+        metrics.clone(),
+    )
+    .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    let gr_families = HashSet::from([FAMILY]);
+    let transitions = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert_eq!(
+            selection
+                .classify_session(source, 11, false, &gr_families, &metrics)
+                .len(),
+            0
+        );
+        selection.session_down(source, 11, &metrics);
+        selection
+            .await_collision_failback_refresh(source, 11, false, &gr_families, true, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
+
+    // FAMILY is negotiated but withheld; only READY_FAMILY is sendable.
+    manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
+        peer: target,
+        session_id: 21,
+        families: vec![FAMILY],
+    });
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    manager.handle_update(peer_up_with_families(
+        target,
+        21,
+        outbound_tx,
+        vec![READY_FAMILY],
+    ));
+    assert_eq!(
+        outbound_rx.try_recv().unwrap().end_of_rib,
+        vec![READY_FAMILY],
+        "the held withheld family's EoR must not go out yet"
+    );
+    assert!(outbound_rx.try_recv().is_err());
+    assert_eq!(
+        manager.pending_eor.get(&target),
+        Some(&HashSet::from([FAMILY]))
+    );
+
+    let route = make_route_with_lp(
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+        Ipv4Addr::new(10, 0, 0, 1),
+        100,
+    );
+    manager.enqueue_routes_received(
+        source,
+        vec![route],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+    );
+    while manager.process_next_route_chunk() {}
+    let release = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(selection.begin_route_refresh(source, 11, FAMILY).is_none());
+        selection
+            .end_route_refresh(source, 11, FAMILY, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions([release], "test refresh completion");
+
+    let updates: Vec<_> = std::iter::from_fn(|| outbound_rx.try_recv().ok()).collect();
+    assert!(
+        updates.iter().all(|u| u.announce.is_empty()),
+        "a withheld family exports no route"
+    );
+    let eor: Vec<_> = updates.iter().flat_map(|u| u.end_of_rib.clone()).collect();
+    assert_eq!(eor, vec![FAMILY], "released once, after selection");
+    assert_eq!(manager.peer_sendable_families[&target], vec![READY_FAMILY]);
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
