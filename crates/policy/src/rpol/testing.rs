@@ -462,7 +462,7 @@ pub(super) fn run_tests_recording(
 /// chain compiler, so tests run the same splice and cross-policy merge
 /// the daemon runs. Also returns each member's own compiled policy, for
 /// coverage attribution (the spliced copy carries the call name).
-fn assemble_chain(
+pub(super) fn assemble_chain(
     expect: &ExpectDef,
     lowerer: &mut Lowerer<'_>,
     store: &mut SetStore,
@@ -477,7 +477,7 @@ fn assemble_chain(
     for member in &expect.calls {
         let args: Vec<u32> = member.args.iter().map(|arg| arg.node).collect();
         let compiled =
-            Arc::new(lowerer.instantiate_chain(&member.policy.node, &args, store, bindings));
+            Arc::new(lowerer.instantiate_member(&member.policy.node, &args, store, bindings));
         let missing = lowerer.take_missing_datasets();
         if !missing.is_empty() {
             return Err(format!(
@@ -557,7 +557,7 @@ fn render_expect(expect: &ExpectDef) -> String {
     }
 }
 
-fn render_call(name: &str, args: &[u32]) -> String {
+pub(super) fn render_call(name: &str, args: &[u32]) -> String {
     if args.is_empty() {
         name.to_string()
     } else {

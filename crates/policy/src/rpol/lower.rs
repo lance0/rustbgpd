@@ -501,14 +501,7 @@ impl<'a> Lowerer<'a> {
         store: &mut SetStore,
         bindings: &DatasetBindings,
     ) -> CompiledChain {
-        self.begin_chain(bindings);
-        let def = self
-            .file
-            .policies
-            .iter()
-            .find(|p| p.name.node == name)
-            .expect("typechecked: policy exists");
-        let policy = self.lower_policy(def, args, store);
+        let policy = self.lower_named(name, args, store, bindings);
         CompiledChain {
             policies: vec![policy],
             prefix_sets: self.prefix_sets.clone(),
@@ -521,6 +514,64 @@ impl<'a> Lowerer<'a> {
             datasets: std::mem::take(&mut self.datasets),
             local_asn: None,
         }
+    }
+
+    /// [`Self::instantiate_chain`] for one member of a test-runner chain
+    /// expectation: the returned chain carries only the set, regex and
+    /// dataset entries its policy references, in the order
+    /// [`crate::compile::compile_chain`] would merge them. An expectation
+    /// can repeat members over one file's tables, so a full table copy per
+    /// member would grow with members × tables instead of the chain node
+    /// budget.
+    pub(super) fn instantiate_member(
+        &mut self,
+        name: &str,
+        args: &[u32],
+        store: &mut SetStore,
+        bindings: &DatasetBindings,
+    ) -> CompiledChain {
+        let policy = self.lower_named(name, args, store, bindings);
+        // Lend the tables to a donor chain rather than cloning them, keep
+        // only the referenced entries, then take the tables back.
+        let donor = CompiledChain {
+            policies: vec![policy],
+            prefix_sets: std::mem::take(&mut self.prefix_sets),
+            community_sets: std::mem::take(&mut self.community_sets),
+            asn_sets: std::mem::take(&mut self.asn_sets),
+            as_path_regexes: std::mem::take(&mut self.as_path_regexes),
+            prefix_set_names: std::mem::take(&mut self.prefix_set_names),
+            community_set_names: std::mem::take(&mut self.community_set_names),
+            asn_set_names: std::mem::take(&mut self.asn_set_names),
+            datasets: std::mem::take(&mut self.datasets),
+            local_asn: None,
+        };
+        let member =
+            crate::compile::splice_compiled(&[(donor.policies[0].name.clone(), &donor, 0)]);
+        self.prefix_sets = donor.prefix_sets;
+        self.community_sets = donor.community_sets;
+        self.asn_sets = donor.asn_sets;
+        self.as_path_regexes = donor.as_path_regexes;
+        self.prefix_set_names = donor.prefix_set_names;
+        self.community_set_names = donor.community_set_names;
+        self.asn_set_names = donor.asn_set_names;
+        member
+    }
+
+    fn lower_named(
+        &mut self,
+        name: &str,
+        args: &[u32],
+        store: &mut SetStore,
+        bindings: &DatasetBindings,
+    ) -> CompiledPolicy {
+        self.begin_chain(bindings);
+        let def = self
+            .file
+            .policies
+            .iter()
+            .find(|p| p.name.node == name)
+            .expect("typechecked: policy exists");
+        self.lower_policy(def, args, store)
     }
 
     fn lower_policy(

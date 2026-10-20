@@ -6951,3 +6951,85 @@ fn chain_expect_charges_the_chain_node_budget() {
         "{failures:?}"
     );
 }
+
+/// Chain-expectation members retain only the set and regex entries they
+/// reference, so retained memory follows the chain node budget rather than
+/// members × file tables (many repeats of a small member over large set
+/// tables; many distinct parameterized regex calls). The assembled chain is
+/// the one the full per-member tables would have produced.
+#[test]
+fn chain_expect_members_retain_only_referenced_tables() {
+    use std::fmt::Write as _;
+
+    use crate::compile::compile_chain;
+    use crate::datasets::DatasetBindings;
+    use crate::engine::{NamedPolicy, PolicyChain};
+
+    const SETS: usize = 500;
+    const MEMBERS: usize = 200;
+    let mut source = String::new();
+    for index in 0..SETS {
+        let _ = writeln!(source, "asn-set s{index} {{ {} }}", index + 1);
+    }
+    source.push_str(
+        "policy e { term t { accept } }
+         policy q { term t { if route.origin-as in s7 { reject } } }
+         policy p(a: u32) { term t { if route.as-path contains a { reject } } }
+         test t { route { }\n",
+    );
+    let repeats = ["e"; MEMBERS].join(", ");
+    let calls = (1..=MEMBERS)
+        .map(|asn| format!("p({asn})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(source, "expect chain [{repeats}, q] == accept");
+    let _ = writeln!(source, "expect chain [{calls}, q, p(1)] == accept }}");
+    assert_eq!(failures_of(&source), Vec::<String>::new());
+
+    let (file, _) = super::front(&source).expect("compiles");
+    let mut store = SetStore::new();
+    let mut lowerer = super::lower::Lowerer::new(&file, &mut store);
+    let bindings = DatasetBindings::new();
+    for expect in &file.tests[0].expects {
+        let (chain, members) =
+            super::testing::assemble_chain(expect, &mut lowerer, &mut store, &bindings)
+                .expect("within budget");
+        let retained: usize = members
+            .iter()
+            .map(|member| {
+                member.prefix_sets.len()
+                    + member.community_sets.len()
+                    + member.asn_sets.len()
+                    + member.as_path_regexes.len()
+                    + member.prefix_set_names.len()
+                    + member.community_set_names.len()
+                    + member.asn_set_names.len()
+            })
+            .sum();
+        // Each member references at most one set (and its name) or regex.
+        assert!(
+            retained <= 2 * members.len(),
+            "{retained} table entries for {} members",
+            members.len()
+        );
+
+        let reference: Vec<NamedPolicy> = expect
+            .calls
+            .iter()
+            .map(|call| {
+                let args: Vec<u32> = call.args.iter().map(|arg| arg.node).collect();
+                let full =
+                    lowerer.instantiate_chain(&call.policy.node, &args, &mut store, &bindings);
+                assert_eq!(full.asn_sets.len(), SETS);
+                NamedPolicy::from_rpol(
+                    super::testing::render_call(&call.policy.node, &args),
+                    Arc::new(full),
+                )
+            })
+            .collect();
+        assert_eq!(
+            chain,
+            compile_chain(&PolicyChain::from_named(reference), &mut store)
+        );
+    }
+}
