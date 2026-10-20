@@ -107,6 +107,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [API reference](docs/reference/api.md#pinning-the-proto-to-a-release) has
   the download, verify and regenerate recipe. Publishing the file promotes no
   alpha field into the v1 contract.
+- `InjectionService.ListPathExportDispositions` reports, for one route added
+  with `AddPath` and named by its `(prefix, prefix_length, path_id)` key, one
+  export disposition per Established peer: committed to the peer's
+  Adj-RIB-Out, withheld with a bounded reason (for example
+  `family_suppressed:missing_ipv6_next_hop`, `export_policy`,
+  `outbound_prefix_limit`, `exact_export_rejected:<reason>` or
+  `not_selected`), or pending. A route for the same prefix from another
+  source never counts as this route's export, and a committed disposition
+  does not mean the peer received the route. Peers are paged in address
+  order. The method is a `sensitive_read` and joins the v1 inventory with
+  `AddPath` and `DeletePath`. See the
+  [export read-back](docs/reference/api.md#export-read-back) reference.
 
 ### Changed
 
@@ -175,8 +187,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was previously accepted and the route was later dropped from the FIB or
   refused at export. IPv4 and IPv6 link-local addresses remain accepted.
 - The v1 inventory now lists a route-server and route-reflector metric floor
-  under `metrics.stable_series`: 26 series covering session state, prefixes per
-  canonical family, max-prefix, RPKI, reload outcome and readiness. The check
+  under `metrics.stable_series`: 27 series covering session state, prefixes per
+  canonical family, max-prefix, RPKI, reload outcome, readiness and export
+  family suppression. The check
   compares each series' name, type and labels with its registration, and its
   pinned label values with production call sites. Series that expose RIB
   actor, scheduler, update-group and recovery internals are now classified as
@@ -230,6 +243,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   raw in `extended_communities`. The `0.ASN:value` read-back of a 4-octet-AS
   redirect whose ASN fits in 16 bits is now documented as RFC 5396 asdot+,
   the spelling that keeps the 4-octet encoding through a read and re-inject.
+- `bgp_export_family_suppressed_total{peer,family,reason}` joins the v1
+  route-server and route-reflector metric floor, with its current values
+  `family="ipv6_unicast"` and `reason="missing_ipv6_next_hop"` pinned. Further
+  bounded `family` and `reason` values are additive. Its help text and
+  reference now say what it counts: session establishments at which a family
+  was withheld, not sessions that withhold it throughout, since a reload that
+  supplies `local_ipv6_nexthop` restores export without a session reset. See
+  the [v1 contract](docs/reference/v1-stable-contract.md).
 
 ### Removed
 
@@ -305,7 +326,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unicast route silently.
   The session logs one WARN when it establishes and increments the new
   `bgp_export_family_suppressed_total{peer,family,reason}` counter
-  (`family="ipv6_unicast"`, `reason="missing_ipv6_next_hop"`), and
+  (`family="ipv6_unicast"`, `reason="missing_ipv6_next_hop"`), which counts
+  session establishments at which the family was withheld, and
   `rustbgpd --check` warns about static neighbors in that shape.
   **Operator-visible:** an injected IPv6 RTBH route toward such a peer still
   returns success from `AddPath`; setting `local_ipv6_nexthop` and reloading
