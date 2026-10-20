@@ -898,7 +898,8 @@ Before rolling any versions:
     [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each
     tag should publish version-less `rustbgpd-linux-amd64.tar.gz` and
     `rustbgpd-linux-arm64.tar.gz`, per-arch `.deb`/`.rpm` packages, the
-    standalone config schema, plus per-arch `checksums-<arch>.txt`
+    standalone config schema, the tagged `rustbgpd.proto` with its
+    `rustbgpd.proto.sha256`, plus per-arch `checksums-<arch>.txt`
     (covering the tarball and packages).
     Each tarball contains `rustbgpd`, `rbgp`, `rs-config-render`,
     `birdwatcher-adapter`, `LICENSE-MIT`, `LICENSE-APACHE`, `LICENSES.md`,

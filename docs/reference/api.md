@@ -40,7 +40,9 @@ principal = "automation.example"
 For readability the examples omit the accompanying
 `-H "authorization: bearer <token>"` metadata header.
 
-The proto definition lives at `proto/rustbgpd.proto`.
+The proto definition lives at `proto/rustbgpd.proto`. Each tagged release
+also publishes that file as a release asset; see
+[pinning the proto to a release](#pinning-the-proto-to-a-release).
 
 For a worked client in a general-purpose language — stub generation, mTLS with
 composed bearer-token call credentials, per-call deadlines, and the
@@ -52,6 +54,34 @@ listed in the narrow [v1 route-server / route-reflector / controller contract](v
 That machine inventory pins method names, streaming modes, and top-level
 request/response messages; a service or RPC existing in this reference does
 not by itself make it v1-stable.
+
+## Pinning the proto to a release
+
+A controller that generates stubs should pin them to the daemon release it
+targets instead of hand-vendoring a copy that drifts. Each tagged release
+publishes the exact tagged `proto/rustbgpd.proto` as the `rustbgpd.proto`
+asset, with `rustbgpd.proto.sha256` beside it:
+
+```bash
+TAG=vX.Y.Z  # the rustbgpd release you target
+base=https://github.com/lance0/rustbgpd/releases/download/$TAG
+curl -fsSLO "$base/rustbgpd.proto" &&
+  curl -fsSLO "$base/rustbgpd.proto.sha256" &&
+  sha256sum -c rustbgpd.proto.sha256 &&
+  python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. rustbgpd.proto
+```
+
+Each command runs only if the previous one succeeded, so a failed download or
+a checksum mismatch never regenerates stubs.
+
+Commit the tag, and the checksum if you like, next to the generated code.
+Moving to a new release means changing `TAG`, verifying again and
+regenerating. A release that predates the asset has none; take its file with
+`git show $TAG:proto/rustbgpd.proto` from a clone instead.
+
+Publishing the file does not promote anything into v1. Alpha messages, fields
+and RPCs in it stay alpha; the
+[v1 contract](v1-stable-contract.md) still defines the stable subset.
 
 ## Service overview
 
@@ -2104,8 +2134,8 @@ and raw in `extended_communities`, which carries every extended community on
 the rule. Only the raw list carries a community the API does not model, so a
 client that cross-checks the two should expect each typed action to have a
 raw twin. `actions` types traffic-rate-bytes (`traffic_rate`),
-traffic-rate-packets (`traffic_rate_packets`, outside the v1 inventory),
-traffic-action, traffic-marking and all three redirect forms. A redirect's
+traffic-rate-packets (`traffic_rate_packets`), traffic-action,
+traffic-marking and all three redirect forms. A redirect's
 `route_target` selects its form, on input and in listings:
 
 | `route_target` | Extended community |
@@ -2113,10 +2143,15 @@ traffic-action, traffic-marking and all three redirect forms. A redirect's
 | `ASN:value`, ASN up to 65535, 32-bit value | Redirect 2-octet AS (`0x8008`) |
 | `a.b.c.d:value`, 16-bit value | Redirect IPv4 address (`0x8108`, RFC 7674) |
 | `ASN:value`, ASN above 65535, 16-bit value | Redirect 4-octet AS (`0x8208`, RFC 7674) |
-| `high.low:value` (RFC 5396 asdot), 16-bit value | Redirect 4-octet AS, for any ASN |
+| `high.low:value` (RFC 5396 asdot+), 16-bit value | Redirect 4-octet AS, for any ASN |
 
-A listing renders a 4-octet-AS redirect whose ASN fits in 16 bits as
-`0.ASN:value`, so sending the string back reproduces the same community.
+A listing renders a 4-octet-AS redirect whose ASN fits in 16 bits in RFC 5396
+asdot+ form, `0.ASN:value`. A plain `ASN:value` with that ASN would select
+the 2-octet-AS community instead, so the asdot+ spelling is what keeps the
+4-octet-AS encoding when a controller reads a rule back and re-injects it.
+The [v1 controller boundary](v1-stable-contract.md#flowspec-controller-boundary)
+pins these typed actions, packet rate included, as API shape only: it makes
+no forwarding or enforcement guarantee for any action.
 `AddFlowSpec` does not deduplicate `actions` against `extended_communities`:
 send each action once, typed or raw.
 

@@ -49,8 +49,10 @@ In particular:
 - Experimental features remain outside the contract.
 - FlowSpec controller origination, local-intent reconciliation, and selected /
   committed advertised views use the
-  [scoped controller boundary](v1-stable-contract.md#flowspec-controller-boundary).
-  `Config.flowspec`, receive-side validation and its shared diagnostic fields,
+  [scoped controller boundary](v1-stable-contract.md#flowspec-controller-boundary),
+  including the typed traffic-rate-bytes, traffic-rate-packets and redirect
+  actions. That pins the API shape only, with no forwarding or enforcement
+  guarantee. `Config.flowspec`, receive-side validation and its shared diagnostic fields,
   remote received-candidate mode, FlowSpec CLI surfaces, GR/LLGR guarantees,
   and dataplane enforcement remain outside that promise.
 - Unicast injection inventories `AddPath`, `DeletePath` and the
