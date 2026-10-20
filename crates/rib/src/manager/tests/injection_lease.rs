@@ -1100,3 +1100,156 @@ async fn an_idle_expiry_task_never_wakes() {
     cancel.send(()).unwrap();
     assert_eq!(task.await.unwrap(), ExpiryExit::Cancelled);
 }
+
+/// Measures one expiry batch's RIB turn: `RUSTBGPD_LEASE_EXPIRY_OWNERS`
+/// owners (default 1), each at the per-owner key cap, expire together with
+/// one eBGP peer attached. A learned update queued at the batch's start
+/// waits the whole turn. Run in release:
+/// `cargo test --release -p rustbgpd-rib --lib -- --ignored --nocapture
+/// expiry_batch_turn`.
+#[tokio::test(start_paused = true)]
+#[ignore = "measurement; run explicitly in release"]
+async fn expiry_batch_turn() {
+    let owners: usize = std::env::var("RUSTBGPD_LEASE_EXPIRY_OWNERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (out_tx, mut out_rx) = mpsc::channel(1 << 16);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: TARGET,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    let leases = manager.injection_leases();
+    let mut index = 0u32;
+    for owner in 0..owners {
+        let owner = format!("o{owner}");
+        for _ in 0..MAX_KEYS_PER_OWNER {
+            let mut route = local_route(0);
+            route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 | index), 32));
+            index += 1;
+            manager
+                .inject_local_route(route, Some((&owner, 5)))
+                .unwrap();
+        }
+        while out_rx.try_recv().is_ok() {}
+    }
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let (expired, _) = leases.take_expired();
+    assert_eq!(expired.len(), owners);
+    let started = std::time::Instant::now();
+    manager.handle_expire_injection_leases(&expired);
+    let turn = started.elapsed();
+    let mut withdrawn = 0;
+    while let Ok(update) = out_rx.try_recv() {
+        withdrawn += update.withdraw.len();
+    }
+    assert_eq!(withdrawn, owners * MAX_KEYS_PER_OWNER);
+    eprintln!(
+        "expiry batch: owners={owners} keys={} turn_ms={:.1}",
+        owners * MAX_KEYS_PER_OWNER,
+        turn.as_secs_f64() * 1000.0
+    );
+}
+
+/// The peer-down comparison for [`expiry_batch_turn`]: one eBGP peer's
+/// session ends holding as many learned routes as the expiry batch
+/// withdraws, with the same receiving peer attached.
+#[tokio::test(start_paused = true)]
+#[ignore = "measurement; run explicitly in release"]
+async fn peer_down_turn() {
+    const SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 81);
+    let owners: usize = std::env::var("RUSTBGPD_LEASE_EXPIRY_OWNERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_up = |peer: IpAddr, asn: u32, outbound_tx| RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: asn,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    };
+    let (out_tx, mut out_rx) = mpsc::channel(1 << 16);
+    manager.handle_update(peer_up(TARGET, 65100, out_tx));
+    let (source_tx, _source_rx) = mpsc::channel(1 << 16);
+    manager.handle_update(peer_up(IpAddr::V4(SOURCE), 65200, source_tx));
+    let total = owners * MAX_KEYS_PER_OWNER;
+    let mut index = 0u32;
+    while (index as usize) < total {
+        let announced = (0..4096)
+            .map(|_| {
+                let mut route = make_route(
+                    Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 | index), 32),
+                    SOURCE,
+                );
+                index += 1;
+                route.attributes = AttrSet::new(vec![
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::AsPath(AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![65200])],
+                    }),
+                    PathAttribute::NextHop(SOURCE),
+                ]);
+                route
+            })
+            .collect();
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(SOURCE),
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+        while out_rx.try_recv().is_ok() {}
+    }
+    let started = std::time::Instant::now();
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: IpAddr::V4(SOURCE),
+        session_id: 0,
+    });
+    while manager.process_next_route_chunk() {}
+    let turn = started.elapsed();
+    let mut withdrawn = 0;
+    while let Ok(update) = out_rx.try_recv() {
+        withdrawn += update.withdraw.len();
+    }
+    assert_eq!(withdrawn, total);
+    eprintln!(
+        "peer down: routes={total} turn_ms={:.1}",
+        turn.as_secs_f64() * 1000.0
+    );
+}

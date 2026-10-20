@@ -284,8 +284,16 @@ Edges:
   batch for all 64 owners withdraws at most about one full table, the size
   of a full-table peer-down. A leased add of a new key past that cap returns
   `RESOURCE_EXHAUSTED` and changes nothing; keys awaiting expiry still count.
-  If measurement shows that a batch this size stalls the actor, expiry
-  adopts the peer-down chunking rather than adding a new mechanism.
+  Measured on a development host (release build, one eBGP receiving peer,
+  three interleaved runs each, the `expiry_batch_turn` and `peer_down_turn`
+  measurements in the RIB tests): one owner at the cap expires in a turn of
+  about 22 ms, against about 20 ms for a peer-down of the same size. All 64
+  owners at the cap expire in 2.9-3.2 s, against 2.2-2.6 s for a 1,048,576
+  route peer-down. Source peer-down services the readiness lane during that
+  turn; the expiry batch does not yet, so a batch that large can hold
+  readiness answers until it finishes. Bringing the batch under the same
+  readiness ownership as peer-down is the planned fix, rather than a new
+  mechanism.
 - **Graceful Restart selection deferral** delays distribution of the expiry
   withdrawal exactly as it delays an injected add today.
 
