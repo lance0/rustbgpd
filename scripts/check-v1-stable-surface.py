@@ -1090,10 +1090,13 @@ def emitted_label_values(
         else:
             call = (use.group(2), use.group(3)) if use.group(2) else None
             if use.group(4):
-                bound = re.findall(
-                    rf"\blet\s+{re.escape(use.group(4))}\s*=\s*(\w+)\s*\(([^()]*)\)\s*;", body
+                name = use.group(4)
+                bound = list(
+                    re.finditer(rf"\blet\s+{re.escape(name)}\s*=\s*(\w+)\s*\(([^()]*)\)\s*;", body)
                 )
-                call = bound[-1] if bound else None
+                # A later rebinding or assignment may change the labels: no evidence.
+                last = bound[-1] if bound else None
+                call = last.groups() if last and not rebinds(body[last.end() :], name) else None
             elements = pass_through_elements(metric_source, *call) if call else []
         if len(elements) != len(defined_labels):
             continue
@@ -1189,6 +1192,14 @@ def function_body(text: str, definition: re.Match) -> str:
     return text[start + 1 : end - 1] if start >= 0 else ""
 
 
+def rebinds(text: str, name: str) -> bool:
+    """Whether `text` shadows or assigns `name` (`let ... name`, `name =`, `name[i] +=`)."""
+    escaped = re.escape(name)
+    return re.search(
+        rf"\blet\b[^=;]*\b{escaped}\b|\b{escaped}\s*(?:\[[^\]]*\]\s*)?[-+*/|&^%]?=(?!=)", text
+    ) is not None
+
+
 def pass_through_elements(source: str, helper: str, arguments: str) -> list[str]:
     """A label helper's returned array, rewritten in terms of one call's arguments.
 
@@ -1203,12 +1214,13 @@ def pass_through_elements(source: str, helper: str, arguments: str) -> list[str]
         part.split(":", 1)[0].strip() for part in call_arguments(source, definitions[0].end()) or []
     ]
     passed = [argument.strip() for argument in arguments.split(",") if argument.strip()]
-    returned = re.search(r"\[([^\[\]]*)\]\s*$", function_body(source, definitions[0]))
+    body = function_body(source, definitions[0])
+    returned = re.search(r"\[([^\[\]]*)\]\s*$", body)
     if returned is None or len(passed) != len(parameters):
         return []
     elements = []
     for element in (part.strip() for part in returned.group(1).split(",") if part.strip()):
-        if element in parameters:
+        if element in parameters and not rebinds(body[: returned.start()], element):
             elements.append(passed[parameters.index(element)])
         elif re.fullmatch(r"\"[^\"]+\"", element):
             elements.append(element)

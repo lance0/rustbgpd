@@ -415,6 +415,16 @@ class MetricFloorTests(unittest.TestCase):
             ("let labels = max_prefix_label_values(peer, family, stage);",
              "let labels = other_labels(peer, family, stage);", 2,
              "pinned metric bgp_max_prefix_headroom label family values"),
+            # A later `let` shadows the helper-bound labels with a literal stage.
+            ("let labels = max_prefix_label_values(peer, family, stage);",
+             "let labels = max_prefix_label_values(peer, family, stage);\n"
+             '        let labels = [labels[0], labels[1], "pre_policy"];', 2,
+             "pinned metric bgp_max_prefix_headroom label family values"),
+            # The helper shadows a parameter before returning it: the whole site is no evidence.
+            ("    [peer, family, stage]", '    let stage = "pre_policy";\n    [peer, family, stage]', 1,
+             "pinned metric bgp_max_prefix_blocked_total label family values"),
+            ("    [peer, family, stage]", "    let family = stage;\n    [peer, family, stage]", 1,
+             "pinned metric bgp_max_prefix_blocked_total label family values"),
             # A renamed state in the constant the one-hot loop iterates.
             ('"open_sent",', '"opensent",', 1,
              "pinned metric bgp_peer_session_state label state values ['open_sent']"),
