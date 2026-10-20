@@ -13,8 +13,9 @@ BANNER = re.compile(
     r"  \|- \d+ peers \(\d+ [ei]BGP(?:, \d+ [ei]BGP)?\)"
     r"(?: in \d+ peer groups?)?\n"
     r"(?:  \|- \d+ named polic(?:y|ies)(?:, \d+ neighbor sets?)?\n)?"
-    r"  \|- grpc: (?:unix:///[^\s]+|tcp://[^\s]+)"
-    r"(?: \(read-only\))?(?: \(token auth\))?\n"
+    # One line per enabled listener: TCP, UDS, or TCP then UDS.
+    r"(?:  \|- grpc: (?:unix:///[^\s]+|tcp://[^\s]+)"
+    r"(?: \(read-only\))?(?: \(token auth\))?\n){1,2}"
     r"  \|- metrics: http://[^\s]+/metrics\n"
 )
 

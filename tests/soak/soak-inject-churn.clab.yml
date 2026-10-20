@@ -6,7 +6,9 @@
 # rustbgpd peers with a single FRR receiver. The soak harness drives
 # `InjectionService.AddPath` / `DeletePath` over gRPC at a sustained
 # churn rate, proving the injection path (the automation-controller
-# beachhead) does not leak under steady-state add/delete cycling.
+# beachhead) does not leak under steady-state add/delete cycling. With
+# LEASE_MODE=1 it also drives ADR-0141 owner leases over the gRPC TCP
+# listener (shared public test-only token).
 #
 # Usage:
 #   docker build -t rustbgpd:dev .
@@ -25,6 +27,7 @@ topology:
       binds:
         - ../interop/configs/rustbgpd-soak-inject-churn.toml:/etc/rustbgpd/config.toml:ro
         - ../interop/scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
         - ip link set eth1 up

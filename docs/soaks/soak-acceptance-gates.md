@@ -145,6 +145,31 @@ Injection: sustained `InjectionService` AddPath/DeletePath churn
 | Session established at end | Final CSV `bgp_established` == 1 | CSV `bgp_established` | Every sample. |
 | Injection RPC failures | 0 (fail-closed) | harness exit path + `churn.log` | Every `rbgp rib` call is checked; a failed RPC aborts the run. |
 
+**Lease mode** (`LEASE_MODE=1`, off by default) adds ADR-0141 owner leases
+beside the unowned churn: `LEASE_OWNERS` (default 4) controllers each hold
+`LEASE_KEYS_PER_OWNER` (default 512) leased /32s from a pool disjoint from
+the churn pool, under a `LEASE_SECONDS` (default 30) lease renewed every
+`LEASE_RENEW_SEC` (default 10). The last owner flaps every
+`LEASE_FLAP_INTERVAL_SEC` (default 600): it stops renewing, lets the lease
+expire, and re-adds, renewing its old generation once before and once after
+the re-add. The controllers
+use grpcurl against the lab's gRPC TCP listener with the shared public
+test-only token. Lease mode adds these gates; missing or malformed lease
+evidence is an input error.
+
+| Gate | Precommitted bound | Evidence |
+|------|--------------------|----------|
+| Controllers | every owner's controller exits 0; no failed leased add | `lease-events.log` |
+| Ordinary renewals | every owner renews at least once; no ordinary renewal refused or failed | `lease-events.log` |
+| Healthy-owner presence | every post-warmup sample: FRR holds all of each healthy owner's keys, and `ListInjectionLeases` shows its lease live | `lease-samples.jsonl` |
+| Flap expiry | per cycle, FRR's first drop is no earlier than the last renewal's send + lease, all keys are gone by its reply + lease + 5 s, and all are back after the re-add; at least max(1, (duration − warmup) ÷ (2 × (flap interval + lease))) complete cycles | `lease-events.log` (FRR polled twice a second during the cycle) |
+| Stale renewal refused | per cycle, a renewal at the old generation after the expiry (no resurrection) and again after the re-add (superseded generation); attempts > 0 and refusals (`FAILED_PRECONDITION`) == attempts | `lease-events.log` |
+| Generation | the flapping owner's incarnation is constant and its sequence strictly increases at every add | `lease-events.log` |
+| `/readyz` | every 1 Hz probe returns 200; at least duration ÷ 2 probes | `readyz.csv` (status and latency) |
+
+RSS, intern-table, session and daemon-log gates are the same as above; the
+unowned consumer count excludes the leased pool.
+
 ## Additional shipped scenarios
 
 These harnesses are part of the suite and can anchor a multi-day window
