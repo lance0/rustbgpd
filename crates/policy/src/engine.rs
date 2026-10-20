@@ -1825,6 +1825,9 @@ impl PolicyChain {
                     || !mods.large_communities_remove.is_empty()
             }
             TermAction::CommunityVar { .. } | TermAction::RemoveLargeCommunityAdmin { .. } => true,
+            TermAction::RemoveAllCommunities { attributes } => {
+                attributes.standard || attributes.large
+            }
             TermAction::Deny
             | TermAction::Bind { .. }
             | TermAction::ForEach(_)

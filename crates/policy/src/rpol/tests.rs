@@ -656,7 +656,6 @@ fn large_community_wildcard_syntax_is_exact_and_removal_only() {
     for bad in [
         "add large-community 65501:*:*",
         "remove community 65501:*:*",
-        "remove large-community *:*:*",
         "remove large-community 65501:*:1",
         "remove large-community 65501:1:*",
         "remove large-community router-asn:*:*",
@@ -699,6 +698,413 @@ fn large_community_wildcard_prepays_the_full_wire_scan() {
     compile_ok(&nested(180));
     let (_, rendered) = diagnostics_of(&nested(181));
     assert!(rendered.contains("exceeds the worst-case evaluation budget"));
+}
+
+/// Fixture entries for `n` values of one community kind (`communities`,
+/// `large-communities` or `ext-communities`), numbered from `base`.
+fn community_fixture(field: &str, base: u32, n: u32) -> String {
+    let values: Vec<String> = (base..base + n)
+        .map(|i| match field {
+            "communities" => format!("65000:{i}"),
+            "large-communities" => format!("65000:{i}:1"),
+            _ => format!("RT:65000:{i}"),
+        })
+        .collect();
+    format!("{field} [{}]", values.join(", "))
+}
+
+const STRIP_MANY: &str = "policy strip {
+    term too-many {
+        if route.communities.len + route.large-communities.len + route.ext-communities.len >= 100 {
+            remove community *; remove large-community *:*:*; remove ext-community *
+        }
+    }
+    term rest { accept }
+}
+";
+
+/// The NLNOG many-communities practice at its exact boundary: each kind's
+/// count compares at 99/100/101, and the summed form strips all three kinds
+/// at 100 and 101 but leaves a 99-value route untouched.
+#[test]
+fn community_counts_compare_and_strip_at_exact_boundaries() {
+    use std::fmt::Write as _;
+
+    let mut source = String::from(STRIP_MANY);
+    for (field, gate) in [
+        ("communities", "std"),
+        ("large-communities", "large"),
+        ("ext-communities", "ext"),
+    ] {
+        let _ = writeln!(
+            source,
+            "policy {gate} {{ term t {{ if route.{field}.len >= 100 {{ reject }} }} term rest {{ accept }} }}"
+        );
+        for (n, verdict) in [(99, "accept"), (100, "reject"), (101, "reject")] {
+            let _ = writeln!(
+                source,
+                "test {gate}-{n} {{ route {{ {} }} expect {gate} == {verdict} }}",
+                community_fixture(field, 1, n)
+            );
+        }
+    }
+    for (std, large, ext) in [(33, 33, 33), (34, 33, 33), (34, 34, 33)] {
+        let route = format!(
+            "{}; {}; {}",
+            community_fixture("communities", 1, std),
+            community_fixture("large-communities", 1, large),
+            community_fixture("ext-communities", 1, ext)
+        );
+        let expectation = if std + large + ext >= 100 {
+            "with only removes community *, removes large-community *:*:*, removes ext-community *"
+        } else {
+            "with not removed community 65000:1, not removed large-community 65000:1:1, \
+             not removed ext-community RT:65000:1"
+        };
+        let _ = writeln!(
+            source,
+            "test sum-{} {{ route {{ {route} }} expect strip == accept {expectation} }}",
+            std + large + ext
+        );
+    }
+    assert_eq!(failures_of(&source), Vec::<String>::new());
+
+    // The boundary is real: shifting the threshold by one fails exactly the
+    // edge cases.
+    let shifted = source.replace(".len >= 100 {", ".len >= 101 {").replace(
+        "route.ext-communities.len >= 100",
+        "route.ext-communities.len >= 101",
+    );
+    let failures = failures_of(&shifted);
+    assert_eq!(failures.len(), 4, "{failures:?}");
+    for name in ["std-100", "large-100", "ext-100", "sum-100"] {
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.starts_with(&format!("{name}:"))),
+            "{name} not caught: {failures:?}"
+        );
+    }
+}
+
+/// Strip-all stages concrete removals from the arrived route only: an
+/// earlier add of a value the route lacks survives, a later add of an
+/// arrived value cancels its removal (same term or a later chain member),
+/// an empty list is a no-op, the scan fails closed above each wire bound,
+/// and nothing reads peer context.
+#[test]
+fn strip_all_communities_are_route_only_concrete_and_bounded() {
+    use crate::engine::{PolicyChain, apply_modifications, explain::explain_chain_statements};
+    use crate::ir::CommunityAttribute;
+    use rustbgpd_wire::{ExtendedCommunity, LargeCommunity, PathAttribute};
+
+    let standard: &'static [u32] = Box::leak(vec![0xFDE8_0001, 0xFDE8_0002, 0xFDE8_0001].into());
+    let large: &'static [LargeCommunity] =
+        Box::leak(vec![LargeCommunity::new(65_000, 1, 1)].into_boxed_slice());
+    let ext: &'static [ExtendedCommunity] =
+        Box::leak(vec![ExtendedCommunity::new(0x0002_FDE8_0000_0009)].into_boxed_slice());
+    let ctx = RouteContext {
+        large_communities: large,
+        extended_communities: ext,
+        ..route_ctx(v4(10, 0, 0, 0, 24), standard, RpkiValidation::NotFound)
+    };
+    let compiled = compile_ok(
+        "policy strip {
+            term early { add community 65000:9 }
+            term s { remove community *; remove large-community *:*:*; remove ext-community *; add community 65000:2 }
+            term allow { accept }
+        }",
+    );
+    let live = compiled.evaluate(&ctx);
+    assert_eq!(live.modifications.communities_remove, vec![0xFDE8_0001]);
+    assert_eq!(
+        live.modifications.communities_add,
+        vec![0xFDE8_0009, 0xFDE8_0002]
+    );
+    assert_eq!(live.modifications.large_communities_remove, large.to_vec());
+    assert_eq!(live.modifications.extended_communities_remove, ext.to_vec());
+    let mut hits = compiled.zero_term_hits();
+    assert_eq!(compiled.evaluate_recording_hits(&ctx, &mut hits), live);
+    let mut attrs = vec![
+        PathAttribute::Communities(standard.to_vec()),
+        PathAttribute::LargeCommunities(large.to_vec()),
+    ];
+    apply_modifications(&mut attrs, &live.modifications);
+    assert_eq!(
+        attrs,
+        vec![PathAttribute::Communities(vec![0xFDE8_0002, 0xFDE8_0009])]
+    );
+
+    // An empty route stages nothing.
+    let empty = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let only_strip = compile_ok(
+        "policy strip { term s { remove community *; remove large-community *:*:*; remove ext-community *; accept } }",
+    );
+    let result = only_strip.evaluate(&empty);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert!(
+        result.modifications.is_empty(),
+        "{:?}",
+        result.modifications
+    );
+
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "strip".to_string(),
+        Arc::new(only_strip.clone()),
+    )]);
+
+    // Route-only, and a source-control change only for the RFC 7947 kinds.
+    assert!(!compiled.requires_peer_context());
+    assert!(!only_strip.requires_peer_context());
+    assert!(chain.modifies_source_control_communities());
+    let ext_only = compile_ok("policy p { term s { remove ext-community *; accept } }");
+    assert!(!ext_only.requires_peer_context());
+    assert!(
+        !PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+            "p".to_string(),
+            Arc::new(ext_only),
+        )])
+        .modifies_source_control_communities()
+    );
+    let counts = compile_ok(
+        "policy p { term t { if route.communities.len + route.large-communities.len + route.ext-communities.len >= 100 { reject } } }",
+    );
+    assert!(!counts.requires_peer_context());
+    assert_eq!(
+        CommunityAttribute::Large.remove_all_str(),
+        "remove large-community *:*:*"
+    );
+    let trace = explain_chain_statements(Some(&chain), &ctx);
+    assert!(
+        trace.steps[0]
+            .modifications
+            .iter()
+            .any(|line| line.starts_with("large_community - 65000:1:1")),
+        "{:?}",
+        trace.steps[0].modifications
+    );
+}
+
+/// Each strip-all form fails the route closed above its attribute's wire
+/// bound, on every evaluation walk, and scans at the bound.
+#[test]
+fn strip_all_fails_closed_above_each_wire_bound() {
+    use crate::engine::{PolicyChain, explain::explain_chain_statements};
+    use rustbgpd_wire::{ExtendedCommunity, LargeCommunity};
+
+    let empty = route_ctx(v4(10, 0, 0, 0, 24), &[], RpkiValidation::NotFound);
+    let only_strip = compile_ok(
+        "policy strip { term s { remove community *; remove large-community *:*:*; remove ext-community *; accept } }",
+    );
+    // Each attribute's wire bound: at the bound the scan runs, above it the
+    // route fails closed on every walk.
+    let at_std = vec![1u32; 16_383];
+    let over_std = vec![1u32; 16_384];
+    let at_ext = vec![ExtendedCommunity::new(0x0002_0001_0000_0001); 8_191];
+    let over_ext = vec![ExtendedCommunity::new(0x0002_0001_0000_0001); 8_192];
+    let at_large = vec![LargeCommunity::new(1, 1, 1); 5_461];
+    let over_large = vec![LargeCommunity::new(1, 1, 1); 5_462];
+    let cases: [(RouteContext<'_>, bool); 6] = [
+        (
+            RouteContext {
+                communities: &at_std,
+                ..empty
+            },
+            true,
+        ),
+        (
+            RouteContext {
+                communities: &over_std,
+                ..empty
+            },
+            false,
+        ),
+        (
+            RouteContext {
+                extended_communities: &at_ext,
+                ..empty
+            },
+            true,
+        ),
+        (
+            RouteContext {
+                extended_communities: &over_ext,
+                ..empty
+            },
+            false,
+        ),
+        (
+            RouteContext {
+                large_communities: &at_large,
+                ..empty
+            },
+            true,
+        ),
+        (
+            RouteContext {
+                large_communities: &over_large,
+                ..empty
+            },
+            false,
+        ),
+    ];
+    let chain = PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "strip".to_string(),
+        Arc::new(only_strip.clone()),
+    )]);
+    for (case, permitted) in &cases {
+        let expected = if *permitted {
+            PolicyAction::Permit
+        } else {
+            PolicyAction::Deny
+        };
+        assert_eq!(only_strip.evaluate(case).action, expected);
+        let mut hits = only_strip.zero_term_hits();
+        assert_eq!(
+            only_strip.evaluate_recording_hits(case, &mut hits).action,
+            expected
+        );
+        assert_eq!(
+            explain_chain_statements(Some(&chain), case).action,
+            expected
+        );
+    }
+}
+
+/// A later chain member's `add` of an arrived value survives an earlier
+/// strip-all, through the daemon's chain merge.
+#[test]
+fn strip_all_then_later_member_add_survives_in_chain() {
+    let source = format!(
+        "{STRIP_MANY}policy tag {{ term t {{ add community 65000:7; accept }} }}
+test chained {{
+    route {{ {} }}
+    expect chain [strip, tag] == accept with community 65000:7, not removed community 65000:7,
+        removes community 65000:6
+}}",
+        community_fixture("communities", 1, 100)
+    );
+    assert_eq!(failures_of(&source), Vec::<String>::new());
+}
+
+/// Adjacent strip-all forms lower to one action, so the guard of the
+/// summed many-communities term evaluates once per route rather than once
+/// per removed attribute. A staged modification between them keeps source
+/// order instead.
+#[test]
+fn strip_all_forms_share_one_guarded_action() {
+    use crate::ir::{CommunityAttributes, TermAction};
+
+    let compiled = compile_ok(STRIP_MANY);
+    let terms = &compiled.policies[0].terms;
+    assert_eq!(terms.len(), 2, "{terms:#?}");
+    assert_eq!(
+        terms[0].action,
+        TermAction::RemoveAllCommunities {
+            attributes: CommunityAttributes {
+                standard: true,
+                extended: true,
+                large: true,
+            },
+        }
+    );
+    assert!(matches!(terms[0].guard, MatchExpr::ValueCmp(_)));
+
+    let split = compile_ok(
+        "policy p { term t { remove community *; add community 65000:1; remove ext-community *; accept } }",
+    );
+    let actions: Vec<_> = split.policies[0].terms.iter().map(|t| &t.action).collect();
+    assert_eq!(actions.len(), 4, "{actions:#?}");
+    assert!(matches!(
+        actions[0],
+        TermAction::RemoveAllCommunities { attributes } if attributes.standard && !attributes.extended
+    ));
+    assert!(matches!(actions[1], TermAction::Continue(_)));
+    assert!(matches!(
+        actions[2],
+        TermAction::RemoveAllCommunities { attributes } if attributes.extended && !attributes.standard
+    ));
+}
+
+#[test]
+fn strip_all_and_count_syntax_is_exact() {
+    for bad in [
+        "add community *",
+        "add ext-community *",
+        "add large-community *:*:*",
+        "remove large-community *",
+        "remove community *:*:*",
+        "remove ext-community *:*:*",
+        "remove community * *",
+        "if route.communities has * { accept }",
+        "if route.communities.len has 65000:1 { accept }",
+        "if route.communities.len in s { accept }",
+        "if route.prefix.len >= 1 { accept }",
+        "if route.communities.count >= 1 { accept }",
+        "if route.communities.len >= 10.0.0.0/8 { accept }",
+        "for c in route.communities.len { accept }",
+    ] {
+        let rendered = diagnostics_of(&format!(
+            "community-set s {{ 65000:1 }} policy p {{ term t {{ {bad} }} }}"
+        ))
+        .1;
+        assert!(!rendered.is_empty(), "unsupported shape compiled: {bad}");
+    }
+    let (_, rendered) = diagnostics_of("policy p { term t { remove large-community * } }");
+    assert!(rendered.contains("`*:*:*`"), "{rendered}");
+    let (_, rendered) = diagnostics_of("policy p { term t { add community * } }");
+    assert!(
+        rendered.contains("wildcards are removal-only"),
+        "{rendered}"
+    );
+    for good in [
+        "if route.communities.len == 0 { accept }",
+        "if route.ext-communities.len != 3 { accept }",
+        "if route.large-communities.len <= 5 { accept }",
+        "let n = route.communities.len; if n >= 2 { accept }",
+        "if max(route.communities.len, route.ext-communities.len) >= 2 { accept }",
+        "set med route.communities.len; accept",
+    ] {
+        compile_ok(&format!("policy p {{ term t {{ {good} }} }}"));
+    }
+}
+
+#[test]
+fn strip_all_prepays_each_attribute_wire_scan() {
+    for (action, fits) in [
+        ("remove community *;", 61),
+        ("remove ext-community *;", 122),
+        ("remove large-community *:*:*;", 183),
+    ] {
+        let source = |n| format!("policy p {{ term t {{ {} accept }} }}", action.repeat(n));
+        compile_ok(&source(fits));
+        let (_, rendered) = diagnostics_of(&source(fits + 1));
+        assert!(
+            rendered.contains("exceeds the worst-case evaluation budget"),
+            "{action} x {}: {rendered}",
+            fits + 1
+        );
+    }
+}
+
+#[test]
+fn strip_all_formats_round_trip() {
+    let source = "policy strip { term t { if route.communities.len+route.ext-communities.len>=100 { remove community *; remove large-community *:*:*; remove ext-community * } } term rest { accept } }\n";
+    let formatted = super::format_rpol(source).expect("formats");
+    assert!(formatted.contains("remove community *;"), "{formatted}");
+    assert!(
+        formatted.contains("remove large-community *:*:*;"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("route.communities.len + route.ext-communities.len >= 100"),
+        "{formatted}"
+    );
+    assert_eq!(
+        super::format_rpol(&formatted).expect("idempotent"),
+        formatted
+    );
+    compile_rpol(&formatted, &mut SetStore::new()).expect("formatted output compiles");
 }
 
 #[test]

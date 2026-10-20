@@ -72,7 +72,7 @@ use super::ast::{
     PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
 use super::diag::Diagnostic;
-use super::typeck::{Field, resolve_field, value_field_of};
+use super::typeck::{Field, community_attribute, resolve_field, value_field_of};
 
 /// Static slot allocation for `let` bindings (LAN-302/LAN-303): one
 /// register file per **source term** (bindings never cross terms),
@@ -723,6 +723,26 @@ impl<'a> Lowerer<'a> {
                         },
                     ));
                 }
+                Stmt::Action(ActionStmt::Community {
+                    kind,
+                    arg: CommunityArg::All(_),
+                    ..
+                }) => {
+                    flush_pending(&mut out, &mut pending);
+                    let attribute = community_attribute(*kind);
+                    match out.last_mut() {
+                        Some((
+                            MatchExpr::True,
+                            TermAction::RemoveAllCommunities { attributes },
+                        )) => attributes.insert(attribute),
+                        _ => out.push((
+                            MatchExpr::True,
+                            TermAction::RemoveAllCommunities {
+                                attributes: attribute.into(),
+                            },
+                        )),
+                    }
+                }
                 Stmt::Action(
                     action @ ActionStmt::Community {
                         add,
@@ -1068,6 +1088,20 @@ fn lower_cmp(
         Field::LocalPref => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::LocalPref),
         Field::Med => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::Med),
         Field::AsPathLen => u32_cmp(op, rhs_u32(rhs, env), MatchExpr::AsPathLen),
+        // Community counts have no dedicated scalar node: compare through
+        // the checked value node, which reads the count without error.
+        Field::CommunitiesLen | Field::LargeCommunitiesLen | Field::ExtCommunitiesLen => {
+            MatchExpr::ValueCmp(Box::new(ValueCmpNode {
+                op: match op {
+                    CmpOp::Eq => ValueCmpOp::Eq,
+                    CmpOp::Ne => ValueCmpOp::Ne,
+                    CmpOp::Ge => ValueCmpOp::Ge,
+                    CmpOp::Le => ValueCmpOp::Le,
+                },
+                lhs: ValueExpr::Field(value_field_of(resolved).expect("u32 count field")),
+                rhs: ValueExpr::Const(rhs_u32(rhs, env)),
+            }))
+        }
         // `!=` gets a dedicated Ne node rather than `Not(Eq)`: an absent
         // origin (empty or AS_SET-only path) must match neither `==` nor
         // `!=` (LAN-209 class), and `Not(OriginAsEq)` would wrongly
@@ -1322,6 +1356,24 @@ impl Lowerer<'_> {
                     });
                 }
                 ActionStmt::Community {
+                    kind,
+                    arg: CommunityArg::All(_),
+                    ..
+                } => {
+                    flush(&mut tail, &mut mods);
+                    // Adjacent strip-all forms share one action, so a guarded
+                    // body evaluates its condition once (the NLNOG shape).
+                    let attribute = community_attribute(*kind);
+                    match tail.last_mut() {
+                        Some(TermAction::RemoveAllCommunities { attributes }) => {
+                            attributes.insert(attribute);
+                        }
+                        _ => tail.push(TermAction::RemoveAllCommunities {
+                            attributes: attribute.into(),
+                        }),
+                    }
+                }
+                ActionStmt::Community {
                     add,
                     arg: CommunityArg::Var(name),
                     ..
@@ -1394,7 +1446,7 @@ impl Lowerer<'_> {
             // their own CommunityVar terms by the statement/body lowerers
             // and never reach here.)
             ActionStmt::Community {
-                arg: CommunityArg::LargeAdminWildcard(_),
+                arg: CommunityArg::LargeAdminWildcard(_) | CommunityArg::All(_),
                 ..
             } => unreachable!("route-dependent wildcard action handled by callers"),
             ActionStmt::Community {
@@ -1736,7 +1788,9 @@ fn accept_predicate(policy: &CompiledPolicy) -> MatchExpr {
     let mut arms: Vec<MatchExpr> = Vec::new();
     for term in &policy.terms {
         match term.action {
-            TermAction::Continue(_) | TermAction::RemoveLargeCommunityAdmin { .. } => {}
+            TermAction::Continue(_)
+            | TermAction::RemoveLargeCommunityAdmin { .. }
+            | TermAction::RemoveAllCommunities { .. } => {}
             // LAN-302/LAN-303: the typechecker rejects `apply` of a
             // policy that declares bindings or contains loops, so an
             // inlined predicate never contains these terms.

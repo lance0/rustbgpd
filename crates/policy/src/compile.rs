@@ -90,7 +90,8 @@ impl ChainNodeBudget {
                     | TermAction::Break
                     | TermAction::ContinueLoop
                     | TermAction::CommunityVar { .. }
-                    | TermAction::RemoveLargeCommunityAdmin { .. } => false,
+                    | TermAction::RemoveLargeCommunityAdmin { .. }
+                    | TermAction::RemoveAllCommunities { .. } => false,
                 }
         })
     }

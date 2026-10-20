@@ -120,7 +120,7 @@ has a known type and every operator a fixed signature.
 | Type | Values | Where |
 |---|---|---|
 | bool | guard expressions | `if` conditions |
-| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked** (overflow/underflow/division-by-zero are evaluation errors, never wraps or traps) |
+| u32 | integer literals, parameters, `let` bindings | `local-pref`, `med`, `as-path.len`, `communities.len`, `large-communities.len`, `ext-communities.len`, `origin-as`, `peer.asn`, arguments; the only arithmetic type — all arithmetic is **checked** (overflow/underflow/division-by-zero are evaluation errors, never wraps or traps) |
 | prefix | prefix literals | `route.prefix` |
 | community (3 kinds) | community literals | community lists, sets, actions |
 | as-path | — (matched, never named) | `route.as-path` |
@@ -467,6 +467,7 @@ group. Comparisons: `==`, `!=`, `>=`, `<=`.
 | `route.communities has 65000:100` | route carries this community (kind-checked against the field) |
 | `route.communities in tagged` | any route community matches any set member |
 | `route.as-path.len >= 3` | AS-path ASN count (RFC 4271 counting) |
+| `route.communities.len >= 100` | number of standard communities on the route (`route.large-communities.len` and `route.ext-communities.len` likewise; 0 when the attribute is absent); route-context-only, so it never disqualifies update-group sharing |
 | `route.as-path contains 65001` | boundary-anchored ASN presence (sugar for `matches "_65001_"`) |
 | `route.as-path matches "^65010"` | Cisco/Quagga-style regex; `_` is a boundary anchor |
 | `route.origin-as == 64500` | origin AS — the last ASN of the rightmost non-empty `AS_SEQUENCE` (`==`/`!=` only) |
@@ -517,7 +518,8 @@ u32 value positions — either side of a u32 comparison, and the
 `set local-pref` / `set med` arguments — accept **value expressions**
 (ADR-0103): arithmetic over integer literals, parameters,
 `let` bindings (below), u32-typed fields (`route.local-pref`,
-`route.med`, `route.as-path.len`, `route.origin-as`, `peer.asn`), and
+`route.med`, `route.as-path.len`, the three community counts such as
+`route.communities.len`, `route.origin-as`, `peer.asn`), and
 three bounded builtins. A comparison's left side may also carry
 arithmetic when it starts with a field or a binding.
 
@@ -1081,6 +1083,7 @@ Two consequences worth internalizing:
 | `add community 65001:999` / `remove community ...` | standard communities |
 | `add large-community 65000:1:2` / `remove ...` | large communities |
 | `remove large-community 65000:*:*` | every arrived large community with global administrator 65000 |
+| `remove community *` / `remove large-community *:*:*` / `remove ext-community *` | every arrived community of that kind |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (ASN: 1–4294967295; count: literal 1–255) |
 | `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
@@ -1110,6 +1113,65 @@ prefix. It scans only the arrived route, preserves foreign administrators, and
 stages concrete, first-seen deduplicated removals. An input with more than 5,461
 arrived large communities fails the route closed before scanning; the compiler
 pre-pays that same conservative wire-derived bound.
+
+The strip-all forms follow the same rules: removal-only, `*` for standard and
+extended communities and `*:*:*` for large communities, arrived route only,
+concrete deduplicated removals. A later `add` of an arrived value, in the same
+policy or a later chain member, cancels its removal under the merge rule above;
+a value added earlier and absent from the arrived route is kept. On a route
+without the attribute they do nothing. Each fails the route closed above its
+wire-derived bound (16,383 standard, 8,191 extended, 5,461 large communities),
+and the compiler pre-pays that scan.
+
+### Routes that carry too many communities
+
+The [NLNOG BGP filter guide](https://bgpfilterguide.nlnog.net/guides/many_communities/)
+recommends stripping communities from routes that carry about 100 of them.
+The counts are u32 fields, so the guide's summed form is one term:
+
+```rpol
+policy strip-many-communities {
+    term too-many {
+        if route.communities.len + route.large-communities.len + route.ext-communities.len >= 100 {
+            remove community *; remove large-community *:*:*; remove ext-community *
+        }
+    }
+    term rest { accept }
+}
+```
+
+This is the guide's BIRD function:
+
+```text
+if ( ( bgp_community.len + bgp_ext_community.len + bgp_large_community.len ) >= 100 ) then {
+    bgp_community.empty;
+    bgp_ext_community.empty;
+    bgp_large_community.empty;
+}
+```
+
+OpenBGPD's `max-communities 100` matches a route with *more than* 100
+values and checks each kind separately, so its three rules become one term
+per kind:
+
+```text
+match from any max-communities 100 set { community delete *:* }
+match from any max-ext-communities 100 set { ext-community delete * * }
+match from any max-large-communities 100 set { large-community delete *:*:* }
+```
+
+```rpol
+policy strip-many-communities {
+    term standard { if route.communities.len >= 101 { remove community * } }
+    term extended { if route.ext-communities.len >= 101 { remove ext-community * } }
+    term large { if route.large-communities.len >= 101 { remove large-community *:*:* } }
+    term rest { accept }
+}
+```
+
+A route server passes communities through by default, so this is opt-in
+ingress hygiene. Pin the threshold with fixtures on both sides of it and
+`removes community *` (below).
 
 ### Computed prepend operands
 
@@ -1214,6 +1276,7 @@ has none). An empty string is a route without an AS path.
 | `community LIT` | `LIT` is in the add list (`large-community` / `ext-community` likewise) |
 | `removes community LIT` | `LIT` is in the remove list (any community kind keyword) |
 | `removes large-community GA:*:*` | every matching fixture value is in the remove list; the fixture must contain at least one match |
+| `removes community *` / `removes large-community *:*:*` / `removes ext-community *` | every fixture value of that kind is in the remove list; the fixture must carry at least one |
 | `not removed community LIT` | `LIT` is present in the fixture and absent from the remove list (any community kind keyword) |
 | `without community LIT` | `LIT` is **not** in the add list (any community kind keyword) |
 | `without local-pref\|med\|next-hop\|prepend` | the policy leaves that attribute unchanged |

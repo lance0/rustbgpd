@@ -26,8 +26,8 @@ use crate::ir::CompiledChain;
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
-    CommunityLit, DatasetEntryAst, ExpectDef, ExpectVerdict, NextHopArg, PeerField, RouteField,
-    ScalarAttr, TestDef, WithAssertion,
+    CommunityKind, CommunityLit, DatasetEntryAst, ExpectDef, ExpectVerdict, NextHopArg, PeerField,
+    RouteField, ScalarAttr, TestDef, WithAssertion,
 };
 use super::lower::{Lowerer, ext_community_value};
 
@@ -619,6 +619,7 @@ fn check_assertion(
                     })
             }
         }
+        WithAssertion::RemovesAll(kind) => check_removes_all(*kind, mods, fixture),
         WithAssertion::NotRemoved(lit) => {
             let present = match lit.node {
                 CommunityLit::Standard(value) => fixture.communities.contains(&value),
@@ -688,6 +689,17 @@ fn discard_asserted(assertion: &WithAssertion, fixture: &Fixture, mods: &mut Rou
         WithAssertion::RemovesLargeAdmin(global) => mods
             .large_communities_remove
             .retain(|lc| lc.global_admin != *global || !fixture.large_communities.contains(lc)),
+        WithAssertion::RemovesAll(kind) => match kind {
+            CommunityKind::Standard => mods
+                .communities_remove
+                .retain(|value| !fixture.communities.contains(value)),
+            CommunityKind::Ext => mods
+                .extended_communities_remove
+                .retain(|value| !fixture.extended_communities.contains(value)),
+            CommunityKind::Large => mods
+                .large_communities_remove
+                .retain(|value| !fixture.large_communities.contains(value)),
+        },
         WithAssertion::Community(lit) | WithAssertion::Removes(lit) => {
             let add = matches!(assertion, WithAssertion::Community(_));
             match lit.node {
@@ -766,6 +778,55 @@ fn community_listed(
             }
         }
     }
+}
+
+/// `removes <kind> *`: every fixture value of the kind is removed.
+fn check_removes_all(
+    kind: CommunityKind,
+    mods: &RouteModifications,
+    fixture: &Fixture,
+) -> Option<String> {
+    let missing = match kind {
+        CommunityKind::Standard => {
+            unremoved(&fixture.communities, &mods.communities_remove, |value| {
+                format!("{}:{}", value >> 16, value & 0xffff)
+            })
+        }
+        CommunityKind::Ext => unremoved(
+            &fixture.extended_communities,
+            &mods.extended_communities_remove,
+            ToString::to_string,
+        ),
+        CommunityKind::Large => unremoved(
+            &fixture.large_communities,
+            &mods.large_communities_remove,
+            ToString::to_string,
+        ),
+    };
+    let keyword = super::typeck::kind_keyword(kind);
+    match missing {
+        Ok(None) => None,
+        Ok(Some(value)) => Some(format!(
+            "expected community {value} to be removed (removes {keyword} *)"
+        )),
+        Err(()) => Some(format!("the fixture carries no {keyword} to remove")),
+    }
+}
+
+/// The first fixture value absent from `removed`, rendered; `Err` when the
+/// fixture has none, so a strip-all assertion is never vacuous.
+fn unremoved<T: PartialEq>(
+    fixture: &[T],
+    removed: &[T],
+    render: impl Fn(&T) -> String,
+) -> Result<Option<String>, ()> {
+    if fixture.is_empty() {
+        return Err(());
+    }
+    Ok(fixture
+        .iter()
+        .find(|value| !removed.contains(value))
+        .map(render))
 }
 
 fn lit_text(lit: &CommunityLit) -> String {
