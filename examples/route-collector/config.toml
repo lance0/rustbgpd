@@ -86,6 +86,7 @@ import_chain = ["observe-all"]
 export_chain = ["deny-all"]
 
 [policy.definitions.deny-all]
+default_action = "deny"
 [[policy.definitions.deny-all.statements]]
 action = "deny"
 prefix = "0.0.0.0/0"

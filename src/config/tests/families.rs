@@ -813,3 +813,111 @@ fn flowspec_validation_survives_raw_effective_and_persisted_config() {
         }
     }
 }
+
+fn v6_over_v4_toml(neighbor: &str, group: &str) -> String {
+    format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+ebgp_requires_policy = false
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.edge]
+{group}
+
+[[neighbors]]
+peer_group = "edge"
+{neighbor}
+"#
+    )
+}
+
+fn v6_next_hop_advisory(config: &Config) -> Option<String> {
+    config
+        .advisories()
+        .into_iter()
+        .find(|a| a.headline.contains("local_ipv6_nexthop"))
+        .map(|a| a.one_line())
+}
+
+#[test]
+fn ebgp_ipv6_unicast_over_ipv4_without_next_hop_raises_an_advisory() {
+    let families = "families = [\"ipv4_unicast\", \"ipv6_unicast\"]";
+    let flagged = parse(&v6_over_v4_toml(
+        &format!("address = \"192.0.2.1\"\nremote_asn = 65002\n{families}"),
+        "",
+    ))
+    .unwrap();
+    let text = v6_next_hop_advisory(&flagged).expect("eBGP v6 over v4 with no next hop");
+    assert!(text.contains("Neighbors: 192.0.2.1."), "{text}");
+    assert!(
+        text.contains("withheld from export") && text.contains("Set local_ipv6_nexthop"),
+        "{text}"
+    );
+
+    // Each of these clears it: a next hop on the neighbor or its group, an
+    // iBGP or route-server-client session, IPv6 transport, no ipv6_unicast,
+    // or an export chain that denies everything.
+    let clean = [
+        (
+            format!(
+                "address = \"192.0.2.1\"\nremote_asn = 65002\n{families}\nlocal_ipv6_nexthop = \"2001:db8::1\""
+            ),
+            String::new(),
+        ),
+        (
+            format!("address = \"192.0.2.1\"\nremote_asn = 65002\n{families}"),
+            "local_ipv6_nexthop = \"2001:db8::1\"".to_string(),
+        ),
+        (
+            format!("address = \"192.0.2.1\"\nremote_asn = 65001\n{families}"),
+            String::new(),
+        ),
+        (
+            format!(
+                "address = \"192.0.2.1\"\nremote_asn = 65002\n{families}\nroute_server_client = true"
+            ),
+            String::new(),
+        ),
+        (
+            format!("address = \"2001:db8::2\"\nremote_asn = 65002\n{families}"),
+            String::new(),
+        ),
+        (
+            "address = \"192.0.2.1\"\nremote_asn = 65002".to_string(),
+            String::new(),
+        ),
+        // A route collector's deny-all export withholds everything anyway.
+        (
+            format!(
+                "address = \"192.0.2.1\"\nremote_asn = 65002\n{families}\n\
+                 export_policy_chain = [\"deny-all\"]\n\n\
+                 [policy.definitions.deny-all]\ndefault_action = \"deny\""
+            ),
+            String::new(),
+        ),
+    ];
+    for (neighbor, group) in clean {
+        let config = parse(&v6_over_v4_toml(&neighbor, &group)).unwrap();
+        assert_eq!(v6_next_hop_advisory(&config), None, "{neighbor} / {group}");
+    }
+}
+
+/// A link-local neighbor whose interface is absent on the host running
+/// `--check` must not hide the advisory for the other neighbors.
+#[test]
+fn ipv6_next_hop_advisory_survives_a_missing_link_local_interface() {
+    let toml = v6_over_v4_toml(
+        "address = \"192.0.2.1\"\nremote_asn = 65002\n\
+         families = [\"ipv4_unicast\", \"ipv6_unicast\"]\n\n\
+         [[neighbors]]\naddress = \"fe80::2\"\ninterface = \"rbgp-absent0\"\nremote_asn = 65003",
+        "",
+    );
+    let config = parse(&toml).expect("a missing interface is legal at load");
+    let text = v6_next_hop_advisory(&config).expect("the IPv4 eBGP neighbor is still flagged");
+    assert!(text.contains("Neighbors: 192.0.2.1."), "{text}");
+}

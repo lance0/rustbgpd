@@ -185,6 +185,16 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto -d '{
 }' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/AddPath
 ```
 
+An IPv6 blackhole (for example a /128) needs an IPv6 next hop on every
+session it must reach. IPv6 RTBH usually runs over IPv4 sessions, so set
+`local_ipv6_nexthop` on those neighbors. Without it, `AddPath` succeeds but
+the route does not reach them. An eBGP session over IPv4 withholds all IPv6
+unicast routes, logs one WARN and increments
+`bgp_export_family_suppressed_total`, and `rustbgpd --check` flags the
+neighbor. An iBGP or route-server-client session refuses the route alone and
+counts it in `bgp_exact_export_rejections_total`. See
+[next-hop self](../reference/api.md#next-hop-self).
+
 ```bash
 # Withdraw when the attack subsides
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto -d '{

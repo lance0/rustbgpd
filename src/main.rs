@@ -1867,7 +1867,7 @@ fn family_partitioned_listener_mss(
 fn check_warnings(config: &Config, listeners: &[GrpcListenerConfig]) -> usize {
     let mut warnings = warn_unpoliced_ebgp(config) + check_tls_expiry_warnings(listeners);
     for advisory in config.advisories() {
-        print_framed_warning(advisory.headline, advisory.detail);
+        print_framed_warning(advisory.headline, &advisory.detail);
         warnings += 1;
     }
     warnings
