@@ -20,7 +20,7 @@ use rustbgpd_wire::{
 use crate::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
 use crate::engine::{
     NamedPolicy, NextHopAction, PolicyAction, PolicyChain, RouteContext, RouteFamily,
-    RouteModifications, RouteType,
+    RouteModifications, RouteType, ext_community_identity,
 };
 use crate::ir::CompiledChain;
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
@@ -693,9 +693,16 @@ fn discard_asserted(assertion: &WithAssertion, fixture: &Fixture, mods: &mut Rou
             CommunityKind::Standard => mods
                 .communities_remove
                 .retain(|value| !fixture.communities.contains(value)),
-            CommunityKind::Ext => mods
-                .extended_communities_remove
-                .retain(|value| !fixture.extended_communities.contains(value)),
+            CommunityKind::Ext => {
+                let fixture: std::collections::HashSet<_> = fixture
+                    .extended_communities
+                    .iter()
+                    .copied()
+                    .map(ext_community_identity)
+                    .collect();
+                mods.extended_communities_remove
+                    .retain(|value| !fixture.contains(&ext_community_identity(*value)));
+            }
             CommunityKind::Large => mods
                 .large_communities_remove
                 .retain(|value| !fixture.large_communities.contains(value)),
@@ -786,20 +793,26 @@ fn check_removes_all(
     mods: &RouteModifications,
     fixture: &Fixture,
 ) -> Option<String> {
+    // Each kind compares under the identity the runtime apply uses: exact
+    // values for standard and large communities, the logical RT/RO
+    // identity for extended communities.
     let missing = match kind {
-        CommunityKind::Standard => {
-            unremoved(&fixture.communities, &mods.communities_remove, |value| {
-                format!("{}:{}", value >> 16, value & 0xffff)
-            })
-        }
+        CommunityKind::Standard => unremoved(
+            &fixture.communities,
+            &mods.communities_remove,
+            |value| *value,
+            |value| format!("{}:{}", value >> 16, value & 0xffff),
+        ),
         CommunityKind::Ext => unremoved(
             &fixture.extended_communities,
             &mods.extended_communities_remove,
+            |value| ext_community_identity(*value),
             ToString::to_string,
         ),
         CommunityKind::Large => unremoved(
             &fixture.large_communities,
             &mods.large_communities_remove,
+            |value| *value,
             ToString::to_string,
         ),
     };
@@ -815,17 +828,19 @@ fn check_removes_all(
 
 /// The first fixture value absent from `removed`, rendered; `Err` when the
 /// fixture has none, so a strip-all assertion is never vacuous.
-fn unremoved<T: PartialEq>(
+fn unremoved<T, K: Eq + std::hash::Hash>(
     fixture: &[T],
     removed: &[T],
+    identity: impl Fn(&T) -> K,
     render: impl Fn(&T) -> String,
 ) -> Result<Option<String>, ()> {
     if fixture.is_empty() {
         return Err(());
     }
+    let removed: std::collections::HashSet<K> = removed.iter().map(&identity).collect();
     Ok(fixture
         .iter()
-        .find(|value| !removed.contains(value))
+        .find(|value| !removed.contains(&identity(value)))
         .map(render))
 }
 

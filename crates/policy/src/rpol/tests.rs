@@ -1026,6 +1026,28 @@ fn strip_all_forms_share_one_guarded_action() {
     ));
 }
 
+/// `removes ext-community *` uses the runtime's logical RT/RO identity: a
+/// fixture `RT:65000:1` is removed by the IPv4-administrator encoding of the
+/// same Route Target, at run time and in the assertion.
+#[test]
+fn removes_ext_wildcard_uses_route_target_identity() {
+    let tests = "
+test same-rt-other-encoding {
+    route { ext-communities [RT:65000:1] }
+    expect scrub == accept with only removes ext-community *
+}
+";
+    let policy = "policy scrub { term t { remove ext-community RT:0.0.253.232:1; accept } }";
+    assert_eq!(
+        failures_of(&format!("{policy}{tests}")),
+        Vec::<String>::new()
+    );
+    let other = "policy scrub { term t { remove ext-community RT:0.0.253.232:2; accept } }";
+    let failures = failures_of(&format!("{other}{tests}"));
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].contains("to be removed"), "{failures:?}");
+}
+
 #[test]
 fn strip_all_and_count_syntax_is_exact() {
     for bad in [
