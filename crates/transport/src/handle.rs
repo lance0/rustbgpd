@@ -316,10 +316,11 @@ pub enum SessionNotification {
         role: SessionRole,
         /// IP address of the remote peer.
         peer_addr: IpAddr,
-        /// Bound scope: `aggregate`, `ipv4_unicast`, `ipv6_unicast`,
-        /// `ipv4_unicast_received`, `ipv6_unicast_received`, or a
-        /// non-unicast family label (`PrefixLimitFamily::label`).
-        scope: &'static str,
+        /// `aggregate` or the bound's canonical family label, as on the
+        /// `bgp_max_prefix_*` metrics.
+        family: &'static str,
+        /// `accepted` (counted after import policy) or `received` (before).
+        stage: &'static str,
         /// Usage that crossed the threshold.
         usage: usize,
         /// Configured bound for the scope.
@@ -969,17 +970,20 @@ pub enum StateQueryOutcome {
 /// One finite inbound max-prefix bound's live capacity (ADR-0108 amendment).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaxPrefixScopeState {
-    /// `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
-    /// `ipv6_unicast_received`, or a non-unicast family label such as
-    /// `l3vpn_ipv4_unicast` (see `PrefixLimitFamily::label`).
-    pub scope: &'static str,
-    /// The session actor's enforcement count for the scope.
+    /// `aggregate` or the bound's canonical family label, such as
+    /// `ipv4_unicast` or `l3vpn_ipv4_unicast`, as on the `bgp_max_prefix_*`
+    /// metrics.
+    pub family: &'static str,
+    /// `accepted` (counted after import policy) or `received` (before it);
+    /// only the unicast families have a `received` bound.
+    pub stage: &'static str,
+    /// The session actor's enforcement count for the bound.
     pub usage: usize,
     /// Configured bound.
     pub limit: u32,
     /// Saturating `limit - usage`.
     pub headroom: u32,
-    /// Whether a `block` episode is open for the scope.
+    /// Whether a `block` episode is open for the bound.
     pub blocking: bool,
 }
 

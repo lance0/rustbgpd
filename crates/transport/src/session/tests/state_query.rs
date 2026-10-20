@@ -267,14 +267,14 @@ async fn query_state_reports_exact_max_prefix_counts_limits_and_headroom() {
         .max_prefix
         .scopes
         .iter()
-        .map(|row| (row.scope, row.usage, row.limit, row.headroom))
+        .map(|row| (row.family, row.stage, row.usage, row.limit, row.headroom))
         .collect();
     assert_eq!(
         rows,
         [
-            ("aggregate", 2, 9, 7),
-            ("ipv4_unicast", 1, 4, 3),
-            ("ipv6_unicast", 1, 6, 5)
+            ("aggregate", "accepted", 2, 9, 7),
+            ("ipv4_unicast", "accepted", 1, 4, 3),
+            ("ipv6_unicast", "accepted", 1, 6, 5)
         ]
     );
 }

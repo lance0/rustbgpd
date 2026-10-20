@@ -1175,7 +1175,8 @@ impl PeerSession {
                         let (usage, limit) = self.max_prefix_scope_usage(scope);
                         let limit = limit?;
                         Some(crate::handle::MaxPrefixScopeState {
-                            scope: scope.as_str(),
+                            family: scope.family_label(),
+                            stage: scope.stage(),
                             usage,
                             limit,
                             headroom: limit
@@ -1653,8 +1654,11 @@ impl PeerSession {
                         if max_prefixes_family.get(family).is_none()
                             && self.config.max_prefixes_family.get(family).is_some()
                         {
-                            self.metrics
-                                .remove_max_prefix_capacity(&self.peer_label, family.label());
+                            self.metrics.remove_max_prefix_capacity(
+                                &self.peer_label,
+                                family.label(),
+                                "accepted",
+                            );
                         }
                     }
                 }

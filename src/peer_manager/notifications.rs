@@ -464,7 +464,8 @@ impl PeerManager {
                 session_id,
                 role,
                 peer_addr,
-                scope,
+                family,
+                stage,
                 usage,
                 bound,
                 percent,
@@ -496,7 +497,7 @@ impl PeerManager {
                     new_state: None,
                     session_role: Some(Self::session_role_label(role).to_string()),
                     reason: format!(
-                        "max-prefix warning for peer {rendered_peer}: {scope} usage {usage} of bound {bound} (threshold {percent}%)"
+                        "max-prefix warning for peer {rendered_peer}: family {family} stage {stage} usage {usage} of bound {bound} (threshold {percent}%)"
                     ),
                 });
             }

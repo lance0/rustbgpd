@@ -2924,9 +2924,9 @@ blocking episode is red as
 intentionally withholding routes until capacity recovers. Merely configured,
 unlimited, and nonblocking family rows do not add checks. An open inbound
 `max_prefix_action = "block"` episode is yellow as
-`peer.<scoped-address>.inbound_prefix_limit.<scope>`: the session stays
-Established while that peer's net-new prefixes are withheld. Nonblocking
-inbound scopes add no checks. Link-local identities
+`peer.<scoped-address>.inbound_prefix_limit.<family>.<stage>`: the session
+stays Established while that peer's net-new prefixes are withheld.
+Nonblocking inbound bounds add no checks. Link-local identities
 retain their `%interface` scope in both check names and details.
 
 `peer.<scoped-address>.inbound_prefix_bound` is yellow for an established

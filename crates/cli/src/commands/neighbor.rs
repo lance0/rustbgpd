@@ -470,7 +470,8 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
             .inbound_prefix_limits
             .iter()
             .map(|row| JsonInboundPrefixLimit {
-                scope: row.scope.clone(),
+                family: row.family.clone(),
+                stage: row.stage.clone(),
                 usage: row.usage,
                 limit: row.limit,
                 headroom: row.headroom,
@@ -919,8 +920,8 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
             rows.line(
                 1,
                 format!(
-                    "{:<22} usage={}; limit={}; headroom={}{blocking}",
-                    row.scope, row.usage, row.limit, row.headroom
+                    "{:<22} stage={}; usage={}; limit={}; headroom={}{blocking}",
+                    row.family, row.stage, row.usage, row.limit, row.headroom
                 ),
             );
         }
@@ -1790,7 +1791,8 @@ mod tests {
             rejected_routes_retained: Some(156),
             reconnect_in_seconds: Some(157),
             inbound_prefix_limits: vec![crate::proto::InboundPrefixLimitState {
-                scope: "scope-value".to_string(),
+                family: "family-value".to_string(),
+                stage: "stage-value".to_string(),
                 usage: 102,
                 limit: 103,
                 headroom: 104,
@@ -2383,7 +2385,7 @@ Selection Deferral:
 Outbound Prefix Limits:
   family-value   usage=102; limit=103; headroom=104; blocking=reason-value
 Inbound Prefix Limits:
-  scope-value            usage=102; limit=103; headroom=104; blocking=reason-value
+  family-value           stage=stage-value; usage=102; limit=103; headroom=104; blocking=reason-value
 Stale Route Retention:
   family-value   phase=phase-value; remaining=00:02:39; stale_routes=160
 Flap Count:               110

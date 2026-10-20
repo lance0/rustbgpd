@@ -217,17 +217,18 @@ pub struct PolicyEvent {
 /// (ADR-0108 amendment).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundPrefixLimitState {
-    /// `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
-    /// `ipv6_unicast_received`, or a non-unicast family label such as
-    /// `l3vpn_ipv4_unicast`.
-    pub scope: String,
-    /// The session actor's enforcement count for the scope.
+    /// `aggregate` or the bound's canonical family label, as on the
+    /// `bgp_max_prefix_*` metrics.
+    pub family: String,
+    /// `accepted` (counted after import policy) or `received` (before it).
+    pub stage: String,
+    /// The session actor's enforcement count for the bound.
     pub usage: u64,
     /// Configured bound.
     pub limit: u32,
     /// Saturating `limit - usage`.
     pub headroom: u32,
-    /// Whether a `block` episode is open for the scope.
+    /// Whether a `block` episode is open for the bound.
     pub blocking: bool,
 }
 

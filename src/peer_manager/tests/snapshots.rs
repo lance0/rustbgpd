@@ -483,14 +483,16 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
     state.max_prefix.prefix_count_ipv6 = 3;
     state.max_prefix.scopes = vec![
         rustbgpd_transport::handle::MaxPrefixScopeState {
-            scope: "aggregate",
+            family: "aggregate",
+            stage: "accepted",
             usage: 11,
             limit: 25,
             headroom: 14,
             blocking: false,
         },
         rustbgpd_transport::handle::MaxPrefixScopeState {
-            scope: "ipv4_unicast",
+            family: "ipv4_unicast",
+            stage: "received",
             usage: 7,
             limit: 15,
             headroom: 8,
@@ -512,7 +514,8 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
         .iter()
         .map(|row| {
             (
-                row.scope.as_str(),
+                row.family.as_str(),
+                row.stage.as_str(),
                 row.usage,
                 row.limit,
                 row.headroom,
@@ -523,8 +526,8 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
     assert_eq!(
         rows,
         [
-            ("aggregate", 11, 25, 14, false),
-            ("ipv4_unicast", 7, 15, 8, true)
+            ("aggregate", "accepted", 11, 25, 14, false),
+            ("ipv4_unicast", "received", 7, 15, 8, true)
         ]
     );
     assert_eq!(live.rejected_routes_retained, Some(4));

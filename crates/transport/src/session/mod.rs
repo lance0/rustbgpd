@@ -754,14 +754,21 @@ impl MaxPrefixScope {
         Self::Family(PrefixLimitFamily::Rtc),
     ];
 
-    pub(super) const fn as_str(self) -> &'static str {
+    /// `aggregate` or the canonical family label of the bound.
+    pub(super) const fn family_label(self) -> &'static str {
         match self {
             Self::Aggregate => "aggregate",
-            Self::Ipv4 => "ipv4_unicast",
-            Self::Ipv6 => "ipv6_unicast",
-            Self::Ipv4Received => "ipv4_unicast_received",
-            Self::Ipv6Received => "ipv6_unicast_received",
+            Self::Ipv4 | Self::Ipv4Received => "ipv4_unicast",
+            Self::Ipv6 | Self::Ipv6Received => "ipv6_unicast",
             Self::Family(family) => family.label(),
+        }
+    }
+
+    /// `received` for a pre-import-policy bound, else `accepted`.
+    pub(super) const fn stage(self) -> &'static str {
+        match self {
+            Self::Ipv4Received | Self::Ipv6Received => "received",
+            _ => "accepted",
         }
     }
 
@@ -1022,18 +1029,21 @@ impl PeerSession {
         self.metrics.set_max_prefix_capacity(
             &self.peer_label,
             "aggregate",
+            "accepted",
             self.known_prefix_count(),
             self.config.max_prefixes,
         );
         self.metrics.set_max_prefix_capacity(
             &self.peer_label,
             "ipv4_unicast",
+            "accepted",
             self.known_unicast_v4,
             self.config.max_prefixes_ipv4,
         );
         self.metrics.set_max_prefix_capacity(
             &self.peer_label,
             "ipv6_unicast",
+            "accepted",
             self.known_unicast_v6,
             self.config.max_prefixes_ipv6,
         );
@@ -1045,13 +1055,17 @@ impl PeerSession {
             if limit.is_some() {
                 self.metrics.set_max_prefix_capacity(
                     &self.peer_label,
-                    scope.as_str(),
+                    scope.family_label(),
+                    scope.stage(),
                     usage,
                     limit,
                 );
             } else {
-                self.metrics
-                    .remove_max_prefix_capacity(&self.peer_label, scope.as_str());
+                self.metrics.remove_max_prefix_capacity(
+                    &self.peer_label,
+                    scope.family_label(),
+                    scope.stage(),
+                );
             }
         }
         // A family scope exists only while its bound is configured; removing
@@ -1061,6 +1075,7 @@ impl PeerSession {
                 self.metrics.set_max_prefix_capacity(
                     &self.peer_label,
                     family.label(),
+                    "accepted",
                     self.family_prefix_usage(family),
                     limit,
                 );
@@ -1070,7 +1085,8 @@ impl PeerSession {
             if self.max_prefix_scope_usage(scope).1.is_some() {
                 self.metrics.set_max_prefix_blocking(
                     &self.peer_label,
-                    scope.as_str(),
+                    scope.family_label(),
+                    scope.stage(),
                     self.max_prefix_blocking[scope.index()],
                 );
             }
@@ -1131,7 +1147,8 @@ impl PeerSession {
                 self.max_prefix_blocking[index] = false;
                 info!(
                     peer = %self.peer_label,
-                    scope = scope.as_str(),
+                    family = scope.family_label(),
+                    stage = scope.stage(),
                     usage,
                     bound,
                     "max prefix blocking ended; requesting route replay"
@@ -1153,20 +1170,25 @@ impl PeerSession {
                     *warned = true;
                     warn!(
                         peer = %self.peer_label,
-                        scope = scope.as_str(),
+                        family = scope.family_label(),
+                    stage = scope.stage(),
                         usage,
                         bound,
                         percent,
                         "max prefix warning threshold crossed"
                     );
-                    self.metrics
-                        .record_max_prefix_warning(&self.peer_label, scope.as_str());
+                    self.metrics.record_max_prefix_warning(
+                        &self.peer_label,
+                        scope.family_label(),
+                        scope.stage(),
+                    );
                     if let Some(ref notify_tx) = self.session_notify_tx
                         && let Err(error) = notify_tx.send(SessionNotification::MaxPrefixWarning {
                             session_id: self.session_identity.id,
                             role: self.session_identity.role,
                             peer_addr: self.peer_ip,
-                            scope: scope.as_str(),
+                            family: scope.family_label(),
+                            stage: scope.stage(),
                             usage,
                             bound,
                             percent,
@@ -1182,7 +1204,8 @@ impl PeerSession {
                     *warned = false;
                     debug!(
                         peer = %self.peer_label,
-                        scope = scope.as_str(),
+                        family = scope.family_label(),
+                    stage = scope.stage(),
                         usage,
                         bound,
                         "max prefix warning threshold re-armed"
@@ -1201,12 +1224,16 @@ impl PeerSession {
     fn note_max_prefix_block(&mut self, scope: MaxPrefixScope) {
         if !self.max_prefix_blocking[scope.index()] {
             self.max_prefix_blocking[scope.index()] = true;
-            self.metrics
-                .record_max_prefix_blocked(&self.peer_label, scope.as_str());
+            self.metrics.record_max_prefix_blocked(
+                &self.peer_label,
+                scope.family_label(),
+                scope.stage(),
+            );
             let (usage, bound) = self.max_prefix_scope_usage(scope);
             warn!(
                 peer = %self.peer_label,
-                scope = scope.as_str(),
+                family = scope.family_label(),
+                    stage = scope.stage(),
                 usage,
                 bound = bound.unwrap_or(0),
                 "max prefix blocking started; net-new prefixes are withheld"
@@ -1712,12 +1739,15 @@ impl PeerSession {
     /// `max_prefixes_received_*` bound was removed at runtime.
     fn drop_received_tracking(&mut self, afi: Afi) {
         let scope = match afi {
-            Afi::Ipv4 => "ipv4_unicast_received",
-            _ => "ipv6_unicast_received",
+            Afi::Ipv4 => MaxPrefixScope::Ipv4Received,
+            _ => MaxPrefixScope::Ipv6Received,
         };
         if self.max_prefix_metric_lease.active {
-            self.metrics
-                .remove_max_prefix_capacity(&self.peer_label, scope);
+            self.metrics.remove_max_prefix_capacity(
+                &self.peer_label,
+                scope.family_label(),
+                scope.stage(),
+            );
         }
         let in_family = |prefix: &Prefix| match prefix {
             Prefix::V4(_) => afi == Afi::Ipv4,

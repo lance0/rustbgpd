@@ -995,7 +995,7 @@ async fn production_collision_promotion_transfers_capacity_after_primary_termina
     let activation_count = Arc::new(AtomicU32::new(0));
 
     mgr.metrics
-        .set_max_prefix_capacity(&peer_label, "aggregate", 2, Some(10));
+        .set_max_prefix_capacity(&peer_label, "aggregate", "accepted", 2, Some(10));
     let (primary_tx, mut primary_rx) = mpsc::channel::<PeerCommand>(8);
     let primary_metrics = mgr.metrics.clone();
     let primary_peer_label = peer_label.clone();
@@ -1036,6 +1036,7 @@ async fn production_collision_promotion_transfers_capacity_after_primary_termina
                     candidate_metrics.set_max_prefix_capacity(
                         &candidate_peer_label,
                         "aggregate",
+                        "accepted",
                         1,
                         Some(10),
                     );
@@ -1158,6 +1159,52 @@ async fn stale_collision_notifications_do_not_mutate_current_peer() {
     );
 }
 
+/// The published detail spells the bound with the metric labels, so an
+/// event correlates with `bgp_max_prefix_*{family,stage}` without a rejoin.
+#[tokio::test]
+async fn max_prefix_warning_event_names_the_metric_family_and_stage() {
+    let mut mgr = test_peer_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(peer_addr, SessionState::Established, None, counters),
+        false,
+    );
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
+    mgr.register_session(session_id, &key(peer_addr));
+    let mut live_events = mgr.session_events_tx.subscribe();
+
+    mgr.handle_session_notification(SessionNotification::MaxPrefixWarning {
+        session_id,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+        family: "ipv4_unicast",
+        stage: "received",
+        usage: 80,
+        bound: 100,
+        percent: 80,
+    })
+    .await;
+
+    let event = live_events.try_recv().expect("the warning is published");
+    let rustbgpd_api::peer_types::SessionEvent::Lifecycle(event) = event.as_ref() else {
+        panic!("expected a lifecycle event, got {event:?}");
+    };
+    assert_eq!(
+        event.event_type,
+        SessionLifecycleEventType::MaxPrefixWarning
+    );
+    assert!(
+        event
+            .reason
+            .contains(": family ipv4_unicast stage received usage 80 of bound 100 (threshold 80%)"),
+        "{}",
+        event.reason
+    );
+}
+
 #[tokio::test]
 async fn stale_max_prefix_warnings_are_not_published() {
     let mut mgr = test_peer_manager();
@@ -1177,7 +1224,8 @@ async fn stale_max_prefix_warnings_are_not_published() {
             session_id,
             role: rustbgpd_transport::SessionRole::Primary,
             peer_addr,
-            scope: "ipv4_unicast",
+            family: "ipv4_unicast",
+            stage: "accepted",
             usage: 80,
             bound: 100,
             percent: 80,
@@ -2481,7 +2529,8 @@ async fn nested_drain_defers_same_address_peer_on_another_interface() {
         session_id: 999,
         role: rustbgpd_transport::SessionRole::Primary,
         peer_addr: addr,
-        scope: "aggregate",
+        family: "aggregate",
+        stage: "accepted",
         usage: 1,
         bound: 2,
         percent: 50,

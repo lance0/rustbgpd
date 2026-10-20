@@ -1112,11 +1112,14 @@ fn inbound_prefix_limit_checks(
                 .filter(|reason| !reason.is_empty())
                 .unwrap_or("unknown (daemon omitted reason)");
             Check {
-                name: format!("peer.{identity}.inbound_prefix_limit.{}", row.scope),
+                name: format!(
+                    "peer.{identity}.inbound_prefix_limit.{}.{}",
+                    row.family, row.stage
+                ),
                 status: CheckStatus::Warn,
                 detail: format!(
-                    "peer {identity} scope {} is withholding net-new received prefixes: usage {}, limit {}, reason {reason}",
-                    row.scope, row.usage, row.limit
+                    "peer {identity} family {} stage {} is withholding net-new received prefixes: usage {}, limit {}, reason {reason}",
+                    row.family, row.stage, row.usage, row.limit
                 ),
             }
         })
@@ -1158,7 +1161,7 @@ fn inbound_prefix_bound_check(
         || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
-        || has_inbound_scope(neighbor, "aggregate")
+        || has_inbound_bound(neighbor, "aggregate")
     {
         return None;
     }
@@ -1199,18 +1202,19 @@ fn inbound_prefix_bound_check(
     })
 }
 
-fn has_inbound_scope(neighbor: &crate::proto::NeighborState, scope: &str) -> bool {
+/// Whether a finite bound of either stage covers `family` (`aggregate` or a
+/// canonical family label).
+fn has_inbound_bound(neighbor: &crate::proto::NeighborState, family: &str) -> bool {
     neighbor
         .inbound_prefix_limits
         .iter()
-        .any(|row| row.scope == scope)
+        .any(|row| row.family == family)
 }
 
-/// Whether a finite per-family bound covers one negotiated family. Scope
-/// names are the canonical family labels (plus `_received` for unicast).
+/// Whether a finite per-family bound, accepted or received, covers one
+/// negotiated family.
 fn family_bounded(neighbor: &crate::proto::NeighborState, family: &str) -> bool {
-    has_inbound_scope(neighbor, family)
-        || has_inbound_scope(neighbor, &format!("{family}_received"))
+    has_inbound_bound(neighbor, family)
 }
 
 /// The per-family keys that can bound `family`, besides the aggregate.
@@ -4948,7 +4952,8 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     #[test]
     fn inbound_prefix_checks_warn_only_for_blocking_scopes() {
         let blocking = crate::proto::InboundPrefixLimitState {
-            scope: "ipv4_unicast".to_string(),
+            family: "ipv4_unicast".to_string(),
+            stage: "accepted".to_string(),
             usage: 3,
             limit: 3,
             headroom: 0,
@@ -4956,7 +4961,8 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             reason: Some("inbound_prefix_limit_reached".to_string()),
         };
         let nonblocking = crate::proto::InboundPrefixLimitState {
-            scope: "ipv6_unicast".to_string(),
+            family: "ipv6_unicast".to_string(),
+            stage: "accepted".to_string(),
             usage: 2,
             limit: 3,
             headroom: 1,
@@ -4969,7 +4975,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(checks.len(), 1);
         assert_eq!(
             checks[0].name,
-            "peer.fe80::1%eth0.inbound_prefix_limit.ipv4_unicast"
+            "peer.fe80::1%eth0.inbound_prefix_limit.ipv4_unicast.accepted"
         );
         assert_eq!(checks[0].status, CheckStatus::Warn);
         assert!(
@@ -5054,16 +5060,17 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             state: crate::proto::SessionState::Established as i32,
             ..Default::default()
         };
-        for scope in [
-            "aggregate",
-            "ipv4_unicast",
-            "ipv6_unicast",
-            "ipv4_unicast_received",
-            "ipv6_unicast_received",
+        for (family, stage) in [
+            ("aggregate", "accepted"),
+            ("ipv4_unicast", "accepted"),
+            ("ipv6_unicast", "accepted"),
+            ("ipv4_unicast", "received"),
+            ("ipv6_unicast", "received"),
         ] {
             let mut bounded = peer.clone();
             bounded.inbound_prefix_limits = vec![crate::proto::InboundPrefixLimitState {
-                scope: scope.to_string(),
+                family: family.to_string(),
+                stage: stage.to_string(),
                 limit: 100,
                 ..Default::default()
             }];
@@ -5073,7 +5080,8 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         // the unicast feed and the aggregate unbounded: the warning stays.
         let mut family_only = peer.clone();
         family_only.inbound_prefix_limits = vec![crate::proto::InboundPrefixLimitState {
-            scope: "rtc".to_string(),
+            family: "rtc".to_string(),
+            stage: "accepted".to_string(),
             limit: 10,
             ..Default::default()
         }];
@@ -5085,7 +5093,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert!(inbound_prefix_bound_check("10.0.0.2", &configured, Some(65001)).is_none());
     }
 
-    fn bound_peer(families: &[&str], scopes: &[&str]) -> crate::proto::NeighborState {
+    fn bound_peer(families: &[&str], bounds: &[(&str, &str)]) -> crate::proto::NeighborState {
         crate::proto::NeighborState {
             config: Some(crate::proto::NeighborConfig {
                 remote_asn: 65002,
@@ -5096,10 +5104,11 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 families: families.iter().map(ToString::to_string).collect(),
                 ..Default::default()
             }),
-            inbound_prefix_limits: scopes
+            inbound_prefix_limits: bounds
                 .iter()
-                .map(|scope| crate::proto::InboundPrefixLimitState {
-                    scope: (*scope).to_string(),
+                .map(|(family, stage)| crate::proto::InboundPrefixLimitState {
+                    family: (*family).to_string(),
+                    stage: (*stage).to_string(),
                     limit: 100,
                     ..Default::default()
                 })
@@ -5122,8 +5131,11 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
     #[test]
     fn inbound_prefix_bound_warns_on_vpn_only_bound_for_dual_family_peer() {
-        let detail = bound_warning(&bound_peer(&VPN_PEER, &["l3vpn_ipv4_unicast"]))
-            .expect("the negotiated IPv4 unicast feed is unbounded");
+        let detail = bound_warning(&bound_peer(
+            &VPN_PEER,
+            &[("l3vpn_ipv4_unicast", "accepted")],
+        ))
+        .expect("the negotiated IPv4 unicast feed is unbounded");
         assert!(
             detail.contains(
                 "negotiated families ipv4_unicast (max_prefixes_ipv4_unicast or max_prefixes_received_ipv4_unicast);"
@@ -5135,7 +5147,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
     #[test]
     fn inbound_prefix_bound_warns_on_unicast_only_bound_for_vpn_peer() {
-        let detail = bound_warning(&bound_peer(&VPN_PEER, &["ipv4_unicast"]))
+        let detail = bound_warning(&bound_peer(&VPN_PEER, &[("ipv4_unicast", "accepted")]))
             .expect("the negotiated VPN family is unbounded");
         assert!(
             detail.contains(
@@ -5147,8 +5159,11 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
     #[test]
     fn inbound_prefix_bound_warns_on_ipv4_only_row_for_dual_stack_peer() {
-        let detail = bound_warning(&bound_peer(&DUAL_STACK_PEER, &["ipv4_unicast"]))
-            .expect("the negotiated IPv6 unicast feed is unbounded");
+        let detail = bound_warning(&bound_peer(
+            &DUAL_STACK_PEER,
+            &[("ipv4_unicast", "accepted")],
+        ))
+        .expect("the negotiated IPv6 unicast feed is unbounded");
         assert!(
             detail.contains(
                 "negotiated families ipv6_unicast (max_prefixes_ipv6_unicast or max_prefixes_received_ipv6_unicast);"
@@ -5162,7 +5177,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         // BGP-LS has no per-family key; only the aggregate covers it.
         let detail = bound_warning(&bound_peer(
             &["ipv4_unicast", "linkstate"],
-            &["ipv4_unicast"],
+            &[("ipv4_unicast", "accepted")],
         ))
         .expect("the negotiated BGP-LS family is unbounded");
         assert!(
@@ -5174,13 +5189,16 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     #[test]
     fn inbound_prefix_bound_passes_with_aggregate_or_every_family_bound() {
         // The aggregate covers every negotiated family.
-        assert_eq!(bound_warning(&bound_peer(&VPN_PEER, &["aggregate"])), None);
         assert_eq!(
-            bound_warning(&bound_peer(&["linkstate"], &["aggregate"])),
+            bound_warning(&bound_peer(&VPN_PEER, &[("aggregate", "accepted")])),
             None
         );
         assert_eq!(
-            bound_warning(&bound_peer(&DUAL_STACK_PEER, &["aggregate"])),
+            bound_warning(&bound_peer(&["linkstate"], &[("aggregate", "accepted")])),
+            None
+        );
+        assert_eq!(
+            bound_warning(&bound_peer(&DUAL_STACK_PEER, &[("aggregate", "accepted")])),
             None
         );
         // A per-family bound on every negotiated family passes, through
@@ -5188,21 +5206,24 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(
             bound_warning(&bound_peer(
                 &VPN_PEER,
-                &["ipv4_unicast", "l3vpn_ipv4_unicast"]
+                &[
+                    ("ipv4_unicast", "accepted"),
+                    ("l3vpn_ipv4_unicast", "accepted")
+                ]
             )),
             None
         );
         assert_eq!(
             bound_warning(&bound_peer(
                 &DUAL_STACK_PEER,
-                &["ipv4_unicast_received", "ipv6_unicast_received"]
+                &[("ipv4_unicast", "received"), ("ipv6_unicast", "received")]
             )),
             None
         );
         assert_eq!(
             bound_warning(&bound_peer(
                 &DUAL_STACK_PEER,
-                &["ipv4_unicast", "ipv6_unicast"]
+                &[("ipv4_unicast", "accepted"), ("ipv6_unicast", "accepted")]
             )),
             None
         );
@@ -7804,7 +7825,8 @@ paths = ["x"]
         // Only the peer group supplies this received-only bound; no legacy aggregate limit is set.
         peers[3].config.as_mut().unwrap().peer_group = "members".to_string();
         peers[3].inbound_prefix_limits = vec![rustbgpd_api::proto::InboundPrefixLimitState {
-            scope: "ipv4_unicast_received".to_string(),
+            family: "ipv4_unicast".to_string(),
+            stage: "received".to_string(),
             limit: 100,
             ..Default::default()
         }];
@@ -8035,7 +8057,8 @@ paths = ["x"]
             reason: Some("outbound_prefix_limit_reached".to_string()),
         }];
         blocked.inbound_prefix_limits = vec![rustbgpd_api::proto::InboundPrefixLimitState {
-            scope: "ipv4_unicast".to_string(),
+            family: "ipv4_unicast".to_string(),
+            stage: "accepted".to_string(),
             usage: 3,
             limit: 3,
             headroom: 0,
@@ -8059,7 +8082,8 @@ paths = ["x"]
             reason: None,
         }];
         unblocked.inbound_prefix_limits = vec![rustbgpd_api::proto::InboundPrefixLimitState {
-            scope: "ipv4_unicast".to_string(),
+            family: "ipv4_unicast".to_string(),
+            stage: "accepted".to_string(),
             usage: 2,
             limit: 3,
             headroom: 1,
@@ -8107,7 +8131,7 @@ paths = ["x"]
         }));
         let inbound_check = manifest_check(
             &manifest,
-            "peer.fe80::1%eth0.inbound_prefix_limit.ipv4_unicast",
+            "peer.fe80::1%eth0.inbound_prefix_limit.ipv4_unicast.accepted",
         );
         assert_eq!(inbound_check["status"], "warn");
         assert!(
