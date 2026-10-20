@@ -4067,9 +4067,12 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
+        // Compare the keys: lease_remaining_ms moves between reads.
+        let keys =
+            |rows: &[proto::LeasedKey]| rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
         assert_eq!(
-            [first.keys, rest.keys].concat(),
-            listed,
+            keys(&[first.keys, rest.keys].concat()),
+            keys(&listed),
             "two pages hold both rules in order"
         );
         for key in listed {

@@ -3348,7 +3348,7 @@ bound to, so an empty page is never ambiguous:
 | `generation` | `keys` | Meaning |
 |---|---|---|
 | absent | any | The owner has no live lease. Re-add the whole desired state; any keys listed are expired and awaiting withdrawal. |
-| present | some | The keys that generation holds. |
+| present | some | The owner's keys. Each row carries its own `generation`: a row whose generation differs from the page's belongs to an expired generation and awaits withdrawal (`lease_remaining_ms` 0). Renewing the live generation does not keep it; re-add it if it is still wanted. |
 | present | none | A live lease that holds no keys. |
 
 A walk is bound to the daemon process and to the owner's generation at its

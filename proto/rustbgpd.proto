@@ -3637,8 +3637,11 @@ service InjectionService {
   //
   // Every page carries the owner's live generation the walk is bound to:
   // absent means the owner has no live lease, so the controller re-adds its
-  // whole desired state; present with keys lists what that generation
-  // holds; present with no keys means a live lease that holds nothing. An
+  // whole desired state; present with keys lists the owner's keys, where a
+  // row whose own generation differs from it belongs to an expired
+  // generation awaiting withdrawal, which renewing the live generation does
+  // not keep, so re-add it if still wanted; present with no keys means a
+  // live lease that holds nothing. An
   // empty page is never a failure: errors are gRPC statuses.
   //
   // A walk is bound to the daemon process and the owner's generation at its
