@@ -1522,9 +1522,12 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         self.state.delete_path_calls.fetch_add(1, Ordering::SeqCst);
         let request = request.into_inner();
         *self.state.last_delete_path.lock().await = Some(request.clone());
-        self.check_injected_owner(&request.owner, request.override_owner)
-            .await?;
         let missing = *self.state.delete_path_missing.lock().await;
+        // Like the daemon, check the owner only of a route that is present.
+        if !missing {
+            self.check_injected_owner(&request.owner, request.override_owner)
+                .await?;
+        }
         let legacy = *self.state.delete_path_legacy.lock().await;
         let outcome = match (missing, legacy) {
             (false, true) => server_proto::PathDeleteOutcome::Unspecified,
@@ -1551,9 +1554,12 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         request: Request<server_proto::DeleteFlowSpecRequest>,
     ) -> Result<Response<server_proto::DeleteFlowSpecResponse>, Status> {
         *self.state.last_delete_flowspec.lock().await = Some(request.get_ref().clone());
-        self.check_injected_owner(&request.get_ref().owner, request.get_ref().override_owner)
-            .await?;
         let matches = *self.state.delete_flowspec_matches.lock().await;
+        // Like the daemon, check the owner only of a rule that is present.
+        if matches {
+            self.check_injected_owner(&request.get_ref().owner, request.get_ref().override_owner)
+                .await?;
+        }
         let legacy = *self.state.delete_flowspec_legacy.lock().await;
         let outcome = match (matches, legacy) {
             (true, true) => server_proto::FlowSpecDeleteOutcome::Unspecified,

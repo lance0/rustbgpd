@@ -104,15 +104,18 @@ async fn rib_delete_allow_missing_reports_not_present() {
         assert!(output.stdout.is_empty(), "{output:?}");
     }
 
-    // The flag combines with the lease-owner flags.
+    // The flag combines with the lease-owner flags. An absent route has no
+    // owner to check, so any owner gets `not present`.
     *server.state.injected_entry_owner.lock().await = "rtbh-pop1".to_string();
-    let args = [&delete(true)[..], &["--override-owner"]].concat();
-    assert_text(
-        &rbgp(&server.addr, false, &args),
-        &format!("Route {PREFIX} not present\n"),
-    );
-    let sent = server.state.last_delete_path.lock().await.clone().unwrap();
-    assert!(sent.allow_missing && sent.override_owner, "{sent:?}");
+    for flags in [&["--override-owner"][..], &["--owner", "ctl"][..]] {
+        let args = [&delete(true)[..], flags].concat();
+        assert_text(
+            &rbgp(&server.addr, false, &args),
+            &format!("Route {PREFIX} not present\n"),
+        );
+        let sent = server.state.last_delete_path.lock().await.clone().unwrap();
+        assert!(sent.allow_missing, "{sent:?}");
+    }
     *server.state.injected_entry_owner.lock().await = String::new();
 
     // An older daemon ignores the flag and reports no outcome. It returns OK
