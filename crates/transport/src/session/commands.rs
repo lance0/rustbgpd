@@ -1640,10 +1640,6 @@ impl PeerSession {
                 // `RibUpdate::RefreshPeerOutbound` so preflight-suppressed
                 // routes are re-probed and advertised AS_PATHs re-encoded
                 // under the new values.
-                let ipv6_was_withheld = self
-                    .negotiated
-                    .clone()
-                    .is_some_and(|neg| self.withholds_ipv6_unicast_export(&neg));
                 let received_was_tracked = [
                     (Afi::Ipv4, self.config.max_prefixes_received_ipv4.is_some()),
                     (Afi::Ipv6, self.config.max_prefixes_received_ipv6.is_some()),
@@ -1694,9 +1690,10 @@ impl PeerSession {
                 // outbound refresh follow. The reverse change keeps the
                 // family; its routes are then refused one at a time.
                 if let Some(neg) = self.negotiated.clone()
-                    && ipv6_was_withheld
+                    && self.ipv6_unicast_withheld
                     && !self.withholds_ipv6_unicast_export(&neg)
                 {
+                    self.ipv6_unicast_withheld = false;
                     let family = (Afi::Ipv6, Safi::Unicast);
                     info!(
                         peer = %self.peer_label,

@@ -842,6 +842,7 @@ impl PeerSession {
                             .is_some_and(|afi| *afi == Afi::Ipv6);
                     let mut sendable_families = if is_ebgp {
                         let withhold_v6 = self.withholds_ipv6_unicast_export(neg);
+                        self.ipv6_unicast_withheld = withhold_v6;
                         if withhold_v6 {
                             // Once per session: the family is withheld before
                             // any route reaches the exact-export probe, so
@@ -865,6 +866,7 @@ impl PeerSession {
                             .copied()
                             .collect()
                     } else {
+                        self.ipv6_unicast_withheld = false;
                         neg.negotiated_families.clone()
                     };
                     if unnumbered_ipv4_without_enhe {
@@ -1203,6 +1205,7 @@ impl PeerSession {
                     });
 
                     self.negotiated = None;
+                    self.ipv6_unicast_withheld = false;
                     self.add_path_receive_families.clear();
                     self.route_refresh_queued.clear();
                     self.clear_known_routes();
