@@ -33,7 +33,10 @@ impl RibManager {
     }
 
     /// Capture the lease tags of a page's locally injected rows in the turn
-    /// that read them.
+    /// that read them. Only for received and best pages, whose rows keep
+    /// their source path ID: advertised rows carry an outbound path ID (0
+    /// for single-best export, a rank under Add-Path), which would match
+    /// another path's tag or none.
     pub(super) fn tag_injected_rows(&self, page: &mut crate::update::RoutePage) {
         if self.injected_owners.is_empty() {
             return;

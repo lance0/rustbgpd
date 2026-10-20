@@ -3176,6 +3176,8 @@ add through `AddPath` or `AddFlowSpec`.
 `ListFlowSpecRoutes` with `received_peer_address: "0.0.0.0"` report each
 owned entry's `injection_owner`, `lease_generation` and `lease_remaining_ms`
 (0 means expired, withdrawal pending); unowned entries leave them unset.
+`ListBestRoutes` reports them on a best local route too. Advertised rows never
+carry them, because their `path_id` is the outbound one.
 `InjectionService.ListInjectionLeases` lists the lease table. The leased adds
 and `RenewLease` are `operator_only`; a successful `RenewLease` is audited at
 INFO rather than WARN. A delete's audit summary names the owner and

@@ -5,7 +5,7 @@ use super::*;
 use crate::injection_lease::{
     ExpiryExit, InjectionLeases, LeaseGeneration, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
-use crate::update::{InjectOutcome, RibCommandError};
+use crate::update::{InjectOutcome, RibCommandError, RoutePage};
 
 const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 70));
 
@@ -785,4 +785,83 @@ fn lease_variants_do_not_grow_rib_update() {
     assert!(size_of::<RibUpdate>() <= 248, "{}", size_of::<RibUpdate>());
     assert!(size_of::<(Route, String, u32, Reply)>() < size_of::<RibUpdate>());
     assert!(size_of::<(FlowSpecRoute, String, u32, Reply)>() < size_of::<RibUpdate>());
+}
+
+async fn route_page(tx: &mpsc::Sender<RibUpdate>, scope: RouteQueryScope) -> RoutePage {
+    let (reply, rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryRoutesPage {
+        scope,
+        filter: None,
+        after: None,
+        expected_version: None,
+        page_size: 10,
+        reply,
+    })
+    .await
+    .unwrap();
+    rx.await.unwrap().unwrap()
+}
+
+/// Lease tags follow source path IDs. Two owners inject one prefix under
+/// path IDs 0 and 42: the received and best rows name each path's own
+/// owner, and the advertised page, whose rows carry an outbound path ID,
+/// names none rather than a wrong one.
+///
+/// Break-to-red: tagging advertised rows by their outbound path ID 0 names
+/// owner `b` for whichever path was exported.
+#[tokio::test(start_paused = true)]
+async fn lease_tags_follow_source_path_ids_and_skip_advertised_rows() {
+    let h = Harness::start().await;
+    let mut path_42 = local_route(1);
+    path_42.path_id = 42;
+    let (_, g_a) = leased_route(&h.tx, path_42, "a", 30).await.unwrap();
+    let (_, g_b) = leased_route(&h.tx, local_route(1), "b", 30).await.unwrap();
+    h.settle().await;
+
+    let owners = |page: &RoutePage| {
+        page.routes
+            .iter()
+            .zip(
+                page.injection
+                    .iter()
+                    .map(Some)
+                    .chain(std::iter::repeat(None)),
+            )
+            .map(|(route, tag)| {
+                (
+                    route.path_id,
+                    tag.and_then(Option::as_ref)
+                        .map(|tag| (tag.owner.to_string(), tag.generation)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let received = route_page(
+        &h.tx,
+        RouteQueryScope::Received {
+            peer: Some(LOCAL_PEER),
+        },
+    )
+    .await;
+    let mut received = owners(&received);
+    received.sort_unstable_by_key(|row| row.0);
+    assert_eq!(
+        received,
+        vec![
+            (0, Some(("b".to_string(), g_b))),
+            (42, Some(("a".to_string(), g_a)))
+        ]
+    );
+    let best = owners(&route_page(&h.tx, RouteQueryScope::Best).await);
+    assert_eq!(best.len(), 1);
+    let expected = if best[0].0 == 42 {
+        ("a".to_string(), g_a)
+    } else {
+        ("b".to_string(), g_b)
+    };
+    assert_eq!(best[0].1, Some(expected));
+    let advertised = owners(&route_page(&h.tx, RouteQueryScope::Advertised { peer: TARGET }).await);
+    assert_eq!(advertised.len(), 1);
+    assert_eq!(advertised[0].1, None, "advertised rows are not tagged");
+    h.stop().await;
 }

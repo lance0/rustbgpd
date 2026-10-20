@@ -3154,8 +3154,9 @@ message Route {
   bool atomic_aggregate = 22;
   // For a route injected with AddLeasedPath (source peer 0.0.0.0): its lease
   // owner, the generation it is tagged with, and the time to the owner's
-  // deadline, where 0 means expired and withdrawal pending. Unset for every
-  // other route.
+  // deadline, where 0 means expired and withdrawal pending. Set on received
+  // and best rows only: advertised rows carry an outbound path_id, so they
+  // leave these unset. Unset for every other route.
   string injection_owner = 23;
   LeaseGeneration lease_generation = 24;
   optional uint32 lease_remaining_ms = 25;

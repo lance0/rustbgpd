@@ -1139,9 +1139,9 @@ impl RibManager {
                 // The baseline is unordered, so each page scans it whole;
                 // it exists only until the member's next successful resync.
                 let page = page_routes(baseline.unicast.values(), filter, after, page_size);
-                let mut page = RoutePage { version, ..page };
-                self.tag_injected_rows(&mut page);
-                let _ = reply.send(Ok(page));
+                // Advertised rows carry outbound path IDs, so they are not
+                // tagged; see `tag_injected_rows`.
+                let _ = reply.send(Ok(RoutePage { version, ..page }));
                 return;
             }
         }
@@ -1258,7 +1258,9 @@ impl RibManager {
             }
         };
         let mut page = RoutePage { version, ..page };
-        self.tag_injected_rows(&mut page);
+        if !matches!(scope, RouteQueryScope::Advertised { .. }) {
+            self.tag_injected_rows(&mut page);
+        }
         if reply.send(Ok(page)).is_err() {
             warn!("query caller dropped before receiving response");
         }
