@@ -3033,16 +3033,20 @@ accepted locally, and only the export to that peer is withheld. The daemon
 never sends an unspecified next hop. How the suppression shows depends on the
 session:
 
-- **eBGP:** the whole IPv6 unicast family is withheld when the session
-  establishes. The daemon logs one WARN per session and increments
+- **eBGP, other than route-server clients:** the whole IPv6 unicast family is
+  withheld when the session establishes. The daemon logs one WARN per session
+  and increments
   `bgp_export_family_suppressed_total{family="ipv6_unicast",reason="missing_ipv6_next_hop"}`.
   `rustbgpd --check` warns about such neighbors before deployment.
-- **iBGP:** the exact-export preflight refuses each such route with reason
+- **iBGP and route-server clients:** the session keeps the family, and the
+  exact-export preflight refuses each next-hop-self route with reason
   `missing_ipv6_next_hop` in `bgp_exact_export_rejections_total`.
 
 For IPv6 RTBH over IPv4 sessions, set `local_ipv6_nexthop` on the neighbor or
-its peer group. On an eBGP session the family is decided at establishment, so
-a reloaded value takes effect for IPv6 unicast after the session resets.
+its peer group. A reloaded value applies to the per-route refusals on the next
+route emission. On an eBGP session that withheld the family, it applies only
+after the session resets, because that session decides the family when it
+establishes.
 
 The route is stored with the unspecified next hop, so `ListBestRoutes`,
 `ListReceivedRoutes`, BMP Loc-RIB and MRT show `0.0.0.0` or `::`, and a
