@@ -655,7 +655,7 @@ impl PeerSession {
                         },
                         shutdown_reason,
                     );
-                    self.notifications_sent += 1;
+                    self.config.neighbor_counters.record_notification_sent();
                     self.metrics.record_notification_sent(
                         &self.peer_label,
                         &code.as_u8().to_string(),
@@ -731,6 +731,9 @@ impl PeerSession {
                         old.as_str(),
                         new.as_str(),
                     );
+                    if old == SessionState::Established {
+                        self.config.neighbor_counters.record_flap();
+                    }
 
                     // Publish operator-facing lifecycle state changes over one
                     // bounded channel per session so PeerManager can preserve

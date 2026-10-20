@@ -4,6 +4,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU8;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
@@ -551,6 +552,75 @@ impl ForwardingStateSource {
     }
 }
 
+/// Lifetime counters of one configured or dynamic neighbor (`PeerKey`),
+/// shared by every session the peer manager runs for it: the initial
+/// session, inbound replacements and promoted collision candidates.
+///
+/// Sessions add to it where they add to the Prometheus counters, so the
+/// operator-facing `flap_count` and `notifications_*` survive a replacement
+/// session. The peer manager drops the block when the neighbor is deleted.
+/// It is runtime state, not configuration: two configs compare equal on it.
+#[derive(Clone, Debug, Default)]
+pub struct NeighborCounters(Arc<NeighborCounterBlock>);
+
+#[derive(Debug, Default)]
+struct NeighborCounterBlock {
+    flaps: AtomicU64,
+    notifications_received: AtomicU64,
+    notifications_sent: AtomicU64,
+}
+
+impl NeighborCounters {
+    /// Transitions out of Established.
+    #[must_use]
+    pub fn flaps(&self) -> u64 {
+        self.0.flaps.load(Ordering::Relaxed)
+    }
+
+    /// NOTIFICATION messages received, all codes.
+    #[must_use]
+    pub fn notifications_received(&self) -> u64 {
+        self.0.notifications_received.load(Ordering::Relaxed)
+    }
+
+    /// NOTIFICATION messages sent, all codes.
+    #[must_use]
+    pub fn notifications_sent(&self) -> u64 {
+        self.0.notifications_sent.load(Ordering::Relaxed)
+    }
+
+    /// Count one transition out of Established.
+    pub fn record_flap(&self) {
+        self.0.flaps.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one NOTIFICATION received.
+    pub fn record_notification_received(&self) {
+        self.0
+            .notifications_received
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one NOTIFICATION sent.
+    pub fn record_notification_sent(&self) {
+        self.0.notifications_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether both handles share one block.
+    #[must_use]
+    pub fn same_block(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl PartialEq for NeighborCounters {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for NeighborCounters {}
+
 /// Transport-layer configuration for a single BGP peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(
@@ -734,6 +804,10 @@ pub struct TransportConfig {
     /// `slow_peer_isolation`. Default off — detection alone is purely
     /// observational.
     pub slow_peer_isolation: bool,
+    /// The neighbor's lifetime counter block. [`TransportConfig::new`]
+    /// starts a standalone one; the peer manager installs the block it owns
+    /// for the neighbor before spawning any session.
+    pub neighbor_counters: NeighborCounters,
 }
 
 /// Default slow-peer backlog threshold: half the writer's outbound
@@ -804,6 +878,7 @@ impl TransportConfig {
             slow_peer_threshold_pct: DEFAULT_SLOW_PEER_THRESHOLD_PCT,
             slow_peer_duration: DEFAULT_SLOW_PEER_DURATION_SECS,
             slow_peer_isolation: false,
+            neighbor_counters: NeighborCounters::default(),
         }
     }
 }
