@@ -2975,8 +2975,11 @@ impl RibManager {
         }
     }
 
-    fn expire_eor_holds(&mut self) {
-        self.expire_eor_grace();
+    /// Expire the holds behind the shared timer that fell due at `due`. Grace
+    /// windows release only up to `due`: a later window waits for its own
+    /// turn, so the work queued before its deadline drains first.
+    fn expire_eor_holds(&mut self, due: tokio::time::Instant) {
+        self.expire_eor_grace(due);
         let now = tokio::time::Instant::now();
         let expired: Vec<IpAddr> = self
             .rtc_eor_hold
@@ -6088,7 +6091,7 @@ impl RibManager {
                 if self.drain_before_expiry(ExpiryTimer::RtcEor).await {
                     continue;
                 }
-                self.expire_eor_holds();
+                self.expire_eor_holds(rtc_eor_sleep.deadline());
                 continue;
             }
             if has_attr_gc_timer && attr_gc_sleep.deadline() <= now {

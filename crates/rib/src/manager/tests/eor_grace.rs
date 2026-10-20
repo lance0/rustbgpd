@@ -419,13 +419,13 @@ async fn absent_replay_is_released_by_the_deadline() {
     assert_eq!(helper.eor, []);
 
     tokio::time::advance(WINDOW.saturating_sub(MS)).await;
-    manager.expire_eor_holds();
+    manager.expire_eor_holds(tokio::time::Instant::now());
     assert!(helper.observe(&mut rx, |helper| helper.has(KEPT)));
     assert_eq!(helper.eor, []);
     assert!(eor_count(&metrics, UPSTREAM) < 0.5);
 
     tokio::time::advance(MS).await;
-    manager.expire_eor_holds();
+    manager.expire_eor_holds(tokio::time::Instant::now());
     helper.observe(&mut rx, |_| true);
     assert_eq!(helper.eor, vec![V4]);
     assert!(!helper.has(KEPT) && !helper.has(UNBANNED));
@@ -481,7 +481,7 @@ async fn unban_during_downtime_is_retained_until_release() {
     assert_eq!(helper.eor, []);
 
     tokio::time::advance(WINDOW).await;
-    manager.expire_eor_holds();
+    manager.expire_eor_holds(tokio::time::Instant::now());
     assert!(helper.observe(&mut rx, |helper| helper.has(KEPT)));
     assert!(!helper.has(UNBANNED), "the lifted ban outlived the release");
 }
@@ -494,7 +494,7 @@ async fn reconnect_does_not_extend_the_deadline() {
     let mut manager = manager(Some(&[UPSTREAM]), &metrics);
     let mut first = connect(&mut manager, UPSTREAM, HELPER);
     tokio::time::advance(Duration::from_secs(6)).await;
-    manager.expire_eor_holds();
+    manager.expire_eor_holds(tokio::time::Instant::now());
     while let Ok(update) = first.try_recv() {
         assert_eq!(update.end_of_rib, []);
     }
@@ -507,12 +507,12 @@ async fn reconnect_does_not_extend_the_deadline() {
         manager.handle_update(message);
     }
     tokio::time::advance(Duration::from_secs(4).saturating_sub(MS)).await;
-    manager.expire_eor_holds();
+    manager.expire_eor_holds(tokio::time::Instant::now());
     while let Ok(update) = second.try_recv() {
         assert!(update.end_of_rib.is_empty(), "released before the deadline");
     }
     tokio::time::advance(MS).await;
-    manager.expire_eor_holds();
+    manager.expire_eor_holds(tokio::time::Instant::now());
     assert_eq!(second.try_recv().unwrap().end_of_rib, vec![V4]);
 }
 
@@ -563,7 +563,7 @@ fn assert_no_eor(rx: &mut mpsc::Receiver<OutboundRouteUpdate>, path: &str) {
 
 async fn release(manager: &mut RibManager) {
     tokio::time::advance(WINDOW).await;
-    manager.expire_eor_holds();
+    manager.expire_eor_holds(tokio::time::Instant::now());
 }
 
 /// Every alternate End-of-RIB writer respects the hold, and the released
@@ -723,4 +723,40 @@ async fn grace_deadlines_use_the_cached_deadline_map() {
     assert!(manager.eor_grace_deadlines.is_stale());
     assert_eq!(manager.next_eor_hold_deadline(), Some(start + WINDOW * 2));
     assert!(!manager.eor_grace_deadlines.is_stale());
+}
+
+/// Two windows of different lengths behind the one shared timer. The timer
+/// fires for the shorter window; by the time its backlog has drained, the
+/// longer window has passed too, while a replay for that peer queued between
+/// the two deadlines still waits in the actor queue. Only the window that
+/// fell due is released, so the replay reaches the later peer before its
+/// End-of-RIB.
+#[tokio::test(start_paused = true)]
+async fn later_window_waits_for_its_own_turn() {
+    let metrics = BgpMetrics::new();
+    let mut config = grace(&[UPSTREAM, CLIENT]);
+    config.peers[1].window = WINDOW + Duration::from_secs(1);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager =
+        RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()).with_eor_grace(config);
+    let start = tokio::time::Instant::now();
+    let mut first = connect(&mut manager, UPSTREAM, HELPER);
+    let mut later = connect(&mut manager, CLIENT, HELPER);
+
+    // A's deadline falls due; its admitted backlog takes until after B's.
+    tokio::time::advance(WINDOW + Duration::from_secs(2)).await;
+    manager.expire_eor_holds(start + WINDOW);
+    assert_eq!(first.try_recv().unwrap().end_of_rib, vec![V4]);
+    assert_no_eor(
+        &mut later,
+        "the later window, released with the earlier one",
+    );
+
+    // The replay queued at 10.5 s is applied before B's own expiry turn.
+    inject(&mut manager, KEPT);
+    manager.expire_eor_holds(start + WINDOW + Duration::from_secs(1));
+    let mut helper = Helper::retaining(&[KEPT]);
+    assert!(helper.observe(&mut later, |helper| helper.has(KEPT)));
+    assert_eq!(helper.eor, vec![V4]);
+    assert_eq!(helper.log.last().map(String::as_str), Some("eor"));
 }
