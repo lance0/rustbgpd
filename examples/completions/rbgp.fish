@@ -929,6 +929,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l tls-key -d 'PEM client private key for mTLS (requires --tls-cert)' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l tls-server-name -d 'Server certificate name to verify instead of the HTTPS address host' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l allow-missing -d 'Succeed and report "not present" when no injected route matches'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l override-owner -d 'Delete the injected route whatever its lease owner, for example a stuck blackhole whose controller is gone'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'

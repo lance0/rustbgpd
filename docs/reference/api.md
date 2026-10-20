@@ -2099,6 +2099,27 @@ also emits ordered `component_details` records with the API component `type`,
 `prefix`, `value`, and `offset`. The explicit offset preserves the RFC 8956
 IPv6 prefix-match semantics, including zero and nonzero values.
 
+Each row reports its RFC 8955 action communities twice: typed in `actions`,
+and raw in `extended_communities`, which carries every extended community on
+the rule. Only the raw list carries a community the API does not model, so a
+client that cross-checks the two should expect each typed action to have a
+raw twin. `actions` types traffic-rate-bytes (`traffic_rate`),
+traffic-rate-packets (`traffic_rate_packets`, outside the v1 inventory),
+traffic-action, traffic-marking and all three redirect forms. A redirect's
+`route_target` selects its form, on input and in listings:
+
+| `route_target` | Extended community |
+|---|---|
+| `ASN:value`, ASN up to 65535, 32-bit value | Redirect 2-octet AS (`0x8008`) |
+| `a.b.c.d:value`, 16-bit value | Redirect IPv4 address (`0x8108`, RFC 7674) |
+| `ASN:value`, ASN above 65535, 16-bit value | Redirect 4-octet AS (`0x8208`, RFC 7674) |
+| `high.low:value` (RFC 5396 asdot), 16-bit value | Redirect 4-octet AS, for any ASN |
+
+A listing renders a 4-octet-AS redirect whose ASN fits in 16 bits as
+`0.ASN:value`, so sending the string back reproduces the same community.
+`AddFlowSpec` does not deduplicate `actions` against `extended_communities`:
+send each action once, typed or raw.
+
 The ordinary `ListFlowSpecRoutes` response remains the selected Loc-RIB view
 in `routes`. Set `received_peer_address` to an IP address to inspect that
 peer's retained, post-import-policy candidates instead, including nonselected
@@ -3047,9 +3068,9 @@ session:
 
 For IPv6 RTBH over IPv4 sessions, set `local_ipv6_nexthop` on the neighbor or
 its peer group. A reloaded value applies to the per-route refusals on the next
-route emission. On an eBGP session that withheld the family, it applies only
-after the session resets, because that session decides the family when it
-establishes.
+route emission. On an eBGP session that withheld the family, the reload
+restores it without a session reset: the session receives its full IPv6
+unicast table and an End-of-RIB.
 
 The route is stored with the unspecified next hop, so `ListBestRoutes`,
 `ListReceivedRoutes`, BMP Loc-RIB and MRT show `0.0.0.0` or `::`, and a
@@ -3128,6 +3149,16 @@ controller's withdraw is idempotent across retries and daemon restarts.
 A daemon that predates these fields ignores `allow_missing`: a missing route
 returns `NOT_FOUND`, and a present route is deleted with outcome
 `UNSPECIFIED`.
+
+`rbgp rib add` prints the outcome, for example `Route 10.99.0.0/24 added
+(unchanged)`, and its `--json` result carries `outcome` (`created`,
+`replaced`, `unchanged`, or `unknown` for an older daemon).
+`rbgp rib delete` reports the delete outcome the same way: its `--json`
+result carries `outcome` (`deleted`, `not_present`, or `unknown` for an older
+daemon). With `--allow-missing`, a missing route prints `Route 10.99.0.0/24
+not present` and exits 0; without the flag a missing route is still an error.
+An older daemon's success prints `Route 10.99.0.0/24 deleted (the daemon did
+not report an outcome)`.
 
 Injected routes are process-local. They are not written to the config and do
 not survive a daemon restart. A restart can fall between two polls of any

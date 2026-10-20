@@ -1620,7 +1620,7 @@ test outside-window-is-not-white-listed {
     let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
     assert!(
         hygiene.contains(
-            "    term reject-as-set { if route.as-path matches \"\\\\{\" { reject } }\n\
+            "policy rs-hygiene {\n\
              \x20   # The white-list tag is set by the route server only; members cannot pre-tag.\n\
              \x20   term scrub-white-list-tag { remove community 65530:2; remove large-community 65500:65530:2 }\n"
         ),

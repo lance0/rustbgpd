@@ -85,6 +85,9 @@ The following shared surfaces remain **outside v1**:
   and `FlowSpecValidationStatus`: these diagnostic fields and enum are
   explicitly excluded even in a local-intent response. Controllers reconcile
   using `route` and `selected`, not validation diagnostics.
+- `FlowSpecAction.traffic_rate_packets`: the typed traffic-rate-packets action
+  is excluded from both FlowSpec method sets. A client that does not read it
+  still finds the action community in `FlowSpecRouteEntry.extended_communities`.
 - `Config.flowspec` and RFC 9117 receive-side validation: validation remains
   opt-in and disabled by default. Local injection remains trusted origination.
 - FlowSpec CLI commands and output, GR/LLGR retention guarantees, remote

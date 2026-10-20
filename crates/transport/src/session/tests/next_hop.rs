@@ -2116,6 +2116,16 @@ async fn establish_v6_over_v4(
 ) -> Vec<(Afi, Safi)> {
     let mut neg = negotiated_session(65002, false);
     neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    establish_with(session, rib_rx, neg).await
+}
+
+/// Establish over IPv4 transport with `neg`; return the `PeerUp` sendable
+/// families.
+async fn establish_with(
+    session: &mut PeerSession,
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    neg: rustbgpd_fsm::NegotiatedSession,
+) -> Vec<(Afi, Safi)> {
     session
         .execute_actions(vec![Action::SessionEstablished(Box::new(neg))])
         .await;
@@ -2182,6 +2192,168 @@ async fn ebgp_ipv6_without_next_hop_is_suppressed_visibly_once_per_session() {
     assert!(families.contains(&(Afi::Ipv6, Safi::Unicast)));
     assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(v6_suppressed_count(&control.metrics), 0.0);
+}
+
+/// Hot-apply `local_ipv6_nexthop`, keeping every other runtime knob as is.
+async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<Ipv6Addr>) {
+    let config = &session.config;
+    let update = crate::handle::PeerRuntimeConfigUpdate {
+        max_prefixes: config.max_prefixes,
+        max_prefixes_ipv4: config.max_prefixes_ipv4,
+        max_prefixes_ipv6: config.max_prefixes_ipv6,
+        max_prefixes_received_ipv4: config.max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6: config.max_prefixes_received_ipv6,
+        max_prefixes_family: config.max_prefixes_family,
+        max_prefix_action: config.max_prefix_action,
+        max_prefix_warning_percent: config.max_prefix_warning_percent,
+        gr_stale_routes_time: config.gr_stale_routes_time,
+        gr_peer_restart_time_max: config.gr_peer_restart_time_max,
+        local_ipv6_nexthop: value,
+        remove_private_as: config.remove_private_as,
+    };
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateRuntimeConfig {
+                config: Box::new(update),
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap().unwrap();
+}
+
+/// The `PeerFamilySendable` `(family, add_path_send_limit)` pairs the
+/// session sent the RIB since the last drain. The session must not have
+/// re-registered or gone down.
+fn drain_family_sendable(
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+) -> Vec<((Afi, Safi), Option<u32>)> {
+    std::iter::from_fn(|| rib_rx.try_recv().ok())
+        .filter_map(|message| match message {
+            RibUpdate::PeerFamilySendable {
+                family,
+                add_path_send_limit,
+                ..
+            } => Some((family, add_path_send_limit)),
+            RibUpdate::PeerUp { .. } | RibUpdate::PeerDown { .. } => {
+                panic!("hot apply must not reset the session")
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Reloading `local_ipv6_nexthop` onto an eBGP session that withheld IPv6
+/// unicast asks the RIB to export the family on the live session: no reset,
+/// no second WARN or counter increment. A reload that leaves the session
+/// without a next hop, or repeats an applied value, sends nothing.
+#[tokio::test]
+async fn hot_applied_ipv6_next_hop_unlocks_withheld_family_without_reset() {
+    let warns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _subscriber = tracing::subscriber::set_default(SuppressionWarnCapture(Arc::clone(&warns)));
+    {
+        let (mut warm, mut warm_rx) = make_test_session_with_rib(65001, 65002);
+        establish_v6_over_v4(&mut warm, &mut warm_rx).await;
+    }
+    tracing::callsite::rebuild_interest_cache();
+    warns.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let families = establish_v6_over_v4(&mut session, &mut rib_rx).await;
+    assert!(!families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let session_id = session.session_identity.id;
+
+    // Control: a reload that still leaves no IPv6 next hop changes nothing.
+    hot_apply_local_ipv6_nexthop(&mut session, None).await;
+    assert_eq!(drain_family_sendable(&mut rib_rx), vec![]);
+
+    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await;
+    assert_eq!(
+        drain_family_sendable(&mut rib_rx),
+        vec![((Afi::Ipv6, Safi::Unicast), None)]
+    );
+    assert_eq!(session.session_identity.id, session_id, "no session reset");
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(v6_suppressed_count(&session.metrics), 1.0);
+
+    // Once unlocked, neither the same value nor removing and re-setting it
+    // is a new unlock.
+    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await;
+    hot_apply_local_ipv6_nexthop(&mut session, None).await;
+    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:2::1".parse().unwrap())).await;
+    assert_eq!(drain_family_sendable(&mut rib_rx), vec![]);
+}
+
+/// Only a session that withheld IPv6 unicast at establishment unlocks it.
+/// A session that established with a next hop, then lost and regained one,
+/// never withheld the family; nor did sessions without IPv6 unicast
+/// negotiated, iBGP sessions, or route-server clients. A reload that sets
+/// `local_ipv6_nexthop` on any of them sends the RIB nothing.
+#[tokio::test]
+async fn hot_applied_ipv6_next_hop_unlocks_only_a_withheld_family() {
+    let next_hop: Ipv6Addr = "2001:db8:0:1::1".parse().unwrap();
+    let dual_stack = |remote_asn| {
+        let mut neg = negotiated_session(remote_asn, false);
+        neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        neg
+    };
+
+    // Established with a next hop: removing then re-setting it unlocks nothing.
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.local_ipv6_nexthop = Some(next_hop);
+    let families = establish_with(&mut session, &mut rib_rx, dual_stack(65002)).await;
+    assert!(families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    hot_apply_local_ipv6_nexthop(&mut session, None).await;
+    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:2::1".parse().unwrap())).await;
+    assert_eq!(drain_family_sendable(&mut rib_rx), vec![], "never withheld");
+
+    // IPv6 unicast not negotiated in OPEN.
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let families =
+        establish_with(&mut session, &mut rib_rx, negotiated_session(65002, false)).await;
+    assert!(!families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    hot_apply_local_ipv6_nexthop(&mut session, Some(next_hop)).await;
+    assert_eq!(drain_family_sendable(&mut rib_rx), vec![], "not negotiated");
+
+    // iBGP keeps the family and refuses routes one at a time.
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    let families = establish_with(&mut session, &mut rib_rx, dual_stack(65001)).await;
+    assert!(families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    hot_apply_local_ipv6_nexthop(&mut session, Some(next_hop)).await;
+    assert_eq!(drain_family_sendable(&mut rib_rx), vec![], "iBGP");
+
+    // Route-server clients keep the family too.
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.route_server_client = true;
+    let families = establish_with(&mut session, &mut rib_rx, dual_stack(65002)).await;
+    assert!(families.contains(&(Afi::Ipv6, Safi::Unicast)));
+    hot_apply_local_ipv6_nexthop(&mut session, Some(next_hop)).await;
+    assert_eq!(
+        drain_family_sendable(&mut rib_rx),
+        vec![],
+        "route-server client"
+    );
+}
+
+/// A withheld family that negotiated Add-Path send carries its effective
+/// send limit, as `PeerAddPathLimits` would have at establishment.
+#[tokio::test]
+async fn hot_applied_ipv6_next_hop_carries_the_add_path_send_limit() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.add_path_send = true;
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    let mut neg = negotiated_session(65002, false);
+    neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), ipv6];
+    neg.add_path_families.insert(ipv6, AddPathMode::Both);
+    neg.effective_add_path_send_limits.insert(ipv6, 4);
+    let families = establish_with(&mut session, &mut rib_rx, neg).await;
+    assert!(!families.contains(&ipv6));
+
+    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await;
+    assert_eq!(drain_family_sendable(&mut rib_rx), vec![(ipv6, Some(4))]);
 }
 
 /// A permit statement rewriting the next hop, optionally for one prefix and

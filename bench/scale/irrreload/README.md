@@ -518,7 +518,7 @@ Documented asymmetries (the honesty notes for the eventual receipt):
   starting measurements. The 10-member transaction remains smoke-only. Its
   rows and artifact roots never enter the cross-daemon table.
 - **Hygiene depth differs slightly.** The rustbgpd SIGHUP cell carries the
-  full rendered `rs-hygiene` (including the AS_SET-segment reject term);
+  full rendered `rs-hygiene`;
   the chain engine and the BIRD/OpenBGPD cells carry the shared core
   (path-length + bogons) only. All hygiene is generation-static and
   constant-size, so it does not contribute to the reload delta being

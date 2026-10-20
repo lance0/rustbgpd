@@ -1,0 +1,434 @@
+diff --git a/tests/interop/m121-evpn-all-active-frr.clab.yml b/tests/interop/m121-evpn-all-active-frr.clab.yml
+index f852d6c69..246539ed4 100644
+--- a/tests/interop/m121-evpn-all-active-frr.clab.yml
++++ b/tests/interop/m121-evpn-all-active-frr.clab.yml
+@@ -19,7 +19,7 @@ topology:
+       cmd: /bin/sleep infinity
+     controller:
+       kind: linux
+-      image: rustbgpd:dev
++      image: rustbgpd:qq1019-m121-090022493  # queue-local (quiet-queue-2026-10-20, A/B image b)
+       cmd: sleep infinity
+       binds:
+         - /proc:/hostproc:ro
+diff --git a/tests/interop/scripts/m121_all_active_frr.py b/tests/interop/scripts/m121_all_active_frr.py
+index 18d04ce2b..d2e22c07c 100644
+--- a/tests/interop/scripts/m121_all_active_frr.py
++++ b/tests/interop/scripts/m121_all_active_frr.py
+@@ -14,6 +14,9 @@ import sys
+ import time
+ 
+ CELLS = ('frr-df', 'rust-df', 'modulo-hazard', 'core-isolation')
++# Queue-local (quiet-queue-2026-10-14): with M121_LOSS_BOUND_CYCLES
++# set, only these two arms run, each in fresh namespaces.
++LOSS_ARMS = ('loss-action', 'loss-control')
+ IPS = {'a': '10.211.0.1', 'b': '10.211.0.2', 'r': '10.211.0.3'}
+ ESI = '03:aa:bb:cc:dd:ee:ff:00:00:01'
+ PEER_MAC = '02:aa:bb:cc:dd:10'
+@@ -65,7 +68,7 @@ def record_host_metadata(root, out, topology):
+ 
+ def render_config(template, cell):
+     """Render exactly the three lab configurations without privileged side effects."""
+-    if cell not in CELLS:
++    if cell not in CELLS + LOSS_ARMS:
+         raise ValueError(f'unknown M121 cell: {cell}')
+     if cell == 'rust-df':
+         for before, after in [('vni = 100', 'vni = 101'), ('10.211.0.2:100', '10.211.0.2:101'),
+@@ -75,11 +78,14 @@ def render_config(template, cell):
+     elif cell == 'modulo-hazard':
+         template = template.replace('df_algorithm = "highest-preference"\n', '')
+         template = template.replace('df_preference = 100\n', '')
+-    elif cell == 'core-isolation':
++    elif cell in ('core-isolation', 'loss-action', 'loss-control'):
+         # ADR-0140 defaults (10 s settle hold, 180 s backstop); a short BGP
+         # hold time lets the sessions expire while the underlay is cut.
++        # Queue-local (quiet-queue-2026-10-14): loss-control is the same
++        # config with the admin-down action disabled.
+         template = template.replace('hold_time = 30', 'hold_time = 9')
+-        template += '\n[evpn_core_isolation]\nenabled = true\nuplinks = ["ul"]\n'
++        enabled = 'false' if cell == 'loss-control' else 'true'
++        template += f'\n[evpn_core_isolation]\nenabled = {enabled}\nuplinks = ["ul"]\n'
+     return template
+ 
+ 
+@@ -170,6 +176,8 @@ def host_run():
+     historical_comparison_enabled(compare)
+     process = subprocess.Popen(['docker', 'exec', '-i', '-e', 'FRR_PIDS=' + os.environ['FRR_PIDS'],
+                                 '-e', 'M121_COMPARE_HISTORICAL=' + compare,
++                                '-e', 'M121_LOSS_BOUND_CYCLES=' + os.environ.get('M121_LOSS_BOUND_CYCLES', ''),
++                                '-e', 'M121_LOSS_ARMS=' + os.environ.get('M121_LOSS_ARMS', ''),  # quiet-queue-2026-10-20
+                                 f'clab-{topology}-controller', 'python3',
+                                 '/m121/scripts/m121_all_active_frr.py', '--config', '/m121/config.toml'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+@@ -879,6 +887,274 @@ def core_isolation(vni):
+     return result
+ 
+ 
++# ---- Queue-local (quiet-queue-2026-10-14): transition-loss bound ----
++# One constant-rate CE -> remote flow, hashed by the CE bond to rustbgpd's
++# member. Each cycle: steady traffic, cut rustbgpd's underlay, keep sending,
++# then restore and wait for full recovery. Every frame carries its sequence
++# number and send time, so each lost frame is attributed to a send instant.
++# loss-action runs with [evpn_core_isolation] enabled, loss-control with it
++# disabled (the pre-fix behaviour). Frames sent on ceb + cea are the sent set;
++# frames at the remote host are the delivered set.
++LOSS_RATE = 2000          # frames per second, one flow (0.5 ms send spacing)
++LOSS_PRE = 2.0            # seconds of steady traffic before the cut
++LOSS_POST = 8.0           # seconds of traffic after the cut
++LOSS_SETTLE = 3.0         # seconds of quiet after recovery before the next cycle
++LOSS_MARKER = b'LOSS-BOUND:'
++LOSS_SENDER = r'''
++import errno, json, socket, struct, sys, time
++iface, head, rate, seconds = sys.argv[1], bytes.fromhex(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
++s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
++s.bind((iface, 0))
++total, interval, offset = int(rate * seconds), 1e9 / rate, len(head)
++buf = bytearray(head + bytes(12))
++late = worst = 0
++refused = []  # [seq, send_ns]: the CE kernel dropped the frame at transmit (ENOBUFS), so it is lost
++start = time.monotonic_ns() + 20_000_000
++start_wall = time.time_ns() + 20_000_000
++for seq in range(total):
++    due = start + int(seq * interval)
++    while (now := time.monotonic_ns()) < due:
++        pass
++    worst = max(worst, now - due)
++    late += now - due > interval
++    sent_ns = time.time_ns()
++    struct.pack_into('!IQ', buf, offset, seq, sent_ns)
++    try:
++        s.send(buf)
++    except OSError as error:
++        if error.errno != errno.ENOBUFS:
++            raise
++        refused.append([seq, sent_ns])
++print(json.dumps(dict(sent=total, rate=rate, seconds=seconds, late_frames=late, worst_lateness_ns=worst, refused=refused,
++                      start_wall_ns=start_wall, end_wall_ns=time.time_ns())))
++'''
++
++
++def loss_frame_head(seed):
++    """frame()'s addresses and ports (so the CE hashes it like the discovery
++    flow), with a fixed payload marker; the sender appends seq and send time."""
++    from evpn_frr_peer_sync import checksum
++    import socket as _socket
++    import struct as _struct
++    body = len(LOSS_MARKER) + 2 + 12
++    udp = _struct.pack('!HHHH', 30000 + seed, 45000, 8 + body, 0)
++    header = _struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp) + body, seed * 16, 0, 64, 17, 0,
++                          _socket.inet_aton(f'198.18.{seed // 250}.{seed % 250 + 1}'), _socket.inet_aton('192.0.2.10'))
++    header = header[:10] + _struct.pack('!H', checksum(header)) + header[12:]
++    eth = bytes.fromhex(REMOTE_MAC.replace(':', '')) + bytes.fromhex(PEER_MAC.replace(':', '')) + b'\x08\x00'
++    return eth + header + udp + LOSS_MARKER + _struct.pack('!H', seed)
++
++
++def loss_records(path, seed):
++    """(capture_ns, seq, send_ns) for this flow's frames in a classic PCAP."""
++    import struct as _struct
++    data = Path(path).read_bytes()
++    orders = {b'\xd4\xc3\xb2\xa1': ('<', 1000), b'\xa1\xb2\xc3\xd4': ('>', 1000),
++              b'\x4d\x3c\xb2\xa1': ('<', 1), b'\xa1\xb2\x3c\x4d': ('>', 1)}
++    assert len(data) >= 24 and data[:4] in orders, f'invalid PCAP {path}'
++    endian, scale = orders[data[:4]]
++    tag = LOSS_MARKER + _struct.pack('!H', seed)
++    cursor, rows = 24, []
++    while cursor + 16 <= len(data):
++        sec, frac, captured, _ = _struct.unpack_from(endian + 'IIII', data, cursor)
++        cursor += 16
++        packet = data[cursor:cursor + captured]
++        cursor += captured
++        at = packet.find(tag)
++        if at < 0 or len(packet) < at + len(tag) + 12:
++            continue
++        seq, sent = _struct.unpack_from('!IQ', packet, at + len(tag))
++        rows.append((sec * 1_000_000_000 + frac * scale, seq, sent))
++    return rows
++
++
++def tcpdump_drops(name):
++    text = (OUT / (name + '.stderr')).read_text()
++    match = re.search(r'(\d+) packets? dropped by kernel', text)
++    assert match, f'no tcpdump drop report for {name}: {text[-300:]}'
++    return int(match[1])
++
++
++def kernel_sample(origin):
++    bond = ns('ce', 'cat', '/proc/net/bonding/bond0')
++    return dict(elapsed=time.monotonic() - origin,
++                rust_member_admin_up='UP' in json.loads(ns('b', 'ip', '-j', 'link', 'show', 'ac'))[0]['flags'],
++                ce_ceb_active=bond_member_active(bond, 'ceb'), ce_aggregator_ports=aggregator_ports(bond))
++
++
++def loss_steady(action):
++    def check():
++        sample = kernel_sample(time.monotonic())
++        assert both_active(sample), sample
++        assert sum(r['state'] == 'Established' for r in ctl('neighbor')) == 2, 'sessions not Established'
++        if action:
++            assert core_state() == 'released', core_state()
++        assert any(r.get('mac') == REMOTE_MAC and r.get('peer') == IPS['r'] for r in ctl('evpn'))
++        rows = json.loads(ns('a', 'bridge', '-j', 'fdb', 'show', 'dev', 'vx100'))
++        assert any(r.get('mac') == REMOTE_MAC and r.get('dst') == IPS['r'] for r in rows), rows
++        rows = json.loads(ns('b', 'bridge', '-j', 'fdb', 'show', 'dev', 'vx100'))
++        assert any(r.get('mac') == REMOTE_MAC and r.get('dst') == IPS['r'] for r in rows), rows
++        return True
++    return check
++
++
++def loss_cycle(arm, cycle, seed, head):
++    phase = f'{arm}-c{cycle:02d}'
++    points = [('ce', 'ceb'), ('ce', 'cea'), ('hr', 'eth0')]
++    items = [start_capture(f'{phase}-{n}-{dev}', n, dev, ['udp', 'dst', 'port', '45000'], snaplen=128)
++             for n, dev in points]
++    monitors = []
++    for node in ('b', 'ce'):
++        log = (OUT / f'{phase}-{node}-ipmonitor.txt').open('w')
++        monitors.append((subprocess.Popen([*prefix(node), 'ip', '-tshort', 'monitor', 'link'],
++                                          stdout=log, stderr=subprocess.STDOUT), log))
++    sender = None
++    try:
++        wait(lambda: capture_ready(items), 'loss capture listeners', timeout=10)
++        sender = subprocess.Popen([*prefix('ce'), 'python3', '-c', LOSS_SENDER, 'bond0', head.hex(),
++                                   str(LOSS_RATE), str(LOSS_PRE + LOSS_POST)],
++                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
++        time.sleep(LOSS_PRE)
++        cut_ns = time.time_ns()
++        run('ip', 'link', 'set', 'ul-b', 'down')
++        cut_done_ns = time.time_ns()
++        event('loss_cut', phase=phase, cut_ns=cut_ns, cut_done_ns=cut_done_ns)
++        origin, samples = time.monotonic(), []
++        while sender.poll() is None:
++            samples.append(kernel_sample(origin))
++            time.sleep(.1)
++        out, err = sender.communicate(timeout=30)
++        assert sender.returncode == 0, f'sender exit {sender.returncode}: {err}'
++        sent = json.loads(out)
++        time.sleep(.5)  # drain only
++    finally:
++        if sender is not None and sender.poll() is None:
++            sender.kill()
++            sender.wait(timeout=10)
++        stop_captures(items)
++        for process, log in monitors:
++            process.terminate()
++            process.wait(timeout=10)
++            log.close()
++    save(f'{phase}-kernel.json', samples)
++    drops = {f'{n}-{dev}': tcpdump_drops(f'{phase}-{n}-{dev}') for n, dev in points}
++    members = {dev: loss_records(OUT / f'{phase}-ce-{dev}.pcap', seed) for dev in ('ceb', 'cea')}
++    delivered = {seq for _, seq, _ in loss_records(OUT / f'{phase}-hr-eth0.pcap', seed)}
++    seen = {}
++    for dev, rows in members.items():
++        for captured, seq, send in rows:
++            seen[seq] = (send, dev, captured)
++    refused = {seq: send for seq, send in sent.pop('refused')}
++    for seq, send in refused.items():
++        seen.setdefault(seq, (send, 'refused', None))
++    lost = sorted(seq for seq in seen if seq not in delivered)
++    ms = lambda ns_: round(ns_ / 1e6, 3)
++    ceb_after = [captured for captured, _, send in members['ceb'] if send >= cut_ns]
++    cea_after = [captured for captured, _, send in members['cea'] if send >= cut_ns]
++    pre_cut_lost = [seq for seq in lost if seen[seq][0] < cut_ns]
++    row = dict(cycle=cycle, seed=seed, sender=sent, tcpdump_drops=drops,
++               cut_ns=cut_ns, cut_command_ms=ms(cut_done_ns - cut_ns),
++               frames_sent=sent['sent'], frames_seen_on_members=len(seen),
++               frames_on_ceb=len(members['ceb']), frames_on_cea=len(members['cea']),
++               frames_refused_at_ce=len(refused),
++               refused_lost_and_delivered=len(set(refused) & delivered),
++               frames_delivered=len(delivered & set(seen)), frames_lost=len(lost),
++               lost_before_cut=len(pre_cut_lost),
++               lost_contiguous=bool(lost) and lost[-1] - lost[0] + 1 == len(lost),
++               lost_censored_at_end=bool(lost) and lost[-1] == max(seen),
++               loss_window_ms=ms(seen[lost[-1]][0] - seen[lost[0]][0] + 1e9 / LOSS_RATE) if lost else 0.0,
++               loss_frames_ms=round(len(lost) * 1000 / LOSS_RATE, 3),
++               cut_to_first_lost_ms=ms(seen[lost[0]][0] - cut_ns) if lost else None,
++               cut_to_last_lost_ms=ms(seen[lost[-1]][0] - cut_ns) if lost else None,
++               cut_to_last_ceb_frame_ms=ms(max(ceb_after) - cut_ns) if ceb_after else None,
++               cut_to_first_cea_frame_ms=ms(min(cea_after) - cut_ns) if cea_after else None,
++               kernel_member_admin_down_s=next((s['elapsed'] for s in samples if not s['rust_member_admin_up']), None),
++               kernel_ceb_inactive_s=next((s['elapsed'] for s in samples if not s['ce_ceb_active']), None))
++    problems = []
++    if any(drops.values()):
++        problems.append(f'tcpdump drops {drops}')
++    if len(seen) != sent['sent']:
++        problems.append(f'{sent["sent"] - len(seen)} sent frames missing from the member captures')
++    if pre_cut_lost:
++        problems.append(f'{len(pre_cut_lost)} frames lost before the cut')
++    if not any(send < cut_ns for _, _, send in members['ceb']):
++        problems.append('flow not on rustbgpd member before the cut')
++    # Send times are stamped at the actual send, so lateness only coarsens the window locally;
++    # a stall longer than 10 ms (20 intervals) makes the cycle invalid.
++    if sent['worst_lateness_ns'] > 10_000_000:
++        problems.append(f'sender stalled {sent["worst_lateness_ns"] / 1e6:.1f} ms')
++    row['invalid'] = problems
++    save(f'{phase}-row.json', row)
++    return row
++
++
++def loss_recover(arm, cycle, action):
++    phase = f'{arm}-c{cycle:02d}'
++    wait(lambda: not any(r['state'] == 'Established' for r in ctl('neighbor')),
++         'rustbgpd EVPN sessions to expire with the underlay cut', timeout=40)
++    run('ip', 'link', 'set', 'ul-b', 'up')
++    restored = time.monotonic()
++    event('loss_restore', phase=phase)
++    # Each cut ends in a hold-timer NOTIFICATION teardown, and the FSM doubles
++    # the reconnect wait per consecutive one (cleared only after 300 s
++    # Established or by an administrative reset). Reset both EVPN neighbors in
++    # both arms so every cycle recovers from the same state; recovery is then
++    # measured from the reset, not from the restore.
++    reset = time.monotonic()
++    reset_ns = time.time_ns()
++    for peer in (IPS['a'], IPS['r']):
++        ctl('neighbor', peer, 'reset')
++    event('loss_reset', phase=phase, peers=[IPS['a'], IPS['r']], reset_ns=reset_ns)
++    send('hr', 'eth0', [1], destination=PEER_MAC, source=REMOTE_MAC)
++    wait(loss_steady(action), f'{phase} full recovery', timeout=120)
++    steady = time.monotonic()
++    time.sleep(LOSS_SETTLE)
++    return dict(reset_ns=reset_ns, restore_to_reset_ms=round((reset - restored) * 1000, 3),
++                reset_to_steady_s=round(steady - reset, 3))
++
++
++def loss_summary(rows, key):
++    import statistics
++    values = [row[key] for row in rows if row[key] is not None]
++    if not values:
++        return None
++    return dict(n=len(values), min=min(values), median=statistics.median(values), max=max(values))
++
++
++def loss_bound(vni, arm, cycles):
++    from m121_all_active_oracle import verify_discovery
++    action = arm == 'loss-action'
++    ns('ce', 'ip', 'link', 'set', 'bond0', 'type', 'bond', 'xmit_hash_policy', 'layer3+4')
++    send('hr', 'eth0', [1], destination=PEER_MAC, source=REMOTE_MAC)
++    wait(loss_steady(action), 'both CE members active, sessions up, remote host known', timeout=120)
++    seeds = list(range(154, 218))
++    paths = verify_discovery(capture(f'{arm}-discover', seeds, count=1, direction='ce-to-remote',
++                                     destination=REMOTE_MAC, source=PEER_MAC), f'{arm}-discover', seeds)
++    seed = paths['b'][0]
++    head = loss_frame_head(seed)
++    rows = []
++    for cycle in range(1, cycles + 1):
++        send('hr', 'eth0', [1], destination=PEER_MAC, source=REMOTE_MAC)
++        wait(loss_steady(action), f'{arm} cycle {cycle} steady state', timeout=60)
++        row = loss_cycle(arm, cycle, seed, head)
++        row.update(loss_recover(arm, cycle, action))
++        save(f'{arm}-c{cycle:02d}-row.json', row)
++        rows.append(row)
++        save(f'loss-bound-{arm}-rows.json', rows)
++    valid = [row for row in rows if not row['invalid']]
++    summary = {key: loss_summary(valid, key) for key in (
++        'frames_lost', 'loss_window_ms', 'loss_frames_ms', 'cut_to_first_lost_ms', 'cut_to_last_lost_ms',
++        'cut_to_last_ceb_frame_ms', 'cut_to_first_cea_frame_ms', 'kernel_member_admin_down_s',
++        'kernel_ceb_inactive_s', 'reset_to_steady_s')}
++    result = dict(arm=arm, action_enabled=action, rate_pps=LOSS_RATE, pre_cut_s=LOSS_PRE,
++                  post_cut_s=LOSS_POST, flow_seed=seed, flows_hashed_to_rust=paths['b'],
++                  cycles=len(rows), valid_cycles=len(valid), censored_cycles=sum(r['lost_censored_at_end'] for r in valid),
++                  summary=summary, rows=rows,
++                  scope='frames lost between the underlay cut and the CE moving the flow; one flow, one host')
++    save(f'loss-bound-{arm}.json', result)
++    return dict(valid_cycles=len(valid), cycles=len(rows), summary=summary)
++
++
+ def cleanup_diagnostics(phase):
+     (OUT / f'cleanup-{phase}-mountinfo.txt').write_text(Path('/proc/self/mountinfo').read_text())
+     processes = {}
+@@ -958,7 +1234,7 @@ def cleanup_preserving_error():
+ def main():
+     global OUT, PIDS
+     parser = argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument('--render-config', choices=CELLS)
++    parser.add_argument('--render-config', choices=CELLS + LOSS_ARMS)
+     parser.add_argument('--host-run', action='store_true')
+     parser.add_argument('--config', type=Path, default=Path(__file__).resolve().parents[1] / 'configs/rustbgpd-m121-pe.toml')
+     args = parser.parse_args()
+@@ -987,17 +1263,24 @@ def main():
+                     kernel=run('uname', '-r').strip(), tshark_version=run('tshark', '--version').splitlines()[0])
+     save('metadata.json', metadata)
+     results = {}
++    loss_cycles = os.environ.get('M121_LOSS_BOUND_CYCLES', '')
+     try:
+-        for cell in CELLS:
++        # Queue-local (quiet-queue-2026-10-20, A/B): M121_LOSS_ARMS=loss-action runs that arm only.
++        arms = tuple(a for a in LOSS_ARMS if a in (os.environ.get('M121_LOSS_ARMS') or ','.join(LOSS_ARMS)).split(','))
++        assert arms, 'M121_LOSS_ARMS selects no loss arm'
++        for cell in (arms if loss_cycles else CELLS):
+             OUT = root / cell
+             OUT.mkdir()
+             vni = 101 if cell == 'rust-df' else 100
+-            winner = {'frr-df': 'a', 'rust-df': 'b', 'modulo-hazard': None, 'core-isolation': 'a'}[cell]
++            winner = {'frr-df': 'a', 'rust-df': 'b', 'modulo-hazard': None, 'core-isolation': 'a',
++                      'loss-action': 'a', 'loss-control': 'a'}[cell]
+             try:
+                 bgp = setup(render_config(template, cell), vni)
+                 wait(lambda vni=vni, winner=winner: ready(vni, winner), 'BGP, LACP and expected DF roles')
+                 result = dict(vni=vni, expected_df=winner)
+-                if cell == 'core-isolation':
++                if cell in LOSS_ARMS:
++                    result['loss_bound'] = loss_bound(vni, cell, int(loss_cycles))
++                elif cell == 'core-isolation':
+                     result['core_isolation'] = core_isolation(vni)
+                 elif winner is not None:
+                     result['peer_only'] = peer_only(vni, compare_historical and cell == 'frr-df')
+@@ -1005,7 +1288,7 @@ def main():
+                     result['bidirectional'] = bidirectional(vni)
+                 else:
+                     result['modulo_fallback'] = modulo_fallback(vni)
+-                if cell != 'core-isolation':
++                if cell != 'core-isolation' and cell not in LOSS_ARMS:
+                     result['bum'] = bum(vni, winner)
+                 if cell == 'frr-df':
+                     result['carrier'] = carrier_cycle(vni, result['peer_only']['b_flow_seeds'])
+diff --git a/tests/interop/scripts/test-m121-evpn-all-active-frr.sh b/tests/interop/scripts/test-m121-evpn-all-active-frr.sh
+index 84aff39d0..a4bd167d6 100755
+--- a/tests/interop/scripts/test-m121-evpn-all-active-frr.sh
++++ b/tests/interop/scripts/test-m121-evpn-all-active-frr.sh
+@@ -52,9 +52,16 @@ PY
+ )
+ docker exec "$CONTROLLER" mkdir -p /receipt
+ # Install only in the owned controller. No changes to the pinned FRR image.
++# Queue-local (quiet-queue-2026-10-14): a controller image built in prep with
++# these tools already installed skips the in-window apt-get.
++if docker exec "$CONTROLLER" sh -c 'command -v python3 && command -v tcpdump && command -v tshark && command -v nsenter' \
++    > "$OUT/setup.log" 2>&1; then
++    echo "controller tools preinstalled; no apt-get" >> "$OUT/setup.log"
++else
+ timeout 240 docker exec -e DEBIAN_FRONTEND=noninteractive "$CONTROLLER" sh -ec \
+     'apt-get update && apt-get install -y --no-install-recommends python3 tcpdump tshark procps util-linux' \
+     > "$OUT/setup.log" 2>&1
++fi
+ M121_COMPARE_HISTORICAL="$COMPARE_HISTORICAL" M121_HOST_OUT="$OUT" FRR_PIDS="$pids" python3 "$SCRIPT_DIR/m121_all_active_frr.py" --host-run \
+     > "$OUT/run.log" 2>&1
+ docker exec "$CONTROLLER" cat /receipt/result.json
+diff --git a/tests/interop/scripts/test_m121_all_active_driver.py b/tests/interop/scripts/test_m121_all_active_driver.py
+index fa0d416e9..543e60222 100644
+--- a/tests/interop/scripts/test_m121_all_active_driver.py
++++ b/tests/interop/scripts/test_m121_all_active_driver.py
+@@ -681,5 +681,25 @@ class CoreIsolationTests(unittest.TestCase):
+         self.assertNotIn('evpn_core_isolation', tomllib.loads(driver.render_config(template, 'frr-df')))
+ 
+ 
++class LossRecoverTests(unittest.TestCase):
++    def test_both_arms_reset_both_neighbors_after_restoring_the_underlay(self):
++        for arm, action in [('loss-action', True), ('loss-control', False)]:
++            with self.subTest(arm=arm):
++                calls = []
++                with patch.object(driver, 'wait'), patch.object(driver, 'send'), \
++                        patch.object(driver.time, 'sleep'), \
++                        patch.object(driver, 'run', side_effect=lambda *a, **k: calls.append(('run', a))), \
++                        patch.object(driver, 'ctl', side_effect=lambda *a: calls.append(('ctl', a)) or {}), \
++                        patch.object(driver, 'event', side_effect=lambda name, **f: calls.append(('event', name))):
++                    row = driver.loss_recover(arm, 1, action)
++                restore = calls.index(('run', ('ip', 'link', 'set', 'ul-b', 'up')))
++                resets = [i for i, c in enumerate(calls) if c[0] == 'ctl' and c[1][-1] == 'reset']
++                self.assertEqual([calls[i][1] for i in resets],
++                                 [('neighbor', driver.IPS['a'], 'reset'), ('neighbor', driver.IPS['r'], 'reset')])
++                self.assertTrue(all(i > restore for i in resets))
++                self.assertIn(('event', 'loss_reset'), calls)
++                self.assertEqual(set(row), {'reset_ns', 'restore_to_reset_ms', 'reset_to_steady_s'})
++
++
+ if __name__ == '__main__':
+     unittest.main()

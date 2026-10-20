@@ -3038,6 +3038,103 @@ impl RibManager {
         );
     }
 
+    /// Start exporting a family the session withheld at `PeerUp`
+    /// ([`RibUpdate::PeerFamilySendable`]). Same recipe as the slow-peer
+    /// seam: the sendable set is a group-key input, so regroup, then a dirty
+    /// resync diffs the whole Adj-RIB-Out, which announces the family's
+    /// routes, followed by its `EoR`. Families already sendable are left
+    /// alone, so a repeated or no-op reload sends nothing.
+    ///
+    /// [`RibUpdate::PeerFamilySendable`]: crate::update::RibUpdate::PeerFamilySendable
+    pub(super) fn handle_peer_family_sendable(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        family: (Afi, Safi),
+        add_path_send_limit: Option<u32>,
+    ) {
+        // Update the session's retained record even when another session
+        // owns the registration: a collision failback reinstalls it from
+        // this record, and transport does not resend the unlock.
+        let Some(record) = self
+            .live_sessions
+            .get_mut(&peer)
+            .and_then(|sessions| sessions.iter_mut().find(|r| r.session_id == session_id))
+        else {
+            let _ = self.stale_session_message(
+                peer,
+                session_id,
+                "PeerFamilySendable",
+                rustbgpd_telemetry::metrics::StaleSessionMessageKind::FamilySendable,
+            );
+            return;
+        };
+        if record.sendable_families.contains(&family) {
+            return;
+        }
+        record.sendable_families.push(family);
+        if let Some(limit) = add_path_send_limit {
+            record.add_path_send_families.push(family);
+            record.add_path_send_limits.insert(family, limit);
+            if record.add_path_send_max == 0 {
+                record.add_path_send_max = limit;
+            }
+        }
+        if self.outbound_session_ids.get(&peer) != Some(&session_id)
+            || !self.peer_sendable_families.contains_key(&peer)
+        {
+            return;
+        }
+        info!(%peer, ?family, "family became sendable mid-session: exporting its table");
+        self.advance_advertised_pages();
+        self.peer_sendable_families
+            .entry(peer)
+            .or_default()
+            .push(family);
+        if let Some(limit) = add_path_send_limit {
+            self.peer_add_path_send_families
+                .entry(peer)
+                .or_default()
+                .push(family);
+            self.peer_add_path_send_limits
+                .entry(peer)
+                .or_default()
+                .insert(family, limit);
+            let max = self.peer_add_path_send_max.entry(peer).or_insert(0);
+            if *max == 0 {
+                *max = limit;
+            }
+        }
+        // A GR restarter would sweep its retained routes on an `EoR` sent
+        // ahead of an ORF-gated flood: defer it as `send_initial_table`
+        // does, until the peer's ROUTE-REFRESH lifts the gate.
+        let orf_gated = self
+            .peer_orf_pending
+            .get(&peer)
+            .is_some_and(|gated| gated.contains(&family));
+        if orf_gated && self.gr_peers.contains_key(&peer) {
+            self.gr_deferred_eor.entry(peer).or_default().insert(family);
+        } else {
+            self.pending_eor.entry(peer).or_default().insert(family);
+        }
+        // The regroup can build a destination table from the whole Loc-RIB;
+        // keep readiness served across it as other full-table paths do.
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                let mut evpn_feed = if manager.update_groups.members.contains_key(&peer) {
+                    manager.recompute_update_group(peer)
+                } else {
+                    None
+                };
+                manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
+                manager.distribute_changes_with_evpn_feeds(
+                    evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
+                    true,
+                );
+            });
+        });
+    }
+
     /// Build the classifier input for one peer.
     ///
     /// `with_policy_fingerprint` gates the O(chain-size) planning-identity

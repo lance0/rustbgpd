@@ -18,14 +18,6 @@ use crate::update::RibCommandError;
 /// Owner label used once [`MAX_LIVE_OWNERS`] distinct owners have been seen.
 const OTHER_OWNER_LABEL: &str = "_other";
 
-#[cfg(test)]
-thread_local! {
-    /// Called once per key while an expiry is swept, so a test can observe
-    /// what the sweep holds.
-    pub(super) static EXPIRY_SWEEP_PROBE: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
-        std::cell::RefCell::new(None);
-}
-
 impl RibManager {
     /// The owner and generation `key` is tagged with, if owned.
     pub(crate) fn injection_tag(&self, key: &InjectedKey) -> Option<InjectionTag> {
@@ -162,8 +154,19 @@ impl RibManager {
         dead
     }
 
+    /// Withdraw every key of the expired generations in one turn, under the
+    /// same readiness ownership as a source peer-down: the sweep and the
+    /// recompute it feeds keep answering readiness queries, so a large batch
+    /// cannot hold `/readyz` until it finishes.
     pub(super) fn handle_expire_injection_leases(&mut self, leases: &[ExpiredLease]) {
+        self.with_peer_teardown_readiness(|manager| manager.expire_injection_leases(leases));
+    }
+
+    fn expire_injection_leases(&mut self, leases: &[ExpiredLease]) {
         let applied_at = tokio::time::Instant::now();
+        let readiness = self.replacement_readiness.clone();
+        #[cfg(test)]
+        let observer = self.replacement_readiness_test_hook.clone();
         let mut unicast = HashSet::new();
         let mut flowspec = HashSet::new();
         let mut retired = Vec::new();
@@ -175,12 +178,17 @@ impl RibManager {
                 .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
             let (mut unicast_count, mut flowspec_count) = (0usize, 0usize);
             for key in keys {
+                // Runs without an owner too, so a regression reaches the real
+                // sweep boundary on an unowned path.
                 #[cfg(test)]
-                EXPIRY_SWEEP_PROBE.with(|probe| {
-                    if let Some(probe) = probe.borrow_mut().as_mut() {
-                        probe();
-                    }
-                });
+                if let Some(observer) = &observer {
+                    observer("lease_expiry_sweep");
+                }
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "lease_expiry_retirement",
+                    false,
+                );
                 match key {
                     InjectedKey::Unicast(prefix, path_id) => {
                         if rib.withdraw(&prefix, path_id) {

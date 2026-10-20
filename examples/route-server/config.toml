@@ -6,7 +6,7 @@
 #   role capability negotiated when the member also sets its role)
 # - dual-stack (IPv4 + IPv6 unicast)
 # - RPKI origin validation (drop invalid, prefer valid) and import
-#   hygiene (reject AS_SET, ASPA-invalid, and a dated dual-stack
+#   hygiene (reject ASPA-invalid paths and a dated dual-stack
 #   special-purpose prefix snapshot — see hygiene.rpol)
 #
 # Path-hiding mitigation (RFC 7947 §2.3.2), both flavors:

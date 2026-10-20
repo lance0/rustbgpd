@@ -512,6 +512,46 @@ async fn reject_retention_records_as_path_loop_reason() {
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 1);
 }
 
+/// RFC 9774: an `AS_SET` announcement is treat-as-withdraw at decode, before
+/// import policy. Behind a deny-all import chain it is retained under the
+/// `treat_as_withdraw` reason, never `policy_reject`, and import explain has
+/// no decision for it. Break-to-red: letting the route reach the chain
+/// retains it as `PolicyReject`, counts a policy reject, and caches a
+/// decision.
+#[tokio::test]
+async fn as_set_announcement_is_treat_as_withdraw_not_a_policy_reject() {
+    use super::import_decision_cache::LookupResult;
+    use rustbgpd_telemetry::reason_labels::ImportRejectReason;
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let (mut session, metrics) =
+        retention_session_with_chain(Some(named_rpol_reject_chain()), |_| {});
+    session.import_explain_enabled = true;
+    // ORIGIN IGP, AS_PATH = AS_SET {65002}, NEXT_HOP 10.0.0.2.
+    let attrs = vec![
+        0x40, 1, 1, 0, 0x40, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA, 0x40, 3, 4, 10, 0, 0, 2,
+    ];
+    session
+        .process_update(rfc7606_update(attrs, &[prefix]))
+        .await;
+
+    let entries = session.rejected_routes.snapshot();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, retention_key(prefix));
+    assert_eq!(entries[0].1.reason, ImportRejectReason::TreatAsWithdraw);
+    assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 1);
+    assert_eq!(
+        query_policy_reject_counts(&mut session).await,
+        Some(crate::PolicyRejectCounts::default())
+    );
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    assert!(matches!(
+        session
+            .import_decision_cache
+            .lookup(&retention_key(prefix), session.import_policy_generation),
+        LookupResult::NotSeen
+    ));
+}
+
 /// LAN-472 pin: an RFC 9234 OTC ingress drop (a pre-policy hygiene
 /// gate) retains the announced identity with the OTC reason token and
 /// the canonical sub-reason detail. Break-to-red: constructing per rejected

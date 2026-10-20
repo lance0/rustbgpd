@@ -274,6 +274,7 @@ covered by later CI receipts). Procedures and results:
 | High-N RIB memory | Structural memory at 100k/500k/900k prefixes; A/B via `bench/compare-rib-memory.sh` under the shared host lock | [`BENCHMARKS.md`](benchmarks.md#memory-footprint), [`../bench/README.md`](../bench/README.md) |
 | Interned attribute-container layout | Pinned negative structural + DHAT receipt: at one unique set per seven prefixes, a slice Arc would add 17.7 MiB at 900k full RIB and 31.4 MiB at RR fanout, so the production migration is rejected | [`perf/attribute-layout-2026-08.md`](perf/attribute-layout-2026-08.md) |
 | EVPN M33 load gate | 50k reflected Type 2 routes + 60 s of 1k-rps churn | [`BENCHMARKS.md`](benchmarks.md#evpn-rr-scale-m33) |
+| EVPN core-isolation transition loss | M121 lab topology, one 2,000 frames/s CE flow hashed to rustbgpd's all-active member, rustbgpd's underlay cut: with `[evpn_core_isolation]` the loss window median is 15 ms (`ac5a1b8d5`) and 15.5 ms (`090022493`) over 24 valid cycles each in a same-night A/B, worst 35.5 ms; with the action disabled every valid cycle loses the flow for the whole 8 s window (censored). One host and probe rate, uplink-carrier signal only; no hardware claim | [`perf/evpn-core-isolation-loss-2026-10-20.md`](perf/evpn-core-isolation-loss-2026-10-20.md), [`artifacts`](perf/artifacts/evpn-core-isolation-loss-2026-10-20/README.md) |
 
 ## Soak receipts
 

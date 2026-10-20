@@ -3723,11 +3723,20 @@ message FlowSpecAction {
     FlowSpecTrafficAction traffic_action = 2;
     FlowSpecTrafficMarking traffic_marking = 3;
     FlowSpecRedirect redirect = 4;
+    // Outside the v1 inventory: a v1 client that does not know this
+    // variant still sees the action in FlowSpecRouteEntry.extended_communities.
+    FlowSpecTrafficRatePackets traffic_rate_packets = 5;
   }
 }
 
+// Traffic-rate-bytes (RFC 8955 §7.1, type 0x8006).
 message FlowSpecTrafficRate {
   float rate = 1; // bytes/sec; 0.0 = drop
+}
+
+// Traffic-rate-packets (RFC 8955 §7.1, type 0x800c).
+message FlowSpecTrafficRatePackets {
+  float rate = 1; // packets/sec; 0.0 = drop
 }
 
 message FlowSpecTrafficAction {
@@ -3744,8 +3753,16 @@ message FlowSpecTrafficMarking {
   uint32 dscp = 1;
 }
 
+// Redirect to a VRF (RFC 8955 §7.4, RFC 7674). The route_target form selects
+// the extended community, as for a Route Target:
+//   "ASN:value", ASN <= 65535, 32-bit value: 2-octet AS (type 0x8008)
+//   "a.b.c.d:value", 16-bit value: IPv4 address (type 0x8108)
+//   "ASN:value", ASN > 65535, 16-bit value: 4-octet AS (type 0x8208)
+//   "high.low:value" (RFC 5396 asdot), 16-bit value: 4-octet AS for any ASN
+// Listings render a 4-octet-AS redirect whose ASN fits in 16 bits as
+// "0.ASN:value", so the string read back always selects the same form.
+// Any other string returns INVALID_ARGUMENT.
 message FlowSpecRedirect {
-  // Route target string: "ASN:value" (e.g. "65001:100").
   string route_target = 1;
 }
 
@@ -3759,6 +3776,9 @@ message FlowSpecRouteEntry {
   AddressFamily afi_safi = 4;
   repeated uint32 as_path = 5;
   repeated uint32 communities = 6;
+  // Every extended community on the rule, raw, including the action
+  // communities that also appear typed in actions. Unknown or unmodelled
+  // communities appear only here.
   repeated uint64 extended_communities = 7;
   // Same as Route.injection_owner, lease_generation and lease_remaining_ms,
   // for a rule injected with AddLeasedFlowSpec. Set only in the
@@ -3779,6 +3799,9 @@ message AddFlowSpecRequest {
   repeated FlowSpecComponent components = 2;
   repeated FlowSpecAction actions = 3;
   repeated uint32 communities = 4;
+  // Raw extended communities, sent alongside those built from actions.
+  // AddFlowSpec does not deduplicate the two lists: give an action either
+  // typed in actions or raw here, not both.
   repeated uint64 extended_communities = 5;
 }
 

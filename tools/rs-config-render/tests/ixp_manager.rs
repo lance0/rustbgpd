@@ -698,7 +698,7 @@ fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_schema_specific() {
         ),
         (
             "policy/ixp-hygiene.rpol",
-            "23a80e763fabe8fb0478df0b3ae7cb8a051f22455cc18fcccc6a2fade82f473f",
+            "af8c627c0a3635204495137b61ad9d3241fd45b6026b77e799c1b88458f4ab3a",
         ),
     ] {
         assert_eq!(content_digest(&v1.files[name]), expected, "{name} drifted");
@@ -776,7 +776,7 @@ fn v2_filter_policies_preserve_order_direction_and_reachability() {
     let full = rendered_v2(&v2_value(V2_FILTERS)).unwrap().files;
     assert_eq!(
         content_digest(&full.values().map(String::as_str).collect::<String>()),
-        "9a9fdd195418f614ce49e6b4dd3c4ee9d5271cfb89eda51d90af5c55b6bdf567"
+        "9a76296f4a0c59aac086a7ea40ac56893cc2700b3ad1f69e52488600d897b9e4"
     );
     let import = &full["policy/client-1.rpol"];
     assert_terms(

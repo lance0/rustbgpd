@@ -19,6 +19,8 @@ struct Harness {
     manager: tokio::task::JoinHandle<()>,
 }
 
+type StageObserver = Arc<dyn Fn(&'static str) + Send + Sync>;
+
 impl Harness {
     async fn start() -> Self {
         Self::start_with_ingest_stall(None).await
@@ -27,10 +29,16 @@ impl Harness {
     /// Start with the ADR-0078 ingest stall set, so a `RoutesReceived`
     /// batch holds the RIB actor for `stall` while later messages queue.
     async fn start_with_ingest_stall(stall: Option<Duration>) -> Self {
+        Self::start_with(stall, None).await
+    }
+
+    /// Start with an ingest stall and a readiness-stage observer.
+    async fn start_with(stall: Option<Duration>, observer: Option<StageObserver>) -> Self {
         let (tx, rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
         manager.test_ingest_stall = stall;
+        manager.replacement_readiness_test_hook = observer;
         let leases = manager.injection_leases();
         let (cancel, cancel_rx) = oneshot::channel();
         let expiry = tokio::spawn(Arc::clone(&leases).run_expiry(tx.clone(), cancel_rx));
@@ -553,7 +561,23 @@ async fn expiry_reports_a_closed_rib_channel() {
 /// `is_unlocked` check at the first key.
 #[tokio::test(start_paused = true)]
 async fn an_expiry_sweep_never_holds_the_lease_lock() {
-    let h = Harness::start().await;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let probe = Arc::new(std::sync::Mutex::new(
+        None::<(Arc<InjectionLeases>, LeaseGeneration)>,
+    ));
+    let observer: StageObserver = {
+        let (probe, record) = (Arc::clone(&probe), Arc::clone(&seen));
+        Arc::new(move |stage| {
+            if stage != "lease_expiry_sweep" {
+                return;
+            }
+            if let Some((leases, keep)) = &*probe.lock().unwrap() {
+                let renewed = leases.is_unlocked() && leases.renew("b", *keep, 3_600).is_some();
+                record.lock().unwrap().push(renewed);
+            }
+        })
+    };
+    let h = Harness::start_with(None, Some(observer)).await;
     let (_, keep) = leased_route(&h.tx, local_route(250), "b", 3_600)
         .await
         .unwrap();
@@ -562,17 +586,9 @@ async fn an_expiry_sweep_never_holds_the_lease_lock() {
             .await
             .unwrap();
     }
-    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (leases, record) = (Arc::clone(&h.leases), Arc::clone(&seen));
-    crate::manager::lease_expiry::EXPIRY_SWEEP_PROBE.with(|probe| {
-        *probe.borrow_mut() = Some(Box::new(move || {
-            let renewed = leases.is_unlocked() && leases.renew("b", keep, 3_600).is_some();
-            record.lock().unwrap().push(renewed);
-        }));
-    });
+    *probe.lock().unwrap() = Some((Arc::clone(&h.leases), keep));
     tokio::time::advance(Duration::from_secs(5)).await;
     h.settle().await;
-    crate::manager::lease_expiry::EXPIRY_SWEEP_PROBE.with(|probe| probe.borrow_mut().take());
     let seen = std::mem::take(&mut *seen.lock().unwrap());
     assert_eq!(seen.len(), 200, "the sweep visited every key of owner a");
     assert!(seen.iter().all(|renewed| *renewed));
@@ -1251,5 +1267,121 @@ async fn peer_down_turn() {
     eprintln!(
         "peer down: routes={total} turn_ms={:.1}",
         turn.as_secs_f64() * 1000.0
+    );
+}
+
+async fn next_entry(rx: &mut mpsc::UnboundedReceiver<usize>) -> Option<usize> {
+    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .unwrap()
+}
+
+/// A multi-owner expiry batch runs under the source peer-down readiness
+/// owner: a readiness query queued while the sweep is inside the batch is
+/// answered at the next key, with the count published before the batch,
+/// and the batch still withdraws every key of every owner.
+///
+/// Break-to-red: without the owner, the sweep's checkpoints service nothing
+/// and the query waits until the whole batch has finished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_multi_owner_expiry_batch_keeps_answering_readiness() {
+    const KEYS: u8 = 4;
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Service a queued query at every checkpoint rather than once per budget.
+    manager.flush_poll_budget = Duration::ZERO;
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    manager.handle_update(super::update_groups_recovery::peer_up(TARGET, out_tx, None));
+    let mut expired = Vec::new();
+    for (owner, base) in [("a", 0), ("b", KEYS)] {
+        let mut generation = None;
+        for octet in base..base + KEYS {
+            let (_, g) = manager
+                .inject_local_route(local_route(octet), Some((owner, 30)))
+                .unwrap();
+            generation = g;
+        }
+        expired.push(crate::injection_lease::ExpiredLease {
+            owner: Arc::from(owner),
+            generation: generation.unwrap(),
+            deadline: tokio::time::Instant::now(),
+        });
+    }
+    while out_rx.try_recv().is_ok() {}
+    let before = manager.loc_rib.len();
+    assert_eq!(before, usize::from(2 * KEYS));
+
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    manager.readiness_rx = Some(readiness_rx);
+    manager.replacement_readiness_receipts.clear();
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    manager.replacement_readiness_test_hook = Some(Arc::new(move |stage| {
+        if stage != "lease_expiry_sweep" {
+            return;
+        }
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call < 2 {
+            entered_tx.send(call).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }
+    }));
+    let actor = tokio::spawn(async move {
+        let update = manager.rx.recv().await.unwrap();
+        manager.handle_update(update);
+        manager
+    });
+    tx.send(RibUpdate::ExpireInjectionLeases { leases: expired })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        next_entry(&mut entered_rx).await,
+        Some(0),
+        "the sweep reached its first key"
+    );
+    let (reply, mut response) = oneshot::channel();
+    readiness_tx
+        .try_send(crate::update::RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: std::time::Instant::now(),
+        })
+        .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        next_entry(&mut entered_rx).await,
+        Some(1),
+        "the sweep reached its next key"
+    );
+    let answered = response.try_recv();
+    release_tx.send(()).unwrap();
+    let manager = actor.await.unwrap();
+
+    assert_eq!(
+        answered,
+        Ok(Ok(before)),
+        "the query is answered inside the batch, not after it"
+    );
+    assert_eq!(manager.loc_rib.len(), 0);
+    let mut withdrawn: Vec<Prefix> = Vec::new();
+    while let Ok(update) = out_rx.try_recv() {
+        withdrawn.extend(update.withdraw.iter().map(|(prefix, _)| *prefix));
+    }
+    withdrawn.sort_unstable();
+    assert_eq!(withdrawn, (0..2 * KEYS).map(host).collect::<Vec<_>>());
+    assert_eq!(
+        manager
+            .replacement_readiness_receipts
+            .iter()
+            .map(|receipt| receipt.kind)
+            .collect::<Vec<_>>(),
+        [super::super::ReadinessOwnerKind::PeerTeardown],
+        "the batch ran under the source teardown owner"
     );
 }
