@@ -29,6 +29,7 @@ pub struct ControlService {
     rib_readiness_tx: Option<mpsc::Sender<RibReadinessQuery>>,
     shutdown_tx: watch::Sender<bool>,
     mrt_trigger_tx: Option<MrtTriggerTx>,
+    incarnation: u64,
 }
 
 impl ControlService {
@@ -55,7 +56,17 @@ impl ControlService {
             rib_readiness_tx: None,
             shutdown_tx,
             mrt_trigger_tx,
+            incarnation: 0,
         }
+    }
+
+    /// Answer `CheckLiveness` with this process's incarnation, the value the
+    /// injection lease table drew at start (`InjectionLeases::incarnation`).
+    /// Without it the field stays zero, as from a server that predates it.
+    #[must_use]
+    pub fn with_incarnation(mut self, incarnation: u64) -> Self {
+        self.incarnation = incarnation;
+        self
     }
 
     /// Route health snapshots through the peer manager's read-only readiness
@@ -99,7 +110,9 @@ impl proto::control_service_server::ControlService for ControlService {
         &self,
         _request: Request<proto::CheckLivenessRequest>,
     ) -> Result<Response<proto::CheckLivenessResponse>, Status> {
-        Ok(Response::new(proto::CheckLivenessResponse {}))
+        Ok(Response::new(proto::CheckLivenessResponse {
+            incarnation: self.incarnation,
+        }))
     }
 
     async fn get_health(
@@ -225,14 +238,19 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_succeeds_with_closed_actor_channels() {
-        use prost::Message as _;
-        let svc = make_service();
+        let svc = make_service().with_incarnation(0x0123_4567_89ab_cdef);
         let response = svc
             .check_liveness(Request::new(proto::CheckLivenessRequest {}))
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(response.encode_to_vec().len(), 0);
+        // The incarnation and nothing else.
+        assert_eq!(
+            response,
+            proto::CheckLivenessResponse {
+                incarnation: 0x0123_4567_89ab_cdef
+            }
+        );
         assert!(
             svc.get_health(Request::new(proto::HealthRequest {}))
                 .await

@@ -137,6 +137,21 @@ async fn start_daemon(dir: &Path) -> (Killed, RibServiceClient<Channel>) {
     panic!("daemon socket did not become ready");
 }
 
+/// The daemon's `CheckLiveness` incarnation.
+async fn incarnation(dir: &Path) -> u64 {
+    let channel = rustbgpd_gobgp_bridge::daemon_channel(
+        &format!("unix://{}", socket(dir).display()).parse().unwrap(),
+        rustbgpd_gobgp_bridge::DAEMON_RPC_TIMEOUT,
+    )
+    .unwrap();
+    rbgp::control_service_client::ControlServiceClient::new(channel)
+        .check_liveness(rbgp::CheckLivenessRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .incarnation
+}
+
 fn stop_daemon(daemon: Killed) {
     let status = Command::new("kill")
         .args(["-TERM", &daemon.0.id().to_string()])
@@ -376,6 +391,8 @@ async fn bridge_against_real_daemon() {
     // replay because the detector withdrew it.
     gobgp.add_path(ban_v4(false)).await.unwrap();
     gobgp.add_path(ban_v6(false)).await.unwrap();
+    let first = incarnation(dir).await;
+    assert_ne!(first, 0);
     stop_daemon(daemon);
     let unban = gobgp.add_path(ban_v4(true)).await.unwrap_err();
     assert_eq!(unban.code(), Code::Unavailable);
@@ -394,6 +411,8 @@ async fn bridge_against_real_daemon() {
     // (one second here) re-adds the IPv6 ban and does not bring back the
     // IPv4 one withdrawn during the outage.
     let (_daemon, mut rib) = start_daemon(dir).await;
+    let second = incarnation(dir).await;
+    assert!(second != 0 && second != first, "{first} then {second}");
     let mut restored = false;
     for _ in 0..100 {
         if routes(&mut rib, "2001:db8::7", 128).await.len() == 1 {

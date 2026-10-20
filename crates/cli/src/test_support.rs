@@ -1079,7 +1079,7 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         _request: Request<server_proto::CheckLivenessRequest>,
     ) -> Result<Response<server_proto::CheckLivenessResponse>, Status> {
         self.state.liveness_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(server_proto::CheckLivenessResponse {}))
+        Ok(Response::new(server_proto::CheckLivenessResponse::default()))
     }
 
     async fn get_health(

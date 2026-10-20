@@ -2,8 +2,8 @@
 //! outage is retried after it, a cancelled unban is still retried, a replay
 //! never reinstalls a withdrawn path, a daemon that stops answering does not
 //! hold the bridge, the tracking cap is checked before the daemon sees a
-//! new ban, and a liveness probe that sees the daemon come back replays at
-//! once.
+//! new ban, and a liveness probe that sees the daemon come back, or answer
+//! with a new incarnation, replays at once.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,10 @@ struct Script {
     stalled: bool,
     /// Answer AddPath with UNAVAILABLE while other calls succeed.
     refuse_add: bool,
+    /// The incarnation CheckLiveness reports.
+    incarnation: u64,
+    /// CheckLiveness calls answered.
+    probes: usize,
 }
 
 #[derive(Clone, Default)]
@@ -112,10 +116,14 @@ impl ControlService for Daemon {
         &self,
         _request: Request<rbgp::CheckLivenessRequest>,
     ) -> Result<Response<rbgp::CheckLivenessResponse>, Status> {
-        if self.0.lock().unwrap().down {
+        let mut script = self.0.lock().unwrap();
+        if script.down {
             return Err(Status::unavailable("scripted outage"));
         }
-        Ok(Response::new(rbgp::CheckLivenessResponse {}))
+        script.probes += 1;
+        Ok(Response::new(rbgp::CheckLivenessResponse {
+            incarnation: script.incarnation,
+        }))
     }
 }
 
@@ -344,6 +352,34 @@ async fn a_probe_that_sees_the_daemon_come_back_replays_at_once() {
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     daemon.0.lock().unwrap().down = false;
+    assert!(
+        wait_held(&daemon, &["203.0.113.1"]).await,
+        "{:?}",
+        held(&daemon)
+    );
+}
+
+#[tokio::test]
+async fn a_restart_between_two_probes_replays_at_once() {
+    let (bridge, daemon) = bridge(8).await;
+    daemon.0.lock().unwrap().incarnation = 1;
+    bridge.spawn_restart_watch(Duration::from_millis(20));
+    bridge.add_path(ban(1, false)).await.unwrap();
+    // Let the watch see the first incarnation.
+    for _ in 0..100 {
+        if daemon.0.lock().unwrap().probes >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The daemon restarts with nothing between two probes: every probe is
+    // answered, only the incarnation changes.
+    {
+        let mut script = daemon.0.lock().unwrap();
+        assert!(script.probes >= 2, "the watch never probed");
+        script.routes.clear();
+        script.incarnation = 2;
+    }
     assert!(
         wait_held(&daemon, &["203.0.113.1"]).await,
         "{:?}",

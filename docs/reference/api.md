@@ -3674,7 +3674,7 @@ Daemon lifecycle, health checks, and metrics.
 
 | RPC | Description |
 |-----|-------------|
-| `CheckLiveness` | Empty authenticated request/response; Read tier. A response means only the gRPC handler answered, without actor readiness or topology. Outside the narrow v1 contract; older servers return `UNIMPLEMENTED`. |
+| `CheckLiveness` | Empty authenticated request; Read tier. A response means only the gRPC handler answered, without actor readiness or topology. Its one field, `incarnation`, is drawn at random at daemon start (the lease `incarnation`) and changes on every start. Outside the narrow v1 contract; older servers return `UNIMPLEMENTED`, or an `incarnation` of zero. |
 | `GetHealth` | Returns health status, uptime, active peers, total routes; core actor probes are bounded by the same 200 ms deadline as HTTP `/readyz` |
 | `GetMetrics` | Returns Prometheus metrics as text; returns `DEADLINE_EXCEEDED` when the wait for the shared one-at-a-time render exceeds 5 s; the render itself is not cancelled |
 | `Shutdown` | Initiates graceful shutdown |
@@ -3702,8 +3702,10 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 For a handler-liveness probe that needs only the Read tier, call
-`CheckLiveness` (an empty response) or run `rbgp health --liveness`, which
-prints `alive`. It does not check actor readiness.
+`CheckLiveness` or run `rbgp health --liveness`, which prints `alive`. It does
+not check actor readiness. The response's `incarnation` identifies one daemon
+process lifetime, so a client that probes periodically sees a restart even
+when no probe failed.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
