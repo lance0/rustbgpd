@@ -501,7 +501,7 @@ impl PeerSession {
     /// `TcpConnectionFails` (→ `SessionDown` → RIB `PeerDown` /
     /// deregistration) exactly as a real TCP failure would — no need
     /// to await an FSM transition synchronously here, which keeps the
-    /// bulk caller chain (`send_route_update`) sync.
+    /// bulk caller chain (`send_route_update_slice`) sync.
     pub(super) fn trigger_outbound_saturation_teardown(&mut self) {
         warn!(
             peer = %self.peer_label,

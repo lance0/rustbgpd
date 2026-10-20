@@ -21,7 +21,7 @@ use rustbgpd_rib::{
     ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
     ExactExportResult, ExactExportSnapshot,
 };
-use rustbgpd_wire::EncodeError;
+use rustbgpd_wire::{EncodeError, Ipv4Prefix};
 
 /// Immutable inputs that determine one established session's outbound wire
 /// representation. A complete replacement is published for runtime changes;
@@ -128,34 +128,11 @@ fn is_injected_self_route(route: &Route) -> bool {
 
 #[cfg(test)]
 thread_local! {
-    /// Unsupported IPv6 next-hop overrides dropped on this thread, so a test
-    /// can pin the fallback warning without depending on tracing callsite
-    /// interest, which is process-wide.
+    /// IPv6 next-hop fallback warnings emitted on this thread, so a test can
+    /// pin the warning count without depending on tracing callsite interest,
+    /// which is process-wide.
     pub(super) static IPV6_NEXT_HOP_FALLBACKS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-}
-
-/// An export-policy IPv6 next hop cannot apply to classic IPv4 NLRI without
-/// Extended Next Hop; the route is sent with its default next hop instead.
-/// Called where classic IPv4 NLRI is chosen, so it reports the drop whether
-/// or not the route stored a `NEXT_HOP`, and never an applied override.
-fn warn_if_ipv6_next_hop_dropped(
-    nh_override: Option<&rustbgpd_policy::NextHopAction>,
-    prefix: Prefix,
-) {
-    if !matches!(
-        nh_override,
-        Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_)))
-    ) {
-        return;
-    }
-    #[cfg(test)]
-    IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(count.get() + 1));
-    tracing::warn!(
-        %prefix,
-        "export policy set IPv6 next-hop for classic IPv4 NLRI; \
-         requires Extended Next Hop (RFC 8950) — using default next-hop instead"
-    );
 }
 
 impl SessionExportProfile {
@@ -1129,10 +1106,6 @@ impl SessionExportProfile {
         })
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keeps the per-family next-hop selection and its refusals in one auditable pass"
-    )]
     pub(super) fn finish_unicast_candidate(
         &self,
         route: &Route,
@@ -1201,7 +1174,6 @@ impl SessionExportProfile {
                 {
                     return Err(ExportProbeError::Ipv4RequiresExtendedNextHop);
                 }
-                warn_if_ipv6_next_hop_dropped(next_hop_override, route.prefix);
                 Ok(PreparedUnicastCandidate::Ipv4Body {
                     attrs: attrs.with_next_hop,
                     entry: Ipv4NlriEntry {
@@ -1846,6 +1818,8 @@ pub(super) struct PreparedAttrCacheKey {
 #[derive(Default)]
 pub(super) struct PreparedAttrCache {
     entries: FastMap<PreparedAttrCacheKey, PreparedUnicastAttributes>,
+    /// The shared update-group encode's drops; one cache spans its pass.
+    pub(super) dropped_ipv6_next_hops: DroppedIpv6NextHops,
     #[cfg(debug_assertions)]
     snapshot: Option<(u64, u64)>,
 }
@@ -1864,6 +1838,51 @@ impl PreparedAttrCache {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
+    }
+}
+
+/// Classic IPv4 routes an export pass sent without their export-policy IPv6
+/// next hop: the first prefix and the route count. One accumulator spans a
+/// whole pass, across its slices, so the drop is reported once.
+#[derive(Default)]
+pub(super) struct DroppedIpv6NextHops(Option<(Ipv4Prefix, usize)>);
+
+impl DroppedIpv6NextHops {
+    /// Note a live classic IPv4 NLRI candidate. An export-policy IPv6 next
+    /// hop cannot apply to it without Extended Next Hop, so it is sent with
+    /// its default next hop instead. Probes never note candidates.
+    pub(super) fn note_ipv4_body(
+        &mut self,
+        next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
+        prefix: Ipv4Prefix,
+    ) {
+        if matches!(
+            next_hop_override,
+            Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_)))
+        ) {
+            self.0.get_or_insert((prefix, 0)).1 += 1;
+        }
+    }
+
+    /// Report the pass's dropped IPv6 next hops in one warning, not one per
+    /// route or slice: a dual-stack policy over a full table would otherwise
+    /// log every route on every pass. A shared update-group encode reports
+    /// once for the whole group, under the encoding member's `peer`, with
+    /// `update_group = true`.
+    pub(super) fn warn(&mut self, peer: &str, update_group: bool) {
+        let Some((first_prefix, routes)) = self.0.take() else {
+            return;
+        };
+        #[cfg(test)]
+        IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(count.get() + 1));
+        tracing::warn!(
+            peer = %peer,
+            update_group,
+            %first_prefix,
+            routes,
+            "export policy set IPv6 next-hop for classic IPv4 NLRI; \
+             requires Extended Next Hop (RFC 8950) — using default next-hop instead"
+        );
     }
 }
 
@@ -1902,7 +1921,7 @@ struct MpAttrCacheKey {
 /// attribute `Arc`. Routes sharing a source allocation share one prepared
 /// vector, so grouping hashes and compares it once rather than per route.
 /// Pointer keys are sound only while the envelope that owns the source
-/// `Arc`s is borrowed, so a cache must not outlive one `send_route_update`.
+/// `Arc`s is borrowed, so a cache must not outlive one `send_route_update_slice`.
 #[derive(Default)]
 pub(super) struct MpAttrCache(FastMap<MpAttrCacheKey, Arc<Vec<PathAttribute>>>);
 

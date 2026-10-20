@@ -4184,18 +4184,12 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
                     next_hop_override: v6_override.as_ref(),
                 })
                 .unwrap_or_else(|error| panic!("{case}: {error:?}"));
-            export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
             let export::PreparedUnicastCandidate::Ipv4Body { attrs, .. } = profile
                 .prepare_unicast_candidate(route, v6_override.as_ref())
                 .unwrap()
             else {
                 panic!("{case}: IPv4 without Extended Next Hop must use body NLRI");
             };
-            assert_eq!(
-                export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
-                1,
-                "{case}: the dropped override is reported once"
-            );
             let next_hops: Vec<_> = attrs
                 .iter()
                 .filter_map(|attr| match attr {
@@ -4209,7 +4203,6 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
         session.negotiated = Some(Arc::new(negotiated_session(remote_asn, true)));
         let profile = session.publish_export_profile();
         for route in [&stored, &bare, &policy_applied] {
-            export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
             let export::PreparedUnicastCandidate::Mp { next_hop, .. } = profile
                 .prepare_unicast_candidate(route, v6_override.as_ref())
                 .unwrap()
@@ -4217,11 +4210,183 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
                 panic!("{case}: an IPv6 next hop with Extended Next Hop uses MP_REACH_NLRI");
             };
             assert_eq!(next_hop, IpAddr::V6(v6), "{case}");
-            assert_eq!(
-                export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
-                0,
-                "{case}: an applied override is not reported as dropped"
+        }
+    }
+}
+
+/// A dual-stack export policy's IPv6 next hop cannot apply to classic IPv4
+/// NLRI without Extended Next Hop, so a learned route falls back to its
+/// stored `NEXT_HOP`. The drop is reported once per export pass, not once
+/// per route; exact-export probes and an applied override report nothing.
+#[tokio::test]
+async fn dropped_ipv6_next_hop_override_warns_once_per_export_pass() {
+    use rustbgpd_policy::NextHopAction;
+
+    let v6_override = Some(NextHopAction::Specific(IpAddr::V6(
+        "2001:db8::1".parse().unwrap(),
+    )));
+    let routes: Vec<Route> = (1..=3u8)
+        .map(|octet| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24)),
+            ..make_route(100)
+        })
+        .collect();
+    for extended_nexthop in [false, true] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        session.negotiated = Some(Arc::new(negotiated_session(65001, extended_nexthop)));
+        let profile = session.publish_export_profile();
+        export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
+        for route in &routes {
+            profile
+                .probe_announcement(ExportCandidate::Unicast {
+                    route,
+                    next_hop_override: v6_override.as_ref(),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+            0,
+            "Extended Next Hop {extended_nexthop}: probes never warn"
+        );
+
+        let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(profile);
+        update.announce = routes.clone().into();
+        update.next_hop_override = vec![v6_override.clone(); routes.len()].into();
+        session.send_route_update(update);
+        assert_eq!(
+            export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+            usize::from(!extended_nexthop),
+            "Extended Next Hop {extended_nexthop}: one warning per pass, only when dropped"
+        );
+        if extended_nexthop {
+            continue;
+        }
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        assert_eq!(parsed.announced.len(), routes.len());
+        assert!(
+            parsed
+                .attributes
+                .contains(&PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2))),
+            "the stored NEXT_HOP is the fallback"
+        );
+    }
+}
+
+/// Only an injected route (`RouteOrigin::Local`) turns an unspecified next
+/// hop into next-hop self. A learned route whose import policy set `0.0.0.0`
+/// or `::` keeps that next hop toward iBGP and route-server-client sessions:
+/// IPv4 sends it as stored, and IPv6 is refused rather than rewritten to the
+/// local address.
+#[tokio::test]
+async fn learned_unspecified_next_hop_is_never_rewritten_to_self() {
+    let local_v6: Ipv6Addr = "2001:db8::fe".parse().unwrap();
+    for origin_type in [
+        rustbgpd_rib::RouteOrigin::Ebgp,
+        rustbgpd_rib::RouteOrigin::Ibgp,
+    ] {
+        let mut v4 = make_route(100);
+        v4.origin_type = origin_type;
+        v4.next_hop = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        AttrSet::edit(&mut v4.attributes, |attrs| {
+            for attr in attrs.iter_mut() {
+                if let PathAttribute::NextHop(next_hop) = attr {
+                    *next_hop = Ipv4Addr::UNSPECIFIED;
+                }
+            }
+        });
+        let mut v6 = make_v6_unicast_route(Ipv6Addr::UNSPECIFIED);
+        v6.origin_type = origin_type;
+        assert_ne!(v4.peer, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_ne!(v6.peer, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
+        for (remote_asn, route_server_client) in [(65001, false), (65002, true)] {
+            let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+            session.config.route_server_client = route_server_client;
+            session.config.local_ipv6_nexthop = Some(local_v6);
+            session.negotiated = Some(Arc::new(negotiated_session(remote_asn, false)));
+            let case = format!(
+                "{origin_type:?} route, remote AS {remote_asn}, \
+                 route server client {route_server_client}"
+            );
+            let profile = session.publish_export_profile();
+            assert_ne!(profile.local_ipv4(), Ipv4Addr::UNSPECIFIED, "{case}");
+
+            let export::PreparedUnicastCandidate::Ipv4Body { attrs, .. } =
+                profile.prepare_unicast_candidate(&v4, None).unwrap()
+            else {
+                panic!("{case}: IPv4 without Extended Next Hop must use body NLRI");
+            };
+            let next_hops: Vec<_> = attrs
+                .iter()
+                .filter_map(|attr| match attr {
+                    PathAttribute::NextHop(next_hop) => Some(*next_hop),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(next_hops, vec![Ipv4Addr::UNSPECIFIED], "{case}");
+
+            assert!(
+                matches!(
+                    profile.prepare_unicast_candidate(&v6, None),
+                    Err(export::ExportProbeError::MissingIpv6NextHop)
+                ),
+                "{case}: a learned `::` is refused, never rewritten to {local_v6}"
             );
         }
+    }
+}
+
+/// The run loop sends an envelope in slices: at most 2,048 routes, and one
+/// route per free writer slot when the writer is nearly full. Dropped IPv6
+/// next hops accumulate across the slices and are reported once, when the
+/// announce phase completes.
+#[tokio::test]
+async fn dropped_ipv6_next_hop_warns_once_across_outbound_slices() {
+    use rustbgpd_policy::NextHopAction;
+
+    let v6_override = Some(NextHopAction::Specific(IpAddr::V6(
+        "2001:db8::1".parse().unwrap(),
+    )));
+    let base = make_route(100);
+    let routes: Vec<Route> = (0..2_100u32)
+        .map(|index| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32)),
+            ..base.clone()
+        })
+        .collect();
+    for writer_slots in [1, 8_192] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+        session.negotiated = Some(Arc::new(negotiated_session(65001, false)));
+        let (bulk, mut wire) = mpsc::channel(writer_slots);
+        session.writer_bulk_tx = Some(bulk);
+        let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(session.publish_export_profile());
+        update.announce = routes.clone().into();
+        update.next_hop_override = vec![v6_override.clone(); routes.len()].into();
+
+        export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
+        session.handle_outbound_route_update(update).await;
+        let mut advances = 1;
+        while session.pending_outbound.is_some() {
+            while wire.try_recv().is_ok() {}
+            session.advance_pending_outbound();
+            advances += 1;
+        }
+        assert!(
+            advances > 1,
+            "{writer_slots} writer slots: the envelope must span several slices"
+        );
+        assert_eq!(
+            export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+            1,
+            "{writer_slots} writer slots: one warning for the envelope, not per slice"
+        );
     }
 }
