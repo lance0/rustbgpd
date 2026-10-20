@@ -2104,8 +2104,8 @@ and raw in `extended_communities`, which carries every extended community on
 the rule. Only the raw list carries a community the API does not model, so a
 client that cross-checks the two should expect each typed action to have a
 raw twin. `actions` types traffic-rate-bytes (`traffic_rate`),
-traffic-rate-packets (`traffic_rate_packets`, outside the v1 inventory),
-traffic-action, traffic-marking and all three redirect forms. A redirect's
+traffic-rate-packets (`traffic_rate_packets`), traffic-action,
+traffic-marking and all three redirect forms. A redirect's
 `route_target` selects its form, on input and in listings:
 
 | `route_target` | Extended community |
@@ -2113,10 +2113,15 @@ traffic-action, traffic-marking and all three redirect forms. A redirect's
 | `ASN:value`, ASN up to 65535, 32-bit value | Redirect 2-octet AS (`0x8008`) |
 | `a.b.c.d:value`, 16-bit value | Redirect IPv4 address (`0x8108`, RFC 7674) |
 | `ASN:value`, ASN above 65535, 16-bit value | Redirect 4-octet AS (`0x8208`, RFC 7674) |
-| `high.low:value` (RFC 5396 asdot), 16-bit value | Redirect 4-octet AS, for any ASN |
+| `high.low:value` (RFC 5396 asdot+), 16-bit value | Redirect 4-octet AS, for any ASN |
 
-A listing renders a 4-octet-AS redirect whose ASN fits in 16 bits as
-`0.ASN:value`, so sending the string back reproduces the same community.
+A listing renders a 4-octet-AS redirect whose ASN fits in 16 bits in RFC 5396
+asdot+ form, `0.ASN:value`. A plain `ASN:value` with that ASN would select
+the 2-octet-AS community instead, so the asdot+ spelling is what keeps the
+4-octet-AS encoding when a controller reads a rule back and re-injects it.
+The [v1 controller boundary](v1-stable-contract.md#flowspec-controller-boundary)
+pins these typed actions, packet rate included, as API shape only: it makes
+no forwarding or enforcement guarantee for any action.
 `AddFlowSpec` does not deduplicate `actions` against `extended_communities`:
 send each action once, typed or raw.
 
