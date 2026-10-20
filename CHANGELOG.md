@@ -11,6 +11,426 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `rbgp rib delete` and `rbgp flowspec delete` take `--owner <name>` and
+  `--override-owner` for entries added under an injection lease, so an
+  operator can remove a stuck blackhole or filter whose controller is gone.
+  Without them, deleting an owned entry fails with exit status 1, names the
+  owner and points at both flags. `rbgp rib` route tables gain a `Lease`
+  column, and `rbgp flowspec received 0.0.0.0` lines a `lease` suffix, when
+  an entry is owned; `--json` rows gain a `lease` object (`owner`,
+  `generation`, `remaining_ms`). Output for unowned entries is unchanged.
+- `tools/gobgp-bridge` adds `rustbgpd-gobgp-bridge`, a separate tool outside
+  the daemon and the v1 contract. It serves GoBGP v3 `AddPath` with binary
+  IPv4 or IPv6 unicast NLRI and attributes on loopback, so RTBH detectors that
+  drive GoBGP can announce and withdraw blackholes through rustbgpd's
+  injection API without client changes. Other GoBGP methods return
+  `UNIMPLEMENTED`. Injected routes do not survive a daemon restart; see the
+  [bridge README](tools/gobgp-bridge/README.md) for the supported subset,
+  the security warning and restart behaviour.
+- `rustbgpd-gobgp-bridge` keeps the bans it has announced in memory and
+  re-adds them on a reconcile pass (`--reconcile-interval-secs`, default 30),
+  so a rustbgpd restart no longer ends mitigation for detectors that announce
+  each ban once. A withdrawal the daemon could not acknowledge is retried on
+  each pass and stops the ban from being replayed. The bridge tracks at most
+  65,536 paths and refuses new bans beyond that with `RESOURCE_EXHAUSTED`.
+  The set does not survive a bridge restart; see the
+  [bridge README](tools/gobgp-bridge/README.md#restart-behaviour).
+- Owner-scoped leases on injected routes and FlowSpec rules
+  ([ADR-0141](docs/adr/0141-injection-owner-lease.md)), so a stopped
+  controller's state expires instead of living until the daemon restarts.
+  `InjectionService.AddLeasedPath` and `AddLeasedFlowSpec` add under an
+  owner's lease and return its generation; `RenewLease` renews it and returns
+  `FAILED_PRECONDITION` for a generation that is not live, including one from
+  before a restart; `ListInjectionLeases` lists the table. When a lease runs
+  out, the daemon withdraws all of the owner's entries in one RIB turn, logs
+  a WARN line, and counts it in the new `bgp_injection_lease_expiries_total`
+  counter; the new `bgp_injection_leases` gauge reports the owners in the
+  table. An unexpected exit of the lease expiry task is a component failure:
+  the daemon shuts down and exits 1. `DeletePath` and `DeleteFlowSpec` gain
+  `owner` and `override_owner`, and local route and FlowSpec read-back report
+  `injection_owner`, `lease_generation` and `lease_remaining_ms`. Unowned
+  injection is unchanged. At most 64 owners hold a live lease, each with at
+  most 16,384 entries. The new RPCs and fields are outside the v1 inventory for now. See
+  [leased injection](docs/reference/api.md#leased-injection).
+- `SelectionDeferralFamilyState` carries a canonical `family` label next to
+  its numeric `afi`/`safi`, and `rbgp neighbor` JSON and detail output show it.
+  The field is empty from an older daemon.
+- `InjectionService.AddPath` accepts an unspecified next hop (`0.0.0.0` or
+  `::`) as next-hop self, resolved per session at export to the session's
+  local address (IPv6: the neighbor's `local_ipv6_nexthop`, else the
+  session's local IPv6 address) on eBGP, iBGP and route-server-client
+  sessions. This is the default next hop of many RTBH controllers. An IPv6
+  route with no local IPv6 next hop on a session is refused for that peer
+  with the exact-export reason `missing_ipv6_next_hop` instead of being sent
+  with `::`, and `[[fib_tables]]` rejects the route with the new reason
+  `next_hop_unspecified`. `AddPathResponse.outcome` reports `CREATED`,
+  `REPLACED` or `UNCHANGED` against the previous local route, and
+  `DeletePathRequest.allow_missing` returns `OK` with outcome `NOT_PRESENT`
+  for an absent route, mirroring the FlowSpec controller contract. The
+  [API reference](docs/reference/api.md#unicast-injection-contract)
+  documents the contract, restart re-injection and the transports for
+  clients without TLS support.
+- The [v1 inventory](docs/reference/v1-stable-contract.md) now pins
+  `NeighborService.ResetNeighbor` and the everyday command paths:
+  `rbgp neighbor add`, `delete`, `enable`, `disable`, `reset`, `refresh-in`
+  and `refresh-out`; `rbgp peer-group list`, `get`, `set`, `delete`,
+  `attach` and `detach`; `rbgp neighbor-set list`, `get`, `set` and
+  `delete`; `rbgp dynamic-neighbor list`, `add` and `delete`; and
+  `rbgp policy chain` with its `show`, `set-import`, `set-export`,
+  `clear-import` and `clear-export` subcommands.
+  **Operator-visible:** `rbgp neighbor <addr> softreset` is now
+  `rbgp neighbor <addr> refresh-in`, pairing with `refresh-out` and
+  `replay-out`; `softreset` remains accepted as an alias. Its `--json`
+  result reports `"action": "refresh_inbound"` (previously `"softreset"`),
+  matching `refresh_outbound` and `replay_outbound`.
+- `RouteEvent` and `BgpEvent` carry a typed `int64 timestamp_unix_ms`. The
+  decimal-string `timestamp` field is still populated but deprecated; new
+  clients should read the typed field. Producers record whole seconds, so the
+  value is currently a multiple of 1000.
+
+### Changed
+
+- `rbgp` runs on a single-threaded async runtime instead of starting one
+  worker thread per host CPU on every invocation, so one-shot commands start
+  faster and their startup cost no longer grows with the host's core count.
+  Scripts, exporters, and probes that call `rbgp` in a loop benefit most.
+- A dirty update-group member that holds an admitted-key recovery proof now
+  resyncs with fewer full passes over that proof: the commit reuses the
+  pre-send reservation, retention checks skip unused entry lookups, proof keys
+  are no longer copied into a temporary prior or the resync's prefix scope
+  when the existing fallback already covers a refusal, and proof lookups
+  compare addresses as integers. Wire output, withdrawal duties and recovery
+  memory are unchanged; full-table mass-dirty recovery spends less RIB-actor
+  time per proof-backed member.
+- `rustbgpd-gobgp-bridge` now passes a `0.0.0.0` or `::` next hop through as
+  next-hop self instead of refusing it, so detectors keep their default next
+  hop. Withdrawals use `DeletePath` with `allow_missing`, and the bridge logs
+  the daemon's add and delete outcome for each request. See the
+  [bridge README](tools/gobgp-bridge/README.md).
+- `InboundPrefixLimitState` names each inbound max-prefix bound with `family`
+  and `stage`, the labels of the `bgp_max_prefix_*` metrics, instead of a
+  single `scope` string (field 1, now reserved by number and name). `family`
+  is `aggregate` or a canonical family label, and `stage` is `accepted` or
+  `received`. A row now joins its metric series without rebuilding the
+  label. The `max_prefix_warning` session event detail, the
+  `inbound_prefix_limits[]` rows of `rbgp neighbor --json`, the "Inbound Prefix
+  Limits" block of the human detail view, and the `rbgp doctor` check name
+  `peer.<address>.inbound_prefix_limit.<family>.<stage>` use the same
+  spelling. See the [API reference](docs/reference/api.md).
+- Prometheus series that carry an address family now use one `family` label
+  with the canonical configuration family labels (`ipv4_unicast`,
+  `l2vpn_evpn`, `linkstate`, and so on). The RIB gauges `bgp_rib_prefixes`,
+  `bgp_rib_adj_out_prefixes` and `bgp_rib_loc_prefixes` publish one series
+  per family instead of per table, so `afi_safi="all"` no longer hides an
+  IPv4 + IPv6 unicast sum. The max-prefix series split the old `scope` into
+  `family` and `stage` (`accepted` or `received`), so they join the RIB
+  gauges with `on(peer, family)`. `bgp_rpki_vrp_count` labels its address
+  family `afi`. The old label names and values are not emitted alongside the
+  new ones; see the upgrade note for the complete mapping and the
+  [operations reference](docs/reference/operations.md) for the series.
+  **Operator-visible:** dashboards, alerts and scripts that select or
+  aggregate on `afi_safi`, `scope` or `af` must be updated; the shipped
+  alert rules and Grafana dashboards are.
+- Output now uses one spelling per value, the one configuration uses. The
+  gRPC `NeighborConfig.role`, `NeighborState.local_role` and
+  `NeighborState.remote_role` report `route_server` and `route_server_client`
+  instead of `rs` and `rs-client`, so `rbgp neighbor` shows the same names
+  as config, events and the `bgp_role_mismatch_total` labels. An absent Role
+  stays an empty string on the API and `none` in that metric. The neighbor
+  detail's distribution mode is `single_best`, `add_path` or
+  `per_client_best` instead of the kebab-case forms.
+  `rbgp rpki verify-path --role` lists `route_server` and
+  `route_server_client`. The old spellings stay accepted as input aliases in
+  configuration, the gRPC role field and the CLI.
+- `rbgp` parser and usage errors (an unknown flag or subcommand, or a missing
+  or malformed argument) exit `64` (`EX_USAGE`) instead of `2`, so they no
+  longer collide with `2` meaning "changes present" for `config diff` and
+  `config plan` or "red checks found" for `doctor`. `--help` and `--version`
+  still exit `0`. The [v1 inventory](docs/reference/v1-stable-contract.md)
+  now pins the exit codes of `config diff`, `config plan`, `config apply`,
+  `config confirm`, `config abort` and `doctor`.
+- Policy `set_next_hop` (TOML) and `set next-hop` (`.rpol`) now refuse an
+  unspecified (`0.0.0.0`, `::`) or multicast address with an error naming the
+  value, at config load, SIGHUP reload, and API policy edits. Such a next hop
+  was previously accepted and the route was later dropped from the FIB or
+  refused at export. IPv4 and IPv6 link-local addresses remain accepted.
+- The v1 inventory now lists a route-server and route-reflector metric floor
+  under `metrics.stable_series`: 26 series covering session state, prefixes per
+  canonical family, max-prefix, RPKI, reload outcome and readiness. The check
+  compares each series' name, type and labels with its registration, and its
+  pinned label values with production call sites. Series that expose RIB
+  actor, scheduler, update-group and recovery internals are now classified as
+  diagnostic under `metrics.diagnostic_series`, and carry no v1 compatibility
+  promise. See the [v1 contract](docs/reference/v1-stable-contract.md).
+- The unicast max-prefix bounds now use the canonical family label like
+  every other family bound: `max_prefixes_ipv4_unicast`,
+  `max_prefixes_ipv6_unicast`, `max_prefixes_received_ipv4_unicast`,
+  `max_prefixes_received_ipv6_unicast`, `max_prefixes_out_ipv4_unicast` and
+  `max_prefixes_out_ipv6_unicast`. `rs-config-render`, the CLI config
+  importers, `rbgp config diff` output and configs the daemon writes back use
+  the new names, and the render receipt reports per-client limits under them.
+- Every config key that `rs-config-render` writes is now in the
+  [v1 stable surface](docs/reference/v1-stable-contract.md): the four
+  unicast accepted and pre-policy bounds above, `max_prefix_action`,
+  `max_prefix_restart_seconds`, `next_hop_ownership`,
+  `rs_control_communities` and `interpret_rfc1997` on neighbors and peer
+  groups, and `honor_blackhole` and `listen_addresses` under `[global]`.
+  `listen_addresses` was alpha. The `max_prefixes` reference now states that
+  a crossed aggregate bound applies `max_prefix_action`, so under `"warning"`
+  it logs instead of tearing the session down.
+- The [v1 inventory](docs/reference/v1-stable-contract.md) no longer pins
+  the alpha TCP-AO neighbor fields (`tcp_ao`, `tcp_ao_health`, the generation
+  fields, `tcp_ao_rotation_phase`, `tcp_ao_rotation_error`), the update-group
+  diagnostics (`update_group`, `update_group_recovery_fallback`,
+  `prefixes_sent_pending`, `selection_deferral.waiter_session_id`) or the
+  unversioned `DiffRuntimeConfigResponse.diff_json` document; they are now
+  explicitly unstable, in the protobuf and in the neighbor-detail JSON floor.
+  `authentication` stays stable. Inventory role families use the canonical
+  configuration labels (`linkstate`, `linkstate_vpn`, `l3vpn_ipv4_unicast`,
+  `l3vpn_ipv6_unicast`), and the stable-surface checker rejects any other.
+
+### Removed
+
+- Removed the optional durable event history and everything built on it:
+  the `[event_history]` config section and its `events.db` store,
+  `EventService.SubscribeFromEvent` and `SubscribeFromEventRequest`, the
+  envelope field `BgpEvent.event_id` (`RouteEvent.event_id` stays),
+  `rbgp events watch --from-event-id`, the `examples/event-bridge` sample,
+  and the `event_history_changed` key in config diff JSON. The protobuf
+  field numbers and names are reserved. The bounded in-memory session,
+  policy, route and EVPN histories behind `ListSessionEvents`,
+  `ListPolicyEvents`, `ListRouteEvents` and `ListEvpnEvents`, and the live
+  `WatchEvents` stream, are unchanged. The daemon no longer links SQLite.
+- Removed the `bgp_event_outbox_committed_total`,
+  `bgp_event_outbox_dropped_total`, `bgp_event_outbox_queue_depth`,
+  `bgp_event_outbox_db_size_bytes`,
+  `bgp_event_outbox_retention_evicted_total`,
+  `bgp_event_outbox_latest_event_id`,
+  `bgp_event_outbox_open_failures_total`, `bgp_event_outbox_degraded`,
+  `bgp_event_outbox_storage_failed` and `bgp_event_outbox_cursor_gap_total`
+  metric families, the `BgpEventOutboxDegraded` and
+  `BgpEventOutboxStorageFailed` alert rules, and the event outbox panels of
+  the overview dashboard.
+- Removed the `BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED` event type and its
+  `OtcRouteBlockedEvent` payload, which only the durable event history ever
+  delivered, together with `rbgp events watch --type otc_route_blocked`.
+  The `bgp_otc_routes_blocked_total{peer,reason}` counter, the per-neighbor
+  `otc_routes_blocked` count and the OTC log lines are unchanged.
+- `NeighborState` no longer carries the per-scope max-prefix scalars
+  `effective_max_prefixes`, `effective_max_prefixes_ipv4`,
+  `effective_max_prefixes_ipv6`, `max_prefix_headroom`,
+  `max_prefix_headroom_ipv4` and `max_prefix_headroom_ipv6` (fields 43–48,
+  now reserved by number and name). They duplicated the `aggregate`,
+  `ipv4_unicast` and `ipv6_unicast` rows of `inbound_prefix_limits`, which
+  report every finite inbound bound for every family. `rbgp neighbor <addr>
+  --json` drops the same six keys, and the human detail view drops its
+  "Max Prefixes" block in favour of the existing "Inbound Prefix Limits"
+  block. `prefixes_received_ipv4` and `prefixes_received_ipv6` are unchanged
+  and are now required numbers in the
+  [v1 neighbor-detail JSON floor](docs/reference/v1-stable-contract.md).
+
+### Fixed
+
+- A policy chain composed from several `.rpol` units could reference more
+  than the 16 datasets one evaluation pins. Every probe of a dataset past
+  the 16th failed closed, so routes reaching that term were denied with a
+  `dataset-unpinned` evaluation error even when the guard permitted them.
+  Config load and reload now refuse such a chain, naming the chain member
+  and the dataset count; see
+  [External policy datasets](docs/reference/configuration.md#external-policy-datasets-policydatasets).
+- `rbgp` prints the canonical configuration family label for every address
+  family in event, watch, FlowSpec and RIB output. BGP-LS families now print
+  `linkstate` and `linkstate_vpn` instead of `bgp_ls` and `bgp_ls_vpn`, and
+  EVPN, L3VPN, labeled-unicast and RT-Constrain families print their labels
+  instead of `unknown`. **Operator-visible:** scripts matching `bgp_ls`,
+  `bgp_ls_vpn` or `unknown` in `afi_safi` output must match the canonical
+  labels.
+- gNMI `Subscribe` STREAM/`ON_CHANGE` on the neighbor `session-state` leaf
+  now works with the default configuration. It reads the live session-event
+  stream instead of requiring the opt-in durable event history, so it no
+  longer returns `FAILED_PRECONDITION`, and gNMI dial-out
+  `mode = "on_change"` no longer requires `[event_history]` to load. A
+  subscriber that falls behind the live stream still gets `DATA_LOSS` and
+  resynchronizes from a full snapshot on reconnect.
+- A route injected with `AddPath` is now validated against the current RPKI
+  VRP table when it is created or replaced, as received routes are. It used to
+  stay `NotFound` until the next VRP change covering its prefix, so a
+  replacement could lose to a received Valid route, or be denied by an export
+  policy that matches on validation, until the cache next updated.
+- An eBGP session (other than a route-server client) that negotiates IPv6
+  unicast but has no IPv6 next hop to advertise, typically IPv6 unicast over
+  IPv4 transport without `local_ipv6_nexthop`, no longer withholds every IPv6
+  unicast route silently.
+  The session logs one WARN when it establishes and increments the new
+  `bgp_export_family_suppressed_total{peer,family,reason}` counter
+  (`family="ipv6_unicast"`, `reason="missing_ipv6_next_hop"`), and
+  `rustbgpd --check` warns about static neighbors in that shape.
+  **Operator-visible:** an injected IPv6 RTBH route toward such a peer still
+  returns success from `AddPath`; set `local_ipv6_nexthop` and reset the
+  session to export it. See the
+  [next-hop self notes](docs/reference/api.md#next-hop-self).
+- An export policy that sets an IPv6 next hop for IPv4 routes toward a peer
+  without Extended Next Hop logs one warning per peer per export pass, or one
+  per update group (`update_group = true`) when the group shares an encode,
+  with the first affected prefix and the route count, instead of one warning
+  per route. Exact-export probes no longer log it.
+
+### Documentation
+
+- Add a dated 2026-10-19 bgperf2 comparator spot-check to the
+  [benchmark page](docs/benchmarks.md#2026-10-19-comparator-spot-check):
+  unreleased rustbgpd against BIRD 2.19.3, BIRD 3.3.3 and GoBGP 4.10.0 on
+  three of the five import shapes, two runs per cell. Both BIRD lines had a
+  lower median total time than rustbgpd at 10 peers × 1,000 prefixes, so the
+  v0.68.0 campaign's "lowest median total time in all five shapes" statement
+  is now scoped to that 2026-08-30 campaign.
+- Add a dated 2026-10-19 bgperf2
+  [paired-read rerun](docs/benchmarks.md#2026-10-19-paired-read-rerun):
+  unreleased rustbgpd against BIRD 2.19.3, BIRD 3.3.3 and GoBGP 4.10.0 on
+  three import shapes, three runs per cell, on a harness revision that pairs
+  each monitor sample with the target read that started with it. rustbgpd had
+  the lowest median total time in all three shapes on that host, at 10 peers
+  × 1,000 prefixes within one sampling step of BIRD 2. The same day's
+  spot-check is kept as measured and marked superseded.
+- Refresh the IXP S2 reload-stall comparison in the
+  [performance summary](docs/perf/README.md) with a 2026-10-19 rerun
+  against OpenBGPD 9.3, three processes per daemon on the phased-churner
+  `reloadstall` harness. The v0.75.0 campaign's result stays in its receipt.
+
+### Upgrade notes
+
+- API and `rbgp neighbor --json` consumers that read `effective_max_prefixes*`
+  or `max_prefix_headroom*` must read `inbound_prefix_limits[]` instead: the
+  `stage = "accepted"` row whose `family` is `aggregate`, `ipv4_unicast` or
+  `ipv6_unicast` carries the same bound as `limit` and the same remaining
+  capacity as `headroom`. A missing row means that bound is unlimited, or
+  that the peer-session snapshot is stale. `rbgp doctor` and the Birdwatcher
+  adapter example now read only the rows, so they no longer recognise a bound
+  reported by a daemon older than 0.69.0.
+- A configuration that still contains an `[event_history]` section now fails
+  to load, at startup and on reload. Delete the section, and delete any
+  `events.db` (plus its `-wal` and `-shm` files) left under
+  `runtime_state_dir` or the configured `[event_history].path`; the daemon
+  no longer reads them. Before upgrading, settle any pending commit-confirm
+  transaction with the previous release (`rbgp config confirm <id>` or
+  `rbgp config abort <id>`), and never edit its retained prior, whose length,
+  file identity and SHA-256 boot recovery checks. If the daemon is upgraded
+  while a pending prior still contains `[event_history]`, startup exits 1
+  with "v3 commit-confirm boot authority is invalid or unavailable" and
+  leaves the locator, pending files and config untouched; reinstall the
+  previous release and start it so its boot recovery restores the prior and
+  ends the transaction, remove the section, then upgrade again. A
+  config-history entry that contains the section cannot be rolled back to.
+  Automation that resumed from `SubscribeFromEvent` cursors should, on
+  reconnect, open and buffer `WatchEvents` before re-reading state (separate
+  RPCs give no atomic handoff), or use a gNMI `Subscribe`, which subscribes
+  before its snapshot. Collectors that need a durable record keep using BMP,
+  Prometheus and the daemon logs.
+- An entry added with `AddLeasedPath` or `AddLeasedFlowSpec` can be replaced
+  or deleted only by its owner: an unowned `AddPath`, `AddFlowSpec`,
+  `DeletePath` or `DeleteFlowSpec` on it returns `FAILED_PRECONDITION`. To
+  remove one by hand, pass `--owner <name>` or `--override-owner` to
+  `rbgp rib delete` or `rbgp flowspec delete`, or set `owner` or
+  `override_owner` on the gRPC delete. Unowned entries behave as before.
+- API and `rbgp neighbor --json` consumers of `inbound_prefix_limits[]` must
+  read `family` and `stage` instead of `scope`:
+  - `scope = "aggregate"` is `family = "aggregate", stage = "accepted"`.
+  - `scope = "ipv4_unicast"` is `family = "ipv4_unicast", stage = "accepted"`.
+  - `scope = "ipv4_unicast_received"` is `family = "ipv4_unicast",
+    stage = "received"`, and likewise for IPv6.
+  - A non-unicast family keeps its label with `stage = "accepted"`.
+
+  Tooling that matches the `max_prefix_warning` event reason or the
+  `rbgp doctor` check `peer.<address>.inbound_prefix_limit.<scope>` must match
+  `family <family> stage <stage>` and `inbound_prefix_limit.<family>.<stage>`.
+- `max_prefixes_ipv4`, `max_prefixes_ipv6`, `max_prefixes_received_ipv4`,
+  `max_prefixes_received_ipv6`, `max_prefixes_out_ipv4` and
+  `max_prefixes_out_ipv6` are deprecated spellings. Existing configs keep
+  parsing with the same meaning, and the JSON Schema still lists them (marked
+  deprecated); rename them to the `_unicast` form shown in the
+  [configuration reference](docs/reference/configuration.md) at your next
+  edit. Setting both spellings of one key in the same table is rejected.
+  Tooling that matches the old names in `rbgp config diff` output, daemon
+  written config, or the `rs-config-render` receipt (`clients[]` limit
+  fields) must switch to the new names.
+- Metric family labels were renamed with no compatibility period; update
+  every query, recording rule, alert and dashboard that uses them before or
+  with the upgrade. Label names:
+  `afi_safi` → `family` on `bgp_rib_prefixes`, `bgp_rib_adj_out_prefixes`,
+  `bgp_rib_loc_prefixes`, `bgp_route_refresh_in_progress`,
+  `bgp_route_refresh_stale_entries`, `bgp_selection_deferral_active`,
+  `bgp_selection_deferral_waiters`, `bgp_selection_deferral_releases_total`,
+  `bgp_selection_deferral_timeouts_total` and
+  `bgp_selection_deferral_ledger_overflows_total`;
+  `scope` → `family` plus a new `stage` label on `bgp_max_prefix_usage`,
+  `bgp_max_prefix_limit`, `bgp_max_prefix_headroom`,
+  `bgp_max_prefix_blocking`, `bgp_max_prefix_blocked_total` and
+  `bgp_max_prefix_warning_total`;
+  `af` → `afi` on `bgp_rpki_vrp_count` (values `ipv4` and `ipv6` unchanged).
+- RIB gauge values (`bgp_rib_prefixes`, `bgp_rib_adj_out_prefixes`,
+  `bgp_rib_loc_prefixes`) are now one series per family:
+  `all` → `ipv4_unicast` and `ipv6_unicast`;
+  `flowspec` → `ipv4_flowspec` and `ipv6_flowspec`; `evpn` → `l2vpn_evpn`;
+  `vpn` → `l3vpn_ipv4_unicast` and `l3vpn_ipv6_unicast`;
+  `labeled` → `ipv4_labeled_unicast` and `ipv6_labeled_unicast`;
+  `bgpls` → `linkstate` and `linkstate_vpn`; `rtc` is unchanged. The old
+  `all` value is
+  `sum without (family) (bgp_rib_prefixes{family=~"ipv4_unicast|ipv6_unicast"})`.
+  `bgp_rib_prefixes` covers `ipv4_unicast`, `ipv6_unicast`, `l2vpn_evpn`,
+  `ipv4_flowspec` and `ipv6_flowspec`; the Adj-RIB-Out gauge starts every
+  family at 0 for each registered peer.
+- Max-prefix values: `scope="aggregate"` →
+  `family="aggregate",stage="accepted"`; `scope="ipv4_unicast"` →
+  `family="ipv4_unicast",stage="accepted"` (likewise `ipv6_unicast` and every
+  non-unicast family);
+  `scope="ipv4_unicast_received"` → `family="ipv4_unicast",stage="received"`
+  and `scope="ipv6_unicast_received"` →
+  `family="ipv6_unicast",stage="received"`.
+- BGP-LS family values `bgpls` → `linkstate` and `bgpls_vpn` →
+  `linkstate_vpn` on `bgp_exact_export_rejections_total`, the
+  route-refresh gauges and the selection-deferral series. Selection-deferral
+  and route-refresh series for families with no configuration label, such as
+  multicast, report `unsupported`.
+- Scripts that match BGP Role or distribution-mode output must use the
+  configuration spellings: `route_server` and `route_server_client` rather
+  than `rs` and `rs-client`, and `single_best`, `add_path` and
+  `per_client_best` rather than their kebab-case forms. Inputs and metric
+  labels are unaffected.
+- `rbgp` now exits `64` on a parser or usage error. A script that treated
+  exit `2` from `rbgp` as a usage error must check for `64`; a script that
+  gates on `config diff`, `config plan` or `doctor` exiting `2` no longer
+  mistakes a renamed flag or missing argument for changes or red checks.
+- A config that previously loaded can now fail to load if a policy sets the
+  next hop to `0.0.0.0`, `::`, or a multicast address; a SIGHUP reload or API
+  policy edit with one is refused and the running config is kept. Use
+  `set_next_hop = "self"` or a reachable unicast address instead.
+- `AddPath` with next hop `0.0.0.0` or `::` used to return
+  `INVALID_ARGUMENT`; it now injects a next-hop-self route. A client that
+  relied on that rejection to catch a missing next hop must validate the
+  field itself. `DeletePath` of an absent route still returns `NOT_FOUND`
+  unless the new `allow_missing` is set, and a daemon that predates these
+  fields leaves `outcome` unset (`UNSPECIFIED`).
+- `rbgp neighbor <addr> softreset` is now `refresh-in`; `softreset` stays
+  accepted as an alias, but its `--json` result reports
+  `"action": "refresh_inbound"` instead of `"softreset"`. Scripts that match
+  the action string must match the new value.
+- `rbgp` event, watch, FlowSpec and RIB output prints canonical family labels:
+  `linkstate` and `linkstate_vpn` instead of `bgp_ls` and `bgp_ls_vpn`, and
+  EVPN, L3VPN, labeled-unicast and RT-Constrain labels instead of `unknown`.
+  Scripts that match the old `afi_safi` values must match the new labels.
+- `rbgp events watch --from-event-id` and `--type otc_route_blocked` are
+  removed with the durable event history and are no longer accepted. OTC
+  blocks remain visible in
+  `bgp_otc_routes_blocked_total`, the per-neighbor `otc_routes_blocked`
+  count and the logs.
+- An eBGP session that negotiates IPv6 unicast without an IPv6 next hop to
+  advertise still withholds IPv6 unicast routes, now with a WARN line and
+  `bgp_export_family_suppressed_total`. `AddPath` of an IPv6 RTBH route
+  still succeeds for such a peer; set `local_ipv6_nexthop` and reset the
+  session to export it.
+
 ## [0.78.0] — 2026-10-18
 
 ### Security
