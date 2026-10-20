@@ -65,8 +65,11 @@ Severity follows impact. A feature's alpha status does not lower it.
 ### Response Timeline
 
 - **Acknowledgment:** Within 48 hours
-- **Critical and High vulnerabilities** (including remote crash and
-  session hijack): Patched and released within 72 hours of confirmation
+- **Critical vulnerabilities, and these High ones:** a remote crash, hang,
+  or RIB wedge caused by BGP peer, RTR, or BFD input, and session hijacking
+  or authentication bypass. Patched and released within 72 hours of
+  confirmation.
+- **Other High vulnerabilities:** Prioritized for the next patch release
 - **Medium and Low vulnerabilities:** Patched in the next milestone release
 
 ### CVE Assignment
