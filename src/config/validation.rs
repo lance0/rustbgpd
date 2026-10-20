@@ -1773,10 +1773,10 @@ impl Config {
                 detail: format!(
                     "Neighbors: {neighbors}.\n\
                      The session has no IPv6 next hop to advertise, so every IPv6 unicast route\n\
-                     toward these neighbors is withheld from export for the whole session (one\n\
-                     WARN per session, counted in bgp_export_family_suppressed_total). Set\n\
-                     local_ipv6_nexthop on the neighbor or its peer group, or remove ipv6_unicast\n\
-                     from its families."
+                     toward these neighbors is withheld from export from session establishment\n\
+                     (one WARN per session, counted in bgp_export_family_suppressed_total). Set\n\
+                     local_ipv6_nexthop on the neighbor or its peer group (a reload restores the\n\
+                     family without a session reset), or remove ipv6_unicast from its families."
                 )
                 .into(),
             });

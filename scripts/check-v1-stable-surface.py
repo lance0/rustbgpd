@@ -1063,7 +1063,9 @@ def emitted_label_values(
 
     Only the setter's argument in that label's position counts: a literal there,
     or the match-arm literals of the function it calls directly or binds with
-    `let`. Unrelated nearby strings are not evidence.
+    `let`. A `param.method()` element counts the arm of `method` for each
+    `Enum::Variant` a caller passes as `param`. Unrelated nearby strings are not
+    evidence.
     """
     binding = re.search(
         rf"let\s+(\w+)\s*=\s*\w+::new\(\s*(?:Histogram)?Opts::new\(\s*\"{re.escape(name)}\"",
@@ -1073,7 +1075,7 @@ def emitted_label_values(
         return set()
     position = defined_labels.index(label)
     values: set[str] = set()
-    setters: list[tuple[str, int]] = []
+    setters: list[tuple[str, int, str | None]] = []
     # `&[...]` literally, `&helper(...)`, or `&name` bound by `let name = helper(...);`.
     pattern = (
         rf"\.{re.escape(binding.group(1))}\s*\.with_label_values\(\s*&\s*"
@@ -1109,8 +1111,11 @@ def emitted_label_values(
         if element.startswith('"'):
             values.add(element.strip('"'))
             continue
+        # `param.method()`: only a parameter traced to its callers' variants counts.
+        via = re.fullmatch(r"(\w+)\s*\.\s*(\w+)\(\s*\)", element)
+        element, method = via.groups() if via else (element, None)
         # `for element in CONST { ... }` in the setter emits every value of CONST.
-        loops = list(
+        loops = [] if method else list(
             re.finditer(rf"\bfor\s+{re.escape(element)}\s+in\s+([A-Z][A-Z0-9_]*)\s*\{{", body)
         )
         if loops:
@@ -1123,7 +1128,10 @@ def emitted_label_values(
                     )
                 )
             continue
-        if rebinds(body, element):
+        # A `let`, assignment or other `for` binding shadows the parameter.
+        if rebinds(body, element) or re.search(
+            rf"\bfor\s+\(?[\w\s,]*\b{re.escape(element)}\b[\w\s,]*\)?\s+in\b", body
+        ):
             continue
         parameters = [
             part.split(":", 1)[0].strip()
@@ -1131,19 +1139,20 @@ def emitted_label_values(
             if part.strip() and "self" not in part
         ]
         if element in parameters:
-            setters.append((setter.group(1), parameters.index(element)))
-    # (function, parameter index, is method, defining file); a method's file is
-    # None because its callers are matched by receiver-free `.name(` alone.
-    pending: list[tuple[str, int, bool, str | None]] = [
-        (setter, index, True, None) for setter, index in setters
+            setters.append((setter.group(1), parameters.index(element), method))
+    # (function, parameter index, is method, defining file, label method); a
+    # method's file is None because its callers are matched by receiver-free
+    # `.name(` alone. A label method maps each caller's `Enum::Variant`.
+    pending: list[tuple[str, int, bool, str | None, str | None]] = [
+        (setter, index, True, None, via) for setter, index, via in setters
     ]
-    seen: set[tuple[str, int, bool, str | None]] = set()
+    seen: set[tuple[str, int, bool, str | None, str | None]] = set()
     while pending:
         item = pending.pop()
         if item in seen:
             continue
         seen.add(item)
-        setter, index, method, defined_in = item
+        setter, index, method, defined_in, via = item
         # A method is called as `.name(`; a free function by a bare or path name,
         # which must resolve to the module that defines it.
         call_pattern = (
@@ -1161,6 +1170,15 @@ def emitted_label_values(
                 if arguments is None or len(arguments) <= index:
                     continue
                 argument = arguments[index]
+                if via is not None:
+                    variant = re.fullmatch(r"(?:\w+::)*(\w+)::(\w+)", argument)
+                    if variant:
+                        values.update(variant_label_values(sources, *variant.groups(), via))
+                    elif re.fullmatch(r"\w+", argument):
+                        through = enclosing_parameter(text, call.start(), argument)
+                        if through:
+                            pending.append((*through, None if through[2] else path, via))
+                    continue
                 literal = re.fullmatch(r"\"([^\"]+)\"", argument)
                 if literal:
                     values.add(literal.group(1))
@@ -1183,8 +1201,51 @@ def emitted_label_values(
                     # A wrapper passing its own parameter through: follow its callers.
                     through = enclosing_parameter(text, call.start(), argument)
                     if through:
-                        pending.append((*through, None if through[2] else path))
+                        pending.append((*through, None if through[2] else path, None))
     return values
+
+
+def variant_label_values(sources: dict[str, str], enum: str, variant: str, method: str) -> set[str]:
+    """The string literal `method` returns for `Enum::Variant`.
+
+    ponytail: a shape check by name, not a Rust parser. `enum Enum` must be
+    declared in exactly one file with exactly one inherent `impl Enum` there,
+    holding one `fn method(self) -> &'static str` whose body is one
+    `match self { .. }` whose arms are all unguarded or-patterns of the
+    enum's own variants, exactly one of them naming the variant and returning
+    a string literal. A guard, wildcard or binding arm could make the named
+    arm unreachable, so any other shape is no evidence.
+    """
+    homes = [
+        text for text in sources.values()
+        for _ in re.finditer(rf"\benum\s+{re.escape(enum)}\b", text)
+    ]
+    if len(homes) != 1:
+        return set()
+    impls = list(re.finditer(rf"\bimpl\s+{re.escape(enum)}\s*(?=\{{)", homes[0]))
+    if len(impls) != 1:
+        return set()
+    block = function_body(homes[0], impls[0])
+    pattern = rf"\bfn\s+{re.escape(method)}\s*\(\s*&?\s*self\s*\)\s*->\s*&'static\s+str(?=\s*\{{)"
+    methods = list(re.finditer(pattern, block))
+    if len(methods) != 1:
+        return set()
+    whole = re.fullmatch(r"\s*match\s+self\s*\{(.*)\}\s*", function_body(block, methods[0]), re.DOTALL)
+    if whole is None:
+        return set()
+    path = rf"(?:Self|{re.escape(enum)})::(\w+)"
+    arms = []
+    for arm in filter(None, split_top_level(whole.group(1), ",")):
+        pattern, _, result = arm.partition("=>")
+        variants = [part.strip() for part in pattern.split("|")]
+        if not result or not all(re.fullmatch(path, part) for part in variants):
+            return set()
+        if any(re.fullmatch(path, part).group(1) == variant for part in variants):
+            arms.append(result.strip())
+    if len(arms) != 1:
+        return set()
+    literal = re.fullmatch(r"\"([^\"]+)\"", arms[0])
+    return {literal.group(1)} if literal else set()
 
 
 # A module-local path for the metric source itself, used to resolve its own constants.
@@ -1436,7 +1497,8 @@ def enclosing_parameter(text: str, position: int, identifier: str) -> tuple[str,
 
     The identifier is a parameter of the function enclosing `position`, or a
     `for` binding that iterates one. Only that function's callers can then
-    supply its values.
+    supply its values, so a `let`, assignment or `for` binding that shadows
+    them before the call is no evidence.
     """
     functions = list(re.finditer(r"\bfn\s+(\w+)\s*(?:<[^>{]*>)?\s*\(", text[:position]))
     if not functions:
@@ -1461,6 +1523,14 @@ def enclosing_parameter(text: str, position: int, identifier: str) -> tuple[str,
     if identifier not in parameters and loops:
         source = loops[-1]
     if source not in parameters:
+        return None
+    between = text[function.end() : position]
+    if rebinds(between, identifier) or rebinds(between, source):
+        return None
+    # A `for` binding of the parameter itself shadows it at the call.
+    if identifier == source and re.search(
+        rf"\bfor\s+\(?[\w\s,]*\b{re.escape(identifier)}\b[\w\s,]*\)?\s+in\b", between
+    ):
         return None
     return function.group(1), parameters.index(source), method
 
