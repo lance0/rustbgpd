@@ -38,7 +38,7 @@ fn format_action(a: &FlowSpecAction) -> String {
             if r.rate == 0.0 {
                 "drop".into()
             } else {
-                format!("rate={:.0}", r.rate)
+                format!("rate={}", r.rate)
             }
         }
         Some(crate::proto::flow_spec_action::Action::TrafficAction(a)) => {
@@ -58,7 +58,7 @@ fn format_action(a: &FlowSpecAction) -> String {
             format!("redirect={}", r.route_target)
         }
         Some(crate::proto::flow_spec_action::Action::TrafficRatePackets(r)) => {
-            format!("rate-pps={:.0}", r.rate)
+            format!("rate-pps={}", r.rate)
         }
         None => "none".into(),
     }
@@ -442,10 +442,38 @@ mod tests {
         assert!(parse_action("mark-dscp=63").is_ok());
     }
 
+    /// A displayed rate parses back to the same action: rounding a fractional
+    /// rate to 0 would turn a rate limit into discard (RFC 8955 §7.3).
     #[test]
-    fn packet_rate_action_round_trips() {
-        let action = parse_action("rate-pps=500").unwrap();
-        assert_eq!(format_action(&action), "rate-pps=500");
+    fn rate_actions_round_trip_through_display() {
+        for text in [
+            "rate=0.25",
+            "rate=1.5",
+            "rate=1000",
+            "rate=3.4028235e38",
+            "rate-pps=0.25",
+            "rate-pps=1.5",
+            "rate-pps=500",
+            "rate-pps=3.4028235e38",
+            "rate-pps=0",
+            "drop",
+        ] {
+            let action = parse_action(text).unwrap();
+            let shown = format_action(&action);
+            assert_eq!(
+                parse_action(&shown).unwrap(),
+                action,
+                "{text} shown as {shown}"
+            );
+        }
+        assert_eq!(
+            format_action(&parse_action("rate=0.25").unwrap()),
+            "rate=0.25"
+        );
+        assert_eq!(
+            format_action(&parse_action("rate-pps=1.5").unwrap()),
+            "rate-pps=1.5"
+        );
         assert!(parse_action("rate-pps=fast").is_err());
     }
 }

@@ -7,7 +7,9 @@
   (`ASN:value`, `a.b.c.d:value`, or RFC 5396 asdot `high.low:value`), where it
   accepted only the 2-octet-AS form, and the new
   `FlowSpecAction.traffic_rate_packets` variant, outside the v1 inventory.
-  `rbgp flowspec` shows and accepts it as `rate-pps=N`. Action communities
+  `rbgp flowspec` shows and accepts it as `rate-pps=N`, and now shows both
+  rates exactly: a fractional rate such as `rate=0.25` was displayed
+  rounded, as `rate=0`, which reads as discard. Action communities
   are still echoed raw in `extended_communities`; see the
   [API reference](../docs/reference/api.md#list-flowspec-routes).
   **Operator-visible:** a 4-octet-AS redirect whose ASN fits in 16 bits reads
