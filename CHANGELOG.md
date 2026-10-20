@@ -89,8 +89,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   matching `refresh_outbound` and `replay_outbound`.
 - `RouteEvent` and `BgpEvent` carry a typed `int64 timestamp_unix_ms`. The
   decimal-string `timestamp` field is still populated but deprecated; new
-  clients should read the typed field. Producers record whole seconds, so the
-  value is currently a multiple of 1000.
+  clients should read the typed field, which carries the event time at
+  millisecond resolution, so it orders events within the same second.
 - `rbgp rib add` prints the unicast injection outcome, for example
   `Route 10.99.0.0/24 added (unchanged)`, and `rbgp rib delete` takes
   `--allow-missing`, which exits 0 and prints `Route 10.99.0.0/24 not present`
@@ -349,6 +349,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   full selection deferral timer for it (RFC 4724 §4.1). The marker follows
   the same holds as a sendable family's End-of-RIB, and no route is exported
   in the family.
+- `rbgp policy check` no longer keeps a full copy of the file's set and
+  regex tables for every member of a test `expect chain [...]`. Each member
+  now retains only the entries its policy references, so a test that
+  repeats a small policy over a file with many sets, or calls a
+  parameterized `route.as-path contains` policy with many distinct
+  arguments, no longer grows memory with members × tables. Test verdicts,
+  failure messages and coverage output are unchanged.
 
 ### Documentation
 
