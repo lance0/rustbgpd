@@ -16,6 +16,7 @@ pub use bench_support::{
 mod conditional_advertisement;
 mod dampening_history;
 mod distribution;
+mod eor_grace;
 mod evpn_recovery;
 mod export_chains;
 mod flowspec_validation;
@@ -119,6 +120,7 @@ pub use conditional_advertisement::{
     ConditionEntryStatus, ConditionalAdvertiseIf, ConditionalAdvertisement,
     ConditionalAdvertisementCapture, ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
 };
+pub use eor_grace::{EorGraceConfig, EorGracePeerConfig};
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 
@@ -888,6 +890,12 @@ pub struct RibManager {
     /// that deferral is staged or released, so the hold ends there, after
     /// the rebuild has emitted the matching VPN/EVPN routes.
     rtc_eor_hold_ready: HashSet<IpAddr>,
+    /// Opt-in End-of-RIB grace windows after a planned restart, keyed by
+    /// configured peer. Empty on cold starts and once each deadline passes.
+    eor_grace: HashMap<IpAddr, eor_grace::EorGracePeer>,
+    /// Each grace window's absolute deadline, with a cached minimum so the
+    /// run loop's per-turn timer probe does not scan the peers.
+    eor_grace_deadlines: graceful_restart::DeadlineMap<IpAddr>,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
     /// Route identities touched while their family's Loc-RIB was frozen.
@@ -1796,6 +1804,9 @@ pub(super) struct LiveSessionRecord {
 #[derive(Clone, Debug, Default)]
 struct PeerSelectionDeferralContext {
     peer_restart_state: bool,
+    /// The OPEN carried a Graceful Restart capability, even one listing no
+    /// family (helper-only, RFC 4724 §3): the peer retains our routes.
+    peer_gr_helper: bool,
     peer_gr_families: Vec<(Afi, Safi)>,
     /// Peer negotiated enhanced route refresh (RFC 7313). Collision
     /// failback only arms a `BoRR`/`EoRR` convergence wait when the
@@ -2400,6 +2411,8 @@ impl RibManager {
             gr_deferred_eor: HashMap::new(),
             rtc_eor_hold: graceful_restart::DeadlineMap::default(),
             rtc_eor_hold_ready: HashSet::new(),
+            eor_grace: HashMap::new(),
+            eor_grace_deadlines: graceful_restart::DeadlineMap::default(),
             selection_deferral: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
             selection_deferred_refresh: HashMap::new(),
@@ -2906,11 +2919,13 @@ impl RibManager {
     }
 
     /// Whether `family`'s pending `EoR` toward `peer` must stay queued: the
-    /// RFC 4724 convergence gate, or the RFC 4684 §6 hold on the families RT
-    /// membership filters while `peer`'s RT-Constrain `EoR` is outstanding.
+    /// RFC 4724 convergence gate, the RFC 4684 §6 hold on the families RT
+    /// membership filters while `peer`'s RT-Constrain `EoR` is outstanding,
+    /// or the opt-in planned-restart grace window.
     pub(super) fn eor_held(&self, peer: IpAddr, family: (Afi, Safi)) -> bool {
         self.selection_convergence_held(family)
             || (self.rtc_eor_hold.contains_key(&peer) && Self::rtc_gated_family(family))
+            || self.eor_grace_held(peer, family)
     }
 
     /// The families the RFC 4684 outbound membership gate filters.
@@ -2952,11 +2967,19 @@ impl RibManager {
         }
     }
 
-    fn next_rtc_eor_hold_deadline(&mut self) -> Option<tokio::time::Instant> {
-        self.rtc_eor_hold.min()
+    /// The nearest `EoR` hold deadline: an RFC 4684 §6 cap or a grace window.
+    fn next_eor_hold_deadline(&mut self) -> Option<tokio::time::Instant> {
+        match (self.rtc_eor_hold.min(), self.next_eor_grace_deadline()) {
+            (Some(rtc), Some(grace)) => Some(rtc.min(grace)),
+            (rtc, grace) => rtc.or(grace),
+        }
     }
 
-    fn expire_rtc_eor_holds(&mut self) {
+    /// Expire the holds behind the shared timer that fell due at `due`. Grace
+    /// windows release only up to `due`: a later window waits for its own
+    /// turn, so the work queued before its deadline drains first.
+    fn expire_eor_holds(&mut self, due: tokio::time::Instant) {
+        self.expire_eor_grace(due);
         let now = tokio::time::Instant::now();
         let expired: Vec<IpAddr> = self
             .rtc_eor_hold
@@ -4126,6 +4149,7 @@ impl RibManager {
                 peer,
                 session_id,
                 peer_restart_state,
+                peer_gr_helper,
                 peer_gr_families,
                 peer_enhanced_refresh,
                 peer_llgr_families,
@@ -4135,6 +4159,7 @@ impl RibManager {
                     (peer, session_id),
                     PeerSelectionDeferralContext {
                         peer_restart_state,
+                        peer_gr_helper,
                         peer_gr_families,
                         peer_enhanced_refresh,
                         peer_llgr_families,
@@ -5986,7 +6011,7 @@ impl RibManager {
                 false
             };
 
-            let has_rtc_eor_timer = if let Some(deadline) = self.next_rtc_eor_hold_deadline() {
+            let has_rtc_eor_timer = if let Some(deadline) = self.next_eor_hold_deadline() {
                 rtc_eor_sleep.as_mut().reset(deadline);
                 true
             } else {
@@ -6071,11 +6096,13 @@ impl RibManager {
                 // membership applied; let it win over the cap. RFC 4684 §6
                 // requires the delay to be bounded; an admitted route batch
                 // finishes first, so no route from an update queued before
-                // the cap lands behind the released EoR.
+                // the cap lands behind the released EoR. The planned-restart
+                // grace window shares this timer for the same reason: an
+                // injection queued before its deadline precedes the marker.
                 if self.drain_before_expiry(ExpiryTimer::RtcEor).await {
                     continue;
                 }
-                self.expire_rtc_eor_holds();
+                self.expire_eor_holds(rtc_eor_sleep.deadline());
                 continue;
             }
             if has_attr_gc_timer && attr_gc_sleep.deadline() <= now {

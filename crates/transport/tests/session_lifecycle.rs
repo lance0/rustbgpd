@@ -102,6 +102,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         peer_group: None,
         gr_stale_routes_time: 360,
         gr_peer_restart_time_max: 4095,
+        gr_eor_grace_time: 0,
         llgr_stale_time: 0,
         gr_restart_until: None,
         local_forwarding_state: None,
@@ -126,6 +127,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
         slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
         slow_peer_isolation: false,
+        neighbor_counters: rustbgpd_transport::NeighborCounters::default(),
     }
 }
 

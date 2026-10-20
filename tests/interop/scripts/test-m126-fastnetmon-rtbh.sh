@@ -13,12 +13,24 @@
 #   4. an unban while rustbgpd is stopped: the stale blackholes stay at FRR
 #      until rustbgpd returns, and the bans are not replayed.
 #
+# Phases 2 and 4 run without the End-of-RIB grace window and record today's
+# gap as the control. Phases 5 and 6 repeat them with gr_eor_grace_time set
+# on the FRR neighbor:
+#
+#   5. a rustbgpd restart while banned: FRR never loses either ban, observed
+#      every second through the bridge's replay and the End-of-RIB release;
+#   6. an unban while rustbgpd is stopped: the stale blackholes stay at FRR
+#      until the window releases End-of-RIB, then FRR removes them.
+#
 # Exit status 0 means every check passed. Control plane only.
 #
 # Environment:
 #   M126_BASE_IMAGE  rustbgpd dev image to build on (default rustbgpd:dev);
 #                    it must have been built from this tree.
 #   M126_IMAGE       tag for the lab image (default rustbgpd-fnm:m126).
+#   M126_LAB         containerlab lab name (default m126-fastnetmon-rtbh), so
+#                    two runs on one host do not share containers. Another
+#                    name deploys a renamed copy of the topology beside it.
 #   KEEP_LAB=1       leave the lab deployed on exit.
 #
 # Requires docker, containerlab, jq and python3.
@@ -33,10 +45,21 @@ TOPO_FILE="$REPO_ROOT/tests/interop/$TOPO.clab.yml"
 M126_BASE_IMAGE="${M126_BASE_IMAGE:-rustbgpd:dev}"
 M126_IMAGE="${M126_IMAGE:-rustbgpd-fnm:m126}"
 export M126_IMAGE
-DET="clab-${TOPO}-detector"
-FRR="clab-${TOPO}-frr"
+M126_LAB="${M126_LAB:-$TOPO}"
+if [ "$M126_LAB" != "$TOPO" ]; then
+    # Beside the original, so its relative bind paths still resolve.
+    RUN_TOPO_FILE="$REPO_ROOT/tests/interop/$M126_LAB.clab.yml"
+else
+    RUN_TOPO_FILE="$TOPO_FILE"
+fi
+DET="clab-${M126_LAB}-detector"
+FRR="clab-${M126_LAB}-frr"
 # The bridge's default reconcile interval, used unchanged.
 RECONCILE_SECS=30
+# Phases 5-6: gr_eor_grace_time on the FRR neighbor. It covers one reconcile
+# interval plus margin, stays below the 120 s Restart Time rustbgpd
+# advertises, and far below FRR's 360 s stale-path time.
+GRACE_SECS=40
 V4="203.0.113.7/32"
 V6="2001:db8:66::7/128"
 V4_NH="10.0.0.1"
@@ -70,7 +93,10 @@ cleanup() {
     local rc=$?
     if [ "$fail" -gt 0 ] || [ "$rc" -ne 0 ]; then dump_state; fi
     if [ "${KEEP_LAB:-0}" != 1 ]; then
-        containerlab destroy -t "$TOPO_FILE" --cleanup >/dev/null 2>&1 || true
+        containerlab destroy -t "$RUN_TOPO_FILE" --cleanup >/dev/null 2>&1 || true
+    fi
+    if [ "$RUN_TOPO_FILE" != "$TOPO_FILE" ] && [ "${KEEP_LAB:-0}" != 1 ]; then
+        rm -f "$RUN_TOPO_FILE"
     fi
     rm -rf "$WORK"
 }
@@ -88,12 +114,20 @@ log "Checking $M126_BASE_IMAGE was built from this tree"
 scripts/source-id.sh --check "$M126_BASE_IMAGE"
 log "Building $M126_IMAGE on $M126_BASE_IMAGE"
 docker build -q --build-arg "BASE=$M126_BASE_IMAGE" -t "$M126_IMAGE" "$LAB_DIR" >/dev/null
-containerlab destroy -t "$TOPO_FILE" --cleanup >/dev/null 2>&1 || true
-containerlab deploy -t "$TOPO_FILE" >"$WORK/deploy.log" 2>&1 || { cat "$WORK/deploy.log" >&2; exit 1; }
+if [ "$RUN_TOPO_FILE" != "$TOPO_FILE" ]; then
+    sed "s/^name: $TOPO\$/name: $M126_LAB/" "$TOPO_FILE" >"$RUN_TOPO_FILE"
+fi
+containerlab destroy -t "$RUN_TOPO_FILE" --cleanup >/dev/null 2>&1 || true
+containerlab deploy -t "$RUN_TOPO_FILE" >"$WORK/deploy.log" 2>&1 || { cat "$WORK/deploy.log" >&2; exit 1; }
 docker exec "$FRR" touch /etc/frr/vtysh.conf # keep vtysh JSON clean
 
 python3 -I "$LAB_DIR/make_attack_pcap.py" "$WORK/attack.pcap"
 docker cp -q "$WORK/attack.pcap" "$DET:/tmp/attack.pcap"
+# The same config with the grace window on the FRR neighbor (its last table).
+GRACE_CONF=/etc/rustbgpd-grace.toml
+{ cat "$LAB_DIR/rustbgpd.toml"; echo "gr_eor_grace_time = $GRACE_SECS"; } >"$WORK/grace.toml"
+docker cp -q "$WORK/grace.toml" "$DET:$GRACE_CONF"
+docker exec "$DET" rustbgpd --check "$GRACE_CONF" >/dev/null
 
 # Exact PIDs of a process name (/proc comm, 15 characters) in the detector.
 pids_of() {
@@ -124,7 +158,7 @@ spawn() { # name command...
     docker exec -d "$DET" sh -c "exec $* >>/var/log/$name.log 2>&1"
 }
 
-start_rustbgpd() { spawn rustbgpd rustbgpd /etc/rustbgpd/config.toml; }
+start_rustbgpd() { spawn rustbgpd rustbgpd "${1:-/etc/rustbgpd/config.toml}"; }
 start_bridge() {
     spawn bridge rustbgpd-gobgp-bridge --listen 127.0.0.1:50051 \
         --daemon unix:///var/lib/rustbgpd/grpc.sock
@@ -279,6 +313,25 @@ wait_session() { # label limit
     ok "$1: session Established after ${secs}s"
 }
 
+# Seconds since the epoch of the first End-of-RIB from rustbgpd for the
+# family ("IPv4" or "IPv6") after line MARK of FRR's log, or nothing.
+frr_eor_after() { # family mark
+    docker exec "$FRR" tail -n +"$(($2 + 1))" /tmp/bgpd.log |
+        grep -a -m1 "rcvd End-of-RIB for $1 Unicast from 10.0.0.1" |
+        while read -r day time _; do
+            date -u -d "$day $time" +%s 2>/dev/null || true
+        done
+}
+
+# Explicit withdrawals of a prefix that FRR has logged so far.
+frr_withdrawals() { # prefix
+    docker exec "$FRR" sh -c 'grep -ac "rcvd UPDATE about $1 .* -- withdrawn" /tmp/bgpd.log || true' _ "$1"
+}
+
+grace_release_logs() {
+    docker exec "$DET" sh -c 'grep -c "End-of-RIB grace window ended at its deadline" /var/log/rustbgpd.log || true'
+}
+
 # ---------------------------------------------------------------------------
 # Bring-up
 # ---------------------------------------------------------------------------
@@ -342,12 +395,18 @@ t0=$(date +%s)
 wait_session "phase 2 restart" 120 || true
 EXPECTED_EST=$((EXPECTED_EST + 1))
 gap_from=""
+gap_withdrawals=""
 back=""
+wd_before=$(($(frr_withdrawals "$V4") + $(frr_withdrawals "$V6")))
 while [ $(($(date +%s) - t0)) -lt $((RECONCILE_SECS + 30)) ]; do
     s4=$(frr_route ipv4 "$V4")
     s6=$(frr_route ipv6 "$V6")
     now=$(($(date +%s) - t0))
-    if [ -z "$gap_from" ] && { [ "$s4" = ABSENT ] || [ "$s6" = ABSENT ]; }; then gap_from=$now; fi
+    if [ -z "$gap_from" ] && { [ "$s4" = ABSENT ] || [ "$s6" = ABSENT ]; }; then
+        gap_from=$now
+        # Phase 5's detector: an absence with no explicit withdrawal is the gap.
+        gap_withdrawals=$(($(frr_withdrawals "$V4") + $(frr_withdrawals "$V6") - wd_before))
+    fi
     if [ "$s4" = "$V4_NH $BLACKHOLE" ] && [ "$s6" = "$V6_NH $BLACKHOLE" ]; then back=$now; break; fi
     sleep 1
 done
@@ -357,6 +416,7 @@ else
     bad "phase 2 bans not back within $((RECONCILE_SECS + 30))s (now '$s4' / '$s6')"
 fi
 record "phase2_first_absent_after_start_s=${gap_from:-never}"
+record "phase2_withdrawals_before_first_absence=${gap_withdrawals:-n/a}"
 record "phase2_bans_back_after_start_s=${back:-never}"
 record "phase2_v4_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "attr: nexthop $V4_NH, origin ?, community blackhole")"
 record "phase2_v6_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "mp_nexthop $V6_NH, community blackhole")"
@@ -413,6 +473,139 @@ EXPECTED_EST=$((EXPECTED_EST + 1))
 expect_unbanned "phase 4 stale bans flushed after restart" 30
 record "phase4_flushed_after_start_s=$(($(date +%s) - t0))"
 expect_stays_absent "phase 4 after restart (two reconcile intervals)" $((2 * RECONCILE_SECS + 5))
+
+# ---------------------------------------------------------------------------
+# Phase 5: rustbgpd restart while banned, End-of-RIB grace window on
+# ---------------------------------------------------------------------------
+
+# Phases 1-4 ran with the window off. Every later start uses the grace config,
+# and every stop is a planned (marker-backed) restart.
+log "Phase 5: ban, then restart rustbgpd with gr_eor_grace_time = $GRACE_SECS"
+start_replay
+expect_banned "phase 5 ban" 60
+stop_one rustbgpd
+expect_stale "phase 5 daemon stopped, FRR keeps stale bans" 10
+releases_before=$(grace_release_logs)
+mark=$(docker exec "$FRR" sh -c 'wc -l < /tmp/bgpd.log')
+start_rustbgpd "$GRACE_CONF"
+t0=$(date +%s)
+wait_session "phase 5 restart" 120 || true
+EXPECTED_EST=$((EXPECTED_EST + 1))
+absent_at=""
+fresh=""
+withdrawn=""
+# Poll every second through the bridge's replay and past the release. A ban
+# may vanish only through an explicit withdrawal UPDATE: FastNetMon 1.2.9
+# lifts an IPv6 ban after ban_time even while the attack continues
+# ("unban_only_if_attack_finished" is IPv4-only) and bans it again later. An
+# absence with no new withdrawal logged since the last poll that saw the ban
+# is the End-of-RIB gap this phase guards against.
+wd4=$(frr_withdrawals "$V4")
+wd6=$(frr_withdrawals "$V6")
+while [ $(($(date +%s) - t0)) -lt $((GRACE_SECS + 15)) ]; do
+    s4=$(frr_route ipv4 "$V4")
+    s6=$(frr_route ipv6 "$V6")
+    now=$(($(date +%s) - t0))
+    if [ "$s4" = ABSENT ]; then
+        if [ "$(frr_withdrawals "$V4")" -gt "$wd4" ]; then withdrawn="$withdrawn ${now}s:v4"; else absent_at=${absent_at:-$now}; fi
+    else
+        wd4=$(frr_withdrawals "$V4")
+    fi
+    if [ "$s6" = ABSENT ]; then
+        if [ "$(frr_withdrawals "$V6")" -gt "$wd6" ]; then withdrawn="$withdrawn ${now}s:v6"; else absent_at=${absent_at:-$now}; fi
+    else
+        wd6=$(frr_withdrawals "$V6")
+    fi
+    if [ -z "$fresh" ] && [ "$s4" = "$V4_NH $BLACKHOLE" ] && [ "$s6" = "$V6_NH $BLACKHOLE" ]; then fresh=$now; fi
+    sleep 1
+done
+if [ -z "$absent_at" ]; then
+    ok "phase 5 FRR never lost a ban without a withdrawal over $((GRACE_SECS + 15))s after rustbgpd started (explicit FastNetMon unbans:${withdrawn:- none})"
+else
+    bad "phase 5 a ban vanished from FRR without a withdrawal ${absent_at}s after rustbgpd started"
+fi
+if [ -n "$fresh" ] && [ "$fresh" -lt "$GRACE_SECS" ]; then
+    ok "phase 5 the bridge's replay refreshed both bans ${fresh}s after start, inside the window"
+else
+    bad "phase 5 replay did not refresh both bans inside the ${GRACE_SECS}s window (fresh=${fresh:-never})"
+fi
+# From FRR's log order: each family's first blackhole UPDATE after the
+# restart came before its End-of-RIB, so the helper never dropped the ban.
+gap4=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "attr: nexthop $V4_NH, origin ?, community blackhole")
+gap6=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "mp_nexthop $V6_NH, community blackhole")
+if [ "$gap4" = 0 ] && [ "$gap6" = 0 ]; then
+    ok "phase 5 FRR's log has both replayed bans before End-of-RIB"
+else
+    bad "phase 5 End-of-RIB before the replayed ban: IPv4 gap ${gap4} ms, IPv6 gap ${gap6} ms"
+fi
+eor4=$(frr_eor_after IPv4 "$mark")
+eor6=$(frr_eor_after IPv6 "$mark")
+if [ -n "$eor4" ] && [ -n "$eor6" ] && [ $((eor4 - t0)) -ge $((GRACE_SECS - 2)) ] &&
+    [ $((eor6 - t0)) -ge $((GRACE_SECS - 2)) ]; then
+    ok "phase 5 FRR received End-of-RIB at the window's end ($((eor4 - t0))s / $((eor6 - t0))s after start)"
+else
+    bad "phase 5 End-of-RIB timing: IPv4 ${eor4:-none}, IPv6 ${eor6:-none}, start $t0"
+fi
+if [ "$(grace_release_logs)" -gt "$releases_before" ]; then
+    ok "phase 5 rustbgpd logged the grace-window release"
+else
+    bad "phase 5 no grace-window release in the rustbgpd log"
+fi
+expect_banned "phase 5 bans fresh after the release" 1
+record "phase5_unexplained_absence_after_start_s=${absent_at:-never}"
+record "phase5_explicit_withdrawals_seen=${withdrawn:- none}"
+record "phase5_bans_fresh_after_start_s=${fresh:-never}"
+record "phase5_v4_gap_ms=$gap4"
+record "phase5_v6_gap_ms=$gap6"
+record "phase5_eor_after_start_s=$((${eor4:-t0} - t0))"
+stop_replay
+expect_unbanned "phase 5 unban after restart" 90
+
+# ---------------------------------------------------------------------------
+# Phase 6: unban while rustbgpd is stopped, End-of-RIB grace window on
+# ---------------------------------------------------------------------------
+
+log "Phase 6: ban, stop rustbgpd, unban while it is down, restart with the window"
+start_replay
+expect_banned "phase 6 ban" 60
+stop_one rustbgpd
+expect_stale "phase 6 daemon stopped" 10
+before=$(docker exec "$DET" grep -c 'AddPath request to BGP daemon failed' /var/log/fastnetmon.log || true)
+stop_replay
+after=$before
+for _ in $(seq 1 90); do
+    after=$(docker exec "$DET" grep -c 'AddPath request to BGP daemon failed' /var/log/fastnetmon.log || true)
+    [ "$after" -ge $((before + 2)) ] && break
+    sleep 1
+done
+if [ "$after" -ge $((before + 2)) ]; then
+    ok "phase 6: FastNetMon's withdrawals failed while rustbgpd was down"
+else
+    bad "phase 6: FastNetMon logged $((after - before)) failed withdrawals, expected 2"
+fi
+start_rustbgpd "$GRACE_CONF"
+t0=$(date +%s)
+wait_session "phase 6 restart" 120 || true
+EXPECTED_EST=$((EXPECTED_EST + 1))
+# The lifted bans stay stale until the release, then FRR removes them.
+held=""
+gone=""
+while [ $(($(date +%s) - t0)) -lt $((GRACE_SECS + 20)) ]; do
+    s4=$(frr_route ipv4 "$V4")
+    s6=$(frr_route ipv6 "$V6")
+    now=$(($(date +%s) - t0))
+    if [ "$s4" = ABSENT ] && [ "$s6" = ABSENT ]; then gone=$now; break; fi
+    if [ "$s4" = "$V4_NH $BLACKHOLE stale" ] && [ "$s6" = "$V6_NH $BLACKHOLE stale" ]; then held=$now; fi
+    sleep 1
+done
+if [ -n "$held" ] && [ "$held" -ge $((GRACE_SECS - 5)) ] && [ -n "$gone" ]; then
+    ok "phase 6 lifted bans stayed stale until ${held}s, removed ${gone}s after start (window ${GRACE_SECS}s)"
+else
+    bad "phase 6 lifted bans: last stale ${held:-never}s, removed ${gone:-never}s, window ${GRACE_SECS}s"
+fi
+record "phase6_stale_until_s=${held:-never}"
+record "phase6_removed_after_start_s=${gone:-never}"
+expect_stays_absent "phase 6 after release (one reconcile interval)" $((RECONCILE_SECS + 5))
 
 # ---------------------------------------------------------------------------
 

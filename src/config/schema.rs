@@ -1696,6 +1696,26 @@ define_neighbor_and_peer_group_configs! {
                 /// `gr_stale_routes_time`.
             }
         }
+        gr_eor_grace_time: Option<u16> {
+            neighbor {
+                /// Planned-restart End-of-RIB grace window (seconds). Default: 0
+                /// (off). After a marker-backed restart, End-of-RIB toward this
+                /// static neighbor is held until this many seconds after daemon
+                /// start, so injection controllers can replay first; routes and
+                /// withdrawals keep flowing. Applies only when the neighbor's
+                /// session advertises Graceful Restart (a helper) without
+                /// Restart State. Must not exceed the effective
+                /// `gr_restart_time`; keep it well below the upstream's own
+                /// stale-route limit, which is not advertised.
+                #[schemars(range(max = 4095))]
+            }
+            peer_group {
+                /// Planned-restart End-of-RIB grace window (seconds) inherited by
+                /// static neighbors in this group. See the neighbor-level
+                /// `gr_eor_grace_time`.
+                #[schemars(range(max = 4095))]
+            }
+        }
         llgr_stale_time: Option<u32> {
             neighbor {
                 /// Long-lived stale routes time (RFC 9494, seconds). Default: 0 (disabled).
@@ -2096,6 +2116,7 @@ impl fmt::Debug for Neighbor {
             .field("gr_restart_time", &self.gr_restart_time)
             .field("gr_peer_restart_time_max", &self.gr_peer_restart_time_max)
             .field("gr_stale_routes_time", &self.gr_stale_routes_time)
+            .field("gr_eor_grace_time", &self.gr_eor_grace_time)
             .field("llgr_stale_time", &self.llgr_stale_time)
             .field("local_ipv6_nexthop", &self.local_ipv6_nexthop)
             .field("route_reflector_client", &self.route_reflector_client)
@@ -2336,6 +2357,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("gr_restart_time", &self.gr_restart_time)
             .field("gr_peer_restart_time_max", &self.gr_peer_restart_time_max)
             .field("gr_stale_routes_time", &self.gr_stale_routes_time)
+            .field("gr_eor_grace_time", &self.gr_eor_grace_time)
             .field("llgr_stale_time", &self.llgr_stale_time)
             .field("local_ipv6_nexthop", &self.local_ipv6_nexthop)
             .field("route_reflector_client", &self.route_reflector_client)

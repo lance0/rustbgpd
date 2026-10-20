@@ -448,6 +448,7 @@ impl PeerManager {
                 let rfc8212_external = resolved.rfc8212_external;
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
                 let mut transport = self.build_transport_config(&cfg);
+                transport.neighbor_counters = self.neighbor_counters_for(&dynamic_peer_key);
                 transport.accepted_dynamic_range = Some(accepted_dynamic_range.clone());
                 transport.dampening_admission = match self
                     .configured_owner_admission_for_dynamic(&accepted_dynamic_range, remote_asn)
@@ -599,6 +600,7 @@ impl PeerManager {
                 );
                 let peer_key = dynamic_peer_key;
                 self.peers.insert(peer_key.clone(), managed);
+                self.retain_neighbor_counters(&peer_key);
                 self.register_session(session_id, &peer_key);
                 self.sync_owned_session_metrics(&peer_key).await;
                 self.publish_peer_info_metric(&peer_key);

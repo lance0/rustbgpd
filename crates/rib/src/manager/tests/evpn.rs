@@ -3760,6 +3760,7 @@ async fn evpn_sessions_synced_waits_for_selection_deferral_release() {
                 peer: IpAddr::V4(peer),
                 session_id: 1,
                 peer_restart_state: false,
+                peer_gr_helper: true,
                 peer_gr_families: evpn_sendable(),
                 peer_enhanced_refresh: true,
                 peer_llgr_families: Vec::new(),

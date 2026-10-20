@@ -687,6 +687,7 @@ struct BgpMetricsInner {
     gr_active_peers: IntGaugeVec,
     gr_stale_routes: IntGaugeVec,
     gr_timer_expired: IntCounterVec,
+    gr_eor_grace_released: IntCounterVec,
     selection_deferral_active: IntGaugeVec,
     selection_deferral_waiters: IntGaugeVec,
     selection_deferral_releases: IntCounterVec,
@@ -2192,6 +2193,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let gr_eor_grace_released = IntCounterVec::new(
+            Opts::new(
+                "bgp_gr_eor_grace_released_total",
+                "End-of-RIB grace windows that ended after a planned restart and released any held End-of-RIB toward the peer, by bounded reason (deadline).",
+            ),
+            &["peer", "reason"],
+        )
+        .expect("valid metric definition");
+
         let selection_deferral_active = IntGaugeVec::new(
             Opts::new(
                 "bgp_selection_deferral_active",
@@ -3336,6 +3346,9 @@ impl BgpMetrics {
             .register(Box::new(gr_timer_expired.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(gr_eor_grace_released.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(selection_deferral_active.clone()))
             .expect("metric not already registered");
         registry
@@ -3729,6 +3742,7 @@ impl BgpMetrics {
             gr_active_peers,
             gr_stale_routes,
             gr_timer_expired,
+            gr_eor_grace_released,
             selection_deferral_active,
             selection_deferral_waiters,
             selection_deferral_releases,
@@ -3985,6 +3999,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.gr_active_peers, peer);
         Self::reap_peer_series_from_vec(&self.0.gr_stale_routes, peer);
         Self::reap_peer_series_from_vec(&self.0.gr_timer_expired, peer);
+        Self::reap_peer_series_from_vec(&self.0.gr_eor_grace_released, peer);
         Self::reap_peer_series_from_vec(&self.0.route_refresh_in_progress, peer);
         Self::reap_peer_series_from_vec(&self.0.route_refresh_stale_entries, peer);
         Self::reap_peer_series_from_vec(&self.0.bmp_source_drops, peer);
@@ -5810,6 +5825,18 @@ impl BgpMetrics {
     /// Record a GR timer expiration for a peer.
     pub fn record_gr_timer_expired(&self, peer: &str) {
         self.0.gr_timer_expired.with_label_values(&[peer]).inc();
+    }
+
+    /// Record a peer's End-of-RIB grace window releasing its held markers.
+    pub fn record_gr_eor_grace_released(
+        &self,
+        peer: &str,
+        reason: crate::reason_labels::GrEorGraceReleaseReason,
+    ) {
+        self.0
+            .gr_eor_grace_released
+            .with_label_values(&[peer, reason.as_str()])
+            .inc();
     }
 
     /// Set whether restarting-speaker route selection is deferred for a family.
@@ -10073,6 +10100,10 @@ mod tests {
         m.set_gr_active(peer, true);
         m.set_gr_stale_routes(peer, 5);
         m.record_gr_timer_expired(peer);
+        m.record_gr_eor_grace_released(
+            peer,
+            crate::reason_labels::GrEorGraceReleaseReason::Deadline,
+        );
         m.set_route_refresh_in_progress(peer, "ipv4_unicast", true);
         m.set_route_refresh_stale_entries(peer, "ipv4_unicast", 9);
         m.record_bmp_source_drop(peer, "channel_full");
@@ -10107,10 +10138,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 78 peer-labeled series; state transitions and EVPN discard types
+        // 79 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 78);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 79);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -10120,7 +10151,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 78);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 79);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -10449,7 +10480,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 66] = [
+    const PEER_LABELED_FAMILIES: [&str; 67] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -10460,6 +10491,7 @@ mod tests {
         "bgp_export_family_suppressed_total",
         "bgp_fsm_stale_timer_events_total",
         "bgp_gr_active_peers",
+        "bgp_gr_eor_grace_released_total",
         "bgp_gr_stale_routes",
         "bgp_gr_timer_expired_total",
         "bgp_hold_timer_rearmed_pending_input_total",

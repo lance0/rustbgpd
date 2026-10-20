@@ -748,6 +748,7 @@ impl RibManager {
     /// `handle_peer_down` does not apply.
     pub(super) fn handle_peer_deleted(&mut self, peer: IpAddr) {
         self.peer_down_teardown(peer);
+        self.eor_grace_peer_deleted(peer);
         self.pending_peer_export_context
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_withheld_families
@@ -1266,6 +1267,19 @@ impl RibManager {
             self.peer_orf_pending
                 .insert(peer, negotiated_orf_recv.into_iter().collect());
         }
+
+        // The planned-restart grace window holds End-of-RIB only toward a
+        // session whose peer retains our routes (RFC 4724 §4.2). Without the
+        // staged OPEN context the session is treated as not a helper.
+        self.eor_grace_classify_session(
+            peer,
+            gr_context
+                .as_ref()
+                .is_some_and(|context| context.peer_gr_helper),
+            gr_context
+                .as_ref()
+                .is_some_and(|context| context.peer_restart_state),
+        );
 
         // RFC 4724 §4.2 / RFC 9494 §4.2: a family whose stale routes are
         // retained but that the new OPEN no longer lists (a GR-phase family

@@ -215,7 +215,7 @@ impl CapacityFixture {
 /// An admission that a real RIB blocked for source capacity. Only the RIB can
 /// set the block, so other suites borrow it from here.
 pub(super) async fn capacity_blocked_admission() -> DampeningAdmission {
-    let mut fixture = CapacityFixture::new().await;
+    let mut fixture = Box::pin(CapacityFixture::new()).await;
     fixture.exhaust().await;
     fixture.rib_task.abort();
     fixture.admission
@@ -227,7 +227,7 @@ pub(super) async fn capacity_blocked_admission() -> DampeningAdmission {
     reason = "one controlled disable interleaving checks producer joins, barrier acknowledgement, and source-local recovery"
 )]
 async fn capacity_disable_joins_both_producers_before_primary_barrier() {
-    let mut fixture = CapacityFixture::new().await;
+    let mut fixture = Box::pin(CapacityFixture::new()).await;
     let notice = fixture.exhaust().await;
     assert!(matches!(
         fixture
@@ -347,7 +347,7 @@ async fn capacity_disable_joins_both_producers_before_primary_barrier() {
 
 #[tokio::test]
 async fn capacity_enable_waits_for_prepare_and_complete_acknowledgements() {
-    let mut fixture = CapacityFixture::new().await;
+    let mut fixture = Box::pin(CapacityFixture::new()).await;
     fixture.disable_and_free_capacity().await;
     let counters = Arc::new(FakePeerCounters::default());
     fixture
@@ -439,7 +439,7 @@ async fn capacity_enable_waits_for_prepare_and_complete_acknowledgements() {
 #[tokio::test]
 async fn capacity_enable_failed_start_reblocks_but_lost_receipts_are_ambiguous() {
     for lost_reply in [None, Some(false), Some(true)] {
-        let mut fixture = CapacityFixture::new().await;
+        let mut fixture = Box::pin(CapacityFixture::new()).await;
         fixture.disable_and_free_capacity().await;
         let replacement = if lost_reply.is_none() {
             let (tx, rx) = mpsc::channel(1);
@@ -530,7 +530,7 @@ async fn capacity_enable_failed_start_reblocks_but_lost_receipts_are_ambiguous()
 )]
 async fn dynamic_retirement_waits_for_queued_wire_capacity_decision() {
     for acknowledge_barrier in [true, false] {
-        let mut fixture = CapacityFixture::new().await;
+        let mut fixture = Box::pin(CapacityFixture::new()).await;
         fixture
             .manager
             .peers

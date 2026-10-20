@@ -1110,6 +1110,10 @@ impl Config {
             .gr_peer_restart_time_max
             .or_else(|| group.and_then(|g| g.gr_peer_restart_time_max))
             .unwrap_or(4095);
+        transport.gr_eor_grace_time = neighbor
+            .gr_eor_grace_time
+            .or_else(|| group.and_then(|g| g.gr_eor_grace_time))
+            .unwrap_or(0);
         transport.llgr_stale_time = llgr_stale_time;
         transport.route_server_client = neighbor
             .route_server_client
@@ -1319,6 +1323,7 @@ impl Config {
             gr_restart_time: None,
             gr_peer_restart_time_max: None,
             gr_stale_routes_time: None,
+            gr_eor_grace_time: None,
             llgr_stale_time: None,
             local_ipv6_nexthop: None,
             route_reflector_client: None,

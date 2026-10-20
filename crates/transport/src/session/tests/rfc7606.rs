@@ -3259,7 +3259,11 @@ async fn ipv4_mp_reach_next_hop_length_boundary() {
                     "{case}"
                 );
                 assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
-                assert_eq!(session.notifications_sent, 0, "{case}");
+                assert_eq!(
+                    session.config.neighbor_counters.notifications_sent(),
+                    0,
+                    "{case}"
+                );
                 assert!(malformed_cause_rows(&session).is_empty(), "{case}");
             } else {
                 assert_ne!(
@@ -3363,7 +3367,11 @@ async fn labeled_ipv4_mp_reach_next_hop_length_boundary() {
                 );
                 assert_eq!(announced[0].next_hop, *expected_next_hop, "{case}");
                 assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
-                assert_eq!(session.notifications_sent, 0, "{case}");
+                assert_eq!(
+                    session.config.neighbor_counters.notifications_sent(),
+                    0,
+                    "{case}"
+                );
                 assert!(malformed_cause_rows(&session).is_empty(), "{case}");
             } else {
                 assert_ne!(

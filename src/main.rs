@@ -1031,6 +1031,36 @@ fn raw_max_gr_restart_time_secs(config: &Config) -> Option<u64> {
         .max()
 }
 
+/// Planned-restart End-of-RIB grace windows for static GR neighbors that set
+/// `gr_eor_grace_time`. One absolute deadline per peer, counted from daemon
+/// start (so startup work cannot stretch it) and never past the
+/// restart-marker window.
+fn eor_grace_config(
+    peer_configs: &[config::ResolvedNeighbor],
+    start_time: tokio::time::Instant,
+    restart_deadline: StdInstant,
+) -> rustbgpd_rib::EorGraceConfig {
+    let restart_deadline = tokio::time::Instant::from_std(restart_deadline);
+    rustbgpd_rib::EorGraceConfig {
+        peers: peer_configs
+            .iter()
+            .map(|neighbor| &neighbor.transport_config)
+            .filter(|transport| transport.peer.graceful_restart && transport.gr_eor_grace_time > 0)
+            .map(|transport| rustbgpd_rib::EorGracePeerConfig {
+                peer: transport.remote_addr.ip(),
+                deadline: (start_time + Duration::from_secs(transport.gr_eor_grace_time.into()))
+                    .min(restart_deadline),
+                families: transport
+                    .peer
+                    .effective_families()
+                    .into_iter()
+                    .filter(|family| rustbgpd_fsm::graceful_restart_preserves_family(*family))
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
     match config.resolved_neighbors() {
         Ok(neighbors) => neighbors
@@ -4589,6 +4619,8 @@ async fn run<T>(
             timeout: deadline.saturating_duration_since(StdInstant::now()),
             waiters,
         });
+        rib_manager =
+            rib_manager.with_eor_grace(eor_grace_config(&peer_configs, start_time, deadline));
     }
     // ADR-0137: seed conditional advertisements before any session can
     // register, after selection deferral so deferral holds them pending.
@@ -10815,6 +10847,7 @@ peer_group = "plain"
                     gr_restart_time: Some(90),
                     gr_peer_restart_time_max: None,
                     gr_stale_routes_time: None,
+                    gr_eor_grace_time: None,
                     llgr_stale_time: None,
                     local_ipv6_nexthop: None,
                     route_reflector_client: Some(false),
@@ -10885,6 +10918,7 @@ peer_group = "plain"
                     gr_restart_time: Some(180),
                     gr_peer_restart_time_max: None,
                     gr_stale_routes_time: None,
+                    gr_eor_grace_time: None,
                     llgr_stale_time: None,
                     local_ipv6_nexthop: None,
                     route_reflector_client: Some(false),
@@ -10955,6 +10989,7 @@ peer_group = "plain"
                     gr_restart_time: Some(300),
                     gr_peer_restart_time_max: None,
                     gr_stale_routes_time: None,
+                    gr_eor_grace_time: None,
                     llgr_stale_time: None,
                     local_ipv6_nexthop: None,
                     route_reflector_client: Some(false),
@@ -11034,6 +11069,47 @@ peer_group = "plain"
             peer_group: None,
             rfc8212_external: false,
         }
+    }
+
+    /// Only GR neighbors that set the window get one. Each deadline counts
+    /// from daemon start, even when startup work ran past it, and none
+    /// outlives the remaining restart-marker window.
+    #[test]
+    fn eor_grace_config_selects_and_clamps_windows() {
+        let mut long = resolved_neighbor_with_mss("10.0.0.2:179", None);
+        long.transport_config.gr_eor_grace_time = 60;
+        let mut short = resolved_neighbor_with_mss("10.0.0.3:179", None);
+        short.transport_config.gr_eor_grace_time = 5;
+        let mut unset = resolved_neighbor_with_mss("10.0.0.4:179", None);
+        unset.transport_config.peer.graceful_restart = true;
+        let mut no_gr = resolved_neighbor_with_mss("10.0.0.5:179", None);
+        no_gr.transport_config.gr_eor_grace_time = 5;
+        no_gr.transport_config.peer.graceful_restart = false;
+        for neighbor in [&mut long, &mut short] {
+            neighbor.transport_config.peer.graceful_restart = true;
+        }
+        let now = StdInstant::now();
+        // Startup took 30 s: the 5 s window is already over.
+        let start_time = tokio::time::Instant::from_std(now)
+            .checked_sub(Duration::from_secs(30))
+            .unwrap();
+        let restart_deadline = now + Duration::from_secs(20);
+        let config = eor_grace_config(&[long, short, unset, no_gr], start_time, restart_deadline);
+        let deadlines: Vec<_> = config
+            .peers
+            .iter()
+            .map(|peer| (peer.peer.to_string(), peer.deadline))
+            .collect();
+        assert_eq!(
+            deadlines,
+            vec![
+                (
+                    "10.0.0.2".to_string(),
+                    tokio::time::Instant::from_std(restart_deadline)
+                ),
+                ("10.0.0.3".to_string(), start_time + Duration::from_secs(5)),
+            ]
+        );
     }
 
     /// When only an IPv4 neighbor has `tcp_mss = 536`, the IPv4 listener gets

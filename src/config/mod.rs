@@ -1959,6 +1959,10 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
             ConfigFieldImpact::HotApplied,
             "hot-applied: setting sends Cease/Administrative Shutdown; clearing enables the peer",
         ),
+        "gr_eor_grace_time" => (
+            ConfigFieldImpact::HotApplied,
+            "hot-applied: read only when a planned restart starts",
+        ),
         "admin_down_reason" => (
             ConfigFieldImpact::HotApplied,
             "hot-applied: sent with the next admin_down shutdown",
@@ -2167,6 +2171,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(gr_restart_time);
     cmp_field!(gr_peer_restart_time_max);
     cmp_field!(gr_stale_routes_time);
+    cmp_field!(gr_eor_grace_time);
     cmp_field!(llgr_stale_time);
     cmp_field!(local_ipv6_nexthop);
     cmp_field!(route_reflector_client);
@@ -2319,6 +2324,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.gr_restart_time == new.gr_restart_time
         && old.gr_peer_restart_time_max == new.gr_peer_restart_time_max
         && old.gr_stale_routes_time == new.gr_stale_routes_time
+        && old.gr_eor_grace_time == new.gr_eor_grace_time
         && old.llgr_stale_time == new.llgr_stale_time
         && old.local_ipv6_nexthop == new.local_ipv6_nexthop
         && old.route_reflector_client == new.route_reflector_client
@@ -3210,6 +3216,10 @@ impl Config {
                     .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
                     .unwrap_or(360),
             );
+            // Off by default; shown only when the neighbor or its group sets it.
+            neighbor.gr_eor_grace_time = neighbor
+                .gr_eor_grace_time
+                .or_else(|| group.and_then(|g| g.gr_eor_grace_time));
             neighbor.llgr_stale_time = Some(
                 neighbor
                     .llgr_stale_time
@@ -3904,6 +3914,7 @@ fn resolved_session_change(
     probe.max_prefix_warning_percent = next.max_prefix_warning_percent;
     probe.gr_stale_routes_time = next.gr_stale_routes_time;
     probe.gr_peer_restart_time_max = next.gr_peer_restart_time_max;
+    probe.gr_eor_grace_time = next.gr_eor_grace_time;
     probe.local_ipv6_nexthop = next.local_ipv6_nexthop;
     probe.remove_private_as = next.remove_private_as;
     if probe != *next {
@@ -6338,6 +6349,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(gr_restart_time);
     cmp_field!(gr_peer_restart_time_max);
     cmp_field!(gr_stale_routes_time);
+    cmp_field!(gr_eor_grace_time);
     cmp_field!(llgr_stale_time);
     cmp_field!(local_ipv6_nexthop);
     cmp_field!(route_reflector_client);
@@ -6383,6 +6395,10 @@ pub fn describe_peer_group_changes(
 /// configuration file, so an API edit keeps their configured values. The
 /// destructuring is exhaustive: a new field fails to compile until it is
 /// classified here as config-file-only or API-owned.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the exhaustive destructuring classifies every peer-group field in one place"
+)]
 pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &PeerGroupConfig) {
     let PeerGroupConfig {
         admin_down,
@@ -6420,6 +6436,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         log_level,
         conditional_advertisements,
         route_flap_dampening,
+        gr_eor_grace_time,
         // Carried by the API definition.
         hold_time: _,
         min_hold_time: _,
@@ -6452,6 +6469,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.admin_down = admin_down;
     target.admin_down_reason = admin_down_reason;
     target.tcp_mss = tcp_mss;
+    target.gr_eor_grace_time = gr_eor_grace_time;
     target.slow_peer_threshold_pct = slow_peer_threshold_pct;
     target.slow_peer_duration = slow_peer_duration;
     target.slow_peer_isolation = slow_peer_isolation;

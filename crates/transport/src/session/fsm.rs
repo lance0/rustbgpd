@@ -655,7 +655,7 @@ impl PeerSession {
                         },
                         shutdown_reason,
                     );
-                    self.notifications_sent += 1;
+                    self.config.neighbor_counters.record_notification_sent();
                     self.metrics.record_notification_sent(
                         &self.peer_label,
                         &code.as_u8().to_string(),
@@ -731,6 +731,9 @@ impl PeerSession {
                         old.as_str(),
                         new.as_str(),
                     );
+                    if old == SessionState::Established {
+                        self.config.neighbor_counters.record_flap();
+                    }
 
                     // Publish operator-facing lifecycle state changes over one
                     // bounded channel per session so PeerManager can preserve
@@ -936,6 +939,15 @@ impl PeerSession {
                         .collect();
 
                     let peer_restart_state = neg.peer_restart_state;
+                    // `peer_gr_capable` is cleared for a capability that lists
+                    // no usable family, but such a helper-only peer still
+                    // retains our routes across our restart (RFC 4724 §3).
+                    let peer_gr_helper = neg.peer_capabilities.iter().any(|capability| {
+                        matches!(
+                            capability,
+                            rustbgpd_wire::Capability::GracefulRestart { .. }
+                        )
+                    });
                     let peer_gr_families = neg
                         .peer_gr_families
                         .iter()
@@ -1015,6 +1027,7 @@ impl PeerSession {
                             peer: self.peer_ip,
                             session_id: self.session_identity.id,
                             peer_restart_state,
+                            peer_gr_helper,
                             peer_gr_families,
                             peer_enhanced_refresh,
                             peer_llgr_families,

@@ -435,6 +435,35 @@ impl std::fmt::Display for RrLoopReason {
     }
 }
 
+/// Why a planned-restart End-of-RIB grace window released its held
+/// End-of-RIB (`bgp_gr_eor_grace_released_total{reason}`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GrEorGraceReleaseReason {
+    /// The window's absolute deadline passed. Replay completion is not
+    /// verified.
+    Deadline,
+}
+
+impl GrEorGraceReleaseReason {
+    /// Every canonical release reason, for vocabulary walks in tests and
+    /// docs.
+    pub const ALL: [Self; 1] = [Self::Deadline];
+
+    /// The canonical reason token used as the metric label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deadline => "deadline",
+        }
+    }
+}
+
+impl std::fmt::Display for GrEorGraceReleaseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Inbound connection admission drop reasons (ADR-0120).
 ///
 /// Surfaces sharing this vocabulary:
@@ -744,9 +773,10 @@ impl OutboundCommitRefusal {
 #[cfg(test)]
 mod tests {
     use super::{
-        EvpnRecoveryExhaustionCause, ExactExportReason, ImportRejectReason,
-        MalformedUpdateDisposition, MalformedUpdateReason, NextHopOwnershipBlockReason,
-        OtcBlockReason, OutboundCommitRefusal, RrLoopReason, SessionDownReason,
+        EvpnRecoveryExhaustionCause, ExactExportReason, GrEorGraceReleaseReason,
+        ImportRejectReason, MalformedUpdateDisposition, MalformedUpdateReason,
+        NextHopOwnershipBlockReason, OtcBlockReason, OutboundCommitRefusal, RrLoopReason,
+        SessionDownReason,
     };
 
     fn assert_snake_case(label: &str) {
@@ -788,6 +818,16 @@ mod tests {
             assert_snake_case(reason.as_str());
             assert!(seen.insert(reason.as_str()), "duplicate label");
         }
+    }
+
+    #[test]
+    fn gr_eor_grace_release_reasons_are_snake_case_and_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for reason in GrEorGraceReleaseReason::ALL {
+            assert_snake_case(reason.as_str());
+            assert!(seen.insert(reason.as_str()), "duplicate label");
+        }
+        assert_eq!(GrEorGraceReleaseReason::Deadline.as_str(), "deadline");
     }
 
     #[test]

@@ -452,6 +452,7 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
                 peer: source,
                 session_id: 1,
                 peer_restart_state: false,
+                peer_gr_helper: true,
                 peer_gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
                 peer_enhanced_refresh: true,
                 peer_llgr_families: Vec::new(),

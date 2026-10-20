@@ -759,6 +759,7 @@ impl PeerManager {
                 )
             };
 
+        transport.neighbor_counters = self.neighbor_counters_for(&peer_key);
         transport.dampening_admission = self
             .configured_owner_admission_for_static(peer_key.clone(), config.remote_asn)
             .map_err(|error| PeerLifecycleError::Internal(error.to_string()))?;
@@ -866,6 +867,7 @@ impl PeerManager {
                 },
             ),
         );
+        self.retain_neighbor_counters(&peer_key);
         self.register_session(session_id, &peer_key);
         self.sync_owned_session_metrics(&peer_key).await;
         self.publish_peer_info_metric(&peer_key);
@@ -2021,7 +2023,32 @@ impl PeerManager {
     /// reap covers them all. Call only after the peer has been removed
     /// from `self.peers` and its session task joined or was aborted and
     /// awaited by bounded shutdown.
+    /// The lifetime counter block for `peer`: its retained block, or a new
+    /// one that [`Self::retain_neighbor_counters`] keeps once the neighbor
+    /// is installed, so a refused accept leaves nothing behind.
+    pub(super) fn neighbor_counters_for(
+        &self,
+        peer: &PeerKey,
+    ) -> rustbgpd_transport::NeighborCounters {
+        self.neighbor_counters
+            .get(peer)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Keep the installed neighbor's counter block until it is deleted.
+    pub(super) fn retain_neighbor_counters(&mut self, peer: &PeerKey) {
+        if let Some(managed) = self.peers.get(peer) {
+            self.neighbor_counters.insert(
+                peer.clone(),
+                managed.transport_config.neighbor_counters.clone(),
+            );
+        }
+    }
+
     pub(super) async fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
+        // A deleted neighbor's counters end with it; a re-add starts at 0.
+        self.neighbor_counters.remove(peer);
         let address = peer.address;
         let peer_label = rustbgpd_telemetry::peer_label(address);
         self.publish_peer_lifecycle_event(
