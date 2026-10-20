@@ -655,7 +655,6 @@ impl PeerSession {
                         },
                         shutdown_reason,
                     );
-                    self.notifications_sent += 1;
                     self.metrics.record_notification_sent(
                         &self.peer_label,
                         &code.as_u8().to_string(),

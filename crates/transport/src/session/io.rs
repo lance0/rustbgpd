@@ -547,7 +547,6 @@ impl PeerSession {
         // double-trigger race). Either way, proceed with teardown.
         self.emit_notification_event(SessionNotificationDirection::Sent, &notif, None);
         let _ = self.enqueue_priority(&Message::Notification(notif));
-        self.notifications_sent += 1;
         self.metrics.record_notification_sent(
             &self.peer_label,
             &NotificationCode::Cease.as_u8().to_string(),
@@ -827,7 +826,6 @@ impl PeerSession {
                                 self.last_down_reason =
                                     Some(PeerDownReason::RemoteNotification(raw_pdu.clone()));
                             }
-                            self.notifications_received += 1;
                             self.record_notification_cause(
                                 SessionNotificationDirection::Received,
                                 &notif,

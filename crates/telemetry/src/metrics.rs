@@ -813,6 +813,28 @@ struct BgpMetricsInner {
 #[derive(Debug, Clone)]
 pub struct BgpMetrics(Arc<BgpMetricsInner>);
 
+/// Per-peer session totals; see [`BgpMetrics::peer_session_totals`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeerSessionTotals {
+    /// Transitions out of Established (`bgp_session_flaps_total`).
+    pub flaps: u64,
+    /// NOTIFICATION messages received, all codes.
+    pub notifications_received: u64,
+    /// NOTIFICATION messages sent, all codes.
+    pub notifications_sent: u64,
+}
+
+/// An integer counter's exported value. Prometheus carries it as `f64`,
+/// exact for every count below 2^53.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "integer counter values are non-negative whole numbers"
+)]
+fn counter_value(value: f64) -> u64 {
+    value as u64
+}
+
 impl BgpMetrics {
     /// Create a new metrics instance with a fresh [`Registry`].
     ///
@@ -4479,6 +4501,38 @@ impl BgpMetrics {
                 .sum()
         };
         (sum(&self.0.messages_received), sum(&self.0.messages_sent))
+    }
+
+    /// Daemon-lifetime session totals for `peer`, read from the same
+    /// counters Prometheus exports: `bgp_session_flaps_total` and the
+    /// `bgp_notifications_{received,sent}_total` series summed over code
+    /// and subcode. They persist across session resets and replacement
+    /// sessions; only peer deletion (which reaps the series) or a daemon
+    /// restart clears them. Reading never instantiates a series.
+    #[must_use]
+    pub fn peer_session_totals(&self, peer: &str) -> PeerSessionTotals {
+        PeerSessionTotals {
+            flaps: Self::peer_counter_sum(&self.0.session_flaps, peer),
+            notifications_received: Self::peer_counter_sum(&self.0.notifications_received, peer),
+            notifications_sent: Self::peer_counter_sum(&self.0.notifications_sent, peer),
+        }
+    }
+
+    /// Sum every existing series of `vec` whose `peer` label is `peer`.
+    fn peer_counter_sum(vec: &IntCounterVec, peer: &str) -> u64 {
+        use prometheus::core::Collector;
+
+        vec.collect()
+            .iter()
+            .flat_map(prometheus::proto::MetricFamily::get_metric)
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|pair| pair.name() == "peer" && pair.value() == peer)
+            })
+            .map(|metric| counter_value(metric.get_counter().get_value()))
+            .sum()
     }
 
     /// Set the number of prefixes in Adj-RIB-In for a peer/AFI-SAFI.
@@ -9000,6 +9054,35 @@ mod tests {
 
         assert_eq!(m.0.route_event_history_capacity.get(), 4096);
         assert_eq!(m.0.route_event_history_depth.get(), 17);
+    }
+
+    #[test]
+    fn peer_session_totals_sum_codes_per_peer_without_instantiating_series() {
+        let m = BgpMetrics::new();
+        assert_eq!(
+            m.peer_session_totals("10.0.0.1"),
+            PeerSessionTotals::default()
+        );
+        assert!(
+            !gather_text(&m).contains(r#"peer="10.0.0.1""#),
+            "reading totals must not create series"
+        );
+
+        m.record_notification_received("10.0.0.1", "6", "9");
+        m.record_notification_received("10.0.0.1", "4", "0");
+        m.record_notification_received("10.0.0.2", "6", "9");
+        m.record_notification_sent("10.0.0.1", "6", "2");
+        m.record_state_transition("10.0.0.1", "established", "idle");
+        m.record_state_transition("10.0.0.2", "established", "idle");
+
+        assert_eq!(
+            m.peer_session_totals("10.0.0.1"),
+            PeerSessionTotals {
+                flaps: 1,
+                notifications_received: 2,
+                notifications_sent: 1,
+            }
+        );
     }
 
     #[test]

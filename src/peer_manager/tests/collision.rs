@@ -2597,3 +2597,144 @@ fn queue_candidate_open(mgr: &PeerManager, session_id: u64, peer_addr: IpAddr) {
         })
         .unwrap();
 }
+
+/// Handle session notifications until the current primary reports
+/// `BackToIdle`, so the reset is fully settled before the next accept.
+async fn handle_until_primary_idle(mgr: &mut PeerManager) {
+    loop {
+        let notification =
+            tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+                .await
+                .expect("the reset primary should report BackToIdle")
+                .expect("notification channel should stay open");
+        let idle = matches!(notification, SessionNotification::BackToIdle { .. });
+        mgr.handle_session_notification(notification).await;
+        if idle {
+            return;
+        }
+    }
+}
+
+/// Accept a real inbound connection for `peer_addr` and drive it to
+/// Established, whichever path the manager takes: promotion of a collision
+/// candidate, or direct replacement of an Idle primary. The RIB `PeerUp` the
+/// new session sends on Established is the handshake.
+async fn establish_inbound(
+    mgr: &mut PeerManager,
+    rib_rx: &mut mpsc::Receiver<rustbgpd_rib::RibUpdate>,
+    peer_addr: IpAddr,
+) -> TcpStream {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let mut client = client.await.unwrap();
+    mgr.handle_inbound(server_stream, remote_addr, None, None)
+        .await;
+    let mut buf = BytesMut::with_capacity(4096);
+    if mgr.peers[&key(peer_addr)].pending_inbound.is_some() {
+        let notification = candidate_open_exchange(mgr, &mut client, &mut buf).await;
+        mgr.handle_session_notification(notification).await;
+    } else {
+        let msg = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_bgp_message(&mut client, &mut buf),
+        )
+        .await
+        .expect("the replacement session must send OPEN");
+        assert!(matches!(msg, Message::Open(_)));
+        let mut bytes =
+            encode_message(&Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2)))).unwrap();
+        bytes.extend(encode_message(&Message::Keepalive).unwrap());
+        client.write_all(&bytes).await.unwrap();
+    }
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
+    loop {
+        let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
+            .await
+            .expect("the new session must establish")
+            .expect("RIB channel open");
+        if matches!(update, rustbgpd_rib::RibUpdate::PeerUp { session_id: id, .. } if id == session_id)
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        mgr.peers[&key(peer_addr)]
+            .handle()
+            .query_state()
+            .await
+            .unwrap()
+            .fsm_state,
+        SessionState::Established
+    );
+    client
+}
+
+/// A peer Hard Reset (Cease 6/9) followed by a reconnect replaces the
+/// session actor. The neighbor's flap and NOTIFICATION counters are
+/// daemon-lifetime: after the new session establishes they still equal the
+/// Prometheus counters, not the fresh actor's zeros.
+#[tokio::test]
+async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(256);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+
+    let mut first = establish_inbound(&mut mgr, &mut rib_rx, peer_addr).await;
+    let first_session = mgr.peers[&key(peer_addr)].session_id();
+    send_bgp_message(
+        &mut first,
+        &Message::Notification(rustbgpd_wire::NotificationMessage::new(
+            rustbgpd_wire::notification::NotificationCode::Cease,
+            rustbgpd_wire::notification::cease_subcode::HARD_RESET,
+            bytes::Bytes::new(),
+        )),
+    )
+    .await;
+    handle_until_primary_idle(&mut mgr).await;
+
+    let _second = establish_inbound(&mut mgr, &mut rib_rx, peer_addr).await;
+    assert_ne!(
+        mgr.peers[&key(peer_addr)].session_id(),
+        first_session,
+        "the reconnect must run on a replacement session actor"
+    );
+
+    let peers = mgr.list_peers().await;
+    let row = peers
+        .iter()
+        .find(|row| row.address == peer_addr)
+        .expect("neighbor row");
+    let totals = mgr
+        .metrics
+        .peer_session_totals(&rustbgpd_telemetry::peer_label(peer_addr));
+    assert_eq!(totals.flaps, 1, "bgp_session_flaps_total counts the reset");
+    assert_eq!(totals.notifications_received, 1);
+    assert_eq!(row.flap_count, totals.flaps);
+    assert_eq!(row.notifications_received, totals.notifications_received);
+    assert_eq!(row.notifications_sent, totals.notifications_sent);
+}

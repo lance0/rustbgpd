@@ -1164,10 +1164,19 @@ async fn open_rejected_with_notification_counts_toward_idle_backoff() {
         session.test_install_stream(client);
         session.drive_fsm(Event::ManualStart).await;
         assert_eq!(session.fsm.state(), SessionState::OpenSent);
-        let sent_before = session.notifications_sent;
+        let sent_before = session
+            .metrics
+            .peer_session_totals(&session.peer_label)
+            .notifications_sent;
         session.drive_fsm(peer_open(65003)).await;
         assert_eq!(session.fsm.state(), SessionState::Idle);
-        assert_eq!(session.notifications_sent, sent_before + 1);
+        assert_eq!(
+            session
+                .metrics
+                .peer_session_totals(&session.peer_label)
+                .notifications_sent,
+            sent_before + 1
+        );
         assert_eq!(pending_reconnect_secs(&session), expected);
     }
 }
