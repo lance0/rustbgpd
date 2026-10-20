@@ -313,13 +313,14 @@ wait_session() { # label limit
     ok "$1: session Established after ${secs}s"
 }
 
-# Seconds since the epoch at which FRR logged End-of-RIB from rustbgpd for
-# the family ("IPv4" or "IPv6") after the given epoch, or nothing.
-frr_eor_after() { # family since
-    docker exec "$FRR" sh -c 'grep -a "rcvd End-of-RIB for $1 Unicast from 10.0.0.1" /tmp/bgpd.log || true' _ "$1" |
+# Seconds since the epoch of the first End-of-RIB from rustbgpd for the
+# family ("IPv4" or "IPv6") after line MARK of FRR's log, or nothing.
+frr_eor_after() { # family mark
+    docker exec "$FRR" tail -n +"$(($2 + 1))" /tmp/bgpd.log |
+        grep -a -m1 "rcvd End-of-RIB for $1 Unicast from 10.0.0.1" |
         while read -r day time _; do
             date -u -d "$day $time" +%s 2>/dev/null || true
-        done | awk -v since="$2" '$1 >= since' | head -1
+        done
 }
 
 # Explicit withdrawals of a prefix that FRR has logged so far.
@@ -485,6 +486,7 @@ expect_banned "phase 5 ban" 60
 stop_one rustbgpd
 expect_stale "phase 5 daemon stopped, FRR keeps stale bans" 10
 expired_before=$(grace_expired_total)
+mark=$(docker exec "$FRR" sh -c 'wc -l < /tmp/bgpd.log')
 start_rustbgpd "$GRACE_CONF"
 t0=$(date +%s)
 wait_session "phase 5 restart" 120 || true
@@ -527,8 +529,17 @@ if [ -n "$fresh" ] && [ "$fresh" -lt "$GRACE_SECS" ]; then
 else
     bad "phase 5 replay did not refresh both bans inside the ${GRACE_SECS}s window (fresh=${fresh:-never})"
 fi
-eor4=$(frr_eor_after IPv4 "$t0")
-eor6=$(frr_eor_after IPv6 "$t0")
+# From FRR's log order: each family's first blackhole UPDATE after the
+# restart came before its End-of-RIB, so the helper never dropped the ban.
+gap4=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "attr: nexthop $V4_NH, origin ?, community blackhole")
+gap6=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "mp_nexthop $V6_NH, community blackhole")
+if [ "$gap4" = 0 ] && [ "$gap6" = 0 ]; then
+    ok "phase 5 FRR's log has both replayed bans before End-of-RIB"
+else
+    bad "phase 5 End-of-RIB before the replayed ban: IPv4 gap ${gap4} ms, IPv6 gap ${gap6} ms"
+fi
+eor4=$(frr_eor_after IPv4 "$mark")
+eor6=$(frr_eor_after IPv6 "$mark")
 if [ -n "$eor4" ] && [ -n "$eor6" ] && [ $((eor4 - t0)) -ge $((GRACE_SECS - 2)) ] &&
     [ $((eor6 - t0)) -ge $((GRACE_SECS - 2)) ]; then
     ok "phase 5 FRR received End-of-RIB at the window's end ($((eor4 - t0))s / $((eor6 - t0))s after start)"
@@ -544,6 +555,8 @@ expect_banned "phase 5 bans fresh after the release" 1
 record "phase5_unexplained_absence_after_start_s=${absent_at:-never}"
 record "phase5_explicit_withdrawals_seen=${withdrawn:- none}"
 record "phase5_bans_fresh_after_start_s=${fresh:-never}"
+record "phase5_v4_gap_ms=$gap4"
+record "phase5_v6_gap_ms=$gap6"
 record "phase5_eor_after_start_s=$((${eor4:-t0} - t0))"
 stop_replay
 expect_unbanned "phase 5 unban after restart" 90
