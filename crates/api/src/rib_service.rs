@@ -9036,6 +9036,7 @@ mod tests {
                 next_hop: Some("198.51.100.1".parse().unwrap()),
                 path_id: 0,
                 route_peer: Some("198.51.100.2".parse().unwrap()),
+                route_path_id: Some(0),
                 route_type: Some(rustbgpd_policy::RouteType::External),
                 reasons: vec![rustbgpd_rib::ExplainReason {
                     code: "policy_permitted",

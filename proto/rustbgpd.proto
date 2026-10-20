@@ -3551,6 +3551,17 @@ service InjectionService {
   // change to the local Adj-RIB-In; selection and distribution follow in the
   // same RIB turn unless Graceful Restart selection deferral is active.
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
+  // Per-peer export disposition of one locally injected unicast route,
+  // identified by its exact AddPath key (prefix, prefix_length, path_id).
+  // A route for the same prefix from another peer, or under another local
+  // path_id, never counts as this route's export. Each peer registered for
+  // outbound updates (an Established session) gets exactly one disposition,
+  // in peer-address order and paged by page_size and page_token; a
+  // configured peer without a session is not listed. COMMITTED means the
+  // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
+  // not received, accepted or installed by the peer, which BGP does not
+  // report. A key with no local route returns NOT_FOUND.
+  rpc ListPathExportDispositions(ListPathExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request
   // is idempotent, and a request with the same key but different actions or
@@ -3703,6 +3714,57 @@ enum PathDeleteOutcome {
   PATH_DELETE_OUTCOME_DELETED = 1;
   // No local route had this key; returned only when allow_missing is set.
   PATH_DELETE_OUTCOME_NOT_PRESENT = 2;
+}
+
+message ListPathExportDispositionsRequest {
+  // The local route's AddPath key.
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  uint32 path_id = 3;
+  // Peers per page: 0 selects 100, and larger values are capped at 1000.
+  uint32 page_size = 4;
+  // next_page_token of the previous page; empty for the first page.
+  string page_token = 5;
+}
+
+enum PathExportDisposition {
+  PATH_EXPORT_DISPOSITION_UNSPECIFIED = 0;
+  // The route is in the peer's Adj-RIB-Out, committed to its outbound
+  // path. Remote receipt is outside this guarantee.
+  PATH_EXPORT_DISPOSITION_COMMITTED = 1;
+  // The route is not exported to this peer; reason says why.
+  PATH_EXPORT_DISPOSITION_WITHHELD = 2;
+  // Export to this peer has not settled; reason names what is outstanding.
+  PATH_EXPORT_DISPOSITION_PENDING = 3;
+}
+
+message PathExportDispositionEntry {
+  string peer_address = 1;
+  PathExportDisposition disposition = 2;
+  // Bounded reason code; empty for COMMITTED. WITHHELD: family_suppressed
+  // plus a colon and the exact-export reason for a negotiated family the
+  // session withholds (e.g. family_suppressed:missing_ipv6_next_hop),
+  // family_not_negotiated, not_selected (another path is this peer's
+  // selected route, or the path ranks beyond Add-Path send_max),
+  // export_policy, outbound_prefix_limit, exact_export_rejected (optionally
+  // a colon and the exact-export reason, e.g.
+  // exact_export_rejected:missing_ipv6_next_hop), export_rule (any other
+  // export gate; explain_code names it). PENDING: selection_deferred,
+  // outbound_resync, orf_pending, not_yet_committed. New codes may be added.
+  string reason = 3;
+  // Stop code of the export explain ladder behind the reason, in the
+  // ExplainAdvertisedRoute gate vocabulary; empty when none applies.
+  string explain_code = 4;
+  // Human-readable detail; not a stable string.
+  string detail = 5;
+  // Outbound Add-Path path identifier when COMMITTED; 0 on single-best.
+  uint32 advertised_path_id = 6;
+}
+
+message ListPathExportDispositionsResponse {
+  repeated PathExportDispositionEntry peers = 1;
+  // Empty when no peers remain.
+  string next_page_token = 2;
 }
 
 // FlowSpec match component (RFC 8955).

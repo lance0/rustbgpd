@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
+use crate::actor_read::rib_manager_read;
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary, safe_summary_value, set_request_summary};
 use crate::proto;
 use crate::route_distinguisher::parse_rd;
@@ -15,6 +16,8 @@ use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::injection_lease::{
     InjectionLeases, LeaseGeneration, validate_lease, validate_owner,
 };
+use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
+use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition};
 use rustbgpd_rib::{
     EvpnRibRoute, FlowSpecRoute, InjectOutcome, RibCommandError, RibUpdate, Route, RouteOrigin,
 };
@@ -143,6 +146,49 @@ pub(crate) const LOCAL_PEER: std::net::IpAddr = std::net::IpAddr::V4(Ipv4Addr::U
 /// An unspecified next hop of either family means next-hop self; it is
 /// stored as the prefix family's unspecified address, which export resolves
 /// per session.
+/// The prefix of a local unicast route key, as `DeletePath` and
+/// `ListPathExportDispositions` name it.
+fn parse_route_key_prefix(prefix: &str, prefix_length: u32) -> Result<Prefix, Status> {
+    let addr: IpAddr = prefix
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
+    match addr {
+        IpAddr::V4(v4) => {
+            let len = u8::try_from(prefix_length)
+                .ok()
+                .filter(|&l| l <= 32)
+                .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
+            Ok(Prefix::V4(Ipv4Prefix::new(v4, len)))
+        }
+        IpAddr::V6(v6) => {
+            let len = u8::try_from(prefix_length)
+                .ok()
+                .filter(|&l| l <= 128)
+                .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
+            Ok(Prefix::V6(Ipv6Prefix::new(v6, len)))
+        }
+    }
+}
+
+/// Peers per `ListPathExportDispositions` page when the request leaves it 0.
+const DEFAULT_EXPORT_PAGE_SIZE: usize = 100;
+
+fn export_disposition_to_proto(row: PeerRouteExport) -> proto::PathExportDispositionEntry {
+    let disposition = match row.disposition {
+        RouteExportDisposition::Committed => proto::PathExportDisposition::Committed,
+        RouteExportDisposition::Withheld => proto::PathExportDisposition::Withheld,
+        RouteExportDisposition::Pending => proto::PathExportDisposition::Pending,
+    };
+    proto::PathExportDispositionEntry {
+        peer_address: row.peer.to_string(),
+        disposition: disposition as i32,
+        reason: row.reason,
+        explain_code: row.explain_code.to_string(),
+        detail: row.detail,
+        advertised_path_id: row.advertised_path_id,
+    }
+}
+
 fn parse_prefix_and_nexthop(
     prefix_str: &str,
     prefix_length: u32,
@@ -508,27 +554,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let req = request.into_inner();
         let (requested_owner, override_owner) = (req.owner.clone(), req.override_owner);
 
-        let addr: IpAddr = req
-            .prefix
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
-
-        let prefix = match addr {
-            IpAddr::V4(v4) => {
-                let len = u8::try_from(req.prefix_length)
-                    .ok()
-                    .filter(|&l| l <= 32)
-                    .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
-                Prefix::V4(Ipv4Prefix::new(v4, len))
-            }
-            IpAddr::V6(v6) => {
-                let len = u8::try_from(req.prefix_length)
-                    .ok()
-                    .filter(|&l| l <= 128)
-                    .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
-                Prefix::V6(Ipv6Prefix::new(v6, len))
-            }
-        };
+        let prefix = parse_route_key_prefix(&req.prefix, req.prefix_length)?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
@@ -769,6 +795,59 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         Ok(Response::new(proto::RenewLeaseResponse {
             generation: Some(generation_to_proto(generation)),
             lease_remaining_ms: millis(remaining),
+        }))
+    }
+
+    async fn list_path_export_dispositions(
+        &self,
+        request: Request<proto::ListPathExportDispositionsRequest>,
+    ) -> Result<Response<proto::ListPathExportDispositionsResponse>, Status> {
+        let req = request.into_inner();
+        let prefix = parse_route_key_prefix(&req.prefix, req.prefix_length)?;
+        let after = if req.page_token.is_empty() {
+            None
+        } else {
+            Some(
+                req.page_token
+                    .parse::<IpAddr>()
+                    .map_err(|_| Status::invalid_argument("invalid page_token"))?,
+            )
+        };
+        let page_size = match req.page_size {
+            0 => DEFAULT_EXPORT_PAGE_SIZE,
+            size => usize::try_from(size)
+                .unwrap_or(usize::MAX)
+                .min(ROUTE_QUERY_MAX_PAGE_SIZE),
+        };
+        let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLocalRouteExport {
+            prefix,
+            path_id: req.path_id,
+            after,
+            page_size,
+            reply,
+        })
+        .await?
+        .ok_or_else(|| {
+            Status::not_found(format!(
+                "no local route {}/{} with path_id {}",
+                req.prefix, req.prefix_length, req.path_id
+            ))
+        })?;
+        let next_page_token = if page.more {
+            page.peers
+                .last()
+                .map(|row| row.peer.to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(proto::ListPathExportDispositionsResponse {
+            peers: page
+                .peers
+                .into_iter()
+                .map(export_disposition_to_proto)
+                .collect(),
+            next_page_token,
         }))
     }
 
@@ -1654,6 +1733,102 @@ mod tests {
     /// An unspecified next hop of either family is next-hop self: it reaches
     /// the RIB as the prefix family's unspecified address, with a stored
     /// `NEXT_HOP` only for an IPv4 prefix. EVPN injection still rejects it.
+    /// The read is served on a read-only listener, maps the RIB's page to
+    /// the wire, resumes after the token's peer, clamps the page size, and
+    /// reports a missing local route as `NOT_FOUND`.
+    #[tokio::test]
+    async fn list_path_export_dispositions_pages_and_maps_rows() {
+        use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition, RouteExportPage};
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let responder = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(update) = rx.recv().await {
+                let RibUpdate::QueryLocalRouteExport {
+                    prefix,
+                    path_id,
+                    after,
+                    page_size,
+                    reply,
+                } = update
+                else {
+                    panic!("expected QueryLocalRouteExport");
+                };
+                seen.push((prefix, path_id, after, page_size));
+                let page = (path_id == 7).then(|| RouteExportPage {
+                    peers: vec![PeerRouteExport {
+                        peer: "192.0.2.1".parse().unwrap(),
+                        disposition: RouteExportDisposition::Withheld,
+                        reason: "family_suppressed:missing_ipv6_next_hop".to_string(),
+                        explain_code: "family_not_sendable",
+                        detail: "withheld".to_string(),
+                        advertised_path_id: 0,
+                    }],
+                    more: after.is_none(),
+                });
+                reply.send(page).ok();
+            }
+            seen
+        });
+        let request = |page_size, page_token: &str, path_id| {
+            Request::new(proto::ListPathExportDispositionsRequest {
+                prefix: "2001:db8::7".into(),
+                prefix_length: 128,
+                path_id,
+                page_size,
+                page_token: page_token.into(),
+            })
+        };
+
+        let first = svc
+            .list_path_export_dispositions(request(0, "", 7))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(first.next_page_token, "192.0.2.1");
+        let row = &first.peers[0];
+        assert_eq!(row.peer_address, "192.0.2.1");
+        assert_eq!(
+            row.disposition,
+            proto::PathExportDisposition::Withheld as i32
+        );
+        assert_eq!(row.reason, "family_suppressed:missing_ipv6_next_hop");
+        assert_eq!(row.explain_code, "family_not_sendable");
+        let last = svc
+            .list_path_export_dispositions(request(5000, &first.next_page_token, 7))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(last.next_page_token, "");
+        let missing = svc
+            .list_path_export_dispositions(request(1, "", 8))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+        let bad_token = svc
+            .list_path_export_dispositions(request(1, "not-an-address", 7))
+            .await
+            .unwrap_err();
+        assert_eq!(bad_token.code(), tonic::Code::InvalidArgument);
+
+        drop(svc);
+        let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8::7".parse().unwrap(), 128));
+        assert_eq!(
+            responder.await.unwrap(),
+            vec![
+                (prefix, 7, None, DEFAULT_EXPORT_PAGE_SIZE),
+                (
+                    prefix,
+                    7,
+                    Some("192.0.2.1".parse().unwrap()),
+                    ROUTE_QUERY_MAX_PAGE_SIZE
+                ),
+                (prefix, 8, None, 1),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn add_path_accepts_unspecified_next_hop_as_self() {
         let (svc, mut rx) = make_service_with_rx();

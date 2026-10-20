@@ -2222,7 +2222,7 @@ async fn withheld_ipv6_unicast_is_staged_before_peer_up() {
     assert_eq!(
         staged(&mut session, &mut rib_rx).await,
         vec![
-            "withheld [(Ipv6, Unicast)]".to_string(),
+            "withheld [((Ipv6, Unicast), MissingIpv6NextHop)]".to_string(),
             "peer_up".to_string()
         ]
     );

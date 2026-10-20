@@ -1304,7 +1304,10 @@ fn register_withheld_v6_peer(
     manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
         peer,
         session_id: 0,
-        families: vec![(Afi::Ipv6, Safi::Unicast)],
+        families: vec![(
+            (Afi::Ipv6, Safi::Unicast),
+            crate::update::ExactExportErrorCode::MissingIpv6NextHop,
+        )],
     });
     register_direct_peer(manager, peer)
 }
@@ -1414,10 +1417,7 @@ fn withheld_family_unlock_after_its_eor_still_exports_the_table() {
         .collect();
     assert_eq!(announced, vec![Prefix::V6(v6)], "the table is not skipped");
     assert_eq!(updates.last().unwrap().end_of_rib, vec![ipv6]);
-    assert_eq!(
-        manager.registered_withheld_families(peer),
-        Vec::<(Afi, Safi)>::new()
-    );
+    assert_eq!(manager.registered_withheld_families(peer), []);
 }
 
 /// A family the session withheld at `PeerUp` (eBGP IPv6 unicast without a

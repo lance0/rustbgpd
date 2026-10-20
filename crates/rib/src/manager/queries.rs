@@ -9,7 +9,7 @@ use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
-use super::helpers::{prefix_family, unicast_route_family};
+use super::helpers::{LOCAL_PEER, prefix_family, unicast_route_family};
 use super::{
     EVPN_ROUTE_EVENT_HISTORY_CAPACITY, ROUTE_EVENT_HISTORY_CAPACITY, ROUTE_QUERY_MAX_PAGE_SIZE,
     RibManager, distribution, update_groups,
@@ -22,8 +22,9 @@ use crate::update::{
     DataplaneVersions, EvpnRoutePage, EvpnRouteQueryKey, ExactBestRoutes, ExactExportKey,
     ExactFibInstallCandidates, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, FibInstallCandidatesPage, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats,
-    NeighborRibSnapshot, NeighborRibSnapshotResponse, RibRowFilter, RoutePage, RoutePageError,
-    RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
+    NeighborRibSnapshot, NeighborRibSnapshotResponse, PeerRouteExport, RibRowFilter,
+    RouteExportDisposition, RouteExportPage, RoutePage, RoutePageError, RoutePageVersion,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
     VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query,
     route_query_key,
 };
@@ -1891,6 +1892,202 @@ impl RibManager {
             warn!("query caller dropped before receiving response");
         }
     }
+    /// Answer [`crate::update::RibUpdate::QueryLocalRouteExport`].
+    pub(super) fn handle_query_local_route_export(
+        &mut self,
+        prefix: Prefix,
+        path_id: u32,
+        after: Option<IpAddr>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<Option<RouteExportPage>>,
+    ) {
+        let page = self.local_route_export_page(prefix, path_id, after, page_size);
+        if reply.send(page).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    /// One page of per-peer export dispositions for the local route
+    /// `(prefix, path_id)`: one prefix-local export explain per listed peer,
+    /// so the page size bounds the work.
+    fn local_route_export_page(
+        &mut self,
+        prefix: Prefix,
+        path_id: u32,
+        after: Option<IpAddr>,
+        page_size: usize,
+    ) -> Option<RouteExportPage> {
+        let route = self
+            .ribs
+            .get(&LOCAL_PEER)?
+            .iter_prefix(&prefix)
+            .find(|route| route.path_id == path_id)?
+            .clone();
+        let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
+        let mut peers =
+            smallest_keys_after(self.peer_sendable_families.keys().copied(), after, n + 1);
+        let more = peers.len() > n;
+        peers.truncate(n);
+        let peers = peers
+            .into_iter()
+            .map(|peer| self.local_route_export(peer, &route))
+            .collect();
+        Some(RouteExportPage { peers, more })
+    }
+
+    /// The export disposition of the local `route` toward one registered
+    /// peer. Committed means the explain found an identical entry for this
+    /// exact source in the peer's Adj-RIB-Out (or its group view); a route
+    /// from any other source, or another local path ID, never counts.
+    fn local_route_export(&mut self, peer: IpAddr, route: &crate::route::Route) -> PeerRouteExport {
+        use RouteExportDisposition::{Committed, Pending, Withheld};
+        let prefix = route.prefix;
+        let family = prefix_family(&prefix);
+        let row = |disposition, reason: &str, explain_code, detail: String| PeerRouteExport {
+            peer,
+            disposition,
+            reason: reason.to_string(),
+            explain_code,
+            detail,
+            advertised_path_id: 0,
+        };
+        if let Some((_, code)) = self
+            .registered_withheld_families(peer)
+            .iter()
+            .find(|(withheld, _)| *withheld == family)
+        {
+            return row(
+                Withheld,
+                &format!("family_suppressed:{}", code.as_str()),
+                "family_not_sendable",
+                format!(
+                    "the session negotiated {} but withholds the family from export",
+                    rustbgpd_wire::family_label(family.0, family.1).unwrap_or("this family")
+                ),
+            );
+        }
+        if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
+            return row(
+                Pending,
+                "outbound_resync",
+                "",
+                "outbound delivery to this peer is resynchronizing".to_string(),
+            );
+        }
+        let source = crate::update::RouteSourceIdentity {
+            peer: LOCAL_PEER,
+            path_id: route.path_id,
+        };
+        // An Add-Path send peer explains this exact source at its outbound
+        // rank; any other peer explains its own selected route.
+        let add_path = self.add_path_send_max_for_prefix(peer, &prefix) > 0;
+        let explanation = self.explain_unicast_export(peer, prefix, add_path.then_some(source));
+        let stop = explanation
+            .gates
+            .iter()
+            .find(|step| step.verdict == crate::update::ExportGateVerdict::Stop);
+        let (code, stop_detail) =
+            stop.map_or(("", String::new()), |step| (step.code, step.detail.clone()));
+        let other_source = !add_path
+            && explanation.route_peer.is_some()
+            && (explanation.route_peer, explanation.route_path_id)
+                != (Some(LOCAL_PEER), Some(route.path_id));
+        let mut export = if other_source {
+            row(
+                Withheld,
+                "not_selected",
+                code,
+                format!(
+                    "this peer's selected path is from {} with path ID {}",
+                    explanation.route_peer.unwrap_or(LOCAL_PEER),
+                    explanation.route_path_id.unwrap_or_default()
+                ),
+            )
+        } else if explanation.decision == crate::update::ExplainDecision::Advertise {
+            if explanation.already_advertised {
+                PeerRouteExport {
+                    advertised_path_id: explanation.path_id,
+                    ..row(Committed, "", "", "in the peer's Adj-RIB-Out".to_string())
+                }
+            } else {
+                row(
+                    Pending,
+                    "not_yet_committed",
+                    "",
+                    "export is staged but the peer's Adj-RIB-Out does not hold it yet".to_string(),
+                )
+            }
+        } else {
+            let (disposition, reason) = self.stopped_export_reason(peer, route, &explanation, code);
+            row(disposition, &reason, code, stop_detail)
+        };
+        if export.disposition != Committed
+            && self
+                .selection_deferral
+                .as_ref()
+                .is_some_and(|deferral| deferral.is_gated(family))
+        {
+            export.disposition = Pending;
+            export.reason = "selection_deferred".to_string();
+            export.detail = format!(
+                "graceful-restart selection deferral holds this family; export would be {}",
+                if export.detail.is_empty() {
+                    "decided after it"
+                } else {
+                    &export.detail
+                }
+            );
+        }
+        export
+    }
+
+    /// The bounded disposition reason for an export explain that stopped
+    /// this route at the gate named `code`.
+    fn stopped_export_reason(
+        &self,
+        peer: IpAddr,
+        route: &crate::route::Route,
+        explanation: &ExplainAdvertisedRoute,
+        code: &str,
+    ) -> (RouteExportDisposition, String) {
+        let reason = match code {
+            "orf_pending" => return (RouteExportDisposition::Pending, code.to_string()),
+            "family_not_sendable" => "family_not_negotiated".to_string(),
+            "policy_denied" | "rfc8212_missing_export_policy" => "export_policy".to_string(),
+            crate::update::OUTBOUND_PREFIX_LIMIT_REACHED => "outbound_prefix_limit".to_string(),
+            "exact_export_rejected" => self
+                .exact_export_rejection_reason(peer, route, explanation)
+                .map_or_else(
+                    || "exact_export_rejected".to_string(),
+                    |reason| format!("exact_export_rejected:{reason}"),
+                ),
+            "beyond_send_max" | "no_best_route" | "no_orr_candidate" => "not_selected".to_string(),
+            _ => "export_rule".to_string(),
+        };
+        (RouteExportDisposition::Withheld, reason)
+    }
+
+    /// The exact-export reason for a route the peer's overlay rejected,
+    /// re-probed with the session's live encoder. `None` when the probe no
+    /// longer reproduces the rejection.
+    fn exact_export_rejection_reason(
+        &self,
+        peer: IpAddr,
+        route: &crate::route::Route,
+        explanation: &ExplainAdvertisedRoute,
+    ) -> Option<&'static str> {
+        let snapshot = self.peer_export_encoders.get(&peer)?.snapshot();
+        let (mut modified, action) =
+            distribution::ExportMemo::default().apply(route, &explanation.modifications);
+        modified.path_id = explanation.path_id;
+        snapshot
+            .probe_announcement(crate::update::ExactExportCandidate::Unicast {
+                route: &modified,
+                next_hop_override: action.as_ref(),
+            })
+            .err()
+            .map(|error| error.code().as_str())
+    }
     /// A gate-ladder explanation for a family whose advertisement is
     /// still held by the RFC 5291 §6 initial-ORF gate — live staging
     /// skips the family wholesale, before any per-prefix work.
@@ -2218,13 +2415,14 @@ impl RibManager {
     /// An unsettled member is explained against its retained regroup baseline;
     /// without one, the caller has already refused
     /// ([`Self::grouped_unicast_admission_unknown`]). The advertised listing
-    /// applies the same rule, so the two agree.
-    fn grouped_unicast_explain_view(&self, peer: IpAddr) -> Option<AdjRibOut> {
-        self.grouped_member_of(peer)?;
+    /// applies the same rule, so the two agree. Explain reads only the
+    /// explained prefix, so the view holds only that prefix's entries.
+    fn grouped_unicast_explain_view(&self, peer: IpAddr, prefix: &Prefix) -> Option<AdjRibOut> {
+        let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let mut view = AdjRibOut::new(peer);
         if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
             let baseline = self.pending_regroup_baseline.get(&peer)?;
-            for (key, route) in &baseline.unicast {
+            for (key, route) in baseline.unicast.iter().filter(|(key, _)| key.0 == *prefix) {
                 view.insert_with_next_hop(
                     route.clone(),
                     baseline.next_hop_overrides.get(key).cloned(),
@@ -2233,13 +2431,22 @@ impl RibManager {
             }
             return Some(view);
         }
-        for route in self.grouped_advertised_routes_iter(peer)? {
-            let action = self
-                .grouped_member_of(peer)
-                .and_then(|id| self.group_ribs.get(&id))
-                .and_then(|group| group.adv_entry(peer, &route.prefix, route.path_id))
-                .and_then(|entry| entry.nh.cloned());
-            view.insert_with_next_hop(route.clone(), action, &mut || {});
+        // The same member filters as `grouped_advertised_routes_iter`,
+        // applied to the staged entries of this one prefix.
+        let rejected = self.peer_unexportable.get(&peer);
+        let limits = self.outbound_prefix_limits.get(&peer);
+        for staged in group.table.iter_prefix(prefix) {
+            let Some(entry) = group.adv_entry_post_backstop(peer, prefix, staged.path_id) else {
+                continue;
+            };
+            let route = entry.route;
+            if rejected.is_some_and(|keys| {
+                keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+            }) || limits.is_some_and(|limits| !limits.admits_grouped(&route.prefix))
+            {
+                continue;
+            }
+            view.insert_with_next_hop(route.clone(), entry.nh.cloned(), &mut || {});
         }
         Some(view)
     }
@@ -2318,7 +2525,7 @@ impl RibManager {
             .peer_export_encoders
             .get(&peer)
             .map(|encoder| encoder.snapshot());
-        let grouped_rib_out = self.grouped_unicast_explain_view(peer);
+        let grouped_rib_out = self.grouped_unicast_explain_view(peer, &prefix);
 
         if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best {
             let mut explanation = Self::explain_single_best_prefix(

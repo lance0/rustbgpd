@@ -1509,6 +1509,8 @@ pub(in crate::manager) struct ExportGateTrace {
     pub gates: Vec<ExportGateStep>,
     /// Source peer of the selected best route (once the ladder reached it).
     pub best_peer: Option<IpAddr>,
+    /// Adj-RIB-In path ID of the selected unicast best route.
+    pub best_path_id: Option<u32>,
     /// Route type of the selected best route.
     pub best_route_type: Option<RouteType>,
     /// Export-policy modifications of the permitting chain verdict.
@@ -1602,6 +1604,7 @@ impl ExportGateTrace {
             next_hop: self.staged_next_hop,
             path_id: self.staged_path_id,
             route_peer: self.best_peer,
+            route_path_id: self.best_path_id,
             route_type: self.best_route_type,
             reasons,
             modifications: self.modifications,

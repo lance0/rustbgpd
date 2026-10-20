@@ -53,6 +53,11 @@ In particular:
   `Config.flowspec`, receive-side validation and its shared diagnostic fields,
   remote received-candidate mode, FlowSpec CLI surfaces, GR/LLGR guarantees,
   and dataplane enforcement remain outside that promise.
+- Unicast injection inventories `AddPath`, `DeletePath` and the
+  `ListPathExportDispositions` read-back. A committed disposition proves
+  outbound admission to a peer's Adj-RIB-Out, not remote receipt, and new
+  bounded reason codes are additive
+  ([export read-back](api.md#export-read-back)).
 - Files under `runtime_state_dir` remain outside the inventory; the
   contract's [on-disk runtime state](v1-stable-contract.md#on-disk-runtime-state)
   section records how each reader treats older and newer versions today.

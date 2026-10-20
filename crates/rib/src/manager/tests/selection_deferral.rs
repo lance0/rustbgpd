@@ -942,7 +942,10 @@ fn withheld_family_eor_waits_for_selection_release() {
     manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
         peer: target,
         session_id: 21,
-        families: vec![FAMILY],
+        families: vec![(
+            FAMILY,
+            crate::update::ExactExportErrorCode::MissingIpv6NextHop,
+        )],
     });
     let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
     manager.handle_update(peer_up_with_families(
