@@ -15,9 +15,11 @@ Daemon security support follows the Linux-only
 
 ## Reporting a Vulnerability
 
-Report security vulnerabilities via
-[GitHub private vulnerability reporting](https://github.com/lance0/rustbgpd/security/advisories/new),
-which is enabled on this repository.
+Report security vulnerabilities through either channel:
+
+- [GitHub private vulnerability reporting](https://github.com/lance0/rustbgpd/security/advisories/new),
+  which is enabled on this repository.
+- Email to [lance@lance0.com](mailto:lance@lance0.com).
 
 **Do not open a public issue for security vulnerabilities.**
 
@@ -27,14 +29,45 @@ which is enabled on this repository.
 - Session hijacking or injection
 - Denial of service via resource exhaustion
 - Memory safety violations
-- Authentication bypass (TCP MD5, GTSM)
+- Authentication bypass (TCP MD5, TCP-AO, GTSM)
+- gRPC authorization bypass (a principal invoking a method above its tier)
+
+### Severity
+
+Severity follows impact. A feature's alpha status does not lower it.
+
+- **Critical:** memory corruption reachable from the network, or an
+  unauthenticated client reaching `mutating` or `operator_only` gRPC
+  methods.
+- **High:**
+  - BGP peer, RPKI cache, or BFD input that crashes the daemon, hangs
+    it, or wedges the RIB.
+  - One peer's input resetting or stalling other peers' sessions.
+  - Unbounded memory growth from bounded input.
+  - Session hijacking or injection, including TCP MD5, TCP-AO, or GTSM
+    bypass.
+  - Import policy, RPKI/ASPA validation, or RFC 8212 bypass.
+  - A lower-tier gRPC principal performing a `mutating` or
+    `operator_only` action.
+  - Disclosure of secret material.
+- **Medium:**
+  - An incorrect reset confined to the sender's own session, for
+    example where RFC 7606 requires treat-as-withdraw. Effects on other
+    peers make it High.
+  - Disproportionate but bounded resource use.
+  - `sensitive_read` data exposed at `read` tier.
+  - Crashes in the offline `rbgp` capture converters or the separate
+    GoBGP bridge process.
+- **Low:** crashes from operator-controlled configuration, policy, or
+  dataset input; panics raised only by dev-profile debug assertions or
+  overflow checks; log-only disclosure.
 
 ### Response Timeline
 
 - **Acknowledgment:** Within 48 hours
-- **Critical vulnerabilities** (remote crash, session hijack): Patched
-  and released within 72 hours of confirmation
-- **Other vulnerabilities:** Patched in the next milestone release
+- **Critical and High vulnerabilities** (including remote crash and
+  session hijack): Patched and released within 72 hours of confirmation
+- **Medium and Low vulnerabilities:** Patched in the next milestone release
 
 ### CVE Assignment
 
