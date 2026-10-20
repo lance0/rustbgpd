@@ -89,12 +89,13 @@ const DEFAULT_LEASED_KEYS_PAGE_SIZE: usize = 100;
 
 /// The page token resuming a walk after `cursor`, bound to the walk's
 /// daemon incarnation and owner generation:
-/// `t1:<incarnation>:<sequence or ->:<key>`, where the key is
+/// `t1:<incarnation>:<sequence, or w<watermark> without a live lease>:<key>`,
+/// where the key is
 /// `u:<addr>/<len>:<path_id>` or `f:<afi>:<hex NLRI>`. Clients treat it as
 /// opaque.
 fn leased_keys_token(page: &LeasedKeysPage, cursor: &InjectedKeyCursor) -> String {
     let sequence = page.generation.map_or_else(
-        || "-".to_string(),
+        || format!("w{}", page.watermark),
         |generation| generation.sequence.to_string(),
     );
     let mut token = format!("t1:{}:{sequence}:", page.incarnation);
@@ -123,16 +124,20 @@ fn parse_leased_keys_token(token: &str) -> Result<LeasedKeysResume, Status> {
     let (incarnation, rest) = rest.split_once(':').ok_or_else(invalid)?;
     let (sequence, key) = rest.split_once(':').ok_or_else(invalid)?;
     let incarnation: u64 = incarnation.parse().map_err(|_| invalid())?;
-    let generation = match sequence {
-        "-" => None,
-        sequence => Some(LeaseGeneration {
-            incarnation,
-            sequence: sequence.parse().map_err(|_| invalid())?,
-        }),
+    let (generation, watermark) = match sequence.strip_prefix('w') {
+        Some(watermark) => (None, watermark.parse().map_err(|_| invalid())?),
+        None => (
+            Some(LeaseGeneration {
+                incarnation,
+                sequence: sequence.parse().map_err(|_| invalid())?,
+            }),
+            0,
+        ),
     };
     Ok(LeasedKeysResume {
         incarnation,
         generation,
+        watermark,
         after: parse_leased_key_cursor(key)?,
     })
 }
@@ -3959,12 +3964,13 @@ mod tests {
 
         for (token, owner) in [
             ("u:198.51.100.7/32:0", "ctl"),
-            ("t1:1:-:u:198.51.100.7/33:0", "ctl"),
+            ("t1:1:w1:u:198.51.100.7/33:0", "ctl"),
+            ("t1:1:-:u:198.51.100.7/32:0", "ctl"),
             ("t1:1:x:u:198.51.100.7/32:0", "ctl"),
-            ("t1:1:-:f:1:abc", "ctl"),
-            ("t1:1:-:f:65535:", "ctl"),
-            ("t1:1:-:f:1:", "ctl"),
-            ("t1:1:-:f:1:030481", "ctl"),
+            ("t1:1:w1:f:1:abc", "ctl"),
+            ("t1:1:w1:f:65535:", "ctl"),
+            ("t1:1:w1:f:1:", "ctl"),
+            ("t1:1:w1:f:1:030481", "ctl"),
             ("x", "ctl"),
             ("", ""),
             ("", "bad owner"),

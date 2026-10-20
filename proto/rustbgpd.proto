@@ -3644,8 +3644,10 @@ service InjectionService {
   // A walk is bound to the daemon process and the owner's generation at its
   // first page. A later page after a daemon restart, or after the owner's
   // lease expired or a new generation started, returns ABORTED and no keys;
-  // restart the walk with an empty page_token. A token from a previous
-  // daemon process is never accepted.
+  // restart the walk with an empty page_token. A walk that began with no
+  // live lease also aborts if any lease generation started since, even one
+  // that expired again. A token from a previous daemon process is never
+  // accepted.
   rpc ListLeasedKeys(ListLeasedKeysRequest) returns (ListLeasedKeysResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR

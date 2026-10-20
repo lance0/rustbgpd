@@ -144,9 +144,13 @@ impl RibManager {
     ) -> Option<LeasedKeysPage> {
         let n = page_size.clamp(1, super::ROUTE_QUERY_MAX_PAGE_SIZE);
         let incarnation = self.injection_leases.incarnation();
-        let generation = self.injection_leases.live_generation(owner);
+        let (generation, watermark) = self.injection_leases.live_generation(owner);
+        // With a live generation, it must be the same one. Without one, no
+        // generation may have started since, even one that expired again.
         if resume.is_some_and(|resume| {
-            resume.incarnation != incarnation || resume.generation != generation
+            resume.incarnation != incarnation
+                || resume.generation != generation
+                || (generation.is_none() && resume.watermark != watermark)
         }) {
             return None;
         }
@@ -154,6 +158,7 @@ impl RibManager {
         let empty = LeasedKeysPage {
             incarnation,
             generation,
+            watermark,
             ..LeasedKeysPage::default()
         };
         let Some(keys) = self.owner_keys.get(owner) else {

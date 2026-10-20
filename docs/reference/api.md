@@ -3354,8 +3354,10 @@ bound to, so an empty page is never ambiguous:
 A walk is bound to the daemon process and to the owner's generation at its
 first page. If the daemon restarts, or the owner's lease expires or a new
 generation starts, before a later page, that page returns `ABORTED` with no
-keys: start the walk again with an empty `page_token`. A token from a
-previous daemon process is never accepted. Adding or deleting keys does not
+keys: start the walk again with an empty `page_token`. A walk that began
+with no live lease also aborts if any lease generation started since, even
+one that expired again before the next page. A token from a previous daemon
+process is never accepted. Adding or deleting keys does not
 change the generation, so it does not abort a walk. Errors are always gRPC
 statuses, never an empty `OK` page.
 

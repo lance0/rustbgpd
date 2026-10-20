@@ -407,6 +407,7 @@ fn resume_after(page: &LeasedKeysPage) -> LeasedKeysResume {
     LeasedKeysResume {
         incarnation: page.incarnation,
         generation: page.generation,
+        watermark: page.watermark,
         after: page.rows.last().unwrap().cursor.clone(),
     }
 }
@@ -591,6 +592,29 @@ async fn a_leased_key_walk_refuses_a_restarted_daemon() {
     let mut restarted = manager_for_keys();
     assert_eq!(
         try_leased_keys(&mut restarted, "ctl", Some(resume_after(&walk)), 1),
+        None
+    );
+}
+
+/// A walk that began without a live lease refuses a continuation after a
+/// generation started and expired again in between, though neither page
+/// sees a live lease.
+///
+/// Break-to-red: comparing only the live generations lets the walk resume.
+#[tokio::test(start_paused = true)]
+async fn a_leased_key_walk_refuses_a_generation_that_came_and_went() {
+    let mut manager = manager_for_keys();
+    sync_leased(&mut manager, 1, "ctl", 5);
+    sync_leased(&mut manager, 2, "ctl", 5);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let walk = leased_keys(&mut manager, "ctl", 1);
+    assert!(walk.more && walk.generation.is_none());
+
+    sync_leased(&mut manager, 3, "ctl", 5);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert_eq!(manager.injection_leases().live_generation("ctl").0, None);
+    assert_eq!(
+        try_leased_keys(&mut manager, "ctl", Some(resume_after(&walk)), 1),
         None
     );
 }

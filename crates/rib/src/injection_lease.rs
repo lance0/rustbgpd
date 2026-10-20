@@ -119,6 +119,9 @@ pub struct LeasedKeysPage {
     /// The owner's live generation the walk is bound to; `None` when the
     /// owner has no live lease.
     pub generation: Option<LeaseGeneration>,
+    /// With no live generation, the next generation sequence when the walk
+    /// began; a generation started since, live or expired, aborts the walk.
+    pub watermark: u64,
 }
 
 /// Where a later page of a per-owner key walk resumes, and the state the
@@ -131,6 +134,8 @@ pub struct LeasedKeysResume {
     pub incarnation: u64,
     /// The owner's live generation at the first page.
     pub generation: Option<LeaseGeneration>,
+    /// The page's watermark, compared only when `generation` is `None`.
+    pub watermark: u64,
     /// Resume strictly after this key.
     pub after: InjectedKeyCursor,
 }
@@ -440,16 +445,20 @@ impl InjectionLeases {
             })
     }
 
-    /// `owner`'s generation if its lease is live now.
+    /// `owner`'s generation if its lease is live now, and the sequence the
+    /// next generation of any owner will take. The second value moves when
+    /// any generation starts, even one that expires again unobserved, so a
+    /// walk that saw no live lease can still tell that one came and went.
     #[must_use]
-    pub fn live_generation(&self, owner: &str) -> Option<LeaseGeneration> {
+    pub fn live_generation(&self, owner: &str) -> (Option<LeaseGeneration>, u64) {
         let state = self.lock();
         let now = Instant::now();
-        state
+        let live = state
             .owners
             .get(owner)
             .filter(|lease| now < lease.deadline)
-            .map(|lease| lease.generation)
+            .map(|lease| lease.generation);
+        (live, state.next_sequence)
     }
 
     /// Current leases, optionally for one owner, sorted by owner.
