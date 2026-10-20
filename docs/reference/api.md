@@ -3061,7 +3061,10 @@ session:
   withheld when the session establishes. The daemon logs one WARN per session
   and increments
   `bgp_export_family_suppressed_total{family="ipv6_unicast",reason="missing_ipv6_next_hop"}`.
-  `rustbgpd --check` warns about such neighbors before deployment.
+  `rustbgpd --check` warns about such neighbors before deployment. The peer
+  still receives an empty IPv6 unicast End-of-RIB with the initial table, so a
+  restarting peer does not wait out its graceful-restart selection deferral
+  for the family.
 - **iBGP and route-server clients:** the session keeps the family, and the
   exact-export preflight refuses each next-hop-self route with reason
   `missing_ipv6_next_hop` in `bgp_exact_export_rejections_total`.

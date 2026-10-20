@@ -390,6 +390,100 @@ class MetricFloorTests(unittest.TestCase):
             "pinned metric bgp_rib_adj_out_prefixes label family values ['ipv4_unicast', 'ipv6_unicast']",
         )
 
+    def replaced(self, text, old, new, count=1):
+        self.assertEqual(text.count(old), count, old)
+        return text.replace(old, new)
+
+    def test_max_prefix_and_session_state_values_are_traced(self):
+        series = {entry["name"]: entry for entry in self.inventory["metrics"]["stable_series"]}
+        self.assertEqual(
+            series["bgp_max_prefix_usage"]["label_values"]["stage"], ["accepted", "received"]
+        )
+        self.assertIn("rtc", series["bgp_max_prefix_blocked_total"]["label_values"]["family"])
+        self.assertIn(
+            "open_sent", series["bgp_peer_session_state"]["label_values"]["state"]
+        )
+        # Each edit is seeded at one emission path; the first series it feeds fails.
+        metric_cases = [
+            # The pass-through helper swaps two labels.
+            ("    [peer, family, stage]", "    [peer, stage, family]", 1,
+             "pinned metric bgp_max_prefix_blocked_total label family values"),
+            # The helper no longer returns an array the checker can map.
+            ("    [peer, family, stage]", "    labels_of(peer, family, stage)", 1,
+             "pinned metric bgp_max_prefix_blocked_total label family values"),
+            # A `let`-bound call to an unknown helper is no evidence.
+            ("let labels = max_prefix_label_values(peer, family, stage);",
+             "let labels = other_labels(peer, family, stage);", 2,
+             "pinned metric bgp_max_prefix_headroom label family values"),
+            # A later `let` shadows the helper-bound labels with a literal stage.
+            ("let labels = max_prefix_label_values(peer, family, stage);",
+             "let labels = max_prefix_label_values(peer, family, stage);\n"
+             '        let labels = [labels[0], labels[1], "pre_policy"];', 2,
+             "pinned metric bgp_max_prefix_headroom label family values"),
+            # The helper shadows a parameter before returning it: the whole site is no evidence.
+            ("    [peer, family, stage]", '    let stage = "pre_policy";\n    [peer, family, stage]', 1,
+             "pinned metric bgp_max_prefix_blocked_total label family values"),
+            ("    [peer, family, stage]", "    let family = stage;\n    [peer, family, stage]", 1,
+             "pinned metric bgp_max_prefix_blocked_total label family values"),
+            # The setter rebinds a helper argument: direct call, then `let`-bound array.
+            ("pub fn record_max_prefix_blocked(&self, peer: &str, family: &str, stage: &str) {\n",
+             "pub fn record_max_prefix_blocked(&self, peer: &str, family: &str, stage: &str) {\n"
+             '        let stage = "pre_policy";\n', 1,
+             "pinned metric bgp_max_prefix_blocked_total label stage values ['accepted', 'received']"),
+            ("let labels = max_prefix_label_values(peer, family, stage);\n        let usage =",
+             'let stage = "pre_policy";\n'
+             "        let labels = max_prefix_label_values(peer, family, stage);\n        let usage =", 1,
+             "pinned metric bgp_max_prefix_headroom label stage values ['accepted', 'received']"),
+            # The loop variable is shadowed before the emission.
+            ("for state in SESSION_STATES {\n            if state != current {",
+             'for state in SESSION_STATES {\n            let state = "renamed";\n'
+             "            if state != current {", 1,
+             "pinned metric bgp_peer_session_state label state values ['active'"),
+            # An earlier `return` in the helper bypasses the tail array.
+            ("    [peer, family, stage]",
+             '    if stage == "received" {\n        return [peer, family, "pre_policy"];\n    }\n'
+             "    [peer, family, stage]", 1,
+             "pinned metric bgp_max_prefix_blocked_total label family values"),
+            # A renamed state in the constant the one-hot loop iterates.
+            ('"open_sent",', '"opensent",', 1,
+             "pinned metric bgp_peer_session_state label state values ['open_sent']"),
+            # A loop the checker cannot resolve to a constant is no evidence.
+            ("for state in SESSION_STATES {", "for state in SESSION_STATES.iter().copied() {", 2,
+             "pinned metric bgp_peer_session_state label state values ['active'"),
+        ]
+        for old, new, count, expected in metric_cases:
+            with self.subTest(old=old, new=new):
+                source = self.replaced(self.metric_source, old, new, count)
+                self.rejected(
+                    lambda source=source: checker.check_metrics(
+                        self.inventory, source, self.emission_sources
+                    ),
+                    expected,
+                )
+        # Renamed values in the label methods callers pass to the helper.
+        session = "crates/transport/src/session/mod.rs"
+        emission_cases = [
+            (session, 'Self::Ipv4Received | Self::Ipv6Received => "received"',
+             'Self::Ipv4Received | Self::Ipv6Received => "pre_policy"',
+             "pinned metric bgp_max_prefix_blocked_total label stage values ['received']"),
+            # Reached only through the `Self::Family(family) => family.label()` arm.
+            ("crates/transport/src/config.rs", 'Self::Rtc => "rtc"', 'Self::Rtc => "rt_constrain"',
+             "pinned metric bgp_max_prefix_blocked_total label family values ['rtc']"),
+            # The match is discarded; the method returns another literal.
+            (session, '            _ => "accepted",\n        }\n',
+             '            _ => "accepted",\n        };\n        "pre_policy"\n',
+             "pinned metric bgp_max_prefix_blocked_total label stage values ['accepted', 'received']"),
+            # A second same-named label method in the crate makes `scope.stage()` ambiguous.
+            (session, "impl MaxPrefixScope {",
+             "fn stage(self) -> &'static str { \"other\" }\nimpl MaxPrefixScope {",
+             "pinned metric bgp_max_prefix_blocked_total label stage values ['accepted', 'received']"),
+        ]
+        for path, old, new, expected in emission_cases:
+            with self.subTest(path=path, new=new):
+                sources = dict(self.emission_sources)
+                sources[path] = self.replaced(sources[path], old, new)
+                self.rejected(lambda sources=sources: self.check(self.inventory, sources), expected)
+
     def test_floor_series_drift_fails(self):
         inventory = copy.deepcopy(self.inventory)
         series = inventory["metrics"]["stable_series"]
