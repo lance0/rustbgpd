@@ -100,6 +100,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp flowspec add` and `delete` already do. The
   [API reference](docs/reference/api.md#unicast-injection-contract)
   describes the outcomes.
+- Each tagged release publishes the exact tagged `proto/rustbgpd.proto` as the
+  `rustbgpd.proto` release asset, with a `rustbgpd.proto.sha256` checksum, so
+  controllers can pin generated stubs to a daemon release instead of
+  hand-vendoring the file. The
+  [API reference](docs/reference/api.md#pinning-the-proto-to-a-release) has
+  the download, verify and regenerate recipe. Publishing the file promotes no
+  alpha field into the v1 contract.
 
 ### Changed
 
@@ -215,6 +222,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_update_malformed_causes_total{reason="as_set_prohibited"}` counts it.
   The [route-server cookbook](docs/cookbook/route-server.md)
   troubleshooting text now says so.
+- The [v1 FlowSpec controller inventory](docs/reference/v1-stable-contract.md#flowspec-controller-boundary)
+  now pins `FlowSpecAction.traffic_rate_packets` and
+  `FlowSpecTrafficRatePackets`, both on `AddFlowSpec` input and on the typed
+  `ListFlowSpecRoutes` read-back. This pins the API shape only and adds no
+  forwarding or enforcement guarantee; action communities are still echoed
+  raw in `extended_communities`. The `0.ASN:value` read-back of a 4-octet-AS
+  redirect whose ASN fits in 16 bits is now documented as RFC 5396 asdot+,
+  the spelling that keeps the 4-octet encoding through a read and re-inject.
 
 ### Removed
 
@@ -305,9 +320,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   redirect forms (RFC 7674) and traffic-rate-packets as typed `actions`;
   previously they appeared only as raw `extended_communities`. `AddFlowSpec`
   accepts all three redirect forms in `FlowSpecRedirect.route_target`
-  (`ASN:value`, `a.b.c.d:value`, or RFC 5396 asdot `high.low:value`), where it
-  accepted only the 2-octet-AS form, and the new
-  `FlowSpecAction.traffic_rate_packets` variant, outside the v1 inventory.
+  (`ASN:value`, `a.b.c.d:value`, or RFC 5396 asdot+ `high.low:value`), where
+  it accepted only the 2-octet-AS form, and the new
+  `FlowSpecAction.traffic_rate_packets` variant, which the v1 controller
+  inventory also pins in this release (see Changed).
   `rbgp flowspec` shows and accepts it as `rate-pps=N`, and now shows both
   rates exactly: a fractional rate such as `rate=0.25` was displayed
   rounded, as `rate=0`, which reads as discard. Action communities
