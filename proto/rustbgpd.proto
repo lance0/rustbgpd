@@ -3751,7 +3751,8 @@ message FlowSpecRouteEntry {
   repeated uint32 communities = 6;
   repeated uint64 extended_communities = 7;
   // Same as Route.injection_owner, lease_generation and lease_remaining_ms,
-  // for a rule injected with AddLeasedFlowSpec.
+  // for a rule injected with AddLeasedFlowSpec. Set only in the
+  // received_peer_address "0.0.0.0" view of ListFlowSpecRoutes.
   string injection_owner = 8;
   LeaseGeneration lease_generation = 9;
   optional uint32 lease_remaining_ms = 10;

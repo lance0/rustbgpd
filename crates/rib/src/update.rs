@@ -617,6 +617,8 @@ pub struct ReceivedFlowSpecRoute {
     pub reason: Option<&'static str>,
     /// Whether validation against the current unicast dependencies is pending.
     pub pending: bool,
+    /// ADR-0141 lease tag of a locally injected rule, captured with the row.
+    pub injection: Option<crate::injection_lease::InjectionTag>,
 }
 
 /// Stable identity of one route tested by the exact outbound encoder.
@@ -1786,6 +1788,9 @@ pub struct RoutePage {
     pub has_more: bool,
     /// Mutation version that must accompany the next continuation request.
     pub version: RoutePageVersion,
+    /// ADR-0141 lease tags of locally injected rows, aligned with `routes`
+    /// and captured in the same RIB turn; empty when no row is owned.
+    pub injection: Vec<Option<crate::injection_lease::InjectionTag>>,
 }
 
 /// One bounded family page; only returned rows are cloned.

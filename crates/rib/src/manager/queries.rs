@@ -299,6 +299,7 @@ pub(super) fn page_routes<'a>(
         total,
         has_more,
         version: RoutePageVersion::default(),
+        injection: Vec::new(),
     }
 }
 /// Full unordered scope scan, O(page) retained references and clones.
@@ -399,6 +400,7 @@ fn page_ordered_routes<'a>(
         total,
         has_more,
         version: RoutePageVersion::default(),
+        injection: Vec::new(),
     }
 }
 
@@ -472,6 +474,7 @@ where
         total,
         has_more,
         version: RoutePageVersion::default(),
+        injection: Vec::new(),
     }
 }
 
@@ -1136,7 +1139,9 @@ impl RibManager {
                 // The baseline is unordered, so each page scans it whole;
                 // it exists only until the member's next successful resync.
                 let page = page_routes(baseline.unicast.values(), filter, after, page_size);
-                let _ = reply.send(Ok(RoutePage { version, ..page }));
+                let mut page = RoutePage { version, ..page };
+                self.tag_injected_rows(&mut page);
+                let _ = reply.send(Ok(page));
                 return;
             }
         }
@@ -1252,7 +1257,8 @@ impl RibManager {
                 }
             }
         };
-        let page = RoutePage { version, ..page };
+        let mut page = RoutePage { version, ..page };
+        self.tag_injected_rows(&mut page);
         if reply.send(Ok(page)).is_err() {
             warn!("query caller dropped before receiving response");
         }

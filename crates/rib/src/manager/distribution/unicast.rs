@@ -1775,14 +1775,13 @@ impl RibManager {
     /// and the lease join or start happen in this turn, before anything
     /// changes; a rejection leaves the RIB, the lease table and the wire as
     /// they were (ADR-0141).
-    fn inject_local_route(
+    pub(in crate::manager) fn inject_local_route(
         &mut self,
         route: crate::route::Route,
         lease: Option<(&str, u32)>,
     ) -> Result<(InjectOutcome, Option<LeaseGeneration>), RibCommandError> {
         let prefix = route.prefix;
         let mut route = route;
-        self.attr_intern.intern(&mut route.attributes);
         // Validate against the current VRP table, as session routes are on
         // insert and as cache revalidation later does for the local
         // Adj-RIB-In; otherwise a replacement would reset the origin state to
@@ -1791,32 +1790,27 @@ impl RibManager {
             route.validation_state = validate_route_rpki(&route, table);
         }
         let key = InjectedKey::Unicast(prefix, route.path_id);
+        let present = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get(&prefix, route.path_id).is_some());
+        // Ownership and capacity are decided before anything changes, so a
+        // refused add leaves the RIB, the lease table and the attribute
+        // intern table as they were.
+        let generation = if let Some((owner, lease_seconds)) = lease {
+            Some(
+                self.admit_injected_lease(&key, present, owner, lease_seconds)?
+                    .generation,
+            )
+        } else {
+            self.check_injected_owner(&key, "")?;
+            None
+        };
+        self.attr_intern.intern(&mut route.attributes);
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-        let present = rib.get(&prefix, route.path_id).is_some();
-        let generation = if let Some((owner, lease_seconds)) = lease {
-            let generation = self
-                .injection_leases
-                .admit_leased_add(
-                    owner,
-                    lease_seconds,
-                    &key,
-                    present,
-                    tokio::time::Instant::now(),
-                )
-                .map_err(lease_rejection)?;
-            self.metrics.set_injection_leases(crate::manager::gauge_val(
-                self.injection_leases.owner_count(),
-            ));
-            Some(generation)
-        } else {
-            self.injection_leases
-                .check_owner(&key, "")
-                .map_err(lease_rejection)?;
-            None
-        };
         // Decide from the local Adj-RIB-In, not Loc-RIB, as for FlowSpec: a
         // received route that out-selects the local one leaves Loc-RIB
         // unchanged even when the local route really was replaced. These are
@@ -1868,21 +1862,25 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
     ) {
         let key = InjectedKey::Unicast(prefix, path_id);
+        let present = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get(&prefix, path_id).is_some());
+        if !override_owner
+            && present
+            && let Err(rejection) = self.check_injected_owner(&key, owner)
+        {
+            let _ = reply.send(Err(rejection));
+            return;
+        }
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-        if !override_owner
-            && rib.get(&prefix, path_id).is_some()
-            && let Err(rejection) = self.injection_leases.check_owner(&key, owner)
-        {
-            let _ = reply.send(Err(lease_rejection(rejection)));
-            return;
-        }
         if rib.withdraw(&prefix, path_id) {
-            self.injection_leases.forget(&key);
-            debug!(%prefix, "withdrawn injected route");
             let unicast_lens = rib.unicast_lens();
+            self.forget_injected(&key);
+            debug!(%prefix, "withdrawn injected route");
             self.finish_local_unicast_withdrawals(&HashSet::from([prefix]), unicast_lens);
             let _ = reply.send(Ok(true));
         } else if allow_missing {

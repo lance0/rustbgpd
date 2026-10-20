@@ -1,16 +1,19 @@
 //! Owner-scoped leases on controller-injected routes (ADR-0141).
 //!
-//! One daemon-wide [`InjectionLeases`](crate::injection_lease::InjectionLeases) table is shared by every
-//! `InjectionService` instance, the RIB manager and the expiry task. It holds
-//! each owner's live lease, the pending-expiry queue, and the ownership tag of
-//! every owned local key. Only RIB turns tag or untag keys, so the tags change
-//! in the same turn as the local Adj-RIB-In. Renewal and lease listing touch
-//! only this table, never the RIB actor, so a backlogged RIB cannot delay a
-//! renewal into an expiry. Every operation under the lock is O(1), or
-//! O(live owners) for the expiry tick; no lock is held across an `.await`.
+//! One daemon-wide [`InjectionLeases`](crate::injection_lease::InjectionLeases)
+//! table is shared by every `InjectionService` instance, the RIB manager and
+//! the expiry task. It holds only bounded owner-level state: each owner's
+//! lease and the pending-expiry queue, at most [`MAX_LIVE_OWNERS`] live
+//! entries. Which local keys an owner holds is indexed in the RIB actor, so
+//! sweeping a large owner's routes never holds this lock. Renewal and lease
+//! listing touch only this table, never the RIB actor, so a backlogged RIB
+//! cannot delay a renewal into an expiry. Every operation samples the clock
+//! after taking the lock, so a renewal that waited for the lock past the
+//! deadline is judged at the time it is applied, and none holds the lock
+//! across an `.await`.
 
+use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
-use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -76,15 +79,14 @@ pub struct LeaseRow {
     pub remaining: Duration,
 }
 
-/// Ownership read-back for one local key.
+/// The owner and generation a local key is tagged with, captured in the RIB
+/// turn that reads or changes the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyLease {
-    /// Owner of the key.
+pub struct InjectionTag {
+    /// Lease owner.
     pub owner: Arc<str>,
     /// Generation the key is tagged with.
     pub generation: LeaseGeneration,
-    /// Time to the deadline; 0 when expired and withdrawal is pending.
-    pub remaining: Duration,
 }
 
 /// Why a leased add or an ownership check was refused. The table, the RIB
@@ -145,12 +147,10 @@ struct LiveLease {
 struct State {
     next_sequence: u64,
     /// Current lease per owner. A lease is live iff `now < deadline`; an
-    /// entry past its deadline stays here until the tick or a leased add
-    /// moves it to `pending`.
+    /// entry past its deadline stays here until the tick, or a successful
+    /// leased add for the same owner, moves it to `pending`.
     owners: HashMap<Arc<str>, LiveLease>,
     pending: Vec<ExpiredLease>,
-    owned: HashMap<InjectedKey, (Arc<str>, LeaseGeneration)>,
-    owner_keys: HashMap<Arc<str>, HashSet<InjectedKey>>,
 }
 
 impl State {
@@ -162,6 +162,13 @@ impl State {
                 deadline: lease.deadline,
             });
         }
+    }
+
+    fn live_count(&self, now: Instant) -> usize {
+        self.owners
+            .values()
+            .filter(|lease| now < lease.deadline)
+            .count()
     }
 }
 
@@ -210,157 +217,104 @@ impl InjectionLeases {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The owner and generation `key` is tagged with, if owned.
-    #[must_use]
-    pub fn owner_of(&self, key: &InjectedKey) -> Option<(Arc<str>, LeaseGeneration)> {
-        self.lock().owned.get(key).cloned()
-    }
-
-    /// Admit a leased add of `key` for `owner` at `now`, in the RIB turn that
-    /// commits it: reject an ownership mismatch, then join the owner's live
-    /// lease (extending it to `max(deadline, now + lease_seconds)`) or start
-    /// a new generation, then tag the key. `key_present` says whether the
-    /// local Adj-RIB-In already holds the key; a present unowned key is never
-    /// adopted.
+    /// Join `owner`'s live lease, extending it to
+    /// `max(deadline, now + lease_seconds)`, or start a new generation. Runs
+    /// in the RIB turn that commits the leased add, after the RIB has checked
+    /// the key's ownership.
     ///
     /// # Errors
     ///
-    /// [`LeaseRejection`] with no change to the table.
-    ///
-    /// # Panics
-    ///
-    /// Never: the owner's entry is joined or inserted under the same lock
-    /// before it is read back.
-    pub fn admit_leased_add(
+    /// [`LeaseRejection::OwnerCap`] when a new owner would exceed
+    /// [`MAX_LIVE_OWNERS`] live leases; nothing changes.
+    pub fn admit(&self, owner: &str, lease_seconds: u32) -> Result<InjectionTag, LeaseRejection> {
+        self.admit_at(owner, lease_seconds, Instant::now)
+    }
+
+    fn admit_at(
         &self,
         owner: &str,
         lease_seconds: u32,
-        key: &InjectedKey,
-        key_present: bool,
-        now: Instant,
-    ) -> Result<LeaseGeneration, LeaseRejection> {
+        clock: impl FnOnce() -> Instant,
+    ) -> Result<InjectionTag, LeaseRejection> {
         let mut state = self.lock();
-        match state.owned.get(key) {
-            Some((holder, _)) if &**holder != owner => {
-                return Err(LeaseRejection::OwnerMismatch(format!(
-                    "key is held by owner {holder:?}"
-                )));
-            }
-            None if key_present => {
-                return Err(LeaseRejection::OwnerMismatch(
-                    "key is held by no owner; delete it before a leased add".to_string(),
-                ));
-            }
-            _ => {}
-        }
+        let now = clock();
         let lease_for = Duration::from_secs(u64::from(lease_seconds));
-        let live = state
-            .owners
-            .get(owner)
-            .is_some_and(|lease| now < lease.deadline);
-        let generation = if live {
-            let lease = state.owners.get_mut(owner).expect("checked live above");
+        if let Some((name, lease)) = state.owners.get_key_value(owner)
+            && now < lease.deadline
+        {
+            let tag = InjectionTag {
+                owner: Arc::clone(name),
+                generation: lease.generation,
+            };
+            let lease = state.owners.get_mut(owner).expect("present above");
             let extended = now + lease_for;
             if extended > lease.deadline {
                 lease.deadline = extended;
                 lease.lease_seconds = lease_seconds;
             }
-            lease.generation
-        } else {
-            state.reap(owner);
-            if state.owners.len() >= MAX_LIVE_OWNERS {
-                return Err(LeaseRejection::OwnerCap);
-            }
-            let generation = LeaseGeneration {
-                incarnation: self.incarnation,
-                sequence: state.next_sequence,
-            };
-            state.next_sequence += 1;
-            state.owners.insert(
-                Arc::from(owner),
-                LiveLease {
-                    generation,
-                    deadline: now + lease_for,
-                    lease_seconds,
-                },
-            );
-            tracing::info!(
-                owner,
-                incarnation = generation.incarnation,
-                sequence = generation.sequence,
-                lease_seconds,
-                "injection lease generation started"
-            );
-            generation
+            drop(state);
+            self.changed.notify_one();
+            return Ok(tag);
+        }
+        // Capacity counts live leases by deadline: unreaped expired records
+        // do not hold a slot, and a rejection moves nothing.
+        if state.live_count(now) >= MAX_LIVE_OWNERS {
+            return Err(LeaseRejection::OwnerCap);
+        }
+        state.reap(owner);
+        let generation = LeaseGeneration {
+            incarnation: self.incarnation,
+            sequence: state.next_sequence,
         };
-        let owner: Arc<str> = Arc::clone(
-            state
-                .owners
-                .get_key_value(owner)
-                .expect("owner was just inserted or joined")
-                .0,
+        state.next_sequence += 1;
+        let name: Arc<str> = Arc::from(owner);
+        state.owners.insert(
+            Arc::clone(&name),
+            LiveLease {
+                generation,
+                deadline: now + lease_for,
+                lease_seconds,
+            },
         );
-        state
-            .owned
-            .insert(key.clone(), (Arc::clone(&owner), generation));
-        state
-            .owner_keys
-            .entry(owner)
-            .or_default()
-            .insert(key.clone());
         drop(state);
         self.changed.notify_one();
-        Ok(generation)
+        tracing::info!(
+            owner,
+            incarnation = generation.incarnation,
+            sequence = generation.sequence,
+            lease_seconds,
+            "injection lease generation started"
+        );
+        Ok(InjectionTag {
+            owner: name,
+            generation,
+        })
     }
 
-    /// Check that `owner` (`""` for unowned) may delete or replace `key`.
-    ///
-    /// # Errors
-    ///
-    /// [`LeaseRejection::OwnerMismatch`] when the key's owner differs.
-    pub fn check_owner(&self, key: &InjectedKey, owner: &str) -> Result<(), LeaseRejection> {
-        let state = self.lock();
-        let holder = state.owned.get(key).map_or("", |(holder, _)| &**holder);
-        if holder == owner {
-            Ok(())
-        } else if holder.is_empty() {
-            Err(LeaseRejection::OwnerMismatch(format!(
-                "key is held by no owner, not {owner:?}"
-            )))
-        } else {
-            Err(LeaseRejection::OwnerMismatch(format!(
-                "key is held by owner {holder:?}"
-            )))
-        }
-    }
-
-    /// Drop `key`'s ownership tag after the RIB removed it.
-    pub fn forget(&self, key: &InjectedKey) {
-        let mut state = self.lock();
-        if let Some((owner, _)) = state.owned.remove(key)
-            && let Some(keys) = state.owner_keys.get_mut(&owner)
-        {
-            keys.remove(key);
-            if keys.is_empty() {
-                state.owner_keys.remove(&owner);
-            }
-        }
-    }
-
-    /// Renew `owner`'s lease if `generation` is live at `now`, setting the
-    /// deadline to exactly `now + lease_seconds` (which may shorten it).
-    /// Returns `None`, changing nothing, for an unknown owner, a superseded
-    /// generation or an expired lease, reaped or not. A renewal at exactly
-    /// the deadline loses.
+    /// Renew `owner`'s lease if `generation` is live, setting the deadline to
+    /// exactly `now + lease_seconds` (which may shorten it). Returns `None`,
+    /// changing nothing, for an unknown owner, a superseded generation or an
+    /// expired lease, reaped or not. A renewal at exactly the deadline loses;
+    /// `now` is read after the lock is taken.
     #[must_use]
     pub fn renew(
         &self,
         owner: &str,
         generation: LeaseGeneration,
         lease_seconds: u32,
-        now: Instant,
+    ) -> Option<Duration> {
+        self.renew_at(owner, generation, lease_seconds, Instant::now)
+    }
+
+    fn renew_at(
+        &self,
+        owner: &str,
+        generation: LeaseGeneration,
+        lease_seconds: u32,
+        clock: impl FnOnce() -> Instant,
     ) -> Option<Duration> {
         let mut state = self.lock();
+        let now = clock();
         let lease = state.owners.get_mut(owner)?;
         if lease.generation != generation || now >= lease.deadline {
             return None;
@@ -373,29 +327,26 @@ impl InjectionLeases {
         Some(lease_for)
     }
 
-    /// Ownership and remaining lease for `key`, for read-back.
+    /// Time left on `tag`'s generation; zero once it has expired or been
+    /// superseded, while its withdrawal is pending.
     #[must_use]
-    pub fn key_lease(&self, key: &InjectedKey, now: Instant) -> Option<KeyLease> {
+    pub fn remaining(&self, tag: &InjectionTag) -> Duration {
         let state = self.lock();
-        let (owner, generation) = state.owned.get(key)?;
-        let remaining = state
+        let now = Instant::now();
+        state
             .owners
-            .get(owner)
-            .filter(|lease| lease.generation == *generation)
+            .get(&tag.owner)
+            .filter(|lease| lease.generation == tag.generation)
             .map_or(Duration::ZERO, |lease| {
                 lease.deadline.saturating_duration_since(now)
-            });
-        Some(KeyLease {
-            owner: Arc::clone(owner),
-            generation: *generation,
-            remaining,
-        })
+            })
     }
 
     /// Current leases, optionally for one owner, sorted by owner.
     #[must_use]
-    pub fn list(&self, owner: Option<&str>, now: Instant) -> Vec<LeaseRow> {
+    pub fn list(&self, owner: Option<&str>) -> Vec<LeaseRow> {
         let state = self.lock();
+        let now = Instant::now();
         let mut rows: Vec<LeaseRow> = state
             .owners
             .iter()
@@ -411,17 +362,19 @@ impl InjectionLeases {
         rows
     }
 
-    /// Owners with a lease in the table, live or awaiting the tick.
+    /// Owners with a live lease now.
     #[must_use]
-    pub fn owner_count(&self) -> usize {
-        self.lock().owners.len()
+    pub fn live_owner_count(&self) -> usize {
+        let state = self.lock();
+        state.live_count(Instant::now())
     }
 
-    /// Move every lease whose deadline is `<= now` to the pending queue,
-    /// drain the queue, and return it with the next deadline still ahead.
+    /// Move every lease whose deadline has passed to the pending queue, drain
+    /// the queue, and return it with the next deadline still ahead.
     #[must_use]
-    pub fn take_expired(&self, now: Instant) -> (Vec<ExpiredLease>, Option<Instant>) {
+    pub fn take_expired(&self) -> (Vec<ExpiredLease>, Option<Instant>) {
         let mut state = self.lock();
+        let now = Instant::now();
         let dead: Vec<Arc<str>> = state
             .owners
             .iter()
@@ -435,36 +388,11 @@ impl InjectionLeases {
         (std::mem::take(&mut state.pending), next)
     }
 
-    /// Untag and return every key of `expired.owner` tagged at or below its
-    /// generation. Keys a newer generation retagged are kept.
-    #[must_use]
-    pub fn take_expired_keys(&self, expired: &ExpiredLease) -> Vec<InjectedKey> {
-        let mut state = self.lock();
-        let Some(keys) = state.owner_keys.get(&expired.owner) else {
-            return Vec::new();
-        };
-        let dead: Vec<InjectedKey> = keys
-            .iter()
-            .filter(|key| {
-                state.owned.get(*key).is_some_and(|(_, tag)| {
-                    tag.incarnation == expired.generation.incarnation
-                        && tag.sequence <= expired.generation.sequence
-                })
-            })
-            .cloned()
-            .collect();
-        for key in &dead {
-            state.owned.remove(key);
-        }
-        if let Some(keys) = state.owner_keys.get_mut(&expired.owner) {
-            for key in &dead {
-                keys.remove(key);
-            }
-            if keys.is_empty() {
-                state.owner_keys.remove(&expired.owner);
-            }
-        }
-        dead
+    /// Whether the lock is free, for tests that prove a code path does not
+    /// hold it.
+    #[cfg(test)]
+    pub(crate) fn is_unlocked(&self) -> bool {
+        self.state.try_lock().is_ok()
     }
 
     /// Drive expiry until cancelled: sleep to the earliest deadline (or until
@@ -479,7 +407,7 @@ impl InjectionLeases {
         mut cancel: oneshot::Receiver<()>,
     ) {
         loop {
-            let (expired, next) = self.take_expired(Instant::now());
+            let (expired, next) = self.take_expired();
             if !expired.is_empty() {
                 tokio::select! {
                     biased;
@@ -510,18 +438,9 @@ impl InjectionLeases {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
-    use rustbgpd_wire::Ipv4Prefix;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use super::*;
-
-    fn key(octet: u8) -> InjectedKey {
-        InjectedKey::Unicast(
-            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32)),
-            0,
-        )
-    }
 
     #[test]
     fn validation_bounds() {
@@ -543,44 +462,35 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn adds_never_shorten_and_renew_sets_exactly() {
         let table = InjectionLeases::new();
-        let now = Instant::now();
-        let g = table
-            .admit_leased_add("ctl", 60, &key(1), false, now)
-            .unwrap();
-        let joined = table
-            .admit_leased_add("ctl", 5, &key(2), false, now)
-            .unwrap();
+        let g = table.admit("ctl", 60).unwrap();
+        let joined = table.admit("ctl", 5).unwrap();
         assert_eq!(joined, g);
         assert_eq!(
-            table.list(Some("ctl"), now)[0].remaining,
+            table.list(Some("ctl"))[0].remaining,
             Duration::from_secs(60)
         );
-        assert_eq!(table.renew("ctl", g, 5, now), Some(Duration::from_secs(5)));
         assert_eq!(
-            table.list(Some("ctl"), now)[0].remaining,
-            Duration::from_secs(5)
+            table.renew("ctl", g.generation, 5),
+            Some(Duration::from_secs(5))
         );
+        assert_eq!(table.list(Some("ctl"))[0].remaining, Duration::from_secs(5));
     }
 
     #[tokio::test(start_paused = true)]
     async fn renewal_at_the_deadline_loses_and_never_resurrects() {
         let table = InjectionLeases::new();
         let start = Instant::now();
-        let g = table
-            .admit_leased_add("ctl", 5, &key(1), false, start)
-            .unwrap();
+        let g = table.admit("ctl", 5).unwrap().generation;
         let deadline = start + Duration::from_secs(5);
-        assert!(
-            table
-                .renew("ctl", g, 5, deadline - Duration::from_nanos(1))
-                .is_some()
-        );
-        let deadline = deadline - Duration::from_nanos(1) + Duration::from_secs(5);
-        assert_eq!(table.renew("ctl", g, 5, deadline), None);
-        let (expired, _) = table.take_expired(deadline);
+        let just_before = deadline - Duration::from_nanos(1);
+        assert!(table.renew_at("ctl", g, 5, || just_before).is_some());
+        let deadline = just_before + Duration::from_secs(5);
+        assert_eq!(table.renew_at("ctl", g, 5, || deadline), None);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let (expired, _) = table.take_expired();
         assert_eq!(expired.len(), 1);
-        assert_eq!(table.renew("ctl", g, 5, deadline), None);
-        assert_eq!(table.list(None, deadline), Vec::new());
+        assert_eq!(table.renew("ctl", g, 5), None);
+        assert_eq!(table.list(None), Vec::new());
     }
 
     #[test]
@@ -588,38 +498,89 @@ mod tests {
         let a = InjectionLeases::new();
         let b = InjectionLeases::new();
         assert_ne!(a.incarnation(), b.incarnation());
-        let now = Instant::now();
-        let ga = a.admit_leased_add("ctl", 30, &key(1), false, now).unwrap();
-        let gb = b.admit_leased_add("ctl", 30, &key(1), false, now).unwrap();
+        let ga = a.admit("ctl", 30).unwrap().generation;
+        let gb = b.admit("ctl", 30).unwrap().generation;
         assert_eq!(ga.sequence, gb.sequence);
-        assert_eq!(b.renew("ctl", ga, 30, now), None);
-        assert!(b.renew("ctl", gb, 30, now).is_some());
+        assert_eq!(b.renew("ctl", ga, 30), None);
+        assert!(b.renew("ctl", gb, 30).is_some());
     }
 
-    #[test]
-    fn owner_cap_and_mismatches_change_nothing() {
-        let now = Instant::now();
+    /// The cap counts live leases by deadline, so expired records awaiting
+    /// the tick do not refuse a new owner; a refusal moves nothing.
+    #[tokio::test(start_paused = true)]
+    async fn owner_cap_counts_live_leases_and_a_rejection_mutates_nothing() {
         let table = InjectionLeases::new();
         for i in 0..MAX_LIVE_OWNERS {
-            let octet = u8::try_from(i).unwrap();
-            table
-                .admit_leased_add(&format!("o{i}"), 30, &key(octet), false, now)
-                .unwrap();
+            table.admit(&format!("o{i}"), 5).unwrap();
         }
-        assert_eq!(
-            table.admit_leased_add("late", 30, &key(200), false, now),
-            Err(LeaseRejection::OwnerCap)
-        );
-        assert_eq!(table.owner_of(&key(200)), None);
-        assert_eq!(table.owner_count(), MAX_LIVE_OWNERS);
-        assert!(matches!(
-            table.admit_leased_add("o1", 30, &key(0), false, now),
-            Err(LeaseRejection::OwnerMismatch(_))
-        ));
-        assert!(matches!(
-            table.admit_leased_add("o0", 30, &key(201), true, now),
-            Err(LeaseRejection::OwnerMismatch(_))
-        ));
-        assert_eq!(table.owner_of(&key(201)), None);
+        assert_eq!(table.admit("late", 30), Err(LeaseRejection::OwnerCap));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        // All 64 expired but none was reaped: a new owner is admitted.
+        table.admit("late", 30).unwrap();
+        for i in 1..MAX_LIVE_OWNERS {
+            table.admit(&format!("n{i}"), 30).unwrap();
+        }
+        // 64 live again plus 64 unreaped records; a refused owner whose own
+        // record expired keeps that record where it is.
+        let before = table.list(Some("o0"));
+        assert_eq!(table.admit("o0", 30), Err(LeaseRejection::OwnerCap));
+        assert_eq!(table.list(Some("o0")), before);
+        assert_eq!(table.live_owner_count(), MAX_LIVE_OWNERS);
+    }
+
+    /// The clock is read after the lock: a renewal or leased add that waits
+    /// for the lock across the deadline is judged at the later time. The fake
+    /// clock counts reads; the holder advances it past the deadline only
+    /// after the contender has had a chance to read it before locking.
+    #[test]
+    fn a_wait_for_the_lock_across_the_deadline_is_judged_after_it() {
+        for leased_add in [false, true] {
+            let table = Arc::new(InjectionLeases::new());
+            let base = Instant::now();
+            let offset_ms = Arc::new(AtomicU64::new(0));
+            let reads = Arc::new(AtomicUsize::new(0));
+            let g = table.admit_at("ctl", 5, || base).unwrap().generation;
+
+            let guard = table.lock();
+            let contender = {
+                let (table, offset_ms, reads) = (
+                    Arc::clone(&table),
+                    Arc::clone(&offset_ms),
+                    Arc::clone(&reads),
+                );
+                std::thread::spawn(move || {
+                    // Take the time before announcing the read, so the
+                    // holder cannot advance it between the two.
+                    let clock = || {
+                        let now = base + Duration::from_millis(offset_ms.load(Ordering::SeqCst));
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        now
+                    };
+                    if leased_add {
+                        table
+                            .admit_at("ctl", 5, clock)
+                            .map(|tag| tag.generation)
+                            .ok()
+                    } else {
+                        table.renew_at("ctl", g, 5, clock).map(|_| g)
+                    }
+                })
+            };
+            // Give a pre-lock read every chance to happen first.
+            let waited = std::time::Instant::now();
+            while reads.load(Ordering::SeqCst) == 0
+                && waited.elapsed() < std::time::Duration::from_millis(200)
+            {
+                std::thread::yield_now();
+            }
+            offset_ms.store(5_000, Ordering::SeqCst);
+            drop(guard);
+            let result = contender.join().unwrap();
+            if leased_add {
+                assert_ne!(result, Some(g), "joined an expired generation");
+            } else {
+                assert_eq!(result, None, "renewed an expired generation");
+            }
+        }
     }
 }

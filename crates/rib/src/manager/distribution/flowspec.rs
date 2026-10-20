@@ -180,31 +180,23 @@ impl RibManager {
     ) -> Result<(InjectOutcome, Option<LeaseGeneration>), RibCommandError> {
         let key = route.selection_key();
         let owned_key = InjectedKey::FlowSpec(key.clone());
+        let present = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get_flowspec(&route.key()).is_some());
+        let generation = if let Some((owner, lease_seconds)) = lease {
+            Some(
+                self.admit_injected_lease(&owned_key, present, owner, lease_seconds)?
+                    .generation,
+            )
+        } else {
+            self.check_injected_owner(&owned_key, "")?;
+            None
+        };
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-        let present = rib.get_flowspec(&route.key()).is_some();
-        let generation = if let Some((owner, lease_seconds)) = lease {
-            let generation = self
-                .injection_leases
-                .admit_leased_add(
-                    owner,
-                    lease_seconds,
-                    &owned_key,
-                    present,
-                    tokio::time::Instant::now(),
-                )
-                .map_err(super::unicast::lease_rejection)?;
-            self.metrics
-                .set_injection_leases(super::gauge_val(self.injection_leases.owner_count()));
-            Some(generation)
-        } else {
-            self.injection_leases
-                .check_owner(&owned_key, "")
-                .map_err(super::unicast::lease_rejection)?;
-            None
-        };
         // Decide from the local Adj-RIB-In, not Loc-RIB: a received rule
         // that out-selects the local one leaves Loc-RIB unchanged even when
         // the local payload really was replaced. `received_at` is excluded,
@@ -246,22 +238,26 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
     ) {
         let owned_key = InjectedKey::FlowSpec(key.clone());
-        let rib = self
-            .ribs
-            .entry(LOCAL_PEER)
-            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         let route_key = FlowSpecRouteKey {
             afi: key.afi,
             rule: key.rule.clone(),
             path_id: 0,
         };
+        let present = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .is_some_and(|rib| rib.get_flowspec(&route_key).is_some());
         if !override_owner
-            && rib.get_flowspec(&route_key).is_some()
-            && let Err(rejection) = self.injection_leases.check_owner(&owned_key, owner)
+            && present
+            && let Err(rejection) = self.check_injected_owner(&owned_key, owner)
         {
-            let _ = reply.send(Err(super::unicast::lease_rejection(rejection)));
+            let _ = reply.send(Err(rejection));
             return;
         }
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         let removed = rib.withdraw_flowspec(&route_key);
         crate::manager::helpers::set_rib_prefixes(
             &self.metrics,
@@ -270,7 +266,7 @@ impl RibManager {
             rib.flowspec_lens(),
         );
         if removed {
-            self.injection_leases.forget(&owned_key);
+            self.forget_injected(&owned_key);
             debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
             let mut fs_affected = HashSet::new();
             fs_affected.insert(key);

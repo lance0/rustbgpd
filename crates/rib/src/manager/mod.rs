@@ -1055,6 +1055,13 @@ pub struct RibManager {
     /// Daemon-wide ADR-0141 lease table, shared with every injection
     /// service and the expiry task.
     injection_leases: Arc<crate::injection_lease::InjectionLeases>,
+    /// ADR-0141 ownership index for `LOCAL_PEER` keys: the tag of each owned
+    /// key and each owner's keys. Changed only in the RIB turn that changes
+    /// the local Adj-RIB-In, and swept here on expiry, never under the
+    /// shared lease-table lock.
+    injected_owners:
+        HashMap<crate::injection_lease::InjectedKey, crate::injection_lease::InjectionTag>,
+    owner_keys: HashMap<Arc<str>, HashSet<crate::injection_lease::InjectedKey>>,
     /// Owner label values already used on the lease-expiry counter; at most
     /// [`crate::injection_lease::MAX_LIVE_OWNERS`], then `_other`.
     lease_metric_owners: HashSet<Arc<str>>,
@@ -2451,6 +2458,8 @@ impl RibManager {
             test_ingest_stall,
             injection_leases: Arc::new(crate::injection_lease::InjectionLeases::new()),
             lease_metric_owners: HashSet::new(),
+            injected_owners: HashMap::new(),
+            owner_keys: HashMap::new(),
             test_panic_on_peer_up: test_panic_on_peer_up.then_some(()),
         }
     }

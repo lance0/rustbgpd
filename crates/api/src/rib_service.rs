@@ -238,26 +238,20 @@ impl RibService {
         self
     }
 
-    /// Fill the lease owner and remaining lease on a locally injected rule.
+    /// Fill the lease owner and remaining lease on a locally injected rule,
+    /// from the owner and generation captured with the RIB snapshot.
     fn annotate_flowspec_lease(
         &self,
-        route: &FlowSpecRoute,
+        tag: Option<&rustbgpd_rib::injection_lease::InjectionTag>,
         entry: &mut proto::FlowSpecRouteEntry,
     ) {
-        if route.peer != LOCAL_INJECTION_PEER {
-            return;
-        }
-        if let Some(lease) = self.injection_leases.as_deref().and_then(|leases| {
-            leases.key_lease(
-                &rustbgpd_rib::injection_lease::InjectedKey::FlowSpec(route.selection_key()),
-                tokio::time::Instant::now(),
-            )
-        }) {
+        if let (Some(tag), Some(leases)) = (tag, self.injection_leases.as_deref()) {
             set_row_lease(
                 &mut entry.injection_owner,
                 &mut entry.lease_generation,
                 &mut entry.lease_remaining_ms,
-                &lease,
+                tag,
+                leases.remaining(tag),
             );
         }
     }
@@ -1916,21 +1910,19 @@ fn build_route_query_filter(
     }))
 }
 
-/// Source peer of locally injected routes and rules.
-const LOCAL_INJECTION_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
-
 fn set_row_lease(
     owner: &mut String,
     generation: &mut Option<proto::LeaseGeneration>,
     remaining_ms: &mut Option<u32>,
-    lease: &rustbgpd_rib::injection_lease::KeyLease,
+    tag: &rustbgpd_rib::injection_lease::InjectionTag,
+    remaining: std::time::Duration,
 ) {
-    *owner = lease.owner.to_string();
+    *owner = tag.owner.to_string();
     *generation = Some(proto::LeaseGeneration {
-        incarnation: lease.generation.incarnation,
-        sequence: lease.generation.sequence,
+        incarnation: tag.generation.incarnation,
+        sequence: tag.generation.sequence,
     });
-    *remaining_ms = Some(u32::try_from(lease.remaining.as_millis()).unwrap_or(u32::MAX));
+    *remaining_ms = Some(u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX));
 }
 
 fn route_page_to_response(
@@ -1940,7 +1932,6 @@ fn route_page_to_response(
     best: bool,
     leases: Option<&rustbgpd_rib::injection_lease::InjectionLeases>,
 ) -> proto::ListRoutesResponse {
-    let now = tokio::time::Instant::now();
     let next_page_token = if page.has_more {
         page.routes
             .last()
@@ -1961,24 +1952,16 @@ fn route_page_to_response(
         routes: page
             .routes
             .iter()
-            .map(|route| {
+            .enumerate()
+            .map(|(index, route)| {
                 let mut row = route_to_proto(route, best);
-                if route.peer == LOCAL_INJECTION_PEER
-                    && let Some(lease) = leases.and_then(|leases| {
-                        leases.key_lease(
-                            &rustbgpd_rib::injection_lease::InjectedKey::Unicast(
-                                route.prefix,
-                                route.path_id,
-                            ),
-                            now,
-                        )
-                    })
-                {
+                if let (Some(Some(tag)), Some(leases)) = (page.injection.get(index), leases) {
                     set_row_lease(
                         &mut row.injection_owner,
                         &mut row.lease_generation,
                         &mut row.lease_remaining_ms,
-                        &lease,
+                        tag,
+                        leases.remaining(tag),
                     );
                 }
                 row
@@ -2879,7 +2862,7 @@ impl proto::rib_service_server::RibService for RibService {
                     .map(|row| {
                         let mut out = received_flowspec_route_to_proto(row);
                         if let Some(entry) = out.route.as_mut() {
-                            self.annotate_flowspec_lease(&row.route, entry);
+                            self.annotate_flowspec_lease(row.injection.as_ref(), entry);
                         }
                         out
                     })
@@ -2907,14 +2890,8 @@ impl proto::rib_service_server::RibService for RibService {
                 .await?;
         }
 
-        let routes: Vec<proto::FlowSpecRouteEntry> = matched
-            .iter()
-            .map(|route| {
-                let mut entry = flowspec_route_to_proto(route);
-                self.annotate_flowspec_lease(route, &mut entry);
-                entry
-            })
-            .collect();
+        let routes: Vec<proto::FlowSpecRouteEntry> =
+            matched.iter().map(flowspec_route_to_proto).collect();
 
         Ok(Response::new(proto::ListFlowSpecResponse {
             routes,
@@ -8434,6 +8411,7 @@ mod tests {
                 validation: FlowSpecValidationStatus::Infeasible,
                 reason: Some("originator_mismatch"),
                 pending: true,
+                injection: None,
             };
             let filter = filter.expect("family filter runs in actor");
             assert!(filter(&row));
@@ -9679,6 +9657,66 @@ mod tests {
     }
 
     /// Load-bearing response proof: removing `page_version` from
+    /// A row's lease comes from the owner and generation the RIB captured
+    /// with the page, and its remaining time is measured against exactly
+    /// that pair: once the owner holds another generation, the captured one
+    /// reports 0 rather than the newer generation's remaining time.
+    ///
+    /// Break-to-red: looking the key's lease up again when the response is
+    /// built reports the current generation instead of the captured one.
+    #[tokio::test(start_paused = true)]
+    async fn route_rows_report_the_lease_captured_with_the_page() {
+        let leases = rustbgpd_rib::injection_lease::InjectionLeases::new();
+        let captured = leases.admit("ctl", 30).unwrap();
+        let mut route = test_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 7), 32)),
+            Vec::new(),
+        );
+        route.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let page = RoutePage {
+            routes: vec![route.clone(), route],
+            total: 2,
+            injection: vec![Some(captured.clone()), None],
+            ..RoutePage::default()
+        };
+        let render = |leases| {
+            route_page_to_response(
+                &page,
+                RouteQueryScope::Best,
+                &route_page_identity(&list_routes_request()),
+                true,
+                Some(leases),
+            )
+            .routes
+        };
+        let rows = render(&leases);
+        assert_eq!(rows[0].injection_owner, "ctl");
+        assert_eq!(
+            rows[0].lease_generation,
+            Some(proto::LeaseGeneration {
+                incarnation: captured.generation.incarnation,
+                sequence: captured.generation.sequence,
+            })
+        );
+        assert_eq!(rows[0].lease_remaining_ms, Some(30_000));
+        assert_eq!(rows[1].injection_owner, "");
+        assert_eq!(rows[1].lease_generation, None);
+        assert_eq!(rows[1].lease_remaining_ms, None);
+
+        // The owner's generation dies and a newer one starts after the
+        // snapshot: the captured row still names its own generation, now dead.
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        let newer = leases.admit("ctl", 60).unwrap();
+        assert_ne!(newer.generation, captured.generation);
+        let rows = render(&leases);
+        assert_eq!(rows[0].injection_owner, "ctl");
+        assert_eq!(
+            rows[0].lease_generation.map(|g| g.sequence),
+            Some(captured.generation.sequence)
+        );
+        assert_eq!(rows[0].lease_remaining_ms, Some(0));
+    }
+
     /// `route_page_to_response` makes this empty terminal-page assertion red.
     #[test]
     fn empty_terminal_route_page_exposes_process_local_version() {
@@ -9694,6 +9732,7 @@ mod tests {
                 total: 0,
                 has_more: false,
                 version,
+                injection: Vec::new(),
             },
             RouteQueryScope::Best,
             &route_page_identity(&list_routes_request()),
@@ -9964,6 +10003,7 @@ mod tests {
                             epoch: 7,
                             generation: 9,
                         },
+                        injection: Vec::new(),
                     }));
                 }
             }
@@ -10044,6 +10084,7 @@ mod tests {
                         epoch: 1,
                         generation: 1,
                     },
+                    injection: Vec::new(),
                 }));
             });
 
@@ -10118,6 +10159,7 @@ mod tests {
                     total: 1,
                     has_more: false,
                     version,
+                    injection: Vec::new(),
                 }));
             }
         });
@@ -10162,6 +10204,7 @@ mod tests {
                         total: 2,
                         has_more: false,
                         version: RoutePageVersion::default(),
+                        injection: Vec::new(),
                     }));
                 }
             }

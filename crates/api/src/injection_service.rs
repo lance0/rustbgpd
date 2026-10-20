@@ -721,12 +721,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         set_request_summary(&request, lease_summary(&req.owner, Some(generation), false));
         let remaining = self
             .leases()?
-            .renew(
-                &req.owner,
-                generation,
-                req.lease_seconds,
-                tokio::time::Instant::now(),
-            )
+            .renew(&req.owner, generation, req.lease_seconds)
             .ok_or_else(|| {
                 tracing::debug!(owner = %req.owner, "injection lease renewal rejected");
                 Status::failed_precondition(
@@ -746,10 +741,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let owner = request.into_inner().owner;
         let leases = self
             .leases()?
-            .list(
-                (!owner.is_empty()).then_some(owner.as_str()),
-                tokio::time::Instant::now(),
-            )
+            .list((!owner.is_empty()).then_some(owner.as_str()))
             .into_iter()
             .map(|row| proto::InjectionLeaseEntry {
                 owner: row.owner.to_string(),
@@ -3339,18 +3331,7 @@ mod tests {
         tx.try_send(RibUpdate::ExpireInjectionLeases { leases: vec![] })
             .unwrap();
         let leases = Arc::new(InjectionLeases::new());
-        let generation = leases
-            .admit_leased_add(
-                "ctl",
-                30,
-                &rustbgpd_rib::injection_lease::InjectedKey::Unicast(
-                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 7), 32)),
-                    0,
-                ),
-                false,
-                tokio::time::Instant::now(),
-            )
-            .unwrap();
+        let generation = leases.admit("ctl", 30).unwrap().generation;
         let svc = InjectionService::new(tx, AccessMode::ReadWrite)
             .with_injection_leases(Arc::clone(&leases));
         let renewed = tokio::time::timeout(
@@ -3471,6 +3452,53 @@ mod tests {
             row.lease_remaining_ms
                 .is_some_and(|ms| ms > 0 && ms <= 60_000)
         );
+
+        // A leased rule joins the owner's generation. The locally injected
+        // view reports its lease; the selected view does not.
+        let rule = svc
+            .add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                rule: Some(proto::AddFlowSpecRequest {
+                    afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                    components: flowspec_rule_components(),
+                    actions: vec![flowspec_rate(0.0)],
+                    communities: vec![],
+                    extended_communities: vec![],
+                }),
+                lease: Some(proto::InjectionLease {
+                    owner: "ctl".into(),
+                    lease_seconds: 30,
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(rule.generation, Some(generation));
+        let list_rules = |received: &str| proto::ListFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            received_peer_address: received.into(),
+            ..Default::default()
+        };
+        let local = rib
+            .list_flow_spec_routes(Request::new(list_rules("0.0.0.0")))
+            .await
+            .unwrap()
+            .into_inner();
+        let entry = local.received_routes[0].route.as_ref().unwrap();
+        assert_eq!(entry.injection_owner, "ctl");
+        assert_eq!(entry.lease_generation, Some(generation));
+        assert!(
+            entry
+                .lease_remaining_ms
+                .is_some_and(|ms| ms > 0 && ms <= 60_000)
+        );
+        let selected = rib
+            .list_flow_spec_routes(Request::new(list_rules("")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(selected.routes.len(), 1);
+        assert_eq!(selected.routes[0].injection_owner, "");
+        assert_eq!(selected.routes[0].lease_remaining_ms, None);
 
         // An unowned delete of the owned route is refused; the owner's works.
         let delete = |owner: &str| proto::DeletePathRequest {

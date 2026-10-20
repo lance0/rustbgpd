@@ -527,12 +527,20 @@ impl RibManager {
                 let selected = self.loc_rib.get_flowspec(&key).is_some_and(|selected| {
                     selected.peer == peer && selected.path_id == route.path_id
                 });
+                let injection = (peer == super::helpers::LOCAL_PEER)
+                    .then(|| {
+                        self.injection_tag(&crate::injection_lease::InjectedKey::FlowSpec(
+                            key.clone(),
+                        ))
+                    })
+                    .flatten();
                 let row = ReceivedFlowSpecRoute {
                     route: route.clone(),
                     selected,
                     validation,
                     reason,
                     pending,
+                    injection,
                 };
                 if filter.is_none_or(|filter| filter(&row)) {
                     rows.push(row);

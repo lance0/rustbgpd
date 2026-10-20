@@ -4062,6 +4062,7 @@ policy customer-in(peer_lp: u32) {
                             total: scoped.len() as u64,
                             has_more,
                             version,
+                            injection: Vec::new(),
                         }));
                     }
                     rustbgpd_rib::RibUpdate::QueryInstalledExportChain { reply, .. } => {

@@ -1,8 +1,6 @@
 //! ADR-0141 owner-scoped leases through a running RIB manager, on a paused
 //! clock.
 
-use tokio::time::Instant as TokioInstant;
-
 use super::*;
 use crate::injection_lease::{InjectionLeases, LeaseGeneration, MAX_LIVE_OWNERS};
 use crate::update::{InjectOutcome, RibCommandError};
@@ -253,7 +251,7 @@ async fn expiry_withdraws_both_families_and_reaches_the_peer() {
         gauge_metric_value(&h.metrics, "bgp_injection_leases", &[]),
         0.0
     );
-    assert_eq!(h.leases.renew("ctl", g, 10, TokioInstant::now()), None);
+    assert_eq!(h.leases.renew("ctl", g, 10), None);
 
     tokio::time::advance(Duration::from_secs(100_000)).await;
     h.settle().await;
@@ -276,10 +274,7 @@ async fn renewal_prevents_expiry_and_adds_never_shorten() {
         .await
         .unwrap();
     tokio::time::advance(Duration::from_secs(8)).await;
-    assert_eq!(
-        h.leases.renew("ctl", g, 10, TokioInstant::now()),
-        Some(Duration::from_secs(10))
-    );
+    assert_eq!(h.leases.renew("ctl", g, 10), Some(Duration::from_secs(10)));
     // Joins at t=8 with 5 s: max(18, 13) keeps 18.
     let (_, joined) = leased_route(&h.tx, local_route(3), "ctl", 5).await.unwrap();
     assert_eq!(joined, g);
@@ -308,14 +303,14 @@ async fn expired_renewal_fails_and_readd_starts_a_new_generation() {
     tokio::time::advance(Duration::from_secs(5)).await;
     h.settle().await;
     assert_eq!(h.drain().iter().map(|u| u.withdraw.len()).sum::<usize>(), 1);
-    assert_eq!(h.leases.renew("ctl", g1, 5, TokioInstant::now()), None);
+    assert_eq!(h.leases.renew("ctl", g1, 5), None);
 
     let (outcome, g2) = leased_route(&h.tx, local_route(1), "ctl", 5).await.unwrap();
     assert_eq!(outcome, InjectOutcome::Created);
     assert_ne!(g2, g1);
     assert_eq!(g2.incarnation, g1.incarnation);
-    assert_eq!(h.leases.renew("ctl", g1, 5, TokioInstant::now()), None);
-    assert!(h.leases.renew("ctl", g2, 5, TokioInstant::now()).is_some());
+    assert_eq!(h.leases.renew("ctl", g1, 5), None);
+    assert!(h.leases.renew("ctl", g2, 5).is_some());
     h.stop().await;
 }
 
@@ -360,7 +355,7 @@ async fn late_expiry_of_an_old_generation_spares_a_retagged_key() {
     assert_eq!(outcome, InjectOutcome::Unchanged);
     assert_ne!(g_next, g);
 
-    let (expired, _) = leases.take_expired(TokioInstant::now());
+    let (expired, _) = leases.take_expired();
     assert_eq!(expired.len(), 1);
     assert_eq!(expired[0].generation, g);
     tx.send(RibUpdate::ExpireInjectionLeases { leases: expired })
@@ -369,11 +364,7 @@ async fn late_expiry_of_an_old_generation_spares_a_retagged_key() {
     let _ = query_best_routes(&tx).await;
     assert!(out_rx.try_recv().is_err(), "no wire churn");
     assert_eq!(local_prefixes(&tx).await, vec![host(1)]);
-    assert!(
-        leases
-            .renew("ctl", g_next, 5, TokioInstant::now())
-            .is_some()
-    );
+    assert!(leases.renew("ctl", g_next, 5).is_some());
 
     drop(tx);
     manager.await.unwrap();
@@ -419,7 +410,7 @@ async fn ownership_mismatches_are_failed_precondition_and_change_nothing() {
         delete_route(&h.tx, 1, "a", false).await,
         Err(RibCommandError::FailedPrecondition(_))
     ));
-    assert_eq!(h.leases.list(Some("b"), TokioInstant::now()), Vec::new());
+    assert_eq!(h.leases.list(Some("b")), Vec::new());
     h.settle().await;
     assert!(
         h.drain().is_empty(),
@@ -463,15 +454,7 @@ async fn expiry_task_cancels_out_of_a_blocked_send_and_an_idle_wait() {
     tx.send(RibUpdate::ExpireInjectionLeases { leases: vec![] })
         .await
         .unwrap();
-    leases
-        .admit_leased_add(
-            "ctl",
-            5,
-            &crate::injection_lease::InjectedKey::Unicast(host(1), 0),
-            false,
-            TokioInstant::now(),
-        )
-        .unwrap();
+    leases.admit("ctl", 5).unwrap();
     let (cancel, cancel_rx) = oneshot::channel();
     let task = tokio::spawn(Arc::clone(&leases).run_expiry(tx.clone(), cancel_rx));
     tokio::time::advance(Duration::from_secs(6)).await;
@@ -500,4 +483,131 @@ async fn expiry_task_cancels_out_of_a_blocked_send_and_an_idle_wait() {
         .await
         .expect("cancelled out of the idle wait")
         .unwrap();
+}
+
+/// The ownership sweep of an expired owner runs in the RIB actor without the
+/// lease table's lock: at every key it withdraws, another owner's renewal is
+/// served at once.
+///
+/// Break-to-red: holding the lease lock across the sweep fails the
+/// `is_unlocked` check at the first key.
+#[tokio::test(start_paused = true)]
+async fn an_expiry_sweep_never_holds_the_lease_lock() {
+    let h = Harness::start().await;
+    let (_, keep) = leased_route(&h.tx, local_route(250), "b", 3_600)
+        .await
+        .unwrap();
+    for octet in 0..200 {
+        leased_route(&h.tx, local_route(octet), "a", 5)
+            .await
+            .unwrap();
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (leases, record) = (Arc::clone(&h.leases), Arc::clone(&seen));
+    crate::manager::lease_expiry::EXPIRY_SWEEP_PROBE.with(|probe| {
+        *probe.borrow_mut() = Some(Box::new(move || {
+            let renewed = leases.is_unlocked() && leases.renew("b", keep, 3_600).is_some();
+            record.lock().unwrap().push(renewed);
+        }));
+    });
+    tokio::time::advance(Duration::from_secs(5)).await;
+    h.settle().await;
+    crate::manager::lease_expiry::EXPIRY_SWEEP_PROBE.with(|probe| probe.borrow_mut().take());
+    let seen = std::mem::take(&mut *seen.lock().unwrap());
+    assert_eq!(seen.len(), 200, "the sweep visited every key of owner a");
+    assert!(seen.iter().all(|renewed| *renewed));
+    assert_eq!(local_prefixes(&h.tx).await, vec![host(250)]);
+    h.stop().await;
+}
+
+/// A refused leased add interns nothing: ownership and capacity are decided
+/// before the attributes enter the intern table.
+///
+/// Break-to-red: interning before admission grows the table by one set per
+/// refused add.
+#[tokio::test(start_paused = true)]
+async fn refused_leased_adds_leave_the_intern_table_alone() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager
+        .inject_local_route(local_route(1), Some(("a", 30)))
+        .unwrap();
+    for i in 1..MAX_LIVE_OWNERS {
+        let octet = u8::try_from(i + 1).unwrap();
+        manager
+            .inject_local_route(local_route(octet), Some((&format!("o{i}"), 30)))
+            .unwrap();
+    }
+    let interned = manager.attr_intern.len();
+    for med in 0..100 {
+        let mut route = local_route(1);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);
+        assert!(matches!(
+            manager.inject_local_route(route, Some(("b", 30))),
+            Err(RibCommandError::FailedPrecondition(_))
+        ));
+        let mut route = local_route(200);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);
+        assert!(matches!(
+            manager.inject_local_route(route, Some(("late", 30))),
+            Err(RibCommandError::ResourceExhausted(_))
+        ));
+    }
+    assert_eq!(manager.attr_intern.len(), interned);
+}
+
+/// A route page and the received `FlowSpec` view carry the owner and
+/// generation each local row had in the RIB turn that read it; unowned rows
+/// carry none.
+///
+/// Break-to-red: without the capture the read-back has no tag to report.
+#[tokio::test(start_paused = true)]
+async fn read_back_captures_tags_with_the_snapshot() {
+    let h = Harness::start().await;
+    let (_, g) = leased_route(&h.tx, local_route(1), "ctl", 30)
+        .await
+        .unwrap();
+    unowned_route(&h.tx, local_route(2)).await.unwrap();
+    leased_rule(&h.tx, local_rule(), "ctl", 30).await.unwrap();
+
+    let (reply, rx) = oneshot::channel();
+    h.tx.send(RibUpdate::QueryRoutesPage {
+        scope: RouteQueryScope::Received {
+            peer: Some(LOCAL_PEER),
+        },
+        filter: None,
+        after: None,
+        expected_version: None,
+        page_size: 10,
+        reply,
+    })
+    .await
+    .unwrap();
+    let page = rx.await.unwrap().unwrap();
+    let tags: Vec<_> = page
+        .routes
+        .iter()
+        .zip(&page.injection)
+        .map(|(route, tag)| {
+            (
+                route.prefix,
+                tag.as_ref().map(|t| (&*t.owner, t.generation)),
+            )
+        })
+        .collect();
+    assert_eq!(tags, vec![(host(1), Some(("ctl", g))), (host(2), None)]);
+
+    let (reply, rx) = oneshot::channel();
+    h.tx.send(RibUpdate::QueryReceivedFlowSpecRoutes {
+        peer: LOCAL_PEER,
+        filter: None,
+        reply,
+    })
+    .await
+    .unwrap();
+    let rows = rx.await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let tag = rows[0].injection.as_ref().expect("owned rule is tagged");
+    assert_eq!((&*tag.owner, tag.generation), ("ctl", g));
+    h.stop().await;
 }
