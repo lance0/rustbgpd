@@ -6047,7 +6047,7 @@ mod tests {
             previous_peer: None,
             best: Some(route),
             previous_best: None,
-            timestamp: "0".to_string(),
+            timestamp_unix_ms: 0,
         }
     }
 

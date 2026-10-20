@@ -492,7 +492,7 @@ impl PeerManager {
                     event_type: rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
                     peer: peer_addr,
                     peer_label: Some(rendered_peer.clone()),
-                    timestamp: Self::session_event_timestamp(),
+                    timestamp_unix_ms: Self::session_event_timestamp(),
                     old_state: None,
                     new_state: None,
                     session_role: Some(Self::session_role_label(role).to_string()),

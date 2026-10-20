@@ -7049,7 +7049,7 @@ impl RibManager {
                     peer: Some(peer),
                     previous_peer: None,
                     target_peer: None,
-                    timestamp: crate::event::unix_timestamp_now(),
+                    timestamp_unix_ms: crate::event::unix_time_ms_now(),
                     path_id,
                     reason: String::new(),
                 });
@@ -7063,7 +7063,7 @@ impl RibManager {
                     peer: None,
                     previous_peer: Some(old_peer),
                     target_peer: None,
-                    timestamp: crate::event::unix_timestamp_now(),
+                    timestamp_unix_ms: crate::event::unix_time_ms_now(),
                     path_id: old_path_id,
                     reason: String::new(),
                 });
@@ -7077,7 +7077,7 @@ impl RibManager {
                     peer: Some(peer),
                     previous_peer: Some(old_peer),
                     target_peer: None,
-                    timestamp: crate::event::unix_timestamp_now(),
+                    timestamp_unix_ms: crate::event::unix_time_ms_now(),
                     path_id,
                     reason: String::new(),
                 });

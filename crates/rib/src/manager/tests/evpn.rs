@@ -3245,7 +3245,7 @@ fn evpn_history_and_live_broadcast_share_arc() {
         previous_peer: None,
         best: Some(route),
         previous_best: None,
-        timestamp: "1".to_string(),
+        timestamp_unix_ms: 1_000,
     });
 
     let broadcast = live.try_recv().unwrap();
@@ -3257,10 +3257,14 @@ fn evpn_history_and_live_broadcast_share_arc() {
     let (reply, result) = oneshot::channel();
     manager.handle_query_evpn_route_event_history(None, None, None, &BTreeSet::new(), 0, reply);
     let mut owned = result.blocking_recv().unwrap();
-    owned[0].timestamp = "caller mutation".to_string();
+    owned[0].timestamp_unix_ms = 42;
     assert_eq!(
-        manager.evpn_route_event_history.back().unwrap().timestamp,
-        "1"
+        manager
+            .evpn_route_event_history
+            .back()
+            .unwrap()
+            .timestamp_unix_ms,
+        1_000
     );
 }
 
