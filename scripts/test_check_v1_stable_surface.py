@@ -425,6 +425,25 @@ class MetricFloorTests(unittest.TestCase):
              "pinned metric bgp_max_prefix_blocked_total label family values"),
             ("    [peer, family, stage]", "    let family = stage;\n    [peer, family, stage]", 1,
              "pinned metric bgp_max_prefix_blocked_total label family values"),
+            # The setter rebinds a helper argument: direct call, then `let`-bound array.
+            ("pub fn record_max_prefix_blocked(&self, peer: &str, family: &str, stage: &str) {\n",
+             "pub fn record_max_prefix_blocked(&self, peer: &str, family: &str, stage: &str) {\n"
+             '        let stage = "pre_policy";\n', 1,
+             "pinned metric bgp_max_prefix_blocked_total label stage values ['accepted', 'received']"),
+            ("let labels = max_prefix_label_values(peer, family, stage);\n        let usage =",
+             'let stage = "pre_policy";\n'
+             "        let labels = max_prefix_label_values(peer, family, stage);\n        let usage =", 1,
+             "pinned metric bgp_max_prefix_headroom label stage values ['accepted', 'received']"),
+            # The loop variable is shadowed before the emission.
+            ("for state in SESSION_STATES {\n            if state != current {",
+             'for state in SESSION_STATES {\n            let state = "renamed";\n'
+             "            if state != current {", 1,
+             "pinned metric bgp_peer_session_state label state values ['active'"),
+            # An earlier `return` in the helper bypasses the tail array.
+            ("    [peer, family, stage]",
+             '    if stage == "received" {\n        return [peer, family, "pre_policy"];\n    }\n'
+             "    [peer, family, stage]", 1,
+             "pinned metric bgp_max_prefix_blocked_total label family values"),
             # A renamed state in the constant the one-hot loop iterates.
             ('"open_sent",', '"opensent",', 1,
              "pinned metric bgp_peer_session_state label state values ['open_sent']"),
@@ -450,6 +469,10 @@ class MetricFloorTests(unittest.TestCase):
             # Reached only through the `Self::Family(family) => family.label()` arm.
             ("crates/transport/src/config.rs", 'Self::Rtc => "rtc"', 'Self::Rtc => "rt_constrain"',
              "pinned metric bgp_max_prefix_blocked_total label family values ['rtc']"),
+            # The match is discarded; the method returns another literal.
+            (session, '            _ => "accepted",\n        }\n',
+             '            _ => "accepted",\n        };\n        "pre_policy"\n',
+             "pinned metric bgp_max_prefix_blocked_total label stage values ['accepted', 'received']"),
             # A second same-named label method in the crate makes `scope.stage()` ambiguous.
             (session, "impl MaxPrefixScope {",
              "fn stage(self) -> &'static str { \"other\" }\nimpl MaxPrefixScope {",

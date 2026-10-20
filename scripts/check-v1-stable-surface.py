@@ -1079,12 +1079,18 @@ def emitted_label_values(
         rf"\.{re.escape(binding.group(1))}\s*\.with_label_values\(\s*&\s*"
         r"(?:\[([^\]]*)\]|(\w+)\s*\(([^()]*)\)|(\w+)\s*\))"
     )
+    # ponytail: a shape check, not a Rust parser. Each traced identifier must
+    # have exactly one binding in the setter (its parameter, its `for` header, or
+    # one `let name = helper(..);`); any other `let` or assignment of it, and
+    # any shape not matched here, fails closed as no evidence.
     for use in re.finditer(pattern, metric_source):
         functions = list(
             re.finditer(r"\bfn\s+(\w+)\s*\(([^)]*)\)", metric_source[: use.start()])
         )
-        setter = functions[-1] if functions else None
-        body = metric_source[setter.end() : use.start()] if setter else ""
+        if not functions:
+            continue
+        setter = functions[-1]
+        body = function_body(metric_source, setter)
         if use.group(1) is not None:
             elements = [element.strip() for element in use.group(1).split(",") if element.strip()]
         else:
@@ -1094,9 +1100,8 @@ def emitted_label_values(
                 bound = list(
                     re.finditer(rf"\blet\s+{re.escape(name)}\s*=\s*(\w+)\s*\(([^()]*)\)\s*;", body)
                 )
-                # A later rebinding or assignment may change the labels: no evidence.
-                last = bound[-1] if bound else None
-                call = last.groups() if last and not rebinds(body[last.end() :], name) else None
+                single = len(bound) == 1 and not rebinds(body.replace(bound[0].group(0), "", 1), name)
+                call = bound[0].groups() if single else None
             elements = pass_through_elements(metric_source, *call) if call else []
         if len(elements) != len(defined_labels):
             continue
@@ -1104,17 +1109,21 @@ def emitted_label_values(
         if element.startswith('"'):
             values.add(element.strip('"'))
             continue
-        if setter is None:
-            continue
         # `for element in CONST { ... }` in the setter emits every value of CONST.
-        loops = re.findall(
-            rf"\bfor\s+{re.escape(element)}\s+in\s+([A-Z][A-Z0-9_]*)\s*\{{", body
+        loops = list(
+            re.finditer(rf"\bfor\s+{re.escape(element)}\s+in\s+([A-Z][A-Z0-9_]*)\s*\{{", body)
         )
         if loops:
-            # The constant lives beside the setter; a module-local path resolves it.
-            values.update(
-                const_label_values({METRIC_PATH: metric_source}, METRIC_PATH, metric_source, loops[-1])
-            )
+            # Code before the header (e.g. a `state = current` log field) is outside its scope.
+            if len(loops) == 1 and not rebinds(body[loops[0].end() :], element):
+                # The constant lives beside the setter; a module-local path resolves it.
+                values.update(
+                    const_label_values(
+                        {METRIC_PATH: metric_source}, METRIC_PATH, metric_source, loops[0].group(1)
+                    )
+                )
+            continue
+        if rebinds(body, element):
             continue
         parameters = [
             part.split(":", 1)[0].strip()
@@ -1200,12 +1209,37 @@ def rebinds(text: str, name: str) -> bool:
     ) is not None
 
 
+def split_top_level(text: str, separator: str) -> list[str]:
+    """`text` split on `separator` outside brackets and string literals."""
+    parts, depth, cursor, index, in_string = [], 0, 0, 0, False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == separator and depth == 0:
+            parts.append(text[cursor:index].strip())
+            cursor = index + 1
+        index += 1
+    return [*parts, text[cursor:].strip()]
+
+
 def pass_through_elements(source: str, helper: str, arguments: str) -> list[str]:
     """A label helper's returned array, rewritten in terms of one call's arguments.
 
-    The helper must be defined once in the metric source and end by returning
-    an array of its own parameters or string literals. Anything else yields no
-    elements, so its call sites are no evidence.
+    ponytail: a shape check, not a Rust parser. The helper must be defined once
+    in the metric source, and its body must be `let` statements binding no
+    returned identifier and `assert!`-family statements, then one tail array of
+    its own parameters or string literals, with no `return`. Any other shape
+    yields no elements, so its call sites are no evidence.
     """
     definitions = list(re.finditer(rf"\bfn\s+{re.escape(helper)}\s*(?:<[^>{{]*>)?\s*\(", source))
     if len(definitions) != 1:
@@ -1215,26 +1249,37 @@ def pass_through_elements(source: str, helper: str, arguments: str) -> list[str]
     ]
     passed = [argument.strip() for argument in arguments.split(",") if argument.strip()]
     body = function_body(source, definitions[0])
-    returned = re.search(r"\[([^\[\]]*)\]\s*$", body)
-    if returned is None or len(passed) != len(parameters):
+    *statements, tail = split_top_level(body, ";")
+    returned = re.fullmatch(r"\[([^\[\]]*)\]", tail)
+    if returned is None or re.search(r"\breturn\b", body) or len(passed) != len(parameters):
         return []
-    elements = []
-    for element in (part.strip() for part in returned.group(1).split(",") if part.strip()):
-        if element in parameters and not rebinds(body[: returned.start()], element):
-            elements.append(passed[parameters.index(element)])
+    elements = [part.strip() for part in returned.group(1).split(",") if part.strip()]
+    for statement in statements:
+        binding = re.fullmatch(r"let\b([^=]*)=.*", statement, flags=re.DOTALL)
+        if binding:
+            if any(re.search(rf"\b{re.escape(element)}\b", binding.group(1)) for element in elements):
+                return []
+        elif not re.fullmatch(r"(?:debug_)?assert(?:_eq|_ne)?!\s*\(.*\)", statement, flags=re.DOTALL):
+            return []
+    mapped = []
+    for element in elements:
+        if element in parameters:
+            mapped.append(passed[parameters.index(element)])
         elif re.fullmatch(r"\"[^\"]+\"", element):
-            elements.append(element)
+            mapped.append(element)
         else:
             return []
-    return elements
+    return mapped
 
 
 def label_method_values(sources: dict[str, str], path: str, method: str, depth: int = 0) -> set[str]:
-    """String literals a `receiver.method()` label call returns from its match arms.
+    """String literals a `receiver.method()` label call returns.
 
-    ponytail: resolves by name, not receiver type. The method must be the only
-    `fn method(self) -> &'static str` in the calling crate, else it is no
-    evidence; an arm delegating to another such method is followed.
+    ponytail: a shape check resolved by name, not receiver type or a Rust parser.
+    The method must be the only `fn method(self) -> &'static str` in the calling
+    crate, and its body exactly one `match self { .. }` whose arms are each a
+    string literal or one delegated `binding.method()` meeting the same rule.
+    Any other shape is no evidence.
     """
     origin = rust_module(path)
     if origin is None or depth > 4:
@@ -1249,10 +1294,22 @@ def label_method_values(sources: dict[str, str], path: str, method: str, depth: 
     if len(found) != 1:
         return set()
     candidate, match = found[0]
-    body = function_body(sources[candidate], match)
-    values = set(re.findall(r"=>\s*\"([^\"]+)\"", body))
-    for delegated in re.findall(r"=>\s*\w+\s*\.\s*(\w+)\(\s*\)", body):
-        values.update(label_method_values(sources, candidate, delegated, depth + 1))
+    whole = re.fullmatch(r"\s*match\s+self\s*\{(.*)\}\s*", function_body(sources[candidate], match), re.DOTALL)
+    if whole is None:
+        return set()
+    values: set[str] = set()
+    for arm in filter(None, split_top_level(whole.group(1), ",")):
+        result = arm.split("=>", 1)[1].strip() if "=>" in arm else ""
+        literal = re.fullmatch(r"\"([^\"]+)\"", result)
+        delegated = re.fullmatch(r"\w+\s*\.\s*(\w+)\(\s*\)", result)
+        found_values = (
+            {literal.group(1)} if literal
+            else label_method_values(sources, candidate, delegated.group(1), depth + 1)
+            if delegated else set()
+        )
+        if not found_values:
+            return set()
+        values.update(found_values)
     return values
 
 
