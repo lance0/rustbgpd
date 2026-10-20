@@ -233,10 +233,19 @@ expect_unbanned() { # label limit
 # MARK of its log, or 0 when the UPDATE came first (FRR never dropped the ban).
 frr_gap_ms() { # mark eor-pattern update-pattern
     docker exec "$FRR" tail -n +"$(($1 + 1))" /tmp/bgpd.log | awk -v e="$2" -v u="$3" '
-        function ms(line,  t) { split($2, t, /[:.]/); return ((t[1] * 60 + t[2]) * 60 + t[3]) * 1000 + t[4] }
-        index($0, e) && !te { te = ms($0) }
-        index($0, u) && !tu { tu = ms($0) }
-        END { if (!te || !tu) print "unknown"; else print (tu > te ? tu - te : 0) }'
+        # Milliseconds since 1970 of a "YYYY/MM/DD HH:MM:SS.mmm" log line,
+        # by days-from-civil, so a gap across midnight stays correct.
+        function ms(  d, t, y, m, era, yoe, doy, doe) {
+            split($1, d, "/"); split($2, t, /[:.]/)
+            y = d[1] - (d[2] <= 2); m = d[2] + 0
+            era = int(y / 400); yoe = y - era * 400
+            doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d[3] - 1
+            doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+            return (((era * 146097 + doe - 719468) * 24 + t[1]) * 60 + t[2]) * 60000 + t[3] * 1000 + t[4]
+        }
+        index($0, e) && !ne { ne = NR; te = ms() }
+        index($0, u) && !nu { nu = NR; tu = ms() }
+        END { if (!ne || !nu) print "unknown"; else if (nu < ne) print 0; else print tu - te }'
 }
 
 expect_stays_absent() { # label seconds
