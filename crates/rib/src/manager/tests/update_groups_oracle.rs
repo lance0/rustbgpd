@@ -1739,7 +1739,7 @@ impl Oracle {
     /// VPN-grouped member, the per-peer Adj-RIB-Out otherwise) for every
     /// peer and compare against the folded emitted VPN state.
     async fn check_vpn_invariant(&mut self, label: &str) {
-        self.quiesce().await;
+        self.settle().await;
         self.drain_collected();
         let folded = fold_vpn(&self.collected);
         let peers: Vec<IpAddr> = self.outs.keys().copied().collect();
@@ -1879,6 +1879,28 @@ impl Oracle {
         let _ = self.best_routes().await;
     }
 
+    /// Quiesce, then require every peer to be outbound-clean, so a resync
+    /// the caller made due by advancing the paused clock has run and sent
+    /// its messages.
+    ///
+    /// The quiesce alone is not that barrier. When it and the due resync
+    /// timer wake the actor together, `select!` can serve the quiesce first;
+    /// if that handler outlasts the wall-clock flush budget, the actor yields
+    /// before its due-timer check and this task resumes ahead of the resync.
+    /// The actor runs the due resync as soon as it resumes, before it serves
+    /// the dirty probes sent after the quiesce, so the probes observe it.
+    async fn settle(&mut self) {
+        self.quiesce().await;
+        let peers: Vec<IpAddr> = self.outs.keys().copied().collect();
+        for peer in peers {
+            let IpAddr::V4(peer) = peer else { continue };
+            assert!(
+                !self.peer_outbound_dirty(peer).await,
+                "{peer} is still outbound-dirty after its resync"
+            );
+        }
+    }
+
     /// Advance past the selection-deferral deadline and return once the
     /// actor has released `family` and processed everything after it.
     ///
@@ -1968,7 +1990,7 @@ impl Oracle {
     /// Close an explicitly scheduled retry after its actor barrier and retain
     /// all admitted messages before comparing the recovered state.
     pub(super) async fn end_recovery(&mut self, peer: Ipv4Addr) {
-        self.quiesce().await;
+        self.settle().await;
         self.drain_collected();
         self.close_recovery(peer);
     }
