@@ -4848,7 +4848,8 @@ log_format = "json"
         let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
-            (concat!("write_tier", "_test_config("), 35),
+            // +1: the unspecified set_next_hop reload test writes its candidate.
+            (concat!("write_tier", "_test_config("), 36),
             (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
