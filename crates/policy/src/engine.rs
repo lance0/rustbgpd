@@ -612,7 +612,7 @@ impl RouteModifications {
             &mut self.extended_communities_remove,
             other.extended_communities_add,
             other.extended_communities_remove,
-            extended_communities_equivalent,
+            ext_community_identity,
         );
         merge_exact_list(
             &mut self.large_communities_add,
@@ -652,20 +652,25 @@ fn use_exact_list_set(left_len: usize, right_len: usize) -> bool {
     left_len > 4 && right_len > 4 && left_len.saturating_mul(right_len) > EXACT_LIST_SET_THRESHOLD
 }
 
-/// Merge add/remove lists where values have logical equivalence and later policy wins.
-fn merge_equivalent_list<T: Copy>(
+/// Merge add/remove lists where values have a logical identity and later
+/// policy wins. Identities are hashed, so merging a strip-all's per-value
+/// removals stays linear.
+fn merge_equivalent_list<T: Copy, K: Eq + Hash>(
     current_add: &mut Vec<T>,
     current_remove: &mut Vec<T>,
     new_add: Vec<T>,
     new_remove: Vec<T>,
-    equivalent: impl Fn(T, T) -> bool,
+    identity: impl Fn(T) -> K,
 ) {
-    for item in &new_remove {
-        current_add.retain(|existing| !equivalent(*existing, *item));
-    }
-    for item in &new_add {
-        current_remove.retain(|existing| !equivalent(*existing, *item));
-    }
+    let cancel = |current: &mut Vec<T>, new: &[T]| {
+        if current.is_empty() || new.is_empty() {
+            return;
+        }
+        let keys: HashSet<K> = new.iter().map(|item| identity(*item)).collect();
+        current.retain(|existing| !keys.contains(&identity(*existing)));
+    };
+    cancel(current_add, &new_remove);
+    cancel(current_remove, &new_add);
     current_add.extend(new_add);
     current_remove.extend(new_remove);
 }
@@ -2185,18 +2190,22 @@ fn apply_extended_community_mods(
         })
         .unwrap_or_default();
 
-    items.retain(|ec| {
-        !remove
-            .iter()
-            .any(|target| extended_communities_equivalent(*ec, *target))
-    });
+    // Hash the logical identities: a strip-all stages one removal per
+    // arrived value, so a pairwise scan here would be quadratic in a
+    // peer-controlled count.
+    if !remove.is_empty() {
+        let removed: HashSet<ExtCommunityIdentity> =
+            remove.iter().copied().map(ext_community_identity).collect();
+        items.retain(|ec| !removed.contains(&ext_community_identity(*ec)));
+    }
 
-    for ec in add {
-        if !items
-            .iter()
-            .any(|existing| extended_communities_equivalent(*existing, *ec))
-        {
-            items.push(*ec);
+    if !add.is_empty() {
+        let mut present: HashSet<ExtCommunityIdentity> =
+            items.iter().copied().map(ext_community_identity).collect();
+        for ec in add {
+            if present.insert(ext_community_identity(*ec)) {
+                items.push(*ec);
+            }
         }
     }
 
@@ -2210,13 +2219,33 @@ fn apply_extended_community_mods(
     }
 }
 
-fn extended_communities_equivalent(a: ExtendedCommunity, b: ExtendedCommunity) -> bool {
-    match (a.route_target(), b.route_target()) {
-        (Some(x), Some(y)) => x == y,
-        _ => match (a.route_origin(), b.route_origin()) {
-            (Some(x), Some(y)) => x == y,
-            _ => a == b,
-        },
+/// The logical identity of an extended community: Route Target and Route
+/// Origin values by decoded `(global, local)` pair, so the 2-octet AS,
+/// 4-octet AS and IPv4-specific encodings of one value are the same
+/// community; everything else by raw value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ExtCommunityIdentity {
+    RouteTarget((u32, u32)),
+    RouteOrigin((u32, u32)),
+    Raw(u64),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Identity derivations on this thread, so tests can bound the work an
+    /// apply or merge does per community.
+    pub(crate) static EXT_IDENTITY_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn ext_community_identity(ec: ExtendedCommunity) -> ExtCommunityIdentity {
+    #[cfg(test)]
+    EXT_IDENTITY_CALLS.with(|calls| calls.set(calls.get() + 1));
+    if let Some(pair) = ec.route_target() {
+        ExtCommunityIdentity::RouteTarget(pair)
+    } else if let Some(pair) = ec.route_origin() {
+        ExtCommunityIdentity::RouteOrigin(pair)
+    } else {
+        ExtCommunityIdentity::Raw(ec.as_u64())
     }
 }
 
