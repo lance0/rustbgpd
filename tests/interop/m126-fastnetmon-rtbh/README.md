@@ -41,19 +41,22 @@ one UDP frame per victim; tcpreplay loops them at 10,000 frames per second.
 | FRR | 10.7.1 (`quay.io/frrouting/frr:10.7.1`) |
 | tcpreplay | Debian 12 package |
 
-## Results (2026-10-20, run of record)
+## Results (2026-10-20, three runs)
 
 | Phase | Observed at FRR |
 |---|---|
-| Ban | `203.0.113.7/32` next hop `10.0.0.1` and `2001:db8:66::7/128` next hop `2001:db8:126::1`, about 3 s after the replay starts. The received UPDATEs carry exactly `community blackhole` (65535:666) and AS path `65001`; next-hop self replaced FastNetMon's `0.0.0.0` and `::`. FRR's table adds `no-export` on receipt (RFC 7999 §3.2). |
-| Unban | Both withdrawn 23 s after the replay stops: `ban_time` plus FastNetMon's 10 s unban watchdog. |
-| rustbgpd restart (SIGTERM, then start 10 s later) | FRR keeps both bans as Graceful Restart stale routes through the outage. The session is back within 1 s of the start, rustbgpd sends End-of-RIB, and FRR has dropped the stale bans by the first poll; the bridge's next reconcile pass re-adds them 16 s after the start. **The upstream had no blackhole for about 16 s.** The gap is bounded by the bridge's reconcile interval (30 s default), not by FastNetMon, which never re-announces. |
+| Ban | `203.0.113.7/32` next hop `10.0.0.1` and `2001:db8:66::7/128` next hop `2001:db8:126::1`, 3-5 s after the replay starts. The received UPDATEs carry exactly `community blackhole` (65535:666) and AS path `65001`; next-hop self replaced FastNetMon's `0.0.0.0` and `::`. FRR's table adds `no-export` on receipt (RFC 7999 §3.2). |
+| Unban | Both withdrawn 20-23 s after the replay stops: `ban_time` plus FastNetMon's 10 s unban watchdog. |
+| rustbgpd restart (SIGTERM, then start 10 s later) | FRR keeps both bans as Graceful Restart stale routes through the outage. The session is back within 1 s of the start, rustbgpd sends End-of-RIB, and FRR drops the stale bans; the bridge's next reconcile pass re-adds them 15-26 s after the start. **The upstream had no blackhole for 13-22 s.** The gap is bounded by the bridge's reconcile interval (30 s default), not by FastNetMon, which never re-announces. |
 | Bridge restart | Bans stay at FRR while the bridge is down; FastNetMon's later unban goes through the new bridge and both are withdrawn. |
-| Unban while rustbgpd is stopped | FastNetMon's two withdrawals fail (`UNAVAILABLE`) 28 s after the replay stops, and the stale blackholes stay at FRR. rustbgpd is then started; its End-of-RIB flushes them within 1 s. The bridge retries its pending withdrawals, and neither ban reappears over the next 65 s. |
+| Unban while rustbgpd is stopped | FastNetMon's two withdrawals fail (`UNAVAILABLE`) 24-28 s after the replay stops, and the stale blackholes stay at FRR. rustbgpd is then started; its End-of-RIB flushes them within 4 s. The bridge retries its pending withdrawals, and neither ban reappears over the next 65 s. |
 
-38 checks, 0 failed. Run-to-run timings vary by a few seconds with
-FastNetMon's watchdog and the bridge's reconcile phase; an earlier run of the
-same phases measured a 13 s restart gap.
+50 checks, 0 failed, on the head that adds this leg. Every ban, unban and
+absence check also requires the session to be Established without a flap
+since the last restart the driver caused: FRR's connection counters, and
+rustbgpd's `bgp_session_established_total` and `bgp_session_flaps_total`.
+Timings vary with FastNetMon's 10 s unban watchdog and the phase of the
+bridge's reconcile pass.
 
 ## Scope
 
