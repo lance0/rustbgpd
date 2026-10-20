@@ -283,6 +283,25 @@ async fn barrier(tx: &mpsc::Sender<RibUpdate>) {
     response.await.unwrap();
 }
 
+/// Return once the resync timer has recorded a `still_dirty` tick, after the
+/// caller advanced the paused clock past its deadline.
+///
+/// One barrier is not enough. When the barrier and the due timer wake the
+/// actor together, `select!` can serve the barrier first; if that handler
+/// then outlasts the wall-clock flush budget (a preempted worker), the actor
+/// yields before its due-timer check and this task resumes ahead of the
+/// tick. The actor fires the tick as soon as it resumes, before it serves
+/// the next barrier, so the second barrier always follows the tick.
+async fn barrier_after_still_dirty_tick(tx: &mpsc::Sender<RibUpdate>, metrics: &BgpMetrics) {
+    for _ in 0..2 {
+        barrier(tx).await;
+        if dirty_resync(metrics, "still_dirty") >= 1.0 {
+            return;
+        }
+    }
+    panic!("no still_dirty resync tick after its deadline");
+}
+
 /// A message handler that drains armed resync work (here `PeerDown`) records
 /// one `cleared` outcome when the loop reaches its end-of-iteration disarm.
 #[tokio::test(start_paused = true)]
@@ -320,8 +339,7 @@ async fn handler_drained_resync_records_one_cleared_outcome() {
 
     // One tick finds the queue still full, so the timer re-arms.
     tokio::time::advance(Duration::from_millis(1100)).await;
-    barrier(&tx).await;
-    assert!(dirty_resync(&metrics, "still_dirty") >= 1.0);
+    barrier_after_still_dirty_tick(&tx, &metrics).await;
     assert!(dirty_resync(&metrics, "cleared").abs() < f64::EPSILON);
 
     // The session closes before the next tick; its handler drains the work.
@@ -382,8 +400,7 @@ async fn outbound_dirty_peers_gauge_tracks_dirty_set() {
 
     // A tick that finds the queue still full leaves the peer dirty.
     tokio::time::advance(Duration::from_millis(1100)).await;
-    barrier(&tx).await;
-    assert!(dirty_resync(&metrics, "still_dirty") >= 1.0);
+    barrier_after_still_dirty_tick(&tx, &metrics).await;
     assert!((dirty_peers() - 1.0).abs() < f64::EPSILON);
     assert!(oldest() >= 1.0);
 
