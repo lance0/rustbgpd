@@ -4297,11 +4297,11 @@ impl RibManager {
             } => self.handle_explain_advertised_route(peer, prefix, rd, labeled, source, reply),
             RibUpdate::QueryLeasedKeys {
                 owner,
-                after,
+                resume,
                 page_size,
                 reply,
             } => {
-                let page = self.leased_keys_page(&owner, after.as_ref(), page_size);
+                let page = self.leased_keys_page(&owner, resume.as_ref(), page_size);
                 if reply.send(page).is_err() {
                     warn!("query caller dropped before receiving response");
                 }

@@ -114,6 +114,25 @@ pub struct LeasedKeysPage {
     pub rows: Vec<LeasedKeyRow>,
     /// Whether keys remain after the last row.
     pub more: bool,
+    /// This process's lease-table incarnation, which the walk is bound to.
+    pub incarnation: u64,
+    /// The owner's live generation the walk is bound to; `None` when the
+    /// owner has no live lease.
+    pub generation: Option<LeaseGeneration>,
+}
+
+/// Where a later page of a per-owner key walk resumes, and the state the
+/// walk's first page saw. A page whose daemon incarnation or owner
+/// generation no longer matches is refused, so a walk never continues into
+/// a different process or a different generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeasedKeysResume {
+    /// Lease-table incarnation of the first page.
+    pub incarnation: u64,
+    /// The owner's live generation at the first page.
+    pub generation: Option<LeaseGeneration>,
+    /// Resume strictly after this key.
+    pub after: InjectedKeyCursor,
 }
 
 /// A generation that left the table, with the deadline it had.
@@ -419,6 +438,18 @@ impl InjectionLeases {
             .map_or(Duration::ZERO, |lease| {
                 lease.deadline.saturating_duration_since(now)
             })
+    }
+
+    /// `owner`'s generation if its lease is live now.
+    #[must_use]
+    pub fn live_generation(&self, owner: &str) -> Option<LeaseGeneration> {
+        let state = self.lock();
+        let now = Instant::now();
+        state
+            .owners
+            .get(owner)
+            .filter(|lease| now < lease.deadline)
+            .map(|lease| lease.generation)
     }
 
     /// Current leases, optionally for one owner, sorted by owner.

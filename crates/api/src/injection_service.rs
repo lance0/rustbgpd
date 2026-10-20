@@ -14,8 +14,8 @@ use crate::route_distinguisher::parse_rd;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::injection_lease::{
-    InjectedKey, InjectedKeyCursor, InjectionLeases, LeaseGeneration, LeasedKeyRow, validate_lease,
-    validate_owner,
+    InjectedKey, InjectedKeyCursor, InjectionLeases, LeaseGeneration, LeasedKeyRow, LeasedKeysPage,
+    LeasedKeysResume, validate_lease, validate_owner,
 };
 use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
 use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition};
@@ -87,28 +87,57 @@ fn generation_to_proto(generation: LeaseGeneration) -> proto::LeaseGeneration {
 /// Keys per `ListLeasedKeys` page when the request leaves it 0.
 const DEFAULT_LEASED_KEYS_PAGE_SIZE: usize = 100;
 
-/// The page token for resuming after `cursor`: `u:<addr>/<len>:<path_id>`
-/// or `f:<afi>:<hex NLRI>`. Clients treat it as opaque.
-fn leased_keys_token(cursor: &InjectedKeyCursor) -> String {
+/// The page token resuming a walk after `cursor`, bound to the walk's
+/// daemon incarnation and owner generation:
+/// `t1:<incarnation>:<sequence or ->:<key>`, where the key is
+/// `u:<addr>/<len>:<path_id>` or `f:<afi>:<hex NLRI>`. Clients treat it as
+/// opaque.
+fn leased_keys_token(page: &LeasedKeysPage, cursor: &InjectedKeyCursor) -> String {
+    let sequence = page.generation.map_or_else(
+        || "-".to_string(),
+        |generation| generation.sequence.to_string(),
+    );
+    let mut token = format!("t1:{}:{sequence}:", page.incarnation);
     match cursor {
         InjectedKeyCursor::Unicast(prefix, path_id) => {
-            format!(
+            let _ = write!(
+                token,
                 "u:{}/{}:{path_id}",
                 prefix.addr_string(),
                 prefix.prefix_len()
-            )
+            );
         }
         InjectedKeyCursor::FlowSpec(afi, nlri) => {
-            let mut token = format!("f:{afi}:");
+            let _ = write!(token, "f:{afi}:");
             for byte in nlri {
                 let _ = write!(token, "{byte:02x}");
             }
-            token
         }
     }
+    token
 }
 
-fn parse_leased_keys_token(token: &str) -> Result<InjectedKeyCursor, Status> {
+fn parse_leased_keys_token(token: &str) -> Result<LeasedKeysResume, Status> {
+    let invalid = || Status::invalid_argument("invalid page_token");
+    let rest = token.strip_prefix("t1:").ok_or_else(invalid)?;
+    let (incarnation, rest) = rest.split_once(':').ok_or_else(invalid)?;
+    let (sequence, key) = rest.split_once(':').ok_or_else(invalid)?;
+    let incarnation: u64 = incarnation.parse().map_err(|_| invalid())?;
+    let generation = match sequence {
+        "-" => None,
+        sequence => Some(LeaseGeneration {
+            incarnation,
+            sequence: sequence.parse().map_err(|_| invalid())?,
+        }),
+    };
+    Ok(LeasedKeysResume {
+        incarnation,
+        generation,
+        after: parse_leased_key_cursor(key)?,
+    })
+}
+
+fn parse_leased_key_cursor(token: &str) -> Result<InjectedKeyCursor, Status> {
     let invalid = || Status::invalid_argument("invalid page_token");
     if let Some(rest) = token.strip_prefix("u:") {
         let (prefix, path_id) = rest.rsplit_once(':').ok_or_else(invalid)?;
@@ -940,7 +969,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
     ) -> Result<Response<proto::ListLeasedKeysResponse>, Status> {
         let req = request.into_inner();
         validate_owner(&req.owner).map_err(Status::invalid_argument)?;
-        let after = if req.page_token.is_empty() {
+        let resume = if req.page_token.is_empty() {
             None
         } else {
             Some(parse_leased_keys_token(&req.page_token)?)
@@ -953,15 +982,21 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         };
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLeasedKeys {
             owner: req.owner,
-            after,
+            resume,
             page_size,
             reply,
         })
-        .await?;
+        .await?
+        .ok_or_else(|| {
+            Status::aborted(
+                "the daemon restarted or the owner's lease generation changed since this \
+                 listing began; restart it with an empty page_token",
+            )
+        })?;
         let next_page_token = if page.more {
             page.rows
                 .last()
-                .map(|row| leased_keys_token(&row.cursor))
+                .map(|row| leased_keys_token(&page, &row.cursor))
                 .unwrap_or_default()
         } else {
             String::new()
@@ -969,6 +1004,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         Ok(Response::new(proto::ListLeasedKeysResponse {
             keys: page.rows.iter().map(leased_key_to_proto).collect(),
             next_page_token,
+            generation: page.generation.map(generation_to_proto),
         }))
     }
 
@@ -3881,7 +3917,8 @@ mod tests {
         );
         assert_eq!(first.keys[0].generation, generation);
         assert!((25_000..=30_000).contains(&first.keys[0].lease_remaining_ms));
-        assert!(first.next_page_token.starts_with("u:"));
+        assert!(first.next_page_token.contains(":u:198.51.100.7/32:0"));
+        assert_eq!(first.generation, generation, "the walk's generation");
 
         let second = list(first.next_page_token, "ctl")
             .await
@@ -3921,11 +3958,13 @@ mod tests {
         );
 
         for (token, owner) in [
-            ("u:198.51.100.7/33:0", "ctl"),
-            ("f:1:abc", "ctl"),
-            ("f:65535:", "ctl"),
-            ("f:1:", "ctl"),
-            ("f:1:030481", "ctl"),
+            ("u:198.51.100.7/32:0", "ctl"),
+            ("t1:1:-:u:198.51.100.7/33:0", "ctl"),
+            ("t1:1:x:u:198.51.100.7/32:0", "ctl"),
+            ("t1:1:-:f:1:abc", "ctl"),
+            ("t1:1:-:f:65535:", "ctl"),
+            ("t1:1:-:f:1:", "ctl"),
+            ("t1:1:-:f:1:030481", "ctl"),
             ("x", "ctl"),
             ("", ""),
             ("", "bad owner"),
@@ -3940,6 +3979,10 @@ mod tests {
         let other = list(String::new(), "other").await.unwrap().into_inner();
         assert_eq!(other.keys, []);
         assert_eq!(other.next_page_token, "");
+        assert_eq!(
+            other.generation, None,
+            "no lease: the walk has no generation"
+        );
 
         drop((svc, reader));
         drop(rib_tx);
@@ -4008,7 +4051,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(first.next_page_token.starts_with("f:1:"));
+        assert!(first.next_page_token.contains(":f:1:"));
         let rest = svc
             .list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
                 owner: "ctl".into(),
@@ -4040,6 +4083,64 @@ mod tests {
         drop(svc);
         drop(rib_tx);
         manager_task.await.unwrap();
+    }
+
+    /// A page token from a previous daemon process is never accepted: the
+    /// restarted daemon answers `ABORTED`, never an empty page that would
+    /// read as "this owner holds nothing more".
+    #[tokio::test]
+    async fn a_leased_key_token_from_a_previous_process_is_aborted() {
+        fn daemon() -> (
+            InjectionService,
+            mpsc::Sender<RibUpdate>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let (rib_tx, rib_rx) = mpsc::channel(64);
+            let manager = rustbgpd_rib::RibManager::new(
+                rib_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                rustbgpd_telemetry::BgpMetrics::new(),
+            );
+            let task = tokio::spawn(manager.run());
+            (
+                InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite),
+                rib_tx,
+                task,
+            )
+        }
+        fn request(page_token: String) -> Request<proto::ListLeasedKeysRequest> {
+            Request::new(proto::ListLeasedKeysRequest {
+                owner: "ctl".into(),
+                page_size: 1,
+                page_token,
+            })
+        }
+
+        let (before, before_tx, before_task) = daemon();
+        for octet in [7, 8] {
+            let mut request = leased_path("ctl", 30);
+            request.path.as_mut().unwrap().prefix = format!("198.51.100.{octet}");
+            before.add_leased_path(Request::new(request)).await.unwrap();
+        }
+        let first = before
+            .list_leased_keys(request(String::new()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.next_page_token.starts_with("t1:"));
+        drop((before, before_tx));
+        before_task.await.unwrap();
+
+        let (after, after_tx, after_task) = daemon();
+        let error = after
+            .list_leased_keys(request(first.next_page_token))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Aborted);
+        drop((after, after_tx));
+        after_task.await.unwrap();
     }
 
     fn leased_path(owner: &str, lease_seconds: u32) -> proto::AddLeasedPathRequest {

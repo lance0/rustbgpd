@@ -11,7 +11,7 @@ use super::helpers::{LOCAL_PEER, gauge_val};
 use super::{AdjRibIn, ExactExportKey, RibManager};
 use crate::injection_lease::{
     ExpiredLease, InjectedKey, InjectedKeyCursor, InjectionTag, LeasedKeyRow, LeasedKeysPage,
-    MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    LeasedKeysResume, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::route::FlowSpecRouteKey;
 use crate::update::RibCommandError;
@@ -130,18 +130,34 @@ impl RibManager {
         Some(tag)
     }
 
-    /// One page of `owner`'s keys in cursor order after `after`. The page
-    /// walks and orders that owner's keys only, which the per-owner key cap
-    /// bounds; another owner's or an unowned entry is never read.
+    /// One page of `owner`'s keys in cursor order, after `resume`'s key.
+    /// The page walks and orders that owner's keys only, which the per-owner
+    /// key cap bounds; another owner's or an unowned entry is never read.
+    /// `None` when `resume` belongs to another incarnation or generation, so
+    /// a walk cut by a restart or a regeneration is refused rather than
+    /// finished early.
     pub(super) fn leased_keys_page(
         &self,
         owner: &str,
-        after: Option<&InjectedKeyCursor>,
+        resume: Option<&LeasedKeysResume>,
         page_size: usize,
-    ) -> LeasedKeysPage {
+    ) -> Option<LeasedKeysPage> {
         let n = page_size.clamp(1, super::ROUTE_QUERY_MAX_PAGE_SIZE);
+        let incarnation = self.injection_leases.incarnation();
+        let generation = self.injection_leases.live_generation(owner);
+        if resume.is_some_and(|resume| {
+            resume.incarnation != incarnation || resume.generation != generation
+        }) {
+            return None;
+        }
+        let after = resume.map(|resume| &resume.after);
+        let empty = LeasedKeysPage {
+            incarnation,
+            generation,
+            ..LeasedKeysPage::default()
+        };
         let Some(keys) = self.owner_keys.get(owner) else {
-            return LeasedKeysPage::default();
+            return Some(empty);
         };
         let mut rows: Vec<(InjectedKeyCursor, &InjectedKey, &InjectionTag)> = keys
             .iter()
@@ -156,7 +172,7 @@ impl RibManager {
         rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         let more = rows.len() > n;
         rows.truncate(n);
-        LeasedKeysPage {
+        Some(LeasedKeysPage {
             rows: rows
                 .into_iter()
                 .map(|(cursor, key, tag)| LeasedKeyRow {
@@ -167,7 +183,8 @@ impl RibManager {
                 })
                 .collect(),
             more,
-        }
+            ..empty
+        })
     }
 
     /// Untag and return every key of `expired.owner` tagged at or below its

@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::injection_lease::{
-    ExpiryExit, InjectedKey, InjectionLeases, LeaseGeneration, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiryExit, InjectedKey, InjectionLeases, LeaseGeneration, LeasedKeysPage, LeasedKeysResume,
+    MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::update::{InjectOutcome, RibCommandError, RoutePage};
 
@@ -380,23 +381,37 @@ fn sync_leased_rule(manager: &mut RibManager, owner: &str) -> LeaseGeneration {
     rx.try_recv().unwrap().unwrap().1
 }
 
-fn leased_keys(
+fn try_leased_keys(
     manager: &mut RibManager,
     owner: &str,
-    after: Option<crate::injection_lease::InjectedKeyCursor>,
+    resume: Option<LeasedKeysResume>,
     page_size: usize,
-) -> crate::injection_lease::LeasedKeysPage {
+) -> Option<LeasedKeysPage> {
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryLeasedKeys {
         owner: owner.to_string(),
-        after,
+        resume,
         page_size,
         reply,
     });
     rx.try_recv().unwrap()
 }
 
-fn listed(page: &crate::injection_lease::LeasedKeysPage) -> Vec<InjectedKey> {
+/// A first page.
+fn leased_keys(manager: &mut RibManager, owner: &str, page_size: usize) -> LeasedKeysPage {
+    try_leased_keys(manager, owner, None, page_size).unwrap()
+}
+
+/// The continuation a walk's token names after `page`.
+fn resume_after(page: &LeasedKeysPage) -> LeasedKeysResume {
+    LeasedKeysResume {
+        incarnation: page.incarnation,
+        generation: page.generation,
+        after: page.rows.last().unwrap().cursor.clone(),
+    }
+}
+
+fn listed(page: &LeasedKeysPage) -> Vec<InjectedKey> {
     page.rows.iter().map(|row| row.key.clone()).collect()
 }
 
@@ -426,7 +441,7 @@ async fn leased_keys_list_only_the_owners_keys_in_order() {
     });
     rx.try_recv().unwrap().unwrap();
 
-    let page = leased_keys(&mut manager, "a", None, 10);
+    let page = leased_keys(&mut manager, "a", 10);
     assert!(!page.more);
     let rule = local_rule();
     assert_eq!(
@@ -446,14 +461,14 @@ async fn leased_keys_list_only_the_owners_keys_in_order() {
             .iter()
             .all(|row| row.remaining == Duration::from_secs(30))
     );
-    let page = leased_keys(&mut manager, "b", None, 10);
+    let page = leased_keys(&mut manager, "b", 10);
     assert_eq!(listed(&page), vec![InjectedKey::Unicast(host(2), 0)]);
     assert_eq!(page.rows[0].generation, g_b);
-    assert_eq!(leased_keys(&mut manager, "nobody", None, 10).rows, []);
+    assert_eq!(leased_keys(&mut manager, "nobody", 10).rows, []);
 
     // Past the deadline but not yet reaped: listed, with nothing remaining.
     tokio::time::advance(Duration::from_secs(31)).await;
-    let page = leased_keys(&mut manager, "b", None, 10);
+    let page = leased_keys(&mut manager, "b", 10);
     assert_eq!(page.rows[0].remaining, Duration::ZERO);
 }
 
@@ -472,7 +487,7 @@ async fn leased_keys_page_within_the_bound() {
     for octet in [5, 1, 4, 2, 3] {
         sync_leased(&mut manager, octet, "a", 30);
     }
-    let first = leased_keys(&mut manager, "a", None, 2);
+    let first = leased_keys(&mut manager, "a", 2);
     assert_eq!(
         listed(&first),
         vec![
@@ -481,8 +496,11 @@ async fn leased_keys_page_within_the_bound() {
         ]
     );
     assert!(first.more);
+    // Adding a key ahead of the cursor and deleting one behind it keep the
+    // lease and its generation, so the walk continues.
     sync_leased(&mut manager, 0, "a", 30);
-    let second = leased_keys(&mut manager, "a", Some(first.rows[1].cursor.clone()), 2);
+    sync_delete(&mut manager, 1, "a");
+    let second = try_leased_keys(&mut manager, "a", Some(resume_after(&first)), 2).unwrap();
     assert_eq!(
         listed(&second),
         vec![
@@ -491,13 +509,114 @@ async fn leased_keys_page_within_the_bound() {
         ]
     );
     assert!(second.more);
-    let last = leased_keys(&mut manager, "a", Some(second.rows[1].cursor.clone()), 2);
+    let last = try_leased_keys(&mut manager, "a", Some(resume_after(&second)), 2).unwrap();
     assert_eq!(listed(&last), vec![InjectedKey::Unicast(host(5), 0)]);
     assert!(!last.more);
-    assert_eq!(leased_keys(&mut manager, "a", None, 0).rows.len(), 1);
+    assert_eq!(leased_keys(&mut manager, "a", 0).rows.len(), 1);
+    assert_eq!(leased_keys(&mut manager, "a", usize::MAX).rows.len(), 5);
+}
+
+fn sync_delete(manager: &mut RibManager, octet: u8, owner: &str) {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix: host(octet),
+        path_id: 0,
+        allow_missing: false,
+        owner: owner.to_string(),
+        override_owner: false,
+        reply,
+    });
+    assert!(rx.try_recv().unwrap().unwrap().removed);
+}
+
+fn manager_for_keys() -> RibManager {
+    RibManager::new(
+        mpsc::channel(1).1,
+        dummy_query_rx(),
+        None,
+        None,
+        BgpMetrics::new(),
+    )
+}
+
+/// Every page names the owner's live generation: absent without a live
+/// lease, present with the keys it holds, and present with none once the
+/// owner deleted every key while its lease lives.
+#[tokio::test]
+async fn leased_key_pages_report_the_walks_generation() {
+    let mut manager = manager_for_keys();
+    let page = leased_keys(&mut manager, "ctl", 10);
+    assert_eq!((page.rows.len(), page.generation), (0, None));
+
+    let generation = sync_leased(&mut manager, 1, "ctl", 30);
+    let page = leased_keys(&mut manager, "ctl", 10);
+    assert_eq!((page.rows.len(), page.generation), (1, Some(generation)));
+    assert_eq!(page.incarnation, manager.injection_leases().incarnation());
+
+    sync_delete(&mut manager, 1, "ctl");
+    let page = leased_keys(&mut manager, "ctl", 10);
+    assert_eq!((page.rows.len(), page.generation), (0, Some(generation)));
+}
+
+/// A walk never continues into a restarted daemon: a later page is
+/// refused whether or not the owner held a live lease, so a truncated walk
+/// cannot end in an empty page that reads as complete.
+///
+/// Break-to-red: without the incarnation check, the no-lease walk resumes
+/// into the restarted process and returns an empty final page.
+#[tokio::test(start_paused = true)]
+async fn a_leased_key_walk_refuses_a_restarted_daemon() {
+    let mut first = manager_for_keys();
+    sync_leased(&mut first, 1, "ctl", 30);
+    sync_leased(&mut first, 2, "ctl", 30);
+    let live = leased_keys(&mut first, "ctl", 1);
+    assert!(live.more && live.generation.is_some());
+
+    let mut restarted = manager_for_keys();
+    sync_leased(&mut restarted, 1, "ctl", 30);
+    sync_leased(&mut restarted, 2, "ctl", 30);
     assert_eq!(
-        leased_keys(&mut manager, "a", None, usize::MAX).rows.len(),
-        6
+        try_leased_keys(&mut restarted, "ctl", Some(resume_after(&live)), 1),
+        None
+    );
+
+    // The owner's lease lapsed before the walk began: keys awaiting
+    // withdrawal, no live generation.
+    let mut lapsed = manager_for_keys();
+    sync_leased(&mut lapsed, 1, "ctl", 5);
+    sync_leased(&mut lapsed, 2, "ctl", 5);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let walk = leased_keys(&mut lapsed, "ctl", 1);
+    assert!(walk.more && walk.generation.is_none());
+    let mut restarted = manager_for_keys();
+    assert_eq!(
+        try_leased_keys(&mut restarted, "ctl", Some(resume_after(&walk)), 1),
+        None
+    );
+}
+
+/// A walk never continues into a new generation: after the owner's lease
+/// expired and the owner added again, a later page is refused.
+///
+/// Break-to-red: without the generation check, the walk resumes into the
+/// new generation's keys.
+#[tokio::test(start_paused = true)]
+async fn a_leased_key_walk_refuses_a_new_generation() {
+    let mut manager = manager_for_keys();
+    sync_leased(&mut manager, 1, "ctl", 5);
+    sync_leased(&mut manager, 2, "ctl", 5);
+    let walk = leased_keys(&mut manager, "ctl", 1);
+    assert!(walk.more);
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let (expired, _) = manager.injection_leases().take_expired();
+    manager.handle_update(RibUpdate::ExpireInjectionLeases { leases: expired });
+    let renewed = sync_leased(&mut manager, 1, "ctl", 5);
+    sync_leased(&mut manager, 2, "ctl", 5);
+    assert_ne!(Some(renewed), walk.generation);
+    assert_eq!(
+        try_leased_keys(&mut manager, "ctl", Some(resume_after(&walk)), 1),
+        None
     );
 }
 
@@ -513,7 +632,7 @@ async fn leased_keys_after_a_restart_carry_the_new_incarnation() {
         BgpMetrics::new(),
     );
     let before = sync_leased(&mut first, 1, "ctl", 30);
-    assert_eq!(leased_keys(&mut first, "ctl", None, 10).rows.len(), 1);
+    assert_eq!(leased_keys(&mut first, "ctl", 10).rows.len(), 1);
 
     let mut restarted = RibManager::new(
         mpsc::channel(1).1,
@@ -522,9 +641,9 @@ async fn leased_keys_after_a_restart_carry_the_new_incarnation() {
         None,
         BgpMetrics::new(),
     );
-    assert_eq!(leased_keys(&mut restarted, "ctl", None, 10).rows, []);
+    assert_eq!(leased_keys(&mut restarted, "ctl", 10).rows, []);
     sync_leased(&mut restarted, 1, "ctl", 30);
-    let page = leased_keys(&mut restarted, "ctl", None, 10);
+    let page = leased_keys(&mut restarted, "ctl", 10);
     assert_eq!(
         page.rows[0].generation.incarnation,
         restarted.injection_leases().incarnation()

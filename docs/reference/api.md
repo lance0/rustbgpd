@@ -3342,10 +3342,27 @@ continues after the last key returned, so a key added or removed elsewhere
 does not shift the pages. An owner holds at most 16,384 keys. It is a
 `sensitive_read`, served on read-only listeners.
 
+Every page carries `generation`, the owner's live generation the walk is
+bound to, so an empty page is never ambiguous:
+
+| `generation` | `keys` | Meaning |
+|---|---|---|
+| absent | any | The owner has no live lease. Re-add the whole desired state; any keys listed are expired and awaiting withdrawal. |
+| present | some | The keys that generation holds. |
+| present | none | A live lease that holds no keys. |
+
+A walk is bound to the daemon process and to the owner's generation at its
+first page. If the daemon restarts, or the owner's lease expires or a new
+generation starts, before a later page, that page returns `ABORTED` with no
+keys: start the walk again with an empty `page_token`. A token from a
+previous daemon process is never accepted. Adding or deleting keys does not
+change the generation, so it does not abort a walk. Errors are always gRPC
+statuses, never an empty `OK` page.
+
 A controller that restarts while the daemon keeps running finds its previous
 process's keys under its owner, still renewed by nobody:
 
-1. List its owner's keys page by page.
+1. List its owner's keys page by page, restarting the walk on `ABORTED`.
 2. Re-add each key it still wants with a leased add; this joins the owner's
    live lease, or starts a new generation if the old one expired.
 3. Delete each listed key it no longer wants with `DeletePath` or

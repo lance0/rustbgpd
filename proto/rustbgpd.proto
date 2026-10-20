@@ -3633,9 +3633,19 @@ service InjectionService {
   // prefix_length, path_id), then FlowSpec by AFI and rule. Only that owner's
   // keys are listed, never another owner's or unowned entries. A key whose
   // lease expired and whose withdrawal is pending reports
-  // lease_remaining_ms = 0. An owner with no keys returns an empty page.
-  // Injected state is process-local, so after a daemon restart an owner holds
-  // no keys until it adds again.
+  // lease_remaining_ms = 0.
+  //
+  // Every page carries the owner's live generation the walk is bound to:
+  // absent means the owner has no live lease, so the controller re-adds its
+  // whole desired state; present with keys lists what that generation
+  // holds; present with no keys means a live lease that holds nothing. An
+  // empty page is never a failure: errors are gRPC statuses.
+  //
+  // A walk is bound to the daemon process and the owner's generation at its
+  // first page. A later page after a daemon restart, or after the owner's
+  // lease expired or a new generation started, returns ABORTED and no keys;
+  // restart the walk with an empty page_token. A token from a previous
+  // daemon process is never accepted.
   rpc ListLeasedKeys(ListLeasedKeysRequest) returns (ListLeasedKeysResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
@@ -4036,6 +4046,9 @@ message ListLeasedKeysResponse {
   repeated LeasedKey keys = 1;
   // Empty when no keys remain.
   string next_page_token = 2;
+  // The owner's live generation this walk is bound to; absent when the
+  // owner has no live lease.
+  LeaseGeneration generation = 3;
 }
 
 message DeleteFlowSpecResponse {
