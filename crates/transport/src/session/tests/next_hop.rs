@@ -4184,18 +4184,12 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
                     next_hop_override: v6_override.as_ref(),
                 })
                 .unwrap_or_else(|error| panic!("{case}: {error:?}"));
-            export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
             let export::PreparedUnicastCandidate::Ipv4Body { attrs, .. } = profile
                 .prepare_unicast_candidate(route, v6_override.as_ref())
                 .unwrap()
             else {
                 panic!("{case}: IPv4 without Extended Next Hop must use body NLRI");
             };
-            assert_eq!(
-                export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
-                1,
-                "{case}: the dropped override is reported once"
-            );
             let next_hops: Vec<_> = attrs
                 .iter()
                 .filter_map(|attr| match attr {
@@ -4209,7 +4203,6 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
         session.negotiated = Some(Arc::new(negotiated_session(remote_asn, true)));
         let profile = session.publish_export_profile();
         for route in [&stored, &bare, &policy_applied] {
-            export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
             let export::PreparedUnicastCandidate::Mp { next_hop, .. } = profile
                 .prepare_unicast_candidate(route, v6_override.as_ref())
                 .unwrap()
@@ -4217,11 +4210,71 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
                 panic!("{case}: an IPv6 next hop with Extended Next Hop uses MP_REACH_NLRI");
             };
             assert_eq!(next_hop, IpAddr::V6(v6), "{case}");
-            assert_eq!(
-                export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
-                0,
-                "{case}: an applied override is not reported as dropped"
-            );
         }
+    }
+}
+
+/// A dual-stack export policy's IPv6 next hop cannot apply to classic IPv4
+/// NLRI without Extended Next Hop, so a learned route falls back to its
+/// stored `NEXT_HOP`. The drop is reported once per export pass, not once
+/// per route; exact-export probes and an applied override report nothing.
+#[tokio::test]
+async fn dropped_ipv6_next_hop_override_warns_once_per_export_pass() {
+    use rustbgpd_policy::NextHopAction;
+
+    let v6_override = Some(NextHopAction::Specific(IpAddr::V6(
+        "2001:db8::1".parse().unwrap(),
+    )));
+    let routes: Vec<Route> = (1..=3u8)
+        .map(|octet| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24)),
+            ..make_route(100)
+        })
+        .collect();
+    for extended_nexthop in [false, true] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        session.negotiated = Some(Arc::new(negotiated_session(65001, extended_nexthop)));
+        let profile = session.publish_export_profile();
+        export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
+        for route in &routes {
+            profile
+                .probe_announcement(ExportCandidate::Unicast {
+                    route,
+                    next_hop_override: v6_override.as_ref(),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+            0,
+            "Extended Next Hop {extended_nexthop}: probes never warn"
+        );
+
+        let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(profile);
+        update.announce = routes.clone().into();
+        update.next_hop_override = vec![v6_override.clone(); routes.len()].into();
+        session.send_route_update(update);
+        assert_eq!(
+            export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+            usize::from(!extended_nexthop),
+            "Extended Next Hop {extended_nexthop}: one warning per pass, only when dropped"
+        );
+        if extended_nexthop {
+            continue;
+        }
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        assert_eq!(parsed.announced.len(), routes.len());
+        assert!(
+            parsed
+                .attributes
+                .contains(&PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2))),
+            "the stored NEXT_HOP is the fallback"
+        );
     }
 }

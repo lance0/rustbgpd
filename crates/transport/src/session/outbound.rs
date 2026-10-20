@@ -999,6 +999,7 @@ impl PeerSession {
                     .clone();
                 match export.finish_unicast_candidate(route, *nh_override, cached_attrs) {
                     Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
+                        prepared_attr_cache.note_ipv4_body(*nh_override, entry.prefix);
                         match v4_body_index.group(&attrs, None, None, v4_body_groups.len()) {
                             Ok(idx) => v4_body_groups[idx].prefixes.push(entry),
                             Err(_) => v4_body_groups.push(V4BodyGroup {
@@ -1049,6 +1050,7 @@ impl PeerSession {
                     Err(_) => {}
                 }
             }
+            prepared_attr_cache.warn_dropped_ipv6_next_hops(&self.peer_label);
             let max_len = export.max_message_len();
             for group in &v4_body_groups {
                 let attrs = group.attrs.as_ref();
