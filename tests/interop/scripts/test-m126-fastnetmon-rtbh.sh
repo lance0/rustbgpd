@@ -176,9 +176,38 @@ expect_route() { # label afi prefix want limit
     fi
 }
 
+# Sessions FRR has seen reach Established. The driver raises it on each
+# restart it causes; any other change is a flap.
+EXPECTED_EST=1
+
+# "<FRR state> <FRR established> <FRR dropped> <rustbgpd state> <rustbgpd flaps>"
+session_counters() {
+    local frr daemon
+    frr=$(docker exec "$FRR" vtysh -c 'show bgp neighbors 10.0.0.1 json' 2>/dev/null \
+        | jq -r '.["10.0.0.1"] | "\(.bgpState) \(.connectionsEstablished) \(.connectionsDropped)"')
+    daemon=$(docker exec "$DET" rbgp --json neighbor 10.0.0.2 2>/dev/null \
+        | jq -r '"\(.state) \(.flap_count)"')
+    echo "$frr $daemon"
+}
+
+# The session is up and has not dropped since the driver last restarted
+# rustbgpd: FRR's connection counters match, and rustbgpd counts no flap.
+session_stable() {
+    [ "$(session_counters)" = "Established $EXPECTED_EST $((EXPECTED_EST - 1)) Established 0" ]
+}
+
+expect_session_stable() { # label
+    if session_stable; then
+        ok "$1: session Established, no flap"
+    else
+        bad "$1: session not stable: '$(session_counters)', expected 'Established $EXPECTED_EST $((EXPECTED_EST - 1)) Established 0'"
+    fi
+}
+
 expect_banned() { # label limit
     expect_route "$1 (IPv4)" ipv4 "$V4" "$V4_NH $BLACKHOLE" "$2"
     expect_route "$1 (IPv6)" ipv6 "$V6" "$V6_NH $BLACKHOLE" "$2"
+    expect_session_stable "$1"
 }
 
 expect_stale() { # label limit
@@ -189,19 +218,28 @@ expect_stale() { # label limit
 expect_unbanned() { # label limit
     expect_route "$1 (IPv4)" ipv4 "$V4" ABSENT "$2"
     expect_route "$1 (IPv6)" ipv6 "$V6" ABSENT "$2"
+    expect_session_stable "$1"
 }
 
 # Fail if either prefix appears at FRR during the next N seconds.
 expect_stays_absent() { # label seconds
-    local end=$(($(date +%s) + $2)) seen=""
+    local end=$(($(date +%s) + $2)) seen="" unstable=""
     while [ "$(date +%s)" -lt "$end" ]; do
         for spec in "ipv4 $V4" "ipv6 $V6"; do
             # shellcheck disable=SC2086
             [ "$(frr_route $spec)" = ABSENT ] || seen="$seen ${spec#* }"
         done
+        # Absence proves nothing over a session that has gone down.
+        session_stable || unstable=$(session_counters)
         sleep 1
     done
-    if [ -z "$seen" ]; then ok "$1: neither prefix appeared at FRR for $2s"; else bad "$1: reappeared:$seen"; fi
+    if [ -n "$unstable" ]; then
+        bad "$1: session not stable during the check: '$unstable'"
+    elif [ -z "$seen" ]; then
+        ok "$1: neither prefix appeared at FRR for $2s over a stable session"
+    else
+        bad "$1: reappeared:$seen"
+    fi
 }
 
 wait_session() { # label limit
@@ -225,6 +263,7 @@ log "FRR: $(docker exec "$FRR" vtysh -c 'show version' | head -1)"
 start_rustbgpd
 start_bridge
 wait_session "bring-up" 90
+expect_session_stable "bring-up"
 start_fnm
 sleep 5
 expect_unbanned "baseline" 5
@@ -274,6 +313,7 @@ expect_stale "phase 2 stale bans held 10s into the outage" 1
 start_rustbgpd
 t0=$(date +%s)
 wait_session "phase 2 restart" 120 || true
+EXPECTED_EST=$((EXPECTED_EST + 1))
 gap_from=""
 back=""
 while [ $(($(date +%s) - t0)) -lt $((RECONCILE_SECS + 30)) ]; do
@@ -340,6 +380,7 @@ expect_stale "phase 4 blackholes linger at FRR after the failed unban" 1
 start_rustbgpd
 t0=$(date +%s)
 wait_session "phase 4 restart" 120 || true
+EXPECTED_EST=$((EXPECTED_EST + 1))
 expect_unbanned "phase 4 stale bans flushed after restart" 30
 record "phase4_flushed_after_start_s=$(($(date +%s) - t0))"
 expect_stays_absent "phase 4 after restart (two reconcile intervals)" $((2 * RECONCILE_SECS + 5))
