@@ -7,9 +7,9 @@ use rustbgpd_api::peer_types::{POLICY_EVENT_HISTORY_CAPACITY, SESSION_EVENT_HIST
 fn event_storage_layout_savings_and_lazy_history_capacity_are_pinned() {
     use std::mem::size_of;
 
-    assert_eq!(size_of::<SessionEvent>(), 168);
-    assert_eq!(size_of::<SessionLifecycleEvent>(), 120);
-    assert_eq!(size_of::<PolicyEvent>(), 160);
+    assert_eq!(size_of::<SessionEvent>(), 152);
+    assert_eq!(size_of::<SessionLifecycleEvent>(), 104);
+    assert_eq!(size_of::<PolicyEvent>(), 144);
     assert_eq!(size_of::<Arc<SessionEvent>>(), 8);
     assert_eq!(size_of::<Arc<PolicyEvent>>(), 8);
 
@@ -74,7 +74,7 @@ fn test_policy_event(target: &str, peer: Option<IpAddr>) -> PolicyEvent {
         peer,
         peer_label: None,
         affected_peer_count: usize::from(peer.is_some()),
-        timestamp: "1".to_string(),
+        timestamp_unix_ms: 1_000,
         reason: format!("policy set policy {target}"),
     }
 }

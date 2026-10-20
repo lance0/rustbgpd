@@ -1257,7 +1257,7 @@ fn last_loss_by_peer(events: &[serde_json::Value]) -> HashMap<String, u64> {
 /// Latest retained operator intent per peer.
 ///
 /// The daemon returns the retained vector oldest-to-newest. Fold that order
-/// directly: lifecycle events are stamped only to whole seconds, and unrelated
+/// directly: lifecycle events can share a timestamp, and unrelated
 /// later FSM events must not erase the most recent enable/disable intent.
 fn latest_admin_state_by_peer(events: &[serde_json::Value]) -> HashMap<String, RetainedAdminState> {
     let mut map = HashMap::new();

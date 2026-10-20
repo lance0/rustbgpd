@@ -490,6 +490,8 @@ pub struct BfdRuntimeEvent {
     pub new_state: rustbgpd_bfd::SessionState,
     /// Local diagnostic accompanying the transition.
     pub diagnostic: rustbgpd_bfd::Diagnostic,
+    /// Transition time in Unix epoch milliseconds.
+    pub timestamp_unix_ms: i64,
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -1357,6 +1359,7 @@ mod linux {
                                 old_state: old,
                                 new_state: new,
                                 diagnostic,
+                                timestamp_unix_ms: rustbgpd_rib::event::unix_time_ms_now(),
                             });
                         }
                         // Notify PeerManager for BGP coupling (step 4), on the

@@ -37,8 +37,9 @@ pub struct RouteEvent {
     pub previous_peer: Option<IpAddr>,
     /// Outbound peer whose export policy filtered the route, if any.
     pub target_peer: Option<IpAddr>,
-    /// Unix epoch timestamp as a string.
-    pub timestamp: String,
+    /// Event time in Unix epoch milliseconds, captured when the event is
+    /// built (see [`unix_time_ms_now`]).
+    pub timestamp_unix_ms: i64,
     /// Add-Path path identifier (RFC 7911). 0 = no Add-Path.
     pub path_id: u32,
     /// Stable operator-facing reason, e.g. "`policy_denied`".
@@ -52,7 +53,7 @@ pub struct RouteEvent {
 /// daemon's local-MAC originator — need the full new best to build a
 /// `RemoteMacView` without a follow-up RIB query. Carrying the full
 /// [`EvpnRibRoute`] on the event side keeps the consumer's hot path
-/// allocation-free: the 432 B event is allocated once, then the
+/// allocation-free: the 416 B event is allocated once, then the
 /// history and live broadcast share that allocation through `Arc`.
 /// Each subscriber clone copies one `Arc`; nested path attributes
 /// remain shared, and the hot path still avoids a follow-up query.
@@ -86,8 +87,9 @@ pub struct EvpnRouteEvent {
     pub peer: Option<IpAddr>,
     /// Peer that previously held best (`None` for `Added`).
     pub previous_peer: Option<IpAddr>,
-    /// Unix epoch timestamp as a string.
-    pub timestamp: String,
+    /// Event time in Unix epoch milliseconds, captured when the event is
+    /// built (see [`unix_time_ms_now`]).
+    pub timestamp_unix_ms: i64,
 }
 
 /// Return the RD embedded in an EVPN route key.
@@ -109,37 +111,55 @@ pub const fn evpn_key_rd(key: &EvpnRouteKey) -> Option<rustbgpd_wire::RouteDisti
     }
 }
 
-/// Returns the current Unix epoch time as a string.
+/// Returns the current wall-clock time in Unix epoch milliseconds, for
+/// stamping an event where it originates.
 #[must_use]
-pub fn unix_timestamp_now() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string()
+pub fn unix_time_ms_now() -> i64 {
+    unix_time_ms(SystemTime::now())
 }
 
-/// Converts an event timestamp from [`unix_timestamp_now`] to Unix epoch
-/// milliseconds. Returns 0 for an empty or unparseable timestamp.
+/// Converts a wall-clock time to Unix epoch milliseconds. Times before the
+/// epoch map to 0; times past the `i64` range saturate.
 #[must_use]
-pub fn unix_timestamp_ms(timestamp: &str) -> i64 {
-    timestamp
-        .parse::<i64>()
-        .map_or(0, |seconds| seconds.saturating_mul(1000))
+pub fn unix_time_ms(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
+        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+    })
+}
+
+/// Renders an event time for the deprecated decimal-string `timestamp`
+/// fields: whole Unix epoch seconds, truncated.
+#[must_use]
+pub fn unix_seconds_string(timestamp_unix_ms: i64) -> String {
+    timestamp_unix_ms.div_euclid(1000).to_string()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
-    fn unix_timestamp_ms_scales_seconds_and_rejects_garbage() {
-        assert_eq!(unix_timestamp_ms("1783915200"), 1_783_915_200_000);
-        assert_eq!(unix_timestamp_ms("0"), 0);
-        assert_eq!(unix_timestamp_ms(""), 0);
-        assert_eq!(unix_timestamp_ms("2026-08-31T12:00:00Z"), 0);
-        assert_eq!(unix_timestamp_ms(&i64::MAX.to_string()), i64::MAX);
-        let now = unix_timestamp_now();
-        assert_eq!(unix_timestamp_ms(&now), now.parse::<i64>().unwrap() * 1000);
+    fn events_in_one_second_get_distinct_ordered_ms_and_the_same_seconds_string() {
+        let second = UNIX_EPOCH + Duration::from_secs(1_783_915_201);
+        let first = unix_time_ms(second + Duration::from_millis(120));
+        let next = unix_time_ms(second + Duration::from_millis(870));
+        assert_eq!(first, 1_783_915_201_120);
+        assert_eq!(next, 1_783_915_201_870);
+        assert!(first < next);
+        // The deprecated string keeps whole, truncated seconds.
+        assert_eq!(unix_seconds_string(first), "1783915201");
+        assert_eq!(unix_seconds_string(next), "1783915201");
+        assert_eq!(unix_seconds_string(1_783_915_200_999), "1783915200");
+        assert_eq!(unix_seconds_string(1_783_915_201_000), "1783915201");
+    }
+
+    #[test]
+    fn unix_time_ms_clamps_out_of_range_times() {
+        assert_eq!(unix_time_ms(UNIX_EPOCH), 0);
+        assert_eq!(unix_time_ms(UNIX_EPOCH - Duration::from_secs(1)), 0);
+        assert_eq!(unix_seconds_string(0), "0");
+        assert!(unix_time_ms_now() > 1_700_000_000_000);
     }
 }

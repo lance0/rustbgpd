@@ -2515,8 +2515,8 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
             Prefix::V6(_) => proto::AddressFamily::Ipv6Unicast,
         }
         .into(),
-        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&event.timestamp),
-        timestamp: event.timestamp,
+        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
+        timestamp_unix_ms: event.timestamp_unix_ms,
         previous_peer_address: event
             .previous_peer
             .map_or_else(String::new, |p: IpAddr| p.to_string()),
@@ -8050,7 +8050,7 @@ mod tests {
                 peer: Some("192.0.2.1".parse().unwrap()),
                 previous_peer: Some("192.0.2.2".parse().unwrap()),
                 target_peer: None,
-                timestamp: "123".to_string(),
+                timestamp_unix_ms: 123_000,
                 path_id: 99,
                 reason: String::new(),
             }])

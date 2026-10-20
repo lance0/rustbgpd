@@ -5164,7 +5164,7 @@ impl RibManager {
                 peer: Some(key.source_peer),
                 previous_peer: None,
                 target_peer: Some(key.target_peer),
-                timestamp: crate::event::unix_timestamp_now(),
+                timestamp_unix_ms: crate::event::unix_time_ms_now(),
                 path_id: key.path_id,
                 reason: "policy_denied".to_string(),
             });

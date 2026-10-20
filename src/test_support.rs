@@ -282,7 +282,7 @@ pub(crate) fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         peer: Some(peer),
         previous_peer: None,
         target_peer: None,
-        timestamp: "0".to_string(),
+        timestamp_unix_ms: 0,
         path_id: 0,
         reason: String::new(),
     }

@@ -725,7 +725,7 @@ impl RibManager {
                     previous_best,
                     peer,
                     previous_peer,
-                    timestamp: crate::event::unix_timestamp_now(),
+                    timestamp_unix_ms: crate::event::unix_time_ms_now(),
                 });
                 changed_keys.insert(*key);
             }

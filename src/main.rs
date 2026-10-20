@@ -843,7 +843,7 @@ const fn grpc_max_tier_to_auth_tier(value: GrpcMaxTier) -> rustbgpd_api::authz::
 }
 
 fn fib_runtime_event_to_bgp_event(
-    event: fib_runtime::FibRuntimeEvent,
+    event: &fib_runtime::FibRuntimeEvent,
 ) -> rustbgpd_api::proto::BgpEvent {
     let (event_type, action, severity) = match event.kind {
         fib_runtime::FibRuntimeEventKind::Installed => (
@@ -880,13 +880,13 @@ fn fib_runtime_event_to_bgp_event(
         prefix_length,
         next_hop,
         peer_address: peer_address.clone(),
-        timestamp: event.timestamp.clone(),
+        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
         reason: event.reason.clone(),
     };
 
     rustbgpd_api::proto::BgpEvent {
-        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&event.timestamp),
-        timestamp: event.timestamp,
+        timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
+        timestamp_unix_ms: event.timestamp_unix_ms,
         category: rustbgpd_api::proto::EventCategory::Dataplane as i32,
         event_type: event_type as i32,
         severity: severity as i32,
@@ -914,7 +914,7 @@ fn spawn_fib_dataplane_event_bridge(
         loop {
             match fib_events.recv().await {
                 Ok(event) => {
-                    let _ = bgp_events.send(fib_runtime_event_to_bgp_event(event));
+                    let _ = bgp_events.send(fib_runtime_event_to_bgp_event(&event));
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     warn!(
@@ -950,14 +950,14 @@ fn bfd_runtime_event_to_bgp_event(
             proto::EventSeverity::Info,
         ),
     };
-    let timestamp = rustbgpd_rib::event::unix_timestamp_now();
+    let timestamp = rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms);
     let peer_address = event.peer.to_string();
     let old_state = bfd_session_state_to_proto(event.old_state);
     let new_state = bfd_session_state_to_proto(event.new_state);
     let diagnostic = bfd_diagnostic_to_str(event.diagnostic).to_string();
     let summary = format!("bfd {peer_address} {old_state:?} → {new_state:?} ({diagnostic})");
     proto::BgpEvent {
-        timestamp_unix_ms: rustbgpd_rib::event::unix_timestamp_ms(&timestamp),
+        timestamp_unix_ms: event.timestamp_unix_ms,
         timestamp: timestamp.clone(),
         category: proto::EventCategory::Bfd as i32,
         event_type: event_type as i32,

@@ -15,5 +15,5 @@
   matching `refresh_outbound` and `replay_outbound`.
 - `RouteEvent` and `BgpEvent` carry a typed `int64 timestamp_unix_ms`. The
   decimal-string `timestamp` field is still populated but deprecated; new
-  clients should read the typed field. Producers record whole seconds, so the
-  value is currently a multiple of 1000.
+  clients should read the typed field, which carries the event time at
+  millisecond resolution, so it orders events within the same second.

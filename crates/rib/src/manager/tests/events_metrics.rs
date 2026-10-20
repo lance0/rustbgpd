@@ -6,11 +6,11 @@ use crate::manager::distribution::OutboundCommitBatch;
 fn event_storage_layout_and_lazy_history_capacity_are_pinned() {
     use std::mem::size_of;
 
-    assert_eq!(size_of::<crate::event::RouteEvent>(), 136);
+    assert_eq!(size_of::<crate::event::RouteEvent>(), 120);
     // SMET widens the Copy key from 36 to 64 B while the full route stays
-    // 68 B. Including alignment, the shared event grows by 32 B; neither
-    // Arc slots nor the lazy history's initial capacity grow.
-    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 432);
+    // 68 B; the millisecond `i64` event time replaced a 24 B `String`.
+    // Neither Arc slots nor the lazy history's initial capacity grow.
+    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 416);
     assert_eq!(size_of::<Arc<crate::event::RouteEvent>>(), 8);
     assert_eq!(size_of::<Arc<crate::event::EvpnRouteEvent>>(), 8);
 
@@ -32,7 +32,7 @@ async fn route_history_and_live_broadcast_share_arc_but_queries_are_owned() {
         peer: None,
         previous_peer: None,
         target_peer: None,
-        timestamp: "1".to_string(),
+        timestamp_unix_ms: 1_000,
         path_id: 0,
         reason: "original".to_string(),
     });
@@ -78,7 +78,7 @@ fn route_event_id_exhaustion_saturates_instead_of_panicking() {
             peer: None,
             previous_peer: None,
             target_peer: None,
-            timestamp: String::new(),
+            timestamp_unix_ms: 0,
             path_id: 0,
             reason: String::new(),
         });
@@ -942,13 +942,8 @@ async fn route_event_has_timestamp() {
     .unwrap();
 
     let event = events_rx.recv().await.unwrap();
-    assert_ne!(event.timestamp.len(), 0);
-    // Should be a valid integer (Unix seconds)
-    let ts: u64 = event
-        .timestamp
-        .parse()
-        .expect("timestamp should be numeric");
-    assert!(ts > 0);
+    // Stamped with the wall clock in Unix epoch milliseconds.
+    assert!(event.timestamp_unix_ms > 1_700_000_000_000);
 
     drop(tx);
     handle.await.unwrap();

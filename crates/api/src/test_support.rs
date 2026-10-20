@@ -107,7 +107,7 @@ pub(crate) fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         peer: Some(peer),
         previous_peer: None,
         target_peer: None,
-        timestamp: "123".to_string(),
+        timestamp_unix_ms: 123_000,
         path_id: 7,
         reason: String::new(),
     }
@@ -156,7 +156,7 @@ pub(crate) fn evpn_event(
         previous_best,
         peer,
         previous_peer,
-        timestamp: "123".to_string(),
+        timestamp_unix_ms: 123_000,
     }
 }
 
@@ -391,7 +391,7 @@ pub(crate) fn lifecycle_event(
         event_type,
         peer,
         peer_label: None,
-        timestamp: "456".to_string(),
+        timestamp_unix_ms: 456_000,
         old_state: Some(SessionState::OpenConfirm),
         new_state: Some(SessionState::Established),
         session_role: Some("primary".to_string()),
@@ -407,7 +407,7 @@ pub(crate) fn notification_event(
         event_type,
         peer,
         peer_label: None,
-        timestamp: "789".to_string(),
+        timestamp_unix_ms: 789_000,
         code: 6,
         subcode: 7,
         description: "Connection Collision Resolution".to_string(),
@@ -427,7 +427,7 @@ pub(crate) fn policy_event(peer: Option<IpAddr>) -> PolicyEvent {
         peer,
         peer_label: None,
         affected_peer_count: 2,
-        timestamp: "789".to_string(),
+        timestamp_unix_ms: 789_000,
         reason: "policy set policy audit-policy".to_string(),
     }
 }
