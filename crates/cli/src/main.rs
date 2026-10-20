@@ -3183,8 +3183,28 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
     Ok((h << 16) | l)
 }
 
-#[tokio::main]
-async fn main() {
+/// One-shot commands do not need a worker per host core: building that pool
+/// dominated startup on many-core hosts. Nothing in the CLI uses
+/// `block_in_place`, which panics on this flavor.
+fn cli_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+fn main() {
+    let runtime = match cli_runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "Error: cannot start runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     let binary_name = invoked_binary_name();
     let mut cli = parse_cli(binary_name);
 
@@ -6027,6 +6047,16 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cli_runtime_does_not_start_a_worker_per_core() {
+        let runtime = cli_runtime().unwrap();
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread
+        );
+        assert_eq!(runtime.metrics().num_workers(), 1);
+    }
+
     #[test]
     fn json_lines_mode_parses_and_rejects_incompatible_views() {
         for args in [

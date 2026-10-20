@@ -1,4 +1,8 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The shared proto lives outside this package, so Cargo's default scan
+    // misses it; declaring paths replaces that scan, so list both inputs.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../proto/rustbgpd.proto");
     // tonic 0.14 split prost-coupled codegen out into tonic-prost-build.
     // Same `configure()` builder surface (build_server / build_client /
     // compile_protos) — only the crate name changed.
