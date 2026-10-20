@@ -689,3 +689,100 @@ async fn an_owner_holds_at_most_the_key_cap() {
             .is_ok()
     );
 }
+
+/// Expiry removes only the local intent: a learned route for the same
+/// prefix, out-selected while the leased route lived, becomes best and is
+/// advertised to the peer in place of the local one.
+///
+/// Break-to-red: an expiry that skips the selection pass leaves the learned
+/// route unadvertised.
+#[tokio::test(start_paused = true)]
+async fn expiry_hands_the_prefix_to_a_learned_route() {
+    const SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 80);
+    let mut h = Harness::start().await;
+    let (source_tx, _source_rx) = mpsc::channel(64);
+    h.tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: IpAddr::V4(SOURCE),
+        peer_asn: 65200,
+        peer_router_id: SOURCE,
+        outbound_tx: source_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    leased_route(&h.tx, local_route(1), "ctl", 10)
+        .await
+        .unwrap();
+    let mut learned = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32), SOURCE);
+    learned.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65200])],
+        }),
+        PathAttribute::NextHop(SOURCE),
+    ]);
+    h.tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(SOURCE),
+        announced: vec![learned],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    h.settle().await;
+    let best = |routes: Vec<Route>| {
+        routes
+            .into_iter()
+            .filter(|route| route.prefix == host(1))
+            .map(|route| route.peer)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(best(query_best_routes(&h.tx).await), vec![LOCAL_PEER]);
+    h.drain();
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    h.settle().await;
+    assert_eq!(
+        best(query_best_routes(&h.tx).await),
+        vec![IpAddr::V4(SOURCE)]
+    );
+    let advertised: Vec<IpAddr> = h
+        .drain()
+        .iter()
+        .flat_map(|update| update.announce.iter())
+        .filter(|route| route.prefix == host(1))
+        .map(|route| route.peer)
+        .collect();
+    assert_eq!(advertised, vec![IpAddr::V4(SOURCE)]);
+    h.stop().await;
+}
+
+/// Every queued RIB message is as large as the largest variant, so a lease
+/// variant must not set that size. Its payloads (a route or rule, an owner
+/// and a reply) stay below the largest existing variant.
+///
+/// Break-to-red: growing any variant past 248 bytes fails the bound; box
+/// the payload instead.
+#[test]
+fn lease_variants_do_not_grow_rib_update() {
+    type Reply = oneshot::Sender<Result<(InjectOutcome, LeaseGeneration), RibCommandError>>;
+    assert!(size_of::<RibUpdate>() <= 248, "{}", size_of::<RibUpdate>());
+    assert!(size_of::<(Route, String, u32, Reply)>() < size_of::<RibUpdate>());
+    assert!(size_of::<(FlowSpecRoute, String, u32, Reply)>() < size_of::<RibUpdate>());
+}
