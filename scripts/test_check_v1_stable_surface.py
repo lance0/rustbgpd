@@ -652,6 +652,22 @@ class PassThroughEmissionTests(unittest.TestCase):
         emitted = self.emitted(caller, **{"crates/fixture/src/wrapper.rs": renamed})
         self.assertEqual(emitted, {"new_a", "new_b"})
 
+    def test_rebound_wrapper_parameter_is_no_evidence(self):
+        # The wrapper's caller passes PAIR, but the value reaching the setter
+        # is rebound or reassigned first: the call emits something else.
+        caller = 'fn caller(m: &M) { crate::wrapper::publish(m, "p", crate::wrapper::PAIR, [1, 2]); }'
+        for old, new in (
+            ("    for (family, count)", '    let families = ["fam_z", "fam_y"];\n    for (family, count)'),
+            ("        metrics.set_x(", '        let family = "fam_z";\n        metrics.set_x('),
+            ("        metrics.set_x(", '        family = "fam_z";\n        metrics.set_x('),
+        ):
+            with self.subTest(new=new):
+                self.assertEqual(self.WRAPPER.count(old), 1)
+                wrapper = self.WRAPPER.replace(old, new)
+                self.assertEqual(
+                    self.emitted(caller, **{"crates/fixture/src/wrapper.rs": wrapper}), set()
+                )
+
     def test_ambiguous_or_unresolvable_constant_is_no_evidence(self):
         caller = 'fn caller(m: &M) { crate::wrapper::publish(m, "p", PAIR, [1, 2]); }'
         # Bare PAIR is neither declared in the caller nor imported.

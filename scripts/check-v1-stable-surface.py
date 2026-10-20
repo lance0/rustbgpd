@@ -1494,7 +1494,8 @@ def enclosing_parameter(text: str, position: int, identifier: str) -> tuple[str,
 
     The identifier is a parameter of the function enclosing `position`, or a
     `for` binding that iterates one. Only that function's callers can then
-    supply its values.
+    supply its values, so a `let` or assignment of either name before the
+    call is no evidence.
     """
     functions = list(re.finditer(r"\bfn\s+(\w+)\s*(?:<[^>{]*>)?\s*\(", text[:position]))
     if not functions:
@@ -1519,6 +1520,9 @@ def enclosing_parameter(text: str, position: int, identifier: str) -> tuple[str,
     if identifier not in parameters and loops:
         source = loops[-1]
     if source not in parameters:
+        return None
+    between = text[function.end() : position]
+    if rebinds(between, identifier) or rebinds(between, source):
         return None
     return function.group(1), parameters.index(source), method
 
