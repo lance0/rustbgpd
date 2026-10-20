@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use rustbgpd_gobgp_bridge::{
-    Bridge, DEFAULT_MAX_TRACKED, DaemonEndpoint, check_listen, daemon_channel, load_token, serve,
+    Bridge, DAEMON_RPC_TIMEOUT, DEFAULT_MAX_TRACKED, DaemonEndpoint, check_listen, daemon_channel,
+    load_token, serve,
 };
 
 #[derive(Parser, Debug)]
@@ -50,7 +51,7 @@ struct Args {
 async fn run(args: Args) -> Result<(), String> {
     check_listen(args.listen, args.allow_non_loopback)?;
     let bearer = args.token_file.as_deref().map(load_token).transpose()?;
-    let channel = daemon_channel(&args.daemon)?;
+    let channel = daemon_channel(&args.daemon, DAEMON_RPC_TIMEOUT)?;
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;

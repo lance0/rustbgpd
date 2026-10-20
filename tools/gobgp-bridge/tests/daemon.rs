@@ -115,6 +115,7 @@ async fn start_daemon(dir: &Path) -> (Killed, RibServiceClient<Channel>) {
     let mut daemon = Killed(child);
     let channel = rustbgpd_gobgp_bridge::daemon_channel(
         &format!("unix://{}", socket(dir).display()).parse().unwrap(),
+        rustbgpd_gobgp_bridge::DAEMON_RPC_TIMEOUT,
     )
     .unwrap();
     let mut rib = RibServiceClient::new(channel);

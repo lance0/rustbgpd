@@ -1,9 +1,12 @@
 //! Replay ordering and capacity against a scripted daemon: an unban during an
-//! outage is retried after it, a replay never reinstalls a withdrawn path, and
-//! the tracking cap is checked before the daemon sees a new ban.
+//! outage is retried after it, a cancelled unban is still retried, a replay
+//! never reinstalls a withdrawn path, a daemon that stops answering does not
+//! hold the bridge, and the tracking cap is checked before the daemon sees a
+//! new ban.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rustbgpd_gobgp_bridge::gobgp::{self, gobgp_api_server::GobgpApi};
 use rustbgpd_gobgp_bridge::rustbgpd::{
@@ -24,8 +27,12 @@ struct Script {
     down: bool,
     /// Park the next AddPath until notified.
     hold_add: Option<Arc<Notify>>,
-    /// Signalled when an AddPath parks.
+    /// Signalled when an AddPath or DeletePath parks.
     parked: Option<Arc<Notify>>,
+    /// Park the next DeletePath until notified.
+    hold_delete: Option<Arc<Notify>>,
+    /// Accept every call and never answer.
+    stalled: bool,
 }
 
 #[derive(Clone, Default)]
@@ -38,13 +45,18 @@ impl InjectionService for Daemon {
         request: Request<rbgp::AddPathRequest>,
     ) -> Result<Response<rbgp::AddPathResponse>, Status> {
         let prefix = request.into_inner().prefix;
-        let (hold, parked) = {
+        let (hold, parked, stalled) = {
             let mut script = self.0.lock().unwrap();
             if script.down {
                 return Err(Status::unavailable("scripted outage"));
             }
-            (script.hold_add.take(), script.parked.take())
+            let hold = script.hold_add.take();
+            let parked = hold.is_some().then(|| script.parked.take()).flatten();
+            (hold, parked, script.stalled)
         };
+        if stalled {
+            std::future::pending::<()>().await;
+        }
         if let Some(hold) = hold {
             parked.unwrap().notify_one();
             hold.notified().await;
@@ -67,10 +79,23 @@ impl InjectionService for Daemon {
     ) -> Result<Response<rbgp::DeletePathResponse>, Status> {
         let req = request.into_inner();
         assert!(req.allow_missing, "withdrawals must be idempotent");
-        let mut script = self.0.lock().unwrap();
-        if script.down {
-            return Err(Status::unavailable("scripted outage"));
+        let (hold, parked, stalled) = {
+            let mut script = self.0.lock().unwrap();
+            if script.down {
+                return Err(Status::unavailable("scripted outage"));
+            }
+            let hold = script.hold_delete.take();
+            let parked = hold.is_some().then(|| script.parked.take()).flatten();
+            (hold, parked, script.stalled)
+        };
+        if stalled {
+            std::future::pending::<()>().await;
         }
+        if let Some(hold) = hold {
+            parked.unwrap().notify_one();
+            hold.notified().await;
+        }
+        let mut script = self.0.lock().unwrap();
         script.calls.push(format!("delete {}", req.prefix));
         script.routes.remove(&req.prefix);
         Ok(Response::new(rbgp::DeletePathResponse::default()))
@@ -78,6 +103,10 @@ impl InjectionService for Daemon {
 }
 
 async fn bridge(max_tracked: usize) -> (Bridge, Daemon) {
+    bridge_with_deadline(max_tracked, rustbgpd_gobgp_bridge::DAEMON_RPC_TIMEOUT).await
+}
+
+async fn bridge_with_deadline(max_tracked: usize, rpc_timeout: Duration) -> (Bridge, Daemon) {
     let daemon = Daemon::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -87,7 +116,7 @@ async fn bridge(max_tracked: usize) -> (Bridge, Daemon) {
             .add_service(service)
             .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
     );
-    let channel = daemon_channel(&format!("http://{addr}").parse().unwrap()).unwrap();
+    let channel = daemon_channel(&format!("http://{addr}").parse().unwrap(), rpc_timeout).unwrap();
     (Bridge::new(channel, None, max_tracked), daemon)
 }
 
@@ -207,4 +236,66 @@ async fn the_cap_is_checked_before_the_daemon_sees_a_new_ban() {
     bridge.add_path(ban(1, true)).await.unwrap();
     bridge.add_path(ban(2, false)).await.unwrap();
     assert_eq!(held(&daemon), ["203.0.113.2"]);
+}
+
+#[tokio::test]
+async fn a_cancelled_unban_is_still_retried() {
+    let (bridge, daemon) = bridge(8).await;
+    bridge.add_path(ban(1, false)).await.unwrap();
+
+    // Park the unban's DeletePath, then drop the handler, as tonic does when
+    // the detector's deadline expires or it disconnects.
+    let hold = Arc::new(Notify::new());
+    let parked = Arc::new(Notify::new());
+    {
+        let mut script = daemon.0.lock().unwrap();
+        script.hold_delete = Some(hold);
+        script.parked = Some(parked.clone());
+    }
+    let unban = tokio::spawn({
+        let bridge = bridge.clone();
+        async move { bridge.add_path(ban(1, true)).await }
+    });
+    parked.notified().await;
+    unban.abort();
+    assert!(unban.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        held(&daemon),
+        ["203.0.113.1"],
+        "the parked delete never completed"
+    );
+
+    daemon.0.lock().unwrap().calls.clear();
+    bridge.reconcile().await;
+    assert_eq!(daemon.0.lock().unwrap().calls, ["delete 203.0.113.1"]);
+    assert_eq!(held(&daemon), Vec::<String>::new());
+    daemon.0.lock().unwrap().calls.clear();
+    bridge.reconcile().await;
+    assert_eq!(daemon.0.lock().unwrap().calls, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_daemon_that_stops_answering_does_not_hold_the_bridge() {
+    let deadline = Duration::from_millis(200);
+    let (bridge, daemon) = bridge_with_deadline(8, deadline).await;
+    bridge.add_path(ban(1, false)).await.unwrap();
+    bridge.add_path(ban(2, false)).await.unwrap();
+
+    daemon.0.lock().unwrap().stalled = true;
+    // A reconcile pass ends at the first deadline instead of holding the lock.
+    tokio::time::timeout(Duration::from_secs(5), bridge.reconcile())
+        .await
+        .expect("reconcile must not wait on a stalled daemon");
+    // So does an unban, which stays pending.
+    let err = tokio::time::timeout(Duration::from_secs(5), bridge.add_path(ban(1, true)))
+        .await
+        .expect("an unban must not wait on a stalled daemon")
+        .unwrap_err();
+    assert!(err.message().contains("retries this withdrawal"), "{err:?}");
+
+    daemon.0.lock().unwrap().stalled = false;
+    // A later ban proceeds, and the next pass applies the pending unban.
+    bridge.add_path(ban(3, false)).await.unwrap();
+    bridge.reconcile().await;
+    assert_eq!(held(&daemon), ["203.0.113.2", "203.0.113.3"]);
 }

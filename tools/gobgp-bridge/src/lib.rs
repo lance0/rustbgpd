@@ -57,6 +57,11 @@ pub mod rustbgpd {
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Deadline for each daemon RPC. Requests and reconcile passes share one
+/// lock, so a daemon that accepts the connection but never answers would
+/// otherwise block every later ban, unban and pass.
+pub const DAEMON_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Where the daemon's gRPC API listens.
 #[derive(Debug, Clone)]
 pub enum DaemonEndpoint {
@@ -121,21 +126,24 @@ type Injection =
     rbgp::injection_service_client::InjectionServiceClient<InterceptedService<Channel, Bearer>>;
 
 /// A lazily connected channel: the bridge starts while the daemon is down
-/// and reconnects on the next request after the daemon returns.
+/// and reconnects on the next request after the daemon returns. Every RPC on
+/// it fails after `rpc_timeout` (normally [`DAEMON_RPC_TIMEOUT`]).
 ///
 /// # Errors
 ///
 /// The endpoint URI is invalid.
-pub fn daemon_channel(endpoint: &DaemonEndpoint) -> Result<Channel, String> {
+pub fn daemon_channel(endpoint: &DaemonEndpoint, rpc_timeout: Duration) -> Result<Channel, String> {
     match endpoint {
         DaemonEndpoint::Tcp(uri) => Ok(Endpoint::from_shared(uri.clone())
             .map_err(|e| format!("invalid daemon endpoint: {e}"))?
             .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(rpc_timeout)
             .connect_lazy()),
         DaemonEndpoint::Uds(path) => {
             let path = path.clone();
             Ok(Endpoint::from_static("http://[::]:50051")
                 .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(rpc_timeout)
                 .connect_with_connector_lazy(tower::service_fn(move |_: Uri| {
                     let path = path.clone();
                     async move {
@@ -219,18 +227,22 @@ impl Bridge {
                 // Stop replaying it first: whatever the daemon answers, the
                 // detector no longer wants this path.
                 desired.routes.remove(&key);
+                // Record the retry before the daemon call: if this request is
+                // cancelled while the call is pending, the next reconcile
+                // pass still applies the withdrawal. A full tracker makes it
+                // best effort.
+                let retried = desired.pending_deletes.contains_key(&key)
+                    || desired.routes.len() + desired.pending_deletes.len() < self.max_tracked;
+                if retried {
+                    desired.pending_deletes.insert(key, req.clone());
+                }
                 match injection.delete_path(req.clone()).await {
                     Ok(response) => {
+                        // Deleted, or NOT_PRESENT under allow_missing.
                         desired.pending_deletes.remove(&key);
                         info!(action = "withdraw", prefix = %prefix_of(&req.prefix, req.prefix_length), outcome = ?response.into_inner().outcome(), "applied");
                     }
                     Err(status) => {
-                        let retried = desired.pending_deletes.contains_key(&key)
-                            || desired.routes.len() + desired.pending_deletes.len()
-                                < self.max_tracked;
-                        if retried {
-                            desired.pending_deletes.insert(key, req.clone());
-                        }
                         return Err(Status::new(
                             status.code(),
                             if retried {

@@ -139,6 +139,10 @@ interval it retries those withdrawals, then re-adds every tracked
 announcement. An unchanged re-add is a no-op in the daemon; after a daemon
 restart it restores the ban. The bridge tracks at most 65,536 paths, and a new
 ban beyond that is refused with `RESOURCE_EXHAUSTED` before the daemon sees it.
+Each daemon call has a 10-second deadline, so a daemon that accepts the
+connection but stops answering fails the request instead of stalling the
+bridge. An unban is recorded for retry before its daemon call, so a timed out
+or cancelled unban is still applied by a later pass.
 
 The integration test (`tests/daemon.rs`) runs each case below against a real
 rustbgpd binary. It has no BGP peers and stops the daemon cleanly, so the
