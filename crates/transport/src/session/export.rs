@@ -103,6 +103,61 @@ impl std::fmt::Debug for SessionExportProfile {
     }
 }
 
+/// An injected route with an unspecified next hop asks for next-hop self on
+/// every session, route-server clients included; an explicit export-policy
+/// next-hop action still wins. The stored next hop stays unspecified, so
+/// this is resolved here, per session, for live and probe paths alike.
+fn local_self_next_hop<'a>(
+    route: &Route,
+    nh_override: Option<&'a rustbgpd_policy::NextHopAction>,
+) -> Option<&'a rustbgpd_policy::NextHopAction> {
+    nh_override
+        .or_else(|| is_injected_self_route(route).then_some(&rustbgpd_policy::NextHopAction::Self_))
+}
+
+/// Whether `route` was injected with next-hop self. Export policy can rewrite
+/// `route.next_hop` before export (the RIB's export memo) while the stored
+/// `NEXT_HOP` keeps the `0.0.0.0` sentinel, so either one carries the intent.
+fn is_injected_self_route(route: &Route) -> bool {
+    route.origin_type == rustbgpd_rib::RouteOrigin::Local
+        && (route.next_hop.is_unspecified()
+            || route.attributes.iter().any(
+                |attr| matches!(attr, PathAttribute::NextHop(next_hop) if next_hop.is_unspecified()),
+            ))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Unsupported IPv6 next-hop overrides dropped on this thread, so a test
+    /// can pin the fallback warning without depending on tracing callsite
+    /// interest, which is process-wide.
+    pub(super) static IPV6_NEXT_HOP_FALLBACKS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// An export-policy IPv6 next hop cannot apply to classic IPv4 NLRI without
+/// Extended Next Hop; the route is sent with its default next hop instead.
+/// Called where classic IPv4 NLRI is chosen, so it reports the drop whether
+/// or not the route stored a `NEXT_HOP`, and never an applied override.
+fn warn_if_ipv6_next_hop_dropped(
+    nh_override: Option<&rustbgpd_policy::NextHopAction>,
+    prefix: Prefix,
+) {
+    if !matches!(
+        nh_override,
+        Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_)))
+    ) {
+        return;
+    }
+    #[cfg(test)]
+    IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(count.get() + 1));
+    tracing::warn!(
+        %prefix,
+        "export policy set IPv6 next-hop for classic IPv4 NLRI; \
+         requires Extended Next Hop (RFC 8950) — using default next-hop instead"
+    );
+}
+
 impl SessionExportProfile {
     /// Whether two profiles produce identical bytes for the same candidate.
     ///
@@ -520,6 +575,11 @@ impl SessionExportProfile {
         local_ipv4: Ipv4Addr,
         nh_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> Vec<PathAttribute> {
+        let nh_override = local_self_next_hop(route, nh_override);
+        // An injected next-hop-self route stores the unspecified sentinel;
+        // when an inapplicable policy override falls back to the default next
+        // hop, that default is self, never the sentinel.
+        let self_route = is_injected_self_route(route);
         let is_ebgp = self.is_ebgp();
         let force_next_hop_self =
             matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
@@ -560,9 +620,10 @@ impl SessionExportProfile {
                         nh_override
                     {
                         attrs.push(PathAttribute::NextHop(*next_hop));
-                    } else if policy_set_specific {
+                    } else if policy_set_specific && !self_route {
                         attrs.push(attr.clone());
-                    } else if force_next_hop_self || (is_ebgp && !route_server_client) {
+                    } else if force_next_hop_self || self_route || (is_ebgp && !route_server_client)
+                    {
                         attrs.push(PathAttribute::NextHop(local_ipv4));
                     } else {
                         attrs.push(attr.clone());
@@ -610,12 +671,7 @@ impl SessionExportProfile {
                     Some(*next_hop)
                 }
                 Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_))) => {
-                    tracing::warn!(
-                        prefix = %route.prefix,
-                        "export policy set IPv6 next-hop for classic IPv4 NLRI; \
-                         requires Extended Next Hop (RFC 8950) — using default next-hop instead"
-                    );
-                    if is_ebgp && !route_server_client {
+                    if self_route || (is_ebgp && !route_server_client) {
                         Some(local_ipv4)
                     } else {
                         match route.next_hop {
@@ -1073,12 +1129,17 @@ impl SessionExportProfile {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps the per-family next-hop selection and its refusals in one auditable pass"
+    )]
     pub(super) fn finish_unicast_candidate(
         &self,
         route: &Route,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
         attrs: PreparedUnicastAttributes,
     ) -> Result<PreparedUnicastCandidate, ExportProbeError> {
+        let next_hop_override = local_self_next_hop(route, next_hop_override);
         let local_ipv4 = self.local_ipv4();
         let rewritten =
             next_hop_override.is_some() || (self.is_ebgp() && !self.route_server_client);
@@ -1140,6 +1201,7 @@ impl SessionExportProfile {
                 {
                     return Err(ExportProbeError::Ipv4RequiresExtendedNextHop);
                 }
+                warn_if_ipv6_next_hop_dropped(next_hop_override, route.prefix);
                 Ok(PreparedUnicastCandidate::Ipv4Body {
                     attrs: attrs.with_next_hop,
                     entry: Ipv4NlriEntry {
@@ -1162,8 +1224,9 @@ impl SessionExportProfile {
                     _ => route.next_hop,
                 };
                 // RFC 2545 §3: an IPv6 MP_REACH next hop is 16 or 32 octets.
-                // Refuse rather than encode a 4-octet one.
-                if next_hop.is_ipv4() {
+                // Refuse rather than encode a 4-octet one, or an unspecified
+                // one when next-hop self found no local IPv6 address.
+                if next_hop.is_ipv4() || next_hop.is_unspecified() {
                     return Err(ExportProbeError::MissingIpv6NextHop);
                 }
                 self.check_link_local_export(

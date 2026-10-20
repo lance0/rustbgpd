@@ -1,10 +1,12 @@
 # Containerlab topology: rustbgpd ↔ 2× FRR (Milestone 3 — Speak)
 #
 # Validates: route redistribution, route injection (gRPC AddPath/DeletePath),
-# split horizon, withdrawal propagation, max-prefix enforcement, export policy.
+# split horizon, withdrawal propagation, max-prefix enforcement, export policy,
+# and next-hop self for an injected 0.0.0.0 / :: next hop on eBGP and iBGP.
 #
 # FRR-A (AS 65002) advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16
 # FRR-B (AS 65003) advertises: nothing (receives redistributed routes)
+# FRR-C (AS 65001, iBGP, IPv4 + IPv6 unicast over IPv4) advertises: nothing
 #
 # Usage:
 #   containerlab deploy -t tests/interop/m3-frr.clab.yml
@@ -27,6 +29,8 @@ topology:
         - ip link set eth1 up
         - ip addr add 10.0.1.1/24 dev eth2
         - ip link set eth2 up
+        - ip addr add 10.0.2.1/24 dev eth3
+        - ip link set eth3 up
       env:
         RUST_LOG: info
 
@@ -50,9 +54,26 @@ topology:
         - ip addr add 10.0.1.2/24 dev eth1
         - ip link set eth1 up
 
+    frr-c:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m3-c.conf:/etc/frr/frr.conf:ro
+        # Without this, vtysh prints a warning on stdout and JSON reads fail.
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        # FRR resets an IPv4 session carrying IPv6 unicast before its OPEN
+        # while the interface lacks a usable IPv6 link-local.
+        - ip -6 addr add fe80::2/64 dev eth1 nodad
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+
   links:
     - endpoints: ["rustbgpd:eth1", "frr-a:eth1"]
     - endpoints: ["rustbgpd:eth2", "frr-b:eth1"]
+    - endpoints: ["rustbgpd:eth3", "frr-c:eth1"]
 
 # Network A: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR-A (10.0.0.2, AS 65002)
 # Network B: 10.0.1.0/24 — rustbgpd (10.0.1.1, AS 65001) ↔ FRR-B (10.0.1.2, AS 65003)
+# Network C: 10.0.2.0/24 — rustbgpd (10.0.2.1, AS 65001) ↔ FRR-C (10.0.2.2, AS 65001)

@@ -3519,7 +3519,27 @@ message BgpEvent {
 // ---------------------------------------------------------------------------
 
 service InjectionService {
+  // Inject or replace a locally originated unicast route. The route is an
+  // upsert keyed on (prefix, prefix_length, path_id): repeating an identical
+  // request is idempotent, and a request with the same key but a different
+  // next hop or attributes replaces the local route. The response reports
+  // which of these happened. OK confirms that the route was accepted into
+  // the local Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution
+  // normally run in the same RIB turn, before the reply, but are deferred
+  // while Graceful Restart selection deferral is active for the family. OK
+  // does not mean any peer received or installed the route, and a received
+  // route for the same prefix can out-select it. Injected routes are
+  // process-local and lost on a daemon restart, so a controller reconciles
+  // periodically and after every reconnect by re-adding its desired routes
+  // (an UNCHANGED re-add is cheap). A lower ControlService.GetHealth
+  // uptime_seconds is an extra trigger, not a reliable restart detector.
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
+  // Withdraw a locally injected unicast route by its (prefix, prefix_length,
+  // path_id) key. Only routes added through AddPath are affected; routes
+  // received from peers are never removed. A key with no local route returns
+  // NOT_FOUND unless allow_missing is set. As for AddPath, OK confirms the
+  // change to the local Adj-RIB-In; selection and distribution follow in the
+  // same RIB turn unless Graceful Restart selection deferral is active.
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request
@@ -3551,6 +3571,26 @@ service InjectionService {
 message AddPathRequest {
   string prefix = 1;
   uint32 prefix_length = 2;
+  // Next hop of the injected route. An unspecified address ("0.0.0.0" or
+  // "::", for either prefix family) means next-hop self: the daemon
+  // advertises the route with its own address on each session, resolved
+  // per session at export like `set next-hop self` in export policy, and
+  // an explicit export-policy next-hop action still wins. An IPv4 prefix
+  // takes the session's local IPv4 address (the router ID on an IPv6-only
+  // session without Extended Next Hop), or the session's local address in
+  // MP_REACH_NLRI when Extended Next Hop (RFC 8950) is negotiated. An IPv6
+  // prefix takes the neighbor's local_ipv6_nexthop, else the session's
+  // local IPv6 address; a session with neither refuses the route with
+  // the exact-export reason missing_ipv6_next_hop rather than sending an
+  // unusable next hop. GoBGP (v3.37.0, v4.10.0) also resolves an unspecified
+  // next hop to the session's local address for eBGP and iBGP peers, but
+  // sends it unchanged to route-server clients; rustbgpd resolves it for
+  // every peer type, route-server clients included. The route is stored
+  // with the unspecified next hop, so route listings, BMP and MRT show it
+  // as such, and FIB installation drops it with reason
+  // next_hop_unspecified.
+  // Any other address is used as given; an IPv6 prefix requires an IPv6
+  // next hop, and multicast or broadcast addresses are rejected.
   string next_hop = 3;
   repeated uint32 as_path = 4;
   // ORIGIN path attribute: 0 = IGP, 1 = EGP, 2 = INCOMPLETE.
@@ -3568,6 +3608,21 @@ message AddPathRequest {
 
 message AddPathResponse {
   reserved 1;
+  // Compared with the local route previously held for this key. A received
+  // route for the same prefix does not affect it.
+  PathInjectOutcome outcome = 2;
+}
+
+enum PathInjectOutcome {
+  // Not reported; a daemon that predates this field leaves it unset.
+  PATH_INJECT_OUTCOME_UNSPECIFIED = 0;
+  // No local route had this (prefix, prefix_length, path_id) key.
+  PATH_INJECT_OUTCOME_CREATED = 1;
+  // A local route had this key with a different next hop or attributes;
+  // the new route replaced it.
+  PATH_INJECT_OUTCOME_REPLACED = 2;
+  // An identical local route already existed. Nothing was redistributed.
+  PATH_INJECT_OUTCOME_UNCHANGED = 3;
 }
 
 message DeletePathRequest {
@@ -3576,9 +3631,27 @@ message DeletePathRequest {
   reserved 3;
   // Add-Path path identifier (RFC 7911). 0 = delete the default path.
   uint32 path_id = 4;
+  // When true, a key with no local route returns OK with outcome NOT_PRESENT
+  // instead of NOT_FOUND, so a controller's withdraw is idempotent across
+  // retries and daemon restarts. A daemon that predates this field ignores
+  // it: a missing route returns NOT_FOUND and a present route is deleted
+  // with outcome UNSPECIFIED.
+  bool allow_missing = 5;
 }
 
-message DeletePathResponse {}
+message DeletePathResponse {
+  PathDeleteOutcome outcome = 1;
+}
+
+enum PathDeleteOutcome {
+  // Not reported. Only a daemon that predates this field leaves it unset,
+  // and such a daemon returns OK only after removing a local route.
+  PATH_DELETE_OUTCOME_UNSPECIFIED = 0;
+  // A local route with this key was removed from the local Adj-RIB-In.
+  PATH_DELETE_OUTCOME_DELETED = 1;
+  // No local route had this key; returned only when allow_missing is set.
+  PATH_DELETE_OUTCOME_NOT_PRESENT = 2;
+}
 
 // FlowSpec match component (RFC 8955).
 message FlowSpecComponent {

@@ -1598,6 +1598,14 @@ cover the BMP exporter and MRT dump export. A ready-to-load
 Prometheus alert-rule pack covering the high-signal `bgp_*` metrics ships
 at [`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml).
 
+For route-server and route-reflector deployments, the series to build on are
+listed under `metrics.stable_series` in the
+[v1 inventory](v1-stable-surface.json). Each entry gives the series' type,
+label set and meaning. Series matching a `metrics.diagnostic_series` pattern
+expose RIB actor, scheduler, update-group and recovery internals. They are
+diagnostic, carry no compatibility promise, and can change in any release. See
+the [v1 contract](v1-stable-contract.md#stable-surfaces).
+
 Two fail-signal counters outside that pack also deserve an alert:
 `evpn_runtime_decomposed_fail_stops_total` increments when a decomposed
 `ApplyEvpnRuntime` sequence leaves unrestored effects and pins the coordinator
@@ -2444,6 +2452,7 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_routes_rejected_total{reason="foreign_route_exists"}` | Desired route suppressed because a kernel row already exists at the same table / metric / prefix and is not daemon-owned |
 | `bgp_fib_routes_rejected_total{reason="owned_route_drifted"}` | A row rustbgpd previously owned was externally changed; rustbgpd released ownership and preserved the live kernel row |
 | `bgp_fib_routes_rejected_total{reason="next_hop_family_unsupported"}` | Desired route suppressed because the table family and BGP next-hop family do not match |
+| `bgp_fib_routes_rejected_total{reason="next_hop_unspecified"}` | Desired route suppressed because its next hop is unspecified: a route injected with next-hop self has no gateway to install |
 | `bgp_fib_routes_rejected_total{reason="link_local_next_hop_scope_missing"}` | Desired route suppressed because an IPv6 link-local next-hop was selected without the egress interface needed to resolve it in the Linux FIB |
 | `bgp_fib_routes_rejected_total{reason="peer_not_allowed"}` | Desired route suppressed by a `[[fib_tables]]` peer / peer-group allow-list |
 | `bgp_fib_routes_rejected_total{reason="route_limit_exceeded"}` | Desired route suppressed because the table exceeded its `max_routes` hard cap; existing owned rows are frozen in place |
@@ -3845,6 +3854,9 @@ for sampled `route_limit_exceeded` rows.
   row in place; a later BGP withdraw will not delete the replacement.
 - `rejected` / `next_hop_family_unsupported`: the configured table family and
   BGP next-hop family do not match.
+- `rejected` / `next_hop_unspecified`: the route's next hop is `0.0.0.0` or
+  `::`, which marks a route injected with next-hop self. It has no gateway to
+  install.
 - `rejected` / `peer_not_allowed`: the route's source peer did not match the
   table's `allowed_neighbors` or `allowed_peer_groups` guardrail.
 - `rejected` / `route_limit_exceeded`: the table's eligible route count

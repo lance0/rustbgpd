@@ -12,6 +12,7 @@ use super::{
     rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
     validate_route_aspa, validate_route_rpki,
 };
+use crate::update::InjectOutcome;
 
 /// Gate code and message for an export-policy deny.
 ///
@@ -1741,17 +1742,46 @@ impl RibManager {
     pub(in crate::manager) fn handle_inject_route(
         &mut self,
         route: crate::route::Route,
-        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+        reply: tokio::sync::oneshot::Sender<Result<InjectOutcome, RibCommandError>>,
     ) {
         let prefix = route.prefix;
         let mut route = route;
         self.attr_intern.intern(&mut route.attributes);
+        // Validate against the current VRP table, as session routes are on
+        // insert and as cache revalidation later does for the local
+        // Adj-RIB-In; otherwise a replacement would reset the origin state to
+        // NotFound until the next covering VRP change.
+        if let Some(table) = self.vrp_table.as_deref() {
+            route.validation_state = validate_route_rpki(&route, table);
+        }
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        // Decide from the local Adj-RIB-In, not Loc-RIB, as for FlowSpec: a
+        // received route that out-selects the local one leaves Loc-RIB
+        // unchanged even when the local route really was replaced. These are
+        // the fields a controller sets. An identical re-add returns before
+        // touching the stored route, keeping its derived state (RPKI
+        // validation, receipt time) and selection exactly as they were.
+        let outcome = match rib.get(&prefix, route.path_id) {
+            None => InjectOutcome::Created,
+            Some(old)
+                if old.next_hop == route.next_hop
+                    && old.link_local_next_hop == route.link_local_next_hop
+                    && old.attributes == route.attributes =>
+            {
+                InjectOutcome::Unchanged
+            }
+            Some(_) => InjectOutcome::Replaced,
+        };
+        if outcome == InjectOutcome::Unchanged {
+            debug!(%prefix, ?outcome, "injected local route");
+            let _ = reply.send(Ok(outcome));
+            return;
+        }
         let replaced = rib.insert(route);
-        debug!(%prefix, "injected local route");
+        debug!(%prefix, ?outcome, "injected local route");
         let rib_len = rib.unicast_lens();
         self.register_unicast_announcer(LOCAL_PEER, prefix);
         crate::manager::helpers::set_rib_prefixes(
@@ -1768,14 +1798,15 @@ impl RibManager {
         self.defer_unicast_attr_gc(usize::from(replaced));
         self.sync_attr_intern_gauge();
 
-        let _ = reply.send(Ok(()));
+        let _ = reply.send(Ok(outcome));
     }
 
     pub(in crate::manager) fn handle_withdraw_injected(
         &mut self,
         prefix: Prefix,
         path_id: u32,
-        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+        allow_missing: bool,
+        reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
     ) {
         let rib = self
             .ribs
@@ -1802,7 +1833,9 @@ impl RibManager {
                 self.defer_unicast_attr_gc(1);
             }
             self.sync_attr_intern_gauge();
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(Ok(true));
+        } else if allow_missing {
+            let _ = reply.send(Ok(false));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
                 "prefix {prefix} not found"

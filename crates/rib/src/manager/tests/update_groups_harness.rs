@@ -20,3 +20,23 @@ pub(super) fn spawn_running_manager_with_roster(
     let handle = tokio::spawn(manager.run());
     (RunningManager { tx, handle }, roster)
 }
+
+/// Return once `peer`'s dirty outbound resync has run, after the caller
+/// advanced the paused clock past the resync interval.
+///
+/// One quiesce is not a barrier here. The run loop can take a query from
+/// `select!` before its due-timer check and then yield on its wall-clock
+/// flush budget, so whether a quiesce lands ahead of the resync tick depends
+/// on host speed. At most two probes precede the tick.
+pub(super) async fn await_dirty_resync(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) {
+    for _ in 0..4 {
+        let (reply, dirty) = oneshot::channel();
+        tx.send(RibUpdate::TestQueryPeerOutboundDirty { peer, reply })
+            .await
+            .unwrap();
+        if !dirty.await.unwrap() {
+            return;
+        }
+    }
+    panic!("{peer} is still dirty after its resync tick");
+}

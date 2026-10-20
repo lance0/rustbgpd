@@ -2428,6 +2428,7 @@ fn drop_reason(drop: &FibDrop) -> &'static str {
     match drop {
         FibDrop::NextHopFamilyUnsupported { .. } => "next_hop_family_unsupported",
         FibDrop::LinkLocalNextHopScopeMissing { .. } => "link_local_next_hop_scope_missing",
+        FibDrop::NextHopUnspecified { .. } => "next_hop_unspecified",
         FibDrop::ForeignRouteExists { .. } => "foreign_route_exists",
         FibDrop::OwnedRouteDrifted { .. } => "owned_route_drifted",
         FibDrop::PeerNotAllowed { .. } => "peer_not_allowed",
@@ -2452,6 +2453,7 @@ fn build_statuses(
             FibDrop::OwnedRouteDrifted { route } => Some(route.key),
             FibDrop::NextHopFamilyUnsupported { .. }
             | FibDrop::LinkLocalNextHopScopeMissing { .. }
+            | FibDrop::NextHopUnspecified { .. }
             | FibDrop::PeerNotAllowed { .. }
             | FibDrop::RouteLimitExceeded { .. } => None,
         })
@@ -2511,6 +2513,17 @@ fn status_for_drop(
             *prefix,
             *next_hop,
             "link_local_next_hop_scope_missing",
+        ),
+        FibDrop::NextHopUnspecified {
+            table_name,
+            prefix,
+            next_hop,
+        } => status_for_next_hop_drop(
+            config,
+            table_name,
+            *prefix,
+            *next_hop,
+            "next_hop_unspecified",
         ),
         FibDrop::ForeignRouteExists { key } => {
             let route = intent.routes.get(key).or_else(|| owned.routes.get(key));
@@ -2964,6 +2977,7 @@ fn build_route_message(
             crate::fib::FibNextHopIneligible::LinkLocalScopeMissing => {
                 "IPv6 link-local next-hop is missing an output interface"
             }
+            crate::fib::FibNextHopIneligible::Unspecified => "next-hop is unspecified",
         };
         return Err(format!(
             "{detail} for {} via {}",

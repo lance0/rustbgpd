@@ -2651,7 +2651,7 @@ block is configured. `state` is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALL
 `FIB_ROUTE_STATE_REJECTED`, `FIB_ROUTE_STATE_FAILED`, or
 `FIB_ROUTE_STATE_UNRESOLVED`); `reason`
 carries values such as `owned`, `foreign_route_exists`,
-`next_hop_family_unsupported`, `peer_not_allowed`,
+`next_hop_family_unsupported`, `next_hop_unspecified`, `peer_not_allowed`,
 `route_limit_exceeded`, `owned_route_drifted`, `next_hop_unresolved`, `dump_failed:DETAIL`,
 or a kernel apply error such as `install_failed:DETAIL`. When a pre-kernel
 planning query fails, this RPC preserves the last successful status snapshot;
@@ -3006,7 +3006,51 @@ The `prefix` and `next_hop` fields accept both IPv4 and IPv6 addresses. Prefix
 length is validated against the address family (max 32 for IPv4, 128 for IPv6).
 An IPv4 prefix takes either next-hop family (RFC 8950). An IPv6 prefix requires
 an IPv6 next hop; an IPv4 `next_hop` is rejected with `INVALID_ARGUMENT`.
+Multicast and broadcast next hops are rejected.
 `path_id` defaults to `0` (default path) when omitted.
+
+#### Next-hop self
+
+An unspecified `next_hop` (`0.0.0.0` or `::`, for either prefix family) means
+next-hop self, the usual default for a remotely triggered blackhole (RTBH)
+controller that lets the edge's own policy map a community to a discard
+route. The daemon resolves it per session at export, like `set next-hop self`
+in export policy, for eBGP, iBGP and route-server-client sessions alike; an
+explicit export-policy next-hop action still wins. An export-policy IPv6 next
+hop cannot apply to an IPv4 route toward a peer without Extended Next Hop; as
+for any route, the default next hop is used instead, which for this route is
+self.
+
+| Prefix | Next hop sent on each session |
+|---|---|
+| IPv4 | The session's local IPv4 address (the router ID on an IPv6-only session without Extended Next Hop), or the session's local address in `MP_REACH_NLRI` when Extended Next Hop (RFC 8950) is negotiated |
+| IPv6 | The neighbor's `local_ipv6_nexthop`, else the session's local IPv6 address |
+
+An IPv6 route on a session with neither, for example IPv6 unicast over an
+IPv4-only session without `local_ipv6_nexthop`, is not sent to that peer: the
+exact-export preflight refuses it with reason `missing_ipv6_next_hop`, as for
+any other route without a usable IPv6 next hop. The daemon never sends an
+unspecified next hop.
+
+The route is stored with the unspecified next hop, so `ListBestRoutes`,
+`ListReceivedRoutes`, BMP Loc-RIB and MRT show `0.0.0.0` or `::`, and a
+`[[fib_tables]]` table rejects it with reason `next_hop_unspecified` rather
+than installing a gateway. GoBGP (v3.37.0 and v4.10.0) also treats an
+unspecified `AddPath` next hop as the session's local address for eBGP and
+iBGP peers, but sends it unchanged to route-server clients.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "prefix": "198.51.100.7",
+    "prefix_length": 32,
+    "next_hop": "0.0.0.0",
+    "communities": [4294902426]
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddPath
+```
+
+`4294902426` is `65535:666`, the RFC 7999 BLACKHOLE community.
 
 ### Withdraw a route
 
@@ -3020,7 +3064,108 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"prefix": "2001:db8:ff::", "prefix_length": 48}' \
   localhost:50051 rustbgpd.v1.InjectionService/DeletePath
+
+# Treat an already absent route as success
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "10.99.0.0", "prefix_length": 24, "allow_missing": true}' \
+  localhost:50051 rustbgpd.v1.InjectionService/DeletePath
 ```
+
+#### Unicast injection contract
+
+A local route is identified by `(prefix, prefix_length, path_id)`. `AddPath`
+is an upsert on that key, so a controller can re-announce its whole route set
+on every reconcile pass:
+
+| `AddPathResponse.outcome` | Meaning |
+|---|---|
+| `PATH_INJECT_OUTCOME_CREATED` | No local route had this key. |
+| `PATH_INJECT_OUTCOME_REPLACED` | A local route with this key had a different next hop or attributes; the new route replaced it. |
+| `PATH_INJECT_OUTCOME_UNCHANGED` | An identical local route already existed. The stored route, including its RPKI validation state, is kept and nothing is redistributed. |
+| `PATH_INJECT_OUTCOME_UNSPECIFIED` | The daemon predates the field. |
+
+The outcome compares the new route with the previous *local* route only, as
+for FlowSpec: replacing a local route that a received route out-selects still
+reports `REPLACED`, although nothing changes on the wire. `0.0.0.0` and `::`
+are the same next-hop-self route.
+
+`OK` confirms that the route was accepted into the local Adj-RIB-In (peer
+`0.0.0.0`). Selection and outbound distribution normally run in the same RIB
+turn, before the reply, but are deferred while Graceful Restart selection
+deferral is active for the family. `OK` does not mean that a peer received or
+installed the route.
+
+`DeletePath` removes only a route added through `AddPath`; it never removes a
+received route. A key with no local route returns `NOT_FOUND` by default. Set
+`allow_missing: true` to get `OK` with outcome `NOT_PRESENT` instead, so a
+controller's withdraw is idempotent across retries and daemon restarts.
+
+| `DeletePathResponse.outcome` | Meaning |
+|---|---|
+| `PATH_DELETE_OUTCOME_DELETED` | A local route with this key was removed from the local Adj-RIB-In. |
+| `PATH_DELETE_OUTCOME_NOT_PRESENT` | No local route had this key; returned only with `allow_missing`. |
+| `PATH_DELETE_OUTCOME_UNSPECIFIED` | The daemon predates the field. |
+
+A daemon that predates these fields ignores `allow_missing`: a missing route
+returns `NOT_FOUND`, and a present route is deleted with outcome
+`UNSPECIFIED`.
+
+Injected routes are process-local. They are not written to the config and do
+not survive a daemon restart. A restart can fall between two polls of any
+signal, so a controller does not rely on detecting it. It reconciles
+periodically and idempotently: it re-adds its whole desired route set, where
+routes still present report `UNCHANGED` and cost no redistribution, and
+withdraws what it no longer wants with `allow_missing: true`. It always
+reconciles after reconnecting to the daemon. A `ControlService.GetHealth`
+`uptime_seconds` lower than on the previous poll is an extra trigger to
+reconcile at once, not the detector: a poll can see a restarted daemon whose
+uptime has already passed the previous reading. The owner leases in
+[ADR-0141](../adr/0141-injection-owner-lease.md), once available, add a
+stronger signal: renewing a lease generation from before the restart fails.
+To list exactly the injected routes, call `RibService.ListReceivedRoutes` with
+`neighbor_address: "0.0.0.0"`.
+
+#### Connecting a controller
+
+Injection RPCs are `operator_only` in the
+[method inventory](grpc-method-inventory.md), so the controller's principal
+needs the `operator` role. The daemon rejects a TCP listener without
+authentication at config load, so a client that only knows plaintext gRPC
+uses one of these transports:
+
+- **Owner-only Unix socket.** Run the controller as the daemon's user and
+  connect to `unix:///var/lib/rustbgpd/grpc.sock` with insecure channel
+  credentials. Such a socket authorizes its clients as the implicit
+  `local-operator` principal; no token or roles entry is needed. Set the
+  channel's default authority to a host name such as `localhost`: gRPC
+  otherwise sends the socket path as the HTTP/2 `:authority`, which the
+  daemon resets.
+- **Loopback TCP with a bearer token.** Configure
+  `[global.telemetry.grpc_tcp]` on `127.0.0.1` with `token_file` and a
+  `principal` mapped to `operator` in `[security.grpc.roles]`, and send
+  `authorization: Bearer <token>` as metadata on every call. Add it to each
+  call directly: gRPC attaches call credentials such as an access token only
+  to a channel it considers secure, and whether local loopback credentials
+  qualify depends on the gRPC version.
+
+In C++ these are, for example:
+
+```cpp
+// Owner-only Unix socket.
+grpc::ChannelArguments args;
+args.SetString(GRPC_ARG_DEFAULT_AUTHORITY, "localhost");
+auto uds = grpc::CreateCustomChannel("unix:///var/lib/rustbgpd/grpc.sock",
+                                     grpc::InsecureChannelCredentials(), args);
+
+// Loopback TCP with a bearer token, added to every call.
+auto tcp = grpc::CreateChannel("127.0.0.1:50051",
+                               grpc::InsecureChannelCredentials());
+grpc::ClientContext context;
+context.AddMetadata("authorization", "Bearer " + token);
+```
+
+Do not expose the listener beyond loopback to reach a remote controller;
+see [security](security.md) for the remote mTLS posture.
 
 ### Inject a FlowSpec rule
 
