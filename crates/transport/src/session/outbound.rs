@@ -1,7 +1,7 @@
 use super::export::{
-    ExportProbeError, ExportWithdrawal, MpAttrCache, PreparedAttrCache, PreparedMpCandidate,
-    PreparedUnicastCandidate, PreparedWithdrawal, ReachNlri, SessionExportProfile, UnreachNlri,
-    has_otc,
+    DroppedIpv6NextHops, ExportProbeError, ExportWithdrawal, MpAttrCache, PreparedAttrCache,
+    PreparedMpCandidate, PreparedUnicastCandidate, PreparedWithdrawal, ReachNlri,
+    SessionExportProfile, UnreachNlri, has_otc,
 };
 use super::{
     Afi, BgpRole, EvpnRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode,
@@ -43,6 +43,9 @@ pub(super) struct PendingOutbound {
     evpn_announce: std::vec::IntoIter<EvpnRibRoute>,
     vpn_announce: std::vec::IntoIter<VpnRibRoute>,
     labeled_announce: std::vec::IntoIter<LabeledRibRoute>,
+    /// Spans every announce slice, so the envelope reports dropped IPv6
+    /// next hops once, when its announce phase completes.
+    dropped_ipv6_next_hops: DroppedIpv6NextHops,
     #[cfg(test)]
     pub(super) test_slice_cost: Option<Duration>,
 }
@@ -312,6 +315,7 @@ impl PeerSession {
             offset: 0,
             capacity_blocked: false,
             slice_routes: super::shared_group::PROGRESSIVE_SLICE_ROUTES,
+            dropped_ipv6_next_hops: DroppedIpv6NextHops::default(),
             #[cfg(test)]
             test_slice_cost: None,
         });
@@ -424,7 +428,7 @@ impl PeerSession {
                 }
                 if let Some(slice) = pending.next_slice(budget.min(pending.slice_routes)) {
                     let started = Instant::now();
-                    self.send_route_update(slice);
+                    self.send_route_update_slice(slice, &mut pending.dropped_ipv6_next_hops);
                     let cost = started.elapsed();
                     // Tests pin the cost so slice sizes never follow host speed.
                     #[cfg(test)]
@@ -440,6 +444,9 @@ impl PeerSession {
         }
         if pending.shared.is_none() && pending.update.replay.is_none() {
             finished |= pending.finish_empty_phases();
+        }
+        if pending.phase > ANNOUNCE_PHASE {
+            pending.dropped_ipv6_next_hops.warn(&self.peer_label, false);
         }
         if self.writer_bulk_admitted != before {
             self.outbound_admission_timer = None;
@@ -494,7 +501,7 @@ impl PeerSession {
 // rationale block at the top of `rib::adj_rib_in`: the key material
 // (attribute Arc pointers, next hops, router ids) derives from route
 // data of explicitly configured peers, each map lives only for one
-// `send_route_update` batch, and per-peer route count is bounded by
+// `send_route_update_slice` batch, and per-peer route count is bounded by
 // enforced `max_prefixes` — so a collision chain is short-lived and
 // capped. A peer able to craft colliding attribute sets already has
 // strictly higher-impact vectors (churn flood, hijack).
@@ -765,19 +772,35 @@ impl PeerSession {
         Some(snapshot)
     }
 
-    /// Send an outbound route update as wire UPDATE messages.
+    /// Send a whole envelope as one pass and report its dropped IPv6 next
+    /// hops once. The run loop slices envelopes through
+    /// `advance_pending_outbound` instead.
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
+        let mut dropped_ipv6_next_hops = DroppedIpv6NextHops::default();
+        self.send_route_update_slice(update, &mut dropped_ipv6_next_hops);
+        dropped_ipv6_next_hops.warn(&self.peer_label, false);
+    }
+
+    /// Send an outbound route update slice as wire UPDATE messages.
     ///
     /// Encodes each piece (`BoRR` markers, withdrawals, announcements,
     /// `FlowSpec`, EVPN, `EoR` markers, `EoRR` markers) and pushes the bytes
     /// onto the writer task's bulk channel via [`Self::enqueue_bulk`].
     /// Returns synchronously — there's no awaiting on TCP writes here
-    /// after the writer-task split (ADR-0051).
+    /// after the writer-task split (ADR-0051). Dropped IPv6 next hops are
+    /// noted in `dropped_ipv6_next_hops`; the caller reports them once per
+    /// envelope.
     #[expect(
         clippy::too_many_lines,
         clippy::needless_pass_by_value,
         reason = "export pipeline keeps policy, ORF, and advertisement ordering in one pass"
     )]
-    pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
+    pub(super) fn send_route_update_slice(
+        &mut self,
+        update: OutboundRouteUpdate,
+        dropped_ipv6_next_hops: &mut DroppedIpv6NextHops,
+    ) {
         let Some(snapshot) = self.outbound_snapshot(&update) else {
             return;
         };
@@ -999,7 +1022,7 @@ impl PeerSession {
                     .clone();
                 match export.finish_unicast_candidate(route, *nh_override, cached_attrs) {
                     Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
-                        prepared_attr_cache.note_ipv4_body(*nh_override, entry.prefix);
+                        dropped_ipv6_next_hops.note_ipv4_body(*nh_override, entry.prefix);
                         match v4_body_index.group(&attrs, None, None, v4_body_groups.len()) {
                             Ok(idx) => v4_body_groups[idx].prefixes.push(entry),
                             Err(_) => v4_body_groups.push(V4BodyGroup {
@@ -1050,7 +1073,6 @@ impl PeerSession {
                     Err(_) => {}
                 }
             }
-            prepared_attr_cache.warn_dropped_ipv6_next_hops(&self.peer_label, false);
             let max_len = export.max_message_len();
             for group in &v4_body_groups {
                 let attrs = group.attrs.as_ref();

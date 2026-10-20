@@ -358,7 +358,9 @@ pub(super) fn encode_shared_unicast_slice(
         // both per-session grouping branches without re-deriving the mode.
         let (key, body_seed) = match export.finish_unicast_candidate(route, nh_override, attrs) {
             Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
-                cache.note_ipv4_body(nh_override, entry.prefix);
+                cache
+                    .dropped_ipv6_next_hops
+                    .note_ipv4_body(nh_override, entry.prefix);
                 (
                     SharedGroupKey {
                         source: route.peer,
@@ -621,7 +623,7 @@ impl PeerSession {
             }
         }
         // One warning covers every member: they share this encoding.
-        cache.warn_dropped_ipv6_next_hops(&self.peer_label, true);
+        cache.dropped_ipv6_next_hops.warn(&self.peer_label, true);
         encode.finish(StreamTerminal::Complete);
         drop(guard);
         debug!(

@@ -4342,3 +4342,51 @@ async fn learned_unspecified_next_hop_is_never_rewritten_to_self() {
         }
     }
 }
+
+/// The run loop sends an envelope in slices: at most 2,048 routes, and one
+/// route per free writer slot when the writer is nearly full. Dropped IPv6
+/// next hops accumulate across the slices and are reported once, when the
+/// announce phase completes.
+#[tokio::test]
+async fn dropped_ipv6_next_hop_warns_once_across_outbound_slices() {
+    use rustbgpd_policy::NextHopAction;
+
+    let v6_override = Some(NextHopAction::Specific(IpAddr::V6(
+        "2001:db8::1".parse().unwrap(),
+    )));
+    let base = make_route(100);
+    let routes: Vec<Route> = (0..2_100u32)
+        .map(|index| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32)),
+            ..base.clone()
+        })
+        .collect();
+    for writer_slots in [1, 8_192] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+        session.negotiated = Some(Arc::new(negotiated_session(65001, false)));
+        let (bulk, mut wire) = mpsc::channel(writer_slots);
+        session.writer_bulk_tx = Some(bulk);
+        let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(session.publish_export_profile());
+        update.announce = routes.clone().into();
+        update.next_hop_override = vec![v6_override.clone(); routes.len()].into();
+
+        export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
+        session.handle_outbound_route_update(update).await;
+        let mut advances = 1;
+        while session.pending_outbound.is_some() {
+            while wire.try_recv().is_ok() {}
+            session.advance_pending_outbound();
+            advances += 1;
+        }
+        assert!(
+            advances > 1,
+            "{writer_slots} writer slots: the envelope must span several slices"
+        );
+        assert_eq!(
+            export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+            1,
+            "{writer_slots} writer slots: one warning for the envelope, not per slice"
+        );
+    }
+}

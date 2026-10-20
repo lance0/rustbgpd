@@ -1818,9 +1818,8 @@ pub(super) struct PreparedAttrCacheKey {
 #[derive(Default)]
 pub(super) struct PreparedAttrCache {
     entries: FastMap<PreparedAttrCacheKey, PreparedUnicastAttributes>,
-    /// Classic IPv4 routes this export pass sent without their export-policy
-    /// IPv6 next hop: the first prefix and the route count.
-    dropped_ipv6_next_hops: Option<(Ipv4Prefix, usize)>,
+    /// The shared update-group encode's drops; one cache spans its pass.
+    pub(super) dropped_ipv6_next_hops: DroppedIpv6NextHops,
     #[cfg(debug_assertions)]
     snapshot: Option<(u64, u64)>,
 }
@@ -1840,7 +1839,15 @@ impl PreparedAttrCache {
     fn len(&self) -> usize {
         self.entries.len()
     }
+}
 
+/// Classic IPv4 routes an export pass sent without their export-policy IPv6
+/// next hop: the first prefix and the route count. One accumulator spans a
+/// whole pass, across its slices, so the drop is reported once.
+#[derive(Default)]
+pub(super) struct DroppedIpv6NextHops(Option<(Ipv4Prefix, usize)>);
+
+impl DroppedIpv6NextHops {
     /// Note a live classic IPv4 NLRI candidate. An export-policy IPv6 next
     /// hop cannot apply to it without Extended Next Hop, so it is sent with
     /// its default next hop instead. Probes never note candidates.
@@ -1853,17 +1860,17 @@ impl PreparedAttrCache {
             next_hop_override,
             Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_)))
         ) {
-            self.dropped_ipv6_next_hops.get_or_insert((prefix, 0)).1 += 1;
+            self.0.get_or_insert((prefix, 0)).1 += 1;
         }
     }
 
-    /// Report this pass's dropped IPv6 next hops in one warning, not one per
-    /// route: a dual-stack policy over a full table would otherwise log every
-    /// route on every pass. A shared update-group encode reports once for
-    /// the whole group, under the encoding member's `peer`, with
+    /// Report the pass's dropped IPv6 next hops in one warning, not one per
+    /// route or slice: a dual-stack policy over a full table would otherwise
+    /// log every route on every pass. A shared update-group encode reports
+    /// once for the whole group, under the encoding member's `peer`, with
     /// `update_group = true`.
-    pub(super) fn warn_dropped_ipv6_next_hops(&mut self, peer: &str, update_group: bool) {
-        let Some((first_prefix, routes)) = self.dropped_ipv6_next_hops.take() else {
+    pub(super) fn warn(&mut self, peer: &str, update_group: bool) {
+        let Some((first_prefix, routes)) = self.0.take() else {
             return;
         };
         #[cfg(test)]
@@ -1914,7 +1921,7 @@ struct MpAttrCacheKey {
 /// attribute `Arc`. Routes sharing a source allocation share one prepared
 /// vector, so grouping hashes and compares it once rather than per route.
 /// Pointer keys are sound only while the envelope that owns the source
-/// `Arc`s is borrowed, so a cache must not outlive one `send_route_update`.
+/// `Arc`s is borrowed, so a cache must not outlive one `send_route_update_slice`.
 #[derive(Default)]
 pub(super) struct MpAttrCache(FastMap<MpAttrCacheKey, Arc<Vec<PathAttribute>>>);
 
