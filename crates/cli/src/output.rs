@@ -544,10 +544,12 @@ pub struct JsonGrRetentionFamily {
 }
 
 /// One finite inbound max-prefix bound. `reason` carries the stable
-/// `inbound_prefix_limit_reached` only while the scope is blocking.
+/// `inbound_prefix_limit_reached` only while the bound is blocking. `family`
+/// and `stage` are the `bgp_max_prefix_*` metric labels.
 #[derive(Serialize)]
 pub struct JsonInboundPrefixLimit {
-    pub scope: String,
+    pub family: String,
+    pub stage: String,
     pub usage: u64,
     pub limit: u32,
     pub headroom: u32,
@@ -2121,7 +2123,8 @@ mod tests {
                 },
             ],
             inbound_prefix_limits: vec![JsonInboundPrefixLimit {
-                scope: "ipv4_unicast".to_string(),
+                family: "ipv4_unicast".to_string(),
+                stage: "accepted".to_string(),
                 usage: 4,
                 limit: 4,
                 headroom: 0,
@@ -2179,8 +2182,10 @@ mod tests {
         assert!(value.get("reconnect_in_seconds").is_none());
         assert_eq!(value["prefixes_received_ipv4"], 7);
         assert_eq!(value["prefixes_received_ipv6"], 3);
-        // Inbound capacity is reported only as scope rows.
-        assert_eq!(value["inbound_prefix_limits"][0]["scope"], "ipv4_unicast");
+        // Inbound capacity is reported only as family/stage rows.
+        assert_eq!(value["inbound_prefix_limits"][0]["family"], "ipv4_unicast");
+        assert_eq!(value["inbound_prefix_limits"][0]["stage"], "accepted");
+        assert!(value["inbound_prefix_limits"][0].get("scope").is_none());
         assert_eq!(value["inbound_prefix_limits"][0]["limit"], 4);
         assert_eq!(value["inbound_prefix_limits"][0]["headroom"], 0);
         for removed in [

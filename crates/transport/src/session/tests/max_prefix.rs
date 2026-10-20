@@ -1817,7 +1817,8 @@ async fn warning_threshold_warns_once_per_crossing_and_never_tears_down() {
         notify_rx.try_recv(),
         Ok(SessionNotification::MaxPrefixWarning {
             session_id: 79,
-            scope: "ipv4_unicast",
+            family: "ipv4_unicast",
+            stage: "accepted",
             usage: 2,
             bound: 4,
             percent: 50,
@@ -1890,7 +1891,8 @@ async fn warning_action_reports_at_the_bound_and_keeps_accepting() {
     assert!(matches!(
         notify_rx.try_recv(),
         Ok(SessionNotification::MaxPrefixWarning {
-            scope: "ipv4_unicast",
+            family: "ipv4_unicast",
+            stage: "accepted",
             usage: 1,
             bound: 1,
             percent: 100,
@@ -2845,7 +2847,7 @@ async fn block_never_latches_and_switching_to_shutdown_enforces_immediately() {
         .max_prefix
         .scopes
         .iter()
-        .find(|row| row.scope == "ipv4_unicast")
+        .find(|row| (row.family, row.stage) == ("ipv4_unicast", "accepted"))
         .expect("ipv4 row");
     assert_eq!(
         (row.usage, row.limit, row.headroom, row.blocking),
@@ -3028,4 +3030,40 @@ async fn disabling_warning_threshold_rearms_it_for_reenable() {
         notify_rx.try_recv(),
         Ok(SessionNotification::MaxPrefixWarning { .. })
     ));
+}
+
+/// Every bound reports the metric vocabulary: `aggregate` or a canonical
+/// family, and `received` only for the two pre-policy unicast bounds.
+#[test]
+fn max_prefix_scopes_split_into_metric_family_and_stage() {
+    let labels: Vec<_> = MaxPrefixScope::ALL
+        .into_iter()
+        .map(|scope| (scope.family_label(), scope.stage()))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            ("aggregate", "accepted"),
+            ("ipv4_unicast", "accepted"),
+            ("ipv6_unicast", "accepted"),
+            ("ipv4_unicast", "received"),
+            ("ipv6_unicast", "received"),
+            ("l3vpn_ipv4_unicast", "accepted"),
+            ("l3vpn_ipv6_unicast", "accepted"),
+            ("ipv4_labeled_unicast", "accepted"),
+            ("ipv6_labeled_unicast", "accepted"),
+            ("l2vpn_evpn", "accepted"),
+            ("ipv4_flowspec", "accepted"),
+            ("ipv6_flowspec", "accepted"),
+            ("rtc", "accepted"),
+        ]
+    );
+    for (family, _) in labels.into_iter().skip(1) {
+        assert!(
+            rustbgpd_wire::CONFIGURED_FAMILIES
+                .iter()
+                .any(|(label, _, _)| *label == family),
+            "{family} is not a canonical family label"
+        );
+    }
 }

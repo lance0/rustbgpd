@@ -28,6 +28,7 @@ _gate:
     just check-contracts
     just check-clippy
     cargo test --locked --workspace
+    just test-rib-paced
     just docs
 
 # `gate-ci` is the local superset of hosted CI's `ci.yml` checks that need no
@@ -143,6 +144,16 @@ test-bins:
 test-integration:
     cargo test --locked --workspace --exclude rustbgpd --test '*'
     cargo test --locked -p rustbgpd --tests
+
+# The RIB actor bounds a poll by a 25 ms wall-clock budget, so on a fast host
+# its unit tests rarely see a paced resync or a yield between updates, and a
+# barrier that only holds there passes until a loaded host reorders it. This
+# runs the update-group, oracle, outbound-commit and timer modules again with
+# the budget forced to 5 µs, so every update paces.
+
+# Rerun the RIB update-group, oracle, outbound-commit and timer tests with the actor's flush budget forced to 5 µs (seconds, after the rib build).
+test-rib-paced:
+    RUSTBGPD_TEST_FLUSH_BUDGET_US=5 cargo test --locked -p rustbgpd-rib --lib -- manager::tests::update_groups:: manager::tests::update_groups_oracle:: manager::tests::outbound_commit_accounting:: manager::tests::timer_cutoffs::
 
 # The library and binary docs are selected together so the binary docs reuse
 # the same private library docs.

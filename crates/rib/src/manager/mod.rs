@@ -1833,6 +1833,26 @@ pub(in crate::manager) const COMMIT_MEMBERS_PER_POLL: usize = 8;
 /// fleet size — a fixed 8-item poll at ~10 ms of interleaved actor work per
 /// poll seam cost ~0.88 s of staggered emission at 700 members.
 const FLUSH_POLL_BUDGET: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// The flush budget a new manager starts with. Unit tests can force it with
+/// `RUSTBGPD_TEST_FLUSH_BUDGET_US` so every update paces, which makes a test
+/// barrier that only holds on a fast host fail deterministically
+/// (`just test-rib-paced`). Other builds always use [`FLUSH_POLL_BUDGET`].
+#[cfg(test)]
+fn initial_flush_poll_budget() -> std::time::Duration {
+    std::env::var("RUSTBGPD_TEST_FLUSH_BUDGET_US").map_or(FLUSH_POLL_BUDGET, |micros| {
+        std::time::Duration::from_micros(
+            micros
+                .parse()
+                .expect("RUSTBGPD_TEST_FLUSH_BUDGET_US must be whole microseconds"),
+        )
+    })
+}
+
+#[cfg(not(test))]
+const fn initial_flush_poll_budget() -> std::time::Duration {
+    FLUSH_POLL_BUDGET
+}
 /// Maximum deferred inbound-refresh retries in a resync-timer tick. Dirty
 /// route replays poll the work budget after each complete peer instead.
 const RESYNC_PEERS_PER_TICK: usize = 8;
@@ -2296,7 +2316,7 @@ impl RibManager {
             outbound_prefix_limits: HashMap::new(),
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
-            flush_poll_budget: FLUSH_POLL_BUDGET,
+            flush_poll_budget: initial_flush_poll_budget(),
             actor_suspended: Arc::default(),
             outbound_session_ids: HashMap::new(),
             live_sessions: HashMap::new(),

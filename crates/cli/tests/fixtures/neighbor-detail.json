@@ -89,7 +89,8 @@
   ],
   "inbound_prefix_limits": [
     {
-      "scope": "scope-value",
+      "family": "family-value",
+      "stage": "stage-value",
       "usage": 102,
       "limit": 103,
       "headroom": 104,

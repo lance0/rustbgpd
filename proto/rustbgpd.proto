@@ -920,12 +920,20 @@ message OutboundPrefixLimitState {
 // One finite inbound max-prefix bound's live capacity for a neighbor
 // (ADR-0108 amendment).
 message InboundPrefixLimitState {
-  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received",
-  // "ipv6_unicast_received", or a non-unicast family label ("l3vpn_ipv4_unicast",
+  // The joined scope string ("ipv4_unicast_received") was replaced by
+  // family + stage, the labels of the bgp_max_prefix_* metrics.
+  reserved 1;
+  reserved "scope";
+  // "aggregate" for the neighbor-wide max_prefixes, or the bound's canonical
+  // family label: "ipv4_unicast", "ipv6_unicast", "l3vpn_ipv4_unicast",
   // "l3vpn_ipv6_unicast", "ipv4_labeled_unicast", "ipv6_labeled_unicast",
-  // "l2vpn_evpn", "ipv4_flowspec", "ipv6_flowspec", "rtc").
-  string scope = 1;
-  // The session actor's enforcement count for the scope.
+  // "l2vpn_evpn", "ipv4_flowspec", "ipv6_flowspec" or "rtc".
+  string family = 7;
+  // "accepted" (counted after import policy) or "received" (counted before
+  // it, the max_prefixes_received_* bounds); only the unicast families have a
+  // "received" row.
+  string stage = 8;
+  // The session actor's enforcement count for the bound.
   uint64 usage = 2;
   // Configured bound.
   uint32 limit = 3;

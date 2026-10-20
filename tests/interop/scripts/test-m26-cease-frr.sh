@@ -246,7 +246,7 @@ warning_event_count() {
 
 inbound_limit_row() {
     grpc_neighbor_state_for "$1" | jq -r '.inboundPrefixLimits[]?
-        | select(.scope == "ipv4_unicast")
+        | select(.family == "ipv4_unicast" and .stage == "accepted")
         | [.usage, .limit, (.blocking // false), (.reason // "")] | join(",")' \
         2>/dev/null || echo error
 }

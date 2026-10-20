@@ -137,7 +137,8 @@ fn inbound_prefix_limit_rows(
         .scopes
         .iter()
         .map(|row| rustbgpd_api::peer_types::InboundPrefixLimitState {
-            scope: row.scope.to_string(),
+            family: row.family.to_string(),
+            stage: row.stage.to_string(),
             usage: u64::try_from(row.usage).unwrap_or(u64::MAX),
             limit: row.limit,
             headroom: row.headroom,

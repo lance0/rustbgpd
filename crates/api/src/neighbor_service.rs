@@ -1172,7 +1172,8 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
             .inbound_prefix_limits
             .iter()
             .map(|row| proto::InboundPrefixLimitState {
-                scope: row.scope.clone(),
+                family: row.family.clone(),
+                stage: row.stage.clone(),
                 usage: row.usage,
                 limit: row.limit,
                 headroom: row.headroom,
@@ -4823,14 +4824,16 @@ mod tests {
         info.prefix_count_ipv6 = 3;
         info.inbound_prefix_limits = vec![
             crate::peer_types::InboundPrefixLimitState {
-                scope: "aggregate".to_string(),
+                family: "aggregate".to_string(),
+                stage: "accepted".to_string(),
                 usage: 11,
                 limit: 20,
                 headroom: 9,
                 blocking: false,
             },
             crate::peer_types::InboundPrefixLimitState {
-                scope: "ipv4_unicast".to_string(),
+                family: "ipv4_unicast".to_string(),
+                stage: "received".to_string(),
                 usage: 7,
                 limit: 10,
                 headroom: 3,
@@ -4849,7 +4852,8 @@ mod tests {
             .iter()
             .map(|row| {
                 (
-                    row.scope.as_str(),
+                    row.family.as_str(),
+                    row.stage.as_str(),
                     row.usage,
                     row.limit,
                     row.headroom,
@@ -4858,13 +4862,14 @@ mod tests {
                 )
             })
             .collect();
-        // An unlimited ipv6_unicast scope has no row.
+        // An unlimited ipv6_unicast bound has no row.
         assert_eq!(
             rows,
             [
-                ("aggregate", 11, 20, 9, false, None),
+                ("aggregate", "accepted", 11, 20, 9, false, None),
                 (
                     "ipv4_unicast",
+                    "received",
                     7,
                     10,
                     3,

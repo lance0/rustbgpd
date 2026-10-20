@@ -824,7 +824,7 @@ fn protocol_row(state: &AppState, n: &proto::NeighborState) -> Result<(String, V
     if let Some(aggregate) = n
         .inbound_prefix_limits
         .iter()
-        .find(|limit| limit.scope == "aggregate")
+        .find(|limit| limit.family == "aggregate")
     {
         row["import_limit"] = Value::from(aggregate.limit);
         row["limit_action"] = Value::from(n.max_prefix_action.clone());
@@ -3124,12 +3124,14 @@ mod tests {
         // Only the aggregate row is BIRD's import limit; a per-family row is not.
         neighbor.inbound_prefix_limits = vec![
             proto::InboundPrefixLimitState {
-                scope: "ipv4_unicast".to_string(),
+                family: "ipv4_unicast".to_string(),
+                stage: "accepted".to_string(),
                 limit: 50,
                 ..Default::default()
             },
             proto::InboundPrefixLimitState {
-                scope: "aggregate".to_string(),
+                family: "aggregate".to_string(),
+                stage: "accepted".to_string(),
                 limit: 100,
                 ..Default::default()
             },

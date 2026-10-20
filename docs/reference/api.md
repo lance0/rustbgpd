@@ -520,14 +520,22 @@ never as `NOT_REQUIRED`.
 
 `NeighborState.inbound_prefix_limits` reports ADR-0108 inbound max-prefix
 capacity, one `InboundPrefixLimitState` per finite configured bound in
-enforcement order: the `scope` name (`aggregate`, `ipv4_unicast`,
-`ipv6_unicast`, `ipv4_unicast_received`, `ipv6_unicast_received`, or a
-non-unicast family label such as `l3vpn_ipv4_unicast` or `l2vpn_evpn`), the
-session actor's `usage` for that scope, the configured `limit`, the
+enforcement order. Each row has:
+
+- `family`: `aggregate` for the neighbor-wide `max_prefixes`, or the bound's
+  canonical family label such as `ipv4_unicast`, `l3vpn_ipv4_unicast` or
+  `l2vpn_evpn`.
+- `stage`: `accepted` for a bound counted after import policy, or `received`
+  for the `max_prefixes_received_*` bounds counted before it. Only the unicast
+  families have a `received` row.
+
+`family` and `stage` are the labels of the `bgp_max_prefix_*` metrics, so a
+row joins its series directly. Each row also carries the session actor's
+`usage` for that bound, the configured `limit`, the
 saturating `headroom`, a `blocking` flag for an open
 `max_prefix_action = "block"` episode, and the stable `reason`
 `inbound_prefix_limit_reached` while blocking. Unlike the outbound sibling,
-a scope with no configured bound has no row at all, so the list is empty for
+a bound that is not configured has no row at all, so the list is empty for
 a peer with no finite inbound bound — and equally empty from a daemon that
 does not expose the field and from a stale peer-session snapshot. Absence is
 therefore never proof that no bound is configured. Counts come from the

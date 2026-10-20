@@ -208,17 +208,14 @@ static POLICY_ROUTES_REAP_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// every policy/action tuple that the installed chains can still emit.
 pub type PolicyRoutesReachability = BTreeMap<(String, String), BTreeSet<(String, String)>>;
 
-/// Split a session max-prefix scope (`ipv4_unicast_received`, `aggregate`,
-/// a canonical family) into the `family` and `stage` metric labels. Only the
-/// unicast received bounds count before import policy.
-fn max_prefix_labels(scope: &str) -> (&str, &'static str) {
-    scope
-        .strip_suffix("_received")
-        .map_or((scope, "accepted"), |family| (family, "received"))
-}
-
-fn max_prefix_label_values<'a>(peer: &'a str, scope: &'a str) -> [&'a str; 3] {
-    let (family, stage) = max_prefix_labels(scope);
+/// Labels of one max-prefix bound: `family` is `aggregate` or a canonical
+/// family label, `stage` is `accepted` (after import policy) or `received`
+/// (before it).
+fn max_prefix_label_values<'a>(peer: &'a str, family: &'a str, stage: &'a str) -> [&'a str; 3] {
+    debug_assert!(
+        matches!(stage, "accepted" | "received"),
+        "max-prefix stage must be accepted or received: {stage:?}"
+    );
     [peer, family, stage]
 }
 
@@ -4859,37 +4856,38 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Publish one authoritative max-prefix accounting scope.
+    /// Publish one authoritative max-prefix accounting bound.
     ///
-    /// `scope` is deliberately bounded to the aggregate and the families
-    /// whose independent limits are enforced by the session actor: unicast
-    /// (accepted and received) and the non-unicast per-family bounds.
-    /// An unlimited scope keeps its usage series but removes limit, headroom,
+    /// `family` is deliberately bounded to the aggregate and the families
+    /// whose independent limits are enforced by the session actor; only the
+    /// unicast families have a `received` stage.
+    /// An unlimited bound keeps its usage series but removes limit, headroom,
     /// and blocking instead of manufacturing a misleading zero.
     pub fn set_max_prefix_capacity(
         &self,
         peer: &str,
-        scope: &str,
+        family: &str,
+        stage: &str,
         usage: usize,
         limit: Option<u32>,
     ) {
         debug_assert!(matches!(
-            scope,
-            "aggregate"
-                | "ipv4_unicast"
-                | "ipv6_unicast"
-                | "ipv4_unicast_received"
-                | "ipv6_unicast_received"
-                | "l3vpn_ipv4_unicast"
-                | "l3vpn_ipv6_unicast"
-                | "ipv4_labeled_unicast"
-                | "ipv6_labeled_unicast"
-                | "l2vpn_evpn"
-                | "ipv4_flowspec"
-                | "ipv6_flowspec"
-                | "rtc"
+            (family, stage),
+            ("ipv4_unicast" | "ipv6_unicast", "accepted" | "received")
+                | (
+                    "aggregate"
+                        | "l3vpn_ipv4_unicast"
+                        | "l3vpn_ipv6_unicast"
+                        | "ipv4_labeled_unicast"
+                        | "ipv6_labeled_unicast"
+                        | "l2vpn_evpn"
+                        | "ipv4_flowspec"
+                        | "ipv6_flowspec"
+                        | "rtc",
+                    "accepted"
+                )
         ));
-        let labels = max_prefix_label_values(peer, scope);
+        let labels = max_prefix_label_values(peer, family, stage);
         let usage = i64::try_from(usage).unwrap_or(i64::MAX);
         self.0
             .max_prefix_usage
@@ -4913,40 +4911,40 @@ impl BgpMetrics {
         }
     }
 
-    /// Remove one scope's usage, limit, and headroom series for a peer. The
-    /// received scopes use this while their bound is unset: without one the
-    /// session does not track rejected identities, so no usage is published.
-    pub fn remove_max_prefix_capacity(&self, peer: &str, scope: &str) {
-        let labels = max_prefix_label_values(peer, scope);
+    /// Remove one bound's usage, limit, and headroom series for a peer. The
+    /// received bounds use this while unset: without one the session does
+    /// not track rejected identities, so no usage is published.
+    pub fn remove_max_prefix_capacity(&self, peer: &str, family: &str, stage: &str) {
+        let labels = max_prefix_label_values(peer, family, stage);
         let _ = self.0.max_prefix_usage.remove_label_values(&labels);
         let _ = self.0.max_prefix_limit.remove_label_values(&labels);
         let _ = self.0.max_prefix_headroom.remove_label_values(&labels);
         let _ = self.0.max_prefix_blocking.remove_label_values(&labels);
     }
 
-    /// Publish whether an inbound `block` episode is open for one scope.
-    pub fn set_max_prefix_blocking(&self, peer: &str, scope: &str, blocking: bool) {
+    /// Publish whether an inbound `block` episode is open for one bound.
+    pub fn set_max_prefix_blocking(&self, peer: &str, family: &str, stage: &str, blocking: bool) {
         self.0
             .max_prefix_blocking
-            .with_label_values(&max_prefix_label_values(peer, scope))
+            .with_label_values(&max_prefix_label_values(peer, family, stage))
             .set(i64::from(blocking));
     }
 
     /// Count one net-new prefix withheld by a full bound under `block`.
     /// Carries no prefix label: the withheld set is the unbounded quantity
     /// the limit exists to contain.
-    pub fn record_max_prefix_blocked(&self, peer: &str, scope: &str) {
+    pub fn record_max_prefix_blocked(&self, peer: &str, family: &str, stage: &str) {
         self.0
             .max_prefix_blocked
-            .with_label_values(&max_prefix_label_values(peer, scope))
+            .with_label_values(&max_prefix_label_values(peer, family, stage))
             .inc();
     }
 
-    /// Count one warning-threshold crossing for a scope.
-    pub fn record_max_prefix_warning(&self, peer: &str, scope: &str) {
+    /// Count one warning-threshold crossing for a bound.
+    pub fn record_max_prefix_warning(&self, peer: &str, family: &str, stage: &str) {
         self.0
             .max_prefix_warning
-            .with_label_values(&max_prefix_label_values(peer, scope))
+            .with_label_values(&max_prefix_label_values(peer, family, stage))
             .inc();
     }
 
@@ -9966,7 +9964,7 @@ mod tests {
         m.record_import_explain_cache_evictions(peer, 1);
         m.set_rfc8212_missing_policy(peer, true, true);
         m.set_peer_update_group(peer, 1);
-        m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
+        m.set_max_prefix_capacity(peer, "aggregate", "accepted", 80, Some(100));
         m.set_outbound_prefix_capacity(peer, "ipv4_unicast", 5, Some(8), true);
         m.record_outbound_prefix_blocked(peer, "ipv4_unicast", 2);
         m.record_orf_capacity_rejection(peer, "ipv4_unicast");
@@ -10073,9 +10071,9 @@ mod tests {
         let m = BgpMetrics::new();
         let peer = "10.0.0.1";
 
-        m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
-        m.set_max_prefix_blocking(peer, "aggregate", true);
-        m.set_max_prefix_capacity(peer, "ipv4_unicast", 12, None);
+        m.set_max_prefix_capacity(peer, "aggregate", "accepted", 80, Some(100));
+        m.set_max_prefix_blocking(peer, "aggregate", "accepted", true);
+        m.set_max_prefix_capacity(peer, "ipv4_unicast", "accepted", 12, None);
 
         let text = gather_text(&m);
         assert!(text.contains(
@@ -10097,7 +10095,7 @@ mod tests {
             r#"bgp_max_prefix_headroom{family="ipv4_unicast",peer="10.0.0.1",stage="accepted"}"#
         ));
 
-        m.set_max_prefix_capacity(peer, "aggregate", 101, None);
+        m.set_max_prefix_capacity(peer, "aggregate", "accepted", 101, None);
         let text = gather_text(&m);
         assert!(text.contains(
             r#"bgp_max_prefix_usage{family="aggregate",peer="10.0.0.1",stage="accepted"} 101"#
@@ -10119,9 +10117,9 @@ mod tests {
     fn max_prefix_received_scope_splits_into_family_and_stage() {
         let m = BgpMetrics::new();
         let peer = "10.0.0.1";
-        m.set_max_prefix_capacity(peer, "ipv6_unicast_received", 7, Some(10));
-        m.record_max_prefix_warning(peer, "ipv6_unicast_received");
-        m.set_max_prefix_capacity(peer, "l2vpn_evpn", 3, Some(5));
+        m.set_max_prefix_capacity(peer, "ipv6_unicast", "received", 7, Some(10));
+        m.record_max_prefix_warning(peer, "ipv6_unicast", "received");
+        m.set_max_prefix_capacity(peer, "l2vpn_evpn", "accepted", 3, Some(5));
 
         let text = gather_text(&m);
         for line in [
@@ -10134,7 +10132,7 @@ mod tests {
         }
         assert!(!text.contains("_received\""));
 
-        m.remove_max_prefix_capacity(peer, "ipv6_unicast_received");
+        m.remove_max_prefix_capacity(peer, "ipv6_unicast", "received");
         assert!(!gather_text(&m).contains(r#"bgp_max_prefix_usage{family="ipv6_unicast""#));
     }
 
@@ -10145,7 +10143,7 @@ mod tests {
     fn max_prefix_capacity_reap_spares_peer_history() {
         let m = BgpMetrics::new();
         let peer = "10.0.0.1";
-        m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
+        m.set_max_prefix_capacity(peer, "aggregate", "accepted", 80, Some(100));
         m.record_max_prefix_exceeded(peer);
 
         m.reap_max_prefix_capacity(peer);
