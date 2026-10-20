@@ -1521,6 +1521,34 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         }))
     }
 
+    async fn add_leased_path(
+        &self,
+        _request: Request<server_proto::AddLeasedPathRequest>,
+    ) -> Result<Response<server_proto::AddLeasedPathResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
+    async fn add_leased_flow_spec(
+        &self,
+        _request: Request<server_proto::AddLeasedFlowSpecRequest>,
+    ) -> Result<Response<server_proto::AddLeasedFlowSpecResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
+    async fn renew_lease(
+        &self,
+        _request: Request<server_proto::RenewLeaseRequest>,
+    ) -> Result<Response<server_proto::RenewLeaseResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
+    async fn list_injection_leases(
+        &self,
+        _request: Request<server_proto::ListInjectionLeasesRequest>,
+    ) -> Result<Response<server_proto::ListInjectionLeasesResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
     async fn add_evpn_route(
         &self,
         _request: Request<server_proto::AddEvpnRouteRequest>,

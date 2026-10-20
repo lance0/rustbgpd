@@ -6,12 +6,12 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 125,
+  "method_count": 129,
   "tier_counts": {
     "read": 1,
-    "sensitive_read": 78,
+    "sensitive_read": 79,
     "mutating": 22,
-    "operator_only": 24
+    "operator_only": 27
   },
   "methods": [
     { "service": "gnmi.gNMI", "method": "Capabilities", "path": "/gnmi.gNMI/Capabilities", "tier": "sensitive_read" },
@@ -121,6 +121,10 @@
     { "service": "rustbgpd.v1.InjectionService", "method": "DeletePath", "path": "/rustbgpd.v1.InjectionService/DeletePath", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "AddFlowSpec", "path": "/rustbgpd.v1.InjectionService/AddFlowSpec", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "DeleteFlowSpec", "path": "/rustbgpd.v1.InjectionService/DeleteFlowSpec", "tier": "operator_only" },
+    { "service": "rustbgpd.v1.InjectionService", "method": "AddLeasedPath", "path": "/rustbgpd.v1.InjectionService/AddLeasedPath", "tier": "operator_only" },
+    { "service": "rustbgpd.v1.InjectionService", "method": "AddLeasedFlowSpec", "path": "/rustbgpd.v1.InjectionService/AddLeasedFlowSpec", "tier": "operator_only" },
+    { "service": "rustbgpd.v1.InjectionService", "method": "RenewLease", "path": "/rustbgpd.v1.InjectionService/RenewLease", "tier": "operator_only" },
+    { "service": "rustbgpd.v1.InjectionService", "method": "ListInjectionLeases", "path": "/rustbgpd.v1.InjectionService/ListInjectionLeases", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.InjectionService", "method": "AddEvpnRoute", "path": "/rustbgpd.v1.InjectionService/AddEvpnRoute", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "DeleteEvpnRoute", "path": "/rustbgpd.v1.InjectionService/DeleteEvpnRoute", "tier": "operator_only" },
     { "service": "rustbgpd.v1.ControlService", "method": "Shutdown", "path": "/rustbgpd.v1.ControlService/Shutdown", "tier": "operator_only" },

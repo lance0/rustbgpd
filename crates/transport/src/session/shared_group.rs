@@ -357,18 +357,23 @@ pub(super) fn encode_shared_unicast_slice(
         // profile's Extended Next Hop state itself, so this match covers
         // both per-session grouping branches without re-deriving the mode.
         let (key, body_seed) = match export.finish_unicast_candidate(route, nh_override, attrs) {
-            Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => (
-                SharedGroupKey {
-                    source: route.peer,
-                    attrs_ptr: Arc::as_ptr(&attrs) as usize,
-                    next_hop: None,
-                    link_local_next_hop: None,
-                },
-                SharedGroupBody::V4Body {
-                    attrs,
-                    entries: vec![entry],
-                },
-            ),
+            Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
+                cache
+                    .dropped_ipv6_next_hops
+                    .note_ipv4_body(nh_override, entry.prefix);
+                (
+                    SharedGroupKey {
+                        source: route.peer,
+                        attrs_ptr: Arc::as_ptr(&attrs) as usize,
+                        next_hop: None,
+                        link_local_next_hop: None,
+                    },
+                    SharedGroupBody::V4Body {
+                        attrs,
+                        entries: vec![entry],
+                    },
+                )
+            }
             Ok(PreparedUnicastCandidate::Mp {
                 afi,
                 next_hop,
@@ -617,6 +622,8 @@ impl PeerSession {
                 tokio::task::yield_now().await;
             }
         }
+        // One warning covers every member: they share this encoding.
+        cache.dropped_ipv6_next_hops.warn(&self.peer_label, true);
         encode.finish(StreamTerminal::Complete);
         drop(guard);
         debug!(

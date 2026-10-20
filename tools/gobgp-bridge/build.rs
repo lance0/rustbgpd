@@ -19,10 +19,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[gobgp.join("gobgp.proto")],
             &[gobgp, well_known_include.clone()],
         )?;
-    // rustbgpd's own API, client side only.
+    // rustbgpd's own API. The server side, with UNIMPLEMENTED stubs, lets the
+    // tests stand in a scripted daemon.
     let rustbgpd = PathBuf::from("../../proto");
     tonic_prost_build::configure()
-        .build_server(false)
+        .generate_default_stubs(true)
         .compile_protos(
             &[rustbgpd.join("rustbgpd.proto")],
             &[rustbgpd, well_known_include],

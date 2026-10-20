@@ -2475,3 +2475,53 @@ async fn shared_group_mixed_pass_rib_out_bmp_mirrors_emitted_frames() {
         );
     }
 }
+
+/// A shared update-group pass drops an export-policy IPv6 next hop for
+/// every member without Extended Next Hop. The encoding member reports it
+/// once for the whole group; members reusing the encode add nothing.
+#[tokio::test]
+async fn shared_group_dropped_ipv6_next_hop_warns_once_per_pass() {
+    let announce: Vec<Route> = (1..=3u8)
+        .map(|octet| {
+            make_sourced_route(
+                Ipv4Addr::new(10, 43, 0, octet),
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, octet, 0), 24),
+                64_600 + u32::from(octet),
+            )
+        })
+        .collect();
+    let v6_override = Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(
+        "2001:db8::1".parse().unwrap(),
+    )));
+    let excluded = Ipv4Addr::new(10, 43, 0, 9);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    super::export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
+
+    let mut wires = Vec::new();
+    for _ in 0..2 {
+        let (mut member, wire) = shared_group_member(65001).await;
+        let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
+        update.next_hop_override = vec![v6_override.clone(); announce.len()].into();
+        member.test_drain_outbound(update).await;
+        wires.push(wire);
+    }
+    let (_, terminal) = shared
+        .cell
+        .get()
+        .expect("the first member publishes the cell")
+        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+        .unwrap()
+        .test_snapshot();
+    assert_eq!(
+        terminal,
+        Some(super::shared_group::StreamTerminal::Complete)
+    );
+    assert_eq!(
+        super::export::IPV6_NEXT_HOP_FALLBACKS.with(std::cell::Cell::get),
+        1,
+        "one warning for the group's pass"
+    );
+    for wire in &mut wires {
+        assert_eq!(read_announced_prefixes(wire, 3).await.len(), 3);
+    }
+}

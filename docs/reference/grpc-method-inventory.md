@@ -229,7 +229,7 @@ shape itself does not raise the tier.
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
 | `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
 
-### InjectionService (6 RPCs)
+### InjectionService (10 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -237,6 +237,10 @@ shape itself does not raise the tier.
 | `DeletePath` | `operator_only` | Withdraws an originated route. Lower-impact than Add, but classifying the inverse separately gives a misleading defense surface — treat as the same risk class. |
 | `AddFlowSpec` | `operator_only` | Installs RFC 8955 traffic-filter rules. Dataplane impact at line rate; one rule can drop or rate-limit arbitrary traffic. |
 | `DeleteFlowSpec` | `operator_only` | Same risk class as Add. |
+| `AddLeasedPath` | `operator_only` | `AddPath` under an owner's lease (ADR-0141); same risk class as `AddPath`. |
+| `AddLeasedFlowSpec` | `operator_only` | `AddFlowSpec` under an owner's lease (ADR-0141); same risk class as `AddFlowSpec`. |
+| `RenewLease` | `operator_only` | Keeps an owner's injected routes and rules alive. Delaying a dead controller's withdrawal has the blast radius of the injection itself, so it shares the adds' tier; a successful renewal is audited at INFO instead of WARN (ADR-0141). |
+| `ListInjectionLeases` | `sensitive_read` | Lease owners, generations and remaining time; discloses controller identities. |
 | `AddEvpnRoute` | `operator_only` | Originates EVPN Type 2/3/5; can blackhole an L2 segment by hijacking a MAC, or steer Type 5 traffic. |
 | `DeleteEvpnRoute` | `operator_only` | Same risk class. |
 
@@ -280,10 +284,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.8% |
-| `sensitive_read` | 78 | 62.4% |
-| `mutating` | 22 | 17.6% |
-| `operator_only` | 24 | 19.2% |
-| **Total** | **125** | **100%** |
+| `sensitive_read` | 79 | 61.2% |
+| `mutating` | 22 | 17.1% |
+| `operator_only` | 27 | 20.9% |
+| **Total** | **129** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`
@@ -296,9 +300,9 @@ to answer. The classification above is deliberately defensive ("when
 in doubt, raise the tier") so the ADR can negotiate a lower tier for a
 specific method if the model warrants it.
 
-1. **Tier vs. service granularity.** Every service except
-   `InjectionService` (uniformly `operator_only`) has at least one
-   `sensitive_read` method. `CheckLiveness` is a `read` method;
+1. **Tier vs. service granularity.** Every service has at least one
+   `sensitive_read` method; `InjectionService` has only
+   `ListInjectionLeases`. `CheckLiveness` is a `read` method;
    `GetHealth` remains sensitive because it returns peer and route counts.
    `EventService` is pure observability (no mutations at all);
    `RibService` is read-only apart from the mutating `SetFibTable` /
@@ -309,12 +313,12 @@ specific method if the model warrants it.
    (including `SetFibTable` / `DeleteFibTable`). The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
-2. **`operator_only` is small enough to gate by principal role.** 24
+2. **`operator_only` is small enough to gate by principal role.** 27
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
-3. **InjectionService is uniformly `operator_only`.** Six of the
-   twenty-four `operator_only` methods live here. The simplest model is
+3. **InjectionService is `operator_only` apart from its lease listing.**
+   Nine of the twenty-seven `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.

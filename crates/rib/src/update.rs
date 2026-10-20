@@ -617,6 +617,8 @@ pub struct ReceivedFlowSpecRoute {
     pub reason: Option<&'static str>,
     /// Whether validation against the current unicast dependencies is pending.
     pub pending: bool,
+    /// ADR-0141 lease tag of a locally injected rule, captured with the row.
+    pub injection: Option<crate::injection_lease::InjectionTag>,
 }
 
 /// Stable identity of one route tested by the exact outbound encoder.
@@ -1234,6 +1236,17 @@ pub struct ExportPolicyTermHits {
     pub terms: Vec<rustbgpd_policy::TermHitRow>,
 }
 
+/// A local delete's result: whether an entry was removed and, when it was
+/// owned, the ADR-0141 owner and generation it held, read in the deleting
+/// turn so an audit names the owner a delete or an override removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectedRemoval {
+    /// Whether a local entry was removed.
+    pub removed: bool,
+    /// The removed entry's lease tag; `None` when unowned or not removed.
+    pub tag: Option<crate::injection_lease::InjectionTag>,
+}
+
 /// Outcome of a local unicast or `FlowSpec` injection, decided against the
 /// local Adj-RIB-In rather than Loc-RIB, so a received route that out-selects
 /// the local one cannot mask a real replacement.
@@ -1254,6 +1267,12 @@ pub enum RibCommandError {
     NotFound(String),
     /// Unexpected RIB command failure.
     Internal(String),
+    /// The command conflicts with current state, such as injection ownership
+    /// (ADR-0141); nothing changed.
+    FailedPrecondition(String),
+    /// A bounded resource, such as the live lease owners, is full; nothing
+    /// changed.
+    ResourceExhausted(String),
 }
 
 impl RibCommandError {
@@ -1271,7 +1290,10 @@ impl RibCommandError {
 impl std::fmt::Display for RibCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(message) | Self::Internal(message) => f.write_str(message),
+            Self::NotFound(message)
+            | Self::Internal(message)
+            | Self::FailedPrecondition(message)
+            | Self::ResourceExhausted(message) => f.write_str(message),
         }
     }
 }
@@ -1777,6 +1799,9 @@ pub struct RoutePage {
     pub has_more: bool,
     /// Mutation version that must accompany the next continuation request.
     pub version: RoutePageVersion,
+    /// ADR-0141 lease tags of locally injected rows, aligned with `routes`
+    /// and captured in the same RIB turn; empty when no row is owned.
+    pub injection: Vec<Option<crate::injection_lease::InjectionTag>>,
 }
 
 /// One bounded family page; only returned rows are cloned.
@@ -2577,8 +2602,32 @@ pub enum RibUpdate {
         path_id: u32,
         /// Reply `Ok(false)` instead of `NotFound` when no local route matches.
         allow_missing: bool,
-        /// Completion reply: `true` when a local route was removed.
-        reply: oneshot::Sender<Result<bool, RibCommandError>>,
+        /// Owner the caller expects (`""` = unowned); a mismatch is
+        /// `FailedPrecondition` unless `override_owner` (ADR-0141).
+        owner: String,
+        /// Delete regardless of the entry's owner.
+        override_owner: bool,
+        /// Completion reply: whether a local route was removed, and its tag.
+        reply: oneshot::Sender<Result<InjectedRemoval, RibCommandError>>,
+    },
+    /// Inject a locally-originated route under an owner's lease (ADR-0141).
+    InjectLeasedRoute {
+        /// The route to inject.
+        route: Route,
+        /// Lease owner, already validated.
+        owner: String,
+        /// Lease duration, already validated.
+        lease_seconds: u32,
+        /// Completion reply with the outcome and the owner's live generation.
+        reply: oneshot::Sender<
+            Result<(InjectOutcome, crate::injection_lease::LeaseGeneration), RibCommandError>,
+        >,
+    },
+    /// Withdraw every key of each expired lease generation (ADR-0141). Sent
+    /// only by the lease expiry task.
+    ExpireInjectionLeases {
+        /// Expired generations with their deadlines.
+        leases: Vec<crate::injection_lease::ExpiredLease>,
     },
     /// Query: one bounded page of a resumable route listing. Filtering
     /// and pagination run inside the RIB task with per-page bounded
@@ -3295,8 +3344,27 @@ pub enum RibUpdate {
         key: crate::route::FlowSpecKey,
         /// Reply `Ok(false)` instead of `NotFound` when no local rule matches.
         allow_missing: bool,
-        /// Completion reply: `true` when a local rule was removed.
-        reply: oneshot::Sender<Result<bool, RibCommandError>>,
+        /// Owner the caller expects (`""` = unowned); a mismatch is
+        /// `FailedPrecondition` unless `override_owner` (ADR-0141).
+        owner: String,
+        /// Delete regardless of the entry's owner.
+        override_owner: bool,
+        /// Completion reply: whether a local rule was removed, and its tag.
+        reply: oneshot::Sender<Result<InjectedRemoval, RibCommandError>>,
+    },
+    /// Inject a locally-originated `FlowSpec` rule under an owner's lease
+    /// (ADR-0141).
+    InjectLeasedFlowSpec {
+        /// The `FlowSpec` route to inject.
+        route: FlowSpecRoute,
+        /// Lease owner, already validated.
+        owner: String,
+        /// Lease duration, already validated.
+        lease_seconds: u32,
+        /// Completion reply with the outcome and the owner's live generation.
+        reply: oneshot::Sender<
+            Result<(InjectOutcome, crate::injection_lease::LeaseGeneration), RibCommandError>,
+        >,
     },
     /// Inject a locally-originated EVPN route (RFC 7432).
     ///

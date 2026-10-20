@@ -569,6 +569,8 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
             prefix: route(255).prefix,
             path_id: 0,
             allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
             reply: mutation_reply,
         })
         .await
