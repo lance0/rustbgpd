@@ -65,11 +65,14 @@ asset, with `rustbgpd.proto.sha256` beside it:
 ```bash
 TAG=vX.Y.Z  # the rustbgpd release you target
 base=https://github.com/lance0/rustbgpd/releases/download/$TAG
-curl -fsSLO "$base/rustbgpd.proto"
-curl -fsSLO "$base/rustbgpd.proto.sha256"
-sha256sum -c rustbgpd.proto.sha256
-python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. rustbgpd.proto
+curl -fsSLO "$base/rustbgpd.proto" &&
+  curl -fsSLO "$base/rustbgpd.proto.sha256" &&
+  sha256sum -c rustbgpd.proto.sha256 &&
+  python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. rustbgpd.proto
 ```
+
+Each command runs only if the previous one succeeded, so a failed download or
+a checksum mismatch never regenerates stubs.
 
 Commit the tag, and the checksum if you like, next to the generated code.
 Moving to a new release means changing `TAG`, verifying again and
