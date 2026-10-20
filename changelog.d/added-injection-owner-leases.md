@@ -10,7 +10,8 @@
   out, the daemon withdraws all of the owner's entries in one RIB turn, logs
   a WARN line, and counts it in the new `bgp_injection_lease_expiries_total`
   counter; the new `bgp_injection_leases` gauge reports the owners in the
-  table. `DeletePath` and `DeleteFlowSpec` gain `owner` and `override_owner`,
+  table. An unexpected exit of the lease expiry task is a component failure:
+  the daemon shuts down and exits 1. `DeletePath` and `DeleteFlowSpec` gain `owner` and `override_owner`,
   and local route and FlowSpec read-back report `injection_owner`,
   `lease_generation` and `lease_remaining_ms`. Unowned injection is
   unchanged. At most 64 owners hold a live lease, each with at most 16,384

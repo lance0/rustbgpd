@@ -1183,6 +1183,16 @@ stopping its accept loop`). The daemon then logs `metrics/readiness server
 exited unexpectedly`, performs the ordinary coordinated shutdown and exits 1
 for `Restart=on-failure`, rather than running on without its health surface.
 
+### Injection lease expiry task exits unexpectedly
+
+The task that expires [owner-scoped injection leases](api.md#leased-injection)
+is supervised like the RIB, because leases would otherwise stop expiring and
+a stopped controller's routes would stay announced. An unexpected return or
+panic logs `injection lease expiry task exited unexpectedly`, performs the
+ordinary coordinated shutdown and exits 1 for `Restart=on-failure`. When the
+task stopped because the RIB manager was already gone, the daemon logs the
+RIB manager failure instead.
+
 ### RPKI subsystem task exits unexpectedly
 
 The daemon treats an unexpected return or panic from the VRP manager, either
@@ -2779,6 +2789,7 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `metrics/readiness server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `injection lease expiry task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `listener accept failing; backing off` | ERROR | A gRPC TCP, gRPC UDS or metrics listener hit resource exhaustion (EMFILE, ENFILE, ENOMEM or ENOBUFS). Accepts back off from 100 ms, doubling to a 1 s cap; the line is logged once per episode and then every 60th failure, with `listener`, `failures` and `backoff_ms` |
 | `listener accept recovered` | INFO | The next connection was accepted after a backoff episode; `failures` counts the episode |
 | `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). The daemon then fail-stops through gRPC server or metrics/readiness server supervision |
