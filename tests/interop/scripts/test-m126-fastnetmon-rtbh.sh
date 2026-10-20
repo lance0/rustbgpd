@@ -229,6 +229,25 @@ expect_unbanned() { # label limit
 }
 
 # Fail if either prefix appears at FRR during the next N seconds.
+# Milliseconds from FRR's End-of-RIB to the first blackhole UPDATE after line
+# MARK of its log, or 0 when the UPDATE came first (FRR never dropped the ban).
+frr_gap_ms() { # mark eor-pattern update-pattern
+    docker exec "$FRR" tail -n +"$(($1 + 1))" /tmp/bgpd.log | awk -v e="$2" -v u="$3" '
+        # Milliseconds since 1970 of a "YYYY/MM/DD HH:MM:SS.mmm" log line,
+        # by days-from-civil, so a gap across midnight stays correct.
+        function ms(  d, t, y, m, era, yoe, doy, doe) {
+            split($1, d, "/"); split($2, t, /[:.]/)
+            y = d[1] - (d[2] <= 2); m = d[2] + 0
+            era = int(y / 400); yoe = y - era * 400
+            doy = int((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d[3] - 1
+            doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+            return (((era * 146097 + doe - 719468) * 24 + t[1]) * 60 + t[2]) * 60000 + t[3] * 1000 + t[4]
+        }
+        index($0, e) && !ne { ne = NR; te = ms() }
+        index($0, u) && !nu { nu = NR; tu = ms() }
+        END { if (!ne || !nu) print "unknown"; else if (nu < ne) print 0; else print tu - te }'
+}
+
 expect_stays_absent() { # label seconds
     local end=$(($(date +%s) + $2)) seen="" unstable=""
     while [ "$(date +%s)" -lt "$end" ]; do
@@ -317,6 +336,7 @@ stop_one rustbgpd
 expect_stale "phase 2 daemon stopped, FRR keeps stale bans" 10
 sleep 10
 expect_stale "phase 2 stale bans held 10s into the outage" 1
+mark=$(docker exec "$FRR" sh -c 'wc -l < /tmp/bgpd.log')
 start_rustbgpd
 t0=$(date +%s)
 wait_session "phase 2 restart" 120 || true
@@ -338,6 +358,8 @@ else
 fi
 record "phase2_first_absent_after_start_s=${gap_from:-never}"
 record "phase2_bans_back_after_start_s=${back:-never}"
+record "phase2_v4_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "attr: nexthop $V4_NH, origin ?, community blackhole")"
+record "phase2_v6_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "mp_nexthop $V6_NH, community blackhole")"
 stop_replay
 expect_unbanned "phase 2 unban after restart" 90
 

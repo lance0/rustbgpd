@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use rustbgpd_gobgp_bridge::{
-    Bridge, DAEMON_RPC_TIMEOUT, DEFAULT_MAX_TRACKED, DaemonEndpoint, check_listen, daemon_channel,
-    load_token, serve,
+    Bridge, DAEMON_RPC_TIMEOUT, DEFAULT_LIVENESS_POLL, DEFAULT_MAX_TRACKED, DaemonEndpoint,
+    check_listen, daemon_channel, load_token, serve,
 };
 
 #[derive(Parser, Debug)]
@@ -61,6 +61,7 @@ async fn run(args: Args) -> Result<(), String> {
     };
     let bridge = Bridge::new(channel, bearer, DEFAULT_MAX_TRACKED);
     bridge.spawn_reconcile(Duration::from_secs(args.reconcile_interval_secs));
+    bridge.spawn_restart_watch(DEFAULT_LIVENESS_POLL);
     serve(listener, bridge, shutdown)
         .await
         .map_err(|e| format!("gRPC server failed: {e}"))

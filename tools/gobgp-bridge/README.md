@@ -137,7 +137,10 @@ the last acknowledged announcement for each path the detector has not
 withdrawn, and any withdrawal the daemon has not acknowledged. Every reconcile
 interval it retries those withdrawals, then re-adds every tracked
 announcement. An unchanged re-add is a no-op in the daemon; after a daemon
-restart it restores the ban. The bridge tracks at most 65,536 paths, and a new
+restart it restores the ban. The bridge also calls the daemon's
+`CheckLiveness` every half second, and starts a pass at once when the daemon
+answers after a failed call. A restart quicker than one probe goes unseen,
+and the periodic pass stays as the backstop. The bridge tracks at most 65,536 paths, and a new
 ban beyond that is refused with `RESOURCE_EXHAUSTED` before the daemon sees it.
 Each daemon call has a 10-second deadline, so a daemon that accepts the
 connection but stops answering fails the request instead of stalling the
@@ -150,7 +153,7 @@ table describes rustbgpd's local state only.
 
 | Event | Result | Local blackhole state | Recovery |
 |-------|--------|-----------------------|----------|
-| Daemon restart | The daemon starts with no injected routes. The bridge reconnects, and its next reconcile pass re-adds every tracked ban. | Bans are missing from the restart until that pass, at most one reconcile interval after the daemon answers again. | None needed. |
+| Daemon restart | The daemon starts with no injected routes. The bridge's next liveness probe sees the daemon answer again and re-adds every tracked ban at once. | Bans are missing from the restart until that pass. The probe runs at a nominal 0.5 s interval; recovery also waits for the probe call, the bridge's lock and one daemon call per tracked ban, so it grows with the number of tracked bans and with RPC latency. A restart the probes miss waits for the next reconcile pass. | None needed. |
 | Bridge restart | Daemon routes are untouched. A new bridge process withdraws them normally. | The new process tracks nothing, so bans made before the restart are not replayed after a later daemon restart. A ban or unban sent while the bridge is down fails at the detector and is not retried. | Restart the bridge. Re-send any ban or unban the detector logged as failed, and any ban that must survive a later daemon restart. |
 | Duplicate ban | Succeeds and returns the same UUID. The daemon keeps one route. | None. | None. |
 | Duplicate unban | Succeeds as a no-op. | None. | None. |
@@ -165,11 +168,11 @@ until its stale timers expire. Interop leg
 [M126](../../tests/interop/m126-fastnetmon-rtbh/README.md) measures this with
 FRR as the helper:
 
-- After a planned rustbgpd restart, the daemon sends End-of-RIB before the
-  bridge's next reconcile pass. FRR drops the stale bans at End-of-RIB and
-  learns them again when the bridge replays them, so the upstream has no
-  blackhole for up to one reconcile interval. A shorter
-  `--reconcile-interval-secs` narrows that gap.
+- After a planned rustbgpd restart, the bridge's replay races the daemon's
+  End-of-RIB on the new session. If End-of-RIB wins, FRR drops the stale bans
+  and learns them again when the replay lands, so the upstream briefly has no
+  blackhole. The liveness probe keeps that window short; the receipt records
+  the measured value.
 - An unban that fails while rustbgpd is stopped leaves the stale blackhole at
   the peer until rustbgpd returns and sends End-of-RIB, or until the peer's
   restart timer expires.
