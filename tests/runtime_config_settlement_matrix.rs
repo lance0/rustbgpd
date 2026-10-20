@@ -473,15 +473,25 @@ impl Control {
 
     /// The armed owner's pre-effect deadline expired before it reached the
     /// still-unclaimed checkpoint. Settling cleanly is the product outcome;
-    /// a fence is accepted only with proof that the owner observed that
-    /// deadline at least a margin late, so the budget had already expired.
+    /// a fence is accepted only when it is the budget's, with proof that the
+    /// owner observed that deadline at least a margin late, so the budget had
+    /// already expired. Any other fence reason fails the matrix.
     fn stall_before_checkpoint(&self, row: MatrixRow, daemon: &mut Daemon) -> Option<HostStall> {
         if !self.dir.join(ARM).exists() {
             return None;
         }
         let kind = format!("\"kind\":\"{}\"", row.kind());
         if daemon.log_has(FAIL_STOP_LINE, &kind) {
+            // The watchdog can log the fence before the owner logs its
+            // pre-effect timeout; judge the complete log once it has exited.
+            daemon.wait_exit(70, CLEAN_EXIT_LIMIT);
             let log = daemon.log();
+            let fences = fail_stop_lines(&log, &kind);
+            assert!(
+                matches!(&fences[..], [fence] if fence.contains(BUDGET_EXPIRED)),
+                "fenced before the armed checkpoint for a reason other than the \
+                 budget: {fences:?}\n{log}"
+            );
             let margin = self.budget / 10;
             assert!(
                 stall_fence_proven(&log, margin),
@@ -489,7 +499,6 @@ impl Control {
                  observed lateness {:?} ms, margin {margin:?}\n{log}",
                 pre_effect_observations(&log)
             );
-            daemon.wait_exit(70, CLEAN_EXIT_LIMIT);
             return Some(HostStall::FencedBeforeCheckpoint);
         }
         (daemon.log_has(SETTLED_LINE, &kind) && pre_effect_observations(&daemon.log()).len() == 1)
@@ -815,6 +824,17 @@ fn wait_metrics(
         daemon.assert_running();
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Every fail-stop line in a daemon log for the settlement `kind` field.
+fn fail_stop_lines<'a>(log: &'a str, kind: &str) -> Vec<&'a str> {
+    log.lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|entry| entry["fields"]["message"] == FAIL_STOP_LINE)
+                && line.contains(kind)
+        })
+        .collect()
 }
 
 /// Elapsed of the one registered settlement, whatever its labels.
@@ -1273,42 +1293,48 @@ fn grpc_endpoint_requires_bound_nonzero_tcp_listener_evidence() {
 fn runtime_config_settlement_matrix_four_rows_three_cycles() {
     let _ = rbgp_binary();
     let matrix_started = Instant::now();
+    // MATRIX_LIMIT bounds the twelve counted cycles. A proven host stall's
+    // attempt is bounded by its own waits and by STALL_ATTEMPTS, so its time
+    // is excluded here rather than raising the aggregate for every run.
+    let mut stalled = Duration::ZERO;
     let mut ordinal = 1;
     for row in MatrixRow::ALL {
         for cycle in 0..3 {
             for attempt in 1..=STALL_ATTEMPTS {
-                let lab = Lab::new(row, cycle, ordinal);
-                ordinal += 1;
-                let mut daemon = lab.spawn("controlled", true);
-                wait_ready_and_idle(daemon.metrics, &mut daemon);
-                assert!(lab.control.dir.join(SETTINGS).is_file());
+                let attempt_started = Instant::now();
+                // The lab and its daemon drop at the end of this block, so an
+                // attempt's teardown is part of its own time.
+                let outcome = {
+                    let lab = Lab::new(row, cycle, ordinal);
+                    ordinal += 1;
+                    let mut daemon = lab.spawn("controlled", true);
+                    wait_ready_and_idle(daemon.metrics, &mut daemon);
+                    assert!(lab.control.dir.join(SETTINGS).is_file());
 
-                let result = match row {
-                    MatrixRow::Apply => exercise_apply(&lab, &mut daemon),
-                    MatrixRow::AutoRevert => exercise_auto_revert(&lab, &mut daemon),
-                    MatrixRow::PeerGroup => exercise_peer_group(&lab, &mut daemon),
-                    MatrixRow::Policy => exercise_policy(&lab, &mut daemon),
+                    let result = match row {
+                        MatrixRow::Apply => exercise_apply(&lab, &mut daemon),
+                        MatrixRow::AutoRevert => exercise_auto_revert(&lab, &mut daemon),
+                        MatrixRow::PeerGroup => exercise_peer_group(&lab, &mut daemon),
+                        MatrixRow::Policy => exercise_policy(&lab, &mut daemon),
+                    };
+                    result.map(|requests| finish_row(&lab, row, &mut daemon, requests))
                 };
-                match result {
-                    Ok(requests) => {
-                        finish_row(&lab, row, &mut daemon, requests);
-                        break;
-                    }
-                    Err(stall) => {
-                        eprintln!("{row:?} cycle {cycle} attempt {attempt}: {stall:?}");
-                        assert!(
-                            attempt < STALL_ATTEMPTS,
-                            "{row:?} cycle {cycle}: host stalls decided all \
-                             {STALL_ATTEMPTS} attempts"
-                        );
-                    }
-                }
+                let Err(stall) = outcome else {
+                    break;
+                };
+                stalled += attempt_started.elapsed();
+                eprintln!("{row:?} cycle {cycle} attempt {attempt}: {stall:?}");
+                assert!(
+                    attempt < STALL_ATTEMPTS,
+                    "{row:?} cycle {cycle}: host stalls decided all {STALL_ATTEMPTS} attempts"
+                );
             }
         }
     }
     assert!(
-        matrix_started.elapsed() < MATRIX_LIMIT,
-        "twelve-cycle settlement matrix exceeded {MATRIX_LIMIT:?}"
+        matrix_started.elapsed() - stalled < MATRIX_LIMIT,
+        "twelve-cycle settlement matrix exceeded {MATRIX_LIMIT:?} \
+         excluding {stalled:?} of proven host stalls"
     );
 }
 
@@ -1327,6 +1353,7 @@ const SIGNAL_ALREADY_FENCED: &str =
 const FAIL_STOP_LINE: &str = "runtime config settlement fail-stop armed";
 const SETTLED_LINE: &str = "runtime config settlement settled";
 const OPERATOR_FORCED: &str = "\"fence_reason\":\"operator_forced\"";
+const BUDGET_EXPIRED: &str = "\"fence_reason\":\"budget_expired\"";
 const CLEAN_EXIT_LIMIT: Duration = Duration::from_secs(30);
 
 /// Begin coordinated shutdown with a registered, unfenced owner and prove
