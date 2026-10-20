@@ -87,12 +87,13 @@ const DEFAULT_LEASED_KEYS_PAGE_SIZE: usize = 100;
 /// where the key is
 /// `u:<addr>/<len>:<path_id>` or `f:<afi>:<hex NLRI>`. Clients treat it as
 /// opaque.
-fn leased_keys_token(page: &LeasedKeysPage, cursor: &InjectedKeyCursor) -> String {
+fn leased_keys_token(owner: &str, page: &LeasedKeysPage, cursor: &InjectedKeyCursor) -> String {
     let sequence = page.generation.map_or_else(
         || format!("w{}", page.watermark),
         |generation| generation.sequence.to_string(),
     );
-    let mut token = format!("t1:{}:{sequence}:", page.incarnation);
+    // Owners are `[A-Za-z0-9._-]`, so the owner field holds no separator.
+    let mut token = format!("t1:{owner}:{}:{sequence}:", page.incarnation);
     match cursor {
         InjectedKeyCursor::Unicast(prefix, path_id) => {
             let _ = write!(
@@ -112,9 +113,17 @@ fn leased_keys_token(page: &LeasedKeysPage, cursor: &InjectedKeyCursor) -> Strin
     token
 }
 
-fn parse_leased_keys_token(token: &str) -> Result<LeasedKeysResume, Status> {
+fn parse_leased_keys_token(token: &str, owner: &str) -> Result<LeasedKeysResume, Status> {
     let invalid = || Status::invalid_argument("invalid page_token");
     let rest = token.strip_prefix("t1:").ok_or_else(invalid)?;
+    let (token_owner, rest) = rest.split_once(':').ok_or_else(invalid)?;
+    // Two owners without a live lease share the same binding, so a token is
+    // only valid for the owner whose walk produced it.
+    if token_owner != owner {
+        return Err(Status::invalid_argument(
+            "page_token belongs to a different owner",
+        ));
+    }
     let (incarnation, rest) = rest.split_once(':').ok_or_else(invalid)?;
     let (sequence, key) = rest.split_once(':').ok_or_else(invalid)?;
     let incarnation: u64 = incarnation.parse().map_err(|_| invalid())?;
@@ -148,7 +157,9 @@ fn parse_leased_key_cursor(token: &str) -> Result<InjectedKeyCursor, Status> {
     }
     let rest = token.strip_prefix("f:").ok_or_else(invalid)?;
     let (afi, hex) = rest.split_once(':').ok_or_else(invalid)?;
-    if hex.len() % 2 != 0 || !hex.is_ascii() {
+    // A listing's cursor is one rule: at most 4,095 bytes plus a 2-byte
+    // length prefix. Refuse anything longer before decoding it.
+    if hex.len() % 2 != 0 || hex.len() > 2 * 4097 || !hex.is_ascii() {
         return Err(invalid());
     }
     let nlri = (0..hex.len())
@@ -1032,7 +1043,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let resume = if req.page_token.is_empty() {
             None
         } else {
-            Some(parse_leased_keys_token(&req.page_token)?)
+            Some(parse_leased_keys_token(&req.page_token, &req.owner)?)
         };
         let page_size = match req.page_size {
             0 => DEFAULT_LEASED_KEYS_PAGE_SIZE,
@@ -1059,7 +1070,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let next_page_token = if page.more {
             page.rows
                 .last()
-                .map(|row| leased_keys_token(&page, &row.cursor))
+                .map(|row| leased_keys_token(&req.owner, &page, &row.cursor))
                 .unwrap_or_default()
         } else {
             String::new()
