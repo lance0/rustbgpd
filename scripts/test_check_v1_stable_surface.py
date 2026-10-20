@@ -679,6 +679,49 @@ class PassThroughEmissionTests(unittest.TestCase):
         )
 
 
+class VariantEmissionTests(unittest.TestCase):
+    """A `param.as_str()` label counts the arm of the variant each caller passes."""
+
+    METRIC = (
+        'let counter = IntCounterVec::new(Opts::new("bgp_y", "help"), &["peer", "reason"]).unwrap();\n'
+        "pub fn record(&self, peer: &str, reason: Reason) {\n"
+        "    self.0.counter.with_label_values(&[peer, reason.as_str()]).inc();\n"
+        "}\n"
+    )
+    REASON = (
+        "pub enum Reason { A, B }\n"
+        "impl Reason {\n"
+        "    pub const fn as_str(self) -> &'static str {\n"
+        "        match self {\n"
+        '            Self::A => "a",\n'
+        '            Self::B => "b",\n'
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    CALLER = "fn caller(m: &M) { m.record(\"p\", crate::reason::Reason::A); }"
+
+    def emitted(self, metric):
+        sources = {
+            "crates/fixture/src/reason.rs": self.REASON,
+            "crates/fixture/src/caller.rs": self.CALLER,
+        }
+        return checker.emitted_label_values(metric, sources, "bgp_y", "reason", ["peer", "reason"])
+
+    def test_passed_variant_counts_only_its_arm(self):
+        self.assertEqual(self.emitted(self.METRIC), {"a"})
+
+    def test_shadowed_receiver_is_no_evidence(self):
+        # The setter emits B's label whatever its caller passes.
+        call = "    self.0.counter.with_label_values(&[peer, reason.as_str()]).inc();\n"
+        for shadow in (
+            f"    for reason in [Reason::B] {{\n    {call}    }}\n",
+            f"    let reason = Reason::B;\n{call}",
+        ):
+            with self.subTest(shadow=shadow):
+                self.assertEqual(self.emitted(self.METRIC.replace(call, shadow)), set())
+
+
 class RoleFamilyTests(unittest.TestCase):
     """Role families must use the configuration labels the daemon accepts."""
 

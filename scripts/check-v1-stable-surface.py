@@ -1128,7 +1128,10 @@ def emitted_label_values(
                     )
                 )
             continue
-        if rebinds(body, element):
+        # A `let`, assignment or other `for` binding shadows the parameter.
+        if rebinds(body, element) or re.search(
+            rf"\bfor\s+\(?[\w\s,]*\b{re.escape(element)}\b[\w\s,]*\)?\s+in\b", body
+        ):
             continue
         parameters = [
             part.split(":", 1)[0].strip()
