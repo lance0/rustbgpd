@@ -3305,7 +3305,13 @@ renewal at exactly the deadline fails. A renewal never creates or resurrects a
 lease. A controller that gets `FAILED_PRECONDITION` from `RenewLease`, or a
 generation from a leased add other than the one it holds, assumes its state
 is gone and re-adds its full desired state; the first leased add starts the
-new generation. Renew well inside the lease, for example every third of it.
+new generation. Store a `LeaseGeneration` and compare it as an opaque pair:
+both `incarnation` and `sequence` must match, and neither alone orders or
+identifies a generation. `incarnation` is a random `fixed64` and `sequence`
+a `uint64`, so proto JSON (for example grpcurl output) renders both as
+strings, such as `{"incarnation": "3238451053446743976", "sequence": "1"}`;
+keep them as strings rather than parsing them into floating-point numbers.
+Renew well inside the lease, for example every third of it.
 `RenewLease` is served from the lease table and never waits behind RIB work.
 
 Expiry removes local intent only. An equal or better route from elsewhere, or
