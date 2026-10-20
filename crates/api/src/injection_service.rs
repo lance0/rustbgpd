@@ -128,10 +128,17 @@ fn parse_leased_keys_token(token: &str) -> Result<InjectedKeyCursor, Status> {
         .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| invalid())?;
-    Ok(InjectedKeyCursor::FlowSpec(
-        afi.parse().map_err(|_| invalid())?,
-        nlri,
-    ))
+    // Only a cursor a listing could have produced: a FlowSpec AFI and exactly
+    // one complete rule. Anything else would silently skip or repeat keys.
+    let afi = match afi.parse::<u16>().map_err(|_| invalid())? {
+        1 => Afi::Ipv4,
+        2 => Afi::Ipv6,
+        _ => return Err(invalid()),
+    };
+    match rustbgpd_wire::flowspec::decode_flowspec_nlri(&nlri, afi) {
+        Ok(rules) if rules.len() == 1 => Ok(InjectedKeyCursor::FlowSpec(afi as u16, nlri)),
+        _ => Err(invalid()),
+    }
 }
 
 fn leased_key_to_proto(row: &LeasedKeyRow) -> proto::LeasedKey {
@@ -3916,6 +3923,9 @@ mod tests {
         for (token, owner) in [
             ("u:198.51.100.7/33:0", "ctl"),
             ("f:1:abc", "ctl"),
+            ("f:65535:", "ctl"),
+            ("f:1:", "ctl"),
+            ("f:1:030481", "ctl"),
             ("x", "ctl"),
             ("", ""),
             ("", "bad owner"),
@@ -3988,6 +3998,31 @@ mod tests {
         };
         let listed = list().await.unwrap().into_inner().keys;
         assert_eq!(listed.len(), 2);
+        // A FlowSpec cursor resumes: one rule per page, then the other.
+        let first = svc
+            .list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: "ctl".into(),
+                page_size: 1,
+                page_token: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.next_page_token.starts_with("f:1:"));
+        let rest = svc
+            .list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: "ctl".into(),
+                page_size: 1,
+                page_token: first.next_page_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            [first.keys, rest.keys].concat(),
+            listed,
+            "two pages hold both rules in order"
+        );
         for key in listed {
             let Some(proto::leased_key::Key::FlowSpec(rule)) = key.key else {
                 panic!("a FlowSpec key");
