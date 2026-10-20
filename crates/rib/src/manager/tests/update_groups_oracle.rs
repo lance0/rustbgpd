@@ -6170,6 +6170,114 @@ async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
     }
 }
 
+/// End-of-RIB through the RIB with action-only suppression in the same
+/// envelope. C's initial End-of-RIB cannot be queued behind its initial
+/// table, so it waits for the dirty resync. Before that resync, C's policy
+/// flips the next-hop action of the admitted key to a wire-equivalent one,
+/// and optionally a new key arrives. The resync envelope is then fully or
+/// partly suppressed, and must still carry the End-of-RIB after the table
+/// progress it covers. `finish` validates each stream's End-of-RIB coverage.
+///
+/// The grouped side is not compared for parity: a grouped member that is
+/// dirty without a regroup baseline has no admitted slot to suppress
+/// against, so it replays the equivalent key. Only the ordering and the
+/// End-of-RIB are asserted for it.
+#[tokio::test]
+async fn oracle_action_only_suppressed_resync_keeps_eor_after_its_table() {
+    tokio::time::pause();
+    for initially_self in [false, true] {
+        for new_key in [false, true] {
+            for force_ungrouped in [false, true] {
+                let policy = |use_self: bool| {
+                    permit_all_with(RouteModifications {
+                        set_next_hop: use_self.then_some(NextHopAction::Self_),
+                        ..RouteModifications::default()
+                    })
+                };
+                let mut o = Oracle::spawn(force_ungrouped, Some(A));
+                for peer in [A, B, C] {
+                    equivalent_action_profile(&mut o, peer).await;
+                }
+                o.peer_up(A, false, true, None, 64).await;
+                o.peer_up(B, false, true, Some(policy(initially_self)), 64)
+                    .await;
+                o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+                    .await;
+                // Capacity 1: the initial table fills C's channel, so its
+                // End-of-RIB is deferred to the dirty resync.
+                o.peer_up(C, false, true, Some(policy(initially_self)), 1)
+                    .await;
+                o.replace_policy(C, Some(policy(!initially_self))).await;
+                if new_key {
+                    o.routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![])
+                        .await;
+                }
+                o.drain_before_recovery(C, RecoveryPath::QueueDeferral)
+                    .await;
+                // Let every resync retry land, draining C between them so a
+                // retry is never refused for want of channel room.
+                for _ in 0..4 {
+                    tokio::time::advance(Duration::from_secs(2)).await;
+                    o.drain_peer_available(C).await;
+                }
+                o.end_recovery(C).await;
+                let stream = o.finish().await;
+
+                let messages = &stream[&IpAddr::V4(C)];
+                let flipped = (!initially_self).then_some(NextHopAction::Self_);
+                let announced: Vec<_> = messages
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, msg)| {
+                        msg.announce
+                            .iter()
+                            .map(move |entry| (index, entry.0, entry.5.clone()))
+                    })
+                    .collect();
+                let eor: Vec<_> = messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, msg)| !msg.end_of_rib.is_empty())
+                    .map(|(index, msg)| (index, msg.end_of_rib.clone()))
+                    .collect();
+                let label = format!(
+                    "initially_self={initially_self} new_key={new_key} ungrouped={force_ungrouped}"
+                );
+                assert_eq!(
+                    eor.len(),
+                    1,
+                    "{label}: exactly one End-of-RIB: {messages:?}"
+                );
+                assert_eq!(eor[0].1, ipv4_sendable(), "{label}");
+                assert!(
+                    announced.iter().all(|(index, ..)| *index <= eor[0].0),
+                    "{label}: End-of-RIB must follow the table it covers: {messages:?}"
+                );
+                assert!(
+                    messages.iter().all(|msg| msg.withdraw.is_empty()),
+                    "{label}"
+                );
+                if new_key {
+                    assert!(
+                        announced
+                            .iter()
+                            .any(|(_, prefix, action)| *prefix == Prefix::V4(pfx(2, 0))
+                                && *action == flipped),
+                        "{label}: the new key carries the new action"
+                    );
+                }
+                if force_ungrouped {
+                    let pfx1: Vec<_> = announced
+                        .iter()
+                        .filter(|(_, prefix, _)| *prefix == Prefix::V4(pfx(1, 0)))
+                        .collect();
+                    assert_eq!(pfx1.len(), 1, "{label}: the equivalent key is suppressed");
+                }
+            }
+        }
+    }
+}
+
 /// A new winner's source already holds the standing route it now receives as
 /// a substitution. Clean promotion must not reannounce that unchanged value.
 #[tokio::test]
