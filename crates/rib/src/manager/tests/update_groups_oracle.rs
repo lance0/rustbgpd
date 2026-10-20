@@ -1879,6 +1879,40 @@ impl Oracle {
         let _ = self.best_routes().await;
     }
 
+    /// Advance past the selection-deferral deadline and return once the
+    /// actor has released `family` and processed everything after it.
+    ///
+    /// One quiesce is not a release barrier. The run loop answers primary
+    /// messages queued before it first sees the timer due ahead of the
+    /// release (the timer's admission cutoff), and whether a quiesce lands
+    /// in that window depends on where the wall-clock flush budget yielded.
+    pub(super) async fn expire_selection_deferral(&mut self, by: Duration, family: (Afi, Safi)) {
+        tokio::time::advance(by).await;
+        // At most two probes precede the release: one the run loop takes
+        // before its timer check, and one queued while it then yielded.
+        for _ in 0..4 {
+            let (reply, state) = oneshot::channel();
+            self.tx
+                .send(RibUpdate::QueryPeerOutboundState {
+                    peer: IpAddr::V4(A),
+                    reply,
+                })
+                .await
+                .unwrap();
+            let released = !state
+                .await
+                .unwrap()
+                .selection_deferral
+                .iter()
+                .any(|row| row.active && (row.afi, row.safi) == family);
+            if released {
+                self.quiesce().await;
+                return;
+            }
+        }
+        panic!("{family:?} selection deferral still held after its deadline");
+    }
+
     /// Drain one pending message from a peer's channel (channel-fill
     /// scenarios). The message stays in the collected stream so folded
     /// comparisons and the VPN invariant checker see the whole history.
@@ -3190,8 +3224,9 @@ async fn run_vpn_swap_case(
         );
     }
     if mode.deferred {
-        tokio::time::advance(Duration::from_secs(31)).await;
-        oracle.quiesce().await;
+        oracle
+            .expire_selection_deferral(Duration::from_secs(31), (Afi::Ipv4, Safi::MplsVpn))
+            .await;
     }
     if mode.jam {
         oracle
