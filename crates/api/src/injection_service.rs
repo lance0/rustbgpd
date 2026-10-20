@@ -1287,12 +1287,19 @@ fn parse_numeric_value(s: &str, label: &str) -> Result<Vec<NumericMatch>, Status
     for (idx, (token, and_bit)) in terms.into_iter().enumerate() {
         let op_len = token
             .chars()
-            .take_while(|c| matches!(c, '=' | '<' | '>'))
+            .take_while(|c| matches!(c, '=' | '<' | '>' | '!'))
             .count();
         let (ops, value_part) = token.split_at(op_len);
-        let eq = ops.contains('=');
-        let lt = ops.contains('<');
-        let gt = ops.contains('>');
+        // `!=` is the not-equal form the read-back renders (`<>` spelled out).
+        let (lt, gt, eq) = match ops {
+            "!=" => (true, true, false),
+            ops if ops.contains('!') => {
+                return Err(Status::invalid_argument(format!(
+                    "{label}: invalid operator in {token:?}"
+                )));
+            }
+            ops => (ops.contains('<'), ops.contains('>'), ops.contains('=')),
+        };
         let value_str = value_part.trim();
         let value: u64 = value_str.parse().map_err(|e| {
             Status::invalid_argument(format!("{label}: invalid value {token:?}: {e}"))
@@ -2266,6 +2273,42 @@ mod tests {
             rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    /// Every numeric operator the injection API accepts renders, in the
+    /// read-back, as a value it accepts again with the same flags, so a
+    /// listed `FlowSpec` key deletes unchanged.
+    ///
+    /// Break-to-red: rendering not-equal-or-equal as `?`, or rejecting the
+    /// rendered `!=`, fails here.
+    #[test]
+    fn rendered_numeric_operators_parse_back_to_the_same_flags() {
+        for (lt, gt, eq) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let op = NumericMatch {
+                end_of_list: true,
+                and_bit: false,
+                lt,
+                gt,
+                eq,
+                value: 80,
+            };
+            let rendered = crate::rib_service::format_numeric_ops(std::slice::from_ref(&op));
+            let parsed = parse_numeric_value(&rendered, "port")
+                .unwrap_or_else(|error| panic!("{rendered:?}: {error}"));
+            assert_eq!(parsed, vec![op], "{rendered:?}");
+        }
+        assert_eq!(
+            parse_numeric_value("!80", "port").unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
     }
 
     #[test]
@@ -3889,6 +3932,77 @@ mod tests {
         assert_eq!(other.next_page_token, "");
 
         drop((svc, reader));
+        drop(rib_tx);
+        manager_task.await.unwrap();
+    }
+
+    /// Leased rules using the not-equal operators list as keys that
+    /// `DeleteFlowSpec` accepts unchanged: add, list, delete as listed.
+    #[tokio::test]
+    async fn listed_not_equal_flowspec_keys_delete_as_listed() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        for (octet, port) in [(1, "<>80"), (2, "<>=80")] {
+            svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                rule: Some(proto::AddFlowSpecRequest {
+                    afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                    components: vec![
+                        proto::FlowSpecComponent {
+                            r#type: 1,
+                            prefix: format!("203.0.113.{octet}/32"),
+                            value: String::new(),
+                            offset: 0,
+                        },
+                        proto::FlowSpecComponent {
+                            r#type: 4,
+                            prefix: String::new(),
+                            value: port.into(),
+                            offset: 0,
+                        },
+                    ],
+                    actions: vec![flowspec_rate(0.0)],
+                    communities: vec![],
+                    extended_communities: vec![],
+                }),
+                lease: Some(proto::InjectionLease {
+                    owner: "ctl".into(),
+                    lease_seconds: 30,
+                }),
+            }))
+            .await
+            .unwrap();
+        }
+        let list = || {
+            svc.list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: "ctl".into(),
+                ..Default::default()
+            }))
+        };
+        let listed = list().await.unwrap().into_inner().keys;
+        assert_eq!(listed.len(), 2);
+        for key in listed {
+            let Some(proto::leased_key::Key::FlowSpec(rule)) = key.key else {
+                panic!("a FlowSpec key");
+            };
+            svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+                afi_safi: rule.afi_safi,
+                components: rule.components.clone(),
+                owner: "ctl".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("{:?}: {error}", rule.components));
+        }
+        assert_eq!(list().await.unwrap().into_inner().keys, []);
+        drop(svc);
         drop(rib_tx);
         manager_task.await.unwrap();
     }

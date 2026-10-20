@@ -4529,7 +4529,10 @@ fn flowspec_prefix_offset(p: &rustbgpd_wire::FlowSpecPrefix) -> u32 {
     }
 }
 
-fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
+/// Numeric operators in the syntax `parse_numeric_value` accepts, so a listed
+/// component can be passed back unchanged; only the all-clear operator,
+/// which the injection API cannot create, has no input form.
+pub(crate) fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
     use std::fmt::Write;
     let mut rendered = String::new();
     for (idx, o) in ops.iter().enumerate() {
@@ -4547,7 +4550,8 @@ fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
             (true, false, true) => "<=",
             (false, true, true) => ">=",
             (true, true, false) => "!=",
-            _ => "?",
+            (true, true, true) => "<>=",
+            (false, false, false) => "?",
         };
         let _ = write!(rendered, "{cmp}{}", o.value);
     }
