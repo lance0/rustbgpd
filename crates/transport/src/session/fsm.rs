@@ -258,6 +258,38 @@ impl PeerSession {
 }
 
 impl PeerSession {
+    /// Whether this session must withhold negotiated IPv6 unicast from
+    /// export: eBGP (not a route-server client) with no usable IPv6 next
+    /// hop from `local_ipv6_nexthop`, the local socket, or a cap-77
+    /// link-local address. Decided at establishment and re-checked when a
+    /// runtime `local_ipv6_nexthop` change may unlock the family.
+    pub(super) fn withholds_ipv6_unicast_export(
+        &self,
+        neg: &rustbgpd_fsm::NegotiatedSession,
+    ) -> bool {
+        if neg.peer_asn == self.config.peer.local_asn
+            || self.config.route_server_client
+            || !neg
+                .negotiated_families
+                .contains(&(Afi::Ipv6, Safi::Unicast))
+        {
+            return false;
+        }
+        let local_ipv6 = self
+            .read_half
+            .as_ref()
+            .and_then(|h| h.local_addr().ok())
+            .and_then(|a| match a.ip() {
+                IpAddr::V6(v6) => Some(v6),
+                IpAddr::V4(_) => None,
+            });
+        super::SessionExportProfile::usable_ipv6_unicast_next_hop(
+            self.config.local_ipv6_nexthop.or(local_ipv6),
+            neg.link_local_next_hop && self.is_scoped_link_local_peer(),
+        )
+        .is_none()
+    }
+
     /// Retain a bounded, secret-free reset cause for snapshots, without
     /// replacing an actionable error during intentional local maintenance.
     /// The teardown cause always records the NOTIFICATION, plus any valid
@@ -809,25 +841,8 @@ impl PeerSession {
                             .get(&(Afi::Ipv4, Safi::Unicast))
                             .is_some_and(|afi| *afi == Afi::Ipv6);
                     let mut sendable_families = if is_ebgp {
-                        let local_ipv6 = self
-                            .read_half
-                            .as_ref()
-                            .and_then(|h| h.local_addr().ok())
-                            .and_then(|a| match a.ip() {
-                                IpAddr::V6(v6) => Some(v6),
-                                IpAddr::V4(_) => None,
-                            });
-                        let local_or_configured_v6 = self.config.local_ipv6_nexthop.or(local_ipv6);
-                        let has_v6_nh = super::SessionExportProfile::usable_ipv6_unicast_next_hop(
-                            local_or_configured_v6,
-                            neg.link_local_next_hop && self.is_scoped_link_local_peer(),
-                        )
-                        .is_some();
-                        let withhold_v6 = !has_v6_nh
-                            && !self.config.route_server_client
-                            && neg
-                                .negotiated_families
-                                .contains(&(Afi::Ipv6, Safi::Unicast));
+                        let withhold_v6 = self.withholds_ipv6_unicast_export(neg);
+                        self.ipv6_unicast_withheld = withhold_v6;
                         if withhold_v6 {
                             // Once per session: the family is withheld before
                             // any route reaches the exact-export probe, so
@@ -837,7 +852,7 @@ impl PeerSession {
                                 family = "ipv6_unicast",
                                 reason = ExactExportReason::MissingIpv6NextHop.as_str(),
                                 "IPv6 unicast negotiated but withheld from export for this session: \
-                                 no usable local IPv6 next hop; set local_ipv6_nexthop and reset the session"
+                                 no usable local IPv6 next hop; set local_ipv6_nexthop to export it"
                             );
                             self.metrics.record_export_family_suppressed(
                                 &self.peer_label,
@@ -851,6 +866,7 @@ impl PeerSession {
                             .copied()
                             .collect()
                     } else {
+                        self.ipv6_unicast_withheld = false;
                         neg.negotiated_families.clone()
                     };
                     if unnumbered_ipv4_without_enhe {
@@ -1189,6 +1205,7 @@ impl PeerSession {
                     });
 
                     self.negotiated = None;
+                    self.ipv6_unicast_withheld = false;
                     self.add_path_receive_families.clear();
                     self.route_refresh_queued.clear();
                     self.clear_known_routes();

@@ -245,7 +245,8 @@ impl RibManager {
     /// discard) and counted in
     /// `bgp_rib_stale_session_message_ignored_total{peer,kind}`.
     /// `kind` is bounded: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`,
-    /// `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`.
+    /// `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`,
+    /// `family_sendable`.
     pub(super) fn stale_session_message(
         &self,
         peer: IpAddr,

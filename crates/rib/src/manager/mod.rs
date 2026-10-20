@@ -4011,6 +4011,12 @@ impl RibManager {
                     self.handle_peer_slow_state(peer, slow);
                 }
             }
+            RibUpdate::PeerFamilySendable {
+                peer,
+                session_id,
+                family,
+                add_path_send_limit,
+            } => self.handle_peer_family_sendable(peer, session_id, family, add_path_send_limit),
             RibUpdate::SetPeerSessionExportPolicy {
                 peer,
                 session_id,

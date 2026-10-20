@@ -320,6 +320,9 @@ pub(crate) struct PeerSession {
     /// `SessionEstablished` and reused by inbound UPDATE decode instead of
     /// rebuilding from `NegotiatedSession::add_path_families` per UPDATE.
     add_path_receive_families: Vec<(Afi, Safi)>,
+    /// This Established session withheld negotiated IPv6 unicast from its
+    /// `PeerUp` for lack of a next hop and has not yet unlocked it.
+    ipv6_unicast_withheld: bool,
     /// Per-family flags for plain ROUTE-REFRESH requests queued to the RIB
     /// and not yet started (see `RibUpdate::RouteRefreshRequest::queued`).
     /// Reset per session epoch so a request left from a torn-down session
@@ -2176,6 +2179,7 @@ impl PeerSession {
             negotiated: None,
             aspa_context_id: Default::default(),
             add_path_receive_families: Vec::new(),
+            ipv6_unicast_withheld: false,
             received_eor_families: HashSet::new(),
             route_refresh_queued: HashMap::new(),
             stop_requested: false,
