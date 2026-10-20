@@ -13,5 +13,6 @@
   table. `DeletePath` and `DeleteFlowSpec` gain `owner` and `override_owner`,
   and local route and FlowSpec read-back report `injection_owner`,
   `lease_generation` and `lease_remaining_ms`. Unowned injection is
-  unchanged. The new RPCs are outside the v1 inventory for now. See
+  unchanged. At most 64 owners hold a live lease, each with at most 16,384
+  entries. The new RPCs and fields are outside the v1 inventory for now. See
   [leased injection](../docs/reference/api.md#leased-injection).

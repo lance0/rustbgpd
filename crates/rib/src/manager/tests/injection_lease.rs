@@ -2,7 +2,9 @@
 //! clock.
 
 use super::*;
-use crate::injection_lease::{InjectionLeases, LeaseGeneration, MAX_LIVE_OWNERS};
+use crate::injection_lease::{
+    InjectionLeases, LeaseGeneration, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+};
 use crate::update::{InjectOutcome, RibCommandError};
 
 const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 70));
@@ -610,4 +612,51 @@ async fn read_back_captures_tags_with_the_snapshot() {
     let tag = rows[0].injection.as_ref().expect("owned rule is tagged");
     assert_eq!((&*tag.owner, tag.generation), ("ctl", g));
     h.stop().await;
+}
+
+/// One owner holds at most `MAX_KEYS_PER_OWNER` keys, which bounds the
+/// work of its expiry batch. A new key past the cap is refused with nothing
+/// changed; replacing a held key, deleting one to make room, and other
+/// owners are unaffected.
+///
+/// Break-to-red: without the cap the extra key is admitted.
+#[tokio::test(start_paused = true)]
+async fn an_owner_holds_at_most_the_key_cap() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let route = |index: usize| {
+        let mut route = local_route(0);
+        let index = u32::try_from(index).unwrap();
+        route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 | index), 32));
+        route
+    };
+    for index in 0..MAX_KEYS_PER_OWNER {
+        manager
+            .inject_local_route(route(index), Some(("a", 30)))
+            .unwrap();
+    }
+    let held = manager.ribs[&LOCAL_PEER].len();
+    let extra = route(MAX_KEYS_PER_OWNER);
+    assert!(matches!(
+        manager.inject_local_route(extra.clone(), Some(("a", 30))),
+        Err(RibCommandError::ResourceExhausted(_))
+    ));
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), held);
+
+    let mut replaced = route(0);
+    replaced.attributes = AttrSet::new(vec![PathAttribute::Med(7)]);
+    manager
+        .inject_local_route(replaced, Some(("a", 30)))
+        .unwrap();
+    manager
+        .inject_local_route(extra.clone(), Some(("b", 30)))
+        .unwrap();
+    let (reply, mut deleted) = oneshot::channel();
+    manager.handle_withdraw_injected(route(1).prefix, 0, false, "a", false, reply);
+    assert_eq!(deleted.try_recv().unwrap(), Ok(true));
+    assert!(
+        manager
+            .inject_local_route(route(MAX_KEYS_PER_OWNER + 1), Some(("a", 30)))
+            .is_ok()
+    );
 }

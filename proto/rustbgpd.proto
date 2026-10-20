@@ -3578,8 +3578,9 @@ service InjectionService {
   // state may be gone and it must re-add its full desired state. A leased
   // add on a key held by another owner, or by no owner, returns
   // FAILED_PRECONDITION: convert an unleased entry by deleting it first, or
-  // add under a fresh key such as another path_id. A 65th live owner returns
-  // RESOURCE_EXHAUSTED. Both leave everything unchanged. A daemon without
+  // add under a fresh key such as another path_id. A 65th live owner, or an
+  // owner's 16,385th key, returns RESOURCE_EXHAUSTED. Both leave everything
+  // unchanged. A daemon without
   // these RPCs answers UNIMPLEMENTED and creates nothing; never retry a
   // failed leased add through AddPath or AddFlowSpec.
   rpc AddLeasedPath(AddLeasedPathRequest) returns (AddLeasedPathResponse);

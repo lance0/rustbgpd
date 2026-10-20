@@ -31,6 +31,11 @@ pub const MIN_LEASE_SECONDS: u32 = 5;
 pub const MAX_LEASE_SECONDS: u32 = 3600;
 /// Most owners with a live lease at once.
 pub const MAX_LIVE_OWNERS: usize = 64;
+
+/// Most keys, unicast and `FlowSpec` together, one owner may hold. With
+/// [`MAX_LIVE_OWNERS`] this bounds one expiry batch near a full-table
+/// peer-down (64 x 16,384 = 1,048,576 withdrawals).
+pub const MAX_KEYS_PER_OWNER: usize = 16_384;
 /// Longest accepted owner name, in bytes.
 pub const MAX_OWNER_LEN: usize = 64;
 

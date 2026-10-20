@@ -3140,6 +3140,7 @@ lag from the deadline, and counts it in
 | `lease_seconds` | 5-3600, else `INVALID_ARGUMENT` |
 | Leased add, owner has a live lease | Joins it; the deadline becomes `max(current, now + lease_seconds)` and never moves earlier |
 | Leased add, no live lease | Starts a new generation; at most 64 live owners, else `RESOURCE_EXHAUSTED` |
+| Leased add of a key the owner does not hold | At most 16,384 keys per owner, unicast and FlowSpec together, else `RESOURCE_EXHAUSTED`; keys awaiting expiry still count |
 | `RenewLease(owner, generation, lease_seconds)` | Sets the deadline to exactly `now + lease_seconds`, which may shorten it; `FAILED_PRECONDITION` unless `generation` is the owner's live lease |
 | Leased add on a key held by another owner or by no owner | `FAILED_PRECONDITION`; delete the unowned entry first, or add under another `path_id` |
 | Unowned add on an owned key | `FAILED_PRECONDITION` |

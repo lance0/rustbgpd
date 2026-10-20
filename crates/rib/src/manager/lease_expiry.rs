@@ -9,7 +9,9 @@ use tracing::warn;
 
 use super::helpers::{LOCAL_PEER, gauge_val};
 use super::{AdjRibIn, ExactExportKey, RibManager};
-use crate::injection_lease::{ExpiredLease, InjectedKey, InjectionTag, MAX_LIVE_OWNERS};
+use crate::injection_lease::{
+    ExpiredLease, InjectedKey, InjectionTag, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+};
 use crate::route::FlowSpecRouteKey;
 use crate::update::RibCommandError;
 
@@ -72,9 +74,9 @@ impl RibManager {
     }
 
     /// Admit a leased add of `key` in the turn that commits it: refuse an
-    /// ownership mismatch, then join or start the owner's lease, then tag the
-    /// key. A present unowned key is never adopted. Nothing changes on a
-    /// refusal.
+    /// ownership mismatch or a new key past [`MAX_KEYS_PER_OWNER`], then join
+    /// or start the owner's lease, then tag the key. A present unowned key is
+    /// never adopted. Nothing changes on a refusal.
     pub(super) fn admit_injected_lease(
         &mut self,
         key: &InjectedKey,
@@ -93,6 +95,16 @@ impl RibManager {
                 return Err(RibCommandError::FailedPrecondition(
                     "key is held by no owner; delete it before a leased add".to_string(),
                 ));
+            }
+            // A new key for this owner; keys awaiting expiry still count.
+            None if self
+                .owner_keys
+                .get(owner)
+                .is_some_and(|keys| keys.len() >= MAX_KEYS_PER_OWNER) =>
+            {
+                return Err(RibCommandError::ResourceExhausted(format!(
+                    "owner {owner:?} already holds {MAX_KEYS_PER_OWNER} injected keys"
+                )));
             }
             _ => {}
         }
