@@ -77,8 +77,11 @@ fn generation_to_proto(generation: LeaseGeneration) -> proto::LeaseGeneration {
     }
 }
 
-fn millis(duration: std::time::Duration) -> u32 {
-    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+/// Lease time left in whole milliseconds, rounded up: 0 only once the
+/// deadline has passed, when a renewal is refused, never for a sub-millisecond
+/// remainder that can still renew.
+pub(crate) fn millis(duration: std::time::Duration) -> u32 {
+    u32::try_from(duration.as_nanos().div_ceil(1_000_000)).unwrap_or(u32::MAX)
 }
 
 /// Audit summary of a completed delete, naming the owner and generation the
@@ -4150,6 +4153,43 @@ mod tests {
 
         drop((svc, rib_tx));
         manager_task.await.unwrap();
+    }
+
+    /// A lease with less than a millisecond left is listed as 1 ms, not 0,
+    /// because it can still renew; 0 is reserved for a passed deadline.
+    ///
+    /// Break-to-red: truncating to whole milliseconds lists it as 0.
+    #[tokio::test(start_paused = true)]
+    async fn remaining_zero_means_the_renewal_is_refused() {
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let leases = Arc::new(InjectionLeases::new());
+        let generation = leases.admit("ctl", 5).unwrap().generation;
+        let svc = InjectionService::new(rib_tx, AccessMode::ReadWrite, Arc::clone(&leases));
+        let listed = || async {
+            svc.list_injection_leases(Request::new(proto::ListInjectionLeasesRequest::default()))
+                .await
+                .unwrap()
+                .into_inner()
+                .leases[0]
+                .lease_remaining_ms
+        };
+        tokio::time::advance(
+            std::time::Duration::from_secs(5) - std::time::Duration::from_micros(500),
+        )
+        .await;
+        assert_eq!(listed().await, 1);
+        assert_eq!(millis(std::time::Duration::ZERO), 0);
+        tokio::time::advance(std::time::Duration::from_micros(500)).await;
+        assert_eq!(listed().await, 0);
+        let refused = svc
+            .renew_lease(Request::new(proto::RenewLeaseRequest {
+                owner: "ctl".into(),
+                generation: Some(generation_to_proto(generation)),
+                lease_seconds: 5,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(lease_conflict_reason(&refused), "GENERATION_NOT_LIVE");
     }
 
     /// The `ErrorInfo` reason of a lease conflict, decoded from the status

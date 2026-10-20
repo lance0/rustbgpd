@@ -3161,7 +3161,8 @@ message Route {
   bool atomic_aggregate = 22;
   // For a route injected with AddLeasedPath (source peer 0.0.0.0): its lease
   // owner, the generation it is tagged with, and the time to the owner's
-  // deadline, where 0 means expired and withdrawal pending. Set on received
+  // deadline, rounded up to whole milliseconds, where 0 means expired and
+  // withdrawal pending. Set on received
   // and best rows only: advertised rows carry an outbound path_id, so they
   // leave these unset. Unset for every other route. The three are set
   // together or not at all: a row with injection_owner non-empty also has
@@ -4021,10 +4022,11 @@ message InjectionLeaseEntry {
   LeaseGeneration generation = 2;
   // The lease_seconds that last set the deadline.
   uint32 lease_seconds = 3;
-  // Time to the deadline; 0 means expired and pending removal: the entry
-  // stays listed until the expiry pass takes it and withdraws the owner's
-  // routes. RenewLease refuses it with GENERATION_NOT_LIVE, and the
-  // controller re-adds its full desired state.
+  // Time to the deadline, rounded up to whole milliseconds; 0 means the
+  // deadline has passed and removal is pending: the entry stays listed
+  // until the expiry pass takes it and withdraws the owner's routes.
+  // RenewLease refuses it with GENERATION_NOT_LIVE, and the controller
+  // re-adds its full desired state.
   uint32 lease_remaining_ms = 4;
 }
 
