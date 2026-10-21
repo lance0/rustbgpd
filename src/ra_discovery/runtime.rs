@@ -206,6 +206,8 @@ fn set_icmp6_filter(socket: &Socket) -> io::Result<()> {
 
 struct Received {
     ifindex: u32,
+    /// The engine's link generation the socket was opened under.
+    generation: u64,
     source: Ipv6Addr,
     hop_limit: Option<u8>,
     payload: Vec<u8>,
@@ -229,7 +231,12 @@ fn recv_one(socket: &Socket, buf: &mut [u8]) -> io::Result<(Ipv6Addr, Option<u8>
     Ok((source, hop_limit, msg.bytes))
 }
 
-async fn reader(socket: Arc<AsyncFd<Socket>>, ifindex: u32, tx: mpsc::Sender<Received>) {
+async fn reader(
+    socket: Arc<AsyncFd<Socket>>,
+    ifindex: u32,
+    generation: u64,
+    tx: mpsc::Sender<Received>,
+) {
     // An RA is at most one MTU; this also holds any non-jumbogram whole.
     let mut buf = vec![0u8; 65_535];
     loop {
@@ -240,6 +247,7 @@ async fn reader(socket: Arc<AsyncFd<Socket>>, ifindex: u32, tx: mpsc::Sender<Rec
             Ok(Ok((source, hop_limit, len))) => {
                 let received = Received {
                     ifindex,
+                    generation,
                     source,
                     hop_limit,
                     payload: buf[..len].to_vec(),
@@ -257,6 +265,7 @@ async fn reader(socket: Arc<AsyncFd<Socket>>, ifindex: u32, tx: mpsc::Sender<Rec
 struct InterfaceSocket {
     name: String,
     ifindex: u32,
+    generation: u64,
     socket: Arc<AsyncFd<Socket>>,
     _reader: AbortOnDropHandle<()>,
 }
@@ -318,13 +327,15 @@ impl Actor {
                 router_lifetime_secs,
             }) => self.engine.on_router_advertisement(
                 packet.ifindex,
+                packet.generation,
                 packet.source,
                 router_lifetime_secs,
                 now,
                 interface_has_address,
             ),
             Ok(NdMessage::RouterSolicitation) => {
-                self.engine.on_router_solicitation(packet.ifindex, now);
+                self.engine
+                    .on_router_solicitation(packet.ifindex, packet.generation, now);
                 Ok(())
             }
             Err(reason) => Err(reason),
@@ -340,24 +351,28 @@ impl Actor {
         }
     }
 
+    /// Open a socket for every bound interface that lacks one for its
+    /// current (ifindex, generation). A new generation gets a new socket, so
+    /// anything the kernel buffered for the old link is discarded with it.
     fn open_sockets(&mut self) {
-        let wanted: Vec<(String, u32)> = self
+        let wanted: Vec<(String, u32, u64)> = self
             .engine
             .bound_interfaces()
-            .filter(|(name, ifindex)| {
+            .filter(|(name, ifindex, generation)| {
                 self.sockets
                     .get(*name)
-                    .is_none_or(|s| s.ifindex != *ifindex)
+                    .is_none_or(|s| (s.ifindex, s.generation) != (*ifindex, *generation))
             })
-            .map(|(name, ifindex)| (name.to_owned(), ifindex))
+            .map(|(name, ifindex, generation)| (name.to_owned(), ifindex, generation))
             .collect();
-        for (name, ifindex) in wanted {
+        for (name, ifindex, generation) in wanted {
             match interface_socket(&name, ifindex).and_then(AsyncFd::new) {
                 Ok(socket) => {
                     let socket = Arc::new(socket);
                     let reader = AbortOnDropHandle::new(tokio::spawn(reader(
                         Arc::clone(&socket),
                         ifindex,
+                        generation,
                         self.received_tx.clone(),
                     )));
                     debug!(interface = %name, ifindex, "RA socket open");
@@ -366,6 +381,7 @@ impl Actor {
                         InterfaceSocket {
                             name,
                             ifindex,
+                            generation,
                             socket,
                             _reader: reader,
                         },
@@ -379,9 +395,13 @@ impl Actor {
     }
 
     fn close_stale_sockets(&mut self) {
-        let live: HashMap<&str, u32> = self.engine.bound_interfaces().collect();
+        let live: HashMap<&str, (u32, u64)> = self
+            .engine
+            .bound_interfaces()
+            .map(|(name, ifindex, generation)| (name, (ifindex, generation)))
+            .collect();
         self.sockets
-            .retain(|name, s| live.get(name.as_str()) == Some(&s.ifindex));
+            .retain(|name, s| live.get(name.as_str()) == Some(&(s.ifindex, s.generation)));
     }
 
     fn flush(&mut self) {

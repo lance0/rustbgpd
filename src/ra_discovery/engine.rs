@@ -152,6 +152,13 @@ pub enum Transmit {
 struct Interface {
     ifindex: Option<u32>,
     up: bool,
+    /// Confirmed `Down` or `Removed` and no `Up` since: candidate input is
+    /// refused, so packets still queued from before the loss cannot rebind.
+    confirmed_down: bool,
+    /// Changes on every `Up` after confirmed loss or recreation. The socket
+    /// layer stamps each packet with the generation it was read under, and
+    /// input from an older generation is discarded.
+    generation: u64,
     /// Live candidates and their expiry.
     candidates: BTreeMap<Ipv6Addr, Instant>,
     binding: Option<Endpoint>,
@@ -167,6 +174,7 @@ pub(crate) struct Engine {
     config: DiscoveryConfig,
     interfaces: BTreeMap<String, Interface>,
     rng: u64,
+    last_generation: u64,
     pub(crate) events: Vec<DiscoveryEvent>,
     pub(crate) transmits: Vec<Transmit>,
 }
@@ -177,6 +185,7 @@ impl Engine {
             config,
             interfaces: BTreeMap::new(),
             rng: seed | 1,
+            last_generation: 0,
             events: Vec::new(),
             transmits: Vec::new(),
         }
@@ -185,7 +194,21 @@ impl Engine {
     /// Begin discovery on `name`. Nothing is received or sent until a link
     /// event supplies its ifindex; the first `Up` sends the link-up RS.
     pub(crate) fn start(&mut self, name: &str) {
-        self.interfaces.entry(name.to_owned()).or_default();
+        if !self.interfaces.contains_key(name) {
+            let generation = self.next_generation();
+            self.interfaces.insert(
+                name.to_owned(),
+                Interface {
+                    generation,
+                    ..Interface::default()
+                },
+            );
+        }
+    }
+
+    fn next_generation(&mut self) -> u64 {
+        self.last_generation += 1;
+        self.last_generation
     }
 
     /// End discovery on `name`, sending a final lifetime-0 RA when this
@@ -208,14 +231,17 @@ impl Engine {
         }
     }
 
-    /// (name, ifindex) of every started interface whose ifindex is known.
-    pub(crate) fn bound_interfaces(&self) -> impl Iterator<Item = (&str, u32)> {
+    /// (name, ifindex, generation) of every started interface whose ifindex
+    /// is known and that is not confirmed down: the sockets to keep open.
+    pub(crate) fn bound_interfaces(&self) -> impl Iterator<Item = (&str, u32, u64)> {
         self.interfaces
             .iter()
-            .filter_map(|(name, i)| Some((name.as_str(), i.ifindex?)))
+            .filter(|(_, i)| !i.confirmed_down)
+            .filter_map(|(name, i)| Some((name.as_str(), i.ifindex?, i.generation)))
     }
 
     pub(crate) fn on_link(&mut self, event: &LinkEvent, now: Instant) {
+        let next_generation = self.last_generation + 1;
         let Some(iface) = self.interfaces.get_mut(&event.name) else {
             return;
         };
@@ -231,6 +257,7 @@ impl Engine {
             LinkState::Down | LinkState::Removed => {
                 clear(&event.name, iface, &mut self.events);
                 iface.up = false;
+                iface.confirmed_down = true;
                 iface.next_ra = None;
                 iface.ifindex = (event.state == LinkState::Down).then_some(event.ifindex);
             }
@@ -238,6 +265,11 @@ impl Engine {
                 if recreated {
                     clear(&event.name, iface, &mut self.events);
                     iface.up = false;
+                }
+                if recreated || iface.confirmed_down {
+                    iface.confirmed_down = false;
+                    iface.generation = next_generation;
+                    self.last_generation = next_generation;
                 }
                 iface.ifindex = Some(event.ifindex);
                 if !iface.up {
@@ -254,12 +286,14 @@ impl Engine {
         }
     }
 
-    /// A validated RA on `ifindex`. `is_own(name, source)` reports whether the
-    /// source is assigned to the receiving interface; it is asked only for a
-    /// source that is not already a candidate.
+    /// A validated RA read on `ifindex` under link `generation`.
+    /// `is_own(name, source)` reports whether the source is assigned to the
+    /// receiving interface; it is asked only for a source that is not already
+    /// a candidate.
     pub(crate) fn on_router_advertisement(
         &mut self,
         ifindex: u32,
+        generation: u64,
         source: Ipv6Addr,
         router_lifetime_secs: u16,
         now: Instant,
@@ -272,6 +306,9 @@ impl Engine {
         else {
             return Ok(());
         };
+        if iface.confirmed_down || iface.generation != generation {
+            return Err(DropReason::StaleLink);
+        }
         let hold = if router_lifetime_secs == 0 {
             LIFETIME_ZERO_HOLD
         } else {
@@ -307,12 +344,12 @@ impl Engine {
 
     /// A valid RS on `ifindex`: answer with an RA after a random delay of up
     /// to 500 ms, no sooner than 3 s after the previous RA (RFC 4861 §6.2.6).
-    pub(crate) fn on_router_solicitation(&mut self, ifindex: u32, now: Instant) {
+    pub(crate) fn on_router_solicitation(&mut self, ifindex: u32, generation: u64, now: Instant) {
         let delay = self.random_up_to(MAX_RA_DELAY_TIME);
         let Some(iface) = self
             .interfaces
             .values_mut()
-            .find(|i| i.ifindex == Some(ifindex))
+            .find(|i| i.ifindex == Some(ifindex) && i.generation == generation)
         else {
             return;
         };

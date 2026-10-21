@@ -48,8 +48,14 @@ fn engine(send: bool, now: Instant) -> Engine {
     e
 }
 
+/// The link generation of `IF`'s current socket (0 while confirmed down).
+fn generation(e: &Engine) -> u64 {
+    e.bound_interfaces().next().map_or(0, |(_, _, g)| g)
+}
+
 fn ra(e: &mut Engine, n: u16, lifetime: u16, now: Instant) -> Result<(), DropReason> {
-    e.on_router_advertisement(IDX, ll(n), lifetime, now, not_own)
+    let g = generation(e);
+    e.on_router_advertisement(IDX, g, ll(n), lifetime, now, not_own)
 }
 
 fn bindings(e: &mut Engine) -> Vec<(Option<Endpoint>, Option<Endpoint>)> {
@@ -69,7 +75,8 @@ fn own_address_ra_is_rejected() {
     let t0 = Instant::now();
     let mut e = engine(true, t0);
     let mut asked = Vec::new();
-    let result = e.on_router_advertisement(IDX, ll(1), 30, t0, |name, src| {
+    let g = generation(&e);
+    let result = e.on_router_advertisement(IDX, g, ll(1), 30, t0, |name, src| {
         asked.push((name.to_owned(), src));
         true
     });
@@ -339,7 +346,8 @@ fn recreated_interface_starts_fresh_on_the_new_ifindex() {
     // Late RAs read from the old socket are ignored.
     ra(&mut e, 3, 30, t0).unwrap();
     assert_eq!(e.events, vec![]);
-    e.on_router_advertisement(IDX + 1, ll(1), 30, t0, not_own)
+    let g = generation(&e);
+    e.on_router_advertisement(IDX + 1, g, ll(1), 30, t0, not_own)
         .unwrap();
     let new = Some(Endpoint {
         address: ll(1),
@@ -347,9 +355,52 @@ fn recreated_interface_starts_fresh_on_the_new_ifindex() {
     });
     assert_eq!(bindings(&mut e), vec![(None, new)]);
     assert_eq!(
-        e.bound_interfaces().collect::<Vec<_>>(),
+        e.bound_interfaces()
+            .map(|(n, i, _)| (n, i))
+            .collect::<Vec<_>>(),
         vec![(IF, IDX + 1)]
     );
+}
+
+#[test]
+fn ra_queued_before_carrier_loss_does_not_bind_after_it() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    // Read off the socket before the loss, processed after it.
+    let queued = generation(&e);
+    e.on_link(&link(LinkState::Down, IDX), t0);
+    assert_eq!(e.bound_interfaces().count(), 0, "socket closes while down");
+    assert_eq!(
+        e.on_router_advertisement(IDX, queued, ll(1), 30, t0, not_own),
+        Err(DropReason::StaleLink)
+    );
+    assert_eq!(e.events, vec![]);
+    assert_eq!(e.next_deadline(), None, "no candidate was recorded");
+}
+
+#[test]
+fn ra_from_a_previous_link_generation_is_discarded_after_down_up() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    let old = generation(&e);
+    ra(&mut e, 1, 30, t0).unwrap();
+    e.on_link(&link(LinkState::Down, IDX), t0);
+    e.on_link(&link(LinkState::Up, IDX), t0);
+    let new = generation(&e);
+    assert_ne!(old, new, "Down->Up starts a new generation");
+    e.events.clear();
+    assert_eq!(
+        e.on_router_advertisement(IDX, old, ll(1), 30, t0, not_own),
+        Err(DropReason::StaleLink)
+    );
+    assert_eq!(e.events, vec![], "stale state is not restored");
+    e.on_router_advertisement(IDX, new, ll(2), 30, t0, not_own)
+        .unwrap();
+    assert_eq!(bindings(&mut e), vec![(None, Some(ep(2)))]);
+    // Unknown and a repeated Up keep the generation.
+    e.on_link(&link(LinkState::Unknown, IDX), t0);
+    e.on_link(&link(LinkState::Up, IDX), t0);
+    assert_eq!(generation(&e), new);
 }
 
 #[test]
@@ -439,7 +490,8 @@ fn sending_opt_out_sends_nothing_but_still_receives() {
     let mut e = engine(false, t0);
     e.on_link(&link(LinkState::Down, IDX), t0);
     e.on_link(&link(LinkState::Up, IDX), t0);
-    e.on_router_solicitation(IDX, t0);
+    let g = generation(&e);
+    e.on_router_solicitation(IDX, g, t0);
     assert_eq!(run_until(&mut e, t0 + Duration::from_secs(600)), vec![]);
     ra(&mut e, 1, 30, t0).unwrap();
     assert_eq!(bindings(&mut e), vec![(None, Some(ep(1)))]);
@@ -454,12 +506,14 @@ fn router_solicitation_is_answered_within_half_a_second_but_rate_limited() {
     // The link-up RA goes at t0.
     assert_eq!(run_until(&mut e, t0).len(), 1);
     let t1 = t0 + Duration::from_secs(5);
-    e.on_router_solicitation(IDX, t1);
+    let g = generation(&e);
+    e.on_router_solicitation(IDX, g, t1);
     let answer = e.next_deadline().unwrap();
     assert!(answer >= t1 && answer <= t1 + Duration::from_millis(500));
     assert_eq!(run_until(&mut e, answer).len(), 1);
     // A second RS right after: no RA sooner than 3 s after the last one.
-    e.on_router_solicitation(IDX, answer);
+    let g = generation(&e);
+    e.on_router_solicitation(IDX, g, answer);
     assert!(e.next_deadline().unwrap() >= answer + Duration::from_secs(3));
 }
 
@@ -482,7 +536,7 @@ fn stop_sends_a_final_lifetime_zero_ra() {
 fn ra_on_an_unstarted_interface_is_ignored() {
     let t0 = Instant::now();
     let mut e = engine(false, t0);
-    e.on_router_advertisement(IDX + 9, ll(1), 30, t0, not_own)
+    e.on_router_advertisement(IDX + 9, 1, ll(1), 30, t0, not_own)
         .unwrap();
     assert_eq!(e.events, vec![]);
 }

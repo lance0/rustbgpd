@@ -51,10 +51,13 @@ pub enum DropReason {
     OwnAddress,
     /// An RA from a new source while the interface's candidate table is full.
     CandidateLimit,
+    /// Read while the link was confirmed down, or before the latest
+    /// Down→Up or recreation: it describes a link that no longer exists.
+    StaleLink,
 }
 
 impl DropReason {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::HopLimit,
         Self::SourceNotLinkLocal,
         Self::NonZeroCode,
@@ -64,6 +67,7 @@ impl DropReason {
         Self::UnexpectedType,
         Self::OwnAddress,
         Self::CandidateLimit,
+        Self::StaleLink,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -77,6 +81,7 @@ impl DropReason {
             Self::UnexpectedType => "unexpected_type",
             Self::OwnAddress => "own_address",
             Self::CandidateLimit => "candidate_limit",
+            Self::StaleLink => "stale_link",
         }
     }
 }
