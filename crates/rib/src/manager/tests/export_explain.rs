@@ -977,12 +977,13 @@ async fn advertised_route_reports_in_sync_and_staged_modifications() {
     )
     .await;
 
-    feed_routes(
-        &tx,
-        source,
-        vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
-    )
-    .await;
+    // The source route records the interface it was learned on.
+    let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+    route.aspa_context = crate::route::AspaContextId::intern_scoped(
+        rustbgpd_wire::AspaValidationContext::default(),
+        Some("eth0"),
+    );
+    feed_routes(&tx, source, vec![route]).await;
     // Live distribution announced the (modified) route.
     let update = rx_t.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
@@ -992,6 +993,7 @@ async fn advertised_route_reports_in_sync_and_staged_modifications() {
     assert!(stopped_gate(&explain).is_none());
     assert_eq!(explain.modifications.set_med, Some(750));
     assert_eq!(explain.route_peer, Some(source));
+    assert_eq!(explain.route_peer_interface.as_deref(), Some("eth0"));
     assert_eq!(
         explain.next_hop,
         Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))

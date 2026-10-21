@@ -533,6 +533,20 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
 
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
+    // The target session's accepted context names its interface; the event
+    // records it as the target's scope.
+    tx.send(RibUpdate::SetPeerSourceContext {
+        peer: target,
+        session_id: 0,
+        context: Arc::new(crate::update::PeerSourceContext {
+            dampening_admission: None,
+            peer_interface: Some("eth1".into()),
+            accepted_dynamic_range: None,
+            route_server_client: false,
+        }),
+    })
+    .await
+    .unwrap();
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
         interpret_rfc1997: true,
@@ -556,10 +570,16 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
     drain_eor(&mut out_rx).await;
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    // The source route records the interface it was learned on.
+    let mut source_route = make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1));
+    source_route.aspa_context = crate::route::AspaContextId::intern_scoped(
+        rustbgpd_wire::AspaValidationContext::default(),
+        Some("eth0"),
+    );
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
-        announced: vec![make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        announced: vec![source_route],
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
@@ -588,9 +608,10 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
     assert!(update.announce.is_empty());
     assert_eq!(update.withdraw, vec![(Prefix::V4(denied_prefix), 0)]);
 
+    // The target is scoped, so an unscoped peer filter would not match it.
     let history = query_route_event_history(
         &tx,
-        Some(target),
+        None,
         Some(Afi::Ipv4),
         Some(Prefix::V4(denied_prefix)),
         10,
@@ -604,6 +625,11 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
     assert_eq!(policy_filtered[0].peer, Some(source));
     assert_eq!(policy_filtered[0].target_peer, Some(target));
     assert_eq!(policy_filtered[0].reason, "policy_denied");
+    assert_eq!(policy_filtered[0].peer_interface().as_deref(), Some("eth0"));
+    assert_eq!(
+        policy_filtered[0].target_peer_interface().as_deref(),
+        Some("eth1")
+    );
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
@@ -614,9 +640,10 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
     .await
     .unwrap();
     assert_eq!(reply_rx.await.unwrap(), Ok(()));
+    // The target is scoped, so an unscoped peer filter would not match it.
     let history = query_route_event_history(
         &tx,
-        Some(target),
+        None,
         Some(Afi::Ipv4),
         Some(Prefix::V4(denied_prefix)),
         10,

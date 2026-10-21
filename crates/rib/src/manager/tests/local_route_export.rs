@@ -479,3 +479,31 @@ fn unknown_local_route_is_not_found() {
     inject(&mut manager, local_route(prefix, 0));
     assert!(query(&mut manager, prefix, 3, None, 10).is_none());
 }
+
+/// Each row reports its destination's scope from the registered session's
+/// accepted context: a scoped neighbor's interface, none for a numbered one.
+/// Red proof: building rows with no interface fails the scoped row.
+#[test]
+fn rows_report_the_destination_scope() {
+    let (mut manager, _tx) = manager();
+    let scoped = v4(1);
+    let numbered = v4(2);
+    manager.handle_update(RibUpdate::SetPeerSourceContext {
+        peer: scoped,
+        session_id: 0,
+        context: Arc::new(crate::update::PeerSourceContext {
+            dampening_admission: None,
+            peer_interface: Some("eth0".into()),
+            accepted_dynamic_range: None,
+            route_server_client: false,
+        }),
+    });
+    let _scoped_rx = peer_up(&mut manager, scoped, ipv4_sendable(), None, 0, 64);
+    let _numbered_rx = peer_up(&mut manager, numbered, ipv4_sendable(), None, 0, 64);
+    let prefix = v4_prefix();
+    inject(&mut manager, local_route(prefix, 0));
+
+    let page = query(&mut manager, prefix, 0, None, 10).unwrap();
+    assert_eq!(row(&page, scoped).peer_interface.as_deref(), Some("eth0"));
+    assert_eq!(row(&page, numbered).peer_interface, None);
+}

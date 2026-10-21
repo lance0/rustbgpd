@@ -9133,6 +9133,86 @@ mod tests {
         // Load-bearing proof: swapping or collapsing either mapping makes this test red.
     }
 
+    /// An Add-Path source selector names a scoped neighbor: the explained
+    /// route's recorded scope must match it, and the response reports it.
+    /// Red proof: dropping the scope comparison answers the eth1 request.
+    #[tokio::test]
+    async fn explain_advertised_route_source_scope_must_match_the_route() {
+        let (tx, mut rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                let RibUpdate::ExplainAdvertisedRoute {
+                    peer,
+                    prefix,
+                    source,
+                    reply,
+                    ..
+                } = update
+                else {
+                    continue;
+                };
+                let _ = reply.send(Ok(ExplainAdvertisedRoute {
+                    decision: ExplainDecision::Advertise,
+                    peer,
+                    prefix,
+                    next_hop: None,
+                    path_id: 1,
+                    route_peer: source.map(|source| source.peer),
+                    route_path_id: source.map(|source| source.path_id),
+                    route_peer_interface: Some("eth0".into()),
+                    route_type: None,
+                    reasons: Vec::new(),
+                    modifications: rustbgpd_policy::RouteModifications::default(),
+                    orr_vantage: None,
+                    orr_candidates: Vec::new(),
+                    deny_validation: Vec::new(),
+                    gates: Vec::new(),
+                    update_group_id: None,
+                    already_advertised: false,
+                    rd: None,
+                    source,
+                }));
+            }
+        });
+        let svc = RibService::new(tx);
+        let request = |source: &str| {
+            Request::new(proto::ExplainAdvertisedRouteRequest {
+                peer_address: "192.0.2.1".to_string(),
+                prefix: "203.0.113.0".to_string(),
+                prefix_length: 24,
+                source: Some(proto::RouteSourceIdentity {
+                    peer_address: source.to_string(),
+                    path_id: 7,
+                    peer_interface: String::new(),
+                }),
+                ..Default::default()
+            })
+        };
+
+        let response = svc
+            .explain_advertised_route(request("fe80::1%eth0"))
+            .await
+            .unwrap()
+            .into_inner();
+        let source = response.source.unwrap();
+        assert_eq!(
+            (source.peer_address.as_str(), source.peer_interface.as_str()),
+            ("fe80::1", "eth0")
+        );
+        assert_eq!(response.route_peer_interface, "eth0");
+
+        let error = svc
+            .explain_advertised_route(request("fe80::1%eth1"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound, "{error}");
+        let error = svc
+            .explain_advertised_route(request("fe80::1"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+    }
+
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
