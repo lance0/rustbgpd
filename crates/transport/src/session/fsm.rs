@@ -355,8 +355,12 @@ impl PeerSession {
     /// connection started) leaves the session alone. The session is not
     /// stop-requested, so the ordinary reconnect path brings it back.
     pub(super) async fn handle_interface_down(&mut self, event: &crate::link::LinkDownEvent) {
+        // Routes retained from a lost connection are judged on that
+        // connection alone, whether or not a replacement socket is already
+        // mid-handshake: closing a replacement before Established emits no
+        // `SessionDown`, so it would never release them.
+        self.purge_retained_on_interface_down(event).await;
         if self.read_half.is_none() {
-            self.purge_retained_on_interface_down(event).await;
             return;
         }
         let Some(connection) = self.connection else {
@@ -408,9 +412,10 @@ impl PeerSession {
         }
     }
 
-    /// The TCP connection failed first and its routes are held under GR/LLGR:
-    /// a confirmed interface-down for that connection purges them now rather
-    /// than at retention expiry.
+    /// An earlier TCP connection failed first and its routes are held under
+    /// GR/LLGR: a confirmed interface-down for that connection purges them now
+    /// rather than at retention expiry, independently of any replacement
+    /// connection.
     async fn purge_retained_on_interface_down(&mut self, event: &crate::link::LinkDownEvent) {
         let Some(retained) = self.gr_retained_connection else {
             return;

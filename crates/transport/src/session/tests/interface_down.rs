@@ -304,3 +304,36 @@ async fn interface_down_discards_a_blocked_writer_backlog() {
         "the queued backlog must not reach the peer ({received} bytes did)"
     );
 }
+
+/// Failover during reconnect: the replacement is mid-handshake (`OpenSent`)
+/// when the confirmed interface-down arrives. The routes retained from the
+/// lost connection are purged, and the replacement on the same link closes.
+#[tokio::test]
+async fn interface_down_during_reconnect_purges_retained_routes() {
+    let (mut session, _server, mut rib_rx) = established_gr_session().await;
+    session.handle_tcp_disconnect();
+    session.drive_fsm(Event::TcpConnectionFails).await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::PeerGracefulRestart { .. })
+    ));
+    let (client, _replacement_server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    assert_eq!(session.fsm.state(), SessionState::OpenSent);
+
+    deliver(
+        &mut session,
+        loopback_event(LinkDownCause::CarrierLost, "127.0.0.1"),
+    )
+    .await;
+    match rib_rx.try_recv() {
+        Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.peer_ip),
+        _ => panic!("the retained routes must be purged while a replacement handshakes"),
+    }
+    assert!(session.gr_retained_connection.is_none());
+    assert!(
+        session.read_half.is_none(),
+        "the replacement on the same link closes too"
+    );
+}
