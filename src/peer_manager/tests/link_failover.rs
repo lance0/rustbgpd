@@ -46,7 +46,7 @@ async fn link_change_reaches_only_eligible_sessions() {
     let (handle, mut unlearned_rx) = recording_handle();
     insert_test_managed_peer_with_asn(&mut mgr, unlearned, 0, handle, false);
 
-    mgr.handle_links_changed().await;
+    mgr.handle_links_changed();
 
     assert!(got_check(&mut ebgp_rx), "eBGP peer is asked to check");
     assert!(!got_check(&mut ibgp_rx), "iBGP is untouched");
@@ -70,7 +70,7 @@ async fn link_change_also_reaches_a_pending_inbound_collision_candidate() {
         handle: candidate,
         session_id: 99,
     });
-    mgr.handle_links_changed().await;
+    mgr.handle_links_changed();
     assert!(got_check(&mut primary_rx));
     assert!(got_check(&mut candidate_rx));
 }
@@ -87,7 +87,7 @@ async fn hot_applied_opt_out_takes_effect_on_the_next_change() {
     config.fast_external_failover = false;
     mgr.hot_update_peer(config).await.expect("hot update");
     while rx.try_recv().is_ok() {}
-    mgr.handle_links_changed().await;
+    mgr.handle_links_changed();
     assert!(!got_check(&mut rx));
 }
 
@@ -99,11 +99,11 @@ async fn a_full_mailbox_keeps_one_flag_and_the_retry_delivers() {
     let mut mgr = test_peer_manager();
     let (handle, mut rx) = full_handle();
     insert_test_managed_peer_with_asn(&mut mgr, "10.0.0.2".parse().unwrap(), 65002, handle, false);
-    mgr.handle_links_changed().await;
+    mgr.handle_links_changed();
     let armed = mgr.link_check.retry_at.expect("retry armed");
     for _ in 0..10 {
         tokio::time::advance(Duration::from_millis(50)).await;
-        mgr.handle_links_changed().await;
+        mgr.handle_links_changed();
         assert_eq!(
             mgr.link_check.retry_at,
             Some(armed),
@@ -131,7 +131,7 @@ async fn pending_state_is_one_entry_per_session_under_flapping() {
         held.push(rx);
     }
     for _ in 0..1000 {
-        mgr.handle_links_changed().await;
+        mgr.handle_links_changed();
     }
     assert_eq!(mgr.link_check.pending.len(), 5);
 }
@@ -167,7 +167,7 @@ async fn a_pending_check_is_dropped_after_a_hot_applied_opt_out() {
         handle: candidate,
         session_id: 99,
     });
-    mgr.handle_links_changed().await;
+    mgr.handle_links_changed();
     assert_eq!(mgr.link_check.pending.len(), 2);
 
     let mut config = make_config(peer, 65002);

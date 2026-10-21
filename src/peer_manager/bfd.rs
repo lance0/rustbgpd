@@ -720,6 +720,8 @@ impl PeerManager {
             return;
         };
         if coupling.reloading {
+            // A generation owns BFD membership now; look again afterwards.
+            self.schedule_bfd_scope_retry();
             return;
         }
         let updates: Vec<(IpAddr, u32)> = coupling
@@ -738,11 +740,12 @@ impl PeerManager {
                 (current != scope).then_some((params.peer, current))
             })
             .collect();
-        if updates.is_empty() {
+        if updates.is_empty() && self.link_check.bfd_unsettled.is_empty() {
             return;
         }
         let coupling = self.bfd_coupling.as_mut().expect("checked above");
         let mut configured = coupling.configured.clone();
+        let mut moving = std::mem::take(&mut self.link_check.bfd_unsettled);
         for (peer, ifindex) in updates {
             let Some(params) = configured.get_mut(&peer) else {
                 continue;
@@ -762,6 +765,14 @@ impl PeerManager {
             params.destination = destination;
             params.revision = coupling.next_revision;
             coupling.next_revision = coupling.next_revision.saturating_add(1);
+            // An undelivered stop for this peer's BGP session belongs to the
+            // replacement too, whether or not the actor acknowledges it.
+            if let Some(retry) = coupling.retries.get_mut(&peer)
+                && !retry.start
+            {
+                retry.revision = Some(params.revision);
+            }
+            moving.insert(peer);
         }
         coupling.prior_held.clone_from(&coupling.held_down);
         coupling
@@ -770,9 +781,43 @@ impl PeerManager {
         coupling.pending = Some(configured);
         coupling.reloading = true;
         coupling.rollback_lookup = false;
+        let strict: Vec<IpAddr> = moving
+            .iter()
+            .copied()
+            .filter(|peer| {
+                coupling
+                    .pending
+                    .as_ref()
+                    .and_then(|pending| pending.get(peer))
+                    .is_some_and(|params| params.strict)
+            })
+            .collect();
         if let Err(error) = self.commit_bfd_reload(None).await {
-            warn!(%error, "BFD link-local scope refresh was not acknowledged by the BFD actor");
+            // Fail closed, as an uncertain reload does: the replacement is not
+            // confirmed, so a strict peer's BGP admission is fenced until a
+            // later attempt settles it.
+            warn!(
+                %error,
+                "BFD link-local scope move was not acknowledged; strict peers are held and the \
+                 move will be retried"
+            );
+            if let Some(coupling) = self.bfd_coupling.as_mut() {
+                coupling.held_down.extend(strict.iter().copied());
+            }
+            for peer in strict {
+                if let Err(error) = self.hold_bgp_for_bfd(peer).await {
+                    warn!(%peer, %error, "failed to stop strict BGP peer after an unacknowledged BFD move");
+                }
+            }
+            self.link_check.bfd_unsettled = moving;
+            self.schedule_bfd_scope_retry();
         }
+    }
+
+    fn schedule_bfd_scope_retry(&mut self) {
+        self.link_check.bfd_retry_at.get_or_insert_with(|| {
+            tokio::time::Instant::now() + super::link_failover::BFD_SCOPE_RETRY
+        });
     }
 
     /// Take the BFD state-change receiver into a `run`-local (so the `select!`

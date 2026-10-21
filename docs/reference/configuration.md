@@ -1148,7 +1148,9 @@ match resolves `interface` to its current index, from the link monitor's
 snapshot when it has a complete one and from the kernel otherwise. An
 interface that is deleted and recreated under the same name is therefore
 dialed and accepted at its new index without a reload, and a configured BFD
-session moves to the new index when the link monitor sees the change. While no
+session moves to the new index when the link monitor sees the change. Until
+the BFD runtime confirms that move, a strict-BFD neighbor is held, and the move
+is retried. While no
 interface has that name, connection attempts fail as unreachable and are
 retried on the normal timer, and inbound connections for the neighbor are not
 matched.

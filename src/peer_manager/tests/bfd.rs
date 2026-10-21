@@ -1872,7 +1872,8 @@ async fn link_local_bfd_follows_a_recreated_interface() {
             link_local_bfd_mgr(interface, false, fake_bfd_peer_handle(counters));
         let actor = answer_reload(reload_rx, rustbgpd_bfd::SessionState::Up);
 
-        mgr.handle_links_changed().await;
+        mgr.handle_links_changed();
+        mgr.run_due_bfd_scope_refresh().await;
 
         let session = &mgr.bfd_coupling.as_ref().unwrap().configured[&peer];
         if moves {
@@ -1908,7 +1909,8 @@ async fn recreated_interface_holds_an_unheld_strict_peer_until_bfd_is_up() {
     assert!(!mgr.bfd_withholding(&peer), "starts unheld");
     let actor = answer_reload(reload_rx, rustbgpd_bfd::SessionState::Down);
 
-    mgr.handle_links_changed().await;
+    mgr.handle_links_changed();
+    mgr.run_due_bfd_scope_refresh().await;
     tokio::time::timeout(Duration::from_secs(2), actor)
         .await
         .expect("the replacement goes through the acknowledged reload path")
@@ -1953,7 +1955,8 @@ async fn recreated_interface_keeps_a_pending_stop_retry() {
     );
     let actor = answer_reload(reload_rx, rustbgpd_bfd::SessionState::Down);
 
-    mgr.handle_links_changed().await;
+    mgr.handle_links_changed();
+    mgr.run_due_bfd_scope_refresh().await;
     tokio::time::timeout(Duration::from_secs(2), actor)
         .await
         .expect("the replacement goes through the acknowledged reload path")
@@ -1963,4 +1966,122 @@ async fn recreated_interface_keeps_a_pending_stop_retry() {
     mgr.retry_bfd_commands(None);
     assert!(matches!(receiver.try_recv(), Ok(PeerCommand::BfdDown)));
     assert!(mgr.bfd_withholding(&peer));
+}
+
+/// A BFD actor that never acknowledges does not delay fast external
+/// failover: the link change dispatches checks at once, and a full mailbox's
+/// retry is still delivered while the BFD scope move waits.
+#[tokio::test(start_paused = true)]
+async fn link_checks_do_not_wait_for_a_bfd_scope_move() {
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _desired_rx, mut reload_rx) =
+        link_local_bfd_mgr("eth1", false, fake_bfd_peer_handle(counters));
+    let (ready_tx, mut ready_rx) = mpsc::channel(8);
+    mgr_insert_peer(&mut mgr, "10.0.1.2", ready_tx);
+    let (busy_tx, mut busy_rx) = mpsc::channel(1);
+    busy_tx.try_send(PeerCommand::Start).unwrap();
+    mgr_insert_peer(&mut mgr, "10.0.1.3", busy_tx);
+
+    mgr.handle_links_changed();
+    assert!(
+        matches!(ready_rx.try_recv(), Ok(PeerCommand::CheckLinks)),
+        "checks go out before any BFD work"
+    );
+    let refresh = tokio::spawn(async move {
+        mgr.run_due_bfd_scope_refresh().await;
+        mgr
+    });
+    let withheld = reload_rx.recv().await.expect("the move asks the actor");
+    assert!(matches!(busy_rx.try_recv(), Ok(PeerCommand::Start)));
+    let retried = tokio::time::timeout(Duration::from_secs(1), busy_rx.recv())
+        .await
+        .expect("the full-mailbox retry is delivered while BFD waits");
+    assert!(matches!(retried, Some(PeerCommand::CheckLinks)));
+    assert!(
+        !refresh.is_finished(),
+        "the BFD acknowledgement is still withheld"
+    );
+    drop(withheld);
+    refresh.await.unwrap();
+}
+
+fn mgr_insert_peer(mgr: &mut PeerManager, address: &str, commands: mpsc::Sender<PeerCommand>) {
+    let handle = PeerHandle::from_parts(commands, tokio::spawn(std::future::pending()));
+    insert_test_managed_peer_with_asn(mgr, address.parse().unwrap(), 65002, handle, false);
+}
+
+/// An unacknowledged move (lost acknowledgement, or the actor gone) fails
+/// closed: the strict peer is held and stopped, the move stays marked, and
+/// the retry settles it once the actor answers.
+#[tokio::test]
+async fn an_unacknowledged_bfd_scope_move_fences_strict_and_retries() {
+    let peer: IpAddr = "fe80::2".parse().unwrap();
+    for send_fails in [false, true] {
+        let counters = Arc::new(BfdCouplingCounters::default());
+        let (mut mgr, _desired_rx, mut reload_rx) =
+            link_local_bfd_mgr("eth1", true, fake_bfd_peer_handle(counters.clone()));
+        if send_fails {
+            reload_rx.close();
+        } else {
+            tokio::spawn(async move {
+                // Take the command and drop its reply: a lost acknowledgement.
+                drop(reload_rx.recv().await);
+                reload_rx
+            });
+        }
+        mgr.handle_links_changed();
+        mgr.run_due_bfd_scope_refresh().await;
+
+        assert!(
+            mgr.bfd_withholding(&peer),
+            "send_fails={send_fails}: fenced"
+        );
+        tokio::time::timeout(Duration::from_secs(2), wait_counter(&counters.bfd_down, 1))
+            .await
+            .expect("the strict peer's BGP session is stopped");
+        assert!(mgr.link_check.bfd_unsettled.contains(&peer));
+        assert!(mgr.link_check.bfd_retry_at.is_some(), "a retry is armed");
+
+        // The retry re-attempts the move even though the index no longer
+        // differs from what is stored; an Up acknowledgement settles it.
+        let (reload_tx, reload_rx) = mpsc::channel(1);
+        mgr = mgr.with_bfd_reload(reload_tx);
+        let actor = answer_reload(reload_rx, rustbgpd_bfd::SessionState::Up);
+        mgr.bfd_scope_retry_due();
+        mgr.run_due_bfd_scope_refresh().await;
+        tokio::time::timeout(Duration::from_secs(2), actor)
+            .await
+            .expect("the retry goes through the acknowledged reload path")
+            .unwrap();
+        assert!(mgr.link_check.bfd_unsettled.is_empty());
+        assert!(
+            !mgr.bfd_withholding(&peer),
+            "the Up acknowledgement releases it"
+        );
+    }
+}
+
+/// A pending stop survives an unacknowledged move too: it is re-keyed to the
+/// replacement revision when the move is staged, so the retry still delivers.
+#[tokio::test]
+async fn a_pending_stop_survives_an_unacknowledged_bfd_scope_move() {
+    let peer: IpAddr = "fe80::2".parse().unwrap();
+    let (commands, mut receiver) = mpsc::channel(1);
+    commands.try_send(PeerCommand::Start).unwrap();
+    let (mut mgr, _desired_rx, mut reload_rx) = link_local_bfd_mgr(
+        "eth1",
+        false,
+        PeerHandle::from_parts(commands, tokio::spawn(std::future::pending())),
+    );
+    let mut genuine_down = down(peer);
+    genuine_down.revision = 3;
+    mgr.handle_bfd_state_change(genuine_down).await;
+    reload_rx.close();
+
+    mgr.handle_links_changed();
+    mgr.run_due_bfd_scope_refresh().await;
+
+    assert!(matches!(receiver.recv().await, Some(PeerCommand::Start)));
+    mgr.retry_bfd_commands(None);
+    assert!(matches!(receiver.try_recv(), Ok(PeerCommand::BfdDown)));
 }
