@@ -136,7 +136,7 @@ Injection: sustained `InjectionService` AddPath/DeletePath churn
 
 | Gate | Precommitted bound | Evidence | Refreshes under scenario via |
 |------|--------------------|----------|------------------------------|
-| Intern-table slope | < 1.0 entries/h | `bgp_rib_attr_intern_global_size` → CSV `intern_size` | Every injected path interns an attribute set; deletes release. |
+| Intern-table slope (post-warmup) | < 1.0 entries/h | `bgp_rib_attr_intern_global_size` → CSV `intern_size` | Every injected path interns an attribute set; deletes release. |
 | RSS slope (post-warmup) | < 1.0 MB/h | VmRSS → CSV `rss_mb` | Continuous add/delete allocation churn. |
 | Peak RSS | < 512 MB | CSV `rss_mb` max | Same. |
 | Churn cycles completed | ≥ 0.5 × ((duration − warmup) ÷ `CHURN_INTERVAL_SEC`) | CSV `churn_cycles` | Analyzer-enforced window floor (at least one). 0.5× of nominal because each batch is 2 × `CHURN_BATCH` sequential `docker exec` RPCs whose wall time rides on top of the 5 s interval; the receipt must state the achieved cadence. At defaults a 72 h run must show ≥ 25 908 cycles. |
@@ -144,6 +144,22 @@ Injection: sustained `InjectionService` AddPath/DeletePath churn
 | Session-flap budget | flap delta == 0 | CSV `flap_count` / `uptime_seconds` (as scenario 2) | Sampled every interval. |
 | Session established at end | Final CSV `bgp_established` == 1 | CSV `bgp_established` | Every sample. |
 | Injection RPC failures | 0 (fail-closed) | harness exit path + `churn.log` | Every `rbgp rib` call is checked; a failed RPC aborts the run. |
+
+The runner samples from t = 0, right after prefill, and starts churn at
+`warmup_sec`. Both slope fits use only samples with `elapsed_sec ≥ warmup_sec`;
+peak RSS still covers every sample. Fewer than two distinct post-warmup sample
+times is insufficient evidence and an input error (exit 2), not a fail. A
+falling post-warmup RSS passes the slope gate.
+
+To re-analyze an archived run with a newer analyzer, write a separate verdict
+and keep the original `verdict.json`, which belongs to the analyzer revision in
+the run's `run.json` `git_head`:
+
+```sh
+python3 tests/soak/analyze-soak-inject-churn.py RUN_DIR --output RUN_DIR/verdict-reanalysis.json
+```
+
+Label the receipt with the analyzer commit used for the re-analysis.
 
 **Lease mode** (`LEASE_MODE=1`, off by default) adds ADR-0141 owner leases
 beside the unowned churn: `LEASE_OWNERS` (default 4) controllers each hold
