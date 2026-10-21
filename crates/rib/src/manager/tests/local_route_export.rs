@@ -1100,3 +1100,52 @@ fn managed_peer_set_change_mid_walk_invalidates_the_walk() {
     .unwrap();
     assert_eq!(peers_of(&rest), vec![v4(3)]);
 }
+
+/// A page selects destinations with a bounded heap: it never holds more than
+/// `page_size + 1` of them, however many peers are registered or named, and
+/// the walk still lists every destination once, in order, across pages and
+/// keys. Red proof: collecting and sorting every destination per page fails
+/// the bound.
+#[test]
+fn page_selection_holds_at_most_page_size_plus_one_destinations() {
+    use crate::manager::queries::EXPORT_SELECTION_HIGH_WATER;
+
+    let (mut manager, _tx) = manager();
+    let _receivers: Vec<_> = (1..=40)
+        .map(|octet| peer_up(&mut manager, v4(octet), ipv4_sendable(), None, 0, 64))
+        .collect();
+    inject(&mut manager, local_route(prefix_at(1), 0));
+    inject(&mut manager, local_route(prefix_at(3), 0));
+    let named = Some(numbered(&(1..=80).map(v4).collect::<Vec<_>>()));
+    let keys = batch_keys();
+    let expected: Vec<IpAddr> = (1..=80).map(v4).collect();
+
+    for page_size in [1, 2, 7] {
+        let mut listed_rows: Vec<(usize, IpAddr)> = Vec::new();
+        let mut resume = None;
+        loop {
+            EXPORT_SELECTION_HIGH_WATER.set(0);
+            let page = query_keys(&mut manager, &keys, named.clone(), resume, page_size).unwrap();
+            assert!(
+                EXPORT_SELECTION_HIGH_WATER.get() <= page_size + 1,
+                "page_size {page_size} held {}",
+                EXPORT_SELECTION_HIGH_WATER.get()
+            );
+            for route in &page.routes {
+                listed_rows.extend(route.peers.iter().map(|row| (route.key, row.peer)));
+            }
+            resume = resume_of(&page);
+            if resume.is_none() {
+                break;
+            }
+        }
+        for key in [0, 2] {
+            let peers: Vec<IpAddr> = listed_rows
+                .iter()
+                .filter(|(listed, _)| *listed == key)
+                .map(|(_, peer)| *peer)
+                .collect();
+            assert_eq!(peers, expected, "page_size {page_size}, key {key}");
+        }
+    }
+}

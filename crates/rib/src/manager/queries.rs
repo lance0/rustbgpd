@@ -215,19 +215,19 @@ pub(super) const BMP_DUMP_CHUNK_SIZE: usize = 256;
 /// capped at `n` — the mutation-robust cursor step of the resumable
 /// BMP Loc-RIB dump. Returns fewer than `n` keys iff the walk past
 /// `after` is exhausted.
-fn smallest_keys_after<K: Ord + Copy>(
+fn smallest_keys_after<K: Ord>(
     keys: impl Iterator<Item = K>,
-    after: Option<K>,
+    after: Option<&K>,
     n: usize,
 ) -> Vec<K> {
     let mut heap = std::collections::BinaryHeap::with_capacity(n + 1);
     for key in keys {
-        if after.is_some_and(|a| key <= a) {
+        if after.is_some_and(|a| key <= *a) {
             continue;
         }
         if heap.len() < n {
             heap.push(key);
-        } else if heap.peek().is_some_and(|&top| key < top) {
+        } else if heap.peek().is_some_and(|top| key < *top) {
             heap.pop();
             heap.push(key);
         }
@@ -486,6 +486,9 @@ thread_local! {
     /// row evaluation, to land a dataset refresh in that window.
     pub(in crate::manager) static BEFORE_EXPORT_ROWS: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::Cell::new(None) };
+    /// Most destinations one disposition page's selection has held.
+    pub(in crate::manager) static EXPORT_SELECTION_HIGH_WATER: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 impl RibManager {
@@ -564,7 +567,7 @@ impl RibManager {
                 };
                 let keys = smallest_keys_after(
                     self.loc_rib.iter().map(|r| r.prefix),
-                    after,
+                    after.as_ref(),
                     BMP_DUMP_CHUNK_SIZE,
                 );
                 for key in &keys {
@@ -601,7 +604,7 @@ impl RibManager {
             Some(Cursor::Vpn(after)) => {
                 let keys = smallest_keys_after(
                     self.loc_rib.iter_vpn().map(|r| r.nlri.key()),
-                    after,
+                    after.as_ref(),
                     BMP_DUMP_CHUNK_SIZE,
                 );
                 for key in &keys {
@@ -1952,28 +1955,7 @@ impl RibManager {
         resume: Option<(RouteExportCursor, RouteExportVersion)>,
         page_size: usize,
     ) -> Result<RouteExportPage, RouteExportPageError> {
-        let local = self.ribs.get(&LOCAL_PEER);
-        let routes: Vec<Option<crate::route::Route>> = keys
-            .iter()
-            .map(|&(prefix, path_id)| {
-                local.and_then(|rib| {
-                    rib.iter_prefix(&prefix)
-                        .find(|route| route.path_id == path_id)
-                        .cloned()
-                })
-            })
-            .collect();
-        let version = RouteExportVersion {
-            roster: self.outbound_roster_generation,
-            route: local_routes_fingerprint(&routes),
-            policy: self.export_policy_version(),
-            managed: managed.as_ref().map_or(0, |peers| {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                peers.hash(&mut hasher);
-                hasher.finish() | 1
-            }),
-        };
+        let (routes, version) = self.local_route_export_version(keys, managed.as_deref());
         let (cursor, expected) = resume.unzip();
         if expected.is_some_and(|expected| expected != version)
             || cursor
@@ -1982,12 +1964,22 @@ impl RibManager {
         {
             return Err(RouteExportPageError::Invalidated);
         }
-        let destinations = self.export_destinations(managed);
-        let RouteExportCursor {
-            key: start,
-            mut after,
-        } = cursor.unwrap_or_default();
+        let managed = managed.unwrap_or_default();
+        let RouteExportCursor { key: start, after } = cursor.unwrap_or_default();
         let mut budget = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
+        // At most two bounded selections per page, each keeping only the
+        // `budget + 1` smallest destinations: one after the cursor for the
+        // resumed key, one from the start for every later key. A later key
+        // never needs more than the budget left, so the second selection's
+        // prefix serves them all.
+        let mut resumed = after.map(|(peer, scope)| {
+            smallest_keys_after(
+                self.export_candidates(&managed),
+                Some(&(peer, scope, true)),
+                budget + 1,
+            )
+        });
+        let mut from_start: Option<Vec<ExportCandidate>> = None;
         #[cfg(test)]
         if let Some(hook) = BEFORE_EXPORT_ROWS.take() {
             hook();
@@ -2012,11 +2004,20 @@ impl RibManager {
                 listed.push(entry);
                 continue;
             };
-            let from = after.take().map_or(0, |after| {
-                destinations
-                    .partition_point(|(peer, scope, _)| (*peer, scope) <= (after.0, &after.1))
-            });
-            let remaining = &destinations[from..];
+            // The cursor applies only to the key it was issued in, which is
+            // the first one this page visits.
+            let after_cursor;
+            let remaining: &[ExportCandidate] =
+                if let Some(selected) = resumed.take().filter(|_| index == start) {
+                    after_cursor = selected;
+                    &after_cursor
+                } else {
+                    from_start.get_or_insert_with(|| {
+                        smallest_keys_after(self.export_candidates(&managed), None, budget + 1)
+                    })
+                };
+            #[cfg(test)]
+            EXPORT_SELECTION_HIGH_WATER.set(EXPORT_SELECTION_HIGH_WATER.get().max(remaining.len()));
             let take = remaining.len().min(budget);
             budget -= take.max(1);
             entry.peers = remaining[..take]
@@ -2054,32 +2055,58 @@ impl RibManager {
         })
     }
 
-    /// Every destination of an export walk in order, with whether it is
+    /// The local routes of `keys`, in order, and the walk version a page
+    /// reads under them and the named `managed` peers.
+    fn local_route_export_version(
+        &self,
+        keys: &[(Prefix, u32)],
+        managed: Option<&[ExportDestination]>,
+    ) -> (Vec<Option<crate::route::Route>>, RouteExportVersion) {
+        let local = self.ribs.get(&LOCAL_PEER);
+        let routes: Vec<Option<crate::route::Route>> = keys
+            .iter()
+            .map(|&(prefix, path_id)| {
+                local.and_then(|rib| {
+                    rib.iter_prefix(&prefix)
+                        .find(|route| route.path_id == path_id)
+                        .cloned()
+                })
+            })
+            .collect();
+        let version = RouteExportVersion {
+            roster: self.outbound_roster_generation,
+            route: local_routes_fingerprint(&routes),
+            policy: self.export_policy_version(),
+            managed: managed.map_or(0, |peers| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                peers.hash(&mut hasher);
+                hasher.finish() | 1
+            }),
+        };
+        (routes, version)
+    }
+
+    /// Every destination of an export walk, unordered, with whether it is
     /// registered for outbound updates: the registered sessions, plus each
     /// `managed` peer that no registered session matches by address and
-    /// scope.
-    fn export_destinations(
-        &self,
-        managed: Option<Vec<ExportDestination>>,
-    ) -> Vec<(IpAddr, Option<Arc<str>>, bool)> {
-        let mut destinations: Vec<_> = self
+    /// scope. Nothing is collected; the caller keeps a bounded selection.
+    fn export_candidates<'a>(
+        &'a self,
+        managed: &'a [ExportDestination],
+    ) -> impl Iterator<Item = ExportCandidate> + 'a {
+        let registered = self
             .peer_sendable_families
             .keys()
-            .map(|&peer| (peer, self.session_peer_scope(peer).peer_interface(), true))
-            .collect();
-        let registered: HashSet<ExportDestination> = destinations
+            .map(|&peer| (peer, self.session_peer_scope(peer).peer_interface(), true));
+        let unregistered = managed
             .iter()
-            .map(|(peer, scope, _)| (*peer, scope.clone()))
-            .collect();
-        destinations.extend(
-            managed
-                .into_iter()
-                .flatten()
-                .filter(|destination| !registered.contains(destination))
-                .map(|(peer, scope)| (peer, scope, false)),
-        );
-        destinations.sort_unstable_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-        destinations
+            .filter(|(peer, scope)| {
+                !(self.peer_sendable_families.contains_key(peer)
+                    && self.session_peer_scope(*peer).peer_interface() == *scope)
+            })
+            .map(|(peer, scope)| (*peer, scope.clone(), false));
+        registered.chain(unregistered)
     }
 
     /// [`RouteExportVersion::policy`]: the installed export chains' change
@@ -3996,6 +4023,12 @@ impl RibManager {
         })
     }
 }
+
+/// An export walk destination with whether it is registered for outbound
+/// updates. Each destination is listed once, so the order is the
+/// destination order; a cursor compares with the flag set, which skips its
+/// destination either way.
+type ExportCandidate = (IpAddr, Option<Arc<str>>, bool);
 
 /// Fingerprint of the local route state that export reads for every
 /// queried key, absent routes included, for [`RouteExportVersion::route`].
