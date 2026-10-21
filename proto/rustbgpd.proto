@@ -3655,10 +3655,11 @@ service InjectionService {
   // path_id, never counts as this route's export. Rows cover Established
   // peers only: each peer registered for outbound updates gets exactly one
   // disposition, in peer-address order and paged by page_size and
-  // page_token. A configured peer without a session is absent from the list,
-  // and absent does not mean withheld: cross-check NeighborService
-  // ListNeighbors to find peers that receive nothing because they are not
-  // Established. COMMITTED means the
+  // page_token. A configured peer without a session is absent from the list
+  // unless include_configured is set, and absent does not mean withheld.
+  // With include_configured, every managed peer without an Established
+  // session also gets one NOT_ESTABLISHED row, in the same order. COMMITTED
+  // means the
   // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
   // not received, accepted or installed by the peer, which BGP does not
   // report. A key with no local route returns NOT_FOUND. A resumed page
@@ -3670,9 +3671,31 @@ service InjectionService {
   // the page is being evaluated. Removing the route and restoring identical
   // content between pages is indistinguishable and the walk stays valid. Other inputs, such as outbound prefix limits,
   // conditional advertisement or other routes for the prefix, are read live
-  // on each page and are not checked. A token for another key or from another daemon process
+  // on each page and are not checked. With include_configured, a resumed
+  // page also returns ABORTED when the managed peer set changed, and a
+  // managed peer becoming Established counts as a peer joining. A token for
+  // another key, another include_configured or from another daemon process
   // returns INVALID_ARGUMENT.
   rpc ListPathExportDispositions(ListPathExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
+  // ListPathExportDispositions over a list of local route keys in one paged
+  // walk, such as every key ListLeasedKeys lists for an owner. A walk names
+  // 1 to 1000 keys; an empty key list, more than 1000 keys or a key named
+  // twice returns INVALID_ARGUMENT. The 1000 bounds the keys per walk, not
+  // what one response holds: a response holds at most page_size entries,
+  // each peer row is one entry, and a key listed with no rows is one, so one
+  // key's rows can span several pages. A key whose rows continue on the
+  // next page is listed there again with the remaining peers. Keys are
+  // listed in request order, each with its peers as
+  // ListPathExportDispositions lists them. A key with no local route on the
+  // page that lists it is listed with found false and no rows; the call
+  // itself does not return NOT_FOUND. A resumed page returns ABORTED on the
+  // changes ListPathExportDispositions checks, applied to every key: the
+  // content of any key's route, or whether it has a route, differs from the
+  // first page. The check compares each page's read, not the history between
+  // pages, so a route added and removed again between pages does not abort
+  // the walk. A token for another key list, another include_configured or
+  // from another daemon process returns INVALID_ARGUMENT.
+  rpc BatchListPathExportDispositions(BatchListPathExportDispositionsRequest) returns (BatchListPathExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request
   // is idempotent, and a request with the same key but different actions or
@@ -3919,6 +3942,10 @@ message ListPathExportDispositionsRequest {
   uint32 page_size = 4;
   // next_page_token of the previous page; empty for the first page. Opaque.
   string page_token = 5;
+  // Also list every managed peer (configured, or dynamic while the daemon
+  // tracks it) without an Established session, as NOT_ESTABLISHED. Keep it
+  // the same on every page of a walk.
+  bool include_configured = 6;
 }
 
 enum PathExportDisposition {
@@ -3930,6 +3957,10 @@ enum PathExportDisposition {
   PATH_EXPORT_DISPOSITION_WITHHELD = 2;
   // Export to this peer has not settled; reason names what is outstanding.
   PATH_EXPORT_DISPOSITION_PENDING = 3;
+  // The peer is managed but has no Established session, so nothing is
+  // exported to it; reason is not_established. Returned only when the
+  // request sets include_configured.
+  PATH_EXPORT_DISPOSITION_NOT_ESTABLISHED = 4;
 }
 
 message PathExportDispositionEntry {
@@ -3944,7 +3975,8 @@ message PathExportDispositionEntry {
   // a colon and the exact-export reason, e.g.
   // exact_export_rejected:missing_ipv6_next_hop), export_rule (any other
   // export gate; explain_code names it). PENDING: selection_deferred,
-  // outbound_resync, orf_pending, not_yet_committed. New codes may be added.
+  // outbound_resync, orf_pending, not_yet_committed. NOT_ESTABLISHED:
+  // not_established. New codes may be added.
   string reason = 3;
   // Stop code of the export explain ladder behind the reason, in the
   // ExplainAdvertisedRoute gate vocabulary; empty when none applies.
@@ -3972,6 +4004,40 @@ message PathExportDispositionEntry {
 message ListPathExportDispositionsResponse {
   repeated PathExportDispositionEntry peers = 1;
   // Empty when no peers remain.
+  string next_page_token = 2;
+}
+
+message BatchListPathExportDispositionsRequest {
+  // The local routes' AddPath keys, in walk order: 1 to 1000 keys per walk,
+  // none named twice.
+  repeated LeasedPathKey keys = 1;
+  // Entries per page: 0 selects 100, and larger values are capped at 1000.
+  // A peer row is one entry, and so is a key listed with no rows, so a page
+  // can end inside one key's rows.
+  uint32 page_size = 2;
+  // next_page_token of the previous page; empty for the first page. Opaque.
+  string page_token = 3;
+  // As ListPathExportDispositionsRequest.include_configured.
+  bool include_configured = 4;
+}
+
+// The export dispositions of one requested key on one page.
+message PathExportDispositions {
+  // The key as the request named it.
+  LeasedPathKey key = 1;
+  // Whether a local route had this key when this page read it. false lists
+  // no peers. A resumed walk also had no route for the key on its first
+  // page, but a route added and removed again between pages is not
+  // detected.
+  bool found = 2;
+  // One row per peer, as ListPathExportDispositions lists them; the key's
+  // remaining peers continue on the next page when it ends mid-key.
+  repeated PathExportDispositionEntry peers = 3;
+}
+
+message BatchListPathExportDispositionsResponse {
+  repeated PathExportDispositions routes = 1;
+  // Empty when no entries remain.
   string next_page_token = 2;
 }
 
