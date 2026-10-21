@@ -1943,10 +1943,11 @@ impl RibManager {
     /// So the page size bounds the explains and every page makes progress.
     ///
     /// A resumed walk is served only while every key's route content, the
-    /// outbound peer roster, the peers' export policy and the named managed
-    /// peers match its first page, so a route removed mid-walk is not
-    /// reported as never having existed and a peer that joins, leaves or
-    /// becomes Established is neither skipped nor counted twice. Any page,
+    /// outbound peer roster, the peers' export policy and other export
+    /// settings, and the named managed peers match its first page, so a
+    /// route removed mid-walk is not reported as never having existed and a
+    /// peer that joins, leaves or becomes Established is neither skipped nor
+    /// counted twice. Any page,
     /// including the first, is refused when the policy version moves while
     /// its rows are evaluated. Removing a route and restoring identical
     /// content between pages leaves the walk valid: every disposition is a
@@ -2105,8 +2106,9 @@ impl RibManager {
                 break;
             }
         }
-        // A dataset refresh is not a RIB message: it can land while the rows
-        // above evaluate, each pinning datasets on its own. Recheck so no page,
+        // A dataset refresh or an encoder profile change is not a RIB
+        // message: it can land while the rows above evaluate, each pinning
+        // datasets or an encoder snapshot on its own. Recheck so no page,
         // first or last, mixes generations or carries a version its rows
         // were not read under. Routes, roster and managed peers are fixed
         // for this call.
@@ -2189,22 +2191,35 @@ impl RibManager {
     }
 
     /// [`RouteExportVersion::policy`]: the installed export chains' change
-    /// version and the summed generations of every dataset the registered
-    /// peers' chains read. A dataset swap is visible to the next explain
-    /// before the RIB hears of it, so its generation is read directly; each
-    /// generation only grows, so any swap moves the sum.
+    /// version, the registered peers' export-settings generation, and the
+    /// summed generations of every dataset the registered peers' chains read
+    /// and of their sessions' exact export encoders. A dataset swap or a
+    /// session's encoder profile change is visible to the next explain
+    /// before the RIB hears of it, so those generations are read directly;
+    /// each only grows, so any change moves its sum.
     fn export_policy_version(&self) -> u64 {
         use std::hash::{Hash, Hasher};
-        let datasets = self
-            .peer_sendable_families
-            .keys()
+        let peers = self.peer_sendable_families.keys();
+        let datasets = peers
+            .clone()
             .filter_map(|&peer| self.export_chains.for_peer(peer))
             .flat_map(|chain| chain.compiled().referenced_datasets())
             .fold(0u64, |sum, slot| {
                 sum.wrapping_add(slot.handle.pin().generation)
             });
+        let encoders = peers
+            .filter_map(|peer| self.peer_export_encoders.get(peer))
+            .fold(0u64, |sum, encoder| {
+                sum.wrapping_add(encoder.snapshot().generation())
+            });
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (self.export_chains.version(), datasets).hash(&mut hasher);
+        (
+            self.export_chains.version(),
+            self.export_settings_generation,
+            datasets,
+            encoders,
+        )
+            .hash(&mut hasher);
         hasher.finish()
     }
 

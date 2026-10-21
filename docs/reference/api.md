@@ -3398,13 +3398,20 @@ when any of these changed since the walk's first page:
 - The export policy of an Established peer, such as a reload that replaces it
   without resetting the session, or the contents of a dataset that policy
   reads.
+- Another export setting of an Established peer that changes without a
+  session reset: its outbound prefix limits, a conditional advertisement
+  attached to it (installed, restored, or its applied state changing), its
+  peer group, its Add-Path send limits, a withheld family becoming
+  exportable, its ORF filter or initial ORF gate, or its session's outbound
+  encoding profile, such as a reload that changes `local_ipv6_nexthop`.
+  Rewriting a setting to the value it already had does not count.
 - With `include_configured`, the managed peer set: a neighbor was added or
   removed. A managed peer becoming Established counts as a peer joining the
   Established set, so its `NOT_ESTABLISHED` row is never stale or repeated.
 
 Any page, including the first, also returns `ABORTED` when a dataset that
-policy reads is refreshed while the page's rows are being evaluated, so no
-page mixes dataset contents.
+policy reads is refreshed, or a session's outbound encoding profile changes,
+while the page's rows are being evaluated, so no page mixes either.
 
 On `ABORTED`, discard the rows already collected and restart the walk with an
 empty `page_token`. A restarted walk for a removed route returns `NOT_FOUND`,
@@ -3413,14 +3420,16 @@ so `NOT_FOUND` on a first page always means no local route has the key.
 The route check compares content, not identity. Removing the route and
 restoring identical content between pages cannot be told apart from no change,
 and the walk stays valid, because every disposition is a function of that
-content. Changes to other local routes do not abort a walk.
+content. Changes to other local routes do not abort a walk, unless they
+change the applied state of a conditional advertisement attached to a
+listed peer.
 
 Other inputs are read live on each page and are not part of this check:
-outbound prefix limits, conditional advertisement, peer-group membership,
-Add-Path send limits, ORF filters, and routes from other sources that change
-which path a peer selects. A change to one of them between pages need not
-abort the walk, and a peer's row reflects them as of the page that listed
-it.
+routes from other sources that change which path a peer selects or fill its
+outbound prefix limit, and outbound delivery progress, such as a peer
+resynchronizing or a staged route reaching its Adj-RIB-Out. A change to one
+of them between pages need not abort the walk, and a peer's row reflects
+them as of the page that listed it.
 
 The `next_page_token` is opaque. It is bound to the route key,
 `include_configured` and the daemon process that issued it. A token for

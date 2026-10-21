@@ -560,6 +560,19 @@ fn walk_started() -> (
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
     RouteExportPage,
 ) {
+    walk_started_with(0, |_| {})
+}
+
+/// [`walk_started`] with the peers' Add-Path `send_max`, and `setup` run
+/// once they are registered, before the route is injected.
+fn walk_started_with(
+    add_path_send_max: u32,
+    setup: impl FnOnce(&mut RibManager),
+) -> (
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    RouteExportPage,
+) {
     let (mut manager, _tx) = manager();
     let receivers = [2, 3, 4]
         .into_iter()
@@ -569,11 +582,12 @@ fn walk_started() -> (
                 PeerId::from_addr(v4(octet)),
                 ipv4_sendable(),
                 None,
-                0,
+                add_path_send_max,
                 64,
             )
         })
         .collect();
+    setup(&mut manager);
     inject(&mut manager, local_route(v4_prefix(), 0));
     let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
     assert_eq!(peers_of(&first), vec![v4(2), v4(3)]);
@@ -1560,4 +1574,438 @@ fn flowspec_walk_pages_and_aborts_on_a_replaced_rule() {
         query_rule(&mut manager, &key, named, resume_of(&first), 2),
         Err(RouteExportPageError::Invalidated)
     );
+}
+
+// --- export settings a reload changes without resetting the session ---
+
+/// The second page of a [`walk_started`] walk is refused.
+fn assert_walk_invalidated(manager: &mut RibManager, first: &RouteExportPage) {
+    assert_eq!(
+        resume(manager, first),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+/// The second page of a [`walk_started`] walk is served under the first
+/// page's version and completes the walk.
+fn assert_walk_resumes(manager: &mut RibManager, first: &RouteExportPage) {
+    let rest = resume(manager, first).unwrap();
+    assert_eq!(peers_of(&rest), vec![v4(4)]);
+    assert!(rest.next.is_none());
+    assert_eq!(rest.version, first.version);
+}
+
+fn install_prefix_limits(manager: &mut RibManager, txn: u64, peer: PeerId, ipv4: u32) {
+    let config = crate::update::OutboundPrefixLimitConfig {
+        neighbors: [(
+            peer,
+            crate::update::OutboundPrefixLimitPair {
+                ipv4: std::num::NonZeroU32::new(ipv4),
+                ipv6: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        groups: HashMap::new(),
+    };
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::PrepareOutboundPrefixLimits { txn, config, reply });
+    rx.try_recv().unwrap().unwrap();
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::ApplyOutboundPrefixLimits {
+        txn,
+        activate: true,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+}
+
+fn set_peer_group(manager: &mut RibManager, peer: PeerId, group: &str) {
+    manager.handle_update(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 0,
+        peer_group: Some(group.to_string()),
+    });
+}
+
+const CONDITIONAL: &str = "backup";
+
+/// A conditional advertisement controlling the walked route, present while
+/// some route for `condition` passes `condition_policy`, with no debounce.
+fn conditional_set(
+    condition: Prefix,
+    condition_policy: Option<PolicyChain>,
+    attached: &[PeerId],
+) -> crate::ConditionalAdvertisementSet {
+    crate::ConditionalAdvertisementSet {
+        definitions: vec![crate::ConditionalAdvertisement {
+            name: Arc::from(CONDITIONAL),
+            advertise_policy: rpol_chain(
+                "policy ctl { term t { if route.prefix == 203.0.113.7/32 { accept } } term rest { reject } }",
+                "ctl",
+            ),
+            advertise_if: crate::ConditionalAdvertiseIf::Present,
+            condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(condition)],
+            condition_policy,
+            settle_time: std::time::Duration::ZERO,
+        }],
+        attachments: attached
+            .iter()
+            .map(|peer| (*peer, vec![Arc::from(CONDITIONAL)]))
+            .collect(),
+    }
+}
+
+fn install_conditional(
+    manager: &mut RibManager,
+    set: crate::ConditionalAdvertisementSet,
+) -> crate::ConditionalAdvertisementCapture {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::InstallConditionalAdvertisements {
+        set,
+        swapping_datasets: vec![],
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+fn other_prefix() -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32))
+}
+
+/// A reload that sets a listed peer's outbound prefix limit invalidates the
+/// walk. Red proof: not advancing the export-settings generation in
+/// `install_outbound_limit` fails this test.
+#[test]
+fn outbound_prefix_limit_changed_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started();
+    install_prefix_limits(&mut manager, 1, PeerId::from_addr(v4(2)), 10);
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// A reload that moves a listed peer into a peer group invalidates the walk.
+/// Red proof: not advancing the export-settings generation in
+/// `set_peer_group` fails this test.
+#[test]
+fn peer_group_changed_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started();
+    set_peer_group(&mut manager, PeerId::from_addr(v4(2)), "rs-clients");
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// A larger effective Add-Path send limit for a listed peer changes which
+/// paths it is sent, so it invalidates the walk. Red proof: not advancing
+/// the export-settings generation on an effective `PeerAddPathLimits`
+/// change fails this test.
+#[test]
+fn add_path_send_limit_changed_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started_with(1, |_| {});
+    manager.handle_update(RibUpdate::PeerAddPathLimits {
+        peer: PeerId::from_addr(v4(2)),
+        session_id: 0,
+        limits: vec![((Afi::Ipv4, Safi::Unicast), 2)],
+    });
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// Attaching a conditional advertisement to a listed peer gates its export,
+/// so the install invalidates the walk. Red proof: not advancing the
+/// export-settings generation in `settle_conditional_advertisement_change`
+/// fails this test.
+#[test]
+fn conditional_advertisement_installed_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started();
+    install_conditional(
+        &mut manager,
+        conditional_set(other_prefix(), None, &[PeerId::from_addr(v4(2))]),
+    );
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// Compensating an install restores the prior gate, which invalidates a
+/// walk begun under the installed one. The peer stays attached throughout,
+/// so it never changes update group. Red proof as for the install.
+#[test]
+fn conditional_advertisement_restored_mid_walk_invalidates_the_resumed_walk() {
+    let listed = PeerId::from_addr(v4(2));
+    let mut capture = None;
+    let (mut manager, _receivers, first) = walk_started_with(0, |manager| {
+        install_conditional(manager, conditional_set(other_prefix(), None, &[listed]));
+        capture = Some(install_conditional(
+            manager,
+            conditional_set(v4_prefix(), None, &[listed]),
+        ));
+    });
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::RestoreConditionalAdvertisements {
+        capture: capture.unwrap(),
+        reply,
+    });
+    rx.try_recv().unwrap();
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// Re-observing a conditional advertisement after its condition dataset
+/// is swapped flips the gate of the attached listed peer, which invalidates
+/// the walk even though no export chain reads that dataset. Red proof: not
+/// advancing the export-settings generation in
+/// `mark_conditional_advertisement_peers_dirty` fails this test.
+#[test]
+fn conditional_advertisement_reobserved_mid_walk_invalidates_the_resumed_walk() {
+    let (condition_policy, handle) = allowed_dataset_chain(
+        "policy p { term t { if route.prefix in allowed { accept } reject } }",
+        true,
+    );
+    let (mut manager, _receivers, first) = walk_started_with(0, |manager| {
+        install_conditional(
+            manager,
+            conditional_set(
+                v4_prefix(),
+                Some(condition_policy),
+                &[PeerId::from_addr(v4(2))],
+            ),
+        );
+    });
+    assert_eq!(
+        row(&first, PeerId::from_addr(v4(2))).disposition,
+        RouteExportDisposition::Committed
+    );
+    handle.refresh(allowed_dataset(false));
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReobserveConditionalAdvertisements {
+        datasets: vec!["allowed".to_string()],
+        changed: vec![],
+        reply,
+    });
+    rx.try_recv().unwrap();
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// A family the session withheld becoming sendable after a reload (for
+/// example one that supplies `local_ipv6_nexthop`) invalidates the walk.
+/// Red proof: not advancing the export-settings generation in
+/// `handle_peer_family_sendable` fails this test.
+#[test]
+fn family_becoming_sendable_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _tx) = manager();
+    let withheld = PeerId::from_addr(v4(2));
+    manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
+        peer: withheld,
+        session_id: 0,
+        families: vec![(
+            (Afi::Ipv6, Safi::Unicast),
+            crate::update::ExactExportErrorCode::MissingIpv6NextHop,
+        )],
+    });
+    // ORF keeps the peer out of update groups, so no regroup reinstalls
+    // its export chain and only the export-settings generation can move.
+    let _withheld_rx = orf_peer_up(&mut manager, 2, ipv4_sendable(), true);
+    let _receivers: Vec<_> = [3, 4]
+        .into_iter()
+        .map(|octet| {
+            peer_up(
+                &mut manager,
+                PeerId::from_addr(v4(octet)),
+                dual_stack_sendable(),
+                None,
+                0,
+                64,
+            )
+        })
+        .collect();
+    let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8::7".parse().unwrap(), 128));
+    inject(&mut manager, local_route(prefix, 0));
+    let first = query(&mut manager, prefix, 0, None, 2).unwrap();
+    assert_eq!(
+        row(&first, withheld).reason,
+        "family_suppressed:missing_ipv6_next_hop"
+    );
+
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer: withheld,
+        session_id: 0,
+        family: (Afi::Ipv6, Safi::Unicast),
+        add_path_send_limit: None,
+    });
+    assert_eq!(
+        query(&mut manager, prefix, 0, resume_of(&first), 2),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+/// Register peer `10.0.0.<octet>`, negotiating Address-Prefix ORF for
+/// IPv4 unicast when `orf`, which also keeps it out of update groups.
+fn orf_peer_up(
+    manager: &mut RibManager,
+    octet: u8,
+    sendable_families: Vec<(Afi, Safi)>,
+    orf: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (outbound_tx, outbound_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: PeerId::from_addr(v4(octet)),
+        session_id: 0,
+        peer_asn: 65_010,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families,
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: if orf { ipv4_sendable() } else { vec![] },
+        negotiated_llgr_families: vec![],
+    });
+    outbound_rx
+}
+
+/// [`walk_started`] where peer 10.0.0.2 negotiated Address-Prefix ORF for
+/// IPv4 unicast, so its export starts behind the RFC 5291 §6 gate.
+fn orf_walk_started(
+    setup: impl FnOnce(&mut RibManager),
+) -> (
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    RouteExportPage,
+) {
+    let (mut manager, _tx) = manager();
+    let receivers = [2, 3, 4]
+        .into_iter()
+        .map(|octet| orf_peer_up(&mut manager, octet, ipv4_sendable(), octet == 2))
+        .collect();
+    setup(&mut manager);
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
+    assert_eq!(peers_of(&first), vec![v4(2), v4(3)]);
+    (manager, receivers, first)
+}
+
+fn push_orf(manager: &mut RibManager, entries: Vec<AddressPrefixOrf>) {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::PeerOrfUpdate {
+        peer: PeerId::from_addr(v4(2)),
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Defer,
+        entries,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+}
+
+fn orf_entry(sequence: u32, match_: OrfMatch, prefix: Prefix) -> AddressPrefixOrf {
+    AddressPrefixOrf {
+        action: OrfAction::Add,
+        match_,
+        sequence,
+        min_len: 32,
+        max_len: 32,
+        prefix: Some(prefix),
+    }
+}
+
+/// The peer's ROUTE-REFRESH lifting the initial ORF gate changes its row
+/// from `orf_pending`, so it invalidates the walk. Red proof: not advancing
+/// the export-settings generation in `lift_orf_gate` fails this test.
+#[test]
+fn orf_gate_lifted_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = orf_walk_started(|_| {});
+    assert_eq!(row(&first, PeerId::from_addr(v4(2))).reason, "orf_pending");
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        peer: PeerId::from_addr(v4(2)),
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// A change to the peer's installed ORF filter invalidates the walk, while
+/// resending the installed entries does not. Red proof: not advancing the
+/// export-settings generation when `handle_peer_orf_update` changes the
+/// filter fails this test.
+#[test]
+fn orf_filter_changed_mid_walk_invalidates_the_resumed_walk() {
+    let permit = orf_entry(10, OrfMatch::Permit, v4_prefix());
+    let installed = permit;
+    let (mut manager, _receivers, first) =
+        orf_walk_started(move |manager| push_orf(manager, vec![installed]));
+    push_orf(&mut manager, vec![permit]);
+    assert_walk_resumes(&mut manager, &first);
+
+    push_orf(
+        &mut manager,
+        vec![orf_entry(20, OrfMatch::Deny, other_prefix())],
+    );
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// A session's exact export encoder can change profile without a reset,
+/// for example when a reload changes `local_ipv6_nexthop`, and the RIB
+/// hears of it only on the next probe; the walk reads the encoders'
+/// generations directly. Red proof: leaving the encoder generations out of
+/// the policy version fails this test.
+#[test]
+fn export_encoder_profile_changed_mid_walk_invalidates_the_resumed_walk() {
+    use super::exportability::MockExactExportEncoder;
+
+    let (mut manager, _tx) = manager();
+    let encoders: Vec<_> = [2, 3, 4]
+        .into_iter()
+        .map(|octet| {
+            let encoder = MockExactExportEncoder::accepting(1);
+            manager.handle_update(RibUpdate::SetPeerExportEncoder {
+                peer: PeerId::from_addr(v4(octet)),
+                session_id: 0,
+                encoder: Arc::clone(&encoder) as Arc<dyn crate::update::ExactExportEncoder>,
+            });
+            let rx = peer_up(
+                &mut manager,
+                PeerId::from_addr(v4(octet)),
+                ipv4_sendable(),
+                None,
+                0,
+                64,
+            );
+            (encoder, rx)
+        })
+        .collect();
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
+    assert!(first.next.is_some());
+
+    encoders[0].0.set_profile(2, []);
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// A reload that leaves every listed peer's export settings as they were
+/// leaves the walk resumable: the same peer group and outbound prefix
+/// limit, an identical conditional-advertisement install, and an
+/// attachment for a peer with no session.
+#[test]
+fn unchanged_export_settings_leave_the_walk_resumable() {
+    let listed = PeerId::from_addr(v4(2));
+    let (mut manager, _receivers, first) = walk_started_with(0, |manager| {
+        set_peer_group(manager, listed, "rs-clients");
+        install_prefix_limits(manager, 1, listed, 10);
+        install_conditional(manager, conditional_set(other_prefix(), None, &[listed]));
+    });
+    set_peer_group(&mut manager, listed, "rs-clients");
+    install_prefix_limits(&mut manager, 2, listed, 10);
+    install_conditional(
+        &mut manager,
+        conditional_set(other_prefix(), None, &[listed]),
+    );
+    let mut unrelated = conditional_set(other_prefix(), None, &[listed]);
+    unrelated
+        .attachments
+        .insert(PeerId::from_addr(v4(9)), vec![Arc::from(CONDITIONAL)]);
+    install_conditional(&mut manager, unrelated);
+    assert_walk_resumes(&mut manager, &first);
 }

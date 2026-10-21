@@ -6435,6 +6435,11 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
+    /// The ORF filter `peer` installed for `family`, if any.
+    fn orf_filter(&self, peer: PeerId, family: (Afi, Safi)) -> Option<&crate::orf::OrfFilterSet> {
+        self.peer_orf_filters.get(&peer)?.get(&family)
+    }
+
     /// Empty families mean permit-all; absent peer keys keep readiness accurate.
     fn reap_empty_orf_filter(&mut self, peer: PeerId, family: (Afi, Safi)) {
         if let Some(by_family) = self.peer_orf_filters.get_mut(&peer) {
@@ -6455,6 +6460,10 @@ impl RibManager {
     /// Accepted updates lift the initial-advertisement gate. The sweep runs
     /// for `IMMEDIATE` or a malformed-field reset (RFC 5291 §6); `DEFER`
     /// installs the filter for outbound churn and a later route refresh.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "filter install, gate lift, change detection and the RFC 5291 sweep are one accepted ORF update"
+    )]
     pub(super) fn handle_peer_orf_update(
         &mut self,
         peer: PeerId,
@@ -6479,6 +6488,9 @@ impl RibManager {
             "an ORF-receive peer must never be registered in an update group"
         );
         let family = (afi, safi);
+        // At most `MAX_ORF_ENTRIES` per ORF message, so only a real filter
+        // change advances the export-settings generation.
+        let installed = self.orf_filter(peer, family).cloned();
         let filter = self
             .peer_orf_filters
             .entry(peer)
@@ -6562,6 +6574,9 @@ impl RibManager {
         // An accepted ORF message is itself a ROUTE-REFRESH (RFC 5291 §6).
         self.lift_orf_gate(peer, family);
         self.reap_empty_orf_filter(peer, family);
+        if self.orf_filter(peer, family) != installed.as_ref() {
+            self.advance_export_settings();
+        }
         if reset || when == WhenToRefresh::Immediate {
             // If this peer's EoR for the family was withheld at `PeerUp`
             // (GR restarter + §6 gate, see `send_initial_table`), the forced

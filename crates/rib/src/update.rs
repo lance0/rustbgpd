@@ -1549,7 +1549,11 @@ pub struct RouteExportVersion {
     /// removing a route and restoring identical content leaves it unchanged.
     pub route: u64,
     /// Export-policy state of the registered peers: the installed chains'
-    /// change version and the generations of the datasets they read.
+    /// change version, the generations of the datasets they read and of
+    /// their sessions' exact export encoders, and the generation of their
+    /// other export settings (outbound prefix limits, conditional
+    /// advertisement, peer group, Add-Path send limits, sendable families
+    /// and ORF state).
     pub policy: u64,
     /// Fingerprint of the managed peers the query named; 0 when it named
     /// none.
@@ -1561,9 +1565,10 @@ pub struct RouteExportVersion {
 pub enum RouteExportPageError {
     /// A resumed walk's route content changed (or a route appeared or was
     /// removed), the outbound peer roster changed, the peers' export policy
-    /// changed or the named managed peers differ since its first page; or,
-    /// on any page, a dataset the policy reads was refreshed while the
-    /// page's rows were evaluated.
+    /// or another export setting changed or the named managed peers differ
+    /// since its first page; or, on any page, a dataset the policy reads or
+    /// a session's export encoder profile changed while the page's rows
+    /// were evaluated.
     Invalidated,
 }
 

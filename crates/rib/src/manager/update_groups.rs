@@ -3092,6 +3092,7 @@ impl RibManager {
         }
         info!(%peer, ?family, "family became sendable mid-session: exporting its table");
         self.advance_advertised_pages();
+        self.advance_export_settings();
         self.peer_sendable_families
             .entry(peer)
             .or_default()

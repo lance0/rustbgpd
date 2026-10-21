@@ -1127,6 +1127,7 @@ impl RibManager {
         if dirty.is_empty() {
             return;
         }
+        self.advance_export_settings();
         let mut regrouped = false;
         let mut evpn_feeds = std::collections::HashMap::new();
         for peer in regroup {
@@ -1166,6 +1167,9 @@ impl RibManager {
             })
             .map(|(peer, _)| *peer)
             .collect();
+        if !peers.is_empty() {
+            self.advance_export_settings();
+        }
         for peer in peers {
             self.mark_outbound_dirty(peer);
         }

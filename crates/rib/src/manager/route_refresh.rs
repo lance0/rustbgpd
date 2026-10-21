@@ -36,18 +36,21 @@ pub(super) enum FamilyReplayOutcome {
 /// Remove one family from a per-peer family set, dropping the peer's entry
 /// when the set empties and never creating one. Readers such as
 /// `clean_policy_transition_peer_ready` check the key, so for these maps a
-/// present key must mean a non-empty set.
+/// present key must mean a non-empty set. Returns whether `family` was
+/// present.
 fn remove_family_drop_empty(
     map: &mut HashMap<PeerId, HashSet<(Afi, Safi)>>,
     peer: PeerId,
     family: (Afi, Safi),
-) {
-    if let Some(families) = map.get_mut(&peer) {
-        families.remove(&family);
-        if families.is_empty() {
-            map.remove(&peer);
-        }
+) -> bool {
+    let Some(families) = map.get_mut(&peer) else {
+        return false;
+    };
+    let removed = families.remove(&family);
+    if families.is_empty() {
+        map.remove(&peer);
     }
+    removed
 }
 
 impl RibManager {
@@ -551,7 +554,9 @@ impl RibManager {
     /// so an empty entry would keep reporting the peer as gated for the
     /// rest of the session.
     pub(super) fn lift_orf_gate(&mut self, peer: PeerId, family: (Afi, Safi)) {
-        remove_family_drop_empty(&mut self.peer_orf_pending, peer, family);
+        if remove_family_drop_empty(&mut self.peer_orf_pending, peer, family) {
+            self.advance_export_settings();
+        }
     }
 
     pub(super) fn handle_route_refresh_request(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
