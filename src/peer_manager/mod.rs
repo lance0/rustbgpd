@@ -2774,7 +2774,7 @@ impl PeerManager {
                     }
                 } => {
                     match changed {
-                        Ok(()) => self.handle_links_changed(),
+                        Ok(()) => self.handle_links_changed().await,
                         // The monitor exited; stop polling a closed channel.
                         Err(_) => link_state_changes = None,
                     }

@@ -61,8 +61,8 @@ impl PeerManager {
 
     /// The link state changed: ask every eligible session to check. A session
     /// already waiting for mailbox space keeps its single pending flag.
-    pub(super) fn handle_links_changed(&mut self) {
-        self.refresh_bfd_link_local_scopes();
+    pub(super) async fn handle_links_changed(&mut self) {
+        self.refresh_bfd_link_local_scopes().await;
         let targets = self.link_check_targets();
         debug!(
             candidate_sessions = targets.len(),

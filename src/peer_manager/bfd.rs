@@ -703,12 +703,19 @@ impl PeerManager {
     }
 
     /// Follow a recreated interface: re-resolve each scoped link-local BFD
-    /// session's interface by name and, when its index changed, publish the
-    /// new destination under a fresh revision so the actor replaces the
-    /// session. Driven by link-state changes, independently of TCP dialing,
-    /// because strict BFD can hold a peer before any connect attempt. A name
-    /// that resolves to nothing leaves the session as it is until it does.
-    pub(super) fn refresh_bfd_link_local_scopes(&mut self) {
+    /// session's interface by name and, when its index changed, replace the
+    /// session under a fresh revision. Driven by link-state changes,
+    /// independently of TCP dialing, because strict BFD can hold a peer before
+    /// any connect attempt. A name that resolves to nothing leaves the session
+    /// as it is until it does.
+    ///
+    /// The replacement is staged as a BFD membership change and settled by
+    /// [`Self::commit_bfd_reload`], exactly as a reload that replaces a session:
+    /// the actor acknowledges the new set, a strict peer whose replacement is
+    /// not yet Up is held again (stopping its BGP session and any pending
+    /// inbound candidate), and an undelivered stop retry moves to the new
+    /// revision.
+    pub(super) async fn refresh_bfd_link_local_scopes(&mut self) {
         let Some(coupling) = self.bfd_coupling.as_ref() else {
             return;
         };
@@ -735,8 +742,9 @@ impl PeerManager {
             return;
         }
         let coupling = self.bfd_coupling.as_mut().expect("checked above");
+        let mut configured = coupling.configured.clone();
         for (peer, ifindex) in updates {
-            let Some(params) = coupling.configured.get_mut(&peer) else {
+            let Some(params) = configured.get_mut(&peer) else {
                 continue;
             };
             let Ok(destination) =
@@ -755,7 +763,16 @@ impl PeerManager {
             params.revision = coupling.next_revision;
             coupling.next_revision = coupling.next_revision.saturating_add(1);
         }
-        self.republish_bfd_desired();
+        coupling.prior_held.clone_from(&coupling.held_down);
+        coupling
+            .prior_initially_withheld
+            .clone_from(&coupling.initially_withheld);
+        coupling.pending = Some(configured);
+        coupling.reloading = true;
+        coupling.rollback_lookup = false;
+        if let Err(error) = self.commit_bfd_reload(None).await {
+            warn!(%error, "BFD link-local scope refresh was not acknowledged by the BFD actor");
+        }
     }
 
     /// Take the BFD state-change receiver into a `run`-local (so the `select!`
