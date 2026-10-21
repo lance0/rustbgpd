@@ -167,6 +167,7 @@ event history was removed), is Superseded.
 | [0139](0139-flowspec-controller-contract.md) | Scoped FlowSpec controller compatibility contract | Accepted | 2026-10-10 | Active |
 | [0140](0140-evpn-core-isolation-es-hold.md) | EVPN core isolation and startup hold for bound Ethernet Segments | Accepted (implemented; M121 interop cell) | 2026-10-12 | Active |
 | [0141](0141-injection-owner-lease.md) | Owner-scoped lease on controller-injected routes | Accepted | 2026-10-19 | Active |
+| [0142](0142-interface-only-unnumbered-neighbors.md) | Interface-only unnumbered neighbors | Accepted | 2026-10-21 | Active |
 
 ## Supporting records
 
