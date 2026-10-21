@@ -793,6 +793,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.InjectionService",
+        "ListLeasedKeys",
+        "/rustbgpd.v1.InjectionService/ListLeasedKeys",
+        AuthTier::SensitiveRead,
+    ),
+    method(
+        "rustbgpd.v1.InjectionService",
         "AddEvpnRoute",
         "/rustbgpd.v1.InjectionService/AddEvpnRoute",
         AuthTier::OperatorOnly,
@@ -933,7 +939,7 @@ mod tests {
     const INVENTORY_JSON: &str = include_str!("../../../docs/reference/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/reference/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 1 | 0.8% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 80 | 61.5% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 81 | 61.8% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1173,7 +1179,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 130);
+        assert_eq!(METHODS.len(), 131);
     }
 
     #[test]
@@ -1214,7 +1220,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 1);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 80);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 81);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 22);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 27);
     }
@@ -1235,6 +1241,12 @@ mod tests {
         assert_eq!(
             method_authz("/rustbgpd.v1.InjectionService/ListInjectionLeases")
                 .map(|method| method.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+        // The per-owner key listing discloses what the lease listing does,
+        // plus the keys: the same read tier.
+        assert_eq!(
+            method_authz("/rustbgpd.v1.InjectionService/ListLeasedKeys").map(|method| method.tier),
             Some(AuthTier::SensitiveRead)
         );
     }
@@ -1414,7 +1426,7 @@ mod tests {
 
     #[test]
     fn markdown_totals_rejects_stale_percentage() {
-        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 80 | 57.0% |");
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 81 | 57.0% |");
         assert_eq!(
             verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
             Err("percentage mismatch")

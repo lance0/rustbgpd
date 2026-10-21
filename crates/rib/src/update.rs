@@ -2899,6 +2899,20 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Option<RouteExportPage>>,
     },
+    /// One page of the injected keys `owner` holds in
+    /// [`crate::injection_lease::InjectedKeyCursor`] order, at most
+    /// `page_size` of them. The reply is `None` when `resume` was bound to
+    /// another daemon incarnation or owner generation than the current one.
+    QueryLeasedKeys {
+        /// Lease owner.
+        owner: String,
+        /// Where a later page resumes; `None` starts a walk.
+        resume: Option<crate::injection_lease::LeasedKeysResume>,
+        /// Keys per page, clamped to `1..=ROUTE_QUERY_MAX_PAGE_SIZE`.
+        page_size: usize,
+        /// Response channel.
+        reply: oneshot::Sender<Option<crate::injection_lease::LeasedKeysPage>>,
+    },
     /// Subscribe to route change events via broadcast channel.
     SubscribeRouteEvents {
         /// Response channel carrying the broadcast receiver.

@@ -3767,37 +3767,12 @@ fn received_flowspec_route_to_proto(
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "FlowSpec route conversion keeps every component and action mapping adjacent"
-)]
-fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
-    let mut as_path = Vec::new();
-    let mut communities = Vec::new();
-    let mut extended_communities = Vec::new();
-
-    for attr in &route.attributes {
-        if let Some(values) = attr.communities() {
-            communities.extend(values);
-            continue;
-        }
-        if let Some(values) = attr.extended_communities() {
-            extended_communities.extend(values.iter().map(|c| c.as_u64()));
-            continue;
-        }
-        if let PathAttribute::AsPath(path) = attr {
-            for segment in &path.segments {
-                let asns = match segment {
-                    AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
-                };
-                as_path.extend(asns);
-            }
-        }
-    }
-
-    let components: Vec<proto::FlowSpecComponent> = route
-        .rule
-        .components
+/// A `FlowSpec` rule's match components as the API names them, the same form
+/// `AddFlowSpec` and `DeleteFlowSpec` take.
+pub(crate) fn flowspec_components_to_proto(
+    rule: &rustbgpd_wire::FlowSpecRule,
+) -> Vec<proto::FlowSpecComponent> {
+    rule.components
         .iter()
         .map(|c| {
             use rustbgpd_wire::FlowSpecComponent as FC;
@@ -3890,7 +3865,34 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
                 },
             }
         })
-        .collect();
+        .collect()
+}
+
+fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
+    let mut as_path = Vec::new();
+    let mut communities = Vec::new();
+    let mut extended_communities = Vec::new();
+
+    for attr in &route.attributes {
+        if let Some(values) = attr.communities() {
+            communities.extend(values);
+            continue;
+        }
+        if let Some(values) = attr.extended_communities() {
+            extended_communities.extend(values.iter().map(|c| c.as_u64()));
+            continue;
+        }
+        if let PathAttribute::AsPath(path) = attr {
+            for segment in &path.segments {
+                let asns = match segment {
+                    AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                };
+                as_path.extend(asns);
+            }
+        }
+    }
+
+    let components = flowspec_components_to_proto(&route.rule);
 
     // Extract FlowSpec actions from extended communities
     let actions: Vec<proto::FlowSpecAction> = route
@@ -4527,7 +4529,10 @@ fn flowspec_prefix_offset(p: &rustbgpd_wire::FlowSpecPrefix) -> u32 {
     }
 }
 
-fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
+/// Numeric operators in the syntax `parse_numeric_value` accepts, so a listed
+/// component can be passed back unchanged; only the all-clear operator,
+/// which the injection API cannot create, has no input form.
+pub(crate) fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
     use std::fmt::Write;
     let mut rendered = String::new();
     for (idx, o) in ops.iter().enumerate() {
@@ -4545,7 +4550,8 @@ fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
             (true, false, true) => "<=",
             (false, true, true) => ">=",
             (true, true, false) => "!=",
-            _ => "?",
+            (true, true, true) => "<>=",
+            (false, false, false) => "?",
         };
         let _ = write!(rendered, "{cmp}{}", o.value);
     }

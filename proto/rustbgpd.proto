@@ -3665,6 +3665,32 @@ service InjectionService {
   // so a controller adopting a listed entry with remaining 0 re-adds its
   // full desired state instead.
   rpc ListInjectionLeases(ListInjectionLeasesRequest) returns (ListInjectionLeasesResponse);
+  // The injected keys one lease owner holds, with each key's generation and
+  // remaining lease, paged in a fixed key order: unicast by (prefix,
+  // prefix_length, path_id), then FlowSpec by AFI and rule. Only that owner's
+  // keys are listed, never another owner's or unowned entries. A key whose
+  // lease expired and whose withdrawal is pending reports
+  // lease_remaining_ms = 0.
+  //
+  // Every page carries the owner's live generation the walk is bound to:
+  // absent means the owner has no live lease, so the controller re-adds its
+  // whole desired state; present with keys lists the owner's keys, where a
+  // row whose own generation differs from it belongs to an expired
+  // generation awaiting withdrawal, which renewing the live generation does
+  // not keep, so re-add it if still wanted; present with no keys means a
+  // live lease that holds nothing. An
+  // empty page is never a failure: errors are gRPC statuses.
+  //
+  // A walk is bound to the daemon process and the owner's generation at its
+  // first page. A later page after a daemon restart, or after the owner's
+  // lease expired or a new generation started, returns ABORTED with a
+  // google.rpc.ErrorInfo (domain "rustbgpd", reason "WALK_INVALIDATED") and
+  // no keys; restart the walk with an empty page_token. A walk that began with no
+  // live lease also aborts if any lease generation started since, even one
+  // that expired again. A token from a previous daemon process is never
+  // accepted, and a token is valid only for the owner it was issued for
+  // (another owner's token is INVALID_ARGUMENT).
+  rpc ListLeasedKeys(ListLeasedKeysRequest) returns (ListLeasedKeysResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
   // reflects them to iBGP peers negotiating L2VPN/EVPN.
@@ -4032,6 +4058,49 @@ message InjectionLeaseEntry {
 
 message ListInjectionLeasesResponse {
   repeated InjectionLeaseEntry leases = 1;
+}
+
+message ListLeasedKeysRequest {
+  // Required lease owner.
+  string owner = 1;
+  // Keys per page: 0 selects 100, and larger values are capped at 1000.
+  uint32 page_size = 2;
+  // next_page_token of the previous page; empty for the first page. Opaque:
+  // never parse or synthesize it.
+  string page_token = 3;
+}
+
+// A unicast key, as AddPath and DeletePath name it.
+message LeasedPathKey {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  uint32 path_id = 3;
+}
+
+// A FlowSpec key, as AddFlowSpec and DeleteFlowSpec name it.
+message LeasedFlowSpecKey {
+  AddressFamily afi_safi = 1;
+  repeated FlowSpecComponent components = 2;
+}
+
+message LeasedKey {
+  oneof key {
+    LeasedPathKey path = 1;
+    LeasedFlowSpecKey flow_spec = 2;
+  }
+  // Generation the key is held under.
+  LeaseGeneration generation = 3;
+  // Time to the lease deadline; 0 means expired, withdrawal pending.
+  uint32 lease_remaining_ms = 4;
+}
+
+message ListLeasedKeysResponse {
+  repeated LeasedKey keys = 1;
+  // Empty when no keys remain.
+  string next_page_token = 2;
+  // The owner's live generation this walk is bound to; absent when the
+  // owner has no live lease.
+  LeaseGeneration generation = 3;
 }
 
 message DeleteFlowSpecResponse {

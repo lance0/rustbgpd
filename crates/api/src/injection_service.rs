@@ -14,7 +14,8 @@ use crate::route_distinguisher::parse_rd;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::injection_lease::{
-    InjectionLeases, LeaseConflict, LeaseGeneration, validate_lease, validate_owner,
+    InjectedKey, InjectedKeyCursor, InjectionLeases, LeaseConflict, LeaseGeneration, LeasedKeyRow,
+    LeasedKeysPage, LeasedKeysResume, validate_lease, validate_owner,
 };
 use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
 use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition};
@@ -74,6 +75,133 @@ fn generation_to_proto(generation: LeaseGeneration) -> proto::LeaseGeneration {
     proto::LeaseGeneration {
         incarnation: generation.incarnation,
         sequence: generation.sequence,
+    }
+}
+
+/// Keys per `ListLeasedKeys` page when the request leaves it 0.
+const DEFAULT_LEASED_KEYS_PAGE_SIZE: usize = 100;
+
+/// The page token resuming a walk after `cursor`, bound to the walk's
+/// daemon incarnation and owner generation:
+/// `t1:<incarnation>:<sequence, or w<watermark> without a live lease>:<key>`,
+/// where the key is
+/// `u:<addr>/<len>:<path_id>` or `f:<afi>:<hex NLRI>`. Clients treat it as
+/// opaque.
+fn leased_keys_token(owner: &str, page: &LeasedKeysPage, cursor: &InjectedKeyCursor) -> String {
+    let sequence = page.generation.map_or_else(
+        || format!("w{}", page.watermark),
+        |generation| generation.sequence.to_string(),
+    );
+    // Owners are `[A-Za-z0-9._-]`, so the owner field holds no separator.
+    let mut token = format!("t1:{owner}:{}:{sequence}:", page.incarnation);
+    match cursor {
+        InjectedKeyCursor::Unicast(prefix, path_id) => {
+            let _ = write!(
+                token,
+                "u:{}/{}:{path_id}",
+                prefix.addr_string(),
+                prefix.prefix_len()
+            );
+        }
+        InjectedKeyCursor::FlowSpec(afi, nlri) => {
+            let _ = write!(token, "f:{afi}:");
+            for byte in nlri {
+                let _ = write!(token, "{byte:02x}");
+            }
+        }
+    }
+    token
+}
+
+fn parse_leased_keys_token(token: &str, owner: &str) -> Result<LeasedKeysResume, Status> {
+    let invalid = || Status::invalid_argument("invalid page_token");
+    let rest = token.strip_prefix("t1:").ok_or_else(invalid)?;
+    let (token_owner, rest) = rest.split_once(':').ok_or_else(invalid)?;
+    // Two owners without a live lease share the same binding, so a token is
+    // only valid for the owner whose walk produced it.
+    if token_owner != owner {
+        return Err(Status::invalid_argument(
+            "page_token belongs to a different owner",
+        ));
+    }
+    let (incarnation, rest) = rest.split_once(':').ok_or_else(invalid)?;
+    let (sequence, key) = rest.split_once(':').ok_or_else(invalid)?;
+    let incarnation: u64 = incarnation.parse().map_err(|_| invalid())?;
+    let (generation, watermark) = match sequence.strip_prefix('w') {
+        Some(watermark) => (None, watermark.parse().map_err(|_| invalid())?),
+        None => (
+            Some(LeaseGeneration {
+                incarnation,
+                sequence: sequence.parse().map_err(|_| invalid())?,
+            }),
+            0,
+        ),
+    };
+    Ok(LeasedKeysResume {
+        incarnation,
+        generation,
+        watermark,
+        after: parse_leased_key_cursor(key)?,
+    })
+}
+
+fn parse_leased_key_cursor(token: &str) -> Result<InjectedKeyCursor, Status> {
+    let invalid = || Status::invalid_argument("invalid page_token");
+    if let Some(rest) = token.strip_prefix("u:") {
+        let (prefix, path_id) = rest.rsplit_once(':').ok_or_else(invalid)?;
+        let (addr, len) = prefix.rsplit_once('/').ok_or_else(invalid)?;
+        let len: u32 = len.parse().map_err(|_| invalid())?;
+        let prefix = parse_route_key_prefix(addr, len).map_err(|_| invalid())?;
+        let path_id = path_id.parse().map_err(|_| invalid())?;
+        return Ok(InjectedKeyCursor::Unicast(prefix, path_id));
+    }
+    let rest = token.strip_prefix("f:").ok_or_else(invalid)?;
+    let (afi, hex) = rest.split_once(':').ok_or_else(invalid)?;
+    // A listing's cursor is one rule: at most 4,095 bytes plus a 2-byte
+    // length prefix. Refuse anything longer before decoding it.
+    if hex.len() % 2 != 0 || hex.len() > 2 * 4097 || !hex.is_ascii() {
+        return Err(invalid());
+    }
+    let nlri = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid())?;
+    // Only a cursor a listing could have produced: a FlowSpec AFI and exactly
+    // one complete rule. Anything else would silently skip or repeat keys.
+    let afi = match afi.parse::<u16>().map_err(|_| invalid())? {
+        1 => Afi::Ipv4,
+        2 => Afi::Ipv6,
+        _ => return Err(invalid()),
+    };
+    match rustbgpd_wire::flowspec::decode_flowspec_nlri(&nlri, afi) {
+        Ok(rules) if rules.len() == 1 => Ok(InjectedKeyCursor::FlowSpec(afi as u16, nlri)),
+        _ => Err(invalid()),
+    }
+}
+
+fn leased_key_to_proto(row: &LeasedKeyRow) -> proto::LeasedKey {
+    let key = match &row.key {
+        InjectedKey::Unicast(prefix, path_id) => {
+            proto::leased_key::Key::Path(proto::LeasedPathKey {
+                prefix: prefix.addr_string(),
+                prefix_length: u32::from(prefix.prefix_len()),
+                path_id: *path_id,
+            })
+        }
+        InjectedKey::FlowSpec(key) => proto::leased_key::Key::FlowSpec(proto::LeasedFlowSpecKey {
+            afi_safi: if key.afi == Afi::Ipv6 {
+                proto::AddressFamily::Ipv6Flowspec
+            } else {
+                proto::AddressFamily::Ipv4Flowspec
+            } as i32,
+            components: crate::rib_service::flowspec_components_to_proto(&key.rule),
+        }),
+    };
+    proto::LeasedKey {
+        key: Some(key),
+        generation: Some(generation_to_proto(row.generation)),
+        lease_remaining_ms: millis(row.remaining),
     }
 }
 
@@ -371,24 +499,30 @@ struct ErrorInfo {
 /// with a `google.rpc.ErrorInfo` detail whose `reason` names the conflict.
 /// The reason is contract; the message is not.
 fn lease_conflict_status(conflict: LeaseConflict, message: String) -> Status {
+    status_with_reason(tonic::Code::FailedPrecondition, conflict.reason(), message)
+}
+
+/// `ErrorInfo.reason` of a `ListLeasedKeys` page whose walk crossed a daemon
+/// restart or an owner generation change.
+const WALK_INVALIDATED: &str = "WALK_INVALIDATED";
+
+/// `code` with a `google.rpc.ErrorInfo` detail naming `reason` in the
+/// `rustbgpd` domain.
+fn status_with_reason(code: tonic::Code, reason: &str, message: String) -> Status {
     use prost::Message as _;
     let info = ErrorInfo {
-        reason: conflict.reason().to_string(),
+        reason: reason.to_string(),
         domain: LEASE_ERROR_DOMAIN.to_string(),
     };
     let details = RpcStatus {
-        code: tonic::Code::FailedPrecondition as i32,
+        code: code as i32,
         message: message.clone(),
         details: vec![prost_types::Any {
             type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
             value: info.encode_to_vec(),
         }],
     };
-    Status::with_details(
-        tonic::Code::FailedPrecondition,
-        message,
-        details.encode_to_vec().into(),
-    )
+    Status::with_details(code, message, details.encode_to_vec().into())
 }
 
 /// Map a RIB-side command error into the right gRPC status code.
@@ -900,6 +1034,54 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         }))
     }
 
+    async fn list_leased_keys(
+        &self,
+        request: Request<proto::ListLeasedKeysRequest>,
+    ) -> Result<Response<proto::ListLeasedKeysResponse>, Status> {
+        let req = request.into_inner();
+        validate_owner(&req.owner).map_err(Status::invalid_argument)?;
+        let resume = if req.page_token.is_empty() {
+            None
+        } else {
+            Some(parse_leased_keys_token(&req.page_token, &req.owner)?)
+        };
+        let page_size = match req.page_size {
+            0 => DEFAULT_LEASED_KEYS_PAGE_SIZE,
+            size => usize::try_from(size)
+                .unwrap_or(usize::MAX)
+                .min(ROUTE_QUERY_MAX_PAGE_SIZE),
+        };
+        let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLeasedKeys {
+            owner: req.owner.clone(),
+            resume,
+            page_size,
+            reply,
+        })
+        .await?
+        .ok_or_else(|| {
+            status_with_reason(
+                tonic::Code::Aborted,
+                WALK_INVALIDATED,
+                "the daemon restarted or the owner's lease generation changed since this \
+                 listing began; restart it with an empty page_token"
+                    .to_string(),
+            )
+        })?;
+        let next_page_token = if page.more {
+            page.rows
+                .last()
+                .map(|row| leased_keys_token(&req.owner, &page, &row.cursor))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(proto::ListLeasedKeysResponse {
+            keys: page.rows.iter().map(leased_key_to_proto).collect(),
+            next_page_token,
+            generation: page.generation.map(generation_to_proto),
+        }))
+    }
+
     async fn list_injection_leases(
         &self,
         request: Request<proto::ListInjectionLeasesRequest>,
@@ -1222,12 +1404,19 @@ fn parse_numeric_value(s: &str, label: &str) -> Result<Vec<NumericMatch>, Status
     for (idx, (token, and_bit)) in terms.into_iter().enumerate() {
         let op_len = token
             .chars()
-            .take_while(|c| matches!(c, '=' | '<' | '>'))
+            .take_while(|c| matches!(c, '=' | '<' | '>' | '!'))
             .count();
         let (ops, value_part) = token.split_at(op_len);
-        let eq = ops.contains('=');
-        let lt = ops.contains('<');
-        let gt = ops.contains('>');
+        // `!=` is the not-equal form the read-back renders (`<>` spelled out).
+        let (lt, gt, eq) = match ops {
+            "!=" => (true, true, false),
+            ops if ops.contains('!') => {
+                return Err(Status::invalid_argument(format!(
+                    "{label}: invalid operator in {token:?}"
+                )));
+            }
+            ops => (ops.contains('<'), ops.contains('>'), ops.contains('=')),
+        };
         let value_str = value_part.trim();
         let value: u64 = value_str.parse().map_err(|e| {
             Status::invalid_argument(format!("{label}: invalid value {token:?}: {e}"))
@@ -2205,6 +2394,42 @@ mod tests {
             rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    /// Every numeric operator the injection API accepts renders, in the
+    /// read-back, as a value it accepts again with the same flags, so a
+    /// listed `FlowSpec` key deletes unchanged.
+    ///
+    /// Break-to-red: rendering not-equal-or-equal as `?`, or rejecting the
+    /// rendered `!=`, fails here.
+    #[test]
+    fn rendered_numeric_operators_parse_back_to_the_same_flags() {
+        for (lt, gt, eq) in [
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let op = NumericMatch {
+                end_of_list: true,
+                and_bit: false,
+                lt,
+                gt,
+                eq,
+                value: 80,
+            };
+            let rendered = crate::rib_service::format_numeric_ops(std::slice::from_ref(&op));
+            let parsed = parse_numeric_value(&rendered, "port")
+                .unwrap_or_else(|error| panic!("{rendered:?}: {error}"));
+            assert_eq!(parsed, vec![op], "{rendered:?}");
+        }
+        assert_eq!(
+            parse_numeric_value("!80", "port").unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
     }
 
     #[test]
@@ -3732,6 +3957,315 @@ mod tests {
         manager_task.await.unwrap();
     }
 
+    /// `ListLeasedKeys` maps an owner's unicast and `FlowSpec` keys to the
+    /// keys `DeletePath` and `DeleteFlowSpec` take, with the generation the
+    /// leased adds returned; its token resumes after the last key; a bad
+    /// owner or token is `INVALID_ARGUMENT`. Served on read-only listeners.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one controller session: add, page, resume, delete the listed keys and reject bad input"
+    )]
+    async fn list_leased_keys_returns_delete_keys_and_resumes_by_token() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let leases = manager.injection_leases();
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+        let generation = svc
+            .add_leased_path(Request::new(leased_path("ctl", 30)))
+            .await
+            .unwrap()
+            .into_inner()
+            .generation;
+        svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+            rule: Some(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: flowspec_rule_components(),
+                actions: vec![flowspec_rate(0.0)],
+                communities: vec![],
+                extended_communities: vec![],
+            }),
+            lease: Some(proto::InjectionLease {
+                owner: "ctl".into(),
+                lease_seconds: 30,
+            }),
+        }))
+        .await
+        .unwrap();
+        let reader =
+            InjectionService::new(rib_tx.clone(), AccessMode::ReadOnly, Arc::clone(&leases));
+        let list = |page_token: String, owner: &str| {
+            reader.list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: owner.into(),
+                page_size: 1,
+                page_token,
+            }))
+        };
+
+        let first = list(String::new(), "ctl").await.unwrap().into_inner();
+        assert_eq!(first.keys.len(), 1);
+        assert_eq!(
+            first.keys[0].key,
+            Some(proto::leased_key::Key::Path(proto::LeasedPathKey {
+                prefix: "198.51.100.7".into(),
+                prefix_length: 32,
+                path_id: 0,
+            }))
+        );
+        assert_eq!(first.keys[0].generation, generation);
+        assert!((25_000..=30_000).contains(&first.keys[0].lease_remaining_ms));
+        assert!(first.next_page_token.contains(":u:198.51.100.7/32:0"));
+        assert_eq!(first.generation, generation, "the walk's generation");
+
+        // The token is bound to the owner whose walk produced it.
+        assert_eq!(
+            list(first.next_page_token.clone(), "other")
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        let second = list(first.next_page_token, "ctl")
+            .await
+            .unwrap()
+            .into_inner();
+        let Some(proto::leased_key::Key::FlowSpec(rule)) = second.keys[0].key.clone() else {
+            panic!("the second key is the FlowSpec rule");
+        };
+        assert_eq!(rule.afi_safi, proto::AddressFamily::Ipv4Flowspec as i32);
+        assert_eq!(second.keys[0].generation, generation);
+        assert_eq!(second.next_page_token, "");
+
+        // The listed keys are exactly what the deletes take.
+        let Some(proto::leased_key::Key::Path(path)) = first.keys[0].key.clone() else {
+            panic!("the first key is the path");
+        };
+        svc.delete_path(Request::new(proto::DeletePathRequest {
+            prefix: path.prefix,
+            prefix_length: path.prefix_length,
+            path_id: path.path_id,
+            owner: "ctl".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+            afi_safi: rule.afi_safi,
+            components: rule.components,
+            owner: "ctl".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            list(String::new(), "ctl").await.unwrap().into_inner().keys,
+            []
+        );
+
+        for (token, owner) in [
+            ("u:198.51.100.7/32:0", "ctl"),
+            ("t1:ctl:1:w1:u:198.51.100.7/33:0", "ctl"),
+            ("t1:ctl:1:-:u:198.51.100.7/32:0", "ctl"),
+            ("t1:ctl:1:x:u:198.51.100.7/32:0", "ctl"),
+            ("t1:ctl:1:w1:f:1:abc", "ctl"),
+            ("t1:ctl:1:w1:f:65535:", "ctl"),
+            ("t1:ctl:1:w1:f:1:", "ctl"),
+            ("t1:ctl:1:w1:f:1:030481", "ctl"),
+            (&*format!("t1:ctl:1:w1:f:1:{}", "00".repeat(4098)), "ctl"),
+            ("x", "ctl"),
+            ("", ""),
+            ("", "bad owner"),
+        ] {
+            let error = list(token.into(), owner).await.unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "{token:?} {owner:?}"
+            );
+        }
+        let other = list(String::new(), "other").await.unwrap().into_inner();
+        assert_eq!(other.keys, []);
+        assert_eq!(other.next_page_token, "");
+        assert_eq!(
+            other.generation, None,
+            "no lease: the walk has no generation"
+        );
+
+        drop((svc, reader));
+        drop(rib_tx);
+        manager_task.await.unwrap();
+    }
+
+    /// Leased rules using the not-equal operators list as keys that
+    /// `DeleteFlowSpec` accepts unchanged: add, list, delete as listed.
+    #[tokio::test]
+    async fn listed_not_equal_flowspec_keys_delete_as_listed() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let leases = manager.injection_leases();
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+        for (octet, port) in [(1, "<>80"), (2, "<>=80")] {
+            svc.add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                rule: Some(proto::AddFlowSpecRequest {
+                    afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                    components: vec![
+                        proto::FlowSpecComponent {
+                            r#type: 1,
+                            prefix: format!("203.0.113.{octet}/32"),
+                            value: String::new(),
+                            offset: 0,
+                        },
+                        proto::FlowSpecComponent {
+                            r#type: 4,
+                            prefix: String::new(),
+                            value: port.into(),
+                            offset: 0,
+                        },
+                    ],
+                    actions: vec![flowspec_rate(0.0)],
+                    communities: vec![],
+                    extended_communities: vec![],
+                }),
+                lease: Some(proto::InjectionLease {
+                    owner: "ctl".into(),
+                    lease_seconds: 30,
+                }),
+            }))
+            .await
+            .unwrap();
+        }
+        let list = || {
+            svc.list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: "ctl".into(),
+                ..Default::default()
+            }))
+        };
+        let listed = list().await.unwrap().into_inner().keys;
+        assert_eq!(listed.len(), 2);
+        // A FlowSpec cursor resumes: one rule per page, then the other.
+        let first = svc
+            .list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: "ctl".into(),
+                page_size: 1,
+                page_token: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.next_page_token.contains(":f:1:"));
+        let rest = svc
+            .list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: "ctl".into(),
+                page_size: 1,
+                page_token: first.next_page_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        // Compare the keys: lease_remaining_ms moves between reads.
+        let keys =
+            |rows: &[proto::LeasedKey]| rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            keys(&[first.keys, rest.keys].concat()),
+            keys(&listed),
+            "two pages hold both rules in order"
+        );
+        for key in listed {
+            let Some(proto::leased_key::Key::FlowSpec(rule)) = key.key else {
+                panic!("a FlowSpec key");
+            };
+            svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+                afi_safi: rule.afi_safi,
+                components: rule.components.clone(),
+                owner: "ctl".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("{:?}: {error}", rule.components));
+        }
+        assert_eq!(list().await.unwrap().into_inner().keys, []);
+        drop(svc);
+        drop(rib_tx);
+        manager_task.await.unwrap();
+    }
+
+    /// A page token from a previous daemon process is never accepted: the
+    /// restarted daemon answers `ABORTED`, never an empty page that would
+    /// read as "this owner holds nothing more".
+    #[tokio::test]
+    async fn a_leased_key_token_from_a_previous_process_is_aborted() {
+        fn daemon() -> (
+            InjectionService,
+            mpsc::Sender<RibUpdate>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let (rib_tx, rib_rx) = mpsc::channel(64);
+            let manager = rustbgpd_rib::RibManager::new(
+                rib_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                rustbgpd_telemetry::BgpMetrics::new(),
+            );
+            let leases = manager.injection_leases();
+            let task = tokio::spawn(manager.run());
+            (
+                InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases)),
+                rib_tx,
+                task,
+            )
+        }
+        fn request(page_token: String) -> Request<proto::ListLeasedKeysRequest> {
+            Request::new(proto::ListLeasedKeysRequest {
+                owner: "ctl".into(),
+                page_size: 1,
+                page_token,
+            })
+        }
+
+        let (before, before_tx, before_task) = daemon();
+        for octet in [7, 8] {
+            let mut request = leased_path("ctl", 30);
+            request.path.as_mut().unwrap().prefix = format!("198.51.100.{octet}");
+            before.add_leased_path(Request::new(request)).await.unwrap();
+        }
+        let first = before
+            .list_leased_keys(request(String::new()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.next_page_token.starts_with("t1:"));
+        drop((before, before_tx));
+        before_task.await.unwrap();
+
+        let (after, after_tx, after_task) = daemon();
+        let error = after
+            .list_leased_keys(request(first.next_page_token))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Aborted);
+        assert_eq!(
+            error_info_reason(&error, tonic::Code::Aborted),
+            WALK_INVALIDATED
+        );
+        drop((after, after_tx));
+        after_task.await.unwrap();
+    }
+
     fn leased_path(owner: &str, lease_seconds: u32) -> proto::AddLeasedPathRequest {
         proto::AddLeasedPathRequest {
             path: Some(proto::AddPathRequest {
@@ -4196,10 +4730,16 @@ mod tests {
     /// details exactly as a client reads the `grpc-status-details-bin`
     /// trailer.
     fn lease_conflict_reason(status: &Status) -> String {
+        error_info_reason(status, tonic::Code::FailedPrecondition)
+    }
+
+    /// The `ErrorInfo` reason of a status with code `code`, decoded as a
+    /// client reads it.
+    fn error_info_reason(status: &Status, code: tonic::Code) -> String {
         use prost::Message as _;
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+        assert_eq!(status.code(), code, "{status:?}");
         let details = RpcStatus::decode(status.details()).expect("google.rpc.Status");
-        assert_eq!(details.code, tonic::Code::FailedPrecondition as i32);
+        assert_eq!(details.code, code as i32);
         let [any] = details.details.as_slice() else {
             panic!("one detail expected: {details:?}");
         };

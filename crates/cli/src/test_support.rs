@@ -1602,6 +1602,13 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         Err(Status::unimplemented("not mocked"))
     }
 
+    async fn list_leased_keys(
+        &self,
+        _request: Request<server_proto::ListLeasedKeysRequest>,
+    ) -> Result<Response<server_proto::ListLeasedKeysResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
     async fn list_injection_leases(
         &self,
         _request: Request<server_proto::ListInjectionLeasesRequest>,

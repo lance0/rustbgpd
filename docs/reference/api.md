@@ -96,7 +96,7 @@ and RPCs in it stay alpha; the
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases |
+| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
@@ -271,7 +271,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `BfdService` | `GetBfdSessions` | None |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
-| `InjectionService` | `ListInjectionLeases`, `ListPathExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
@@ -3029,6 +3029,7 @@ export policy).
 | `AddLeasedPath` / `AddLeasedFlowSpec` | Inject a route or FlowSpec rule under an owner's lease; see [leased injection](#leased-injection) |
 | `RenewLease` | Renew an owner's lease generation |
 | `ListInjectionLeases` | List the injection lease table |
+| `ListLeasedKeys` | List the keys one lease owner holds; see [reconcile an owner's keys](#reconcile-an-owners-keys) |
 | `AddEvpnRoute` | Inject an EVPN Type 2 (MAC/IP), Type 3 (IMET), or Type 5 (IP Prefix) route; Type 5 may be interface-less or carry an overlay-index gateway |
 | `DeleteEvpnRoute` | Withdraw a previously injected EVPN route by its EVPN route key |
 
@@ -3365,6 +3366,65 @@ carry them, because their `path_id` is the outbound one.
 `InjectionService.ListInjectionLeases` lists the lease table. `rbgp rib
 received 0.0.0.0` and `rbgp flowspec received 0.0.0.0` show each owned
 entry's owner and remaining lease, in text and under `lease` in `--json`.
+
+##### Reconcile an owner's keys
+
+`InjectionService.ListLeasedKeys` lists exactly the keys one owner holds:
+each unicast key as the `(prefix, prefix_length, path_id)` that `DeletePath`
+takes, each FlowSpec key as the `afi_safi` and `components` that
+`DeleteFlowSpec` takes, with the key's `LeaseGeneration` and
+`lease_remaining_ms` (0 means expired, withdrawal pending). Another owner's
+keys and unowned entries never appear. Keys come in a fixed order, unicast by
+prefix and `path_id` and then FlowSpec, `page_size` 0 returns up to 100 keys,
+larger values are capped at 1000, and a non-empty `next_page_token`
+continues after the last key returned, so a key added or removed elsewhere
+does not shift the pages. An owner holds at most 16,384 keys. It is a
+`sensitive_read`, served on read-only listeners.
+
+Every page carries `generation`, the owner's live generation the walk is
+bound to, so an empty page is never ambiguous:
+
+| `generation` | `keys` | Meaning |
+|---|---|---|
+| absent | any | The owner has no live lease. Re-add the whole desired state; any keys listed are expired and awaiting withdrawal. |
+| present | some | The owner's keys. Each row carries its own `generation`: a row whose generation differs from the page's belongs to an expired generation and awaits withdrawal (`lease_remaining_ms` 0). Renewing the live generation does not keep it; re-add it if it is still wanted. |
+| present | none | A live lease that holds no keys. |
+
+A walk is bound to the daemon process and to the owner's generation at its
+first page. If the daemon restarts, or the owner's lease expires or a new
+generation starts, before a later page, that page returns `ABORTED` with no
+keys and a `google.rpc.ErrorInfo` whose `reason` is `WALK_INVALIDATED`
+(domain `rustbgpd`): start the walk again with an empty `page_token`. A walk that began
+with no live lease also aborts if any lease generation started since, even
+one that expired again before the next page. A token from a previous daemon
+process is never accepted, and a token is valid only for the owner it was
+issued for: another owner's token returns `INVALID_ARGUMENT`. Adding or deleting keys does not
+change the generation, so it does not abort a walk. Errors are always gRPC
+statuses, never an empty `OK` page.
+
+A controller that restarts while the daemon keeps running finds its previous
+process's keys under its owner, still renewed by nobody:
+
+1. List its owner's keys page by page, restarting the walk on `ABORTED`.
+2. Re-add each key it still wants with a leased add; this joins the owner's
+   live lease, or starts a new generation if the old one expired.
+3. Delete each listed key it no longer wants with `DeletePath` or
+   `DeleteFlowSpec`, passing its `owner`.
+4. Renew with the generation the leased adds returned.
+
+The listing reads the daemon's state at the time of each page; a key can
+expire between the listing and the delete, so delete with `allow_missing:
+true`. After a daemon restart the owner holds no keys: injected state is
+process-local, and the keys the controller adds again carry the new
+process's `incarnation`. The FlowSpec `components` come back in the daemon's
+canonical spelling, for example `==80` for a request's `=80`, which
+`DeleteFlowSpec` accepts unchanged.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"owner": "rtbh-pop1"}' \
+  localhost:50051 rustbgpd.v1.InjectionService/ListLeasedKeys
+```
 
 To remove an owned entry by hand, for example a blackhole still announced for
 a controller that is wedged or gone, delete it as its owner or override the

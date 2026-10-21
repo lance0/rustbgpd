@@ -10,7 +10,8 @@ use tracing::warn;
 use super::helpers::{LOCAL_PEER, gauge_val};
 use super::{AdjRibIn, ExactExportKey, RibManager};
 use crate::injection_lease::{
-    ExpiredLease, InjectedKey, InjectionTag, LeaseConflict, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiredLease, InjectedKey, InjectedKeyCursor, InjectionTag, LeaseConflict, LeasedKeyRow,
+    LeasedKeysPage, LeasedKeysResume, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::route::FlowSpecRouteKey;
 use crate::update::RibCommandError;
@@ -130,6 +131,68 @@ impl RibManager {
             }
         }
         Some(tag)
+    }
+
+    /// One page of `owner`'s keys in cursor order, after `resume`'s key.
+    /// The page walks and orders that owner's keys only, which the per-owner
+    /// key cap bounds; another owner's or an unowned entry is never read.
+    /// `None` when `resume` belongs to another incarnation or generation, so
+    /// a walk cut by a restart or a regeneration is refused rather than
+    /// finished early.
+    pub(super) fn leased_keys_page(
+        &self,
+        owner: &str,
+        resume: Option<&LeasedKeysResume>,
+        page_size: usize,
+    ) -> Option<LeasedKeysPage> {
+        let n = page_size.clamp(1, super::ROUTE_QUERY_MAX_PAGE_SIZE);
+        let incarnation = self.injection_leases.incarnation();
+        let (generation, watermark) = self.injection_leases.live_generation(owner);
+        // With a live generation, it must be the same one. Without one, no
+        // generation may have started since, even one that expired again.
+        if resume.is_some_and(|resume| {
+            resume.incarnation != incarnation
+                || resume.generation != generation
+                || (generation.is_none() && resume.watermark != watermark)
+        }) {
+            return None;
+        }
+        let after = resume.map(|resume| &resume.after);
+        let empty = LeasedKeysPage {
+            incarnation,
+            generation,
+            watermark,
+            ..LeasedKeysPage::default()
+        };
+        let Some(keys) = self.owner_keys.get(owner) else {
+            return Some(empty);
+        };
+        let mut rows: Vec<(InjectedKeyCursor, &InjectedKey, &InjectionTag)> = keys
+            .iter()
+            .filter_map(|key| {
+                let tag = self.injected_owners.get(key)?;
+                let cursor = InjectedKeyCursor::of(key);
+                after
+                    .is_none_or(|after| cursor > *after)
+                    .then_some((cursor, key, tag))
+            })
+            .collect();
+        rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let more = rows.len() > n;
+        rows.truncate(n);
+        Some(LeasedKeysPage {
+            rows: rows
+                .into_iter()
+                .map(|(cursor, key, tag)| LeasedKeyRow {
+                    key: key.clone(),
+                    cursor,
+                    generation: tag.generation,
+                    remaining: self.injection_leases.remaining(tag),
+                })
+                .collect(),
+            more,
+            ..empty
+        })
     }
 
     /// Untag and return every key of `expired.owner` tagged at or below its
