@@ -23,10 +23,10 @@ use crate::update::{
     ExactFibInstallCandidates, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, FibInstallCandidatesPage, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats,
     NeighborRibSnapshot, NeighborRibSnapshotResponse, PeerRouteExport, RibRowFilter,
-    RouteExportDisposition, RouteExportPage, RoutePage, RoutePageError, RoutePageVersion,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
-    VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query,
-    route_query_key,
+    RouteExportDisposition, RouteExportPage, RouteExportPageError, RouteExportVersion, RoutePage,
+    RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
+    UpdateGroupPeerComparison, VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
+    ordered_route_query, route_query_key,
 };
 
 /// Full-snapshot queries check cancellation at bounded work intervals instead
@@ -477,6 +477,14 @@ where
         version: RoutePageVersion::default(),
         injection: Vec::new(),
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook run once between a disposition page's version check and its
+    /// row evaluation, to land a dataset refresh in that window.
+    pub(in crate::manager) static BEFORE_EXPORT_ROWS: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 impl RibManager {
@@ -1910,9 +1918,9 @@ impl RibManager {
         &mut self,
         prefix: Prefix,
         path_id: u32,
-        after: Option<IpAddr>,
+        after: Option<(IpAddr, RouteExportVersion)>,
         page_size: usize,
-        reply: tokio::sync::oneshot::Sender<Option<RouteExportPage>>,
+        reply: tokio::sync::oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
     ) {
         let page = self.local_route_export_page(prefix, path_id, after, page_size);
         if reply.send(page).is_err() {
@@ -1922,30 +1930,94 @@ impl RibManager {
 
     /// One page of per-peer export dispositions for the local route
     /// `(prefix, path_id)`: one prefix-local export explain per listed peer,
-    /// so the page size bounds the work.
+    /// so the page size bounds the work. A resumed walk is served only while
+    /// its route content, the outbound peer roster and the peers' export
+    /// policy match its first page, so a route removed mid-walk is not
+    /// reported as never having existed and a peer that joins or leaves is
+    /// neither skipped nor counted twice. Any page, including the first, is
+    /// refused when the policy version moves while its rows are evaluated.
+    /// Removing the route and restoring identical content between pages
+    /// leaves the walk valid: every disposition is a function of that
+    /// content.
     fn local_route_export_page(
         &mut self,
         prefix: Prefix,
         path_id: u32,
-        after: Option<IpAddr>,
+        after: Option<(IpAddr, RouteExportVersion)>,
         page_size: usize,
-    ) -> Option<RouteExportPage> {
-        let route = self
+    ) -> Result<RouteExportPage, RouteExportPageError> {
+        let Some(route) = self
             .ribs
-            .get(&LOCAL_PEER)?
-            .iter_prefix(&prefix)
-            .find(|route| route.path_id == path_id)?
-            .clone();
+            .get(&LOCAL_PEER)
+            .and_then(|rib| {
+                rib.iter_prefix(&prefix)
+                    .find(|route| route.path_id == path_id)
+            })
+            .cloned()
+        else {
+            return Err(if after.is_some() {
+                RouteExportPageError::Invalidated
+            } else {
+                RouteExportPageError::NoRoute
+            });
+        };
+        let version = RouteExportVersion {
+            roster: self.outbound_roster_generation,
+            route: local_route_fingerprint(&route),
+            policy: self.export_policy_version(),
+        };
+        if after.is_some_and(|(_, expected)| expected != version) {
+            return Err(RouteExportPageError::Invalidated);
+        }
         let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
-        let mut peers =
-            smallest_keys_after(self.peer_sendable_families.keys().copied(), after, n + 1);
+        let mut peers = smallest_keys_after(
+            self.peer_sendable_families.keys().copied(),
+            after.map(|(peer, _)| peer),
+            n + 1,
+        );
         let more = peers.len() > n;
         peers.truncate(n);
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_EXPORT_ROWS.take() {
+            hook();
+        }
         let peers = peers
             .into_iter()
             .map(|peer| self.local_route_export(peer, &route))
             .collect();
-        Some(RouteExportPage { peers, more })
+        // A dataset refresh is not a RIB message: it can land while the rows
+        // above evaluate, each pinning datasets on its own. Recheck so no page,
+        // first or last, mixes generations or carries a version its rows
+        // were not read under. Route and roster are actor-owned and cannot
+        // move inside this call.
+        if self.export_policy_version() != version.policy {
+            return Err(RouteExportPageError::Invalidated);
+        }
+        Ok(RouteExportPage {
+            peers,
+            more,
+            version,
+        })
+    }
+
+    /// [`RouteExportVersion::policy`]: the installed export chains' change
+    /// version and the summed generations of every dataset the registered
+    /// peers' chains read. A dataset swap is visible to the next explain
+    /// before the RIB hears of it, so its generation is read directly; each
+    /// generation only grows, so any swap moves the sum.
+    fn export_policy_version(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let datasets = self
+            .peer_sendable_families
+            .keys()
+            .filter_map(|&peer| self.export_chains.for_peer(peer))
+            .flat_map(|chain| chain.compiled().referenced_datasets())
+            .fold(0u64, |sum, slot| {
+                sum.wrapping_add(slot.handle.pin().generation)
+            });
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (self.export_chains.version(), datasets).hash(&mut hasher);
+        hasher.finish()
     }
 
     /// The export disposition of the local `route` toward one registered
@@ -3841,6 +3913,22 @@ impl RibManager {
             evpn_routes,
         })
     }
+}
+
+/// Fingerprint of the local route state that export reads, for
+/// [`RouteExportVersion::route`].
+fn local_route_fingerprint(route: &crate::route::Route) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        route.next_hop,
+        route.link_local_next_hop,
+        &*route.attributes,
+        route.validation_state,
+        route.aspa_state,
+    )
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]

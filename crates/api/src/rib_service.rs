@@ -1833,6 +1833,27 @@ fn route_page_token_signature(payload: &str) -> String {
     encoded
 }
 
+/// `payload` with its process-local integrity tag appended, for page tokens
+/// of RPCs outside this service.
+pub(crate) fn sign_page_token(payload: &str) -> String {
+    let signature = route_page_token_signature(payload);
+    format!("{payload}|{signature}")
+}
+
+/// The payload of a token [`sign_page_token`] produced in this process, or
+/// `None` for a forged, altered or pre-restart token.
+pub(crate) fn verified_page_token_payload(token: &str) -> Option<&str> {
+    let (payload, signature) = token.rsplit_once('|')?;
+    let expected = route_page_token_signature(payload);
+    (signature.len() == expected.len()
+        && signature
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0)
+        .then_some(payload)
+}
+
 /// Encode an opaque cursor whose process-local integrity tag binds every field.
 /// Tokens intentionally expire across process restarts.
 fn encode_route_page_token(

@@ -18,7 +18,9 @@ use rustbgpd_rib::injection_lease::{
     LeasedKeysPage, LeasedKeysResume, validate_lease, validate_owner,
 };
 use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
-use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition};
+use rustbgpd_rib::update::{
+    PeerRouteExport, RouteExportDisposition, RouteExportPageError, RouteExportVersion,
+};
 use rustbgpd_rib::{
     EvpnRibRoute, FlowSpecRoute, InjectOutcome, ReplayComplete, RibCommandError, RibUpdate, Route,
     RouteOrigin,
@@ -298,6 +300,55 @@ fn parse_route_key_prefix(prefix: &str, prefix_length: u32) -> Result<Prefix, St
 
 /// Peers per `ListPathExportDispositions` page when the request leaves it 0.
 const DEFAULT_EXPORT_PAGE_SIZE: usize = 100;
+
+/// Longest `ListPathExportDispositions` page token this process issues,
+/// with room to spare.
+const EXPORT_PAGE_TOKEN_MAX_LEN: usize = 256;
+
+/// The opaque continuation of a `ListPathExportDispositions` walk: the
+/// route key, the walk version the RIB reported and the last listed peer,
+/// signed so that only this process's tokens resume.
+fn encode_export_page_token(
+    prefix: Prefix,
+    path_id: u32,
+    peer: IpAddr,
+    version: RouteExportVersion,
+) -> String {
+    crate::rib_service::sign_page_token(&format!(
+        "pe1|{:016x}|{:016x}|{:016x}|{prefix}|{path_id}|{peer}",
+        version.roster, version.route, version.policy
+    ))
+}
+
+/// Where a `ListPathExportDispositions` page resumes. A token this process
+/// did not issue, or one issued for another route key, is
+/// `INVALID_ARGUMENT`.
+fn decode_export_page_token(
+    token: &str,
+    prefix: Prefix,
+    path_id: u32,
+) -> Result<(IpAddr, RouteExportVersion), Status> {
+    let invalid = || Status::invalid_argument("invalid page_token");
+    if token.len() > EXPORT_PAGE_TOKEN_MAX_LEN {
+        return Err(invalid());
+    }
+    let payload = crate::rib_service::verified_page_token_payload(token).ok_or_else(invalid)?;
+    let parts: Vec<_> = payload.split('|').collect();
+    let ["pe1", roster, route, policy, key_prefix, key_path_id, peer] = parts.as_slice() else {
+        return Err(invalid());
+    };
+    if *key_prefix != prefix.to_string() || *key_path_id != path_id.to_string() {
+        return Err(Status::invalid_argument(
+            "page_token belongs to another route key",
+        ));
+    }
+    let version = RouteExportVersion {
+        roster: u64::from_str_radix(roster, 16).map_err(|_| invalid())?,
+        route: u64::from_str_radix(route, 16).map_err(|_| invalid())?,
+        policy: u64::from_str_radix(policy, 16).map_err(|_| invalid())?,
+    };
+    Ok((peer.parse().map_err(|_| invalid())?, version))
+}
 
 fn export_disposition_to_proto(row: PeerRouteExport) -> proto::PathExportDispositionEntry {
     let disposition = match row.disposition {
@@ -997,11 +1048,11 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let after = if req.page_token.is_empty() {
             None
         } else {
-            Some(
-                req.page_token
-                    .parse::<IpAddr>()
-                    .map_err(|_| Status::invalid_argument("invalid page_token"))?,
-            )
+            Some(decode_export_page_token(
+                &req.page_token,
+                prefix,
+                req.path_id,
+            )?)
         };
         let page_size = match req.page_size {
             0 => DEFAULT_EXPORT_PAGE_SIZE,
@@ -1017,19 +1068,21 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             reply,
         })
         .await?
-        .ok_or_else(|| {
-            Status::not_found(format!(
+        .map_err(|error| match error {
+            RouteExportPageError::NoRoute => Status::not_found(format!(
                 "no local route {}/{} with path_id {}",
                 req.prefix, req.prefix_length, req.path_id
-            ))
+            )),
+            RouteExportPageError::Invalidated => Status::aborted(
+                "the local route, the Established peer set or their export policy changed \
+                 during pagination; restart with an empty page_token",
+            ),
         })?;
-        let next_page_token = if page.more {
-            page.peers
-                .last()
-                .map(|row| row.peer.to_string())
-                .unwrap_or_default()
-        } else {
-            String::new()
+        let next_page_token = match page.peers.last() {
+            Some(row) if page.more => {
+                encode_export_page_token(prefix, req.path_id, row.peer, page.version)
+            }
+            _ => String::new(),
         };
         Ok(Response::new(proto::ListPathExportDispositionsResponse {
             peers: page
@@ -2031,15 +2084,22 @@ mod tests {
     /// `NEXT_HOP` only for an IPv4 prefix. EVPN injection still rejects it.
     /// The read is served on a read-only listener, maps the RIB's page to
     /// the wire, resumes after the token's peer, clamps the page size, and
-    /// reports a missing local route as `NOT_FOUND`.
+    /// reports a missing local route as `NOT_FOUND`. The first page carries
+    /// no cursor; a stale token is `ABORTED`, and a forged, legacy or
+    /// other-key token is `INVALID_ARGUMENT` without reaching the RIB.
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
-        reason = "one paged exchange drives the mapping, resume, clamp and not-found checks"
+        reason = "one paged exchange drives the mapping, resume, clamp, not-found and token checks"
     )]
     async fn list_path_export_dispositions_pages_and_maps_rows() {
         use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition, RouteExportPage};
 
+        let version = RouteExportVersion {
+            roster: 5,
+            route: 0xfeed,
+            policy: 0xbeef,
+        };
         let (tx, mut rx) = mpsc::channel(16);
         let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
         let responder = tokio::spawn(async move {
@@ -2056,31 +2116,38 @@ mod tests {
                     panic!("expected QueryLocalRouteExport");
                 };
                 seen.push((prefix, path_id, after, page_size));
-                let page = (path_id == 7).then(|| RouteExportPage {
-                    peers: vec![
-                        PeerRouteExport {
-                            peer: "192.0.2.1".parse().unwrap(),
-                            peer_interface: None,
-                            disposition: RouteExportDisposition::Withheld,
-                            reason: "family_suppressed:missing_ipv6_next_hop".to_string(),
-                            explain_code: "family_not_sendable",
-                            detail: "withheld".to_string(),
-                            advertised_path_id: 0,
-                            deny_validation: vec![],
-                        },
-                        PeerRouteExport {
-                            peer: "192.0.2.2".parse().unwrap(),
-                            peer_interface: Some("eth0".into()),
-                            disposition: RouteExportDisposition::Withheld,
-                            reason: "export_policy".to_string(),
-                            explain_code: "policy_denied",
-                            detail: "denied".to_string(),
-                            advertised_path_id: 0,
-                            deny_validation: vec!["rpki_invalid".to_string()],
-                        },
-                    ],
-                    more: after.is_none(),
-                });
+                let page = if path_id != 7 {
+                    Err(RouteExportPageError::NoRoute)
+                } else if after.is_some_and(|(_, seen)| seen != version) {
+                    Err(RouteExportPageError::Invalidated)
+                } else {
+                    Ok(RouteExportPage {
+                        peers: vec![
+                            PeerRouteExport {
+                                peer: "192.0.2.1".parse().unwrap(),
+                                peer_interface: None,
+                                disposition: RouteExportDisposition::Withheld,
+                                reason: "family_suppressed:missing_ipv6_next_hop".to_string(),
+                                explain_code: "family_not_sendable",
+                                detail: "withheld".to_string(),
+                                advertised_path_id: 0,
+                                deny_validation: vec![],
+                            },
+                            PeerRouteExport {
+                                peer: "192.0.2.2".parse().unwrap(),
+                                peer_interface: Some("eth0".into()),
+                                disposition: RouteExportDisposition::Withheld,
+                                reason: "export_policy".to_string(),
+                                explain_code: "policy_denied",
+                                detail: "denied".to_string(),
+                                advertised_path_id: 0,
+                                deny_validation: vec!["rpki_invalid".to_string()],
+                            },
+                        ],
+                        more: after.is_none(),
+                        version,
+                    })
+                };
                 reply.send(page).ok();
             }
             seen
@@ -2094,13 +2161,18 @@ mod tests {
                 page_token: page_token.into(),
             })
         };
+        let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8::7".parse().unwrap(), 128));
+        let peer2: IpAddr = "192.0.2.2".parse().unwrap();
 
         let first = svc
             .list_path_export_dispositions(request(0, "", 7))
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(first.next_page_token, "192.0.2.2");
+        assert_eq!(
+            decode_export_page_token(&first.next_page_token, prefix, 7).unwrap(),
+            (peer2, version)
+        );
         let row = &first.peers[0];
         assert_eq!(row.peer_address, "192.0.2.1");
         assert_eq!(
@@ -2129,27 +2201,170 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(missing.code(), tonic::Code::NotFound);
-        let bad_token = svc
-            .list_path_export_dispositions(request(1, "not-an-address", 7))
+        // A token this process issued for an older walk version.
+        let stale = encode_export_page_token(
+            prefix,
+            7,
+            peer2,
+            RouteExportVersion {
+                roster: 4,
+                ..version
+            },
+        );
+        let aborted = svc
+            .list_path_export_dispositions(request(1, &stale, 7))
             .await
             .unwrap_err();
-        assert_eq!(bad_token.code(), tonic::Code::InvalidArgument);
+        assert_eq!(aborted.code(), tonic::Code::Aborted);
+        // Rejected before the RIB: a bare peer address (the earlier token
+        // form), a token with an altered field, and another key's token.
+        let altered = first.next_page_token.replacen("pe1|", "pe1|1", 1);
+        for (token, path_id) in [
+            ("not-an-address", 7),
+            ("192.0.2.2", 7),
+            (altered.as_str(), 7),
+            (first.next_page_token.as_str(), 8),
+        ] {
+            let error = svc
+                .list_path_export_dispositions(request(1, token, path_id))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{token}");
+        }
 
         drop(svc);
-        let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8::7".parse().unwrap(), 128));
         assert_eq!(
             responder.await.unwrap(),
             vec![
                 (prefix, 7, None, DEFAULT_EXPORT_PAGE_SIZE),
+                (prefix, 7, Some((peer2, version)), ROUTE_QUERY_MAX_PAGE_SIZE),
+                (prefix, 8, None, 1),
                 (
                     prefix,
                     7,
-                    Some("192.0.2.2".parse().unwrap()),
-                    ROUTE_QUERY_MAX_PAGE_SIZE
+                    Some((
+                        peer2,
+                        RouteExportVersion {
+                            roster: 4,
+                            ..version
+                        }
+                    )),
+                    1
                 ),
-                (prefix, 8, None, 1),
             ]
         );
+    }
+
+    /// The paged walk against a real RIB, mutated between page calls: a
+    /// route deleted mid-walk is `ABORTED` where a never-added key is
+    /// `NOT_FOUND`, and a peer flap between pages is `ABORTED` rather than
+    /// a resumed walk that silently skips or repeats a peer.
+    #[tokio::test]
+    async fn export_disposition_walk_aborts_on_mid_walk_changes() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::new(InjectionLeases::new()),
+        );
+        let mut outbound = Vec::new();
+        let mut peer_up = |octet: u8| {
+            let (outbound_tx, outbound_rx) = mpsc::channel(64);
+            outbound.push(outbound_rx);
+            RibUpdate::PeerUp {
+                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
+                session_id: 0,
+                peer_asn: 65_010,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                outbound_tx,
+                export_policy: None,
+                sendable_families: vec![(Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: vec![],
+                add_path_send_max: 0,
+                negotiated_orf_recv: vec![],
+                negotiated_llgr_families: vec![],
+            }
+        };
+        for update in [peer_up(1), peer_up(2), peer_up(3)] {
+            rib_tx.send(update).await.unwrap();
+        }
+        let add = |path_id| {
+            svc.add_path(Request::new(proto::AddPathRequest {
+                prefix: "203.0.113.7".into(),
+                prefix_length: 32,
+                next_hop: "0.0.0.0".into(),
+                path_id,
+                ..Default::default()
+            }))
+        };
+        let list = |path_id, page_token: String| {
+            svc.list_path_export_dispositions(Request::new(
+                proto::ListPathExportDispositionsRequest {
+                    prefix: "203.0.113.7".into(),
+                    prefix_length: 32,
+                    path_id,
+                    page_size: 2,
+                    page_token,
+                },
+            ))
+        };
+        add(1).await.unwrap();
+
+        // Peer flap between pages: down then up again leaves the same
+        // peer set, but the first page described the previous session.
+        let first = list(1, String::new()).await.unwrap().into_inner();
+        assert_eq!(first.peers.len(), 2);
+        rib_tx
+            .send(RibUpdate::PeerDown {
+                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                session_id: 0,
+            })
+            .await
+            .unwrap();
+        rib_tx.send(peer_up(1)).await.unwrap();
+        let flapped = list(1, first.next_page_token).await.unwrap_err();
+        assert_eq!(flapped.code(), tonic::Code::Aborted);
+
+        // A restarted walk completes when nothing moves between pages.
+        let first = list(1, String::new()).await.unwrap().into_inner();
+        let rest = list(1, first.next_page_token.clone())
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(rest.peers.len(), 1);
+        assert_eq!(rest.next_page_token, "");
+
+        // Route deleted between pages.
+        svc.delete_path(Request::new(proto::DeletePathRequest {
+            prefix: "203.0.113.7".into(),
+            prefix_length: 32,
+            path_id: 1,
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        let deleted = list(1, first.next_page_token).await.unwrap_err();
+        assert_eq!(deleted.code(), tonic::Code::Aborted);
+        let never = list(2, String::new()).await.unwrap_err();
+        assert_eq!(never.code(), tonic::Code::NotFound);
+        let restarted = list(1, String::new()).await.unwrap_err();
+        assert_eq!(restarted.code(), tonic::Code::NotFound);
+
+        drop((svc, rib_tx, outbound));
+        manager_task.await.unwrap();
     }
 
     #[tokio::test]
