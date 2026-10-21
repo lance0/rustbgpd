@@ -9,7 +9,7 @@ use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfEntries, OrfMatch, OrfType};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinError;
 use tracing::Instrument;
 
 const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -604,25 +604,19 @@ impl PeerSession {
     /// task returns while its detached writer still holds the NOTIFICATION,
     /// and a process exit that follows it closes the socket first. The
     /// caller's deadline bounds the wait: `PeerHandle::shutdown_timeout`
-    /// aborts the session task when it expires, and the writer is aborted
-    /// with it, so a backlog flushed ahead of the Cease to a peer that has
-    /// stopped reading cannot outlive that deadline.
+    /// aborts the session task when it expires, and dropping the
+    /// [`super::writer::WriterJoin`] aborts the writer with it, so a backlog
+    /// flushed ahead of the Cease to a peer that has stopped reading cannot
+    /// outlive that deadline.
     pub(super) async fn join_closed_writer(&mut self) {
-        struct AbortOnDrop(tokio::task::AbortHandle);
-        impl Drop for AbortOnDrop {
-            fn drop(&mut self) {
-                self.0.abort();
-            }
-        }
         debug_assert!(
             self.writer_priority_tx.is_none() && self.writer_bulk_tx.is_none(),
             "join the writer only after its senders are dropped"
         );
-        if let Some(join) = self.writer_join.take() {
-            let _abort = AbortOnDrop(join.abort_handle());
-            if let Err(error) = join.await {
-                warn!(peer = %self.peer_label, %error, "writer task failed during session close");
-            }
+        if let Some(join) = self.writer_join.take()
+            && let Err(error) = join.await
+        {
+            warn!(peer = %self.peer_label, %error, "writer task failed during session close");
         }
     }
 
@@ -1477,7 +1471,7 @@ pub(super) async fn read_tcp(
 /// `writer_join = None` before the next select iteration — polling a
 /// completed `JoinHandle` a second time panics per tokio semantics.
 pub(super) async fn await_writer_join(
-    handle: &mut Option<JoinHandle<Result<(), super::writer::WriterExit>>>,
+    handle: &mut Option<super::writer::WriterJoin>,
 ) -> Result<Result<(), super::writer::WriterExit>, JoinError> {
     let join = handle
         .as_mut()

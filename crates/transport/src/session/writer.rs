@@ -213,7 +213,39 @@ pub(super) struct WriterHandle {
     pub(super) teardown_tx: watch::Sender<bool>,
     /// Resolves when the writer exits: `Ok(())` on clean shutdown,
     /// `Err(WriterExit)` on TCP write/flush failure or send-hold expiry.
-    pub(super) join: JoinHandle<Result<(), WriterExit>>,
+    pub(super) join: WriterJoin,
+}
+
+/// The writer task's handle, which aborts the writer when dropped. The
+/// session owns it for the connection's lifetime, so whatever drops the
+/// session also stops its writer: an owner abandoning a close at its
+/// deadline (even while the session still awaits RIB or BMP delivery before
+/// queueing the NOTIFICATION), a replaced connection, or a session task that
+/// ends. A detached writer could otherwise keep writing past that deadline,
+/// or stay blocked forever when the send hold timer is disabled.
+pub(super) struct WriterJoin(JoinHandle<Result<(), WriterExit>>);
+
+impl WriterJoin {
+    pub(super) fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for WriterJoin {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl Future for WriterJoin {
+    type Output = Result<Result<(), WriterExit>, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
 }
 
 /// The constant KEEPALIVE PDU: 16-byte all-ones marker, length 19,
@@ -258,7 +290,7 @@ pub(super) fn spawn(
         #[cfg(all(target_os = "linux", feature = "bench-internals"))]
         bench_writer_polls: std::env::var("RUSTBGPD_BENCH_WRITER_POLLS").as_deref() == Ok("1"),
     };
-    let join = tokio::spawn(task.run().in_current_span());
+    let join = WriterJoin(tokio::spawn(task.run().in_current_span()));
     WriterHandle {
         bulk_tx,
         completed,

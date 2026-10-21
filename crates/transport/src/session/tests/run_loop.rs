@@ -700,6 +700,91 @@ async fn stop_past_the_flush_budget_discards_the_backlog_and_clears_the_queue_ga
         .expect("run() must return Ok");
 }
 
+/// A shutdown can be abandoned before the NOTIFICATION is even queued: on the
+/// Established path `SessionDown` first waits for RIB delivery, and a full
+/// RIB channel parks it there. When the owner drops the session task at its
+/// deadline, the session's writer must stop with it rather than keep
+/// flushing the backlog from a detached task.
+#[tokio::test]
+async fn shutdown_abandoned_before_the_cease_is_queued_aborts_the_writer() {
+    let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+    let (peer_ip, session_id) = (session.peer_ip, session.session_identity.id);
+    while session
+        .rib_tx
+        .try_send(RibUpdate::PeerDown {
+            peer: peer_ip,
+            session_id,
+        })
+        .is_ok()
+    {}
+    let senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
+    let session_task = tokio::spawn(async move { session.run().await });
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    // Handshake: the session has taken the command off its channel.
+    while cmd_tx.capacity() < cmd_tx.max_capacity() {
+        tokio::task::yield_now().await;
+    }
+    tokio::task::yield_now().await;
+    assert!(
+        !session_task.is_finished() && senders_dropped.has_changed().is_ok(),
+        "the session must still be parked on RIB delivery, before the Cease"
+    );
+    session_task.abort();
+    assert!(session_task.await.unwrap_err().is_cancelled());
+
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), peer.read_to_end(&mut wire))
+        .await
+        .expect("the aborted writer must close the socket")
+        .unwrap();
+    let mut rest = wire.as_slice();
+    let mut updates = 0;
+    while rest.len() >= 19 {
+        let len = usize::from(u16::from_be_bytes([rest[16], rest[17]]));
+        if rest.len() < len {
+            break;
+        }
+        assert_ne!(rest[18], 3, "no NOTIFICATION was queued before the drop");
+        updates += usize::from(rest[18] == 2);
+        rest = &rest[len..];
+    }
+    assert!(
+        updates < WEDGED_BACKLOG,
+        "the writer kept flushing after its session was dropped"
+    );
+}
+
+/// An owner that stops a session and then drops its handle ends the session
+/// task while the stop's NOTIFICATION may still be queued behind a backlog.
+/// The task joins that in-progress close before it returns, since dropping
+/// the session aborts its writer.
+#[tokio::test]
+async fn dropping_the_handle_after_a_stop_still_flushes_the_cease() {
+    let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+    let mut senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
+    let session_task = tokio::spawn(async move { session.run().await });
+    cmd_tx
+        .send(PeerCommand::Stop { reason: None })
+        .await
+        .unwrap();
+    assert!(senders_dropped.changed().await.is_err());
+    drop(cmd_tx);
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    session_task
+        .await
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
+    let frames = parse_wire_frames(&wire);
+    let (last_type, last) = frames.last().expect("frames on the wire");
+    assert_eq!(
+        *last_type, 3,
+        "the stop's NOTIFICATION must reach the wire last"
+    );
+    assert_eq!(&last[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
+}
+
 /// The flush ahead of the Cease stays inside the per-peer shutdown bound: when
 /// the owner gives up on a session whose peer stopped reading (as
 /// `PeerHandle::shutdown_timeout` does by aborting the task), the writer is

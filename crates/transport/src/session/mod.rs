@@ -288,7 +288,7 @@ pub(crate) struct PeerSession {
     /// `JoinHandle` of the writer task. Polled by the session's
     /// `select!` so writer-exit (clean shutdown, TCP error, or RFC 9687
     /// send-hold expiry) surfaces as a TCP-disconnect event.
-    writer_join: Option<JoinHandle<Result<(), writer::WriterExit>>>,
+    writer_join: Option<writer::WriterJoin>,
     read_buf: ReadBuffer,
     timers: Timers,
     metrics: BgpMetrics,
@@ -2844,17 +2844,19 @@ impl PeerSession {
 
                 // External command
                 cmd = commands.recv() => {
-                    match cmd {
-                        Some(cmd) => {
-                            if self.handle_command(cmd).await == ControlFlow::Break(()) {
-                                self.join_closed_writer().await;
-                                return Ok(());
-                            }
+                    let Some(cmd) = cmd else {
+                        // All senders dropped — shut down. A close already
+                        // under way (for example after a stop) still gets
+                        // to write its NOTIFICATION: dropping the session
+                        // aborts its writer.
+                        if self.writer_priority_tx.is_none() {
+                            self.join_closed_writer().await;
                         }
-                        None => {
-                            // All senders dropped — shut down
-                            return Ok(());
-                        }
+                        return Ok(());
+                    };
+                    if self.handle_command(cmd).await == ControlFlow::Break(()) {
+                        self.join_closed_writer().await;
+                        return Ok(());
                     }
                 }
 
