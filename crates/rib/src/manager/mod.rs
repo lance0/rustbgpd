@@ -1851,6 +1851,10 @@ const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
 /// Server-side hard cap on a paged route-query page — bounds per-page
 /// allocation regardless of the client-requested size.
 pub const ROUTE_QUERY_MAX_PAGE_SIZE: usize = 1000;
+/// Most local route keys one export-disposition query may name. Every page
+/// of a walk re-reads each named key's route to check the walk's fence, so
+/// this bounds that per-page work beside the page size.
+pub const LOCAL_ROUTE_EXPORT_MAX_KEYS: usize = 1000;
 
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
 /// Production stride of probed routes between wall-clock checks inside one
@@ -4357,12 +4361,12 @@ impl RibManager {
                 }
             }
             RibUpdate::QueryLocalRouteExport {
-                prefix,
-                path_id,
-                after,
+                keys,
+                managed,
+                resume,
                 page_size,
                 reply,
-            } => self.handle_query_local_route_export(prefix, path_id, after, page_size, reply),
+            } => self.handle_query_local_route_export(&keys, managed, resume, page_size, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
             }

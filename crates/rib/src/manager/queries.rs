@@ -21,12 +21,13 @@ use crate::update::{
     BestPathCandidate, BestRoutesPage, DataplaneExactQueryError, DataplanePageError,
     DataplaneVersions, EvpnRoutePage, EvpnRouteQueryKey, ExactBestRoutes, ExactExportKey,
     ExactFibInstallCandidates, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
-    ExplainBestPath, FibInstallCandidatesPage, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats,
-    NeighborRibSnapshot, NeighborRibSnapshotResponse, PeerRouteExport, RibRowFilter,
-    RouteExportDisposition, RouteExportPage, RouteExportPageError, RouteExportVersion, RoutePage,
-    RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
-    UpdateGroupPeerComparison, VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
-    ordered_route_query, route_query_key,
+    ExplainBestPath, ExportDestination, FibInstallCandidatesPage, LocalRouteExports, MrtPeerEntry,
+    MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse,
+    PeerRouteExport, RibRowFilter, RouteExportCursor, RouteExportDisposition, RouteExportPage,
+    RouteExportPageError, RouteExportVersion, RoutePage, RoutePageError, RoutePageVersion,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
+    VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query,
+    route_query_key,
 };
 
 /// Full-snapshot queries check cancellation at bounded work intervals instead
@@ -1916,88 +1917,169 @@ impl RibManager {
     /// Answer [`crate::update::RibUpdate::QueryLocalRouteExport`].
     pub(super) fn handle_query_local_route_export(
         &mut self,
-        prefix: Prefix,
-        path_id: u32,
-        after: Option<(IpAddr, RouteExportVersion)>,
+        keys: &[(Prefix, u32)],
+        managed: Option<Vec<ExportDestination>>,
+        resume: Option<(RouteExportCursor, RouteExportVersion)>,
         page_size: usize,
         reply: tokio::sync::oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
     ) {
-        let page = self.local_route_export_page(prefix, path_id, after, page_size);
+        let page = self.local_route_export_page(keys, managed, resume, page_size);
         if reply.send(page).is_err() {
             warn!("query caller dropped before receiving response");
         }
     }
 
-    /// One page of per-peer export dispositions for the local route
-    /// `(prefix, path_id)`: one prefix-local export explain per listed peer,
-    /// so the page size bounds the work. A resumed walk is served only while
-    /// its route content, the outbound peer roster and the peers' export
-    /// policy match its first page, so a route removed mid-walk is not
-    /// reported as never having existed and a peer that joins or leaves is
-    /// neither skipped nor counted twice. Any page, including the first, is
-    /// refused when the policy version moves while its rows are evaluated.
-    /// Removing the route and restoring identical content between pages
-    /// leaves the walk valid: every disposition is a function of that
-    /// content.
+    /// One page of per-destination export dispositions for the local routes
+    /// `keys`: keys in query order, each key's destinations in order, at most
+    /// `page_size` entries. A destination row costs one prefix-local export
+    /// explain, or none for a managed peer that is not registered; a key with
+    /// no local route, or with no destinations, is one entry with no rows.
+    /// So the page size bounds the explains and every page makes progress.
+    ///
+    /// A resumed walk is served only while every key's route content, the
+    /// outbound peer roster, the peers' export policy and the named managed
+    /// peers match its first page, so a route removed mid-walk is not
+    /// reported as never having existed and a peer that joins, leaves or
+    /// becomes Established is neither skipped nor counted twice. Any page,
+    /// including the first, is refused when the policy version moves while
+    /// its rows are evaluated. Removing a route and restoring identical
+    /// content between pages leaves the walk valid: every disposition is a
+    /// function of that content.
     fn local_route_export_page(
         &mut self,
-        prefix: Prefix,
-        path_id: u32,
-        after: Option<(IpAddr, RouteExportVersion)>,
+        keys: &[(Prefix, u32)],
+        managed: Option<Vec<ExportDestination>>,
+        resume: Option<(RouteExportCursor, RouteExportVersion)>,
         page_size: usize,
     ) -> Result<RouteExportPage, RouteExportPageError> {
-        let Some(route) = self
-            .ribs
-            .get(&LOCAL_PEER)
-            .and_then(|rib| {
-                rib.iter_prefix(&prefix)
-                    .find(|route| route.path_id == path_id)
+        let local = self.ribs.get(&LOCAL_PEER);
+        let routes: Vec<Option<crate::route::Route>> = keys
+            .iter()
+            .map(|&(prefix, path_id)| {
+                local.and_then(|rib| {
+                    rib.iter_prefix(&prefix)
+                        .find(|route| route.path_id == path_id)
+                        .cloned()
+                })
             })
-            .cloned()
-        else {
-            return Err(if after.is_some() {
-                RouteExportPageError::Invalidated
-            } else {
-                RouteExportPageError::NoRoute
-            });
-        };
+            .collect();
         let version = RouteExportVersion {
             roster: self.outbound_roster_generation,
-            route: local_route_fingerprint(&route),
+            route: local_routes_fingerprint(&routes),
             policy: self.export_policy_version(),
+            managed: managed.as_ref().map_or(0, |peers| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                peers.hash(&mut hasher);
+                hasher.finish() | 1
+            }),
         };
-        if after.is_some_and(|(_, expected)| expected != version) {
+        let (cursor, expected) = resume.unzip();
+        if expected.is_some_and(|expected| expected != version)
+            || cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.key >= keys.len())
+        {
             return Err(RouteExportPageError::Invalidated);
         }
-        let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
-        let mut peers = smallest_keys_after(
-            self.peer_sendable_families.keys().copied(),
-            after.map(|(peer, _)| peer),
-            n + 1,
-        );
-        let more = peers.len() > n;
-        peers.truncate(n);
+        let destinations = self.export_destinations(managed);
+        let RouteExportCursor {
+            key: start,
+            mut after,
+        } = cursor.unwrap_or_default();
+        let mut budget = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
         #[cfg(test)]
         if let Some(hook) = BEFORE_EXPORT_ROWS.take() {
             hook();
         }
-        let peers = peers
-            .into_iter()
-            .map(|peer| self.local_route_export(peer, &route))
-            .collect();
+        let mut listed = Vec::new();
+        let mut next = None;
+        for (index, route) in routes.iter().enumerate().skip(start) {
+            if budget == 0 {
+                next = Some(RouteExportCursor {
+                    key: index,
+                    after: None,
+                });
+                break;
+            }
+            let mut entry = LocalRouteExports {
+                key: index,
+                found: route.is_some(),
+                peers: Vec::new(),
+            };
+            let Some(route) = route else {
+                budget -= 1;
+                listed.push(entry);
+                continue;
+            };
+            let from = after.take().map_or(0, |after| {
+                destinations
+                    .partition_point(|(peer, scope, _)| (*peer, scope) <= (after.0, &after.1))
+            });
+            let remaining = &destinations[from..];
+            let take = remaining.len().min(budget);
+            budget -= take.max(1);
+            entry.peers = remaining[..take]
+                .iter()
+                .map(|(peer, scope, registered)| {
+                    if *registered {
+                        self.local_route_export(*peer, route)
+                    } else {
+                        not_established_export(*peer, scope.clone())
+                    }
+                })
+                .collect();
+            listed.push(entry);
+            if take < remaining.len() {
+                let (peer, scope, _) = &remaining[take - 1];
+                next = Some(RouteExportCursor {
+                    key: index,
+                    after: Some((*peer, scope.clone())),
+                });
+                break;
+            }
+        }
         // A dataset refresh is not a RIB message: it can land while the rows
         // above evaluate, each pinning datasets on its own. Recheck so no page,
         // first or last, mixes generations or carries a version its rows
-        // were not read under. Route and roster are actor-owned and cannot
-        // move inside this call.
+        // were not read under. Routes, roster and managed peers are fixed
+        // for this call.
         if self.export_policy_version() != version.policy {
             return Err(RouteExportPageError::Invalidated);
         }
         Ok(RouteExportPage {
-            peers,
-            more,
+            routes: listed,
+            next,
             version,
         })
+    }
+
+    /// Every destination of an export walk in order, with whether it is
+    /// registered for outbound updates: the registered sessions, plus each
+    /// `managed` peer that no registered session matches by address and
+    /// scope.
+    fn export_destinations(
+        &self,
+        managed: Option<Vec<ExportDestination>>,
+    ) -> Vec<(IpAddr, Option<Arc<str>>, bool)> {
+        let mut destinations: Vec<_> = self
+            .peer_sendable_families
+            .keys()
+            .map(|&peer| (peer, self.session_peer_scope(peer).peer_interface(), true))
+            .collect();
+        let registered: HashSet<ExportDestination> = destinations
+            .iter()
+            .map(|(peer, scope, _)| (*peer, scope.clone()))
+            .collect();
+        destinations.extend(
+            managed
+                .into_iter()
+                .flatten()
+                .filter(|destination| !registered.contains(destination))
+                .map(|(peer, scope)| (peer, scope, false)),
+        );
+        destinations.sort_unstable_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        destinations
     }
 
     /// [`RouteExportVersion::policy`]: the installed export chains' change
@@ -3915,20 +3997,41 @@ impl RibManager {
     }
 }
 
-/// Fingerprint of the local route state that export reads, for
-/// [`RouteExportVersion::route`].
-fn local_route_fingerprint(route: &crate::route::Route) -> u64 {
+/// Fingerprint of the local route state that export reads for every
+/// queried key, absent routes included, for [`RouteExportVersion::route`].
+fn local_routes_fingerprint(routes: &[Option<crate::route::Route>]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (
-        route.next_hop,
-        route.link_local_next_hop,
-        &*route.attributes,
-        route.validation_state,
-        route.aspa_state,
-    )
-        .hash(&mut hasher);
+    for route in routes {
+        route
+            .as_ref()
+            .map(|route| {
+                (
+                    route.next_hop,
+                    route.link_local_next_hop,
+                    &*route.attributes,
+                    route.validation_state,
+                    route.aspa_state,
+                )
+            })
+            .hash(&mut hasher);
+    }
     hasher.finish()
+}
+
+/// The row of a managed peer with no session registered for outbound
+/// updates: nothing is exported to it, and no explain runs.
+fn not_established_export(peer: IpAddr, peer_interface: Option<Arc<str>>) -> PeerRouteExport {
+    PeerRouteExport {
+        peer,
+        peer_interface,
+        disposition: RouteExportDisposition::NotEstablished,
+        reason: "not_established".to_string(),
+        explain_code: "",
+        detail: "no Established session; nothing is exported to this peer".to_string(),
+        advertised_path_id: 0,
+        deny_validation: Vec::new(),
+    }
 }
 
 #[cfg(test)]

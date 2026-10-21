@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::update::{
-    PeerRouteExport, RouteExportDisposition, RouteExportPage, RouteExportPageError,
-    RouteExportVersion,
+    ExportDestination, LocalRouteExports, PeerRouteExport, RouteExportCursor,
+    RouteExportDisposition, RouteExportPage, RouteExportPageError, RouteExportVersion,
 };
 
 fn manager() -> (RibManager, mpsc::Sender<RibUpdate>) {
@@ -93,26 +93,56 @@ fn inject(manager: &mut RibManager, route: Route) {
     rx.try_recv().unwrap().unwrap();
 }
 
-fn query(
+type Resume = Option<(RouteExportCursor, RouteExportVersion)>;
+
+fn query_keys(
     manager: &mut RibManager,
-    prefix: Prefix,
-    path_id: u32,
-    after: Option<(IpAddr, RouteExportVersion)>,
+    keys: &[(Prefix, u32)],
+    named: Option<Vec<ExportDestination>>,
+    resume: Resume,
     page_size: usize,
 ) -> Result<RouteExportPage, RouteExportPageError> {
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryLocalRouteExport {
-        prefix,
-        path_id,
-        after,
+        keys: keys.to_vec(),
+        managed: named,
+        resume,
         page_size,
         reply,
     });
     rx.try_recv().unwrap()
 }
 
+fn query(
+    manager: &mut RibManager,
+    prefix: Prefix,
+    path_id: u32,
+    resume: Resume,
+    page_size: usize,
+) -> Result<RouteExportPage, RouteExportPageError> {
+    query_keys(manager, &[(prefix, path_id)], None, resume, page_size)
+}
+
+/// Where the walk `page` belongs to resumes.
+fn resume_of(page: &RouteExportPage) -> Resume {
+    page.next.clone().map(|cursor| (cursor, page.version))
+}
+
+/// A page that lists one key and finds no local route for it.
+fn not_found(key: usize) -> Vec<LocalRouteExports> {
+    vec![LocalRouteExports {
+        key,
+        found: false,
+        peers: vec![],
+    }]
+}
+
 fn row(page: &RouteExportPage, peer: IpAddr) -> &PeerRouteExport {
-    page.peers.iter().find(|row| row.peer == peer).unwrap()
+    page.routes
+        .iter()
+        .flat_map(|route| &route.peers)
+        .find(|row| row.peer == peer)
+        .unwrap()
 }
 
 fn v4(octet: u8) -> IpAddr {
@@ -146,8 +176,8 @@ fn withheld_family_is_reported_beside_a_committed_peer() {
     inject(&mut manager, local_route(prefix, 0));
 
     let page = query(&mut manager, prefix, 0, None, 10).unwrap();
-    assert_eq!(page.peers.len(), 2);
-    assert!(!page.more);
+    assert_eq!(peers_of(&page).len(), 2);
+    assert!(page.next.is_none());
     let suppressed = row(&page, withheld);
     assert_eq!(suppressed.disposition, RouteExportDisposition::Withheld);
     assert_eq!(suppressed.reason, "family_suppressed:missing_ipv6_next_hop");
@@ -447,27 +477,18 @@ fn peers_page_in_address_order_within_the_bound() {
     inject(&mut manager, local_route(prefix, 0));
 
     let first = query(&mut manager, prefix, 0, None, 2).unwrap();
-    assert_eq!(
-        first.peers.iter().map(|row| row.peer).collect::<Vec<_>>(),
-        vec![v4(1), v4(2)]
-    );
-    assert!(first.more);
-    let rest = query(&mut manager, prefix, 0, Some((v4(2), first.version)), 2).unwrap();
-    assert_eq!(
-        rest.peers.iter().map(|row| row.peer).collect::<Vec<_>>(),
-        vec![v4(3)]
-    );
-    assert!(!rest.more);
+    assert_eq!(peers_of(&first), vec![v4(1), v4(2)]);
+    assert!(first.next.is_some());
+    let rest = query(&mut manager, prefix, 0, resume_of(&first), 2).unwrap();
+    assert_eq!(peers_of(&rest), vec![v4(3)]);
+    assert!(rest.next.is_none());
     // Zero still returns a row; the cap bounds an oversized request.
     assert_eq!(
-        query(&mut manager, prefix, 0, None, 0).unwrap().peers.len(),
+        peers_of(&query(&mut manager, prefix, 0, None, 0).unwrap()).len(),
         1
     );
     assert_eq!(
-        query(&mut manager, prefix, 0, None, usize::MAX)
-            .unwrap()
-            .peers
-            .len(),
+        peers_of(&query(&mut manager, prefix, 0, None, usize::MAX).unwrap()).len(),
         3
     );
     drop(receivers);
@@ -479,13 +500,13 @@ fn unknown_local_route_is_not_found() {
     let _rx = peer_up(&mut manager, v4(1), ipv4_sendable(), None, 0, 64);
     let prefix = v4_prefix();
     assert_eq!(
-        query(&mut manager, prefix, 0, None, 10),
-        Err(RouteExportPageError::NoRoute)
+        query(&mut manager, prefix, 0, None, 10).unwrap().routes,
+        not_found(0)
     );
     inject(&mut manager, local_route(prefix, 0));
     assert_eq!(
-        query(&mut manager, prefix, 3, None, 10),
-        Err(RouteExportPageError::NoRoute)
+        query(&mut manager, prefix, 3, None, 10).unwrap().routes,
+        not_found(0)
     );
 }
 
@@ -518,7 +539,11 @@ fn rows_report_the_destination_scope() {
 }
 
 fn peers_of(page: &RouteExportPage) -> Vec<IpAddr> {
-    page.peers.iter().map(|row| row.peer).collect()
+    page.routes
+        .iter()
+        .flat_map(|route| &route.peers)
+        .map(|row| row.peer)
+        .collect()
 }
 
 /// Peers 10.0.0.2..=4 and the local route, with a first page of two peers.
@@ -535,7 +560,7 @@ fn walk_started() -> (
     inject(&mut manager, local_route(v4_prefix(), 0));
     let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
     assert_eq!(peers_of(&first), vec![v4(2), v4(3)]);
-    assert!(first.more);
+    assert!(first.next.is_some());
     (manager, receivers, first)
 }
 
@@ -543,8 +568,7 @@ fn resume(
     manager: &mut RibManager,
     first: &RouteExportPage,
 ) -> Result<RouteExportPage, RouteExportPageError> {
-    let last = first.peers.last().unwrap().peer;
-    query(manager, v4_prefix(), 0, Some((last, first.version)), 2)
+    query(manager, v4_prefix(), 0, resume_of(first), 2)
 }
 
 fn withdraw(manager: &mut RibManager, prefix: Prefix, path_id: u32) {
@@ -562,8 +586,8 @@ fn withdraw(manager: &mut RibManager, prefix: Prefix, path_id: u32) {
 
 /// A route removed between pages invalidates the resumed walk instead of
 /// answering as if the key never existed; a fresh walk then reports no
-/// route. Red proof: answering a resumed walk's missing route with `NoRoute`
-/// fails the first assertion.
+/// route. Red proof: leaving the routes out of the walk version fails the
+/// first assertion.
 #[test]
 fn route_removed_mid_walk_invalidates_the_resumed_walk() {
     let (mut manager, _receivers, first) = walk_started();
@@ -573,8 +597,8 @@ fn route_removed_mid_walk_invalidates_the_resumed_walk() {
         Err(RouteExportPageError::Invalidated)
     );
     assert_eq!(
-        query(&mut manager, v4_prefix(), 0, None, 2),
-        Err(RouteExportPageError::NoRoute)
+        query(&mut manager, v4_prefix(), 0, None, 2).unwrap().routes,
+        not_found(0)
     );
 }
 
@@ -655,12 +679,12 @@ fn unrelated_changes_leave_the_walk_resumable() {
     });
     let rest = resume(&mut manager, &first).unwrap();
     assert_eq!(peers_of(&rest), vec![v4(4)]);
-    assert!(!rest.more);
+    assert!(rest.next.is_none());
     assert_eq!(rest.version, first.version);
 
     let single = query(&mut manager, v4_prefix(), 0, None, 10).unwrap();
     assert_eq!(peers_of(&single), vec![v4(2), v4(3), v4(4)]);
-    assert!(!single.more);
+    assert!(single.next.is_none());
 }
 
 /// The route fence is content, not identity, by design: removing the route
@@ -673,7 +697,7 @@ fn identical_route_restored_mid_walk_leaves_the_walk_resumable() {
     inject(&mut manager, local_route(v4_prefix(), 0));
     let rest = resume(&mut manager, &first).unwrap();
     assert_eq!(peers_of(&rest), vec![v4(4)]);
-    assert!(!rest.more);
+    assert!(rest.next.is_none());
 }
 
 /// Replacing a listed peer's export policy between pages, as a reload does
@@ -761,7 +785,7 @@ fn dataset_walk_setup() -> (
 fn export_dataset_swapped_mid_walk_invalidates_the_resumed_walk() {
     let (mut manager, _receivers, handle) = dataset_walk_setup();
     let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
-    assert!(first.more);
+    assert!(first.next.is_some());
 
     handle.refresh(allowed_dataset(false));
     assert_eq!(
@@ -782,7 +806,7 @@ fn export_dataset_swapped_while_a_page_evaluates_invalidates_the_page() {
 
     let (mut manager, _receivers, handle) = dataset_walk_setup();
     let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
-    assert!(first.more);
+    assert!(first.next.is_some());
     let refresh = Arc::clone(&handle);
     BEFORE_EXPORT_ROWS.set(Some(Box::new(move || {
         refresh.refresh(allowed_dataset(false));
@@ -802,4 +826,277 @@ fn export_dataset_swapped_while_a_page_evaluates_invalidates_the_page() {
     );
     // Without a refresh in the window, a restarted walk is served.
     assert!(query(&mut manager, v4_prefix(), 0, None, 2).is_ok());
+}
+
+fn prefix_at(octet: u8) -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32))
+}
+
+/// Per key on a page: its index, whether it was found and its row peers.
+fn listed(page: &RouteExportPage) -> Vec<(usize, bool, Vec<IpAddr>)> {
+    page.routes
+        .iter()
+        .map(|route| {
+            (
+                route.key,
+                route.found,
+                route.peers.iter().map(|row| row.peer).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Peers 10.0.0.1..=3 and local routes for keys 0 and 2 of [`batch_keys`];
+/// key 1 never exists.
+fn batch_setup() -> (RibManager, Vec<mpsc::Receiver<OutboundRouteUpdate>>) {
+    let (mut manager, _tx) = manager();
+    let receivers = [1, 2, 3]
+        .into_iter()
+        .map(|octet| peer_up(&mut manager, v4(octet), ipv4_sendable(), None, 0, 64))
+        .collect();
+    inject(&mut manager, local_route(prefix_at(1), 0));
+    inject(&mut manager, local_route(prefix_at(3), 0));
+    (manager, receivers)
+}
+
+fn batch_keys() -> Vec<(Prefix, u32)> {
+    vec![(prefix_at(1), 0), (prefix_at(2), 0), (prefix_at(3), 0)]
+}
+
+/// A batch lists keys in query order, each with every peer, and a key with
+/// no local route as one not-found entry rather than failing the call.
+#[test]
+fn batch_lists_keys_in_order_with_a_not_found_entry() {
+    let (mut manager, _receivers) = batch_setup();
+    let page = query_keys(&mut manager, &batch_keys(), None, None, 100).unwrap();
+    let all = vec![v4(1), v4(2), v4(3)];
+    assert_eq!(
+        listed(&page),
+        vec![(0, true, all.clone()), (1, false, vec![]), (2, true, all)]
+    );
+    assert!(page.next.is_none());
+    assert_eq!(
+        row(&page, v4(1)).disposition,
+        RouteExportDisposition::Committed
+    );
+}
+
+/// The page size bounds entries across keys: a row is one, and so is a key
+/// listed with no rows. A key split across pages continues with its
+/// remaining peers and no empty continuation entry. Red proof: charging
+/// nothing for a not-found key lists key 2's first row on the first page.
+#[test]
+fn batch_pages_split_keys_and_resume_where_they_stopped() {
+    let (mut manager, _receivers) = batch_setup();
+    let keys = batch_keys();
+    let first = query_keys(&mut manager, &keys, None, None, 4).unwrap();
+    assert_eq!(
+        listed(&first),
+        vec![(0, true, vec![v4(1), v4(2), v4(3)]), (1, false, vec![])]
+    );
+    assert_eq!(
+        first.next,
+        Some(RouteExportCursor {
+            key: 2,
+            after: None
+        })
+    );
+    let rest = query_keys(&mut manager, &keys, None, resume_of(&first), 4).unwrap();
+    assert_eq!(listed(&rest), vec![(2, true, vec![v4(1), v4(2), v4(3)])]);
+    assert!(rest.next.is_none());
+
+    // Two rows per page: key 0 splits after its second peer.
+    let first = query_keys(&mut manager, &keys, None, None, 2).unwrap();
+    assert_eq!(listed(&first), vec![(0, true, vec![v4(1), v4(2)])]);
+    let second = query_keys(&mut manager, &keys, None, resume_of(&first), 2).unwrap();
+    assert_eq!(
+        listed(&second),
+        vec![(0, true, vec![v4(3)]), (1, false, vec![])]
+    );
+    let third = query_keys(&mut manager, &keys, None, resume_of(&second), 2).unwrap();
+    assert_eq!(listed(&third), vec![(2, true, vec![v4(1), v4(2)])]);
+    let last = query_keys(&mut manager, &keys, None, resume_of(&third), 2).unwrap();
+    assert_eq!(listed(&last), vec![(2, true, vec![v4(3)])]);
+    assert!(last.next.is_none());
+}
+
+/// With no peers at all, each found key is still one entry, so a walk over
+/// many keys pages instead of returning them all at once.
+#[test]
+fn batch_found_key_without_peers_is_one_entry() {
+    let (mut manager, _tx) = manager();
+    inject(&mut manager, local_route(prefix_at(1), 0));
+    inject(&mut manager, local_route(prefix_at(3), 0));
+    let keys = batch_keys();
+    let first = query_keys(&mut manager, &keys, None, None, 2).unwrap();
+    assert_eq!(listed(&first), vec![(0, true, vec![]), (1, false, vec![])]);
+    let rest = query_keys(&mut manager, &keys, None, resume_of(&first), 2).unwrap();
+    assert_eq!(listed(&rest), vec![(2, true, vec![])]);
+    assert!(rest.next.is_none());
+}
+
+/// The route fence covers every key of the batch, not only the one being
+/// listed: a key not yet reached that is removed, or a not-found key that
+/// appears, invalidates the walk. Red proof: fingerprinting only the first
+/// key's route fails this test.
+#[test]
+fn batch_walk_aborts_when_any_key_changes() {
+    let (mut manager, _receivers) = batch_setup();
+    let keys = batch_keys();
+    let first = query_keys(&mut manager, &keys, None, None, 2).unwrap();
+    withdraw(&mut manager, prefix_at(3), 0);
+    assert_eq!(
+        query_keys(&mut manager, &keys, None, resume_of(&first), 2),
+        Err(RouteExportPageError::Invalidated)
+    );
+
+    let (mut manager, _receivers) = batch_setup();
+    let first = query_keys(&mut manager, &keys, None, None, 2).unwrap();
+    inject(&mut manager, local_route(prefix_at(2), 0));
+    assert_eq!(
+        query_keys(&mut manager, &keys, None, resume_of(&first), 2),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+fn numbered(peers: &[IpAddr]) -> Vec<ExportDestination> {
+    peers.iter().map(|&peer| (peer, None)).collect()
+}
+
+/// Named managed peers without a registered session are listed as not
+/// Established, in destination order beside the registered ones, with no
+/// explain behind them; without names, only registered peers are listed.
+#[test]
+fn managed_peers_without_a_session_are_listed_only_when_named() {
+    let (mut manager, _tx) = manager();
+    let _rx = peer_up(&mut manager, v4(2), ipv4_sendable(), None, 0, 64);
+    inject(&mut manager, local_route(v4_prefix(), 0));
+
+    let page = query_keys(
+        &mut manager,
+        &[(v4_prefix(), 0)],
+        Some(numbered(&[v4(1), v4(2), v4(3)])),
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(peers_of(&page), vec![v4(1), v4(2), v4(3)]);
+    assert_eq!(
+        row(&page, v4(2)).disposition,
+        RouteExportDisposition::Committed
+    );
+    for peer in [v4(1), v4(3)] {
+        let row = row(&page, peer);
+        assert_eq!(row.disposition, RouteExportDisposition::NotEstablished);
+        assert_eq!(row.reason, "not_established");
+        assert_eq!(row.explain_code, "");
+    }
+
+    let page = query(&mut manager, v4_prefix(), 0, None, 10).unwrap();
+    assert_eq!(peers_of(&page), vec![v4(2)]);
+}
+
+/// A managed link-local peer matches a registered session only on the same
+/// interface: the same address on another interface is a separate,
+/// not-Established destination with its own scope, and a walk pages between
+/// the two by scope.
+#[test]
+fn managed_peers_match_registered_sessions_by_scope() {
+    let (mut manager, _tx) = manager();
+    let link_local: IpAddr = "fe80::1".parse().unwrap();
+    manager.handle_update(RibUpdate::SetPeerSourceContext {
+        peer: link_local,
+        session_id: 0,
+        context: Arc::new(crate::update::PeerSourceContext {
+            dampening_admission: None,
+            peer_interface: Some("eth0".into()),
+            accepted_dynamic_range: None,
+            route_server_client: false,
+        }),
+    });
+    let _rx = peer_up(&mut manager, link_local, ipv4_sendable(), None, 0, 64);
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let named = Some(vec![
+        (link_local, Some(Arc::from("eth0"))),
+        (link_local, Some(Arc::from("eth1"))),
+    ]);
+    let keys = [(v4_prefix(), 0)];
+
+    let first = query_keys(&mut manager, &keys, named.clone(), None, 1).unwrap();
+    let rows = &first.routes[0].peers;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].peer_interface.as_deref(), Some("eth0"));
+    assert_eq!(rows[0].disposition, RouteExportDisposition::Committed);
+    assert_eq!(
+        first.next.as_ref().and_then(|cursor| cursor.after.clone()),
+        Some((link_local, Some(Arc::from("eth0"))))
+    );
+
+    let rest = query_keys(&mut manager, &keys, named, resume_of(&first), 1).unwrap();
+    let rows = &rest.routes[0].peers;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].peer_interface.as_deref(), Some("eth1"));
+    assert_eq!(rows[0].disposition, RouteExportDisposition::NotEstablished);
+    assert!(rest.next.is_none());
+}
+
+/// A managed peer that becomes Established between pages moves from a
+/// not-Established row to a registered one, so the walk is invalidated
+/// rather than listing it twice or with a stale disposition. Registration
+/// moves both the roster generation and the export chains' version. Red
+/// proof: dropping both fails this test; dropping either alone does not.
+#[test]
+fn managed_peer_becoming_established_mid_walk_invalidates_the_walk() {
+    let (mut manager, _tx) = manager();
+    let _rx = peer_up(&mut manager, v4(2), ipv4_sendable(), None, 0, 64);
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let named = Some(numbered(&[v4(1), v4(2), v4(3)]));
+    let keys = [(v4_prefix(), 0)];
+    let first = query_keys(&mut manager, &keys, named.clone(), None, 1).unwrap();
+    assert_eq!(peers_of(&first), vec![v4(1)]);
+
+    let _joined = peer_up(&mut manager, v4(3), ipv4_sendable(), None, 0, 64);
+    assert_eq!(
+        query_keys(&mut manager, &keys, named, resume_of(&first), 1),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+/// A change to the managed peer set between pages, such as a neighbor added
+/// by a reload, invalidates the walk even though no session registered.
+/// Red proof: leaving the managed peers out of the version fails this test.
+#[test]
+fn managed_peer_set_change_mid_walk_invalidates_the_walk() {
+    let (mut manager, _tx) = manager();
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let keys = [(v4_prefix(), 0)];
+    let first = query_keys(
+        &mut manager,
+        &keys,
+        Some(numbered(&[v4(1), v4(3)])),
+        None,
+        1,
+    )
+    .unwrap();
+    assert_eq!(peers_of(&first), vec![v4(1)]);
+    assert_eq!(
+        query_keys(
+            &mut manager,
+            &keys,
+            Some(numbered(&[v4(1), v4(2), v4(3)])),
+            resume_of(&first),
+            1
+        ),
+        Err(RouteExportPageError::Invalidated)
+    );
+    // The same set resumes.
+    let rest = query_keys(
+        &mut manager,
+        &keys,
+        Some(numbered(&[v4(1), v4(3)])),
+        resume_of(&first),
+        1,
+    )
+    .unwrap();
+    assert_eq!(peers_of(&rest), vec![v4(3)]);
 }
