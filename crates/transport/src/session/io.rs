@@ -598,6 +598,25 @@ impl PeerSession {
         self.evpn_discard_warned.fill(false);
     }
 
+    /// Wait for the writer after a terminal `close_tcp`, so the session task
+    /// resolves only once the frames it enqueued, such as the shutdown Cease,
+    /// have been written or the writer has failed. Without this, the session
+    /// task returns while its detached writer still holds the NOTIFICATION,
+    /// and a process exit that follows it closes the socket first. The
+    /// caller's deadline bounds the wait: `PeerHandle::shutdown_timeout`
+    /// aborts the session task when it expires.
+    pub(super) async fn join_closed_writer(&mut self) {
+        debug_assert!(
+            self.writer_priority_tx.is_none() && self.writer_bulk_tx.is_none(),
+            "join the writer only after its senders are dropped"
+        );
+        if let Some(join) = self.writer_join.take()
+            && let Err(error) = join.await
+        {
+            warn!(peer = %self.peer_label, %error, "writer task failed during session close");
+        }
+    }
+
     /// Clear TCP state after disconnect or error. Same writer-channel
     /// drop pattern as `close_tcp`.
     pub(super) fn handle_tcp_disconnect(&mut self) {
