@@ -554,12 +554,6 @@ pub(crate) struct PeerSession {
     /// Earliest active refresh-accounting deadline. Kept separate from the
     /// snapshot owner so the run loop can borrow it independently in `select!`.
     refresh_accounting_timer: Option<Pin<Box<Sleep>>>,
-    /// Session counters
-    updates_received: u64,
-    updates_sent: u64,
-    otc_routes_blocked: u64,
-    import_policy_routes_permitted: u64,
-    import_policy_routes_denied: u64,
     /// Times this actor left Established; only for connect-failure logging.
     /// The operator-facing count is the neighbor's `NeighborCounters`.
     flap_count: u64,
@@ -2244,11 +2238,6 @@ impl PeerSession {
             flowspec_counts: [0; 2],
             refresh_accounting: refresh_accounting::RefreshMaxPrefixAccounting::default(),
             refresh_accounting_timer: None,
-            updates_received: 0,
-            updates_sent: 0,
-            otc_routes_blocked: 0,
-            import_policy_routes_permitted: 0,
-            import_policy_routes_denied: 0,
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
@@ -2698,7 +2687,9 @@ impl PeerSession {
         reason: rustbgpd_telemetry::reason_labels::OtcBlockReason,
         count: u64,
     ) {
-        self.otc_routes_blocked = self.otc_routes_blocked.saturating_add(count);
+        self.config
+            .neighbor_counters
+            .record_otc_routes_blocked(count);
         self.metrics
             .record_otc_routes_blocked(&self.peer_label, reason, count);
     }

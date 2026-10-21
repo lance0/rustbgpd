@@ -493,8 +493,20 @@ async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity()
         assert!(!session.known_labeled.contains(&key(44)));
         assert_eq!(session.known_prefix_count(), 1);
         assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
-        assert_eq!(session.import_policy_routes_permitted, 3);
-        assert_eq!(session.import_policy_routes_denied, 3);
+        assert_eq!(
+            session
+                .config
+                .neighbor_counters
+                .import_policy_routes_permitted(),
+            3
+        );
+        assert_eq!(
+            session
+                .config
+                .neighbor_counters
+                .import_policy_routes_denied(),
+            3
+        );
 
         buffer_route_refresh(
             &mut session,

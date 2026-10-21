@@ -949,11 +949,10 @@ impl RibManager {
         // Drop per-peer export-policy counters alongside the rest of the
         // per-peer state. Without this the HashMap grows unbounded as
         // peers come and go (especially under dynamic neighbors), and
-        // stale aggregates leak across peer-identity reuse. The reset
-        // also gives operators consistent semantics: the import-side
-        // counters reset on session-down (they live on PeerSessionState),
-        // and the export-side aggregates do too — same per-session
-        // contract in both directions. Operators that need across-flap
+        // stale aggregates leak across peer-identity reuse. These export
+        // aggregates are therefore per session; the import-side totals
+        // live in the transport's neighbor counter block for the daemon's
+        // lifetime instead. Operators that need across-flap export
         // totals can use `rate()` / `increase()` over
         // `bgp_policy_routes_total`: each installed label identity is
         // monotonic, while a successfully retired identity goes stale and
