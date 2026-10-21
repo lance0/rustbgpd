@@ -1099,9 +1099,12 @@ pub struct PeerSessionState {
     pub peer_paths_limits: Vec<((Afi, Safi), u16)>,
     /// Effective family-local outbound Add-Path caps.
     pub effective_add_path_send_limits: Vec<((Afi, Safi), u32)>,
-    /// Total UPDATE messages received.
+    /// Total UPDATE messages received. Like every counter here except
+    /// `messages_*`, it is read from the neighbor's
+    /// [`crate::NeighborCounters`], so it persists across session resets and
+    /// replacement sessions until the neighbor is deleted.
     pub updates_received: u64,
-    /// Total UPDATE messages sent.
+    /// Total UPDATE messages sent (same scope).
     pub updates_sent: u64,
     /// Total NOTIFICATION messages received from this neighbor, all codes.
     /// Read from the neighbor's [`crate::NeighborCounters`], so it persists
@@ -1137,11 +1140,12 @@ pub struct PeerSessionState {
     /// Whether this session is TCP-AO protected, independent of whether the
     /// latest read-only socket inspection succeeded.
     pub tcp_ao_protected: bool,
-    /// Number of unicast route announcements blocked by RFC 9234 OTC rules.
+    /// Number of unicast route announcements blocked by RFC 9234 OTC rules
+    /// (neighbor lifetime, like `updates_*`).
     pub otc_routes_blocked: u64,
-    /// Import policy evaluations that permitted a route.
+    /// Import policy evaluations that permitted a route (neighbor lifetime).
     pub import_policy_routes_permitted: u64,
-    /// Import policy evaluations that denied a route.
+    /// Import policy evaluations that denied a route (neighbor lifetime).
     pub import_policy_routes_denied: u64,
     /// Slow-peer flag (LAN-470): the session is alive but its outbound
     /// queue has stayed above the configured backlog threshold for the

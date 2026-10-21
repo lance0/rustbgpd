@@ -66,7 +66,11 @@ class AnalyzerContracts(unittest.TestCase):
                 first.update(gr_active_peers="1", gr_stale_routes="1")
             elif name == "hot-reload":
                 first["apply_ok"] = "0"
-            yield f"analyze-soak-{name}.py", [first, final], {**metadata, interval: 10}, cycle, floor
+            rows = [first, final]
+            if name == "inject-churn":
+                # Its slope fit needs two samples at or after warmup_sec.
+                rows.insert(1, {**first, "elapsed_sec": "20"})
+            yield f"analyze-soak-{name}.py", rows, {**metadata, interval: 10}, cycle, floor
 
     def test_window_cycle_floors_are_enforced(self):
         for analyzer, rows, metadata, cycle, floor in self.window_cases():
@@ -642,6 +646,63 @@ class LeaseModeContracts(unittest.TestCase):
             with self.subTest(name):
                 result = run_lease_analyzer(**kwargs)
                 self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+
+
+INJECT_FIELDS = [*BASE, "elapsed_sec", "live_target", "frr_route_count", "churn_cycles",
+                 "add_total", "del_total", "flap_count", "uptime_seconds"]
+RSS_META = {"soak_seconds": 7200, "warmup_sec": 600, "churn_interval_sec": 7200}
+
+
+def rss_series(points):
+    """Clean inject-churn rows whose only varying evidence is (elapsed, rss_mb)."""
+    return [{**BASE, "elapsed_sec": str(t), "rss_mb": str(rss), "live_target": "1024",
+             "frr_route_count": "1024", "churn_cycles": str(int(t > 0)),
+             "add_total": "1049", "del_total": "25", "flap_count": "0",
+             "uptime_seconds": str(10 + t)}
+            for t, rss in points]
+
+
+def post_warmup(rss_at):
+    return [(t, rss_at(t)) for t in range(600, 7201, 300)]
+
+
+class InjectChurnRssWindow(unittest.TestCase):
+    """The RSS slope gate fits only samples at or after warmup_sec."""
+
+    # Destructive proof: fitting every row (the pre-fix rule) makes the
+    # growth case pass (whole-window slope < 0) and the warmup-ramp case fail.
+    CASES = (
+        # 60 MB settle during warmup hides +1.5 MB/h growth from a whole-window fit.
+        ("post_warmup_growth", [(0, 60), (300, 40)]
+         + post_warmup(lambda t: 25 + 1.5 * (t - 600) / 3600), False),
+        ("falling", [(0, 42), (300, 41)]
+         + post_warmup(lambda t: 41 - 16 * (t - 600) / 6600), True),
+        ("warmup_spike_then_flat", [(0, 25), (300, 90)] + post_warmup(lambda t: 25), True),
+        ("warmup_ramp_then_flat", [(0, 5), (300, 15)] + post_warmup(lambda t: 25), True),
+    )
+
+    def test_slope_gate_uses_post_warmup_samples(self):
+        for name, points, expected in self.CASES:
+            with self.subTest(case=name):
+                result = run_analyzer("analyze-soak-inject-churn.py", INJECT_FIELDS,
+                                      rss_series(points), RSS_META)
+                self.assertEqual(result.returncode, 0 if expected else 1,
+                                 result.stderr + result.stdout)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["slope_window"],
+                                 {"from_elapsed_sec": 600, "samples": len(points) - 2})
+                self.assertEqual(payload["gates"]["rss_slope_per_hour"]["pass"], expected)
+                self.assertTrue(all(g["pass"] for key, g in payload["gates"].items()
+                                    if key != "rss_slope_per_hour"), payload)
+
+    def test_too_few_post_warmup_samples_is_insufficient_evidence(self):
+        for points in ([(0, 25), (300, 25)], [(0, 25), (300, 25), (7200, 25)],
+                       [(0, 25), (7200, 25), (7200, 25)]):
+            with self.subTest(points=points):
+                result = run_analyzer("analyze-soak-inject-churn.py", INJECT_FIELDS,
+                                      rss_series(points), RSS_META)
+                self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+                self.assertIn("insufficient evidence", result.stderr)
 
 
 if __name__ == "__main__":

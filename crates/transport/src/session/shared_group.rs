@@ -609,7 +609,7 @@ impl PeerSession {
                             own_send_healthy = false;
                             break;
                         }
-                        self.updates_sent += 1;
+                        self.config.neighbor_counters.record_update_sent();
                         self.metrics.record_message_sent(&self.peer_label, "update");
                         sent += 1;
                     }

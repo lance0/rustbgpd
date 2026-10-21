@@ -1352,14 +1352,15 @@ sanity-check on the labeled Prometheus counter:
 
 | Field | Direction | Scope |
 |---|---|---|
-| `import_policy_routes_permitted` | import | Per session — resets on session-down (lives on `PeerSessionState`). |
-| `import_policy_routes_denied` | import | Per session — same. |
-| `export_policy_routes_permitted` | export | Per RIB peer-attach — resets on `handle_peer_down`, i.e. session-down. |
-| `export_policy_routes_denied` | export | Per RIB peer-attach — same. |
+| `import_policy_routes_permitted` | import | Daemon lifetime per neighbor — survives session resets and reconfigures; cleared by daemon restart or neighbor deletion. |
+| `import_policy_routes_denied` | import | Daemon lifetime per neighbor — same. |
+| `export_policy_routes_permitted` | export | Per session — the RIB resets it when the session goes down. |
+| `export_policy_routes_denied` | export | Per session — same. |
 
-Both directions reset together on the next session establishment, so
-"how many routes did this session permit / deny in total" is straight
-subtraction; "how many across reconnects" requires Prometheus history.
+The import totals keep counting across reconnects, like `updates_*` and
+`flap_count`; the export totals start again from zero on each session.
+For a rate or a per-session window in either direction, use
+`increase()` over `bgp_policy_routes_total`.
 The CLI surfaces these in `rbgp neighbor <peer>` as a Policy Stats
 block:
 

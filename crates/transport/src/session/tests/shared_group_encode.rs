@@ -645,7 +645,7 @@ async fn shared_group_pending_stream_waits_without_self_waking() {
         ready.await;
     }
     member.advance_pending_outbound();
-    assert_eq!(member.updates_sent, 1);
+    assert_eq!(member.config.neighbor_counters.updates_sent(), 1);
     assert!(member.pending_outbound.is_none());
     member.writer_join.take().unwrap().abort();
 }
@@ -819,7 +819,7 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
         };
         member.handle_outbound_route_update(update).await;
         if !elected_encoder {
-            assert_eq!(member.updates_sent, 2048);
+            assert_eq!(member.config.neighbor_counters.updates_sent(), 2048);
             assert!(member.pending_outbound.is_some());
             assert_eq!(member.writer_bulk_tx.as_ref().unwrap().capacity(), 0);
         }
@@ -836,7 +836,7 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
         let mut drained = 0;
         if let Some(held) = &mut held_writer {
             // Capacity stays held until both queued reads have replied.
-            assert_eq!(member.updates_sent, 2048);
+            assert_eq!(member.config.neighbor_counters.updates_sent(), 2048);
             while held.try_recv().is_ok() {
                 drained += 1;
             }
@@ -851,7 +851,7 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
                 drained += 1;
             }
             assert_eq!(drained, 2100);
-            assert_eq!(member.updates_sent, 2100);
+            assert_eq!(member.config.neighbor_counters.updates_sent(), 2100);
         }
         assert!(member.deferred_command.is_none());
         if let Some(writer) = member.writer_join.take() {
@@ -1062,9 +1062,9 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
     follower.handle_outbound_route_update(update).await;
     assert_eq!(refresh_frame_kind(frames.try_recv().unwrap()), "refresh:1");
     follower.advance_pending_outbound();
-    assert_eq!(follower.updates_sent, 2048);
+    assert_eq!(follower.config.neighbor_counters.updates_sent(), 2048);
     follower.advance_pending_outbound();
-    assert_eq!(follower.updates_sent, 4096);
+    assert_eq!(follower.config.neighbor_counters.updates_sent(), 4096);
     {
         let pending = follower.pending_outbound.as_ref().unwrap();
         let ready = pending.ready(follower.writer_bulk_tx.as_ref());
@@ -1153,7 +1153,7 @@ async fn shared_group_buffered_consumer_yields_for_new_reads() {
     let (bulk, _held) = mpsc::channel(2048);
     member.writer_bulk_tx = Some(bulk);
     member.handle_outbound_route_update(update).await;
-    assert_eq!(member.updates_sent, 2048);
+    assert_eq!(member.config.neighbor_counters.updates_sent(), 2048);
     let (reply, state) = oneshot::channel();
     commands
         .try_send(PeerCommand::QueryState { reply })

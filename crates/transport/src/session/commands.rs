@@ -1110,9 +1110,10 @@ impl PeerSession {
         // OpenConfirm.
         let neg = self.fsm.negotiated().or(self.negotiated.as_deref());
         let (messages_received, messages_sent) = self.metrics.peer_message_totals(&self.peer_label);
-        // Daemon-lifetime per neighbor: a replacement session (inbound
-        // reconnect, collision promotion, recovery respawn) shares the
-        // neighbor's counter block instead of starting from fresh actor state.
+        // Every NeighborState counter is daemon-lifetime per neighbor: a
+        // replacement session (inbound reconnect, collision promotion,
+        // recovery respawn) shares the neighbor's counter block instead of
+        // starting from fresh actor state.
         let totals = &self.config.neighbor_counters;
         let prefix_count = self.known_prefix_count();
         let prefix_count_ipv4 = self.known_unicast_v4;
@@ -1218,15 +1219,15 @@ impl PeerSession {
                     )
                 })
                 .unwrap_or_default(),
-            updates_received: self.updates_received,
-            updates_sent: self.updates_sent,
+            updates_received: totals.updates_received(),
+            updates_sent: totals.updates_sent(),
             notifications_received: totals.notifications_received(),
             notifications_sent: totals.notifications_sent(),
             messages_received,
             messages_sent,
-            otc_routes_blocked: self.otc_routes_blocked,
-            import_policy_routes_permitted: self.import_policy_routes_permitted,
-            import_policy_routes_denied: self.import_policy_routes_denied,
+            otc_routes_blocked: totals.otc_routes_blocked(),
+            import_policy_routes_permitted: totals.import_policy_routes_permitted(),
+            import_policy_routes_denied: totals.import_policy_routes_denied(),
             flap_count: totals.flaps(),
             uptime_secs,
             last_error: self.last_error.clone(),
