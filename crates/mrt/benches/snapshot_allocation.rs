@@ -22,9 +22,9 @@ use rustbgpd_mrt::codec::encode_snapshot;
 #[cfg(feature = "snapshot-allocation-diagnostics")]
 use rustbgpd_mrt::codec::encode_snapshot_with_allocation_diagnostics;
 use rustbgpd_mrt::reader::{SnapshotEntry, SnapshotNlri};
-use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::MrtPeerEntry;
+use rustbgpd_rib::{AttrSet, PeerId};
 use rustbgpd_wire::attribute::encode_path_attributes;
 use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
@@ -561,7 +561,7 @@ fn make_route(
         next_hop: peer.peer_addr,
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: peer.peer_addr,
+        peer: PeerId::from_addr(peer.peer_addr),
         attributes: Arc::clone(&attributes[source_index]),
         received_at: rustbgpd_rib::route::ReceivedAt::from_instant(received_at),
         origin_type: RouteOrigin::Ebgp,
@@ -709,7 +709,7 @@ fn validate_snapshot(bytes: &[u8], fixture: &Fixture) -> AnyResult<Validation> {
             .ok_or_else(|| invalid("decoded more entries than the fixture contains"))?;
         if prefix != expected_route.prefix
             || Some(entry.peer_index) != expected_peer_index(expected_route)
-            || entry.peer.peer_addr != expected_route.peer
+            || entry.peer.peer_addr != expected_route.peer.addr()
             || entry.next_hop != Some(expected_route.next_hop)
             || entry.link_local_next_hop != expected_route.link_local_next_hop
             || !attributes_match_route(&entry.attributes, expected_route)
@@ -765,7 +765,7 @@ fn validate_snapshot(bytes: &[u8], fixture: &Fixture) -> AnyResult<Validation> {
 }
 
 fn expected_peer_index(route: &Route) -> Option<u16> {
-    let IpAddr::V4(address) = route.peer else {
+    let IpAddr::V4(address) = route.peer.addr() else {
         return None;
     };
     u16::try_from(u32::from(address).checked_sub(PEER_IPV4_BASE)?).ok()

@@ -1,19 +1,20 @@
 use super::evpn_group_storage::{fixture, received, register, stage};
 use super::exportability::MockExactExportEncoder;
 use super::*;
+use crate::PeerId;
 use crate::manager::distribution::OutboundCommitBatch;
 use rustbgpd_wire::RouteRefreshSubtype;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
 
-fn admit_waiting_for_eor(manager: &mut RibManager, peer: IpAddr, gid: usize, route: &EvpnRibRoute) {
+fn admit_waiting_for_eor(manager: &mut RibManager, peer: PeerId, gid: usize, route: &EvpnRibRoute) {
     admit_waiting_for_marker(manager, peer, gid, route, false);
 }
 
 fn admit_waiting_for_marker(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     gid: usize,
     route: &EvpnRibRoute,
     eorr: bool,
@@ -365,7 +366,7 @@ fn owned_initial_postadmission_mismatch_keeps_enqueue_truth_but_holds_terminal()
 
 fn admit_converged_owned(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     gid: usize,
     output: &mut mpsc::Receiver<OutboundRouteUpdate>,
     route: &EvpnRibRoute,
@@ -633,7 +634,7 @@ fn private_handoff_keeps_held_eor_and_eorr_then_rejoins_without_inherited_debt()
 
         // Recreate an occupied destination, then join using the actual private
         // OLD. Identical R must transfer storage without another ANN/marker.
-        let keeper = Ipv4Addr::new(192, 0, 2, 31).into();
+        let keeper = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
         let (sender, mut keeper_output) = mpsc::channel(8);
         register(&mut manager, keeper, sender);
         while keeper_output.try_recv().is_ok() {}
@@ -725,7 +726,7 @@ fn private_join_refusal_retains_old_values_until_changed_and_removed_routes_are_
     manager
         .loc_rib
         .recompute_evpn(changed.key(), [&changed].into_iter());
-    let keeper = Ipv4Addr::new(192, 0, 2, 31).into();
+    let keeper = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
     let (sender, mut keeper_output) = mpsc::channel(8);
     register(&mut manager, keeper, sender);
     while keeper_output.try_recv().is_ok() {}
@@ -829,7 +830,7 @@ fn marker_retry_rotates_past_thirty_two_full_receivers_without_rebuilding_routes
     let mut outputs = Vec::new();
     let resets = count_reset_attempts(&mut manager);
     for host in 40..73 {
-        let peer = Ipv4Addr::new(192, 0, 2, host).into();
+        let peer = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, host).into());
         let (sender, mut output) = mpsc::channel(8);
         register(&mut manager, peer, sender);
         while output.try_recv().is_ok() {}
@@ -971,7 +972,7 @@ fn same_channel_owned_replay_withdraws_retained_old_only_key_without_reset() {
         .get_mut(&gid)
         .unwrap()
         .set_evpn_ownership_for_test(false);
-    let keeper = Ipv4Addr::new(192, 0, 2, 31).into();
+    let keeper = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
     let (keeper_sender, mut keeper_output) = mpsc::channel(8);
     register(&mut manager, keeper, keeper_sender);
     while keeper_output.try_recv().is_ok() {}
@@ -1140,7 +1141,7 @@ fn ordinary_owned_fanout_preserves_exact_rejection_withdrawals_and_actual_counts
         .get_mut(&gid)
         .unwrap()
         .set_evpn_ownership_for_test(false);
-    let second = Ipv4Addr::new(192, 0, 2, 31).into();
+    let second = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
     let (sender, mut second_output) = mpsc::channel(8);
     register(&mut manager, second, sender);
     while second_output.try_recv().is_ok() {}
@@ -1526,7 +1527,7 @@ fn review_announce_unicast(manager: &mut RibManager, octet: u8) -> Route {
         source,
     );
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![route.clone()],
         withdrawn: vec![],
@@ -1776,7 +1777,7 @@ fn review_inactive_marker_scheduler_visits_no_ordinary_peers() {
         let (sender, mut receiver) = mpsc::channel(8);
         register(
             &mut manager,
-            Ipv4Addr::new(192, 0, 2, suffix).into(),
+            PeerId::from_addr(Ipv4Addr::new(192, 0, 2, suffix).into()),
             sender,
         );
         while receiver.try_recv().is_ok() {}
@@ -1965,7 +1966,7 @@ fn review_receipt_count_tracks_replay_replacement_retirement_and_teardown() {
         assert_eq!(manager.evpn_feed_receipt_count, actual);
     }
     let (mut manager, peer, gid, mut output) = fixture();
-    let keeper = Ipv4Addr::new(192, 0, 2, 31).into();
+    let keeper = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
     let (keeper_sender, mut keeper_output) = mpsc::channel(8);
     register(&mut manager, keeper, keeper_sender);
     while keeper_output.try_recv().is_ok() {}
@@ -2012,7 +2013,7 @@ fn assert_review2_selection_release(nonempty: bool, staged: bool) {
     use crate::manager::selection_deferral::SelectionDeferralTransition;
     let (manager, peer, gid, mut output) = fixture();
     let route = received(100);
-    let survivor = Ipv4Addr::new(192, 0, 2, 99).into();
+    let survivor = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 99).into());
     let mut waiters = vec![crate::SelectionDeferralWaiterConfig {
         peer: route.peer,
         families: vec![EVPN],
@@ -2152,7 +2153,7 @@ fn assert_review2_direct_family_refusal(family: u8) {
     let resets = count_reset_attempts(&mut manager);
     if family == 0 {
         manager.handle_update(RibUpdate::RoutesReceived {
-            peer: source.into(),
+            peer: peer_v4(source),
             session_id: 0,
             announced: vec![],
             withdrawn: vec![],
@@ -2165,14 +2166,14 @@ fn assert_review2_direct_family_refusal(family: u8) {
         while manager.process_next_route_chunk() {}
     } else if family == 1 {
         manager.handle_update(RibUpdate::BgpLsRoutesReceived {
-            peer: source.into(),
+            peer: peer_v4(source),
             session_id: 0,
             announced: vec![make_bgpls_route(source, 42, 100)],
             withdrawn: vec![],
         });
     } else {
         manager.handle_update(RibUpdate::VpnRoutesReceived {
-            peer: source.into(),
+            peer: peer_v4(source),
             session_id: 0,
             announced: vec![make_vpn_rib_route(source, 42, 100, 100)],
             withdrawn: vec![],
@@ -2226,7 +2227,7 @@ fn review2_direct_grouped_vpn_refusal_preserves_evpn_recovery() {
 #[test]
 fn review2_conditional_attachment_removal_preserves_complete_sparse_handoff() {
     let (mut manager, peer, gid, mut output) = fixture();
-    let keeper = Ipv4Addr::new(192, 0, 2, 31).into();
+    let keeper = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
     let (keeper_sender, mut keeper_output) = mpsc::channel(8);
     register(&mut manager, keeper, keeper_sender);
     while keeper_output.try_recv().is_ok() {}
@@ -2361,7 +2362,7 @@ fn assert_review2_selection_resync_terminal(private: bool) {
     assert!(manager.dirty_peers.contains(&peer));
     assert!(!manager.evpn_feed_is_current(peer));
     while output.try_recv().is_ok() {}
-    let source = Ipv4Addr::new(192, 0, 2, 99).into();
+    let source = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 99).into());
     manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![crate::SelectionDeferralWaiterConfig {

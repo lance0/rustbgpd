@@ -156,7 +156,7 @@ fn route(src: Ipv4Addr, prefix: Prefix, local_pref: u32, communities: Vec<u32>) 
     Route {
         prefix,
         next_hop,
-        peer: IpAddr::V4(src),
+        peer: PeerId::from_addr(IpAddr::V4(src)),
         attributes: ibgp_attrs(local_pref, communities),
         origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
         peer_router_id: src,
@@ -176,7 +176,7 @@ fn vpn_route(src: Ipv4Addr, n: u8, label: u32, local_pref: u32) -> rustbgpd_rib:
     rustbgpd_rib::VpnRibRoute {
         nlri: vpn_nlri(n, label),
         next_hop: IpAddr::V4(src),
-        peer: IpAddr::V4(src),
+        peer: PeerId::from_addr(IpAddr::V4(src)),
         attributes: ibgp_attrs(local_pref, vec![]),
         origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
         peer_router_id: src,
@@ -297,7 +297,7 @@ impl Run {
 
     async fn routes(&mut self, from: Ipv4Addr, announced: Vec<Route>, withdrawn: Vec<Prefix>) {
         self.send(RibUpdate::RoutesReceived {
-            peer: IpAddr::V4(from),
+            peer: PeerId::from_addr(IpAddr::V4(from)),
             session_id: 0,
             announced,
             withdrawn: withdrawn.into_iter().map(|prefix| (prefix, 0)).collect(),
@@ -317,7 +317,7 @@ impl Run {
         withdrawn: Vec<rustbgpd_rib::VpnRibRouteKey>,
     ) {
         self.send(RibUpdate::VpnRoutesReceived {
-            peer: IpAddr::V4(from),
+            peer: PeerId::from_addr(IpAddr::V4(from)),
             session_id: 0,
             announced,
             withdrawn,

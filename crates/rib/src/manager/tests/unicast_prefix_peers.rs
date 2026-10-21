@@ -1,3 +1,5 @@
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -7,8 +9,8 @@ use super::super::{AdjRibInEpoch, PrefixAnnouncers, UnicastPrefixPeers};
 use super::*;
 use crate::attr_set::AttrSet;
 
-fn peer(n: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(192, 0, 2, n))
+fn peer(n: u8) -> PeerId {
+    peer_v4(Ipv4Addr::new(192, 0, 2, n))
 }
 
 fn prefix(n: u8) -> Prefix {
@@ -20,7 +22,7 @@ fn manager() -> RibManager {
     RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
 }
 
-fn peer_up(manager: &mut RibManager, peer: IpAddr, session_id: u64) {
+fn peer_up(manager: &mut RibManager, peer: PeerId, session_id: u64) {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
         peer,
@@ -42,8 +44,8 @@ fn peer_up(manager: &mut RibManager, peer: IpAddr, session_id: u64) {
     });
 }
 
-fn seed_route(manager: &mut RibManager, source: IpAddr, p: Prefix) {
-    let IpAddr::V4(source_v4) = source else {
+fn seed_route(manager: &mut RibManager, source: PeerId, p: Prefix) {
+    let IpAddr::V4(source_v4) = source.addr() else {
         unreachable!()
     };
     let Prefix::V4(prefix_v4) = p else {
@@ -57,8 +59,8 @@ fn seed_route(manager: &mut RibManager, source: IpAddr, p: Prefix) {
     manager.register_unicast_announcer(source, p);
 }
 
-fn make_add_path_route(source: IpAddr, p: Prefix, path_id: u32, med: u32) -> Route {
-    let IpAddr::V4(source) = source else {
+fn make_add_path_route(source: PeerId, p: Prefix, path_id: u32, med: u32) -> Route {
+    let IpAddr::V4(source) = source.addr() else {
         unreachable!()
     };
     let Prefix::V4(prefix) = p else {
@@ -74,7 +76,7 @@ fn make_add_path_route(source: IpAddr, p: Prefix, path_id: u32, med: u32) -> Rou
 
 fn routes_received(
     manager: &mut RibManager,
-    source: IpAddr,
+    source: PeerId,
     session_id: u64,
     announced: Vec<Route>,
     withdrawn: Vec<(Prefix, u32)>,
@@ -93,15 +95,15 @@ fn routes_received(
     drain_route_chunks(manager);
 }
 
-fn route_identity(route: &Route) -> (IpAddr, u32, u32) {
+fn route_identity(route: &Route) -> (PeerId, u32, u32) {
     (route.peer, route.path_id, route.med())
 }
 
 fn assert_prefix_state(
     manager: &RibManager,
     p: Prefix,
-    expected: &[(IpAddr, u32, u32)],
-    expected_best: Option<(IpAddr, u32, u32)>,
+    expected: &[(PeerId, u32, u32)],
+    expected_best: Option<(PeerId, u32, u32)>,
 ) {
     let mut full = manager
         .ribs

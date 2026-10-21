@@ -1,3 +1,5 @@
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
@@ -30,7 +32,7 @@ use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key}
 async fn published_export_rows(
     tx: &mpsc::Sender<RibUpdate>,
     roster: &crate::export_roster::ExportRosterReader,
-    peer: Option<IpAddr>,
+    peer: Option<PeerId>,
 ) -> Vec<crate::update::ExportPolicyTermHits> {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryLocRibCount { reply })
@@ -43,7 +45,7 @@ async fn published_export_rows(
 /// Capture `roster`'s export rows with a far deadline.
 async fn capture_export_rows(
     roster: &crate::export_roster::ExportRoster,
-    peer: Option<IpAddr>,
+    peer: Option<PeerId>,
 ) -> Vec<crate::update::ExportPolicyTermHits> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     crate::export_roster::capture_export(roster, peer, deadline)
@@ -55,7 +57,7 @@ async fn capture_export_rows(
 /// after the unit just completed, and capture its rows.
 async fn manager_export_rows(
     manager: &mut RibManager,
-    peer: Option<IpAddr>,
+    peer: Option<PeerId>,
 ) -> Vec<crate::update::ExportPolicyTermHits> {
     manager.publish_export_roster();
     capture_export_rows(&manager.export_roster().load(), peer).await
@@ -161,7 +163,7 @@ fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
         route,
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
@@ -193,7 +195,7 @@ fn make_bgpls_route(peer: Ipv4Addr, payload_suffix: u8, local_pref: u32) -> BgpL
         family: BgpLsFamily::LinkState,
         nlri,
         next_hop: IpAddr::V4(peer),
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
@@ -233,7 +235,7 @@ fn make_labeled_rib_route(
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
@@ -264,7 +266,7 @@ fn make_rtc_rib_route(
     crate::route::RtcRibRoute {
         nlri,
         next_hop: IpAddr::V4(peer),
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
@@ -297,7 +299,7 @@ fn make_vpn_rib_route(
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
@@ -323,7 +325,7 @@ fn dummy_query_rx() -> mpsc::Receiver<RibUpdate> {
 fn neighbor_rib_snapshot_query_projects_policy_stats() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
     let counters = crate::update::ExportPolicyCounters::default();
     counters.add(NeighborPolicyStats {
         export_policy_routes_permitted: 17,
@@ -536,11 +538,11 @@ async fn preclosed_fib_candidates_query_skips_snapshot_and_releases_actor() {
     handle.await.unwrap();
 }
 
-async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
+async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> Vec<Route> {
     collect_query_routes(tx, RouteQueryScope::Received { peer: Some(peer) }).await
 }
 
-async fn collect_advertised_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
+async fn collect_advertised_routes(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> Vec<Route> {
     collect_query_routes(tx, RouteQueryScope::Advertised { peer }).await
 }
 
@@ -636,7 +638,7 @@ async fn query_rtc_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<crate::route::Rtc
 
 async fn query_explain_advertised_route(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     prefix: Prefix,
 ) -> crate::update::ExplainAdvertisedRoute {
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -655,7 +657,7 @@ async fn query_explain_advertised_route(
 
 async fn query_explain_advertised_source(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     prefix: Prefix,
     source: crate::update::RouteSourceIdentity,
 ) -> Result<crate::update::ExplainAdvertisedRoute, crate::update::ExplainAdvertisedRouteError> {
@@ -676,7 +678,7 @@ async fn query_explain_advertised_source(
 /// VPN-key export explain helper (`rd` set) for the export-explain tests.
 async fn query_explain_advertised_vpn_route(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     prefix: Prefix,
     rd: rustbgpd_wire::RouteDistinguisher,
 ) -> crate::update::ExplainAdvertisedRoute {
@@ -698,7 +700,7 @@ async fn query_explain_advertised_vpn_route(
 /// export-explain tests.
 async fn query_explain_advertised_labeled_route(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     prefix: Prefix,
 ) -> crate::update::ExplainAdvertisedRoute {
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -803,7 +805,7 @@ async fn query_lookup_best_path(
 async fn query_explain_best_path_for_peer(
     tx: &mpsc::Sender<RibUpdate>,
     prefix: Prefix,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> Option<crate::update::ExplainBestPath> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::ExplainBestPath {
@@ -818,7 +820,7 @@ async fn query_explain_best_path_for_peer(
 
 async fn query_neighbor_policy_stats(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> crate::update::NeighborPolicyStats {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryNeighborPolicyStats {
@@ -989,7 +991,7 @@ fn drain_final_labeled(
 async fn feed_square_topology(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr) {
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced: crate::orr::fixtures::square_topology(peer),
         withdrawn: vec![],
     })
@@ -1001,7 +1003,7 @@ async fn feed_square_topology(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr) {
 /// its initial-table `EoR` so the channel starts empty.
 async fn orr_client_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     vantage: Option<IpAddr>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(64);
@@ -1059,7 +1061,7 @@ fn route_chunk_and_its_coalesced_flush_are_observed_as_separate_work_units() {
     let metrics = BgpMetrics::new();
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
@@ -1143,7 +1145,7 @@ fn make_vpn6_rib_route_with_rts(
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(100),
@@ -1181,7 +1183,7 @@ fn rt(local_admin: u16) -> ExtendedCommunity {
 /// Does NOT drain anything — the caller asserts the initial dump / `EoR`.
 async fn rtc_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     is_ebgp: bool,
     rr_client: bool,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -1213,7 +1215,7 @@ async fn rtc_peer_up(
 async fn send_rtc_interest(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, local_admins: &[u16]) {
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced: local_admins
             .iter()
             .map(|&la| make_rtc_rib_route(peer, la, 100))
@@ -1228,7 +1230,7 @@ async fn send_rtc_interest(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, local_a
 /// Does NOT drain — callers assert the initial dump.
 async fn vpn_rtc_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
@@ -1268,7 +1270,7 @@ fn make_multipath_route(
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -1295,7 +1297,7 @@ fn make_route_with_as_path(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>) -
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -1318,7 +1320,7 @@ fn make_route_with_as_path(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>) -
 
 async fn query_route_event_history(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: Option<IpAddr>,
+    peer: Option<PeerId>,
     afi: Option<Afi>,
     prefix: Option<Prefix>,
     limit: usize,
@@ -1349,7 +1351,7 @@ fn vpn_rtc_sendable() -> Vec<(Afi, Safi)> {
 /// GR entry with LLGR negotiated for the given family tuples. The per-family
 /// LLGR stale time equals `llgr_stale_time`.
 fn gr_with_llgr(
-    peer: IpAddr,
+    peer: PeerId,
     restart_time: u16,
     gr_families: Vec<(Afi, Safi)>,
     llgr_families: Vec<(Afi, Safi)>,
@@ -1379,7 +1381,7 @@ fn gr_with_llgr(
 /// optional Add-Path send) for the RFC 9494 export-gate tests.
 async fn llgr_gate_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     sendable: Vec<(Afi, Safi)>,
     is_ebgp: bool,
     llgr_families: Vec<(Afi, Safi)>,

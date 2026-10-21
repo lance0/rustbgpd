@@ -2,9 +2,11 @@
 //! `bgp_outbound_eor_deferrals_total`, never as a route drop.
 
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
-const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+const PEER: PeerId = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
 fn eor_deferrals(metrics: &BgpMetrics) -> f64 {
     counter_metric_value(
@@ -21,7 +23,7 @@ fn peer_up_with_full_queue() -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let source = Ipv4Addr::new(10, 0, 0, 1);
     manager.enqueue_routes_received(
-        source.into(),
+        peer_v4(source),
         vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
             source,

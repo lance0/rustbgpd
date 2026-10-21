@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use prometheus::Encoder;
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, RouteTarget};
-use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::route::{EvpnRibRoute, NextHopScope, Route, RouteOrigin};
+use rustbgpd_rib::{AttrSet, PeerId};
 use rustbgpd_rib::{RouteEvent, RouteEventType};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -247,7 +247,7 @@ pub(crate) fn route_from_peer(
         next_hop,
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer,
+        peer: PeerId::from_addr(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
@@ -279,7 +279,7 @@ pub(crate) fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         event_id: 0,
         event_type: RouteEventType::BestChanged,
         prefix,
-        peer: Some(peer),
+        peer: Some(PeerId::from_addr(peer)),
         previous_peer: None,
         target_peer: None,
         peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,

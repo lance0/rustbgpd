@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 /// Established session that acknowledges an export hot-apply only after
 /// `ack_delay`: healthy, but busy with concurrent reload work. State queries
@@ -540,7 +541,7 @@ async fn cohort_hot_apply_budget_still_bounds_a_stalled_session() {
 async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 41, 0, 1));
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 41, 0, 1)));
     let attempts = Arc::new(AtomicUsize::new(0));
     let (rib_tx, mut rib_rx) = mpsc::channel(16);
     let (_command_tx, command_rx) = mpsc::channel(16);
@@ -556,15 +557,15 @@ async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
     );
     insert_test_managed_peer(
         &mut manager,
-        peer,
-        established_export_policy_test_session(peer, attempts, None),
+        peer.addr(),
+        established_export_policy_test_session(peer.addr(), attempts, None),
         false,
     );
 
     // One target can never reach the two-member cohort, so this snapshot takes
     // the wholly authoritative walk.
     let apply = manager.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
-        address: peer,
+        address: peer.addr(),
         interface: None,
         import_policy: None,
         export_policy: Some(deny_policy_chain()),
@@ -587,7 +588,7 @@ async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
         result.is_ok(),
         "an eleven-second forward walk reply must still apply: {result:?}"
     );
-    let peer_state = manager.peers.get(&key(peer)).unwrap();
+    let peer_state = manager.peers.get(&key(peer.addr())).unwrap();
     assert!(!peer_state.pending_export_apply);
     assert!(!peer_state.pending_refresh);
 }
@@ -775,7 +776,7 @@ async fn forward_walk_rib_budget_bounds_full_channel_admission() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
     for retained_proof in [false, true] {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 41, 3, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 41, 3, 1)));
         let (mut manager, _) = rfc8212_status_manager();
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let (marker_reply, _marker_rx) = oneshot::channel();
@@ -789,9 +790,9 @@ async fn forward_walk_rib_budget_bounds_full_channel_admission() {
         manager.rib_tx = rib_tx;
         insert_test_managed_peer(
             &mut manager,
-            peer,
+            peer.addr(),
             acking_policy_handle(
-                peer,
+                peer.addr(),
                 if retained_proof {
                     SessionState::Idle
                 } else {
@@ -801,16 +802,19 @@ async fn forward_walk_rib_budget_bounds_full_channel_admission() {
             false,
         );
         if retained_proof {
-            manager.peers.get_mut(&key(peer)).unwrap().import_policy =
-                Some(crate::config::reserved_rfc8212_deny_chain(
-                    crate::config::RFC8212_MISSING_IMPORT_POLICY,
-                ));
+            manager
+                .peers
+                .get_mut(&key(peer.addr()))
+                .unwrap()
+                .import_policy = Some(crate::config::reserved_rfc8212_deny_chain(
+                crate::config::RFC8212_MISSING_IMPORT_POLICY,
+            ));
         }
         let started = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             RIB_BATCH_REPLY_TIMEOUT * 3,
             manager.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
-                address: peer,
+                address: peer.addr(),
                 interface: None,
                 import_policy: retained_proof.then(deny_policy_chain),
                 export_policy: Some(deny_policy_chain()),
@@ -851,7 +855,13 @@ async fn forward_walk_rib_budget_bounds_full_channel_admission() {
                     )
                     .collect()))
                 .unwrap();
-            assert!(manager.peers.get(&key(peer)).unwrap().pending_export_apply);
+            assert!(
+                manager
+                    .peers
+                    .get(&key(peer.addr()))
+                    .unwrap()
+                    .pending_export_apply
+            );
         }
     }
 }

@@ -1,7 +1,7 @@
+use crate::PeerId;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::net::IpAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -136,7 +136,7 @@ impl RibManager {
     /// Publish `bgp_gr_stale_routes{peer}` from the peer's maintained stale
     /// counters: every route held GR- or LLGR-stale, across every family
     /// table. A partial-GR peer holds both kinds at once, so both count.
-    pub(super) fn publish_gr_stale_routes(&self, peer: IpAddr) {
+    pub(super) fn publish_gr_stale_routes(&self, peer: PeerId) {
         self.metrics.set_gr_stale_routes(
             &peer.to_string(),
             i64::try_from(self.retained_stale_count(peer)).unwrap_or(i64::MAX),
@@ -144,7 +144,7 @@ impl RibManager {
     }
 
     /// Routes `peer` holds GR- or LLGR-stale, from maintained counters.
-    pub(super) fn retained_stale_count(&self, peer: IpAddr) -> u64 {
+    pub(super) fn retained_stale_count(&self, peer: PeerId) -> u64 {
         self.ribs
             .get(&peer)
             .map_or(0, crate::adj_rib_in::AdjRibIn::retained_stale_count)
@@ -155,7 +155,7 @@ impl RibManager {
     /// routes without passing a retention transition, so they publish here;
     /// a peer whose count did not move (every peer with nothing retained)
     /// gains no series.
-    pub(super) fn republish_gr_stale_routes_if_moved(&self, peer: IpAddr, before: u64) {
+    pub(super) fn republish_gr_stale_routes_if_moved(&self, peer: PeerId, before: u64) {
         if self.retained_stale_count(peer) != before {
             self.publish_gr_stale_routes(peer);
         }
@@ -164,7 +164,7 @@ impl RibManager {
     /// Every peer that may hold GR/LLGR retention, from the same three maps
     /// [`Self::gr_retention_snapshot`] reads. Map keys only: bounded by the
     /// retained peer-family count, never by routes.
-    pub(super) fn gr_retention_peers(&self) -> std::collections::BTreeSet<IpAddr> {
+    pub(super) fn gr_retention_peers(&self) -> std::collections::BTreeSet<PeerId> {
         self.gr_peers
             .keys()
             .chain(self.llgr_peers.keys())
@@ -183,7 +183,7 @@ impl RibManager {
     /// The phase and deadline reads are map lookups and the stale counts
     /// come from the Adj-RIB-In's maintained counters, so a row costs
     /// O(families) and a list or doctor read never scans routes.
-    pub(super) fn gr_retention_snapshot(&self, peer: IpAddr) -> Vec<GrRetentionFamilyState> {
+    pub(super) fn gr_retention_snapshot(&self, peer: PeerId) -> Vec<GrRetentionFamilyState> {
         let gr_families = self.gr_peers.get(&peer);
         let llgr_families = self.llgr_peers.get(&peer);
         let mut rows: Vec<((Afi, Safi), GrRetentionPhase, Option<tokio::time::Instant>)> =
@@ -264,7 +264,7 @@ impl RibManager {
     )]
     pub(super) fn handle_peer_graceful_restart(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         restart_time: u16,
         stale_routes_time: u64,
@@ -757,7 +757,7 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "LLGR promotion has unicast + FlowSpec paths"
     )]
-    pub(super) fn sweep_gr_stale(&mut self, peer: IpAddr) {
+    pub(super) fn sweep_gr_stale(&mut self, peer: PeerId) {
         // Timer arms call this outside `handle_update`; invalidate Received,
         // Best, and Advertised continuations before stale promotion/purge.
         self.advance_all_route_pages();
@@ -926,7 +926,7 @@ impl RibManager {
     )]
     fn enter_llgr_phase(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         families: &[(Afi, Safi)],
         llgr_config: &LlgrPeerConfig,
     ) {
@@ -1121,7 +1121,7 @@ impl RibManager {
     /// grouped per peer. Called from the manager run loop's LLGR timer arm.
     pub(super) fn sweep_expired_llgr_stale(&mut self) {
         let now = tokio::time::Instant::now();
-        let mut expired: std::collections::HashMap<IpAddr, Vec<(Afi, Safi)>> =
+        let mut expired: std::collections::HashMap<PeerId, Vec<(Afi, Safi)>> =
             std::collections::HashMap::new();
         for (&(peer, afi, safi), &deadline) in &self.llgr_stale_deadlines {
             if deadline <= now {
@@ -1146,7 +1146,7 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "family-scoped sweeps and recomputes across all seven route tables"
     )]
-    pub(super) fn sweep_llgr_stale(&mut self, peer: IpAddr, families: &[(Afi, Safi)]) {
+    pub(super) fn sweep_llgr_stale(&mut self, peer: PeerId, families: &[(Afi, Safi)]) {
         if !families.is_empty() {
             // Like GR expiry, LLGR expiry is a direct timer mutation seam.
             self.advance_all_route_pages();
@@ -1308,7 +1308,7 @@ impl RibManager {
     /// expiry is a timer decision without a session identity; once departure
     /// is established it can use unconditional teardown rather than the
     /// session-identity-gated `handle_peer_down`.
-    fn release_peer_state_if_departed(&mut self, peer: IpAddr) {
+    fn release_peer_state_if_departed(&mut self, peer: PeerId) {
         if !self.outbound_peers.contains_key(&peer)
             && self.live_sessions.get(&peer).is_none_or(Vec::is_empty)
         {
@@ -1336,7 +1336,7 @@ impl RibManager {
     /// expired.
     pub(super) fn expire_refresh_windows(&mut self) {
         let now = tokio::time::Instant::now();
-        let expired: Vec<(IpAddr, Afi, Safi)> = self
+        let expired: Vec<(PeerId, Afi, Safi)> = self
             .refresh_deadlines
             .iter()
             .filter(|&(_, &deadline)| deadline <= now)

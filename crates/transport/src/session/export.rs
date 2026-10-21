@@ -2748,6 +2748,7 @@ mod tests {
     use crate::config::{TcpAoAlgorithm, TcpAoConfig};
     use rustbgpd_fsm::{NegotiatedSession, PeerConfig};
     use rustbgpd_rib::AttrSet;
+    use rustbgpd_rib::PeerId;
     use rustbgpd_telemetry::BgpMetrics;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, encode_message};
     use tokio::sync::mpsc;
@@ -2903,7 +2904,7 @@ mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
             attributes: AttrSet::new(vec![]),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
@@ -2983,7 +2984,7 @@ mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
                 PathAttribute::AsPath(AsPath {
@@ -3242,7 +3243,7 @@ mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
             attributes: AttrSet::new(vec![PathAttribute::Origin(rustbgpd_wire::Origin::Igp)]),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
@@ -3278,7 +3279,7 @@ mod tests {
                 next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 link_local_next_hop: None,
                 next_hop_scope: None,
-                peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
                 attributes: Arc::clone(&shared_attributes),
                 received_at: rustbgpd_rib::route::ReceivedAt::now(),
                 origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
@@ -3468,7 +3469,7 @@ mod tests {
             next_hop,
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
             attributes: AttrSet::new(attributes),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,

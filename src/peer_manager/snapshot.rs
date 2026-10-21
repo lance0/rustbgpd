@@ -1,3 +1,4 @@
+use rustbgpd_rib::PeerId;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -97,7 +98,7 @@ pub(super) fn rfc9972_rpki_validation_counts(
 ) -> Option<Vec<(u16, u8, rustbgpd_bmp::BmpRpkiValidationCounts)>> {
     let session = state.negotiated_session.as_ref()?;
     let counts = counts?;
-    let peer_counts = counts.get(&peer);
+    let peer_counts = counts.get(&PeerId::from_addr(peer));
     let mut projected = Vec::with_capacity(2);
     for (afi, safi) in [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)] {
         if !session.families.contains(&(afi, safi)) {
@@ -932,7 +933,7 @@ impl PeerManager {
             let adj_rib_out_post = bmp_peer_stats.as_ref().map(|stats| {
                 stats
                     .adj_rib_out_post
-                    .get(&peer_addr)
+                    .get(&PeerId::from_addr(peer_addr))
                     .map(|families| {
                         families
                             .iter()

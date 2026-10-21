@@ -27,6 +27,7 @@ mod outbound_prefix_limits;
 mod peer_lifecycle;
 mod queries;
 mod replacement_summaries;
+use crate::PeerId;
 use peer_lifecycle::SessionTeardownDisposition;
 mod route_refresh;
 mod selection_deferral;
@@ -78,8 +79,8 @@ fn with_executor_handoff<T>(work: impl FnOnce() -> T) -> T {
 /// Add one export batch's tally for `peer` to its neighbor's totals, one map
 /// lookup per peer per batch. An empty tally touches nothing.
 fn add_export_tally(
-    counters: &mut HashMap<IpAddr, crate::update::ExportPolicyCounters>,
-    peer: IpAddr,
+    counters: &mut HashMap<PeerId, crate::update::ExportPolicyCounters>,
+    peer: PeerId,
     tally: NeighborPolicyStats,
 ) {
     if tally != NeighborPolicyStats::default() {
@@ -351,13 +352,13 @@ struct UnicastPrefixPeers {
     prefixes: crate::fast_hash::FastMap<Prefix, PrefixAnnouncers>,
     spills: Vec<smallvec::SmallVec<[AdjRibInEpoch; 2]>>,
     free_spills: Vec<u32>,
-    peer_epochs: HashMap<IpAddr, AdjRibInEpoch>,
-    epoch_peers: crate::fast_hash::FastMap<AdjRibInEpoch, IpAddr>,
+    peer_epochs: HashMap<PeerId, AdjRibInEpoch>,
+    epoch_peers: crate::fast_hash::FastMap<AdjRibInEpoch, PeerId>,
     next_epoch: u32,
 }
 
 impl UnicastPrefixPeers {
-    fn epoch_for_peer(&mut self, peer: IpAddr) -> AdjRibInEpoch {
+    fn epoch_for_peer(&mut self, peer: PeerId) -> AdjRibInEpoch {
         if let Some(&epoch) = self.peer_epochs.get(&peer) {
             return epoch;
         }
@@ -371,13 +372,13 @@ impl UnicastPrefixPeers {
         epoch
     }
 
-    fn retire_peer(&mut self, peer: IpAddr) {
+    fn retire_peer(&mut self, peer: PeerId) {
         if let Some(epoch) = self.peer_epochs.remove(&peer) {
             self.epoch_peers.remove(&epoch);
         }
     }
 
-    fn register(&mut self, peer: IpAddr, prefix: Prefix) {
+    fn register(&mut self, peer: PeerId, prefix: Prefix) {
         let epoch = self.epoch_for_peer(peer);
         match self.prefixes.get(&prefix).copied() {
             None => {
@@ -420,16 +421,16 @@ impl UnicastPrefixPeers {
         slice.iter().copied()
     }
 
-    fn peers(&self, prefix: &Prefix) -> impl Iterator<Item = IpAddr> + '_ {
+    fn peers(&self, prefix: &Prefix) -> impl Iterator<Item = PeerId> + '_ {
         self.epochs(prefix)
             .filter_map(|epoch| self.epoch_peers.get(&epoch).copied())
     }
 
-    fn prune_to_live(&mut self, prefix: &Prefix, mut live: impl FnMut(IpAddr) -> bool) {
+    fn prune_to_live(&mut self, prefix: &Prefix, mut live: impl FnMut(PeerId) -> bool) {
         let Some(value) = self.prefixes.get(prefix).copied() else {
             return;
         };
-        let live_epoch = |epoch: &AdjRibInEpoch, live: &mut dyn FnMut(IpAddr) -> bool| {
+        let live_epoch = |epoch: &AdjRibInEpoch, live: &mut dyn FnMut(PeerId) -> bool| {
             self.epoch_peers.get(epoch).copied().is_some_and(live)
         };
         match value {
@@ -528,9 +529,9 @@ impl RtcMembership {
 )]
 struct VpnLabeledStagingContext<'a> {
     loc_rib: &'a LocRib,
-    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    ribs: &'a HashMap<PeerId, AdjRibIn>,
     rib_out: &'a AdjRibOut,
-    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    peer_is_rr_client: &'a HashMap<PeerId, bool>,
     target_is_ebgp: bool,
     interpret_rfc1997: bool,
     target_is_rr_client: bool,
@@ -564,7 +565,7 @@ enum FullPassPath {
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
 /// No `Arc<RwLock>` — all state is owned by this task.
 pub struct RibManager {
-    ribs: HashMap<IpAddr, AdjRibIn>,
+    ribs: HashMap<PeerId, AdjRibIn>,
     /// Global cross-peer attribute intern table (LAN-336). Owned by this
     /// task like everything else — lock-free by construction. Every route
     /// insertion seam interns `route.attributes` here BEFORE storing the
@@ -599,7 +600,7 @@ pub struct RibManager {
     /// disables the test hook.
     #[cfg(test)]
     dataplane_exact_cancel_after_visits: std::sync::atomic::AtomicUsize,
-    adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
+    adj_ribs_out: HashMap<PeerId, AdjRibOut>,
     /// Per-peer outbound unicast prefix admission state (ADR-0113). An entry
     /// exists only for a peer whose resolved `max_prefixes_out_ipv4` /
     /// `max_prefixes_out_ipv6` sets a limit in at least one family — a
@@ -607,11 +608,11 @@ pub struct RibManager {
     /// A peer left unlimited in both families has no entry, and clearing a
     /// peer's last family limit removes its entry again, so the unlimited
     /// export path keeps its original state shape and per-route cost.
-    outbound_prefix_limits: HashMap<IpAddr, outbound_prefix_limits::OutboundPrefixLimits>,
+    outbound_prefix_limits: HashMap<PeerId, outbound_prefix_limits::OutboundPrefixLimits>,
     /// Resolver tables, prepared-transaction slot, admission epoch, and
     /// coalesced family-scoped recovery intent for those limits (ADR-0113).
     outbound_limit_control: outbound_prefix_limits::OutboundLimitControl,
-    outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
+    outbound_peers: HashMap<PeerId, mpsc::Sender<OutboundRouteUpdate>>,
     /// Transport session identity recorded at `PeerUp` registration,
     /// keyed like `outbound_peers`. `handle_peer_down` /
     /// `handle_peer_graceful_restart` discard a teardown whose stamped id
@@ -620,7 +621,7 @@ pub struct RibManager {
     /// destroy the surviving session's state. Invariant: equals the
     /// `session_id` of the LAST entry in `live_sessions[peer]` whenever a
     /// registration exists.
-    outbound_session_ids: HashMap<IpAddr, u64>,
+    outbound_session_ids: HashMap<PeerId, u64>,
     /// Every live transport session known for a peer address, in `PeerUp`
     /// arrival order (last = the active registration), bounded by
     /// [`MAX_LIVE_SESSIONS_PER_PEER`]. During the RFC 4271 §6.8 collision
@@ -633,53 +634,53 @@ pub struct RibManager {
     /// `PeerDown(loser)`) instead of tearing down a peer that still has
     /// an Established session. Entries are removed by their session's own
     /// `PeerDown`/GR-down or by full peer teardown.
-    live_sessions: HashMap<IpAddr, Vec<LiveSessionRecord>>,
+    live_sessions: HashMap<PeerId, Vec<LiveSessionRecord>>,
     /// Physical live-session completion options, including collision records.
     /// Zero avoids fleet scans while EVPN completion control is inactive.
     evpn_feed_receipt_count: usize,
     /// Session-stamped local role staged before `PeerUp`, so the initial
     /// Adj-RIB-Out build can enforce RFC 9234 OTC egress rules.
-    pending_peer_export_context: HashMap<(IpAddr, u64), Option<BgpRole>>,
+    pending_peer_export_context: HashMap<(PeerId, u64), Option<BgpRole>>,
     /// Session-stamped negotiated-but-withheld families staged before
     /// `PeerUp` (`RibUpdate::SetPeerWithheldFamilies`).
-    pending_peer_withheld_families: HashMap<(IpAddr, u64), Vec<crate::update::WithheldFamily>>,
+    pending_peer_withheld_families: HashMap<(PeerId, u64), Vec<crate::update::WithheldFamily>>,
     /// Session-stamped RFC 7947 §2.3.2 control-community context staged
     /// before `PeerUp` (the RS-side local ASN when the session interprets
     /// route-server control communities).
-    pending_peer_rs_control: HashMap<(IpAddr, u64), Option<u32>>,
+    pending_peer_rs_control: HashMap<(PeerId, u64), Option<u32>>,
     /// Session-stamped exact encoder staged immediately before `PeerUp`.
     /// Keeping the handle separate from the legacy registration payload
     /// avoids making every non-transport `PeerUp` producer construct a fake
     /// wire encoder while still fencing collision losers by session id.
-    pending_peer_export_encoders: HashMap<(IpAddr, u64), Arc<dyn ExactExportEncoder>>,
+    pending_peer_export_encoders: HashMap<(PeerId, u64), Arc<dyn ExactExportEncoder>>,
     /// Neighbor export-policy totals staged before `PeerUp`, keyed like the
     /// encoders above.
-    pending_peer_export_counters: HashMap<(IpAddr, u64), crate::update::ExportPolicyCounters>,
+    pending_peer_export_counters: HashMap<(PeerId, u64), crate::update::ExportPolicyCounters>,
     /// Session-stamped peer GR capability context staged immediately before
     /// `PeerUp`, used only by the process-start RFC 4724 selection gate.
-    pending_peer_gr_context: HashMap<(IpAddr, u64), PeerSelectionDeferralContext>,
+    pending_peer_gr_context: HashMap<(PeerId, u64), PeerSelectionDeferralContext>,
     /// Accepted provenance awaiting its matching session registration.
-    pending_peer_source_context: HashMap<(IpAddr, u64), Arc<crate::update::PeerSourceContext>>,
+    pending_peer_source_context: HashMap<(PeerId, u64), Arc<crate::update::PeerSourceContext>>,
     /// Committed owner authority; history allocation remains absent in production.
     dampening_history: dampening_history::DampeningHistoryState,
     /// Policy identity awaiting its matching registration, before initial export.
-    pending_peer_policy_context: HashMap<(IpAddr, u64), Option<String>>,
+    pending_peer_policy_context: HashMap<(PeerId, u64), Option<String>>,
     /// Exact encoder owned by the active outbound registration. Every
     /// precommit pass captures one immutable snapshot from this handle and
     /// attaches that same snapshot to the outbound envelope.
-    peer_export_encoders: HashMap<IpAddr, Arc<dyn ExactExportEncoder>>,
+    peer_export_encoders: HashMap<PeerId, Arc<dyn ExactExportEncoder>>,
     /// Sparse per-peer identities rejected by exact wire preparation. For
     /// update-group members this is the member-local overlay over the shared
     /// group table; for private peers it suppresses repeated diagnostics and
     /// withdrawals for routes that were never advertised.
-    peer_unexportable: HashMap<IpAddr, HashSet<ExactExportKey>>,
+    peer_unexportable: HashMap<PeerId, HashSet<ExactExportKey>>,
     #[cfg(test)]
     grouped_advertised_count_calls: std::sync::atomic::AtomicUsize,
     /// Installed export chains, per peer and global fallback, and their
     /// published counter roster (ADR-0136).
     export_chains: export_chains::ExportChains,
     /// Families the transport can actually serialize per peer.
-    peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
+    peer_sendable_families: HashMap<PeerId, Vec<(Afi, Safi)>>,
     /// Advances whenever a peer joins or leaves `peer_sendable_families`, so
     /// a paged export-disposition walk detects a roster change between pages.
     outbound_roster_generation: u64,
@@ -688,26 +689,26 @@ pub struct RibManager {
     /// export of LLGR-stale routes: absent family + eBGP target =
     /// suppress (§4.4); absent family + iBGP target = advertise with
     /// `NO_EXPORT` and `LOCAL_PREF` 0, rewritten in transport (§4.6).
-    peer_advertised_llgr_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
+    peer_advertised_llgr_families: HashMap<PeerId, Vec<(Afi, Safi)>>,
     /// Whether each registered outbound peer is eBGP (true) or iBGP (false).
-    peer_is_ebgp: HashMap<IpAddr, bool>,
+    peer_is_ebgp: HashMap<PeerId, bool>,
     /// Whether the active or GR/LLGR-retained peer is a route reflector
     /// client. Retained across graceful-restart outbound teardown because
     /// stale iBGP routes still need their source classification; overwritten
     /// at re-registration and removed by terminal peer teardown.
-    peer_is_rr_client: HashMap<IpAddr, bool>,
+    peer_is_rr_client: HashMap<PeerId, bool>,
     /// Local RFC 9234 role for the active outbound registration.
-    peer_local_roles: HashMap<IpAddr, Option<BgpRole>>,
+    peer_local_roles: HashMap<PeerId, Option<BgpRole>>,
     /// Current RFC 9234 egress-denied disposition, indexed by peer and
     /// prefix so one-prefix churn never scans every denied route.
-    peer_otc_blocked: HashMap<IpAddr, HashMap<Prefix, HashSet<u32>>>,
+    peer_otc_blocked: HashMap<PeerId, HashMap<Prefix, HashSet<u32>>>,
     /// OTC rejections waiting to ride the next reserved outbound envelope to
     /// transport's existing metric/event publisher. Every pending identity is
     /// also present in [`Self::peer_otc_blocked`].
-    pending_otc_blocked: HashMap<IpAddr, HashMap<(Prefix, u32), crate::route::Route>>,
+    pending_otc_blocked: HashMap<PeerId, HashMap<(Prefix, u32), crate::route::Route>>,
     /// RFC 9107 ORR vantage per registered outbound peer (RR clients
     /// configured with `orr_vantage` only).
-    peer_orr_vantage: HashMap<IpAddr, IpAddr>,
+    peer_orr_vantage: HashMap<PeerId, IpAddr>,
     /// Cached ORR topology + per-vantage SPF state (RFC 9107), rebuilt
     /// by [`Self::recompute_orr`] at every BGP-LS mutation seam. Empty
     /// while `peer_orr_vantage` is empty (zero non-ORR cost).
@@ -727,22 +728,22 @@ pub struct RibManager {
     /// Ordered (`BTreeSet`) so the resync tick can round-robin fairly via
     /// [`Self::dirty_resync_cursor`] instead of re-drawing an arbitrary
     /// subset each tick.
-    dirty_peers: BTreeSet<IpAddr>,
+    dirty_peers: BTreeSet<PeerId>,
     /// When each peer's current dirty episode began. Written when a peer
     /// enters `dirty_peers`; meaningful only while it is still there.
-    dirty_since: HashMap<IpAddr, tokio::time::Instant>,
+    dirty_since: HashMap<PeerId, tokio::time::Instant>,
     /// Ring position of the dirty-resync round-robin: the last peer
     /// attempted. Selection resumes strictly after it (wrapping), so peers
     /// whose sends keep failing cannot monopolize every tick while
     /// drainable peers starve.
-    dirty_resync_cursor: Option<IpAddr>,
+    dirty_resync_cursor: Option<PeerId>,
     /// Collision-failback inbound ROUTE-REFRESH requests deferred because
     /// the surviving session's outbound channel was full. One generation
     /// per peer coalesces repeat attempts and fences delivery to the same
     /// live session that became the survivor.
-    pending_inbound_refresh: BTreeMap<IpAddr, u64>,
+    pending_inbound_refresh: BTreeMap<PeerId, u64>,
     /// Ring position for bounded pending inbound-refresh retries.
-    pending_inbound_refresh_cursor: Option<IpAddr>,
+    pending_inbound_refresh_cursor: Option<PeerId>,
     /// Wall-clock budget one actor poll may spend flushing paced work —
     /// commit-kind transition polls and dirty-resync ticks — before parking
     /// for the readiness seam. A unit of paced work is cheap-to-moderate,
@@ -767,18 +768,18 @@ pub struct RibManager {
     /// per peer) at the end of each `distribute_changes` pass so the
     /// force is one-shot and doesn't leak into unrelated subsequent
     /// passes.
-    force_outbound_peers: HashSet<IpAddr>,
+    force_outbound_peers: HashSet<PeerId>,
     /// `EoR` markers that failed to enqueue and must be retried.
-    pending_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    pending_eor: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Families with an outstanding enhanced route refresh response retry.
     /// Entries are never left empty: readers check the key.
-    pending_refresh: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    pending_refresh: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Outbound registrations (initial table dumps) deferred behind queued
     /// actor work, completed one per run-loop iteration between drained
     /// mutation batches (LAN-475). Peer-keyed (deduplicated): the advance
     /// registers the peer's CURRENT last live session, so a session
     /// superseded or failed over while queued resolves to its survivor.
-    pending_initial_registrations: VecDeque<IpAddr>,
+    pending_initial_registrations: VecDeque<PeerId>,
     /// Loc-RIB size below which a `PeerUp` initial dump always completes
     /// inline even with queued actor work — a small dump costs microseconds,
     /// so deferring it buys nothing and only perturbs registration-timing
@@ -786,102 +787,102 @@ pub struct RibManager {
     /// it to 0 to exercise the deferral without bulk data.
     initial_dump_defer_min_routes: usize,
     /// Active inbound enhanced route refresh windows by peer/family.
-    refresh_in_progress: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    refresh_in_progress: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Per-peer/per-family deadlines for active enhanced route refresh windows.
-    refresh_deadlines: graceful_restart::DeadlineMap<(IpAddr, Afi, Safi)>,
+    refresh_deadlines: graceful_restart::DeadlineMap<(PeerId, Afi, Safi)>,
     /// Unicast routes still awaiting replacement during an inbound refresh.
-    refresh_stale_routes: HashMap<IpAddr, HashSet<(Prefix, u32)>>,
+    refresh_stale_routes: HashMap<PeerId, HashSet<(Prefix, u32)>>,
     /// `FlowSpec` routes still awaiting replacement during an inbound refresh.
-    refresh_stale_flowspec: HashMap<IpAddr, HashSet<crate::route::FlowSpecRouteKey>>,
+    refresh_stale_flowspec: HashMap<PeerId, HashSet<crate::route::FlowSpecRouteKey>>,
     /// EVPN routes still awaiting replacement during an inbound refresh.
-    refresh_stale_evpn: HashMap<IpAddr, HashSet<rustbgpd_wire::EvpnRouteKey>>,
+    refresh_stale_evpn: HashMap<PeerId, HashSet<rustbgpd_wire::EvpnRouteKey>>,
     /// BGP-LS routes still awaiting replacement during an inbound refresh.
-    refresh_stale_bgpls: HashMap<IpAddr, HashSet<crate::route::BgpLsRouteKey>>,
+    refresh_stale_bgpls: HashMap<PeerId, HashSet<crate::route::BgpLsRouteKey>>,
     /// VPNv4/VPNv6 routes still awaiting replacement during an inbound refresh.
-    refresh_stale_vpn: HashMap<IpAddr, HashSet<crate::route::VpnRibRouteKey>>,
+    refresh_stale_vpn: HashMap<PeerId, HashSet<crate::route::VpnRibRouteKey>>,
     /// Labeled-unicast route keys marked stale by an in-progress RFC 7313
     /// enhanced route refresh (the SAFI 4 sibling of `refresh_stale_vpn`).
-    refresh_stale_labeled: HashMap<IpAddr, HashSet<crate::route::LabeledRibRouteKey>>,
+    refresh_stale_labeled: HashMap<PeerId, HashSet<crate::route::LabeledRibRouteKey>>,
     /// RT-Constrain routes still awaiting replacement during an inbound refresh.
-    refresh_stale_rtc: HashMap<IpAddr, HashSet<crate::route::RtcRibRouteKey>>,
+    refresh_stale_rtc: HashMap<PeerId, HashSet<crate::route::RtcRibRouteKey>>,
     /// O(1) per-peer/per-family stale-entry counts for refresh observability.
-    refresh_stale_counts: HashMap<(IpAddr, Afi, Safi), usize>,
+    refresh_stale_counts: HashMap<(PeerId, Afi, Safi), usize>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
     /// Value is the set of (AFI, SAFI) families still awaiting End-of-RIB.
-    gr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    gr_peers: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Deadlines for sweeping stale routes per GR peer.
-    gr_stale_deadlines: graceful_restart::DeadlineMap<IpAddr>,
+    gr_stale_deadlines: graceful_restart::DeadlineMap<PeerId>,
     /// Configured stale-routes-time per GR peer (seconds), used to reset
     /// the timer on `PeerUp` during graceful restart.
-    gr_stale_routes_time: HashMap<IpAddr, u64>,
+    gr_stale_routes_time: HashMap<PeerId, u64>,
     /// Peers currently in LLGR stale phase (RFC 9494), keyed by peer address.
     /// Value is the set of (AFI, SAFI) families in LLGR.
-    llgr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    llgr_peers: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Deadlines for sweeping LLGR-stale routes, per (peer, AFI, SAFI) —
     /// RFC 9494 §4.3 stale time is negotiated per family. An entry is
     /// stamped ONCE when the family enters the LLGR stale phase and
     /// deliberately survives re-establishment while routes remain
     /// LLGR-stale: the ORIGINAL Long-Lived Stale Time bounds total
     /// retention, so a reconnect-then-down never restarts the timer.
-    llgr_stale_deadlines: graceful_restart::DeadlineMap<(IpAddr, Afi, Safi)>,
+    llgr_stale_deadlines: graceful_restart::DeadlineMap<(PeerId, Afi, Safi)>,
     /// Configured per-peer LLGR parameters, stored on `PeerGracefulRestart`.
-    llgr_peer_config: HashMap<IpAddr, LlgrPeerConfig>,
+    llgr_peer_config: HashMap<PeerId, LlgrPeerConfig>,
     /// Maximum Add-Path paths per prefix per peer (0 = single-best only).
-    peer_add_path_send_max: HashMap<IpAddr, u32>,
+    peer_add_path_send_max: HashMap<PeerId, u32>,
     /// Effective family-local Add-Path caps, including peer Paths-Limit.
-    peer_add_path_send_limits: HashMap<IpAddr, HashMap<(Afi, Safi), u32>>,
+    peer_add_path_send_limits: HashMap<PeerId, HashMap<(Afi, Safi), u32>>,
     /// Route-server clients with RFC 7947 §2.3.2 per-client best-path
     /// enabled: unicast export stages the first export-policy-permitted
     /// candidate (path-hiding mitigation) at `path_id 0` instead of the
     /// Loc-RIB best. Families with negotiated Add-Path send take the
     /// multipath path instead.
-    peer_per_client_best: HashSet<IpAddr>,
+    peer_per_client_best: HashSet<PeerId>,
     /// Peers with RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress
     /// enforcement enabled (config `interpret_rfc1997`, default
     /// `!route_server_client`). Source routes carrying either community
     /// are suppressed at staging toward these peers when they are eBGP.
-    peer_interpret_rfc1997: HashSet<IpAddr>,
+    peer_interpret_rfc1997: HashSet<PeerId>,
     /// Peers whose sessions interpret RFC 7947 §2.3.2 route-server
     /// control communities at export staging (config
     /// `rs_control_communities`, default `route_server_client`), mapped
     /// to the RS-side local ASN the control communities are keyed on.
     /// Enabled peers are disqualified from update-group sharing.
-    peer_rs_control: HashMap<IpAddr, u32>,
+    peer_rs_control: HashMap<PeerId, u32>,
     /// Peer ASN, tracked for MRT `PEER_INDEX_TABLE`.
-    peer_asn: HashMap<IpAddr, u32>,
+    peer_asn: HashMap<PeerId, u32>,
     /// Peer-group membership used for export policy neighbor-set matching.
-    peer_group: HashMap<IpAddr, String>,
+    peer_group: HashMap<PeerId, String>,
     /// ADR-0137 conditional-advertisement condition tracker.
     conditional_advertisements: conditional_advertisement::ConditionalAdvertisementTracker,
     /// Process-local content version for exact peer-group planning seals.
     peer_group_version: Option<RoutePageVersion>,
     /// Peer BGP router ID, tracked for MRT `PEER_INDEX_TABLE`.
-    peer_bgp_id: HashMap<IpAddr, Ipv4Addr>,
+    peer_bgp_id: HashMap<PeerId, Ipv4Addr>,
     /// Families for which Add-Path Send/Both was negotiated per peer.
-    peer_add_path_send_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
+    peer_add_path_send_families: HashMap<PeerId, Vec<(Afi, Safi)>>,
     /// Per-peer Address-Prefix ORF filters (RFC 5291/5292), keyed by
     /// `(AFI, SAFI)`. Consulted as an additional outbound filter before export
     /// policy when distributing to the peer. Absent ⇒ no ORF constraint.
-    peer_orf_filters: HashMap<IpAddr, HashMap<(Afi, Safi), crate::orf::OrfFilterSet>>,
+    peer_orf_filters: HashMap<PeerId, HashMap<(Afi, Safi), crate::orf::OrfFilterSet>>,
     /// Peers currently isolated from shared update-groups because their
     /// transport flagged them slow (LAN-470, `slow_peer_isolation`).
     /// Membership recomputes classify these as
     /// `GroupMembership::SlowPeer` (per-peer fallback path). Per-session
     /// state: cleared on session teardown like the ORF gate above.
-    slow_isolated_peers: HashSet<IpAddr>,
+    slow_isolated_peers: HashSet<PeerId>,
     /// Per-peer RT-Constrain membership (RFC 4684) gating VPNv4/VPNv6
     /// distribution. Present (possibly empty = advertise NO VPN routes,
     /// the strict rule) from peer-up for every peer that negotiated
     /// `(IPv4, RtConstrain)`; absent ⇒ no RTC constraint. Per-session
     /// state: cleared with the rest of the outbound teardown, so a GR
     /// re-establish starts strict until the peer's interest re-arrives.
-    peer_rt_membership: HashMap<IpAddr, RtcMembership>,
+    peer_rt_membership: HashMap<PeerId, RtcMembership>,
     /// Families whose initial advertisement is gated pending the peer's first
     /// ROUTE-REFRESH (RFC 5291 §6). While a `(peer, AFI, SAFI)` is here, the
     /// initial table dump skips it; the gate is lifted on the first refresh.
     /// A peer's entry is dropped once no family remains gated
     /// (`lift_orf_gate`), so key presence means "at least one family gated".
-    peer_orf_pending: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    peer_orf_pending: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Families whose initial-table `EoR` is withheld because the peer came
     /// back as a graceful-restart RESTARTER (RFC 4724) while the family was
     /// still behind the RFC 5291 §6 ORF initial-advertisement gate. An
@@ -891,7 +892,7 @@ pub struct RibManager {
     /// after the gate lifts and the gated flood is sent. Non-GR ORF peers
     /// keep the immediate `EoR`: a client that never sends ROUTE-REFRESH
     /// would otherwise never see `EoR` at all.
-    gr_deferred_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    gr_deferred_eor: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Peers whose RT-Constrain-filtered families (VPN, EVPN) keep their
     /// initial-table `EoR` in `pending_eor` until the peer's RT-Constrain
     /// `EoR` arrives or the [`RTC_EOR_HOLD_CAP`] deadline passes (RFC 4684
@@ -902,18 +903,18 @@ pub struct RibManager {
     /// interest arrives withdraws VPN routes we are about to re-send. A peer
     /// with the Restart State bit set is never held: it withholds its own
     /// RTC `EoR` until it has ours (RFC 4724 §4.1).
-    rtc_eor_hold: graceful_restart::DeadlineMap<IpAddr>,
+    rtc_eor_hold: graceful_restart::DeadlineMap<PeerId>,
     /// Held peers whose RT-Constrain `EoR` (or closing `EoRR`) arrived while
     /// RT-Constrain selection was deferred. Membership is not rebuilt until
     /// that deferral is staged or released, so the hold ends there, after
     /// the rebuild has emitted the matching VPN/EVPN routes.
-    rtc_eor_hold_ready: HashSet<IpAddr>,
+    rtc_eor_hold_ready: HashSet<PeerId>,
     /// Opt-in End-of-RIB grace windows after a planned restart, keyed by
     /// configured peer. Empty on cold starts and once each deadline passes.
-    eor_grace: HashMap<IpAddr, eor_grace::EorGracePeer>,
+    eor_grace: HashMap<PeerId, eor_grace::EorGracePeer>,
     /// Each grace window's absolute deadline, with a cached minimum so the
     /// run loop's per-turn timer probe does not scan the peers.
-    eor_grace_deadlines: graceful_restart::DeadlineMap<IpAddr>,
+    eor_grace_deadlines: graceful_restart::DeadlineMap<PeerId>,
     /// Controllers whose replay-complete signals release the grace windows
     /// early, and the ones that have signalled.
     eor_replay: eor_grace::ReplayWait,
@@ -925,7 +926,7 @@ pub struct RibManager {
     deferred_selection_keys: selection_deferral::DeferredSelectionKeys,
     /// Route-refresh responses received while family convergence and `EoR`
     /// remain held. Replayed after the convergence `EoR` is queued.
-    selection_deferred_refresh: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    selection_deferred_refresh: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
     vrp_table: Option<Arc<VrpTable>>,
     /// Current ASPA table for path verification. `None` = no ASPA data.
@@ -939,12 +940,12 @@ pub struct RibManager {
     /// Currently surfaced unicast export-policy denials. This keeps
     /// route-level policy-filtered events transition-based instead of
     /// re-emitting on every dirty or forced outbound resync.
-    policy_filtered_routes: HashMap<IpAddr, HashSet<PolicyFilteredRouteKey>>,
+    policy_filtered_routes: HashMap<PeerId, HashSet<PolicyFilteredRouteKey>>,
     /// The attached session's export-policy totals handle, keyed by target
     /// peer. The handle belongs to the neighbor (`PeerUp` carries it), so the
     /// totals outlive this registration; only the RIB's reference ends with
     /// the session.
-    export_policy_counters: HashMap<IpAddr, crate::update::ExportPolicyCounters>,
+    export_policy_counters: HashMap<PeerId, crate::update::ExportPolicyCounters>,
     /// Bounded recent route-event history for after-the-fact operator
     /// timeline queries. Live streaming still uses `route_events_tx`.
     route_event_history: VecDeque<Arc<RouteEvent>>,
@@ -1117,11 +1118,11 @@ pub struct RibManager {
     /// minus own-sourced, or the per-peer Adj-RIB-Out) — unicast plus
     /// group-owned VPN — held until its one-shot resync diff succeeds.
     /// Transient — regroups are config-time events.
-    pending_regroup_baseline: HashMap<IpAddr, update_groups::RegroupBaseline>,
+    pending_regroup_baseline: HashMap<PeerId, update_groups::RegroupBaseline>,
     /// Candidate withdrawal keys carried across a dirty regroup; admission
     /// intersects these with the member's actual admitted-key proof. Cleared
     /// on resync success.
-    pending_extra_withdraws: HashMap<IpAddr, update_groups::ExtraWithdraws>,
+    pending_extra_withdraws: HashMap<PeerId, update_groups::ExtraWithdraws>,
     /// Actual admitted unicast/VPN keys while a member's shared desired view
     /// can advance without delivery. Exact capacity charge is capped at
     /// 64 MiB per peer and 512 MiB per daemon (provisional qualification
@@ -1135,7 +1136,7 @@ pub struct RibManager {
     /// Unique across group recreation and paired EVPN route/input writes.
     evpn_table_stamp: u64,
     /// Fairness position for marker-only completion retries on the resync timer.
-    evpn_marker_cursor: Option<IpAddr>,
+    evpn_marker_cursor: Option<PeerId>,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
@@ -1991,8 +1992,8 @@ fn test_ingest_stall_override(env: Option<&str>) -> Option<std::time::Duration> 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct PolicyFilteredRouteKey {
-    pub(super) target_peer: IpAddr,
-    pub(super) source_peer: IpAddr,
+    pub(super) target_peer: PeerId,
+    pub(super) source_peer: PeerId,
     pub(super) prefix: Prefix,
     pub(super) path_id: u32,
 }
@@ -2052,7 +2053,7 @@ impl PendingRoutesReceived {
         reason = "RIB update messages carry every supported family as one transaction"
     )]
     fn new(
-        peer: IpAddr,
+        peer: PeerId,
         announced: Vec<crate::route::Route>,
         withdrawn: Vec<(Prefix, u32)>,
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
@@ -2093,7 +2094,7 @@ impl PendingRoutesReceived {
         self.flowspec_capacity_hint
     }
 
-    fn peer(&self) -> IpAddr {
+    fn peer(&self) -> PeerId {
         self.source.peer
     }
 
@@ -2958,7 +2959,7 @@ impl RibManager {
     /// RFC 4724 convergence gate, the RFC 4684 §6 hold on the families RT
     /// membership filters while `peer`'s RT-Constrain `EoR` is outstanding,
     /// or the opt-in planned-restart grace window.
-    pub(super) fn eor_held(&self, peer: IpAddr, family: (Afi, Safi)) -> bool {
+    pub(super) fn eor_held(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
         self.selection_convergence_held(family)
             || (self.rtc_eor_hold.contains_key(&peer) && Self::rtc_gated_family(family))
             || self.eor_grace_held(peer, family)
@@ -2972,7 +2973,7 @@ impl RibManager {
     /// End a peer's RFC 4684 §6 `EoR` hold and emit the held markers. A
     /// dirty peer keeps them pending: its resync flushes them after the
     /// routes it replays, preserving table-before-`EoR` order.
-    fn release_rtc_eor_hold(&mut self, peer: IpAddr) {
+    fn release_rtc_eor_hold(&mut self, peer: PeerId) {
         self.rtc_eor_hold_ready.remove(&peer);
         if self.rtc_eor_hold.remove(&peer).is_some() && !self.dirty_peers.contains(&peer) {
             self.flush_pending_eor(peer);
@@ -2984,7 +2985,7 @@ impl RibManager {
     /// unless RT-Constrain selection is still deferred: membership is then
     /// rebuilt only when the deferral is staged or released, and the hold
     /// ends there instead, after the VPN/EVPN routes it admits.
-    fn rtc_membership_complete(&mut self, peer: IpAddr) {
+    fn rtc_membership_complete(&mut self, peer: PeerId) {
         if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
             if self.rtc_eor_hold.contains_key(&peer) {
                 self.rtc_eor_hold_ready.insert(peer);
@@ -2997,7 +2998,7 @@ impl RibManager {
     /// RT-Constrain selection was just staged or released and every
     /// membership rebuilt: end the holds whose `EoR` already arrived.
     fn release_ready_rtc_eor_holds(&mut self) {
-        let ready: Vec<IpAddr> = self.rtc_eor_hold_ready.drain().collect();
+        let ready: Vec<PeerId> = self.rtc_eor_hold_ready.drain().collect();
         for peer in ready {
             self.release_rtc_eor_hold(peer);
         }
@@ -3017,7 +3018,7 @@ impl RibManager {
     fn expire_eor_holds(&mut self, due: tokio::time::Instant) {
         self.expire_eor_grace(due);
         let now = tokio::time::Instant::now();
-        let expired: Vec<IpAddr> = self
+        let expired: Vec<PeerId> = self
             .rtc_eor_hold
             .iter()
             .filter(|&(_, &deadline)| deadline <= now)
@@ -3064,7 +3065,7 @@ impl RibManager {
     }
 
     #[must_use]
-    fn peer_has_any_add_path_send(&self, peer: IpAddr) -> bool {
+    fn peer_has_any_add_path_send(&self, peer: PeerId) -> bool {
         self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0) > 0
             && self
                 .peer_add_path_send_families
@@ -3073,7 +3074,7 @@ impl RibManager {
     }
 
     #[must_use]
-    fn add_path_send_max_for_prefix(&self, peer: IpAddr, prefix: &Prefix) -> u32 {
+    fn add_path_send_max_for_prefix(&self, peer: PeerId, prefix: &Prefix) -> u32 {
         let send_max = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
         if send_max == 0 {
             return 0;
@@ -3108,7 +3109,7 @@ impl RibManager {
     /// chain is never compiled. Registration needs no call: its initial dump
     /// takes a counted `share()` of the installed chain, and group handles are
     /// always shares.
-    fn create_installed_export_counters(&self, peers: impl IntoIterator<Item = IpAddr>) {
+    fn create_installed_export_counters(&self, peers: impl IntoIterator<Item = PeerId>) {
         for peer in peers {
             if let Some(Some(chain)) = self.export_chains.get(&peer) {
                 let _ = chain.hit_counters();
@@ -3143,12 +3144,12 @@ impl RibManager {
     }
 
     /// Resolve the export policy for a peer: per-peer if set, else global.
-    fn export_policy_for(&self, peer: IpAddr) -> Option<&PolicyChain> {
+    fn export_policy_for(&self, peer: PeerId) -> Option<&PolicyChain> {
         self.export_chains.for_peer(peer)
     }
 
     /// Clear all enhanced route refresh state for a peer.
-    fn clear_peer_refresh_state(&mut self, peer: IpAddr) {
+    fn clear_peer_refresh_state(&mut self, peer: PeerId) {
         self.pending_refresh.remove(&peer);
         self.refresh_in_progress.remove(&peer);
         self.refresh_stale_routes.remove(&peer);
@@ -3187,7 +3188,7 @@ impl RibManager {
         self.orr_page_topology = None;
     }
 
-    pub(super) fn set_peer_group(&mut self, peer: IpAddr, group: Option<String>) {
+    pub(super) fn set_peer_group(&mut self, peer: PeerId, group: Option<String>) {
         let changed = match group {
             Some(group) => {
                 self.peer_group.get(&peer) != Some(&group) && {
@@ -3504,7 +3505,7 @@ impl RibManager {
         // after shutdown tore the TCP sessions down) quiesces in one cheap
         // tick — instead of burning an O(table) export pass per dead peer
         // and re-arming forever, starving the shutdown observation.
-        let gone: Vec<IpAddr> = self
+        let gone: Vec<PeerId> = self
             .dirty_peers
             .iter()
             .copied()
@@ -3515,13 +3516,13 @@ impl RibManager {
             self.drop_gone_dirty_peer(peer);
         }
         let poll_start = std::time::Instant::now();
-        let mut attempted: HashSet<IpAddr> = HashSet::new();
+        let mut attempted: HashSet<PeerId> = HashSet::new();
         loop {
             // One full-table member can consume the poll budget on its own.
             // Check after that real transaction completes so a healthy fleet
             // does not become one readiness owner older than the stall bound.
             // Cheap peers can still drain within the same poll budget.
-            let ring: Vec<IpAddr> = {
+            let ring: Vec<PeerId> = {
                 let after = self
                     .dirty_peers
                     .iter()
@@ -3547,18 +3548,18 @@ impl RibManager {
             };
             self.dirty_resync_cursor = Some(last);
             attempted.extend(ring.iter().copied());
-            let selected: BTreeSet<IpAddr> = ring.into_iter().collect();
-            let withheld: Vec<IpAddr> = self.dirty_peers.difference(&selected).copied().collect();
+            let selected: BTreeSet<PeerId> = ring.into_iter().collect();
+            let withheld: Vec<PeerId> = self.dirty_peers.difference(&selected).copied().collect();
             // A withheld peer re-marked during this pass continues its
             // episode; keep its original start time.
-            let withheld_since: Vec<(IpAddr, tokio::time::Instant)> = withheld
+            let withheld_since: Vec<(PeerId, tokio::time::Instant)> = withheld
                 .iter()
                 .filter_map(|peer| self.dirty_since.get(peer).map(|since| (*peer, *since)))
                 .collect();
             // A failed forced replay is also dirty. Its force bit must not
             // bypass this same peer slice; unrelated force-only work keeps
             // its existing path and scheduling.
-            let withheld_force: Vec<IpAddr> = withheld
+            let withheld_force: Vec<PeerId> = withheld
                 .iter()
                 .copied()
                 .filter(|peer| self.force_outbound_peers.remove(peer))
@@ -5208,7 +5209,7 @@ impl RibManager {
     /// a scoped (IPv6 link-local) neighbor and to none for numbered
     /// neighbors, an active session without one, and peers without a live
     /// session.
-    pub(super) fn session_peer_scope(&self, peer: IpAddr) -> crate::route::AspaContextId {
+    pub(super) fn session_peer_scope(&self, peer: PeerId) -> crate::route::AspaContextId {
         // The active registration is the newest live record (see
         // `register_active_session`); a collision loser's scope never counts.
         self.live_sessions
@@ -5244,7 +5245,7 @@ impl RibManager {
 
     pub(super) fn update_policy_filtered_routes_for_prefixes(
         &mut self,
-        target_peer: IpAddr,
+        target_peer: PeerId,
         prefixes: &HashSet<Prefix>,
         current: &HashSet<PolicyFilteredRouteKey>,
     ) {
@@ -5313,7 +5314,7 @@ impl RibManager {
         self.replacement_checkpoint(true);
     }
 
-    pub(super) fn clear_policy_filtered_routes_for_peer(&mut self, target_peer: IpAddr) {
+    pub(super) fn clear_policy_filtered_routes_for_peer(&mut self, target_peer: PeerId) {
         if let Some(mut routes) = self.policy_filtered_routes.remove(&target_peer) {
             retire_hash_set(&mut routes, &mut || self.replacement_checkpoint(false));
         }
@@ -5330,7 +5331,7 @@ impl RibManager {
 
     fn handle_bgpls_routes_received(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announced: Vec<crate::route::BgpLsRibRoute>,
         withdrawn: Vec<crate::route::BgpLsRouteKey>,
     ) {
@@ -5389,7 +5390,7 @@ impl RibManager {
 
     fn handle_vpn_routes_received(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announced: Vec<crate::route::VpnRibRoute>,
         withdrawn: Vec<crate::route::VpnRibRouteKey>,
     ) {
@@ -5458,7 +5459,7 @@ impl RibManager {
 
     fn handle_labeled_routes_received(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announced: Vec<crate::route::LabeledRibRoute>,
         withdrawn: Vec<crate::route::LabeledRibRouteKey>,
     ) {
@@ -5527,7 +5528,7 @@ impl RibManager {
     /// VPNv4/VPNv6 Adj-RIB-Out restages under the new filter.
     fn handle_rtc_routes_received(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announced: Vec<crate::route::RtcRibRoute>,
         withdrawn: Vec<crate::route::RtcRibRouteKey>,
     ) {
@@ -5586,7 +5587,7 @@ impl RibManager {
     /// paths) and route the result through [`Self::set_rt_membership`] —
     /// the corrective emit (grouped delta walk or per-peer restage) fires
     /// there iff the membership actually changed.
-    fn rebuild_rtc_membership_and_restage_vpn(&mut self, peer: IpAddr) {
+    fn rebuild_rtc_membership_and_restage_vpn(&mut self, peer: PeerId) {
         let membership = self.rtc_membership_from_rib(peer);
         self.set_rt_membership(peer, Some(membership));
     }
@@ -5610,7 +5611,7 @@ impl RibManager {
     /// keeps the per-peer dirty restage (the Adj-RIB-Out equality
     /// machinery yields the RFC 4684 minimal update set, no session
     /// reset). An unchanged membership is a strict no-op.
-    fn set_rt_membership(&mut self, peer: IpAddr, membership: Option<RtcMembership>) {
+    fn set_rt_membership(&mut self, peer: PeerId, membership: Option<RtcMembership>) {
         // Removing Φ is valid only before outbound registration (a new
         // session that did not negotiate RTC) or after deregistration during
         // teardown. On a live registration it would silently change the peer
@@ -5702,7 +5703,7 @@ impl RibManager {
     /// advertisements through the restart window). Shared by the rebuild
     /// seam above and the GR re-establish path in
     /// `register_active_session`.
-    fn rtc_membership_from_rib(&self, peer: IpAddr) -> RtcMembership {
+    fn rtc_membership_from_rib(&self, peer: PeerId) -> RtcMembership {
         let mut has_default = false;
         let mut entries: Vec<rustbgpd_wire::RtcNlri> = Vec::new();
         if let Some(rib) = self.ribs.get(&peer) {
@@ -5771,7 +5772,7 @@ impl RibManager {
         if changed.is_empty() {
             return;
         }
-        let bound: Vec<IpAddr> = self
+        let bound: Vec<PeerId> = self
             .peer_orr_vantage
             .iter()
             .filter(|(peer, vantage)| {
@@ -6243,7 +6244,7 @@ impl RibManager {
                 if self.drain_before_expiry(ExpiryTimer::GrStale).await {
                     continue;
                 }
-                let expired: Vec<IpAddr> = self
+                let expired: Vec<PeerId> = self
                     .gr_stale_deadlines
                     .iter()
                     .filter(|&(_, &deadline)| deadline <= now)

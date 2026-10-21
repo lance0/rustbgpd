@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -388,16 +389,18 @@ fn record_generation_policy_commands(
         while let Some(command) = rx.recv().await {
             let entry = match &command {
                 RibUpdate::PrepareExportPolicyDestination { peer, .. } => {
-                    Some(("prepare", vec![*peer]))
+                    Some(("prepare", vec![peer.addr()]))
                 }
-                RibUpdate::ReplacePeerExportPolicy { peer, .. } => Some(("replace", vec![*peer])),
+                RibUpdate::ReplacePeerExportPolicy { peer, .. } => {
+                    Some(("replace", vec![peer.addr()]))
+                }
                 RibUpdate::ReplacePeerExportPolicies { replacements, .. }
                 | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { replacements, .. } => {
                     Some((
                         "replace",
                         replacements
                             .iter()
-                            .map(|replacement| replacement.peer)
+                            .map(|replacement| replacement.peer.addr())
                             .collect(),
                     ))
                 }
@@ -405,12 +408,12 @@ fn record_generation_policy_commands(
                     "restore",
                     replacements
                         .iter()
-                        .map(|replacement| replacement.peer)
+                        .map(|replacement| replacement.peer.addr())
                         .collect(),
                 )),
-                RibUpdate::RefreshPeerOutbound { peer, .. } => Some(("refresh", vec![*peer])),
+                RibUpdate::RefreshPeerOutbound { peer, .. } => Some(("refresh", vec![peer.addr()])),
                 RibUpdate::ReevaluatePeerExportPolicies { peers, .. } => {
-                    Some(("reevaluate", peers.clone()))
+                    Some(("reevaluate", peers.iter().map(|peer| peer.addr()).collect()))
                 }
                 _ => None,
             };
@@ -3918,14 +3921,18 @@ fn intercept_dataset_rib(
                     let _ = reply.send(retained);
                 }
                 RibUpdate::ReevaluatePeerExportPolicies { peers, reply, .. } => {
-                    recorded.lock().unwrap().push(peers.clone());
-                    let outcome = if missing.is_some_and(|peer| peers.contains(&peer)) {
-                        Err(rustbgpd_rib::RibCommandError::not_found(
-                            "missing outbound registration",
-                        ))
-                    } else {
-                        Ok(())
-                    };
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(peers.iter().map(|peer| peer.addr()).collect());
+                    let outcome =
+                        if missing.is_some_and(|peer| peers.contains(&PeerId::from_addr(peer))) {
+                            Err(rustbgpd_rib::RibCommandError::not_found(
+                                "missing outbound registration",
+                            ))
+                        } else {
+                            Ok(())
+                        };
                     let _ = reply.send(outcome);
                 }
                 other => {
@@ -4054,7 +4061,7 @@ async fn assert_slow_export_keeps_down_dependent_proof(slow_singleton: bool) {
                     let _ = reply.send(0);
                 }
                 RibUpdate::ReevaluatePeerExportPolicies { peers, reply, .. } => {
-                    if (peers == vec![down]) == slow_singleton {
+                    if (peers == vec![PeerId::from_addr(down)]) == slow_singleton {
                         tokio::time::sleep(RIB_BATCH_REPLY_TIMEOUT + Duration::from_secs(60)).await;
                     }
                     let _ = reply.send(Ok(()));
@@ -5453,7 +5460,7 @@ async fn inject_condition_route(harness: &GenerationHarness) {
         .mgr
         .rib_tx
         .send(RibUpdate::RoutesReceived {
-            peer: IpAddr::V4(source),
+            peer: PeerId::from_addr(IpAddr::V4(source)),
             session_id: 0,
             announced: vec![rustbgpd_rib::Route {
                 prefix: rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
@@ -5463,7 +5470,7 @@ async fn inject_condition_route(harness: &GenerationHarness) {
                 next_hop: IpAddr::V4(source),
                 link_local_next_hop: None,
                 next_hop_scope: None,
-                peer: IpAddr::V4(source),
+                peer: PeerId::from_addr(IpAddr::V4(source)),
                 attributes: rustbgpd_rib::AttrSet::new(vec![rustbgpd_wire::PathAttribute::Origin(
                     rustbgpd_wire::Origin::Igp,
                 )]),

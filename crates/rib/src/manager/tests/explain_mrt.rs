@@ -1,4 +1,6 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
 #[test]
 fn canceled_mrt_snapshot_skips_builder_before_route_clone() {
@@ -16,7 +18,7 @@ async fn warm_mrt_snapshot_rejects_session_generation_change_at_rib_fence() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
@@ -66,7 +68,7 @@ async fn warm_mrt_snapshot_excludes_routes_for_family_outside_exact_view() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
@@ -165,7 +167,7 @@ async fn warm_mrt_snapshot_rejects_materialization_before_route_clone() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
@@ -238,7 +240,7 @@ async fn mrt_snapshot_uses_adj_rib_in_routes_without_loc_rib_duplication() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -272,7 +274,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -328,7 +330,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
     let meta = snapshot
         .peers
         .iter()
-        .find(|entry| entry.peer_addr == peer)
+        .find(|entry| entry.peer_addr == peer.addr())
         .expect("peer metadata should remain available during GR");
     assert_eq!(meta.peer_asn, 65001);
     assert_eq!(meta.peer_bgp_id, Ipv4Addr::new(10, 0, 0, 1));
@@ -353,7 +355,7 @@ async fn explain_best_path_returns_candidates_without_winner() {
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer_a),
+        peer: peer_v4(peer_a),
         announced: vec![route_a],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -367,7 +369,7 @@ async fn explain_best_path_returns_candidates_without_winner() {
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer_b),
+        peer: peer_v4(peer_b),
         announced: vec![route_b],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -387,12 +389,12 @@ async fn explain_best_path_returns_candidates_without_winner() {
     // Best route should be from peer_a (higher LP).
     assert!(explain.best.is_some());
     let best = explain.best.unwrap();
-    assert_eq!(best.peer, IpAddr::V4(peer_a));
+    assert_eq!(best.peer, peer_v4(peer_a));
 
     // Candidates should NOT include the winner.
     assert_eq!(explain.candidates.len(), 1);
     let loser = &explain.candidates[0];
-    assert_eq!(loser.route.peer, IpAddr::V4(peer_b));
+    assert_eq!(loser.route.peer, peer_v4(peer_b));
     assert_eq!(
         loser.vs_best_reason,
         crate::best_path::BestPathReason::HigherLocalPref
@@ -418,10 +420,6 @@ async fn explain_best_path_returns_candidates_without_winner() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the route batch literal carries every supported family as one transaction"
-)]
 async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
     let (tx, rx) = mpsc::channel(64);
     let handle =
@@ -444,7 +442,7 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
     ] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(peer),
+            peer: peer_v4(peer),
             announced: vec![route],
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -461,7 +459,7 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
         .await
         .unwrap();
     assert_eq!(exact.prefix, Prefix::V4(closer));
-    assert_eq!(exact.best.as_ref().unwrap().peer, IpAddr::V4(closer_peer));
+    assert_eq!(exact.best.as_ref().unwrap().peer, peer_v4(closer_peer));
 
     let closest = query_lookup_best_path(&tx, query).await.unwrap();
     assert_eq!(closest.prefix, Prefix::V4(closer));
@@ -472,7 +470,7 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(closer_peer),
+        peer: peer_v4(closer_peer),
         announced: vec![],
         withdrawn: vec![(Prefix::V4(closer), 0)],
         flowspec_announced: vec![],
@@ -485,22 +483,16 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
     .unwrap();
     let fallback = query_lookup_best_path(&tx, query).await.unwrap();
     assert_eq!(fallback.prefix, Prefix::V4(farther));
-    assert_eq!(
-        fallback.best.as_ref().unwrap().peer,
-        IpAddr::V4(winner_peer)
-    );
+    assert_eq!(fallback.best.as_ref().unwrap().peer, peer_v4(winner_peer));
     assert_eq!(fallback.candidates.len(), 1);
-    assert_eq!(
-        fallback.candidates[0].route.peer,
-        IpAddr::V4(alternative_peer)
-    );
+    assert_eq!(fallback.candidates[0].route.peer, peer_v4(alternative_peer));
     assert!(fallback.peer.is_none());
     assert_eq!(fallback.add_path_send_max, 0);
 
     for peer in [winner_peer, alternative_peer] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(peer),
+            peer: peer_v4(peer),
             announced: vec![],
             withdrawn: vec![(Prefix::V4(farther), 0)],
             flowspec_announced: vec![],
@@ -518,7 +510,7 @@ async fn lookup_best_path_is_atomic_and_falls_back_after_withdrawal() {
     );
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(default_peer),
+        peer: peer_v4(default_peer),
         announced: vec![],
         withdrawn: vec![(Prefix::V4(default), 0)],
         flowspec_announced: vec![],
@@ -568,7 +560,7 @@ async fn explain_best_path_single_path_has_no_best_reason() {
     let peer = Ipv4Addr::new(1, 0, 0, 1);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced: vec![make_route_with_lp(prefix, peer, 100)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -582,10 +574,7 @@ async fn explain_best_path_single_path_has_no_best_reason() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let explain = query_explain_best_path(&tx, Prefix::V4(prefix)).await;
-    assert_eq!(
-        explain.best.as_ref().map(|r| r.peer),
-        Some(IpAddr::V4(peer))
-    );
+    assert_eq!(explain.best.as_ref().map(|r| r.peer), Some(peer_v4(peer)));
     assert!(explain.candidates.is_empty());
     assert!(explain.best_reason.is_none());
     assert_eq!(explain.best_reason_detail.len(), 0);
@@ -658,7 +647,7 @@ async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
     let expected_best = all.iter().min_by(|a, b| best_path_cmp(a, b)).unwrap();
     let best = explain.best.as_ref().expect("best route");
     assert_eq!(best.peer, expected_best.peer);
-    assert_eq!(best.peer, IpAddr::V4(winner_peer));
+    assert_eq!(best.peer, peer_v4(winner_peer));
 
     // Winner attribution: the runner-up is the ECMP sibling (ties every
     // attribute step, loses on peer address), so the winning step is
@@ -672,7 +661,7 @@ async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
         explain
             .candidates
             .iter()
-            .find(|c| c.route.peer == IpAddr::V4(peer))
+            .find(|c| c.route.peer == peer_v4(peer))
             .unwrap_or_else(|| panic!("candidate {peer} missing"))
     };
 
@@ -738,7 +727,7 @@ async fn explain_best_path_lower_bgp_identifier_beats_peer_address() {
 
     let explain = query_explain_best_path(&tx, Prefix::V4(prefix)).await;
     let best = explain.best.as_ref().expect("best route");
-    assert_eq!(best.peer, IpAddr::V4(low_id_peer));
+    assert_eq!(best.peer, peer_v4(low_id_peer));
     assert_eq!(
         explain.best_reason,
         Some(BestPathReason::LowerBgpIdentifier)
@@ -750,7 +739,7 @@ async fn explain_best_path_lower_bgp_identifier_beats_peer_address() {
     let loser = explain
         .candidates
         .iter()
-        .find(|c| c.route.peer == IpAddr::V4(low_addr_peer))
+        .find(|c| c.route.peer == peer_v4(low_addr_peer))
         .expect("losing candidate");
     assert_eq!(loser.vs_best_reason, BestPathReason::LowerBgpIdentifier);
     assert_eq!(loser.vs_best_detail, "bgp_identifier 2.2.2.2 > 1.1.1.1");
@@ -769,10 +758,10 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
     let metrics = BgpMetrics::new();
     let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
 
-    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let peer3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer3 = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     for (peer, peer_addr, asn, lp) in [
@@ -833,7 +822,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
     // The remaining two are peer2 (advertised at rank 2) and peer3
     // (filtered, beyond send_max).
     assert_eq!(explain.candidates.len(), 2);
-    let by_peer: std::collections::HashMap<IpAddr, &crate::update::BestPathCandidate> = explain
+    let by_peer: std::collections::HashMap<PeerId, &crate::update::BestPathCandidate> = explain
         .candidates
         .iter()
         .map(|c| (c.route.peer, c))
@@ -867,8 +856,8 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
     let metrics = BgpMetrics::new();
     let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
 
-    let peer_winner = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let peer_runner_up = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer_winner = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer_runner_up = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // peer_winner has the higher LP and *is* the target peer.
@@ -945,7 +934,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
 
     let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     for (peer, addr, asn, lp) in [
@@ -954,7 +943,7 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
     ] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer,
+            peer: PeerId::from_addr(peer),
             announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -1020,7 +1009,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
 
     let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     for (peer, addr, asn, lp) in [
@@ -1029,7 +1018,7 @@ async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
     ] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer,
+            peer: PeerId::from_addr(peer),
             announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -1094,7 +1083,7 @@ async fn explain_best_path_for_unknown_peer_returns_none() {
     let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
-    let unknown = IpAddr::V4(Ipv4Addr::new(10, 99, 99, 99));
+    let unknown = peer_v4(Ipv4Addr::new(10, 99, 99, 99));
 
     let result = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), unknown).await;
     assert!(result.is_none(), "unknown peer should yield None");
@@ -1117,7 +1106,7 @@ async fn explain_best_path_global_view_unchanged() {
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer_a),
+        peer: peer_v4(peer_a),
         announced: vec![make_route_with_lp(prefix, peer_a, 200)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -1130,7 +1119,7 @@ async fn explain_best_path_global_view_unchanged() {
     .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer_b),
+        peer: peer_v4(peer_b),
         announced: vec![make_route_with_lp(prefix, peer_b, 100)],
         withdrawn: vec![],
         flowspec_announced: vec![],

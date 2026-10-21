@@ -1,3 +1,4 @@
+use crate::PeerId;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -72,12 +73,12 @@ pub(super) struct GroupReplay {
     pub(super) next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     pub(super) encode: Arc<crate::update::SharedGroupEncode>,
     pub(super) probe_cache: super::distribution::SharedUnicastProbeCache,
-    only_source: Option<IpAddr>,
+    only_source: Option<PeerId>,
 }
 
 impl GroupReplay {
     /// Empty and entirely own-sourced inventories keep the ordinary path.
-    pub(super) fn has_routes_for(&self, peer: IpAddr) -> bool {
+    pub(super) fn has_routes_for(&self, peer: PeerId) -> bool {
         !self.announce.is_empty() && self.only_source != Some(peer)
     }
 }
@@ -120,7 +121,7 @@ impl RibManager {
     /// over to the survivor instead of tearing the peer down.
     pub(super) fn handle_peer_down(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
     ) -> SessionTeardownDisposition {
         let disposition = self.classify_session_teardown(peer, session_id, "PeerDown");
@@ -146,7 +147,7 @@ impl RibManager {
     /// pre-stamping accept-all behavior and is never discarded.
     pub(super) fn classify_session_teardown(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         event: &str,
     ) -> SessionTeardownDisposition {
@@ -253,7 +254,7 @@ impl RibManager {
     /// `family_sendable`.
     pub(super) fn stale_session_message(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         event: &'static str,
         kind: StaleSessionMessageKind,
@@ -299,7 +300,7 @@ impl RibManager {
     /// negotiated Route Refresh, inbound state stays empty until the
     /// peer's natural re-advertisement (its next own route change) — that
     /// staleness window is logged by the session task.
-    pub(super) fn fail_over_registration(&mut self, peer: IpAddr, down_id: u64, event: &str) {
+    pub(super) fn fail_over_registration(&mut self, peer: PeerId, down_id: u64, event: &str) {
         let Some(survivor_session_id) = self
             .live_sessions
             .get(&peer)
@@ -341,7 +342,7 @@ impl RibManager {
     /// still be refreshed. A full outbound channel defers one generation-
     /// scoped request into the existing bounded resync cadence; a closed
     /// channel is terminal.
-    pub(super) fn request_inbound_refresh(&mut self, peer: IpAddr) {
+    pub(super) fn request_inbound_refresh(&mut self, peer: PeerId) {
         let Some(record) = self
             .live_sessions
             .get(&peer)
@@ -387,7 +388,7 @@ impl RibManager {
     /// Full channels retain the coalesced bit for the ordinary retry interval;
     /// closed or superseded sessions retire it without spinning.
     pub(super) fn retry_pending_inbound_refresh_bounded(&mut self) {
-        let ring: Vec<IpAddr> = {
+        let ring: Vec<PeerId> = {
             let after = self.pending_inbound_refresh.keys().filter(|peer| {
                 match self.pending_inbound_refresh_cursor {
                     Some(cursor) => **peer > cursor,
@@ -463,7 +464,7 @@ impl RibManager {
     /// the session-identity gate are authoritative non-session events:
     /// peer deletion (config removed the neighbor) and GR/LLGR retention
     /// expiry (the peer never came back).
-    pub(super) fn peer_down_teardown(&mut self, peer: IpAddr) {
+    pub(super) fn peer_down_teardown(&mut self, peer: PeerId) {
         // Full teardown drops every live-session record with the
         // registration — any session event arriving for the address
         // afterwards is classified against an empty state (accept-all
@@ -524,7 +525,7 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "peer teardown keeps recomputation and exact-identity consumers before the detached retirement and following attribute GC"
     )]
-    fn clear_peer_adj_rib_in(&mut self, peer: IpAddr) {
+    fn clear_peer_adj_rib_in(&mut self, peer: PeerId) {
         // The discarded routes no longer back any session's End-of-RIB; only
         // a later marker on the replayed feed may report it synced again.
         for record in self.live_sessions.get_mut(&peer).into_iter().flatten() {
@@ -748,7 +749,7 @@ impl RibManager {
     /// Deletion is a config decision, not a session event, so it runs the
     /// teardown unconditionally — the session-identity gate in
     /// `handle_peer_down` does not apply.
-    pub(super) fn handle_peer_deleted(&mut self, peer: IpAddr, label: Option<Arc<str>>) {
+    pub(super) fn handle_peer_deleted(&mut self, peer: PeerId, label: Option<Arc<str>>) {
         self.peer_down_teardown(peer);
         self.eor_grace_peer_deleted(peer);
         self.pending_peer_export_context
@@ -791,7 +792,7 @@ impl RibManager {
     /// (`peer_asn`/`peer_group`/`peer_bgp_id`) and the retained route-source
     /// classification (`peer_is_rr_client`) stay out: GR keeps them for stale
     /// routes and the returning peer; terminal `PeerDown` removes them.
-    pub(super) fn clear_outbound_peer_state(&mut self, peer: IpAddr) {
+    pub(super) fn clear_outbound_peer_state(&mut self, peer: PeerId) {
         self.clear_outbound_peer_state_inner(peer, false);
     }
 
@@ -799,7 +800,7 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "outbound teardown keeps per-registration cleanup and detached table retirement in their existing ownership order"
     )]
-    fn clear_outbound_peer_state_inner(&mut self, peer: IpAddr, same_connection_replay: bool) {
+    fn clear_outbound_peer_state_inner(&mut self, peer: PeerId, same_connection_replay: bool) {
         self.invalidate_evpn_feed_completion(peer);
         if !same_connection_replay {
             self.retire_evpn_recovery(peer);
@@ -1013,7 +1014,7 @@ impl RibManager {
     )]
     pub(super) fn handle_peer_up(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         peer_asn: u32,
         peer_router_id: Ipv4Addr,
@@ -1204,7 +1205,7 @@ impl RibManager {
     /// Resolve Paths-Limit against only the newest live session.
     pub(super) fn newest_live_session_mut(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
     ) -> Option<&mut LiveSessionRecord> {
         self.live_sessions
@@ -1223,7 +1224,7 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "session classification (GR, LLGR, RTC, selection deferral) stays in one auditable pass"
     )]
-    fn register_active_session(&mut self, peer: IpAddr, registration: ActiveSessionRegistration) {
+    fn register_active_session(&mut self, peer: PeerId, registration: ActiveSessionRegistration) {
         let Some(record) = self
             .live_sessions
             .get(&peer)
@@ -1561,7 +1562,7 @@ impl RibManager {
     /// either inline (quiet actor) or deferred to the run loop (LAN-475);
     /// re-reads the live-session record so a deferred completion always
     /// registers the CURRENT session's negotiated state.
-    pub(super) fn complete_outbound_registration(&mut self, peer: IpAddr) {
+    pub(super) fn complete_outbound_registration(&mut self, peer: PeerId) {
         if self.install_outbound_registration(peer) {
             self.send_initial_table(peer);
         }
@@ -1570,7 +1571,7 @@ impl RibManager {
     /// Everything [`Self::complete_outbound_registration`] does before the
     /// initial table: install the CURRENT live session's outbound state and
     /// update-group membership. `false` only when no live session exists.
-    fn install_outbound_registration(&mut self, peer: IpAddr) -> bool {
+    fn install_outbound_registration(&mut self, peer: PeerId) -> bool {
         let Some(record) = self
             .live_sessions
             .get(&peer)
@@ -1775,7 +1776,7 @@ impl RibManager {
 
     pub(super) fn handle_set_peer_policy_context(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         peer_group: Option<String>,
     ) {
         self.set_peer_group(peer, peer_group);
@@ -1785,7 +1786,7 @@ impl RibManager {
     /// with the session's reason for each.
     pub(super) fn registered_withheld_families(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> &[crate::update::WithheldFamily] {
         self.outbound_session_ids
             .get(&peer)
@@ -1806,7 +1807,7 @@ impl RibManager {
     /// Initial export only reads inbound/selected routes, so the readiness
     /// count stays exact while outbound state changes. Standalone exports fence
     /// general and summary queries; nested owners retain their context/age.
-    pub(super) fn send_initial_table(&mut self, peer: IpAddr) {
+    pub(super) fn send_initial_table(&mut self, peer: PeerId) {
         super::with_executor_handoff(|| {
             self.with_replacement_readiness(|manager| {
                 manager.send_initial_table_with_readiness(peer, None);
@@ -1824,7 +1825,7 @@ impl RibManager {
     /// member's own registration, residue, commit and `EoR` in queue order.
     /// Nothing else runs on the actor in between, so no live update can
     /// overtake an unfinished member's initial table.
-    pub(super) fn complete_deferred_registration(&mut self, leader: IpAddr) {
+    pub(super) fn complete_deferred_registration(&mut self, leader: PeerId) {
         if !self.install_outbound_registration(leader) {
             return;
         }
@@ -1859,7 +1860,7 @@ impl RibManager {
     /// at most [`MAX_JOIN_COHORT_EXAMINED`] queued entries checked against
     /// the leader's profile. Every other entry is moved back to the queue
     /// unexamined, so the requeue itself is linear in the queue length.
-    fn take_join_cohort(&mut self, leader: IpAddr) -> Vec<IpAddr> {
+    fn take_join_cohort(&mut self, leader: PeerId) -> Vec<PeerId> {
         if self.pending_initial_registrations.is_empty() {
             return Vec::new();
         }
@@ -1937,7 +1938,7 @@ impl RibManager {
 
     /// Register each cohort member and send every member its initial table
     /// from one shared replay of the leader's group table.
-    fn send_cohort_initial_tables(&mut self, leader: IpAddr, members: Vec<IpAddr>) {
+    fn send_cohort_initial_tables(&mut self, leader: PeerId, members: Vec<PeerId>) {
         let gid = self
             .grouped_member_of(leader)
             .expect("cohort leader is grouped");
@@ -2033,7 +2034,7 @@ impl RibManager {
     /// avoids walking the Loc-RIB and every Adj-RIB-In on each replay.
     pub(super) fn grouped_join_prefix_scope(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         group: &super::update_groups::GroupRibOut,
         checkpoint: &mut impl FnMut(),
     ) -> HashSet<Prefix> {
@@ -2080,7 +2081,7 @@ impl RibManager {
     pub(super) fn grouped_join_replay<'a>(
         &self,
         group: &'a super::update_groups::GroupRibOut,
-        peer: IpAddr,
+        peer: PeerId,
         rs_control: Option<(u32, u32)>,
         mut checkpoint: impl FnMut(),
     ) -> Vec<super::update_groups::AdvEntry<'a>> {
@@ -2119,7 +2120,7 @@ impl RibManager {
     )]
     fn send_initial_table_with_readiness(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         cohort: Option<&mut GroupReplay>,
     ) {
         let readiness = self.replacement_readiness.clone();

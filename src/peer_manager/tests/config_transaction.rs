@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 #[tokio::test]
 async fn transaction_plan_retains_missing_interface_member() {
@@ -131,7 +132,7 @@ log_format = "json"
         reply
             .send(rustbgpd_rib::UpdateGroupSnapshot {
                 peers: vec![rustbgpd_rib::UpdateGroupPeerSnapshot {
-                    peer: "192.0.2.1".parse().unwrap(),
+                    peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
                     input: rustbgpd_rib::UpdateGroupClassifierInput {
                         policy_fingerprint: None,
                         policy_provenance: None,
@@ -724,7 +725,7 @@ route_server_client = true
         reply
             .send(rustbgpd_rib::UpdateGroupSnapshot {
                 peers: vec![rustbgpd_rib::UpdateGroupPeerSnapshot {
-                    peer: "192.0.2.1".parse().unwrap(),
+                    peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
                     input: live_input,
                     classification: live_classification,
                     runtime_membership: "group:0".to_string(),
@@ -882,7 +883,7 @@ export_policy_chain = ["dataset-export"]
             reply
                 .send(rustbgpd_rib::UpdateGroupSnapshot {
                     peers: vec![rustbgpd_rib::UpdateGroupPeerSnapshot {
-                        peer: "192.0.2.1".parse().unwrap(),
+                        peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
                         input: live_input.clone(),
                         classification: live_classification.clone(),
                         runtime_membership: "group:0".to_string(),

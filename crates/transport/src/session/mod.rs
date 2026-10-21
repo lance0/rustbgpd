@@ -30,8 +30,8 @@ use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
-    LabeledRibRoute, LabeledRibRouteKey, NextHopScope, OutboundRouteUpdate, RibUpdate, Route,
-    RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
+    LabeledRibRoute, LabeledRibRouteKey, NextHopScope, OutboundRouteUpdate, PeerId, RibUpdate,
+    Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
 use rustbgpd_telemetry::{BgpMetrics, reason_labels::SessionDownReason};
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
@@ -1002,6 +1002,11 @@ struct AcceptedTransport {
 }
 
 impl PeerSession {
+    /// This session's neighbor identity in the RIB.
+    pub(super) fn rib_peer(&self) -> PeerId {
+        PeerId::from_addr(self.peer_ip)
+    }
+
     fn path_receive_admission(&self) -> Option<PathReceiveAdmission> {
         (self.config.peer.paths_limit_receive_max > 0
             && [Afi::Ipv4, Afi::Ipv6]

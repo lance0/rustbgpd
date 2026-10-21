@@ -2493,6 +2493,7 @@ mod tests {
     use bytes::Bytes;
     use rustbgpd_fsm::PeerConfig;
     use rustbgpd_rib::AttrSet;
+    use rustbgpd_rib::PeerId;
     use rustbgpd_wire::{
         AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, Ipv6Prefix,
         MacAddress, MplsLabel, Origin, RouteDistinguisher, notification::NotificationCode,
@@ -2561,7 +2562,7 @@ mod tests {
             next_hop: IpAddr::V6("2001:db8::2".parse().unwrap()),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {

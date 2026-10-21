@@ -624,7 +624,9 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
 async fn received_validation_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
-        scope: rustbgpd_rib::RouteQueryScope::Received { peer: Some(peer) },
+        scope: rustbgpd_rib::RouteQueryScope::Received {
+            peer: Some(PeerId::from_addr(peer)),
+        },
         filter: None,
         after: None,
         expected_version: None,
@@ -1078,8 +1080,9 @@ async fn session_verdicts_equal_rib_validation_for_the_same_tables() {
             validated_with,
         };
 
-        let kept = rib_stored_verdicts(batch(Some(provenance.clone())), peer, &vrps, &aspa).await;
-        let revalidated = rib_stored_verdicts(batch(None), peer, &vrps, &aspa).await;
+        let kept =
+            rib_stored_verdicts(batch(Some(provenance.clone())), peer.addr(), &vrps, &aspa).await;
+        let revalidated = rib_stored_verdicts(batch(None), peer.addr(), &vrps, &aspa).await;
         assert_eq!(kept, revalidated, "remote AS {remote_asn}");
         assert_eq!(
             kept,

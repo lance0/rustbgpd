@@ -10,6 +10,7 @@ use rustbgpd_evpn_load::{establish_on, PeerConfig as StubConfig};
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::RibUpdate;
 use rustbgpd_rib::AttrSet;
+use rustbgpd_rib::PeerId;
 use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::PeerHandle;
@@ -142,7 +143,7 @@ fn route(prefix: Ipv4Prefix, peer: Ipv4Addr) -> Route {
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: PeerId::from_addr(IpAddr::V4(peer)),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
@@ -266,14 +267,17 @@ async fn counts(query: &mpsc::Sender<RibUpdate>) -> Result<HashMap<IpAddr, u64>>
                 .into_iter()
                 .find(|((afi, safi), _)| *afi == Afi::Ipv4 && *safi == Safi::Unicast)
                 .map_or(0, |(_, count)| count);
-            (peer, count)
+            (peer.addr(), count)
         })
         .collect())
 }
 async fn group(query: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Result<String> {
     let (reply, receive) = oneshot::channel();
     query
-        .send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+        .send(RibUpdate::QueryPeerUpdateGroup {
+            peer: PeerId::from_addr(peer),
+            reply,
+        })
         .await?;
     Ok(receive.await?)
 }
@@ -412,7 +416,7 @@ pub async fn run(output: &str, tiny: bool) -> Result<()> {
         send_before(
             &rib_tx,
             RibUpdate::RoutesReceived {
-                peer: IpAddr::V4(peer),
+                peer: PeerId::from_addr(IpAddr::V4(peer)),
                 session_id: 0,
                 announced,
                 withdrawn: vec![],

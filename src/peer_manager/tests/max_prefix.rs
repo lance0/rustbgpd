@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 /// Load-bearing timed-restart proof: removing the run-loop sleep, using
 /// `>=` one second early, extending on a duplicate terminal notice, or leaving
@@ -1121,23 +1122,31 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
         rib_tx.clone(),
         None,
     );
-    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 36));
+    let addr = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 36)));
     let aborted = Arc::new(AtomicU32::new(0));
     let cancel_notify = Arc::new(Notify::new());
     insert_test_managed_peer(
         &mut mgr,
-        addr,
+        addr.addr(),
         stalled_shutdown_peer_handle_with_notify(aborted.clone(), Some(cancel_notify.clone()))
             .await,
         false,
     );
     let candidate = Arc::new(FakePeerCounters::default());
-    mgr.peers.get_mut(&key(addr)).unwrap().pending_inbound = Some(PendingInbound {
+    mgr.peers
+        .get_mut(&key(addr.addr()))
+        .unwrap()
+        .pending_inbound = Some(PendingInbound {
         recovery_reset: None,
-        handle: fake_peer_handle(addr, SessionState::OpenConfirm, None, candidate.clone()),
+        handle: fake_peer_handle(
+            addr.addr(),
+            SessionState::OpenConfirm,
+            None,
+            candidate.clone(),
+        ),
         session_id: 2,
     });
-    mgr.register_session(2, &key(addr));
+    mgr.register_session(2, &key(addr.addr()));
     mgr.next_session_id = 3;
 
     rib_tx
@@ -1164,7 +1173,7 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
         mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {
             session_id: 2,
             role: rustbgpd_transport::SessionRole::InboundCandidate,
-            peer_addr: addr,
+            peer_addr: addr.addr(),
             count: 501,
             bound: 500,
             family: None,
@@ -1180,16 +1189,16 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
     };
     assert_eq!(peer, addr);
     assert_eq!(session_id, 1);
-    let managed = mgr.peers.get(&key(addr)).unwrap();
+    let managed = mgr.peers.get(&key(addr.addr())).unwrap();
     assert_eq!(managed.session_id(), 3);
     assert!(!managed.enabled);
     assert!(managed.pending_inbound.is_none());
     assert!(mgr.peer_key_for_session(1).is_none());
-    assert_eq!(mgr.peer_key_for_session(3), Some(key(addr)));
+    assert_eq!(mgr.peer_key_for_session(3), Some(key(addr.addr())));
     assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
-    mgr.enable_peer(key(addr)).await.unwrap();
-    assert!(mgr.peers.get(&key(addr)).unwrap().enabled);
-    assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
+    mgr.enable_peer(key(addr.addr())).await.unwrap();
+    assert!(mgr.peers.get(&key(addr.addr())).unwrap().enabled);
+    assert!(!mgr.max_prefix_latches.contains_key(&key(addr.addr())));
 }
 
 /// Load-bearing latch-gauge proof: `bgp_max_prefix_latched` follows the

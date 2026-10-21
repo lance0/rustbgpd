@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::peer_v4;
 
 fn assert_route_refresh_actor_samples(metrics: &BgpMetrics, begin: u64, eorr: u64, timeout: u64) {
     assert_eq!(
@@ -23,7 +24,7 @@ fn route_refresh_actor_duration_counts_only_accepted_active_refresh_work() {
     let (_tx, rx) = mpsc::channel(8);
     let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
@@ -123,7 +124,7 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 34, 100);
     let key = route.key();
 
@@ -136,7 +137,7 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     .await
     .unwrap();
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -205,7 +206,7 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
@@ -280,7 +281,7 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let route1 = make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1));
@@ -363,7 +364,7 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
@@ -429,7 +430,7 @@ async fn enhanced_route_refresh_eorr_without_active_state_is_ignored() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
@@ -472,7 +473,7 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let route1 = make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1));
@@ -544,7 +545,7 @@ async fn enhanced_route_refresh_timeout_is_family_isolated() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let v6_prefix = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0), 64);
 
@@ -603,7 +604,7 @@ async fn enhanced_route_refresh_bgpls_eorr_sweeps_unreplaced_route() {
     let handle = tokio::spawn(manager.run());
 
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     let route1 = make_bgpls_route(peer_addr, 21, 100);
     let route2 = make_bgpls_route(peer_addr, 22, 100);
     let key1 = route1.key();
@@ -667,7 +668,7 @@ async fn enhanced_route_refresh_bgpls_withdraw_clears_stale_marker() {
     let handle = tokio::spawn(manager.run());
 
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     let route = make_bgpls_route(peer_addr, 23, 100);
     let key = route.key();
 
@@ -729,7 +730,7 @@ async fn enhanced_route_refresh_vpn_eorr_sweeps_unreplaced_route() {
     let handle = tokio::spawn(manager.run());
 
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     let route1 = make_vpn_rib_route(peer_addr, 21, 100, 100);
     let route2 = make_vpn_rib_route(peer_addr, 22, 100, 100);
     let key1 = route1.key();
@@ -793,7 +794,7 @@ async fn enhanced_route_refresh_vpn_withdraw_clears_stale_marker() {
     let handle = tokio::spawn(manager.run());
 
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     let route = make_vpn_rib_route(peer_addr, 23, 100, 100);
     let key = route.key();
 
@@ -856,7 +857,7 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -881,7 +882,7 @@ async fn enhanced_route_refresh_vpn_eorr_reflects_withdrawal_to_peer() {
     drain_eor(&mut out_rx).await;
 
     let source_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let source = IpAddr::V4(source_addr);
+    let source = peer_v4(source_addr);
     let survivor = make_vpn_rib_route(source_addr, 24, 100, 100);
     let omitted = make_vpn_rib_route(source_addr, 25, 100, 100);
     let omitted_key = omitted.key();
@@ -946,7 +947,7 @@ async fn eorr_preserves_gr_stale_routes_awaiting_eor() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let retained_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
@@ -1093,7 +1094,7 @@ async fn eorr_preserves_llgr_stale_routes_awaiting_eor() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let retained_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
@@ -1235,7 +1236,7 @@ fn peer_down_mid_refresh_zeroes_refresh_gauges() {
     let (_tx, rx) = mpsc::channel(8);
     let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1301,7 +1302,7 @@ fn peer_down_mid_refresh_zeroes_refresh_gauges() {
 fn route_refresh_request_releases_its_queued_flag_on_dequeue() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,

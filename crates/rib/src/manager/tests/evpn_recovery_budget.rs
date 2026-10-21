@@ -1,3 +1,4 @@
+use crate::PeerId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::exportability::MockExactExportEncoder;
@@ -24,10 +25,10 @@ fn capture_reset_requests(manager: &mut RibManager) -> ResetRequests {
     requests
 }
 
-fn fixture(capacity: usize) -> (RibManager, IpAddr, mpsc::Receiver<OutboundRouteUpdate>) {
+fn fixture(capacity: usize) -> (RibManager, PeerId, mpsc::Receiver<OutboundRouteUpdate>) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.30".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.30".parse().unwrap());
     let (sender, mut output) = mpsc::channel(capacity);
     register(&mut manager, peer, sender);
     while output.try_recv().is_ok() {}
@@ -44,13 +45,13 @@ fn fixture(capacity: usize) -> (RibManager, IpAddr, mpsc::Receiver<OutboundRoute
     (manager, peer, output)
 }
 
-fn register(manager: &mut RibManager, peer: IpAddr, sender: mpsc::Sender<OutboundRouteUpdate>) {
+fn register(manager: &mut RibManager, peer: PeerId, sender: mpsc::Sender<OutboundRouteUpdate>) {
     register_session(manager, peer, sender, 7);
 }
 
 fn register_session(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sender: mpsc::Sender<OutboundRouteUpdate>,
     session_id: u64,
 ) {
@@ -74,7 +75,7 @@ fn register_session(
     });
 }
 
-fn own(manager: &mut RibManager, peer: IpAddr, fresh: bool) {
+fn own(manager: &mut RibManager, peer: PeerId, fresh: bool) {
     let gid = manager.grouped_member_of(peer).unwrap();
     manager
         .group_ribs
@@ -747,7 +748,7 @@ fn evpn_page_guard_requires_real_owned_unsettled_state_and_preserves_cursor_prec
     manager.handle_query_evpn_routes_page(
         RouteQueryScope::Advertised { peer },
         None,
-        Some((route(1).key(), peer)),
+        Some((route(1).key(), peer.addr())),
         None,
         1,
         reply,
@@ -816,7 +817,7 @@ fn ownership_registration_refusal_has_bounded_session_reset_control() {
 
 struct FinalTransactionFixture {
     manager: RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     gid: usize,
     output: mpsc::Receiver<OutboundRouteUpdate>,
     encoder: Arc<MockExactExportEncoder>,
@@ -1187,7 +1188,7 @@ fn final_evpn_admission_publishes_one_mixed_family_transaction_after_validation(
 fn assert_pcb_otc_overlay_order(reserve_refused: bool, later_accepts: Option<bool>) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.30".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.30".parse().unwrap());
     manager.handle_update(RibUpdate::SetPeerExportContext {
         peer,
         session_id: 0,

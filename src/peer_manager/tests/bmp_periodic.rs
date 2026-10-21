@@ -1,5 +1,6 @@
 use super::*;
 use rustbgpd_api::peer_types::{PeerManagerOperatorQuery, PeerManagerReadinessQuery};
+use rustbgpd_rib::PeerId;
 
 fn enable_loc_rib_stats(manager: &mut PeerManager) {
     manager.current_config.bmp = Some(crate::config::BmpConfig {
@@ -351,7 +352,7 @@ async fn periodic_reports_preserve_order_selection_and_output_drop_counters() {
                         peer_queries += 1;
                         let _ = reply.send(rustbgpd_rib::BmpPeerStats {
                             adj_rib_out_post: HashMap::from([(
-                                peer,
+                                PeerId::from_addr(peer),
                                 vec![((Afi::Ipv4, Safi::Unicast), 7)],
                             )]),
                             rpki_adj_rib_in_post: None,

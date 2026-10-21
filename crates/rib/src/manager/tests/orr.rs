@@ -1,4 +1,6 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
 /// Value of a label-less counter metric (0.0 when never incremented).
 fn counter_metric_value(metrics: &BgpMetrics, name: &str) -> f64 {
@@ -17,7 +19,7 @@ fn counter_metric_value(metrics: &BgpMetrics, name: &str) -> f64 {
 #[tokio::test]
 async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     let feed = Ipv4Addr::new(10, 9, 9, 9);
-    let feed_peer = IpAddr::V4(feed);
+    let feed_peer = peer_v4(feed);
     let family = (Afi::BgpLs, Safi::BgpLs);
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
@@ -31,7 +33,7 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     let handle = tokio::spawn(manager.run());
 
     feed_square_topology(&tx, feed).await;
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let _client_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
     let gated = query_orr_status(&tx).await;
     assert_eq!(gated.topology_nodes, 0);
@@ -105,14 +107,14 @@ async fn peer_up_registers_orr_vantage_and_teardown_clears() {
     assert!(status.vantages.is_empty());
     assert_eq!(status.topology_nodes, 0);
 
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let _out_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
 
     let status = query_orr_status(&tx).await;
     assert_eq!(status.vantages.len(), 1);
     assert_eq!(status.vantages[0].vantage, vantage_at_node_a());
     assert!(status.vantages[0].resolved);
-    assert_eq!(status.vantages[0].peers, vec![client]);
+    assert_eq!(status.vantages[0].peers, vec![client.addr()]);
     assert_eq!(status.topology_nodes, 4);
     assert_eq!(status.topology_links, 4);
     assert_eq!(status.input_diagnostics.included_default, 4);
@@ -207,8 +209,8 @@ async fn orr_status_reports_resolved_and_unresolved_vantages() {
 
     feed_square_topology(&tx, Ipv4Addr::new(10, 9, 9, 9)).await;
 
-    let client1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client1 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client2 = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let outside = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
     let _out1 = orr_client_peer_up(&tx, client1, Some(vantage_at_node_a())).await;
     let _out2 = orr_client_peer_up(&tx, client2, Some(outside)).await;
@@ -224,14 +226,14 @@ async fn orr_status_reports_resolved_and_unresolved_vantages() {
     assert_eq!(resolved.router_id_hex, format!("00000000000{A:x}"));
     // From A the square reaches A, X, and Y — never B.
     assert_eq!(resolved.reachable_nodes, 3);
-    assert_eq!(resolved.peers, vec![client1]);
+    assert_eq!(resolved.peers, vec![client1.addr()]);
 
     let unresolved = &status.vantages[1];
     assert_eq!(unresolved.vantage, outside);
     assert!(!unresolved.resolved);
     assert_eq!(unresolved.node_key_hex.len(), 0);
     assert_eq!(unresolved.reachable_nodes, 0);
-    assert_eq!(unresolved.peers, vec![client2]);
+    assert_eq!(unresolved.peers, vec![client2.addr()]);
 
     assert!(
         (gauge_metric_value(&metrics, "bgp_orr_unresolved_vantages", &[]) - 1.0).abs()
@@ -258,7 +260,7 @@ async fn bgpls_gr_stale_topology_keeps_orr_vantages_resolved() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let _out_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
 
     let status = query_orr_status(&tx).await;
@@ -280,7 +282,7 @@ async fn bgpls_gr_stale_topology_keeps_orr_vantages_resolved() {
     // peer's routes as stale — the topology, and the vantage, must survive.
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
-        peer: IpAddr::V4(feed),
+        peer: peer_v4(feed),
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
@@ -324,7 +326,7 @@ async fn no_vantage_configured_skips_topology_rebuild() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let _out_rx = orr_client_peer_up(&tx, client, None).await;
 
     // BGP-LS churn: announce, re-announce, withdraw.
@@ -337,7 +339,7 @@ async fn no_vantage_configured_skips_topology_rebuild() {
         .collect();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(feed),
+        peer: peer_v4(feed),
         announced: vec![],
         withdrawn: keys,
     })
@@ -371,7 +373,7 @@ async fn empty_bgpls_batch_skips_orr_recompute() {
     // Resolve a vantage against the square topology (initial SPF run).
     let feed = Ipv4Addr::new(10, 9, 9, 9);
     feed_square_topology(&tx, feed).await;
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let _out_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
     let status = query_orr_status(&tx).await;
     assert!(status.vantages[0].resolved, "vantage must resolve");
@@ -386,7 +388,7 @@ async fn empty_bgpls_batch_skips_orr_recompute() {
         .key();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 8, 8, 8)),
+        peer: peer_v4(Ipv4Addr::new(10, 8, 8, 8)),
         announced: vec![],
         withdrawn: vec![unheld_key],
     })
@@ -416,10 +418,10 @@ async fn unicast_stream_with_vantage(vantage: Option<IpAddr>) -> Vec<(Vec<String
     // the only variable.
     feed_square_topology(&tx, Ipv4Addr::new(10, 9, 9, 9)).await;
 
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = orr_client_peer_up(&tx, client, vantage).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
@@ -549,7 +551,7 @@ fn ibgp_route(prefix: Ipv4Prefix, peer: Ipv4Addr, next_hop: IpAddr) -> Route {
         next_hop,
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(100),
@@ -588,7 +590,7 @@ async fn orr_rr_manager() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<(
 async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, announced: Vec<Route>) {
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -643,8 +645,8 @@ fn drain_final_unicast(
 #[tokio::test]
 async fn two_clients_different_vantages_receive_divergent_bests() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
     let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
 
@@ -672,8 +674,8 @@ async fn two_clients_different_vantages_receive_divergent_bests() {
 #[tokio::test]
 async fn explain_best_path_for_orr_peer_uses_that_peers_vantage() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let _out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
     let _out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
 
@@ -742,9 +744,9 @@ async fn topology_metric_flip_marks_only_affected_vantage_peers_dirty_and_flips_
     use crate::orr::fixtures::{A, X, link_route, v4_interface, v4_neighbor};
 
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let client_c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_c = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
     let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
     let mut out_c = orr_client_peer_up(&tx, client_c, None).await;
@@ -760,7 +762,7 @@ async fn topology_metric_flip_marks_only_affected_vantage_peers_dirty_and_flips_
     // prefers Y (10 < 100); distances from B are untouched.
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![link_route(
             ORR_FEED,
             A,
@@ -827,11 +829,11 @@ async fn prefix_metric_flip_reexports_orr_best_with_unchanged_node_distances() {
     assert_eq!(after_spf.cost_to(&after, IpAddr::V4(nh_y)), Some(10));
 
     let (tx, handle) = orr_rr_manager().await;
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![prefix_x, prefix_y],
         withdrawn: vec![],
     })
@@ -863,7 +865,7 @@ async fn prefix_metric_flip_reexports_orr_best_with_unchanged_node_distances() {
 
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![changed_x],
         withdrawn: vec![],
     })
@@ -899,15 +901,15 @@ async fn prefix_withdrawal_and_restoration_reexport_only_changed_orr_bests() {
     let prefix_x = prefix_route(ORR_FEED, X, nh_x, 32, Some(0));
     let prefix_y = prefix_route(ORR_FEED, Y, nh_y, 32, Some(0));
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let client_plain = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_plain = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
     let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
     let mut out_plain = orr_client_peer_up(&tx, client_plain, None).await;
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![prefix_x.clone(), prefix_y],
         withdrawn: vec![],
     })
@@ -945,7 +947,7 @@ async fn prefix_withdrawal_and_restoration_reexport_only_changed_orr_bests() {
     ] {
         tx.send(RibUpdate::BgpLsRoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(ORR_FEED),
+            peer: peer_v4(ORR_FEED),
             announced,
             withdrawn,
         })
@@ -1007,11 +1009,11 @@ async fn exact_address_owner_change_reexports_orr_best() {
     assert_eq!(after_spf.cost_to(&after, next_hop), Some(10));
 
     let (tx, handle) = orr_rr_manager().await;
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![at_x.clone()],
         withdrawn: vec![],
     })
@@ -1039,7 +1041,7 @@ async fn exact_address_owner_change_reexports_orr_best() {
 
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![at_y],
         withdrawn: vec![at_x.key()],
     })
@@ -1068,9 +1070,9 @@ async fn excluded_topology_mutation_does_not_dirty_or_stage_outbound() {
     use crate::orr::fixtures::{A, X, link_route, mt_id_tlv, v4_interface, v4_neighbor};
 
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let client_c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_c = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
     let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
     let mut out_c = orr_client_peer_up(&tx, client_c, None).await;
@@ -1082,7 +1084,7 @@ async fn excluded_topology_mutation_does_not_dirty_or_stage_outbound() {
 
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![link_route(
             ORR_FEED,
             A,
@@ -1120,8 +1122,8 @@ async fn excluded_topology_mutation_does_not_dirty_or_stage_outbound() {
 #[tokio::test]
 async fn unresolved_vantage_falls_back_to_loc_rib_best() {
     let (tx, handle) = orr_rr_manager().await;
-    let orr_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let plain_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let orr_client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let plain_client = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let outside = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
     let mut out_orr = orr_client_peer_up(&tx, orr_client, Some(outside)).await;
     let mut out_plain = orr_client_peer_up(&tx, plain_client, None).await;
@@ -1151,8 +1153,8 @@ async fn unresolved_vantage_falls_back_to_loc_rib_best() {
 #[tokio::test]
 async fn bgpls_withdrawal_of_all_links_reverts_orr_peers_to_standard_best() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut out_a = orr_client_peer_up(&tx, client_a, Some(vantage_at_node_a())).await;
     let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
 
@@ -1166,7 +1168,7 @@ async fn bgpls_withdrawal_of_all_links_reverts_orr_peers_to_standard_best() {
         .collect();
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![],
         withdrawn: keys,
     })
@@ -1195,7 +1197,7 @@ async fn orr_client_initial_dump_gets_vantage_best() {
     let (tx, handle) = orr_rr_manager().await;
     announce_divergent_bests(&tx).await;
 
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1234,7 +1236,7 @@ async fn orr_client_initial_dump_gets_vantage_best() {
 #[tokio::test]
 async fn route_refresh_replays_vantage_best() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
 
     announce_divergent_bests(&tx).await;
@@ -1273,7 +1275,7 @@ async fn explain_advertised_route_reports_orr_vantage_and_costs() {
     use crate::orr::fixtures::{A, X, link_route, mt_id_tlv};
 
     let (tx, handle) = orr_rr_manager().await;
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let _out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
 
     announce_divergent_bests(&tx).await;
@@ -1289,7 +1291,7 @@ async fn explain_advertised_route_reports_orr_vantage_and_costs() {
     .await;
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![link_route(ORR_FEED, A, X, Some(0), &[mt_id_tlv(&[2])])],
         withdrawn: vec![],
     })
@@ -1367,7 +1369,7 @@ async fn explain_advertised_route_reports_orr_vantage_and_costs() {
 #[tokio::test]
 async fn no_advertise_orr_winner_is_withdrawn_without_runner_up_fallback() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 33));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 33));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1492,7 +1494,7 @@ async fn no_advertise_orr_winner_is_withdrawn_without_runner_up_fallback() {
 #[tokio::test]
 async fn explain_advertised_route_non_orr_peer_unchanged() {
     let (tx, handle) = orr_rr_manager().await;
-    let plain_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let plain_client = peer_v4(Ipv4Addr::new(10, 0, 0, 5));
     let _out = orr_client_peer_up(&tx, plain_client, None).await;
 
     announce_divergent_bests(&tx).await;
@@ -1524,7 +1526,7 @@ async fn explain_advertised_route_non_orr_peer_unchanged() {
 #[tokio::test]
 async fn explain_advertised_route_orr_no_surviving_candidate() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let client_b_v4 = Ipv4Addr::new(10, 0, 0, 3);
     let _out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
 
@@ -1555,14 +1557,14 @@ async fn explain_advertised_route_orr_no_surviving_candidate() {
 #[tokio::test]
 async fn split_horizon_and_rr_suppression_apply_before_orr_ranking() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let client_b_v4 = Ipv4Addr::new(10, 0, 0, 3);
     let mut out_b = orr_client_peer_up(&tx, client_b, Some(vantage_at_node_b())).await;
 
     // A non-client iBGP peer bound to the same vantage. (Config
     // validation rejects orr_vantage without rr-client; the RIB layer
     // trusts PeerUp, and the suppression seam must hold regardless.)
-    let peer_d = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let peer_d = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let (out_tx_d, mut out_d) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1645,7 +1647,7 @@ async fn split_horizon_and_rr_suppression_apply_before_orr_ranking() {
 #[tokio::test]
 async fn orr_with_addpath_send_ranks_by_vantage_cost() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1718,7 +1720,7 @@ fn vpn6_route_at(peer: Ipv4Addr, next_hop: IpAddr, segment: u16) -> VpnRibRoute 
 /// RR-client flag, draining the initial-table `EoR`.
 async fn vpn_orr_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     vantage: Option<IpAddr>,
     sendable_families: Vec<(Afi, Safi)>,
     route_reflector_client: bool,
@@ -1752,7 +1754,7 @@ async fn vpn_orr_peer_up(
 async fn announce_vpn(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, announced: Vec<VpnRibRoute>) {
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced,
         withdrawn: vec![],
     })
@@ -1786,8 +1788,8 @@ async fn announce_divergent_vpn_bests(
 #[tokio::test]
 async fn two_vpn_clients_different_vantages_receive_divergent_bests() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut out_a = vpn_orr_peer_up(
         &tx,
         client_a,
@@ -1829,7 +1831,7 @@ async fn two_vpn_clients_different_vantages_receive_divergent_bests() {
 #[tokio::test]
 async fn vpn_orr_addpath_ranking_uses_vantage_costs() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_a) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1887,8 +1889,8 @@ async fn vpn_orr_addpath_ranking_uses_vantage_costs() {
 #[tokio::test]
 async fn two_vpn6_clients_different_vantages_receive_divergent_bests() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut out_a = vpn_orr_peer_up(
         &tx,
         client_a,
@@ -1934,9 +1936,9 @@ async fn vpn_orr_topology_metric_flip_moves_only_affected_client() {
     use crate::orr::fixtures::{A, X, link_route, v4_interface, v4_neighbor};
 
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let client_c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_c = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut out_a = vpn_orr_peer_up(
         &tx,
         client_a,
@@ -1964,7 +1966,7 @@ async fn vpn_orr_topology_metric_flip_moves_only_affected_client() {
     // Flip A→X to metric 100: from A the SPF now prefers Y (10 < 100).
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![link_route(
             ORR_FEED,
             A,
@@ -2005,8 +2007,8 @@ async fn vpn_orr_topology_metric_flip_moves_only_affected_client() {
 #[tokio::test]
 async fn vpn_orr_unresolved_vantage_falls_back_to_loc_rib_best() {
     let (tx, handle) = orr_rr_manager().await;
-    let orr_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let plain_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let orr_client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let plain_client = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let outside = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
     let mut out_orr = vpn_orr_peer_up(&tx, orr_client, Some(outside), vpn_sendable(), true).await;
     let mut out_plain = vpn_orr_peer_up(&tx, plain_client, None, vpn_sendable(), true).await;
@@ -2036,7 +2038,7 @@ async fn vpn_orr_unresolved_vantage_falls_back_to_loc_rib_best() {
 #[tokio::test]
 async fn non_orr_vpn_peer_unchanged() {
     let (tx, handle) = orr_rr_manager().await;
-    let plain_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let plain_client = peer_v4(Ipv4Addr::new(10, 0, 0, 5));
     let mut out = vpn_orr_peer_up(&tx, plain_client, None, vpn_sendable(), true).await;
 
     let key = announce_divergent_vpn_bests(&tx, 83).await;
@@ -2081,7 +2083,7 @@ async fn vpn_orr_rtc_filter_applies_to_vantage_winner() {
     let _ = query_vpn_routes(&tx).await;
 
     // An iBGP RR client at vantage B that negotiated VPNv4 + RTC.
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2138,7 +2140,7 @@ async fn vpn_orr_rtc_filter_applies_to_vantage_winner() {
 #[tokio::test]
 async fn vpn_orr_split_horizon_and_rr_suppression_before_ranking() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let client_b_v4 = Ipv4Addr::new(10, 0, 0, 3);
     let mut out_b = vpn_orr_peer_up(
         &tx,
@@ -2150,7 +2152,7 @@ async fn vpn_orr_split_horizon_and_rr_suppression_before_ranking() {
     .await;
     // A non-client iBGP peer bound to the same vantage (the RIB layer
     // trusts PeerUp; the suppression seam must hold regardless).
-    let peer_d = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let peer_d = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut out_d = vpn_orr_peer_up(
         &tx,
         peer_d,
@@ -2211,7 +2213,7 @@ async fn vpn_orr_initial_dump_gets_vantage_best() {
     let (tx, handle) = orr_rr_manager().await;
     let key = announce_divergent_vpn_bests(&tx, 87).await;
 
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let (out_tx, mut out_b) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2250,7 +2252,7 @@ async fn vpn_orr_initial_dump_gets_vantage_best() {
 #[tokio::test]
 async fn vpn_orr_route_refresh_replays_vantage_best() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut out_b = vpn_orr_peer_up(
         &tx,
         client_b,
@@ -2313,7 +2315,7 @@ async fn announce_labeled(
 ) {
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced,
         withdrawn: vec![],
     })
@@ -2347,8 +2349,8 @@ async fn announce_divergent_labeled_bests(
 #[tokio::test]
 async fn two_labeled_clients_different_vantages_receive_divergent_bests() {
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut out_a = vpn_orr_peer_up(
         &tx,
         client_a,
@@ -2393,9 +2395,9 @@ async fn labeled_orr_topology_metric_flip_moves_only_affected_client() {
     use crate::orr::fixtures::{A, X, link_route, v4_interface, v4_neighbor};
 
     let (tx, handle) = orr_rr_manager().await;
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let client_c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let client_c = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut out_a = vpn_orr_peer_up(
         &tx,
         client_a,
@@ -2423,7 +2425,7 @@ async fn labeled_orr_topology_metric_flip_moves_only_affected_client() {
     // Flip A→X to metric 100: from A the SPF now prefers Y (10 < 100).
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(ORR_FEED),
+        peer: peer_v4(ORR_FEED),
         announced: vec![link_route(
             ORR_FEED,
             A,
@@ -2465,7 +2467,7 @@ async fn labeled_orr_topology_metric_flip_moves_only_affected_client() {
 async fn conditional_advertisement_gates_the_orr_winner_after_earlier_gates() {
     use crate::{ConditionalAdvertiseIf, ConditionalAdvertisement, ConditionalAdvertisementSet};
 
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 34));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 34));
     let condition = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 99), 32);
     let compiled = rustbgpd_policy::rpol::RpolFile::parse(
         "policy ctl { term t { if route.prefix == 198.51.100.0/24 { accept } } term rest { reject } }",

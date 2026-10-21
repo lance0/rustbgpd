@@ -4,12 +4,13 @@
 //! their sparse payload through the existing mixed-family admission. Fixed
 //! session receipts retain only completion coverage and ordered marker debt.
 
+use crate::PeerId;
 use rustbgpd_wire::EvpnRouteKey;
 
+use super::RibManager;
 use super::update_groups::recovery_provenance::{
     EvpnProofView, Exhaustion, PeerSession, ProvenanceHandle,
 };
-use super::{IpAddr, RibManager};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::EvpnRibRoute;
 use crate::update::{EvpnRecoveryReset, EvpnRecoveryResetOutcome, OutboundRouteUpdate};
@@ -81,7 +82,7 @@ impl RibManager {
         Some(next)
     }
 
-    fn evpn_completion_record(&self, peer: IpAddr) -> Option<&super::LiveSessionRecord> {
+    fn evpn_completion_record(&self, peer: PeerId) -> Option<&super::LiveSessionRecord> {
         let session_id = self.outbound_session_ids.get(&peer)?;
         let outbound = self.outbound_peers.get(&peer)?;
         self.live_sessions.get(&peer)?.iter().find(|record| {
@@ -91,7 +92,7 @@ impl RibManager {
 
     fn evpn_completion_record_mut(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<&mut super::LiveSessionRecord> {
         let session_id = *self.outbound_session_ids.get(&peer)?;
         let outbound = self.outbound_peers.get(&peer)?;
@@ -105,7 +106,7 @@ impl RibManager {
 
     fn replace_evpn_feed_completion(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         completion: Option<EvpnFeedCompletion>,
     ) -> bool {
         let Some(record) = self.evpn_completion_record_mut(peer) else {
@@ -125,7 +126,7 @@ impl RibManager {
     /// Physical record removal owns this adjustment, before later ledger cleanup.
     pub(in crate::manager) fn drop_evpn_feed_receipts(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: Option<u64>,
     ) {
         let removed = self.live_sessions.get_mut(&peer).map_or(0, |records| {
@@ -138,7 +139,7 @@ impl RibManager {
         self.evpn_feed_receipt_count -= removed;
     }
 
-    fn ensure_evpn_feed_receipt(&mut self, peer: IpAddr, target: EvpnFeedTarget) -> Option<u64> {
+    fn ensure_evpn_feed_receipt(&mut self, peer: PeerId, target: EvpnFeedTarget) -> Option<u64> {
         let provenance = self.evpn_recovery_handle(peer)?;
         if let Some(completion) = self
             .evpn_completion_record(peer)
@@ -161,7 +162,7 @@ impl RibManager {
         .then_some(revision)
     }
 
-    pub(in crate::manager) fn invalidate_evpn_feed_completion(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn invalidate_evpn_feed_completion(&mut self, peer: PeerId) {
         if self
             .evpn_completion_record(peer)
             .is_none_or(|record| record.evpn_feed_completion.is_none())
@@ -178,7 +179,7 @@ impl RibManager {
         }
     }
 
-    pub(in crate::manager) fn begin_private_evpn_handoff(&mut self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn begin_private_evpn_handoff(&mut self, peer: PeerId) -> bool {
         let Some(provenance) = self.evpn_recovery_handle(peer) else {
             return false;
         };
@@ -206,7 +207,7 @@ impl RibManager {
     /// complete plan. Preserve only that operation's otherwise-current seal.
     pub(in crate::manager) fn mark_outbound_dirty_with_evpn_feed(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         feed: &mut Option<EvpnCompleteFeed>,
     ) -> bool {
         let current = feed
@@ -230,7 +231,7 @@ impl RibManager {
         marked
     }
 
-    pub(in crate::manager) fn has_evpn_feed_completion(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn has_evpn_feed_completion(&self, peer: PeerId) -> bool {
         self.evpn_completion_record(peer)
             .and_then(|record| record.evpn_feed_completion.as_ref())
             .is_some_and(|completion| {
@@ -238,7 +239,7 @@ impl RibManager {
             })
     }
 
-    pub(in crate::manager) fn has_private_evpn_handoff(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn has_private_evpn_handoff(&self, peer: PeerId) -> bool {
         self.evpn_completion_record(peer)
             .and_then(|record| record.evpn_feed_completion.as_ref())
             .is_some_and(|completion| {
@@ -247,12 +248,12 @@ impl RibManager {
             })
     }
 
-    pub(in crate::manager) fn evpn_admitted_count(&self, peer: IpAddr) -> usize {
+    pub(in crate::manager) fn evpn_admitted_count(&self, peer: PeerId) -> usize {
         self.evpn_completion_record(peer)
             .map_or(0, |record| record.evpn_admitted_count)
     }
 
-    pub(in crate::manager) fn set_evpn_admitted_count(&mut self, peer: IpAddr, count: usize) {
+    pub(in crate::manager) fn set_evpn_admitted_count(&mut self, peer: PeerId, count: usize) {
         if let Some(record) = self.evpn_completion_record_mut(peer) {
             record.evpn_admitted_count = count;
         }
@@ -262,7 +263,7 @@ impl RibManager {
     /// A retained proof supersedes the clean projection after a missed send.
     pub(in crate::manager) fn evpn_prior_admitted(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         key: &EvpnRouteKey,
         stage: Option<&super::update_groups::EvpnGroupStageOutput>,
     ) -> Option<bool> {
@@ -297,7 +298,7 @@ impl RibManager {
     /// No receiver state changes until the existing mixed commit succeeds.
     pub(in crate::manager) fn planned_evpn_admitted_count(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         announce: &[EvpnRibRoute],
         withdraw: &[EvpnRouteKey],
         stage: Option<&super::update_groups::EvpnGroupStageOutput>,
@@ -332,7 +333,7 @@ impl RibManager {
     /// prior coverage and all operation-local seals expire on that replay.
     pub(in crate::manager) fn take_evpn_feed_completion(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         outbound: &mpsc::Sender<OutboundRouteUpdate>,
     ) -> Option<EvpnFeedCompletion> {
@@ -351,7 +352,7 @@ impl RibManager {
         Some(completion)
     }
 
-    pub(in crate::manager) fn evpn_feed_is_current(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn evpn_feed_is_current(&self, peer: PeerId) -> bool {
         let Some(record) = self.evpn_completion_record(peer) else {
             return false;
         };
@@ -380,7 +381,7 @@ impl RibManager {
 
     pub(in crate::manager) fn evpn_feed_seal_is_current(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         seal: &EvpnFeedSeal,
     ) -> bool {
         seal.revision != 0
@@ -415,7 +416,7 @@ impl RibManager {
             && !self.evpn_recovery_reset_pending(peer)
     }
 
-    fn evpn_projection_matches_proof(&self, peer: IpAddr, seal: &EvpnFeedSeal) -> bool {
+    fn evpn_projection_matches_proof(&self, peer: PeerId, seal: &EvpnFeedSeal) -> bool {
         let Ok(Some(proof)) = self.evpn_recovery.proof(seal.provenance) else {
             return false;
         };
@@ -457,7 +458,7 @@ impl RibManager {
 
     /// This seal is minted only after the existing private full-resync walk
     /// has staged Loc-RIB, actual private rows and every retained proof key.
-    pub(in crate::manager) fn private_evpn_feed_seal(&self, peer: IpAddr) -> Option<EvpnFeedSeal> {
+    pub(in crate::manager) fn private_evpn_feed_seal(&self, peer: PeerId) -> Option<EvpnFeedSeal> {
         let record = self.evpn_completion_record(peer)?;
         let completion = record.evpn_feed_completion.as_ref()?;
         if completion.target != EvpnFeedTarget::PrivateHandoff
@@ -492,7 +493,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn complete_evpn_feed_admitted(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         seal: EvpnFeedSeal,
         admitted_markers: u8,
     ) -> bool {
@@ -604,7 +605,7 @@ impl RibManager {
 
     pub(in crate::manager) fn evpn_feed_markers_admitted(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         sender: &mpsc::Sender<OutboundRouteUpdate>,
         bits: u8,
     ) {
@@ -633,7 +634,7 @@ impl RibManager {
         self.try_settle_evpn_feed(peer);
     }
 
-    fn try_settle_evpn_feed(&mut self, peer: IpAddr) -> bool {
+    fn try_settle_evpn_feed(&mut self, peer: PeerId) -> bool {
         if !self.evpn_feed_is_current(peer) {
             return false;
         }
@@ -656,7 +657,7 @@ impl RibManager {
 
     pub(in crate::manager) fn evpn_resync_data_is_covered(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         complete_producer: bool,
     ) -> bool {
         if self.evpn_feed_is_current(peer)
@@ -681,7 +682,7 @@ impl RibManager {
 
     fn pending_marker_family_ready(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         family: (rustbgpd_wire::Afi, rustbgpd_wire::Safi),
     ) -> bool {
         !self.eor_held(peer, family)
@@ -699,7 +700,7 @@ impl RibManager {
                 || self.evpn_feed_is_current(peer))
     }
 
-    pub(in crate::manager) fn evpn_marker_retry_runnable(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn evpn_marker_retry_runnable(&self, peer: PeerId) -> bool {
         #[cfg(test)]
         if let Some(observer) = &self.replacement_readiness_test_hook {
             observer("evpn_marker_candidate");
@@ -733,7 +734,7 @@ impl RibManager {
             if peers.contains(&peer) || !self.evpn_marker_retry_runnable(peer) {
                 continue;
             }
-            let order = |peer: IpAddr| {
+            let order = |peer: PeerId| {
                 (
                     self.evpn_marker_cursor.is_some_and(|cursor| peer <= cursor),
                     peer,
@@ -810,7 +811,7 @@ impl RibManager {
     /// labelling desired OLD values as actually admitted.
     pub(in crate::manager) fn prepare_complete_evpn_feed(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         destination: usize,
         old_group: Option<usize>,
         old_is_clean: bool,
@@ -830,7 +831,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn prepare_complete_evpn_feed_before_deltas(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         destination: usize,
         old_group: Option<usize>,
         old_is_clean: bool,
@@ -956,7 +957,7 @@ impl RibManager {
     }
     pub(in crate::manager) fn take_evpn_recovery_reset_receipt(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         outbound: &mpsc::Sender<OutboundRouteUpdate>,
     ) -> (Option<ResetReceipt>, bool) {
@@ -976,12 +977,12 @@ impl RibManager {
             })
     }
 
-    pub(in crate::manager) fn evpn_grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
+    pub(in crate::manager) fn evpn_grouped_member_of(&self, peer: PeerId) -> Option<usize> {
         let gid = self.grouped_member_of(peer)?;
         self.group_ribs.get(&gid)?.owns_evpn_routes().then_some(gid)
     }
 
-    fn evpn_recovery_owner(&self, peer: IpAddr) -> Option<PeerSession> {
+    fn evpn_recovery_owner(&self, peer: PeerId) -> Option<PeerSession> {
         Some(PeerSession {
             peer,
             session_id: *self.outbound_session_ids.get(&peer)?,
@@ -990,13 +991,13 @@ impl RibManager {
 
     pub(in crate::manager) fn evpn_recovery_handle(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<ProvenanceHandle> {
         self.evpn_recovery
             .primary_handle(self.evpn_recovery_owner(peer)?)
     }
 
-    fn evpn_registration_reset(&self, peer: IpAddr) -> Option<PendingReset> {
+    fn evpn_registration_reset(&self, peer: PeerId) -> Option<PendingReset> {
         let owner = self.evpn_recovery_owner(peer)?;
         let sender = self.outbound_peers.get(&peer)?;
         self.live_sessions
@@ -1008,14 +1009,14 @@ impl RibManager {
             .evpn_recovery_reset
     }
 
-    pub(in crate::manager) fn register_evpn_recovery(&mut self, peer: IpAddr, fresh: bool) -> bool {
+    pub(in crate::manager) fn register_evpn_recovery(&mut self, peer: PeerId, fresh: bool) -> bool {
         let Some(gid) = self.evpn_grouped_member_of(peer) else {
             return true;
         };
         self.register_evpn_recovery_for_group(peer, gid, fresh)
     }
 
-    fn register_evpn_recovery_for_group(&mut self, peer: IpAddr, gid: usize, fresh: bool) -> bool {
+    fn register_evpn_recovery_for_group(&mut self, peer: PeerId, gid: usize, fresh: bool) -> bool {
         if !self
             .group_ribs
             .get(&gid)
@@ -1056,7 +1057,7 @@ impl RibManager {
         }
     }
 
-    pub(in crate::manager) fn prepare_evpn_registration_replay(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn prepare_evpn_registration_replay(&mut self, peer: PeerId) {
         let Some(handle) = self.evpn_recovery_handle(peer) else {
             return;
         };
@@ -1072,7 +1073,7 @@ impl RibManager {
     }
 
     /// Capture actual private admitted rows through an existing owner claim.
-    pub(in crate::manager) fn capture_private_evpn_admitted(&mut self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn capture_private_evpn_admitted(&mut self, peer: PeerId) -> bool {
         self.capture_evpn_admitted(peer, true, &[], None)
     }
 
@@ -1080,7 +1081,7 @@ impl RibManager {
     /// Ordinary private registrations still do not allocate recovery state.
     pub(in crate::manager) fn capture_private_evpn_before_join(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         destination: usize,
     ) -> bool {
         self.capture_evpn_admitted(peer, true, &[], Some(destination))
@@ -1088,7 +1089,7 @@ impl RibManager {
 
     /// Only a settled clean owner proves the installed table is actual OLD.
     /// Capturing/exhausted or missing owners cannot recurse into this capture.
-    pub(in crate::manager) fn capture_clean_evpn_before_dirty(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn capture_clean_evpn_before_dirty(&mut self, peer: PeerId) {
         if !self.dirty_peers.contains(&peer)
             && self
                 .evpn_completion_record(peer)
@@ -1102,13 +1103,13 @@ impl RibManager {
         }
     }
 
-    pub(in crate::manager) fn capture_shared_evpn_admitted(&mut self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn capture_shared_evpn_admitted(&mut self, peer: PeerId) -> bool {
         self.capture_evpn_admitted(peer, false, &[], None)
     }
 
     pub(in crate::manager) fn capture_shared_evpn_before_deltas(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         old_deltas: &[super::update_groups::EvpnGroupDelta],
     ) -> bool {
         self.capture_evpn_admitted(peer, false, old_deltas, None)
@@ -1120,7 +1121,7 @@ impl RibManager {
     )]
     fn capture_evpn_admitted(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         private: bool,
         old_deltas: &[super::update_groups::EvpnGroupDelta],
         destination: Option<usize>,
@@ -1311,7 +1312,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn capture_evpn_recovery_before_projection(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         keys: impl Iterator<Item = EvpnRouteKey>,
     ) -> bool {
         if self.evpn_grouped_member_of(peer).is_none() {
@@ -1368,7 +1369,7 @@ impl RibManager {
         true
     }
 
-    fn refuse_evpn_capture(&mut self, peer: IpAddr, handle: ProvenanceHandle) {
+    fn refuse_evpn_capture(&mut self, peer: PeerId, handle: ProvenanceHandle) {
         // Preserve any allocation/capacity refusal already recorded. A lost
         // producer must never remain Capturing with no reset duty.
         self.evpn_recovery.abort_capture(handle);
@@ -1376,7 +1377,7 @@ impl RibManager {
         self.retry_evpn_recovery_reset(peer);
     }
 
-    pub(in crate::manager) fn evpn_recovery_reset_pending(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn evpn_recovery_reset_pending(&self, peer: PeerId) -> bool {
         self.evpn_registration_reset(peer).is_some()
             || self
                 .evpn_recovery_handle(peer)
@@ -1385,7 +1386,7 @@ impl RibManager {
 
     /// Queue admission retains one receipt; only actual guarded execution
     /// suppresses retries. Polling never waits on the lifecycle/session actor.
-    pub(in crate::manager) fn retry_evpn_recovery_reset(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn retry_evpn_recovery_reset(&mut self, peer: PeerId) {
         let handle = self.evpn_recovery_handle(peer);
         let (Some(owner), Some(outbound)) = (
             self.evpn_recovery_owner(peer),
@@ -1466,7 +1467,7 @@ impl RibManager {
 
     fn report_evpn_reset_retry(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         error: Exhaustion,
         failure: &'static str,
@@ -1482,7 +1483,7 @@ impl RibManager {
             "EVPN recovery reset lacks an execution receipt; retaining bounded retry");
     }
 
-    pub(in crate::manager) fn evpn_advertised_resync_in_progress(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn evpn_advertised_resync_in_progress(&self, peer: PeerId) -> bool {
         // A retained primary/reset handoff remains authoritative through an
         // exact connection replay or a move to the private projection. A
         // negotiated EVPN family in an ordinary unicast group does not.
@@ -1500,7 +1501,7 @@ impl RibManager {
     /// mutation. Sorting uses the existing owned batch, without key scratch.
     pub(in crate::manager) fn reserve_evpn_recovery_admission(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announce: &mut [EvpnRibRoute],
         withdraw: &mut Vec<EvpnRouteKey>,
     ) -> bool {
@@ -1553,7 +1554,7 @@ impl RibManager {
 
     fn prepare_empty_evpn_admission(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         handle: ProvenanceHandle,
         candidates: &[EvpnRibRoute],
     ) {
@@ -1593,7 +1594,7 @@ impl RibManager {
 
     pub(in crate::manager) fn admit_evpn_recovery_batch(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announce: &[EvpnRibRoute],
         withdraw: &[EvpnRouteKey],
     ) -> bool {
@@ -1627,7 +1628,7 @@ impl RibManager {
 
     pub(in crate::manager) fn preflight_final_evpn_recovery(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announce: &mut [EvpnRibRoute],
         withdraw: &mut Vec<EvpnRouteKey>,
     ) -> bool {
@@ -1661,7 +1662,7 @@ impl RibManager {
 
     pub(in crate::manager) fn retain_evpn_recovery_withdrawals(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         withdrawals: &mut Vec<EvpnRouteKey>,
     ) {
         let Some(handle) = self.evpn_recovery_handle(peer) else {
@@ -1676,7 +1677,7 @@ impl RibManager {
         withdrawals.dedup();
     }
 
-    pub(in crate::manager) fn finish_evpn_recovery(&mut self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn finish_evpn_recovery(&mut self, peer: PeerId) -> bool {
         if self.evpn_recovery_reset_pending(peer) {
             self.mark_outbound_dirty(peer);
             self.retry_evpn_recovery_reset(peer);
@@ -1732,7 +1733,7 @@ impl RibManager {
     #[cfg(test)]
     pub(in crate::manager) fn settle_evpn_recovery(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         current: impl Iterator<Item = EvpnRouteKey>,
     ) -> bool {
         let Some(handle) = self.evpn_recovery_handle(peer) else {
@@ -1749,7 +1750,7 @@ impl RibManager {
         matches && self.evpn_recovery.finish_recovery(handle) == Ok(true)
     }
 
-    pub(in crate::manager) fn retire_evpn_recovery(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn retire_evpn_recovery(&mut self, peer: PeerId) {
         if let Some(handle) = self.evpn_recovery_handle(peer) {
             self.evpn_recovery.retire_member(handle);
         }

@@ -1,10 +1,11 @@
+use crate::PeerId;
 use crate::fast_hash::FastSet;
 
 use super::{
-    Afi, ExactExportKey, FastMap, GroupEvalAccumulator, GroupRibOut, HashSet, IpAddr,
-    NextHopAction, PolicyAction, PolicyLabel, Prefix, RibManager, Route, RouteQueryKey,
-    RtcMembership, Safi, VpnAddressFamily, VpnRibRoute, VpnRibRouteKey, VpnRouteKey,
-    bump_counter_row, route_query_key, rt_passes, vpn_routes_equal,
+    Afi, ExactExportKey, FastMap, GroupEvalAccumulator, GroupRibOut, HashSet, NextHopAction,
+    PolicyAction, PolicyLabel, Prefix, RibManager, Route, RouteQueryKey, RtcMembership, Safi,
+    VpnAddressFamily, VpnRibRoute, VpnRibRouteKey, VpnRouteKey, bump_counter_row, route_query_key,
+    rt_passes, vpn_routes_equal,
 };
 
 impl RibManager {
@@ -39,7 +40,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn assemble_group_resync(
         group: &GroupRibOut,
-        member: IpAddr,
+        member: PeerId,
         rs_control: Option<(u32, u32)>,
         is_dirty: bool,
         is_force: bool,
@@ -184,7 +185,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn assemble_group_vpn_resync(
         group: &GroupRibOut,
-        member: IpAddr,
+        member: PeerId,
         filter: Option<&RtcMembership>,
         is_dirty: bool,
         is_force: bool,
@@ -299,7 +300,7 @@ impl RibManager {
     /// policy check).
     pub(in crate::manager) fn apply_group_policy_counters(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         evals: &GroupEvalAccumulator,
     ) {
         if evals.totals.is_empty() {
@@ -339,7 +340,7 @@ impl RibManager {
     /// re-evaluates only that family).
     pub(in crate::manager) fn apply_group_join_counters(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         gid: usize,
         family: Option<(Afi, Safi)>,
     ) {
@@ -466,7 +467,7 @@ impl RibManager {
     /// maxima admitted); `None` for ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_routes_iter(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<impl Iterator<Item = &Route>> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
@@ -495,7 +496,7 @@ impl RibManager {
     /// membership, split horizon and member-local encoder rejection applied.
     pub(in crate::manager) fn grouped_advertised_vpn_routes_iter(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<impl Iterator<Item = &crate::route::VpnRibRoute>> {
         let group = self.group_ribs.get(&self.vpn_grouped_member_of(peer)?)?;
         let rtc = group.rtc_negotiated();
@@ -515,7 +516,7 @@ impl RibManager {
     /// underlying group rows before filling that page.
     pub(in crate::manager) fn grouped_advertised_routes_ordered_iter(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         after: Option<RouteQueryKey>,
     ) -> Option<impl Iterator<Item = &Route>> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
@@ -550,7 +551,7 @@ impl RibManager {
 
     /// Materialized sibling of [`Self::grouped_advertised_routes_iter`] for
     /// legacy full-snapshot and route-refresh callers.
-    pub(in crate::manager) fn grouped_advertised_routes(&self, peer: IpAddr) -> Option<Vec<Route>> {
+    pub(in crate::manager) fn grouped_advertised_routes(&self, peer: PeerId) -> Option<Vec<Route>> {
         self.replacement_checkpoint(true);
         let capacity = self
             .group_ribs
@@ -567,7 +568,7 @@ impl RibManager {
 
     /// Synthesized advertised-route count for a grouped peer; `None`
     /// for ungrouped peers.
-    pub(in crate::manager) fn grouped_advertised_count(&self, peer: IpAddr) -> Option<usize> {
+    pub(in crate::manager) fn grouped_advertised_count(&self, peer: PeerId) -> Option<usize> {
         #[cfg(test)]
         self.grouped_advertised_count_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -608,7 +609,7 @@ impl RibManager {
     /// per-family Adj-RIB-Out gauge; `None` for ungrouped peers.
     pub(in crate::manager) fn grouped_advertised_unicast_lens(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<[usize; 2]> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         if self.outbound_prefix_limits.contains_key(&peer) {
@@ -642,7 +643,7 @@ impl RibManager {
     /// for the per-family Adj-RIB-Out gauge; `None` for ungrouped peers.
     pub(in crate::manager) fn grouped_vpn_advertised_lens(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<[usize; 2]> {
         let gid = self.vpn_grouped_member_of(peer)?;
         let group = self.group_ribs.get(&gid)?;
@@ -672,7 +673,7 @@ impl RibManager {
     /// exact-export rejection overlay. The group table and RTC membership
     /// counters remain shared truths; only this member-local projection is
     /// reduced.
-    pub(in crate::manager) fn grouped_vpn_advertised_count(&self, peer: IpAddr) -> Option<usize> {
+    pub(in crate::manager) fn grouped_vpn_advertised_count(&self, peer: PeerId) -> Option<usize> {
         let gid = self.vpn_grouped_member_of(peer)?;
         let group = self.group_ribs.get(&gid)?;
         let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
@@ -700,7 +701,7 @@ impl RibManager {
     /// truth for a classic-message peer that rejected an oversized route.
     pub(in crate::manager) fn grouped_family_counts(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<Vec<((Afi, Safi), u64)>> {
         let gid = self.grouped_member_of(peer)?;
         let group = self.group_ribs.get(&gid)?;

@@ -148,8 +148,8 @@ fn prepare(
     let flow_head = sequence_head(flow.as_path())?;
     let local_domain = flow.origin_type == RouteOrigin::Ibgp && flow_head.is_none();
     if !local_domain
-        && originator(flow.originator_id(), flow.peer)
-            != originator(best.originator_id(), best.peer)
+        && originator(flow.originator_id(), flow.peer.addr())
+            != originator(best.originator_id(), best.peer.addr())
     {
         return Err(InfeasibleReason::OriginatorMismatch);
     }
@@ -223,6 +223,7 @@ fn covers(cover: Prefix, destination: Prefix) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::PeerId;
 
     use rustbgpd_wire::{Afi, Ipv6PrefixOffset, PathAttribute};
 
@@ -279,8 +280,8 @@ mod tests {
     #[test]
     fn originator_is_attribute_or_transport_address_not_router_id_or_next_hop() {
         let (mut flow, mut cover) = fixture();
-        cover.peer = "2001:db8::1".parse().unwrap();
-        cover.next_hop = flow.peer;
+        cover.peer = PeerId::from_addr("2001:db8::1".parse().unwrap());
+        cover.next_hop = flow.peer.addr();
         cover.peer_router_id = flow.peer_router_id;
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
@@ -297,7 +298,7 @@ mod tests {
         // Attribute identity and the same direct peer address denote the same
         // originator; their encoding provenance must not create a mismatch.
         flow.attributes.pop();
-        flow.peer = IpAddr::V4(id);
+        flow.peer = PeerId::from_addr(IpAddr::V4(id));
         assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
     }
 
@@ -319,7 +320,10 @@ mod tests {
         let (mut flow, mut cover) = fixture();
         flow.origin_type = RouteOrigin::Ibgp;
         flow.attributes = vec![path(&[])];
-        set_peer(&mut cover, "198.51.100.2".parse().unwrap());
+        set_peer(
+            &mut cover,
+            PeerId::from_addr("198.51.100.2".parse().unwrap()),
+        );
         assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
         assert_eq!(
             evaluate(&flow, None, &[]),
@@ -442,7 +446,10 @@ mod tests {
         cover.attributes = AttrSet::new(vec![path(&[])]);
         let mut child = cover.clone();
         child.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 25));
-        set_peer(&mut child, "198.51.100.2".parse().unwrap());
+        set_peer(
+            &mut child,
+            PeerId::from_addr("198.51.100.2".parse().unwrap()),
+        );
         assert_eq!(
             evaluate(&flow, Some(&cover), std::slice::from_ref(&child)),
             Feasibility::Feasible

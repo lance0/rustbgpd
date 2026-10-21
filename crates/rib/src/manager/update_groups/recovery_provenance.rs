@@ -5,8 +5,8 @@
 //! qualification surfaces. Register ownership before changing a projection;
 //! failed capture stays exhausted until that owned record is retired.
 
+use crate::PeerId;
 use std::mem::size_of;
-use std::net::IpAddr;
 
 pub(in crate::manager) use crate::update::EvpnRecoveryExhaustionCause as ExhaustionCause;
 use rustbgpd_wire::EvpnRouteKey;
@@ -101,7 +101,7 @@ impl<'a> EvpnProofView<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(in crate::manager) struct PeerSession {
-    pub(in crate::manager) peer: IpAddr,
+    pub(in crate::manager) peer: PeerId,
     pub(in crate::manager) session_id: u64,
 }
 
@@ -116,7 +116,7 @@ pub(in crate::manager) struct ProvenanceHandle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::manager) struct Exhaustion {
     pub(in crate::manager) cause: ExhaustionCause,
-    pub(in crate::manager) limiting_peer: Option<IpAddr>,
+    pub(in crate::manager) limiting_peer: Option<PeerId>,
     pub(in crate::manager) attempted_peer_bytes: usize,
     pub(in crate::manager) attempted_daemon_bytes: usize,
 }
@@ -259,7 +259,7 @@ impl EvpnRecoveryProvenance {
     }
 
     /// Charges aggregate all retained generations and snapshots at an address.
-    pub(in crate::manager) fn peer_usage(&self, peer: IpAddr) -> Usage {
+    pub(in crate::manager) fn peer_usage(&self, peer: PeerId) -> Usage {
         self.records
             .get(self.peer_range(peer).start)
             .filter(|r| r.handle.owner.peer == peer)
@@ -275,7 +275,7 @@ impl EvpnRecoveryProvenance {
             )
     }
 
-    fn peer_range(&self, peer: IpAddr) -> std::ops::Range<usize> {
+    fn peer_range(&self, peer: PeerId) -> std::ops::Range<usize> {
         let start = self.records.partition_point(|r| r.handle.owner.peer < peer);
         let end = self
             .records
@@ -430,7 +430,7 @@ impl EvpnRecoveryProvenance {
         true
     }
 
-    fn check(&self, address: IpAddr, peer: usize, daemon: usize) -> Result<(), Exhaustion> {
+    fn check(&self, address: PeerId, peer: usize, daemon: usize) -> Result<(), Exhaustion> {
         let cause = if peer > self.peer_limit {
             Some(ExhaustionCause::PeerLimit)
         } else if daemon > self.daemon_limit {
@@ -471,14 +471,14 @@ impl EvpnRecoveryProvenance {
         true
     }
 
-    fn note_peer_peak(&mut self, peer: IpAddr, attempted: usize) {
+    fn note_peer_peak(&mut self, peer: PeerId, attempted: usize) {
         let range = self.peer_range(peer);
         for record in &mut self.records[range] {
             record.peer_peak = record.peer_peak.max(attempted);
         }
     }
 
-    fn set_peer_retained(&mut self, peer: IpAddr, retained: usize) {
+    fn set_peer_retained(&mut self, peer: PeerId, retained: usize) {
         let range = self.peer_range(peer);
         for record in &mut self.records[range] {
             record.peer_retained = retained;
@@ -646,7 +646,7 @@ impl EvpnRecoveryProvenance {
         self.universe_index(handle).is_some()
     }
 
-    fn peer_references_universe(&self, peer: IpAddr, universe: UniverseHandle) -> bool {
+    fn peer_references_universe(&self, peer: PeerId, universe: UniverseHandle) -> bool {
         self.records[self.peer_range(peer)]
             .iter()
             .any(|record| record.universe == Some(universe))
@@ -2100,13 +2100,14 @@ impl EvpnRecoveryProvenance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
     use std::net::Ipv4Addr;
 
     use rustbgpd_wire::{EthernetTagId, RouteDistinguisher};
 
     fn owner(peer: u8, session_id: u64) -> PeerSession {
         PeerSession {
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, peer)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, peer))),
             session_id,
         }
     }

@@ -11,6 +11,7 @@
 //! A small non-ignored test keeps the profile shapes and JSON schema compiling
 //! under ordinary `cargo test`.
 
+use rustbgpd_rib::PeerId;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::net::{IpAddr, Ipv4Addr};
@@ -359,7 +360,7 @@ fn make_route(prefix: Prefix, peer_idx: u32, attrs: &[PathAttribute]) -> Route {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1))),
         attributes: AttrSet::new(attrs.to_vec()),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -508,8 +509,11 @@ fn measure_adj_rib_in(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let start = Instant::now();
 
     let mut intern = AttrInternTable::new();
-    let mut rib =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
+    let mut rib = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+        prefixes.len(),
+        0,
+    );
     for prefix in prefixes {
         let mut route = make_route(*prefix, 1, &attrs);
         intern.intern(&mut route.attributes);
@@ -592,10 +596,16 @@ fn measure_full_rib(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let start = Instant::now();
 
     let mut intern = AttrInternTable::new();
-    let mut rib1 =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
-    let mut rib2 =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), prefixes.len(), 0);
+    let mut rib1 = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+        prefixes.len(),
+        0,
+    );
+    let mut rib2 = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
+        prefixes.len(),
+        0,
+    );
     let mut loc = LocRib::with_capacity(prefixes.len());
 
     for prefix in prefixes {
@@ -652,10 +662,16 @@ fn measure_full_rib_attribute_ratio(
     let start = Instant::now();
 
     let mut intern = AttrInternTable::new();
-    let mut rib1 =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
-    let mut rib2 =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), prefixes.len(), 0);
+    let mut rib1 = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+        prefixes.len(),
+        0,
+    );
+    let mut rib2 = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
+        prefixes.len(),
+        0,
+    );
     let mut loc = LocRib::with_capacity(prefixes.len());
 
     for (idx, prefix) in prefixes.iter().enumerate() {
@@ -719,10 +735,16 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let start = Instant::now();
 
     let mut intern = AttrInternTable::new();
-    let mut rib1 =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
-    let mut rib2 =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), prefixes.len(), 0);
+    let mut rib1 = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+        prefixes.len(),
+        0,
+    );
+    let mut rib2 = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
+        prefixes.len(),
+        0,
+    );
     let mut loc = LocRib::with_capacity(prefixes.len());
 
     for prefix in prefixes {
@@ -738,8 +760,14 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
         loc.recompute(*prefix, candidates);
     }
 
-    let mut out1 = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1)), loc.len());
-    let mut out2 = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1)), loc.len());
+    let mut out1 = AdjRibOut::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1))),
+        loc.len(),
+    );
+    let mut out2 = AdjRibOut::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1))),
+        loc.len(),
+    );
     for prefix in prefixes {
         let Some(best) = loc.get(prefix) else {
             continue;
@@ -784,10 +812,16 @@ fn measure_rr_fanout_representative(profile: &'static str, prefixes: &[Prefix]) 
     let start = Instant::now();
 
     let mut intern = AttrInternTable::new();
-    let mut rib1 =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
-    let mut rib2 =
-        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), prefixes.len(), 0);
+    let mut rib1 = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+        prefixes.len(),
+        0,
+    );
+    let mut rib2 = AdjRibIn::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
+        prefixes.len(),
+        0,
+    );
     let mut loc = LocRib::with_capacity(prefixes.len());
 
     for (idx, prefix) in prefixes.iter().enumerate() {
@@ -805,8 +839,14 @@ fn measure_rr_fanout_representative(profile: &'static str, prefixes: &[Prefix]) 
         loc.recompute(*prefix, candidates);
     }
 
-    let mut out1 = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1)), loc.len());
-    let mut out2 = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1)), loc.len());
+    let mut out1 = AdjRibOut::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1))),
+        loc.len(),
+    );
+    let mut out2 = AdjRibOut::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1))),
+        loc.len(),
+    );
     for prefix in prefixes {
         let Some(best) = loc.get(prefix) else {
             continue;
@@ -985,7 +1025,7 @@ fn adj_rib_out_release_unicast_reclaims_100k_structural_capacity() {
 
     let prefixes = generate_prefixes(PREFIX_COUNT);
     let attrs = typical_attributes(1);
-    let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1)));
+    let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1))));
     for prefix in &prefixes {
         rib.insert(make_route(*prefix, 1, &attrs));
     }
@@ -997,7 +1037,7 @@ fn adj_rib_out_release_unicast_reclaims_100k_structural_capacity() {
     let structural_bytes_before = route_bytes_before + prefix_bytes_before;
     assert_eq!(rib.len(), PREFIX_COUNT);
     assert_eq!(prefix_len_before, PREFIX_COUNT);
-    let fresh = AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1)));
+    let fresh = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1))));
     let fresh_route_capacity = fresh.bench_route_capacity();
     let fresh_route_bytes = fresh_route_capacity * std::mem::size_of::<Option<Route>>();
     let fresh_prefix_len = fresh.bench_prefix_index_len();
@@ -1039,7 +1079,10 @@ fn adj_rib_out_first_adoption_tail_trim_reclaims_expected_slot_bytes() {
 
     let prefixes = generate_prefixes(STAGED);
     let attrs = typical_attributes(1);
-    let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1)), RESERVED);
+    let mut rib = AdjRibOut::with_capacity(
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1))),
+        RESERVED,
+    );
     for prefix in prefixes {
         rib.insert(make_route(prefix, 1, &attrs));
     }

@@ -9,6 +9,7 @@
 //! The fanout driver registers synthetic outbound peers, seeds the Loc-RIB, and
 //! runs `distribute_changes` directly.
 
+use crate::PeerId;
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -247,6 +248,7 @@ pub(in crate::manager) fn retirement_end(phase: usize, sample: Option<Retirement
 #[cfg(test)]
 mod retirement_readiness_tests {
     use super::RetirementReadiness;
+    use crate::PeerId;
     use std::time::Duration;
 
     fn manager_with_queries(
@@ -422,7 +424,7 @@ mod retirement_readiness_tests {
                     progress,
                 );
             });
-            let peer = "192.0.2.1".parse().unwrap();
+            let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
             let prefix =
                 rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new([10, 0, 0, 0].into(), 24));
             let route = crate::test_support::make_route_with_path_id(prefix, 0);
@@ -666,10 +668,10 @@ pub struct RecoveryScanReceipt {
     pub refusal: Option<&'static str>,
 }
 
-fn scan_peer(index: usize) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::from(
+fn scan_peer(index: usize) -> PeerId {
+    PeerId::from_addr(IpAddr::V4(Ipv4Addr::from(
         0xc000_0200_u32 + u32::try_from(index).expect("bounded scan owner index"),
-    ))
+    )))
 }
 
 fn scan_old(spec: RecoveryScanSpec) -> impl Iterator<Item = usize> {
@@ -757,7 +759,7 @@ fn scan_common_route(spec: RecoveryScanSpec, n: usize, at: std::time::Instant) -
         Key::Unicast(prefix, path_id) => ScanCommonRoute::Unicast(Route {
             prefix,
             path_id,
-            next_hop: scan_peer(0),
+            next_hop: scan_peer(0).addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: scan_peer(0),
@@ -779,7 +781,7 @@ fn scan_common_route(spec: RecoveryScanSpec, n: usize, at: std::time::Instant) -
                 prefix: key.prefix,
             },
             path_id,
-            next_hop: scan_peer(0),
+            next_hop: scan_peer(0).addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: scan_peer(0),
@@ -829,7 +831,7 @@ fn scan_evpn_route(n: usize, at: std::time::Instant) -> crate::route::EvpnRibRou
     };
     crate::route::EvpnRibRoute {
         route,
-        next_hop: scan_peer(0),
+        next_hop: scan_peer(0).addr(),
         link_local_next_hop: None,
         peer: scan_peer(0),
         attributes: crate::attr_set::AttrSet::new(vec![]),
@@ -1773,7 +1775,7 @@ impl RibManager {
         &mut self,
         query_tx: &mpsc::Sender<RibUpdate>,
         families: &[(Afi, Safi)],
-        snapshot_peer: IpAddr,
+        snapshot_peer: PeerId,
         expire: bool,
     ) -> [u64; 14] {
         let primary_depth_before = self.primary_backlog();
@@ -1877,8 +1879,8 @@ impl RibManager {
         assert!(self.unicast_prefix_peers.is_empty());
         assert!((1..=2).contains(&announcers_per_prefix));
         let peers = [
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
         ];
         for &prefix in prefixes {
             for &peer in &peers[..announcers_per_prefix] {
@@ -1890,7 +1892,7 @@ impl RibManager {
             capacity: self.unicast_prefix_peers.capacity(),
             announcers_per_prefix,
             prefix_size: std::mem::size_of::<Prefix>(),
-            peer_address_size: std::mem::size_of::<IpAddr>(),
+            peer_address_size: std::mem::size_of::<PeerId>(),
             primary_value_size: std::mem::size_of::<super::PrefixAnnouncers>(),
             epoch_size: std::mem::size_of::<super::AdjRibInEpoch>(),
             spill_slots: self.unicast_prefix_peers.spills.len(),
@@ -1907,10 +1909,10 @@ impl RibManager {
     ///
     /// Panics when `index` exceeds `u32::MAX`, far beyond a useful benchmark.
     #[must_use]
-    pub fn bench_peer_address(index: usize) -> IpAddr {
+    pub fn bench_peer_address(index: usize) -> PeerId {
         let idx = u32::try_from(index).expect("bench peer index fits in u32");
         let [_, b1, b2, b3] = idx.to_be_bytes();
-        IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3))
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3)))
     }
 
     /// Register `n_peers` synthetic iBGP outbound peers (`10.a.b.c`), each
@@ -2013,7 +2015,9 @@ impl RibManager {
     ) {
         self.initial_dump_defer_min_routes = 0;
         self.pending_initial_registrations
-            .push_back(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 255)));
+            .push_back(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                203, 0, 113, 255,
+            ))));
         for (index, outbound_tx, encoder) in joiners {
             self.bench_join_route_reflector_peer(index, outbound_tx, encoder);
         }
@@ -2205,7 +2209,7 @@ impl RibManager {
     /// Tokio actor scheduling.
     fn bench_apply_routes_received(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announced: Vec<Route>,
         withdrawn: Vec<(Prefix, u32)>,
     ) {
@@ -2368,7 +2372,7 @@ impl RibManager {
     /// Enter Graceful Restart for an unregistered synthetic source through the
     /// production `PeerGracefulRestart` path: its routes in `families` are
     /// retained and marked stale.
-    pub fn bench_gr_restart(&mut self, peer: IpAddr, families: &[(Afi, Safi)]) {
+    pub fn bench_gr_restart(&mut self, peer: PeerId, families: &[(Afi, Safi)]) {
         self.handle_update(RibUpdate::PeerGracefulRestart {
             peer,
             session_id: 0,
@@ -2390,7 +2394,7 @@ impl RibManager {
     ///
     /// Panics only if a duration or count exceeds `u64`.
     #[must_use]
-    pub fn bench_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) -> [u64; 10] {
+    pub fn bench_end_of_rib(&mut self, peer: PeerId, afi: Afi, safi: Safi) -> [u64; 10] {
         self.adj_rib_out_commit_stats.eor_unicast_affected = 0;
         self.adj_rib_out_commit_stats.eor_unicast_changed = 0;
         self.adj_rib_out_commit_stats.eor_unicast_recompute_ns = 0;
@@ -2430,7 +2434,7 @@ impl RibManager {
     /// outbound registration uses the production legacy-unregistered
     /// `session_id = 0` compatibility branch.
     pub fn bench_seed_loc_rib(&mut self, routes: Vec<Route>) {
-        let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
+        let mut by_peer: BTreeMap<PeerId, Vec<Route>> = BTreeMap::new();
         for route in routes {
             by_peer.entry(route.peer).or_default().push(route);
         }
@@ -2445,7 +2449,7 @@ impl RibManager {
     /// manager dispatcher and ends after its bounded route-chunk, recompute,
     /// and distribution work drains. Manager-channel dequeue and Tokio actor
     /// scheduling are outside this synchronous benchmark.
-    pub fn bench_withdraw_loc_rib(&mut self, peer: IpAddr, withdrawn: Vec<(Prefix, u32)>) {
+    pub fn bench_withdraw_loc_rib(&mut self, peer: PeerId, withdrawn: Vec<(Prefix, u32)>) {
         self.bench_apply_routes_received(peer, Vec::new(), withdrawn);
     }
 
@@ -2459,7 +2463,7 @@ impl RibManager {
     /// Panics if a requested fixture route was not present in its source
     /// Adj-RIB-In; that would make the churn control incomparable.
     pub fn bench_churn_loc_rib(&mut self, routes: Vec<Route>) {
-        let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
+        let mut by_peer: BTreeMap<PeerId, Vec<Route>> = BTreeMap::new();
         for route in routes {
             by_peer.entry(route.peer).or_default().push(route);
         }
@@ -2495,7 +2499,7 @@ impl RibManager {
     #[must_use]
     pub fn bench_prepare_unicast_replacement(&mut self, routes: Vec<Route>) -> HashSet<Prefix> {
         let expected = routes.len();
-        let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
+        let mut by_peer: BTreeMap<PeerId, Vec<Route>> = BTreeMap::new();
         for route in routes {
             by_peer.entry(route.peer).or_default().push(route);
         }
@@ -2536,7 +2540,7 @@ impl RibManager {
     /// Panics if any replacement's source `AdjRibIn` is absent.
     #[must_use]
     pub fn bench_prepare_multipath_replacement(&mut self, routes: Vec<Route>) -> HashSet<Prefix> {
-        let mut by_peer: BTreeMap<IpAddr, Vec<Route>> = BTreeMap::new();
+        let mut by_peer: BTreeMap<PeerId, Vec<Route>> = BTreeMap::new();
         let mut affected = HashSet::new();
         for route in routes {
             affected.insert(route.prefix);
@@ -2702,7 +2706,7 @@ impl RibManager {
         clippy::cast_possible_truncation,
         reason = "benchmark fixture gauge counts are exact small nonnegative integers"
     )]
-    fn bench_adj_rib_out_family_values(&self, peer: IpAddr) -> [i64; 7] {
+    fn bench_adj_rib_out_family_values(&self, peer: PeerId) -> [i64; 7] {
         // One slot per table, summing its canonical families.
         const FAMILIES: [&[&str]; 7] = [
             &crate::manager::helpers::UNICAST_FAMILIES,
@@ -2774,7 +2778,7 @@ impl RibManager {
 
     fn bench_apply_authoritative_export_policy(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         export_policy: Option<PolicyChain>,
     ) {
         let started = std::time::Instant::now();

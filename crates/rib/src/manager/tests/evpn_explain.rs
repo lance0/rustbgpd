@@ -1,10 +1,12 @@
 use super::*;
+use crate::PeerId;
 use crate::attr_set::AttrSet;
 use crate::best_path::BestPathReason;
+use crate::test_support::peer_v4;
 use crate::update::{ExplainDecision, ExplainEvpnRoute, ExportGateVerdict};
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
-const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+const TARGET: PeerId = peer_v4(Ipv4Addr::new(192, 0, 2, 9));
 
 fn fixture() -> (
     RibManager,
@@ -39,8 +41,8 @@ fn install(manager: &mut RibManager, route: &EvpnRibRoute) {
 fn query(
     manager: &mut RibManager,
     key: rustbgpd_wire::EvpnRouteKey,
-    received_from: Option<IpAddr>,
-    advertised_to: Option<IpAddr>,
+    received_from: Option<PeerId>,
+    advertised_to: Option<PeerId>,
 ) -> ExplainEvpnRoute {
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::ExplainEvpnRoute {
@@ -296,7 +298,7 @@ fn exact_evpn_explain_source_scope_deferral_dirty_and_encoder_overlay_are_distin
         .or_insert_with(|| AdjRibOut::new(TARGET))
         .insert_evpn(old.clone());
     let mut fresh = old.clone();
-    fresh.peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    fresh.peer = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
     AttrSet::edit(&mut fresh.attributes, |attrs| {
         attrs.push(PathAttribute::LocalPref(250));
     });
@@ -377,8 +379,8 @@ fn argument_query(
     manager: &mut RibManager,
     imet: &EvpnRibRoute,
     ead: &EvpnRibRoute,
-    received_from: Option<IpAddr>,
-    advertised_to: Option<IpAddr>,
+    received_from: Option<PeerId>,
+    advertised_to: Option<PeerId>,
 ) -> crate::update::ExplainSrv6Argument {
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::ExplainEvpnRoute {
@@ -686,7 +688,7 @@ fn srv6_p2mp_imet_replacement_withdrawal_and_recovery_reach_export_and_inspectio
 /// Every peer's export-policy totals, for before/after comparisons.
 fn export_policy_snapshots(
     manager: &RibManager,
-) -> std::collections::HashMap<IpAddr, crate::update::NeighborPolicyStats> {
+) -> std::collections::HashMap<PeerId, crate::update::NeighborPolicyStats> {
     manager
         .export_policy_counters
         .iter()

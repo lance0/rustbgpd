@@ -1,5 +1,6 @@
 use super::*;
 use crate::adj_rib_in::AdjRibIn;
+use crate::test_support::peer_v4;
 use rustbgpd_wire::{
     EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute,
 };
@@ -19,7 +20,7 @@ fn rib_route(route: EvpnRoute) -> EvpnRibRoute {
         route,
         next_hop: IpAddr::V4(PEER),
         link_local_next_hop: None,
-        peer: IpAddr::V4(PEER),
+        peer: peer_v4(PEER),
         attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
@@ -76,8 +77,8 @@ fn install_and_recompute(manager: &mut RibManager, route: EvpnRibRoute) {
     let key = route.key();
     manager
         .ribs
-        .entry(IpAddr::V4(PEER))
-        .or_insert_with(|| AdjRibIn::new(IpAddr::V4(PEER)))
+        .entry(peer_v4(PEER))
+        .or_insert_with(|| AdjRibIn::new(peer_v4(PEER)))
         .insert_evpn(route);
     manager.recompute_and_distribute_evpn(&HashSet::from([key]));
 }
@@ -87,7 +88,7 @@ fn withdraw_and_recompute(manager: &mut RibManager, route: &EvpnRibRoute) {
     assert!(
         manager
             .ribs
-            .get_mut(&IpAddr::V4(PEER))
+            .get_mut(&peer_v4(PEER))
             .unwrap()
             .withdraw_evpn(&key)
     );
@@ -170,8 +171,8 @@ fn every_relevant_shape_add_change_withdraw_advances_exactly_once() {
     let keys: HashSet<_> = routes.iter().map(EvpnRibRoute::key).collect();
     let rib = manager
         .ribs
-        .entry(IpAddr::V4(PEER))
-        .or_insert_with(|| AdjRibIn::new(IpAddr::V4(PEER)));
+        .entry(peer_v4(PEER))
+        .or_insert_with(|| AdjRibIn::new(peer_v4(PEER)));
     for route in routes {
         rib.insert_evpn(route);
     }

@@ -89,6 +89,7 @@
 //! Historical first-advertise A/B receipt:
 //! `docs/perf/exact-export-fanout-2026-07.md`.
 
+use rustbgpd_rib::PeerId;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
@@ -176,7 +177,7 @@ fn make_route_with_med(prefix: Prefix, med: u32) -> Route {
         next_hop: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
         attributes: AttrSet::new(attributes),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         // eBGP-learned so it reflects freely to the iBGP / RR clients (no
@@ -347,7 +348,7 @@ fn add_path_source(index: usize) -> Ipv4Addr {
 fn add_path_route(index: usize, candidates: usize, med: u32) -> Route {
     let mut route = make_route_with_med(add_path_prefix(), med);
     let source = add_path_source(index);
-    route.peer = IpAddr::V4(source);
+    route.peer = PeerId::from_addr(IpAddr::V4(source));
     route.peer_router_id = source;
     let local_pref =
         10_000 + u32::try_from(candidates - index).expect("benchmark candidate count fits u32");
@@ -779,7 +780,7 @@ fn per_client_best_resync_routes(peers: usize) -> Vec<Route> {
         .map(|(index, mut route)| {
             let source = RibManager::bench_peer_address(index % peers);
             route.peer = source;
-            route.peer_router_id = match source {
+            route.peer_router_id = match source.addr() {
                 IpAddr::V4(address) => address,
                 IpAddr::V6(_) => unreachable!("benchmark peer addresses are IPv4"),
             };
@@ -796,7 +797,7 @@ fn route_has_community(route: &Route, community: u32) -> bool {
 
 fn drain_per_client_best_resync_envelopes(
     receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
-    target: IpAddr,
+    target: PeerId,
     expected: &HashSet<(Prefix, u32)>,
     expected_community: u32,
     expected_envelopes: usize,
@@ -1075,10 +1076,11 @@ fn build_grouped_withdrawal_fanout(peers: usize) -> GroupedWithdrawalFanoutState
     GroupedWithdrawalFanoutState {
         manager,
         receivers,
-        source_peer: routes
+        source_peer: (routes
             .first()
             .expect("grouped-withdrawal fixture must contain routes")
-            .peer,
+            .peer)
+            .addr(),
         routes,
         withdrawals,
         expected_inventory,
@@ -1272,9 +1274,10 @@ fn bench_grouped_withdrawal_fanout(c: &mut Criterion) {
                         let withdrawn = state.withdrawals.clone();
                         state.manager.bench_reset_adj_rib_out_fanout_receipt();
                         let started = Instant::now();
-                        state
-                            .manager
-                            .bench_withdraw_loc_rib(state.source_peer, withdrawn);
+                        state.manager.bench_withdraw_loc_rib(
+                            PeerId::from_addr(state.source_peer),
+                            withdrawn,
+                        );
                         accumulated += started.elapsed();
                         assert_grouped_withdrawal_receipt(
                             state.manager.bench_adj_rib_out_fanout_receipt(),
@@ -1801,7 +1804,7 @@ fn build_group_join(sources: u8, routes: usize) -> RibManager {
         (1..=sources)
             .flat_map(|source| {
                 base.iter().map(move |route| Route {
-                    peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, source)),
+                    peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, source))),
                     ..route.clone()
                 })
             })
@@ -2088,7 +2091,7 @@ fn assert_add_path_envelope(
             .map(|route| route.peer)
             .collect::<Vec<_>>(),
         (first..first + expected_count)
-            .map(|index| IpAddr::V4(add_path_source(index)))
+            .map(|index| PeerId::from_addr(IpAddr::V4(add_path_source(index))))
             .collect::<Vec<_>>(),
         "the exact eligible source inventory must fill send_max"
     );
@@ -2568,7 +2571,7 @@ const QUEUED_SOURCE_B: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
 
 fn queued_route(prefix: Prefix, source: Ipv4Addr, med: u32) -> Route {
     let mut route = make_route_with_med(prefix, med);
-    route.peer = IpAddr::V4(source);
+    route.peer = PeerId::from_addr(IpAddr::V4(source));
     route.peer_router_id = source;
     route
 }
@@ -2587,7 +2590,7 @@ struct QueuedAnnounceState {
 fn queue_messages(tx: &mpsc::Sender<RibUpdate>, messages: Vec<QueuedMessage>) {
     for (source, announced, withdrawn) in messages {
         tx.try_send(RibUpdate::RoutesReceived {
-            peer: IpAddr::V4(source),
+            peer: PeerId::from_addr(IpAddr::V4(source)),
             session_id: 0,
             announced,
             withdrawn,

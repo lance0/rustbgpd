@@ -1,10 +1,11 @@
 use super::{
     BatchedMemberSupplement, BatchedTransitionCounters, BatchedTransitionInventory,
     CleanPolicyTransitionInventory, CleanPolicyTransitionInventoryBuilder, FastMap, GroupKey,
-    GroupMembership, GroupRibOut, IpAddr, LargeCommunity, NextHopAction, PolicyAction, PolicyChain,
+    GroupMembership, GroupRibOut, LargeCommunity, NextHopAction, PolicyAction, PolicyChain,
     PolicyTransitionGroupStart, Prefix, RibManager, Route, UpdateGroupClassification,
     classify_update_group, routes_equal, source_control_input,
 };
+use crate::PeerId;
 use tracing::info;
 
 use crate::fast_hash::{AddrMap, FastSet};
@@ -205,12 +206,12 @@ impl RibManager {
         // walk at reload-stall scale. The merge clones one label per
         // distinct (label) / (source, label) pair per chunk instead.
         let mut chunk_totals: FastMap<Option<&str>, u64> = FastMap::default();
-        let mut chunk_by_source: AddrMap<IpAddr, FastMap<Option<&str>, u64>> = AddrMap::default();
+        let mut chunk_by_source: AddrMap<PeerId, FastMap<Option<&str>, u64>> = AddrMap::default();
         // Run-length fold for the permit counters: tables interleave far
         // fewer (source, label) flips than routes (contiguous prefix blocks
         // from one source are the common shape), so accumulate runs and
         // touch the maps once per flip instead of twice per route.
-        let mut run: Option<(IpAddr, Option<&str>, u64)> = None;
+        let mut run: Option<(PeerId, Option<&str>, u64)> = None;
         for &(prefix, path_id) in keys {
             crate::manager::replacement_readiness_checkpoint_at(
                 &self.replacement_readiness,
@@ -647,7 +648,7 @@ impl RibManager {
     /// split-horizon counter semantics without another full-table walk.
     pub(in crate::manager) fn apply_clean_policy_transition_counters(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         inventory: &CleanPolicyTransitionInventory,
     ) {
         let own = inventory.permit_by_source.get(&peer);
@@ -699,7 +700,7 @@ impl RibManager {
     /// the group key from RIB-staging inputs.
     pub(in crate::manager) fn compute_update_group_membership(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> GroupMembership {
         let chain = self.export_policy_for(peer).cloned();
         self.compute_update_group_membership_for_policy(peer, chain.as_ref(), None)
@@ -707,7 +708,7 @@ impl RibManager {
 
     pub(in crate::manager) fn compute_update_group_membership_with_receipt(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         receipt: &mut crate::manager::AuthoritativeTransitionReceipt,
     ) -> GroupMembership {
         let chain = self.export_policy_for(peer).cloned();
@@ -726,7 +727,7 @@ impl RibManager {
     /// discards them. No group table or wire state is touched here.
     fn compute_update_group_membership_for_policy(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         chain: Option<&PolicyChain>,
         receipt: Option<&mut crate::manager::AuthoritativeTransitionReceipt>,
     ) -> GroupMembership {
@@ -797,7 +798,7 @@ impl RibManager {
     /// transition and prove that only the chain dimension changes.
     pub(in crate::manager) fn clean_policy_transition_destination(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         policy: Option<&PolicyChain>,
     ) -> Option<(usize, usize)> {
         let GroupMembership::Grouped(source) = self.update_groups.members.get(&peer)? else {
@@ -846,7 +847,7 @@ impl RibManager {
     pub(in crate::manager) fn begin_policy_transition_group(
         &mut self,
         gid: usize,
-        peer: IpAddr,
+        peer: PeerId,
         export_policy: Option<&PolicyChain>,
     ) -> PolicyTransitionGroupStart {
         if self.group_ribs.contains_key(&gid) {
@@ -943,7 +944,7 @@ impl RibManager {
     /// delta accepted by every target writer.
     pub(in crate::manager) fn commit_clean_policy_transition_member(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         source: usize,
         destination: usize,
     ) {
@@ -1035,7 +1036,7 @@ impl RibManager {
         let mut next_hop_override: Vec<Option<NextHopAction>> =
             Vec::with_capacity(destination.table.len());
         checkpoint(true);
-        let mut supplements: AddrMap<IpAddr, BatchedMemberSupplement> = AddrMap::default();
+        let mut supplements: AddrMap<PeerId, BatchedMemberSupplement> = AddrMap::default();
         let mut counters = BatchedTransitionCounters::default();
         let mut rejected = false;
         'destination: for route in destination.table.iter() {
@@ -1216,7 +1217,7 @@ impl RibManager {
     /// per member instead of O(table).
     pub(in crate::manager) fn apply_batched_transition_counters(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         inventory: &BatchedTransitionInventory,
     ) {
         let rows = inventory

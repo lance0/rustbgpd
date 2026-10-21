@@ -2,7 +2,7 @@
 //! family, keyed by `(Prefix, path_id)` for unicast so Add-Path and
 //! single-best export share one table.
 
-use std::net::IpAddr;
+use crate::PeerId;
 
 use rustbgpd_policy::NextHopAction;
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
@@ -27,7 +27,7 @@ use crate::update::{RouteQueryKey, route_query_key};
 /// Routes are keyed by `(Prefix, path_id)` for Add-Path (RFC 7911).
 /// In single-best mode, `path_id` is always 0.
 pub struct AdjRibOut {
-    peer: IpAddr,
+    peer: PeerId,
     /// Unicast route bodies, stored densely behind `u32` handles (LAN-335).
     /// The `(prefix, path_id)` identity lives on the routes themselves and in
     /// `prefix_path_ids`; there is no separate keyed route map — this struct
@@ -251,7 +251,7 @@ pub(crate) fn reserve_sharded_map<K: Eq + std::hash::Hash, V>(
 impl AdjRibOut {
     /// Create a new empty Adj-RIB-Out for the given peer.
     #[must_use]
-    pub fn new(peer: IpAddr) -> Self {
+    pub fn new(peer: PeerId) -> Self {
         Self::with_capacity(peer, 0)
     }
 
@@ -264,7 +264,7 @@ impl AdjRibOut {
     /// releases an existing private reservation; a later return to the
     /// per-peer path grows the private table again from empty.
     #[must_use]
-    pub fn with_capacity(peer: IpAddr, capacity: usize) -> Self {
+    pub fn with_capacity(peer: PeerId, capacity: usize) -> Self {
         Self {
             peer,
             routes: RouteSlab::with_capacity(capacity),
@@ -342,7 +342,7 @@ impl AdjRibOut {
 
     /// Return the peer address this RIB belongs to.
     #[must_use]
-    pub fn peer(&self) -> IpAddr {
+    pub fn peer(&self) -> PeerId {
         self.peer
     }
 
@@ -1160,7 +1160,7 @@ mod tests {
     /// dropping an insert, withdraw, or clear adjustment makes this red.
     #[test]
     fn family_lens_follow_each_afi_through_insert_withdraw_and_clear() {
-        let mut rib = AdjRibOut::new("192.0.2.1".parse().unwrap());
+        let mut rib = AdjRibOut::new(PeerId::from_addr("192.0.2.1".parse().unwrap()));
         let v4 = prefix_a();
         let v6 = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
             "2001:db8::".parse().unwrap(),
@@ -1183,7 +1183,7 @@ mod tests {
 
     #[test]
     fn unicast_action_residue_follows_exact_admitted_key_lifecycle() {
-        let mut rib = AdjRibOut::new("192.0.2.1".parse().unwrap());
+        let mut rib = AdjRibOut::new(PeerId::from_addr("192.0.2.1".parse().unwrap()));
         let prefix = prefix_a();
         for path_id in [1, 2] {
             rib.insert_with_next_hop(
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[test]
     fn unicast_action_residue_is_dropped_by_full_clears_and_slot_reuse() {
-        let mut rib = AdjRibOut::new("192.0.2.1".parse().unwrap());
+        let mut rib = AdjRibOut::new(PeerId::from_addr("192.0.2.1".parse().unwrap()));
         let specific = NextHopAction::Specific("192.0.2.9".parse().unwrap());
         let prefix = prefix_a();
         let resets: [fn(&mut AdjRibOut); 2] = [AdjRibOut::clear, |rib| rib.retire_with(&mut || {})];
@@ -1258,7 +1258,7 @@ mod tests {
         assert!(!rib.has_next_hop_overrides());
 
         // Dense next-hop-self stores one flag per slot and no hashed entry.
-        let mut rib = AdjRibOut::new("192.0.2.1".parse().unwrap());
+        let mut rib = AdjRibOut::new(PeerId::from_addr("192.0.2.1".parse().unwrap()));
         for path_id in 0..1024 {
             rib.insert_with_next_hop(
                 make_route(prefix, path_id),
@@ -1296,11 +1296,11 @@ mod tests {
         nlri: rustbgpd_wire::bgpls::BgpLsNlri,
         peer_oct: u8,
     ) -> BgpLsRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         BgpLsRibRoute {
             family,
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             peer,
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
@@ -1321,10 +1321,10 @@ mod tests {
     }
 
     fn make_vpn_route(nlri: VpnNlri, peer_oct: u8) -> VpnRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         VpnRibRoute {
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer,
@@ -1344,7 +1344,7 @@ mod tests {
     fn vpn_reservation_covers_a_batch_skewed_into_one_shard() {
         use crate::fast_hash::{SHARD_SPLIT_AT, shard_index};
         let route = |n: u32| make_vpn_route(vpn_nlri((0x0a00_0000 + n).to_be_bytes(), 32, 100), 1);
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let split = u32::try_from(SHARD_SPLIT_AT).unwrap() + 1;
         for n in 0..split {
             rib.insert_vpn(route(n));
@@ -1382,7 +1382,7 @@ mod tests {
 
     #[test]
     fn vpn_insert_remove_iter_isolated_from_unicast_index() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
         let key = VpnRibRouteKey {
             nlri_key: nlri.key(),
@@ -1400,7 +1400,7 @@ mod tests {
         assert_eq!(rib.vpn_len(), 1, "same key should replace");
         assert_eq!(
             rib.get_vpn(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
         );
 
         assert!(rib.remove_vpn(&key));
@@ -1409,13 +1409,13 @@ mod tests {
     }
 
     fn make_labeled_route(addr: [u8; 4], len: u8, path_id: u32, peer_oct: u8) -> LabeledRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         LabeledRibRoute {
             nlri: rustbgpd_wire::LabeledNlri {
                 labels: vec![MplsLabelEntry::try_new(100, 0, true).unwrap()],
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(addr), len)),
             },
-            next_hop: peer,
+            next_hop: peer.addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer,
@@ -1431,7 +1431,7 @@ mod tests {
 
     #[test]
     fn labeled_insert_remove_iter_isolated_from_unicast_index() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         // Same prefix as prefix_a() to prove the tables cannot collide.
         let route = make_labeled_route([10, 0, 0, 0], 24, 0, 1);
         let key = route.key();
@@ -1448,7 +1448,7 @@ mod tests {
         assert_eq!(rib.labeled_len(), 1, "same key should replace");
         assert_eq!(
             rib.get_labeled(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
         );
 
         assert!(rib.remove_labeled(&key));
@@ -1458,7 +1458,7 @@ mod tests {
 
     #[test]
     fn labeled_index_tracks_add_path_multiple_ids() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let prefix = prefix_a();
 
         assert_eq!(rib.labeled_path_ids_for_key(&prefix).len(), 0);
@@ -1483,10 +1483,10 @@ mod tests {
     fn make_rtc_route(local_admin: u32, peer_oct: u8) -> RtcRibRoute {
         // 2-octet-AS RT:65001:<local_admin>, origin AS 65001, full /96.
         let rt = 0x0002_FDE9_0000_0000_u64 | u64::from(local_admin);
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         RtcRibRoute {
             nlri: RtcNlri::new(65001, rt, 96).unwrap(),
-            next_hop: peer,
+            next_hop: peer.addr(),
             peer,
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
@@ -1500,7 +1500,7 @@ mod tests {
 
     #[test]
     fn rtc_insert_remove_iter_isolated_from_unicast_index() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let route = make_rtc_route(100, 1);
         let key = route.key();
 
@@ -1516,7 +1516,7 @@ mod tests {
         assert_eq!(rib.rtc_len(), 1, "same key should replace");
         assert_eq!(
             rib.get_rtc(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
         );
 
         assert!(rib.remove_rtc(&key));
@@ -1526,7 +1526,7 @@ mod tests {
 
     #[test]
     fn index_tracks_single_best_insert_withdraw() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let p = prefix_a();
 
         assert!(rib.path_ids_for_prefix(&p).is_empty());
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[test]
     fn index_tracks_add_path_multiple_ids() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let p = prefix_a();
 
         rib.insert(make_route(p, 1));
@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn checkpointed_unicast_mutations_visit_path_ids() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let prefix = prefix_a();
         let mut checkpoints = 0;
 
@@ -1582,7 +1582,7 @@ mod tests {
 
     #[test]
     fn index_handles_duplicate_insert() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let p = prefix_a();
 
         rib.insert(make_route(p, 0));
@@ -1593,7 +1593,7 @@ mod tests {
 
     #[test]
     fn index_isolated_per_prefix() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let pa = prefix_a();
         let pb = prefix_b();
 
@@ -1613,7 +1613,7 @@ mod tests {
 
     #[test]
     fn clear_resets_index() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         rib.insert(make_route(prefix_a(), 0));
         rib.insert(make_route(prefix_b(), 1));
         rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(13), 1));
@@ -1627,7 +1627,8 @@ mod tests {
 
     #[test]
     fn clear_unicast_keeps_capacity_and_other_families() {
-        let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 64);
+        let mut rib =
+            AdjRibOut::with_capacity(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)), 64);
         rib.insert(make_route(prefix_a(), 0));
         rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
         rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(15), 1));
@@ -1643,7 +1644,8 @@ mod tests {
 
     #[test]
     fn release_unicast_drops_capacity_and_keeps_other_families() {
-        let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 64);
+        let mut rib =
+            AdjRibOut::with_capacity(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)), 64);
         rib.insert(make_route(prefix_a(), 0));
         rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
         rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(16), 1));
@@ -1659,7 +1661,8 @@ mod tests {
 
     #[test]
     fn release_unicast_with_checkpoints_keeps_other_families() {
-        let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 8);
+        let mut rib =
+            AdjRibOut::with_capacity(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)), 8);
         rib.insert(make_route(prefix_a(), 1));
         rib.insert(make_route(prefix_a(), 2));
         rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
@@ -1677,7 +1680,7 @@ mod tests {
 
     #[test]
     fn clear_vpn_keeps_capacity_and_other_families() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         for octet in 1..=64 {
             rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, octet, 0], 24, 100), 1));
         }
@@ -1695,7 +1698,7 @@ mod tests {
 
     #[test]
     fn release_vpn_drops_capacity_and_keeps_other_families() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         for octet in 1..=64 {
             rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, octet, 0], 24, 100), 1));
         }
@@ -1714,7 +1717,7 @@ mod tests {
 
     #[test]
     fn release_vpn_with_checkpoints_keeps_other_families() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         rib.insert(make_route(prefix_a(), 0));
         rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
         rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 2, 0], 24, 100), 1));
@@ -1736,7 +1739,7 @@ mod tests {
 
     #[test]
     fn retire_with_checkpoints_every_populated_family() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         rib.insert(make_route(prefix_a(), 0));
         rib.insert_flowspec(crate::test_support::make_flowspec_route(Ipv4Addr::new(
             10, 0, 0, 1,
@@ -1760,7 +1763,8 @@ mod tests {
 
     #[test]
     fn shrink_unicast_to_fit_preserves_routes_index_and_other_families() {
-        let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 64);
+        let mut rib =
+            AdjRibOut::with_capacity(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)), 64);
         rib.insert(make_route(prefix_a(), 0));
         rib.insert(make_route(prefix_b(), 1));
         rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
@@ -1782,7 +1786,7 @@ mod tests {
 
     #[test]
     fn bgpls_insert_remove_isolated_from_unicast_index() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let nlri = bgpls_nlri(14);
         let key = BgpLsRouteKey {
             family: BgpLsFamily::LinkState,
@@ -1800,7 +1804,7 @@ mod tests {
         assert_eq!(rib.bgpls_len(), 1, "same opaque key should replace");
         assert_eq!(
             rib.get_bgpls(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
         );
 
         assert!(rib.remove_bgpls(&key));
@@ -1810,7 +1814,7 @@ mod tests {
 
     #[test]
     fn iter_prefix_uses_index() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         let pa = prefix_a();
         let pb = prefix_b();
 
@@ -1838,7 +1842,7 @@ mod tests {
     /// BMP stat type 17 source) and omits empty families.
     #[test]
     fn family_counts_buckets_all_family_maps() {
-        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         assert_eq!(rib.family_counts().len(), 0);
 
         rib.insert(make_route(prefix_a(), 0));

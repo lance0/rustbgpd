@@ -9,6 +9,7 @@
 //! as separate units and cannot see this private module; they keep
 //! their own builders.
 
+use crate::PeerId;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
@@ -19,6 +20,11 @@ use rustbgpd_wire::{
 
 use crate::attr_set::AttrSet;
 use crate::route::{FlowSpecRoute, Route, RouteOrigin};
+
+/// The RIB identity of the IPv4 neighbor at `addr`.
+pub(crate) const fn peer_v4(addr: Ipv4Addr) -> crate::PeerId {
+    crate::PeerId::from_addr(IpAddr::V4(addr))
+}
 
 /// The BGP Identifier of the session peer at `peer`: the address itself
 /// for IPv4, its lowest nonzero 32-bit word for IPv6. A session route never
@@ -46,7 +52,7 @@ pub(crate) fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         next_hop: IpAddr::V4(next_hop),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(next_hop),
+        peer: PeerId::from_addr(IpAddr::V4(next_hop)),
         attributes: AttrSet::new(vec![]),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -67,7 +73,7 @@ pub(crate) fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
         next_hop: IpAddr::V6(next_hop),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V6(next_hop),
+        peer: PeerId::from_addr(IpAddr::V6(next_hop)),
         attributes: AttrSet::new(vec![]),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -85,9 +91,9 @@ pub(crate) fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
 /// Move a fixture route to `peer`, keeping `peer_router_id` derived from
 /// the new peer rather than the constructor's. `LOCAL_PEER` (`0.0.0.0`)
 /// yields the injection sentinel, matching a locally originated route.
-pub(crate) fn set_peer(route: &mut Route, peer: IpAddr) {
+pub(crate) fn set_peer(route: &mut Route, peer: PeerId) {
     route.peer = peer;
-    route.peer_router_id = session_router_id(peer);
+    route.peer_router_id = session_router_id(peer.addr());
 }
 
 pub(crate) fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref: u32) -> Route {
@@ -96,7 +102,7 @@ pub(crate) fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref:
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: PeerId::from_addr(IpAddr::V4(peer)),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -124,7 +130,7 @@ pub(crate) fn make_route_with_path_id(prefix: Prefix, path_id: u32) -> Route {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
         attributes: AttrSet::new(vec![]),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -148,7 +154,7 @@ pub(crate) fn make_flowspec_route(peer: Ipv4Addr) -> FlowSpecRoute {
             ))],
         },
         afi: Afi::Ipv4,
-        peer: IpAddr::V4(peer),
+        peer: PeerId::from_addr(IpAddr::V4(peer)),
         attributes: vec![],
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ebgp,

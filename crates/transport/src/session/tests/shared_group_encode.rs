@@ -1181,16 +1181,16 @@ async fn shared_transition_payload_excludes_only_the_target_source() {
     session.negotiated = Some(Arc::new(negotiated));
 
     let own = make_route(100);
-    assert_eq!(own.peer, session.peer_ip);
+    assert_eq!(own.peer, PeerId::from_addr(session.peer_ip));
     let other_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let other = Route {
         prefix: Prefix::V4(other_prefix),
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))),
         ..own.clone()
     };
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
-    update.announce_source_exclusion = Some(session.peer_ip);
+    update.announce_source_exclusion = Some(PeerId::from_addr(session.peer_ip));
     update.announce = vec![own, other.clone()].into();
     update.next_hop_override = vec![None, None].into();
     session.send_route_update(update);
@@ -1464,7 +1464,7 @@ async fn shared_group_encode_streams_multiple_slices() {
                     Ipv4Addr::from(0x0A40_0000_u32 + u32::try_from(i).unwrap() * 256),
                     24,
                 )),
-                peer: IpAddr::V4(source),
+                peer: PeerId::from_addr(IpAddr::V4(source)),
                 next_hop: IpAddr::V4(source),
                 attributes: Arc::clone(&attrs[i % 3]),
                 ..make_route(100)
@@ -1496,7 +1496,7 @@ async fn shared_group_encode_streams_multiple_slices() {
     let expected_a: Vec<Prefix> = {
         let mut v: Vec<Prefix> = announce
             .iter()
-            .filter(|route| route.peer != IpAddr::V4(sources[0]))
+            .filter(|route| route.peer != PeerId::from_addr(IpAddr::V4(sources[0])))
             .map(|route| route.prefix)
             .collect();
         v.sort_unstable();
@@ -1510,7 +1510,7 @@ async fn shared_group_encode_streams_multiple_slices() {
     let expected_b: Vec<Prefix> = {
         let mut v: Vec<Prefix> = announce
             .iter()
-            .filter(|route| route.peer != IpAddr::V4(sources[1]))
+            .filter(|route| route.peer != PeerId::from_addr(IpAddr::V4(sources[1])))
             .map(|route| route.prefix)
             .collect();
         v.sort_unstable();
@@ -1542,14 +1542,14 @@ async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
     let prefix_c = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let route_a = Route {
         prefix: Prefix::V4(prefix_a),
-        peer: IpAddr::V4(source_a),
+        peer: PeerId::from_addr(IpAddr::V4(source_a)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 40, 0, 9)),
         attributes: Arc::clone(&shared_attrs),
         ..make_route(100)
     };
     let route_b = Route {
         prefix: Prefix::V4(prefix_b),
-        peer: IpAddr::V4(source_b),
+        peer: PeerId::from_addr(IpAddr::V4(source_b)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 40, 0, 9)),
         attributes: Arc::clone(&shared_attrs),
         ..make_route(100)
@@ -1634,7 +1634,7 @@ fn shared_group_source_order_groups_each_source_contiguously() {
     let announce: Vec<Route> = pattern
         .iter()
         .map(|&peer| Route {
-            peer,
+            peer: PeerId::from_addr(peer),
             ..make_route(100)
         })
         .collect();
@@ -1653,8 +1653,8 @@ fn shared_group_source_order_groups_each_source_contiguously() {
 /// Chunks per source within each slice of the source-grouped walk: the
 /// minimum UPDATE count the shared stream can produce when every source
 /// carries one attribute set.
-fn grouped_chunks_per_source(announce: &[Route]) -> std::collections::BTreeMap<IpAddr, usize> {
-    let mut peers: Vec<IpAddr> = announce.iter().map(|route| route.peer).collect();
+fn grouped_chunks_per_source(announce: &[Route]) -> std::collections::BTreeMap<PeerId, usize> {
+    let mut peers: Vec<PeerId> = announce.iter().map(|route| route.peer).collect();
     peers.sort();
     let mut chunks = std::collections::BTreeMap::new();
     for slice in peers.chunks(super::shared_group::PROGRESSIVE_SLICE_ROUTES) {
@@ -1705,7 +1705,7 @@ async fn shared_group_mixed_source_inventory_keeps_minimal_updates_per_member() 
                     Ipv4Addr::from(0x0A40_0000_u32 + u32::try_from(i).unwrap() * 256),
                     24,
                 )),
-                peer: IpAddr::V4(sources[s]),
+                peer: PeerId::from_addr(IpAddr::V4(sources[s])),
                 next_hop: IpAddr::V4(sources[s]),
                 attributes: Arc::clone(&attrs[s]),
                 ..make_route(100)
@@ -1746,10 +1746,10 @@ async fn shared_group_mixed_source_inventory_keeps_minimal_updates_per_member() 
             Some(super::shared_group::StreamTerminal::Complete)
         );
         assert_eq!(chunk_count, minimal, "shared stream UPDATE count");
-        let member_updates = minimal - per_source[&IpAddr::V4(excluded)];
+        let member_updates = minimal - per_source[&PeerId::from_addr(IpAddr::V4(excluded))];
         let mut expected: Vec<Prefix> = announce
             .iter()
-            .filter(|route| route.peer != IpAddr::V4(excluded))
+            .filter(|route| route.peer != PeerId::from_addr(IpAddr::V4(excluded)))
             .map(|route| route.prefix)
             .collect();
         expected.sort_unstable();
@@ -2215,7 +2215,7 @@ async fn shared_group_mixed_failover_pass_stays_on_encode_once() {
             .snapshot_from(0, usize::MAX)
             .0
             .into_iter()
-            .filter(|chunk| chunk.source != IpAddr::V4(excluded))
+            .filter(|chunk| chunk.source != PeerId::from_addr(IpAddr::V4(excluded)))
             .map(|chunk| chunk.bytes.to_vec())
             .collect();
         assert_eq!(published.len(), 2);
@@ -2459,7 +2459,7 @@ async fn shared_group_mixed_pass_rib_out_bmp_mirrors_emitted_frames() {
         announced.sort_unstable();
         let mut expected: Vec<_> = announce
             .iter()
-            .filter(|route| route.peer != IpAddr::V4(excluded))
+            .filter(|route| route.peer != PeerId::from_addr(IpAddr::V4(excluded)))
             .map(|route| route.prefix)
             .collect();
         expected.sort_unstable();
