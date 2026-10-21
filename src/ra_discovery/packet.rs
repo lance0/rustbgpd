@@ -54,10 +54,14 @@ pub enum DropReason {
     /// Read while the link was confirmed down, or before the latest
     /// Down→Up or recreation: it describes a link that no longer exists.
     StaleLink,
+    /// The interface's address list could not be read, so the RA's source
+    /// cannot be checked against our own addresses. Never treated as "not
+    /// ours" or as "ours": the RA is skipped and state is left alone.
+    AddressInventoryUnavailable,
 }
 
 impl DropReason {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::HopLimit,
         Self::SourceNotLinkLocal,
         Self::NonZeroCode,
@@ -68,6 +72,7 @@ impl DropReason {
         Self::OwnAddress,
         Self::CandidateLimit,
         Self::StaleLink,
+        Self::AddressInventoryUnavailable,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -82,6 +87,7 @@ impl DropReason {
             Self::OwnAddress => "own_address",
             Self::CandidateLimit => "candidate_limit",
             Self::StaleLink => "stale_link",
+            Self::AddressInventoryUnavailable => "address_inventory_unavailable",
         }
     }
 }

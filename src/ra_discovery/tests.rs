@@ -21,9 +21,8 @@ fn ep(n: u16) -> Endpoint {
     }
 }
 
-fn not_own(_: &str, _: Ipv6Addr) -> bool {
-    false
-}
+/// The `is_own` callback for a readable inventory without the source.
+const NOT_OWN: fn(&str, Ipv6Addr) -> Option<bool> = |_, _| Some(false);
 
 fn link(state: LinkState, ifindex: u32) -> LinkEvent {
     LinkEvent {
@@ -55,7 +54,7 @@ fn generation(e: &Engine) -> u64 {
 
 fn ra(e: &mut Engine, n: u16, lifetime: u16, now: Instant) -> Result<(), DropReason> {
     let g = generation(e);
-    e.on_router_advertisement(IDX, g, ll(n), lifetime, now, not_own)
+    e.on_router_advertisement(IDX, g, ll(n), lifetime, now, NOT_OWN)
 }
 
 fn bindings(e: &mut Engine) -> Vec<(Option<Endpoint>, Option<Endpoint>)> {
@@ -78,7 +77,7 @@ fn own_address_ra_is_rejected() {
     let g = generation(&e);
     let result = e.on_router_advertisement(IDX, g, ll(1), 30, t0, |name, src| {
         asked.push((name.to_owned(), src));
-        true
+        Some(true)
     });
     assert_eq!(result, Err(DropReason::OwnAddress));
     assert_eq!(asked, vec![(IF.to_owned(), ll(1))]);
@@ -101,7 +100,7 @@ fn candidate_that_becomes_a_local_address_is_dropped_on_refresh() {
     let g = generation(&e);
     let t1 = t0 + Duration::from_secs(5);
     assert_eq!(
-        e.on_router_advertisement(IDX, g, ll(1), 30, t1, |_, src| src == ll(1)),
+        e.on_router_advertisement(IDX, g, ll(1), 30, t1, |_, src| Some(src == ll(1))),
         Err(DropReason::OwnAddress)
     );
     assert_eq!(
@@ -121,10 +120,34 @@ fn candidate_that_becomes_a_local_address_is_dropped_on_refresh() {
     // Further RAs from it are dropped, not refreshed or relearned.
     e.events.clear();
     assert_eq!(
-        e.on_router_advertisement(IDX, g, ll(1), 30, t1, |_, src| src == ll(1)),
+        e.on_router_advertisement(IDX, g, ll(1), 30, t1, |_, src| Some(src == ll(1))),
         Err(DropReason::OwnAddress)
     );
     assert_eq!(e.events, vec![]);
+}
+
+#[test]
+fn unreadable_address_inventory_neither_binds_nor_removes() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    let g = generation(&e);
+    // fe80::1 is actually local, but the inventory cannot be read: no
+    // candidate, no binding.
+    assert_eq!(
+        e.on_router_advertisement(IDX, g, ll(1), 30, t0, |_, _| None),
+        Err(DropReason::AddressInventoryUnavailable)
+    );
+    assert_eq!(e.events, vec![]);
+    // An existing candidate survives an RA processed with no inventory.
+    ra(&mut e, 2, 30, t0).unwrap();
+    e.events.clear();
+    assert_eq!(
+        e.on_router_advertisement(IDX, g, ll(2), 30, t0, |_, _| None),
+        Err(DropReason::AddressInventoryUnavailable)
+    );
+    assert_eq!(e.events, vec![]);
+    e.poll(t0 + Duration::from_secs(29));
+    assert_eq!(e.events, vec![], "fe80::2 still bound and live");
 }
 
 #[test]
@@ -432,7 +455,7 @@ fn recreated_interface_starts_fresh_on_the_new_ifindex() {
     ra(&mut e, 3, 30, t0).unwrap();
     assert_eq!(e.events, vec![]);
     let g = generation(&e);
-    e.on_router_advertisement(IDX + 1, g, ll(1), 30, t0, not_own)
+    e.on_router_advertisement(IDX + 1, g, ll(1), 30, t0, NOT_OWN)
         .unwrap();
     let new = Some(Endpoint {
         address: ll(1),
@@ -456,7 +479,7 @@ fn ra_queued_before_carrier_loss_does_not_bind_after_it() {
     e.on_link(&link(LinkState::Down, IDX), t0);
     assert_eq!(e.bound_interfaces().count(), 0, "socket closes while down");
     assert_eq!(
-        e.on_router_advertisement(IDX, queued, ll(1), 30, t0, not_own),
+        e.on_router_advertisement(IDX, queued, ll(1), 30, t0, NOT_OWN),
         Err(DropReason::StaleLink)
     );
     assert_eq!(e.events, vec![]);
@@ -475,11 +498,11 @@ fn ra_from_a_previous_link_generation_is_discarded_after_down_up() {
     assert_ne!(old, new, "Down->Up starts a new generation");
     e.events.clear();
     assert_eq!(
-        e.on_router_advertisement(IDX, old, ll(1), 30, t0, not_own),
+        e.on_router_advertisement(IDX, old, ll(1), 30, t0, NOT_OWN),
         Err(DropReason::StaleLink)
     );
     assert_eq!(e.events, vec![], "stale state is not restored");
-    e.on_router_advertisement(IDX, new, ll(2), 30, t0, not_own)
+    e.on_router_advertisement(IDX, new, ll(2), 30, t0, NOT_OWN)
         .unwrap();
     assert_eq!(bindings(&mut e), vec![(None, Some(ep(2)))]);
     // Unknown and a repeated Up keep the generation.
@@ -651,7 +674,7 @@ fn stop_sends_a_final_lifetime_zero_ra() {
 fn ra_on_an_unstarted_interface_is_ignored() {
     let t0 = Instant::now();
     let mut e = engine(false, t0);
-    e.on_router_advertisement(IDX + 9, 1, ll(1), 30, t0, not_own)
+    e.on_router_advertisement(IDX + 9, 1, ll(1), 30, t0, NOT_OWN)
         .unwrap();
     assert_eq!(e.events, vec![]);
 }

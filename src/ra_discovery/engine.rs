@@ -293,6 +293,8 @@ impl Engine {
     /// the candidate cap, including refreshes of a known candidate: an
     /// address assigned locally after it was learned (a local radvd, say)
     /// stops being a candidate at its next RA, which is then dropped.
+    /// `None` means the address list could not be read: the RA is skipped
+    /// without learning, refreshing or removing anything.
     pub(crate) fn on_router_advertisement(
         &mut self,
         ifindex: u32,
@@ -300,7 +302,7 @@ impl Engine {
         source: Ipv6Addr,
         router_lifetime_secs: u16,
         now: Instant,
-        is_own: impl FnOnce(&str, Ipv6Addr) -> bool,
+        is_own: impl FnOnce(&str, Ipv6Addr) -> Option<bool>,
     ) -> Result<(), DropReason> {
         let Some((name, iface)) = self
             .interfaces
@@ -324,7 +326,10 @@ impl Engine {
         if !known && iface.candidates.len() >= MAX_CANDIDATES_PER_INTERFACE {
             return Err(DropReason::CandidateLimit);
         }
-        if is_own(name, source) {
+        let Some(own) = is_own(name, source) else {
+            return Err(DropReason::AddressInventoryUnavailable);
+        };
+        if own {
             if known {
                 iface.candidates.remove(&source);
                 self.events.push(DiscoveryEvent::CandidateExpired {

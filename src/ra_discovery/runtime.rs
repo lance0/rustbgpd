@@ -73,6 +73,8 @@ impl Counters {
 
 /// Opens the per-interface socket; replaced by a fake in tests.
 type Opener = Box<dyn FnMut(&str, u32) -> io::Result<Socket> + Send>;
+/// Sends one datagram; replaced by a fake in tests.
+type Sender = Box<dyn FnMut(&Socket, &[u8], &socket2::SockAddr) -> io::Result<usize> + Send>;
 
 impl RaDiscovery {
     /// Open-probe a raw `ICMPv6` socket, then spawn the actor on the current
@@ -291,12 +293,19 @@ struct Actor {
     local_addresses: HashMap<String, (Instant, Vec<Ipv6Addr>)>,
     opener: Opener,
     open_retries: HashMap<String, OpenRetry>,
-    /// A link-up RS whose interface had no socket yet, keyed by interface
-    /// name with the (ifindex, generation) it belongs to. Sent when that
-    /// socket opens; dropped on stop or a generation change.
-    pending_rs: HashMap<String, (u32, u64)>,
-    #[cfg(test)]
-    sent: Vec<Transmit>,
+    sender: Sender,
+    /// A link-up RS not yet sent (no socket, or the send failed), keyed by
+    /// interface name. Retried until it is sent; dropped on stop or a
+    /// generation change.
+    pending_rs: HashMap<String, PendingRs>,
+}
+
+struct PendingRs {
+    ifindex: u32,
+    generation: u64,
+    failures: u32,
+    /// After a send failure, not before this (same backoff as socket opens).
+    at: Instant,
 }
 
 enum Input {
@@ -340,16 +349,21 @@ impl Actor {
             local_addresses: HashMap::new(),
             opener,
             open_retries: HashMap::new(),
+            sender: Box::new(Socket::send_to),
             pending_rs: HashMap::new(),
-            #[cfg(test)]
-            sent: Vec::new(),
         };
         (actor, event_rx, received_rx)
     }
 
-    /// The next engine deadline or socket-open retry.
+    /// The next engine deadline, socket-open retry or RS resend. An RS that
+    /// is waiting for its socket wakes nothing: the open retry does.
     fn next_wake(&self) -> Option<Instant> {
-        let retry = self.open_retries.values().map(|r| r.at).min();
+        let rs = self
+            .pending_rs
+            .iter()
+            .filter(|(name, p)| self.has_socket(name, p.ifindex, p.generation))
+            .map(|(_, p)| p.at);
+        let retry = self.open_retries.values().map(|r| r.at).chain(rs).min();
         match (self.engine.next_deadline(), retry) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -373,7 +387,7 @@ impl Actor {
                 command = commands.recv() => {
                     let Some(command) = command else {
                         self.engine.stop_all();
-                        self.flush();
+                        self.flush(Instant::now());
                         return;
                     };
                     Input::Command(command)
@@ -407,9 +421,35 @@ impl Actor {
         if reconcile {
             self.open_sockets(now);
         }
-        self.flush();
+        self.flush(now);
         if reconcile {
             self.close_stale_sockets();
+            self.send_pending_rs(now);
+        }
+    }
+
+    fn has_socket(&self, name: &str, ifindex: u32, generation: u64) -> bool {
+        self.sockets
+            .get(name)
+            .is_some_and(|s| (s.ifindex, s.generation) == (ifindex, generation))
+    }
+
+    /// Send every pending RS whose socket is open and whose backoff is over.
+    fn send_pending_rs(&mut self, now: Instant) {
+        let due: Vec<String> = self
+            .pending_rs
+            .iter()
+            .filter(|(name, p)| p.at <= now && self.has_socket(name, p.ifindex, p.generation))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in due {
+            let ifindex = self.pending_rs[&name].ifindex;
+            if self.transmit(Transmit::RouterSolicitation { ifindex }) {
+                self.pending_rs.remove(&name);
+            } else if let Some(p) = self.pending_rs.get_mut(&name) {
+                p.failures += 1;
+                p.at = now + open_backoff(p.failures);
+            }
         }
     }
 
@@ -434,7 +474,7 @@ impl Actor {
                 packet.source,
                 router_lifetime_secs,
                 now,
-                |name, source| is_local_address(local, name, source, now),
+                |name, source| is_local_address(local, name, source, now, interface_addresses),
             ),
             Ok(NdMessage::RouterSolicitation) => {
                 self.engine
@@ -488,7 +528,6 @@ impl Actor {
                         self.received_tx.clone(),
                     )));
                     debug!(interface = %name, ifindex, "RA socket open");
-                    let pending_rs = self.pending_rs.get(&name) == Some(&(ifindex, generation));
                     self.sockets.insert(
                         name.clone(),
                         InterfaceSocket {
@@ -499,10 +538,6 @@ impl Actor {
                             _reader: reader,
                         },
                     );
-                    if pending_rs {
-                        self.pending_rs.remove(&name);
-                        self.transmit(Transmit::RouterSolicitation { ifindex });
-                    }
                 }
                 Err(error) => {
                     let failures = failures + 1;
@@ -536,10 +571,10 @@ impl Actor {
         self.open_retries
             .retain(|name, r| live.get(name.as_str()) == Some(&(r.ifindex, r.generation)));
         self.pending_rs
-            .retain(|name, link| live.get(name.as_str()) == Some(link));
+            .retain(|name, p| live.get(name.as_str()) == Some(&(p.ifindex, p.generation)));
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self, now: Instant) {
         for event in self.engine.events.drain(..) {
             debug!(?event, "router discovery event");
             let _ = self.events.send(event);
@@ -548,21 +583,34 @@ impl Actor {
             if self.transmit(transmit) {
                 continue;
             }
-            // No socket yet. A missed RA is covered by the next scheduled
-            // one; the link-up RS is not, so keep it for the socket.
+            // Not sent: no socket yet, or the send failed. A missed RA is
+            // covered by the next scheduled one; the link-up RS is not, so
+            // keep it. Without a socket it goes as soon as one opens; after
+            // a send failure it backs off like a socket open.
             if let Transmit::RouterSolicitation { ifindex } = transmit
                 && let Some((name, _, generation)) = self
                     .engine
                     .bound_interfaces()
                     .find(|(_, i, _)| *i == ifindex)
             {
-                self.pending_rs
-                    .insert(name.to_owned(), (ifindex, generation));
+                let at = if self.has_socket(name, ifindex, generation) {
+                    now + open_backoff(1)
+                } else {
+                    now
+                };
+                let pending = PendingRs {
+                    ifindex,
+                    generation,
+                    failures: u32::from(at != now),
+                    at,
+                };
+                self.pending_rs.insert(name.to_owned(), pending);
             }
         }
     }
 
-    /// Send on the interface's socket. False when it has no socket.
+    /// Send on the interface's socket. False when it has no socket or the
+    /// send failed.
     fn transmit(&mut self, transmit: Transmit) -> bool {
         let (ifindex, destination) = match transmit {
             Transmit::RouterAdvertisement { ifindex, .. } => (ifindex, ALL_NODES),
@@ -580,42 +628,51 @@ impl Actor {
             Transmit::RouterSolicitation { .. } => packet::encode_router_solicitation(lladdr),
         };
         let to = SocketAddrV6::new(destination, 0, 0, ifindex);
-        if let Err(error) = socket.socket.get_ref().send_to(&bytes, &to.into()) {
-            debug!(interface = %socket.name, %error, "router discovery send failed");
+        match (self.sender)(socket.socket.get_ref(), &bytes, &to.into()) {
+            Ok(_) => true,
+            Err(error) => {
+                debug!(interface = %socket.name, %error, "router discovery send failed");
+                false
+            }
         }
-        #[cfg(test)]
-        self.sent.push(transmit);
-        true
     }
 }
 
 /// Whether `address` is assigned to `interface` (own-advertisement check),
-/// from an address list at most [`LOCAL_ADDRESS_TTL`] old.
+/// from an address list at most [`LOCAL_ADDRESS_TTL`] old. `None` when the
+/// list cannot be read: a failed read is never cached and never stands in
+/// for an empty list.
 fn is_local_address(
     cache: &mut HashMap<String, (Instant, Vec<Ipv6Addr>)>,
     interface: &str,
     address: Ipv6Addr,
     now: Instant,
-) -> bool {
-    let entry = cache
-        .entry(interface.to_owned())
-        .or_insert_with(|| (now, interface_addresses(interface)));
-    if now.duration_since(entry.0) >= LOCAL_ADDRESS_TTL {
-        *entry = (now, interface_addresses(interface));
+    inventory: impl FnOnce(&str) -> io::Result<Vec<Ipv6Addr>>,
+) -> Option<bool> {
+    let fresh = cache
+        .get(interface)
+        .is_some_and(|(at, _)| now.duration_since(*at) < LOCAL_ADDRESS_TTL);
+    if !fresh {
+        match inventory(interface) {
+            Ok(addresses) => {
+                cache.insert(interface.to_owned(), (now, addresses));
+            }
+            Err(error) => {
+                cache.remove(interface);
+                debug!(interface, %error, "cannot read interface addresses");
+                return None;
+            }
+        }
     }
-    entry.1.contains(&address)
+    Some(cache[interface].1.contains(&address))
 }
 
-fn interface_addresses(interface: &str) -> Vec<Ipv6Addr> {
-    nix::ifaddrs::getifaddrs().map_or_else(
-        |_| Vec::new(),
-        |addrs| {
-            addrs
-                .filter(|a| a.interface_name == interface)
-                .filter_map(|a| Some(a.address?.as_sockaddr_in6()?.ip()))
-                .collect()
-        },
-    )
+fn interface_addresses(interface: &str) -> io::Result<Vec<Ipv6Addr>> {
+    let addrs = nix::ifaddrs::getifaddrs().map_err(io::Error::from)?;
+    Ok(addrs
+        .filter(|a| a.interface_name == interface)
+        .filter_map(|a| Some(a.address?.as_sockaddr_in6()?.ip()))
+        .collect())
 }
 
 /// The interface's Ethernet address for the Source Link-Layer Address option.
@@ -630,15 +687,35 @@ fn link_layer_address(interface: &str) -> Option<[u8; 6]> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::net::Ipv6Addr;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use socket2::{Domain, Socket, Type};
 
-    use super::{Actor, Command, Input, Received, open_backoff};
-    use crate::ra_discovery::engine::Transmit;
+    use super::{Actor, Command, Input, Received, is_local_address, open_backoff};
     use crate::ra_discovery::{DiscoveryConfig, LinkEvent, LinkState};
+
+    /// `ICMPv6` types the fake sender was asked to send, in order.
+    type Sent = Arc<Mutex<Vec<u8>>>;
+
+    /// Record each send; the first `failures` sends fail.
+    fn fake_sender(actor: &mut Actor, failures: u32) -> Sent {
+        let sent = Sent::default();
+        let log = Arc::clone(&sent);
+        let mut calls = 0;
+        actor.sender = Box::new(move |_, bytes, _| {
+            calls += 1;
+            if calls <= failures {
+                return Err(std::io::Error::other("send failed"));
+            }
+            log.lock().unwrap().push(bytes[0]);
+            Ok(bytes.len())
+        });
+        sent
+    }
 
     /// An actor whose socket opener fails `failures` times, then succeeds
     /// with an ordinary socket standing in for the raw one.
@@ -696,18 +773,50 @@ mod tests {
     #[tokio::test]
     async fn link_up_rs_waits_for_the_socket() {
         let (mut actor, attempts) = flaky_actor(2, true);
+        let sent = fake_sender(&mut actor, 0);
         let t0 = Instant::now();
         actor.handle(Input::Command(Command::Start("x".into())), t0);
         actor.handle(link(LinkState::Up), t0);
         actor.handle(Input::Wake, t0 + Duration::from_secs(1));
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
-        assert_eq!(actor.sent, vec![], "no socket yet");
+        assert_eq!(*sent.lock().unwrap(), Vec::<u8>::new(), "no socket yet");
         actor.handle(Input::Wake, t0 + Duration::from_secs(3));
         assert_eq!(attempts.load(Ordering::Relaxed), 3);
-        assert_eq!(
-            actor.sent,
-            vec![Transmit::RouterSolicitation { ifindex: 9 }]
-        );
+        assert_eq!(*sent.lock().unwrap(), vec![133], "the held RS");
+        assert!(actor.pending_rs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_rs_send_stays_pending_until_a_later_tick_sends_it() {
+        let (mut actor, _) = flaky_actor(0, true);
+        let sent = fake_sender(&mut actor, 1);
+        let t0 = Instant::now();
+        actor.handle(Input::Command(Command::Start("x".into())), t0);
+        actor.handle(link(LinkState::Up), t0);
+        // The link-up RS send failed: still pending, with a 1 s retry wake.
+        assert_eq!(*sent.lock().unwrap(), Vec::<u8>::new());
+        assert!(actor.pending_rs.contains_key("x"));
+        assert!(actor.next_wake().unwrap() <= t0 + Duration::from_secs(1));
+        actor.handle(Input::Wake, t0 + Duration::from_secs(1));
+        // The tick also sends the first unsolicited RA (134).
+        assert_eq!(*sent.lock().unwrap(), vec![134, 133], "RS resent");
+        assert!(actor.pending_rs.is_empty());
+    }
+
+    #[test]
+    fn unreadable_inventory_is_never_cached_or_read_as_empty() {
+        let mut cache = HashMap::new();
+        let local: Ipv6Addr = "fe80::1".parse().unwrap();
+        let t0 = Instant::now();
+        let fail = |_: &str| Err(std::io::Error::other("netlink dump failed"));
+        assert_eq!(is_local_address(&mut cache, "x", local, t0, fail), None);
+        assert!(cache.is_empty(), "the failure is not cached");
+        let ok = |_: &str| Ok(vec![local]);
+        assert_eq!(is_local_address(&mut cache, "x", local, t0, ok), Some(true));
+        // A later failure drops the stale list rather than serving it.
+        let later = t0 + Duration::from_secs(2);
+        assert_eq!(is_local_address(&mut cache, "x", local, later, fail), None);
+        assert!(cache.is_empty());
     }
 
     #[tokio::test]
@@ -724,11 +833,11 @@ mod tests {
         let (mut actor, _) = flaky_actor(u32::MAX, true);
         actor.handle(Input::Command(Command::Start("x".into())), t0);
         actor.handle(link(LinkState::Up), t0);
-        let first = actor.pending_rs["x"];
+        let first = actor.pending_rs["x"].generation;
         actor.handle(link(LinkState::Down), t0);
         assert!(actor.pending_rs.is_empty());
         actor.handle(link(LinkState::Up), t0);
-        assert_ne!(actor.pending_rs["x"], first);
+        assert_ne!(actor.pending_rs["x"].generation, first);
     }
 
     #[test]
