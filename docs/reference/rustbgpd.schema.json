@@ -1276,6 +1276,11 @@
           "type": "boolean",
           "default": false
         },
+        "fast_external_failover": {
+          "description": "Daemon-wide default for fast external failover (see the neighbor-level\n`fast_external_failover`). Unset means on. A peer group or neighbor\nvalue overrides it. **Restart-required:** a SIGHUP keeps the startup\nvalue.",
+          "type": "boolean",
+          "default": true
+        },
         "gr_eor_replay_owners": {
           "description": "Injection controllers whose replay-complete signal\n(`InjectionService.MarkReplayComplete`) releases the planned-restart\nEnd-of-RIB grace window (`gr_eor_grace_time`) early. The held\nEnd-of-RIB is released once every listed controller has signalled\nfor the current daemon incarnation, or at the window's deadline,\nwhichever comes first. Names use the lease owner syntax: 1-64 bytes\nof `[A-Za-z0-9._-]`. Empty (the default) keeps the timer-only window.\n**Restart-required:** read once at startup.",
           "type": "array",
@@ -2149,6 +2154,13 @@
             "type": "string"
           }
         },
+        "fast_external_failover": {
+          "description": "Fast external failover. When the kernel confirms that the\ninterface carrying this session lost carrier, went\nadministratively down, was removed, or lost the session's\nlocal address, close the session at once instead of waiting\nfor the hold timer. The stop sends no NOTIFICATION and does\nnot retain routes under Graceful Restart or LLGR; the session\nreconnects normally. Applies only to eBGP sessions whose own\nsocket proves the peer is directly connected: the local\naddress is configured on the interface and the peer is inside\nits connected prefix, or the peer is an IPv6 link-local\nneighbor on that interface. Default: inherited from the peer\ngroup, then `global.fast_external_failover`, then true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "gr_eor_grace_time": {
           "description": "Planned-restart End-of-RIB grace window (seconds). Default: 0\n(off). After a marker-backed restart, End-of-RIB toward this\nstatic neighbor is held until this many seconds after daemon\nstart, so injection controllers can replay first; routes and\nwithdrawals keep flowing. Applies only when the neighbor's\nsession advertises Graceful Restart (a helper) without\nRestart State. Must not exceed the effective\n`gr_restart_time`; keep it well below the upstream's own\nstale-route limit, which is not advertised.",
           "type": [
@@ -2849,6 +2861,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "fast_external_failover": {
+          "description": "Fast external failover inherited by neighbors in this group.\nSee the neighbor-level `fast_external_failover`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "gr_eor_grace_time": {
           "description": "Planned-restart End-of-RIB grace window (seconds) inherited by\nstatic neighbors in this group. See the neighbor-level\n`gr_eor_grace_time`.",

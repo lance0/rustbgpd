@@ -807,6 +807,13 @@ pub struct Global {
     /// 1.
     #[serde(default)]
     pub link_bandwidth_weighted: bool,
+    /// Daemon-wide default for fast external failover (see the neighbor-level
+    /// `fast_external_failover`). Unset means on. A peer group or neighbor
+    /// value overrides it. **Restart-required:** a SIGHUP keeps the startup
+    /// value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "bool", extend("default" = true))]
+    pub fast_external_failover: Option<bool>,
     /// Install local kernel blackhole routes for accepted EBGP best
     /// routes carrying RFC 7999 `BLACKHOLE`. Off by default and only
     /// effective when `honor_blackhole = true`. The first FIB slice is
@@ -1328,6 +1335,26 @@ define_neighbor_and_peer_group_configs! {
             peer_group {
                 /// Slow-peer isolation inherited by neighbors in this group. See
                 /// the neighbor-level `slow_peer_isolation`.
+            }
+        }
+        fast_external_failover: Option<bool> {
+            neighbor {
+                /// Fast external failover. When the kernel confirms that the
+                /// interface carrying this session lost carrier, went
+                /// administratively down, was removed, or lost the session's
+                /// local address, close the session at once instead of waiting
+                /// for the hold timer. The stop sends no NOTIFICATION and does
+                /// not retain routes under Graceful Restart or LLGR; the session
+                /// reconnects normally. Applies only to eBGP sessions whose own
+                /// socket proves the peer is directly connected: the local
+                /// address is configured on the interface and the peer is inside
+                /// its connected prefix, or the peer is an IPv6 link-local
+                /// neighbor on that interface. Default: inherited from the peer
+                /// group, then `global.fast_external_failover`, then true.
+            }
+            peer_group {
+                /// Fast external failover inherited by neighbors in this group.
+                /// See the neighbor-level `fast_external_failover`.
             }
         }
         max_prefixes: Option<u32> {
@@ -2057,6 +2084,7 @@ impl fmt::Debug for Neighbor {
             .field("slow_peer_threshold_pct", &self.slow_peer_threshold_pct)
             .field("slow_peer_duration", &self.slow_peer_duration)
             .field("slow_peer_isolation", &self.slow_peer_isolation)
+            .field("fast_external_failover", &self.fast_external_failover)
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4_unicast", &self.max_prefixes_ipv4_unicast)
             .field("max_prefixes_ipv6_unicast", &self.max_prefixes_ipv6_unicast)
@@ -2299,6 +2327,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("slow_peer_threshold_pct", &self.slow_peer_threshold_pct)
             .field("slow_peer_duration", &self.slow_peer_duration)
             .field("slow_peer_isolation", &self.slow_peer_isolation)
+            .field("fast_external_failover", &self.fast_external_failover)
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4_unicast", &self.max_prefixes_ipv4_unicast)
             .field("max_prefixes_ipv6_unicast", &self.max_prefixes_ipv6_unicast)

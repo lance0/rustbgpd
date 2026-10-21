@@ -1147,6 +1147,11 @@ impl Config {
             .slow_peer_isolation
             .or_else(|| group.and_then(|g| g.slow_peer_isolation))
             .unwrap_or(false);
+        transport.fast_external_failover = neighbor
+            .fast_external_failover
+            .or_else(|| group.and_then(|g| g.fast_external_failover))
+            .or(self.global.fast_external_failover)
+            .unwrap_or(true);
         // RFC 1997 egress enforcement defaults to on, except for
         // route-server clients (transparent pass-through unless the
         // operator opts in explicitly).
@@ -1294,6 +1299,7 @@ impl Config {
             slow_peer_threshold_pct: None,
             slow_peer_duration: None,
             slow_peer_isolation: None,
+            fast_external_failover: None,
             max_prefixes: None,
             max_prefixes_ipv4_unicast: None,
             max_prefixes_ipv6_unicast: None,

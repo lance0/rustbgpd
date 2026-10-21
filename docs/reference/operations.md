@@ -1338,6 +1338,41 @@ actor skips route materialization. Cancellation observed while the manager
 awaits the RIB reply prevents encode and file publication. Snapshot cloning is
 synchronous actor work: a clone already running cannot be interrupted.
 
+### A directly connected link fails (fast external failover)
+
+When the kernel's interface state shows that the interface carrying an eBGP
+session lost carrier, went administratively down, was removed, or lost the
+session's local address, the session closes at once rather than at hold-timer
+expiry ([how a session qualifies](configuration.md#fast-external-failover)).
+Look for:
+
+- the `fast external failover: ...` WARN lines (see
+  [Key log messages](#key-log-messages)), which name the interface and the
+  reason;
+- a neighbor last error such as
+  `fast external failover: interface eth1 (ifindex 4) carrier lost`, which is
+  also the `reason` of the `SESSION_LOST` event in `rbgp events`;
+- `bgp_session_down_total{reason="local_no_notification"}` increasing.
+
+The session's routes are withdrawn, not held under Graceful Restart, and the
+session reconnects on its normal retry timer once the link is back. Unlike FRR,
+which resets the session on every confirmed interface-down, rustbgpd checks the
+current state: a down that recovered before the session checked, with the TCP
+connection still up, finds no current local failure requiring teardown and
+leaves the session up. How short an outage this absorbs depends on scheduling
+and is not a fixed threshold. A surviving session does not prove forwarding is
+healthy; BFD and the hold timer still apply. Nothing is
+stopped while the link state is unknown: when
+`bgp_netlink_subscription_overruns_total{actor="fast_external_failover"}`
+increases, sessions are checked again only after a fresh interface dump
+succeeds, and the hold timer or BFD covers the gap.
+
+A session that keeps flapping with the link is reporting a flapping link.
+Dampen carrier where it originates (for example the bond's `downdelay`). To keep
+a session up until its hold timer instead, set
+`fast_external_failover = false` on the neighbor or its peer group (hot-applied
+on SIGHUP), or in `[global]` (restart-required).
+
 ### Peer max-prefix exceeded
 
 When a peer exceeds `max_prefixes`, `max_prefixes_ipv4_unicast`, `max_prefixes_ipv6_unicast`,
@@ -1780,7 +1815,7 @@ one beside it, so `group_left` joins never match two identities for one peer.
 | `bgp_session_established_total` | Cumulative sessions that reached Established (per-process counter; resets on restart) |
 | `bgp_session_flaps_total` | Cumulative session flaps |
 | `bgp_send_hold_expirations_total{peer}` | Sessions torn down because the RFC 9687 send-hold timer expired: the peer stopped draining its TCP socket, so the session closed locally without a NOTIFICATION. The shipped `BgpSendHoldExpired` alert is critical on any increase |
-| `bgp_session_down_total{peer,interface,reason}` | Established active-primary sessions that ended. `local_notification` means a locally initiated NOTIFICATION teardown even if best-effort delivery failed; `remote_notification` means a received NOTIFICATION; `local_no_notification` includes forced local close such as send-hold expiry; `remote_no_notification` means remote TCP close without a NOTIFICATION; the remaining bounded values are `transport_error` and defensive `unknown`. |
+| `bgp_session_down_total{peer,interface,reason}` | Established active-primary sessions that ended. `local_notification` means a locally initiated NOTIFICATION teardown even if best-effort delivery failed; `remote_notification` means a received NOTIFICATION; `local_no_notification` includes forced local close such as send-hold expiry and fast external failover; `remote_no_notification` means remote TCP close without a NOTIFICATION; the remaining bounded values are `transport_error` and defensive `unknown`. |
 | `bgp_session_state_transitions_total` | FSM state transitions |
 
 The shipped `BgpSessionNotEstablished` alert requires effective administrative
@@ -2491,7 +2526,7 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_dataplane_reconcile_planning_failures_total{actor="general_fib",reason}` | Pre-kernel planning aborts; the last successful status snapshot and all kernel/ownership state remain unchanged |
 | `bgp_kernel_route_notify_dropped_total{actor,reason="channel_full"}` | Kernel route-event wake feed dropped an event before the FIB or BLACKHOLE reconciler could consume it; periodic reconcile remains the repair backstop |
 | `bgp_kernel_route_notify_subscription_failures_total{actor,group}` | The FIB or BLACKHOLE reconciler failed to subscribe to an IPv4/IPv6 route multicast group and is running with periodic-only kernel-drift repair |
-| `bgp_netlink_subscription_overruns_total{actor}` | The kernel reported a receive-buffer overrun to the `link_carrier`, `general_fib`, or `blackhole_discard` NETLINK_ROUTE actor. Each increment is one overrun notification—not a count of lost events—and proves only that one or more multicast events may have been lost |
+| `bgp_netlink_subscription_overruns_total{actor}` | The kernel reported a receive-buffer overrun to the `link_carrier`, `general_fib`, `blackhole_discard`, or `fast_external_failover` NETLINK_ROUTE actor. Each increment is one overrun notification—not a count of lost events—and proves only that one or more multicast events may have been lost |
 | `bgp_session_notification_outstanding` | Current lossless session notifications from sender entry through successful PeerManager dequeue. This includes synchronous in-flight reservations plus queued notifications; handling occurs after the value is decremented. |
 | `bgp_session_notification_outstanding_high_watermark` | Monotonic daemon-lifetime high-water mark of that outstanding population. It resets only when the daemon restarts and is not an exact per-flap or per-round peak. |
 
@@ -2788,6 +2823,8 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `starting rustbgpd` | INFO | Daemon started successfully |
 | `session established` | INFO | BGP session reached Established |
 | `session down` | INFO | BGP session left Established |
+| `fast external failover: interface down, closing session without NOTIFICATION` | WARN | A session whose own connection runs over that interface stopped without waiting for its hold timer |
+| `fast external failover: interface down, purging routes retained from the lost connection` | WARN | A session's earlier connection had already failed and its routes were held under Graceful Restart; its interface is now down, so they are withdrawn |
 | `TCP connect failed` | INFO / WARN | First socket failure in a failed-connect episode; WARN after an Established epoch, INFO for a peer that has not established yet |
 | `TCP connect task failed` | WARN | First internal connect-task failure in a failed-connect episode |
 | `received SIGTERM` / `received SIGINT` | INFO | Process signal received |
