@@ -278,6 +278,24 @@ async fn received_flowspec_json_projection_covers_proto_fields_and_pending_resul
         })
     );
 
+    // A link-local peer is sent with its scope, which the daemon requires.
+    for (view, peer) in [("received", "fe80::1%eth0"), ("advertised", "fe80::2%eth1")] {
+        let output = run(&["--json", "flowspec", view, peer]);
+        let request = server
+            .state
+            .last_list_flowspec
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        let sent = if view == "received" {
+            request.received_peer_address
+        } else {
+            request.advertised_peer_address
+        };
+        assert_eq!(sent, peer, "{output:?}");
+    }
+
     let output = run(&["flowspec", "received", "2001:db8::1"]);
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8(output.stdout).unwrap();

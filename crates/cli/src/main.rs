@@ -1989,16 +1989,18 @@ enum TopologyAction {
 enum FlowspecAction {
     /// Show committed post-export-policy rules toward a destination peer
     Advertised {
-        /// Destination peer IP address
-        peer: std::net::IpAddr,
+        /// Destination peer IP address (fe80::1%eth0 for a link-local peer)
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
+        peer: String,
         /// Address family (ipv4_flowspec or ipv6_flowspec)
         #[arg(short = 'a', long)]
         family: Option<String>,
     },
     /// Show retained received candidates, including infeasible and nonselected rules
     Received {
-        /// Source peer IP address
-        peer: std::net::IpAddr,
+        /// Source peer IP address (fe80::1%eth0 for a link-local peer)
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
+        peer: String,
         /// Address family (ipv4_flowspec or ipv6_flowspec)
         #[arg(short = 'a', long)]
         family: Option<String>,
