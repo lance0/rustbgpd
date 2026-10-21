@@ -96,7 +96,7 @@ and RPCs in it stay alpha; the
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases and a controller replay-complete signal |
+| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases and a controller replay-complete signal |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
@@ -271,7 +271,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `BfdService` | `GetBfdSessions` | None |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
-| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`, `BatchListPathExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
@@ -3106,6 +3106,7 @@ export policy).
 | `AddPath` | Inject a route with specified attributes |
 | `DeletePath` | Withdraw a previously injected route |
 | `ListPathExportDispositions` | Per-peer export disposition of one injected unicast route; see [export read-back](#export-read-back) |
+| `BatchListPathExportDispositions` | The same for up to 1000 injected unicast route keys per paged walk; see [batch read-back](#batch-read-back) |
 | `AddFlowSpec` | Inject a FlowSpec rule with actions |
 | `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
 | `AddLeasedPath` / `AddLeasedFlowSpec` | Inject a route or FlowSpec rule under an owner's lease; see [leased injection](#leased-injection) |
@@ -3308,16 +3309,23 @@ routes, call `RibService.ListReceivedRoutes` with
 exported to, call `ListPathExportDispositions` with the same
 `(prefix, prefix_length, path_id)` key. It returns one row per peer with an
 Established session, in peer-address order, and each row has exactly one
-disposition. Rows cover Established peers only: a configured peer without a
-session is absent from the list. Absent does not mean withheld, it means no
-session exists to export to, so cross-check `NeighborService.ListNeighbors`
-to find configured peers that are not Established.
+disposition. By default, rows cover Established peers only: a configured peer
+without a session is absent from the list. Absent does not mean withheld; it
+means no session exists to export to.
+
+Set `include_configured` to also list every managed peer without an
+Established session, with disposition `PATH_EXPORT_DISPOSITION_NOT_ESTABLISHED`,
+in the same order. Managed peers are the configured neighbors, plus dynamic
+neighbors while the daemon tracks them. A link-local neighbor's row carries its
+`peer_interface`, as Established rows do. Both lists come from the same read,
+so no join with `NeighborService.ListNeighbors` is needed.
 
 | `disposition` | Meaning |
 |---|---|
 | `PATH_EXPORT_DISPOSITION_COMMITTED` | This exact route sits in the peer's Adj-RIB-Out, committed to its outbound path. `advertised_path_id` is its outbound Add-Path identifier, 0 on single-best. |
 | `PATH_EXPORT_DISPOSITION_WITHHELD` | The route is not exported to this peer; `reason` says why. |
 | `PATH_EXPORT_DISPOSITION_PENDING` | Export has not settled; `reason` names what is outstanding. |
+| `PATH_EXPORT_DISPOSITION_NOT_ESTABLISHED` | The peer is managed but has no Established session, so nothing is exported to it. Returned only with `include_configured`. |
 
 Committed is local send-side state. BGP carries no acceptance signal, so it
 does not mean the peer received, accepted or installed the route. A route for
@@ -3339,6 +3347,7 @@ a route for the prefix.
 | `outbound_resync` | Pending | Outbound delivery to the peer is resynchronizing. |
 | `orf_pending` | Pending | The peer negotiated ORF and has not sent its first ROUTE-REFRESH. |
 | `not_yet_committed` | Pending | The route is staged but the Adj-RIB-Out does not hold it yet. |
+| `not_established` | Not established | The peer has no Established session. |
 
 New reason codes may be added. `explain_code` gives the stop code of the
 [export explain](#explain-one-advertised-route-decision) ladder behind a
@@ -3383,6 +3392,9 @@ when any of these changed since the walk's first page:
 - The export policy of an Established peer, such as a reload that replaces it
   without resetting the session, or the contents of a dataset that policy
   reads.
+- With `include_configured`, the managed peer set: a neighbor was added or
+  removed. A managed peer becoming Established counts as a peer joining the
+  Established set, so its `NOT_ESTABLISHED` row is never stale or repeated.
 
 Any page, including the first, also returns `ABORTED` when a dataset that
 policy reads is refreshed while the page's rows are being evaluated, so no
@@ -3404,15 +3416,70 @@ which path a peer selects. A change to one of them between pages need not
 abort the walk, and a peer's row reflects them as of the page that listed
 it.
 
-The `next_page_token` is opaque. It is bound to the route key and the daemon
-process that issued it. A token for another key, an altered token, or one
-from before a daemon restart returns `INVALID_ARGUMENT`; restart the walk
-with an empty `page_token`.
+The `next_page_token` is opaque. It is bound to the route key,
+`include_configured` and the daemon process that issued it. A token for
+another key or another `include_configured`, an altered token, or one from
+before a daemon restart returns `INVALID_ARGUMENT`; restart the walk with an
+empty `page_token`.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"prefix": "2001:db8::7", "prefix_length": 128}' \
   localhost:50051 rustbgpd.v1.InjectionService/ListPathExportDispositions
+```
+
+##### Batch read-back
+
+`BatchListPathExportDispositions` reads many keys in one paged walk, such as
+every key `ListLeasedKeys` lists for an owner. `keys` takes the same
+`(prefix, prefix_length, path_id)` keys, and `include_configured` works as
+above. Each page lists keys in request order. Each key appears as one
+`routes` entry that echoes the key as requested, with the key's rows as
+`ListPathExportDispositions` lists them.
+
+A key with no local route is listed with `found = false` and no rows; the
+call does not fail with `NOT_FOUND`. `found = false` means the key had no
+local route when the page that lists it was read. Each resumed page also
+checks that every key has a route exactly when it had one on the first page,
+so a key that gains or loses its route between those reads returns `ABORTED`.
+The check compares reads, not the history between them: a route added and
+removed again between two pages leaves nothing to compare and does not abort
+the walk.
+
+The cost of a walk is bounded in three ways:
+
+- **Keys per walk.** A request names 1 to 1000 keys. This bounds the keys,
+  not the routes or rows one response returns. An empty list, more than 1000
+  keys, or a key named twice after host bits are masked returns
+  `INVALID_ARGUMENT` before any work. Split a larger set across walks.
+- **Entries per page.** `page_size` 0 returns up to 100 entries, and larger
+  values are capped at 1000. Each peer row is one entry, and so is a key
+  listed with no rows. Peer rows use up the page budget, so a page covers
+  fewer keys as the peer count grows, and one key with more peers than the
+  page size spans several pages. Each row costs at most one single-prefix
+  export explain; `NOT_ESTABLISHED` rows and keys without a route cost none.
+- **Route checks per page.** Every page re-reads the route of each named key
+  to check the walk, so this per-page cost grows with the key count, up to
+  1000 route lookups.
+
+A key whose rows do not fit on a page is listed again at the start of the
+next page with its remaining rows, so concatenate a key's entries across
+pages.
+
+A resumed page returns `ABORTED` on the changes `ListPathExportDispositions`
+checks. The route check covers every named key, not only the one being listed:
+if any key's route content, or whether it has a route, differs from the
+first page, the whole walk aborts. Changes to local routes outside the
+key list do not abort it. The `next_page_token` is bound to the key list in
+order, `include_configured` and the daemon process. A token for another key
+list returns `INVALID_ARGUMENT`.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"keys": [{"prefix": "2001:db8::7", "prefix_length": 128},
+                {"prefix": "203.0.113.9", "prefix_length": 32}],
+       "include_configured": true}' \
+  localhost:50051 rustbgpd.v1.InjectionService/BatchListPathExportDispositions
 ```
 
 #### Leased injection
