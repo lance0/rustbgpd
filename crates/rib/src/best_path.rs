@@ -1134,6 +1134,40 @@ mod tests {
         r
     }
 
+    /// Pins today's tie-break for two neighbors that share one IPv6
+    /// link-local address on different interfaces (config validation still
+    /// rejects the pair). Equal on every attribute, without Add-Path, the
+    /// comparators fall through to the peer address and cannot order them
+    /// even though each route records its own interface. The scoped
+    /// tie-break must turn this red.
+    #[test]
+    fn same_link_local_address_on_two_interfaces_compares_equal() {
+        let context = rustbgpd_wire::AspaValidationContext {
+            neighbor_asn: Some(65001),
+            local_role: None,
+            first_as_check_exempt: false,
+        };
+        let on = |interface: &str| {
+            let mut route = base_route(Ipv4Addr::new(1, 0, 0, 1));
+            route.peer = PeerId::from_addr("fe80::1".parse().unwrap());
+            route.aspa_context =
+                crate::route::AspaContextId::intern_scoped(context, Some(interface));
+            route
+        };
+        let (eth0, eth1) = (on("eth0"), on("eth1"));
+        assert_eq!(eth0.peer_interface().as_deref(), Some("eth0"));
+        assert_eq!(eth1.peer_interface().as_deref(), Some("eth1"));
+
+        for (a, b) in [(&eth0, &eth1), (&eth1, &eth0)] {
+            assert_eq!(best_path_cmp(a, b), Ordering::Equal);
+            assert_eq!(best_path_cmp_orr(a, b, Some(10), Some(10)), Ordering::Equal);
+            assert_eq!(
+                best_path_cmp_with_reason(a, b),
+                (Ordering::Equal, BestPathReason::LowerPathId)
+            );
+        }
+    }
+
     /// RFC 4456 §9 orders the identifier comparison before `CLUSTER_LIST`
     /// length: the lower `ORIGINATOR_ID` wins despite a longer list.
     #[test]
