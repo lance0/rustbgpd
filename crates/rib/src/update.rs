@@ -1511,8 +1511,12 @@ pub struct RouteExportVersion {
     /// registers for or leaves outbound updates, so a flap advances it too.
     pub roster: u64,
     /// Fingerprint of the local route's next hops, attributes and
-    /// validation states.
+    /// validation states. Content, not identity: removing the route and
+    /// restoring identical content leaves it unchanged.
     pub route: u64,
+    /// Export-policy state of the registered peers: the installed chains'
+    /// change version and the generations of the datasets they read.
+    pub policy: u64,
 }
 
 /// Why a [`RouteExportPage`] was not served.
@@ -1520,8 +1524,9 @@ pub struct RouteExportVersion {
 pub enum RouteExportPageError {
     /// No local route has this key, and no walk was being resumed.
     NoRoute,
-    /// A resumed walk's route was removed or changed, or the outbound peer
-    /// roster changed, since its first page.
+    /// A resumed walk's route content changed (or the route is gone), the
+    /// outbound peer roster changed, or the peers' export policy changed
+    /// since its first page.
     Invalidated,
 }
 

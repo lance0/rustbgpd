@@ -1923,9 +1923,12 @@ impl RibManager {
     /// One page of per-peer export dispositions for the local route
     /// `(prefix, path_id)`: one prefix-local export explain per listed peer,
     /// so the page size bounds the work. A resumed walk is served only while
-    /// its route and the outbound peer roster match its first page, so a
-    /// route removed mid-walk is not reported as never having existed and a
-    /// peer that joins or leaves is neither skipped nor counted twice.
+    /// its route content, the outbound peer roster and the peers' export
+    /// policy match its first page, so a route removed mid-walk is not
+    /// reported as never having existed and a peer that joins or leaves is
+    /// neither skipped nor counted twice. Removing the route and restoring
+    /// identical content between pages leaves the walk valid: every
+    /// disposition is a function of that content.
     fn local_route_export_page(
         &mut self,
         prefix: Prefix,
@@ -1951,6 +1954,7 @@ impl RibManager {
         let version = RouteExportVersion {
             roster: self.outbound_roster_generation,
             route: local_route_fingerprint(&route),
+            policy: self.export_policy_version(),
         };
         if after.is_some_and(|(_, expected)| expected != version) {
             return Err(RouteExportPageError::Invalidated);
@@ -1972,6 +1976,26 @@ impl RibManager {
             more,
             version,
         })
+    }
+
+    /// [`RouteExportVersion::policy`]: the installed export chains' change
+    /// version and the summed generations of every dataset the registered
+    /// peers' chains read. A dataset swap is visible to the next explain
+    /// before the RIB hears of it, so its generation is read directly; each
+    /// generation only grows, so any swap moves the sum.
+    fn export_policy_version(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let datasets = self
+            .peer_sendable_families
+            .keys()
+            .filter_map(|&peer| self.export_chains.for_peer(peer))
+            .flat_map(|chain| chain.compiled().referenced_datasets())
+            .fold(0u64, |sum, slot| {
+                sum.wrapping_add(slot.handle.pin().generation)
+            });
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (self.export_chains.version(), datasets).hash(&mut hasher);
+        hasher.finish()
     }
 
     /// The export disposition of the local `route` toward one registered

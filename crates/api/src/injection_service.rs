@@ -315,8 +315,8 @@ fn encode_export_page_token(
     version: RouteExportVersion,
 ) -> String {
     crate::rib_service::sign_page_token(&format!(
-        "pe1|{:016x}|{:016x}|{prefix}|{path_id}|{peer}",
-        version.roster, version.route
+        "pe1|{:016x}|{:016x}|{:016x}|{prefix}|{path_id}|{peer}",
+        version.roster, version.route, version.policy
     ))
 }
 
@@ -334,7 +334,7 @@ fn decode_export_page_token(
     }
     let payload = crate::rib_service::verified_page_token_payload(token).ok_or_else(invalid)?;
     let parts: Vec<_> = payload.split('|').collect();
-    let ["pe1", roster, route, key_prefix, key_path_id, peer] = parts.as_slice() else {
+    let ["pe1", roster, route, policy, key_prefix, key_path_id, peer] = parts.as_slice() else {
         return Err(invalid());
     };
     if *key_prefix != prefix.to_string() || *key_path_id != path_id.to_string() {
@@ -345,6 +345,7 @@ fn decode_export_page_token(
     let version = RouteExportVersion {
         roster: u64::from_str_radix(roster, 16).map_err(|_| invalid())?,
         route: u64::from_str_radix(route, 16).map_err(|_| invalid())?,
+        policy: u64::from_str_radix(policy, 16).map_err(|_| invalid())?,
     };
     Ok((peer.parse().map_err(|_| invalid())?, version))
 }
@@ -1073,8 +1074,8 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 req.prefix, req.prefix_length, req.path_id
             )),
             RouteExportPageError::Invalidated => Status::aborted(
-                "the local route or the Established peer set changed during pagination; \
-                 restart with an empty page_token",
+                "the local route, the Established peer set or their export policy changed \
+                 during pagination; restart with an empty page_token",
             ),
         })?;
         let next_page_token = match page.peers.last() {
@@ -2097,6 +2098,7 @@ mod tests {
         let version = RouteExportVersion {
             roster: 5,
             route: 0xfeed,
+            policy: 0xbeef,
         };
         let (tx, mut rx) = mpsc::channel(16);
         let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));

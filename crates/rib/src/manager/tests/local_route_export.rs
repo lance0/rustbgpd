@@ -662,3 +662,95 @@ fn unrelated_changes_leave_the_walk_resumable() {
     assert_eq!(peers_of(&single), vec![v4(2), v4(3), v4(4)]);
     assert!(!single.more);
 }
+
+/// The route fence is content, not identity, by design: removing the route
+/// and restoring identical content between pages leaves the walk valid,
+/// because every disposition is a function of that content.
+#[test]
+fn identical_route_restored_mid_walk_leaves_the_walk_resumable() {
+    let (mut manager, _receivers, first) = walk_started();
+    withdraw(&mut manager, v4_prefix(), 0);
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let rest = resume(&mut manager, &first).unwrap();
+    assert_eq!(peers_of(&rest), vec![v4(4)]);
+    assert!(!rest.more);
+}
+
+/// Replacing a listed peer's export policy between pages, as a reload does
+/// without resetting the session, invalidates the walk. Red proof: leaving
+/// the chains' change version out of the policy version fails this test.
+#[test]
+fn export_policy_replaced_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started();
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: v4(2),
+        export_policy: Some(deny_prefixes_chain(&[v4_prefix()])),
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+/// A dataset swap is visible to the next explain before any RIB message
+/// arrives, so a swap of a dataset a listed peer's export chain reads
+/// invalidates the walk with no RIB update in between. Red proof: leaving
+/// the dataset generations out of the policy version fails this test.
+#[test]
+fn export_dataset_swapped_mid_walk_invalidates_the_resumed_walk() {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry, SetStore};
+
+    let data = |listed: bool| {
+        DatasetData::Prefix(PrefixSet::new(listed.then_some(PrefixSetEntry {
+            prefix: v4_prefix(),
+            ge: None,
+            le: None,
+        })))
+    };
+    let handle = Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        data(true),
+    ));
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::clone(&handle));
+    let compiled = rustbgpd_policy::rpol::RpolFile::parse(
+        "dataset prefix-set allowed\npolicy p { term t { if route.prefix in allowed { accept } reject } }",
+    )
+    .unwrap()
+    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+    .unwrap()
+    .unwrap();
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )]);
+
+    let (mut manager, _tx) = manager();
+    let _receivers: Vec<_> = [2, 3, 4]
+        .into_iter()
+        .map(|octet| {
+            peer_up(
+                &mut manager,
+                v4(octet),
+                ipv4_sendable(),
+                Some(chain.clone()),
+                0,
+                64,
+            )
+        })
+        .collect();
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
+    assert!(first.more);
+
+    handle.refresh(data(false));
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
