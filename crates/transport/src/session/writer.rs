@@ -38,6 +38,13 @@
 //! `PeerSession::trigger_outbound_out_of_resources_teardown`; this module
 //! owns the discard/flush/close mechanics.
 //!
+//! Every other NOTIFICATION ends an ordinary close, and it is the last
+//! frame too (RFC 4271 §4.5): the writer flushes the bulk frames queued
+//! before it within a bounded budget, discards the rest, writes the
+//! NOTIFICATION, and writes nothing after it (see
+//! `WriterTask::close_with_notification`). Priority preemption applies to
+//! KEEPALIVE, OPEN and ROUTE-REFRESH frames only.
+//!
 //! # Bulk write coalescing (LAN-332)
 //!
 //! Per-message `write_all + flush` made writer+syscalls the largest
@@ -132,6 +139,20 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// wire time as before, while amortizing the syscall + flush cost.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
 
+/// How long a closing writer may spend flushing queued bulk frames ahead of
+/// its NOTIFICATION before it discards the rest. The peer manager gives a
+/// shutting-down session 500 ms before aborting it (and the writer with it);
+/// spending at most half of that on the flush leaves the rest for the
+/// NOTIFICATION, so a peer that is reading, however slowly, still receives
+/// its Cease rather than a bare close. Error NOTIFICATIONs have no outer
+/// deadline and use the same budget.
+pub(super) const CLOSE_FLUSH_BUDGET: Duration = Duration::from_millis(250);
+
+/// Whether a queued frame is a BGP NOTIFICATION (type 3).
+fn is_notification(frame: &[u8]) -> bool {
+    frame.get(18) == Some(&3)
+}
+
 /// Coalesce already-queued bulk frames behind `first` into one
 /// contiguous buffer, up to [`MAX_BATCH_FRAMES`] / [`MAX_BATCH_BYTES`].
 /// Non-blocking: only frames already sitting in the channel join the
@@ -192,7 +213,39 @@ pub(super) struct WriterHandle {
     pub(super) teardown_tx: watch::Sender<bool>,
     /// Resolves when the writer exits: `Ok(())` on clean shutdown,
     /// `Err(WriterExit)` on TCP write/flush failure or send-hold expiry.
-    pub(super) join: JoinHandle<Result<(), WriterExit>>,
+    pub(super) join: WriterJoin,
+}
+
+/// The writer task's handle, which aborts the writer when dropped. The
+/// session owns it for the connection's lifetime, so whatever drops the
+/// session also stops its writer: an owner abandoning a close at its
+/// deadline (even while the session still awaits RIB or BMP delivery before
+/// queueing the NOTIFICATION), a replaced connection, or a session task that
+/// ends. A detached writer could otherwise keep writing past that deadline,
+/// or stay blocked forever when the send hold timer is disabled.
+pub(super) struct WriterJoin(JoinHandle<Result<(), WriterExit>>);
+
+impl WriterJoin {
+    pub(super) fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for WriterJoin {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl Future for WriterJoin {
+    type Output = Result<Result<(), WriterExit>, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
 }
 
 /// The constant KEEPALIVE PDU: 16-byte all-ones marker, length 19,
@@ -230,13 +283,14 @@ pub(super) fn spawn(
         priority_rx,
         keepalive_rx,
         teardown_rx,
+        closed_at: None,
         metrics,
         peer_label,
         send_hold_time,
         #[cfg(all(target_os = "linux", feature = "bench-internals"))]
         bench_writer_polls: std::env::var("RUSTBGPD_BENCH_WRITER_POLLS").as_deref() == Ok("1"),
     };
-    let join = tokio::spawn(task.run().in_current_span());
+    let join = WriterJoin(tokio::spawn(task.run().in_current_span()));
     WriterHandle {
         bulk_tx,
         completed,
@@ -254,6 +308,9 @@ struct WriterTask {
     priority_rx: mpsc::UnboundedReceiver<Bytes>,
     keepalive_rx: watch::Receiver<Option<Duration>>,
     teardown_rx: watch::Receiver<bool>,
+    /// When the session dropped its senders without a hard teardown: the
+    /// start of an ordinary close, which [`CLOSE_FLUSH_BUDGET`] runs from.
+    closed_at: Option<tokio::time::Instant>,
     metrics: BgpMetrics,
     peer_label: String,
     send_hold_time: Option<Duration>,
@@ -261,13 +318,31 @@ struct WriterTask {
     bench_writer_polls: bool,
 }
 
+/// Once the writer is gone its queue is gone, however it ended: a close
+/// flush, a budget discard, a Cease/8 teardown, a write failure, a send-hold
+/// expiry or an abort. Publish that, so `bgp_peer_outbound_queue_depth` does
+/// not keep the last in-flight sample for a session that stays alive (for
+/// example after an administrative stop).
+impl Drop for WriterTask {
+    fn drop(&mut self) {
+        self.metrics
+            .set_peer_outbound_queue_depth(&self.peer_label, 0);
+    }
+}
+
 /// Resolve once the session has signalled hard teardown. Pends forever
 /// otherwise — including when the sender is dropped *without*
 /// signalling, which is the ordinary (non-hard-teardown) close path and
-/// must keep the writer's drain-then-exit semantics.
-async fn teardown_requested(rx: &mut watch::Receiver<bool>) {
+/// must keep the writer's drain-then-exit semantics. That drop is recorded
+/// in `closed_at`, so a write already in flight counts against the close's
+/// flush budget.
+async fn teardown_requested(
+    rx: &mut watch::Receiver<bool>,
+    closed_at: &mut Option<tokio::time::Instant>,
+) {
     while !*rx.borrow_and_update() {
         if rx.changed().await.is_err() {
+            closed_at.get_or_insert_with(tokio::time::Instant::now);
             std::future::pending::<()>().await;
         }
     }
@@ -325,6 +400,7 @@ impl WriterTask {
                         // close path, keep drain semantics and never
                         // poll this arm again.
                         teardown_open = false;
+                        self.closed_at.get_or_insert_with(tokio::time::Instant::now);
                     }
                     continue;
                 }
@@ -341,6 +417,9 @@ impl WriterTask {
                 }
                 msg = self.priority_rx.recv(), if priority_open => {
                     if let Some(b) = msg {
+                        if is_notification(&b) {
+                            return self.close_with_notification(b).await;
+                        }
                         (b, false)
                     } else {
                         priority_open = false;
@@ -387,14 +466,73 @@ impl WriterTask {
             };
             self.write_message(&bytes).await?;
             if from_bulk {
-                let next = (*self.completed_tx.borrow())
-                    .checked_add(bytes.len() as u64)
-                    .ok_or_else(|| {
-                        WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
-                    })?;
-                self.completed_tx.send_replace(next);
+                self.record_bulk_completed(bytes.len())?;
             }
         }
+    }
+
+    fn record_bulk_completed(&self, len: usize) -> Result<(), WriterExit> {
+        let next = (*self.completed_tx.borrow())
+            .checked_add(len as u64)
+            .ok_or_else(|| {
+                WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
+            })?;
+        self.completed_tx.send_replace(next);
+        Ok(())
+    }
+
+    /// RFC 4271 §4.5 closes the connection right after a NOTIFICATION, so it
+    /// must be the final frame. An ordinary close first writes the bulk
+    /// frames the session admitted before it (UPDATEs, End-of-RIB markers,
+    /// and the EVPN withdraws that shutdown drains ahead of the Cease) for at
+    /// most [`CLOSE_FLUSH_BUDGET`], discards whatever is still queued, then
+    /// writes the NOTIFICATION, and nothing after. A hard teardown signalled
+    /// meanwhile stops the flush, so its backlog is discarded as before. A
+    /// write that fails or exceeds the send hold time ends the task without
+    /// the NOTIFICATION. The session always drops its senders right after the
+    /// NOTIFICATION; the writer waits for that, discarding anything queued
+    /// later, so the session observes its exit only after the close.
+    async fn close_with_notification(mut self, notification: Bytes) -> Result<(), WriterExit> {
+        // The budget runs from the close, so a batch that was already in
+        // flight counts against it. One frame per write after that, so the
+        // budget is overshot by at most one frame.
+        let deadline =
+            self.closed_at.unwrap_or_else(tokio::time::Instant::now) + CLOSE_FLUSH_BUDGET;
+        while !*self.teardown_rx.borrow() && tokio::time::Instant::now() < deadline {
+            let Ok(frame) = self.bulk_rx.try_recv() else {
+                break;
+            };
+            self.write_message(&frame).await?;
+            self.record_bulk_completed(frame.len())?;
+        }
+        let mut discarded = 0usize;
+        while self.bulk_rx.try_recv().is_ok() {
+            discarded += 1;
+        }
+        if discarded > 0 {
+            debug!(
+                discarded,
+                budget_ms = CLOSE_FLUSH_BUDGET.as_millis(),
+                "writer: discarded queued bulk frames to send the closing NOTIFICATION"
+            );
+        }
+        self.write_message(&notification).await?;
+        let (mut bulk_open, mut priority_open, mut teardown_open) = (true, true, true);
+        while (bulk_open || priority_open) && !*self.teardown_rx.borrow() {
+            tokio::select! {
+                biased;
+                changed = self.teardown_rx.changed(), if teardown_open => {
+                    teardown_open = changed.is_ok();
+                }
+                msg = self.priority_rx.recv(), if priority_open => priority_open = msg.is_some(),
+                msg = self.bulk_rx.recv(), if bulk_open => bulk_open = msg.is_some(),
+            }
+        }
+        if *self.teardown_rx.borrow() {
+            return Err(WriterExit::TornDown);
+        }
+        debug!("writer: NOTIFICATION written, senders dropped, exiting cleanly");
+        Ok(())
     }
 
     /// `write_all + flush` one message (or one coalesced batch of
@@ -406,6 +544,7 @@ impl WriterTask {
         let Self {
             write_half,
             teardown_rx,
+            closed_at,
             send_hold_time,
             peer_label,
             #[cfg(all(target_os = "linux", feature = "bench-internals"))]
@@ -438,7 +577,7 @@ impl WriterTask {
             tokio::select! {
                 biased;
                 result = bounded_write => Some(result),
-                () = teardown_requested(teardown_rx) => None,
+                () = teardown_requested(teardown_rx, closed_at) => None,
             }
         };
         #[cfg(all(target_os = "linux", feature = "bench-internals"))]
@@ -589,6 +728,7 @@ mod tests {
     use super::*;
 
     use tokio::io::AsyncReadExt;
+    use tokio::net::tcp::OwnedReadHalf;
     use tokio::net::{TcpListener, TcpStream};
 
     #[cfg(all(target_os = "linux", feature = "bench-internals"))]
@@ -634,6 +774,128 @@ mod tests {
         let (server, _) = listener.accept().await.unwrap();
         let client = connect.await.unwrap();
         (server, client)
+    }
+
+    const SLOW_PEER_FRAMES: usize = 512;
+
+    /// A writer wedged behind a peer that has stopped reading, with
+    /// [`SLOW_PEER_FRAMES`] 4 KiB UPDATEs and then a Cease queued.
+    async fn wedged_writer_with_cease() -> (WriterHandle, TcpStream, OwnedReadHalf) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::spawn(async move {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_recv_buffer_size(4096).unwrap();
+            socket.connect(addr).await.unwrap()
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        socket2::SockRef::from(&server)
+            .set_send_buffer_size(4096)
+            .unwrap();
+        let peer = connect.await.unwrap();
+        let (read, write) = server.into_split();
+        let handle = spawn(
+            write,
+            SLOW_PEER_FRAMES,
+            BgpMetrics::new(),
+            "slow-peer".into(),
+            None,
+        );
+        let mut update = vec![0u8; 4096];
+        update[..16].fill(0xff);
+        update[16..18].copy_from_slice(&4096u16.to_be_bytes());
+        update[18] = 2;
+        let update = Bytes::from(update);
+        for _ in 0..SLOW_PEER_FRAMES {
+            handle.bulk_tx.send(update.clone()).await.unwrap();
+        }
+        let mut cease = vec![0xffu8; 16];
+        cease.extend_from_slice(&[0, 21, 3, 6, 2]);
+        handle.priority_tx.send(Bytes::from(cease)).unwrap();
+        (handle, peer, read)
+    }
+
+    /// Read to EOF, advancing the paused clock by `step` after each read, and
+    /// return the frame types seen, checking every frame is whole.
+    async fn read_frame_types(peer: &mut TcpStream, step: Duration) -> Vec<u8> {
+        let mut wire = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = peer.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            wire.extend_from_slice(&chunk[..n]);
+            tokio::time::advance(step).await;
+        }
+        let mut types = Vec::new();
+        let mut rest = wire.as_slice();
+        while !rest.is_empty() {
+            let len = usize::from(u16::from_be_bytes([rest[16], rest[17]]));
+            types.push(rest[18]);
+            rest = &rest[len..];
+        }
+        types
+    }
+
+    fn assert_cease_last_and_backlog_cut(types: &[u8]) {
+        assert_eq!(
+            types.last(),
+            Some(&3),
+            "the NOTIFICATION must be the final frame"
+        );
+        let count = |kind: u8| types.iter().fold(0, |n, &t| n + usize::from(t == kind));
+        assert_eq!(count(3), 1);
+        let flushed = count(2);
+        assert!(
+            flushed < SLOW_PEER_FRAMES,
+            "the backlog must be cut at the budget, but all {flushed} frames were flushed"
+        );
+    }
+
+    /// A slow peer that keeps reading cannot hold the Cease hostage behind a
+    /// large backlog: once [`CLOSE_FLUSH_BUDGET`] is spent, the writer
+    /// discards the queued frames and still ends with the NOTIFICATION. The
+    /// paused clock moves only when this reader advances it between reads,
+    /// so the budget expires after a fixed amount of reading.
+    #[tokio::test(start_paused = true)]
+    async fn close_flush_budget_discards_the_backlog_and_still_ends_with_the_notification() {
+        let (handle, mut peer, _read) = wedged_writer_with_cease().await;
+        let WriterHandle {
+            bulk_tx,
+            priority_tx,
+            join,
+            ..
+        } = handle;
+        drop((bulk_tx, priority_tx));
+        let types = read_frame_types(&mut peer, Duration::from_millis(25)).await;
+        assert!(join.await.unwrap().is_ok());
+        assert_cease_last_and_backlog_cut(&types);
+    }
+
+    /// The budget runs from the session's close, not from when the writer
+    /// reaches the NOTIFICATION, so time spent finishing a batch that was
+    /// already in flight counts against it. Here the whole budget passes
+    /// while the peer is not reading; once it reads, the writer must not
+    /// start a fresh budget's worth of flushing.
+    #[tokio::test(start_paused = true)]
+    async fn close_flush_budget_counts_the_write_in_flight_at_the_close() {
+        let (handle, mut peer, _read) = wedged_writer_with_cease().await;
+        let WriterHandle {
+            bulk_tx,
+            priority_tx,
+            keepalive_tx,
+            teardown_tx,
+            join,
+            ..
+        } = handle;
+        drop((bulk_tx, priority_tx, keepalive_tx, teardown_tx));
+        // The writer is parked in a bulk write; let it observe the close.
+        tokio::task::yield_now().await;
+        tokio::time::advance(CLOSE_FLUSH_BUDGET + Duration::from_millis(1)).await;
+        let types = read_frame_types(&mut peer, Duration::ZERO).await;
+        assert!(join.await.unwrap().is_ok());
+        assert_cease_last_and_backlog_cut(&types);
     }
 
     #[tokio::test]
@@ -1211,6 +1473,19 @@ mod keepalive_cadence_tests {
     /// never pinned high after the last enqueue.
     #[tokio::test]
     async fn bulk_queue_depth_gauge_rises_then_drains() {
+        queue_depth_gauge_rises_then_returns_to_zero(false).await;
+    }
+
+    /// The same backlog ended by a closing NOTIFICATION: the close flush and
+    /// discard bypass the run loop's sampling, and an administratively
+    /// stopped session stays alive, so the writer's exit must publish the
+    /// empty queue itself.
+    #[tokio::test]
+    async fn bulk_queue_depth_gauge_returns_to_zero_after_a_closing_notification() {
+        queue_depth_gauge_rises_then_returns_to_zero(true).await;
+    }
+
+    async fn queue_depth_gauge_rises_then_returns_to_zero(close_with_cease: bool) {
         const FRAMES: usize = 200;
         // Shrink both socket buffers so the writer wedges with little data,
         // leaving a large observable backlog in the bulk channel.
@@ -1258,12 +1533,23 @@ mod keepalive_cadence_tests {
             "expected outbound queue depth > 0 while backlogged, got {depth}"
         );
 
-        // Drain the socket so the writer can flush the whole backlog.
-        let mut sink = vec![0u8; FRAMES * 1024];
-        peer.read_exact(&mut sink).await.unwrap();
         let join = handle.join;
-        drop(handle.bulk_tx);
-        drop(handle.priority_tx);
+        if close_with_cease {
+            let mut cease = vec![0xffu8; 16];
+            cease.extend_from_slice(&[0, 21, 3, 6, 2]);
+            handle.priority_tx.send(Bytes::from(cease)).unwrap();
+            drop(handle.bulk_tx);
+            drop(handle.priority_tx);
+            let mut wire = Vec::new();
+            peer.read_to_end(&mut wire).await.unwrap();
+            assert_eq!(&wire[wire.len() - 21..][18..], &[3, 6, 2]);
+        } else {
+            // Drain the socket so the writer can flush the whole backlog.
+            let mut sink = vec![0u8; FRAMES * 1024];
+            peer.read_exact(&mut sink).await.unwrap();
+            drop(handle.bulk_tx);
+            drop(handle.priority_tx);
+        }
         join.await.unwrap().unwrap();
 
         // Shrink: fully drained, the gauge is walked back to 0.

@@ -1864,8 +1864,10 @@ async fn shared_group_consumer_streams_concurrently_with_live_encoder() {
     );
     let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 42, 0, 9), &announce);
     let mut member = member;
+    // The consumer hands the member back: dropping a session aborts its writer.
     let consumer = tokio::spawn(async move {
         member.test_drain_outbound(update).await;
+        member
     });
     // Publish while the consumer is (very likely) parked on the notify.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1873,7 +1875,7 @@ async fn shared_group_consumer_streams_concurrently_with_live_encoder() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     typed.test_publish(slice_2);
     typed.test_finish(StreamTerminal::Complete);
-    tokio::time::timeout(Duration::from_secs(5), consumer)
+    let _member = tokio::time::timeout(Duration::from_secs(5), consumer)
         .await
         .expect("consumer must terminate once the stream completes")
         .unwrap();
@@ -2497,12 +2499,14 @@ async fn shared_group_dropped_ipv6_next_hop_warns_once_per_pass() {
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     super::export::IPV6_NEXT_HOP_FALLBACKS.with(|count| count.set(0));
 
-    let mut wires = Vec::new();
+    // Members stay alive: dropping a session aborts its writer.
+    let (mut members, mut wires) = (Vec::new(), Vec::new());
     for _ in 0..2 {
         let (mut member, wire) = shared_group_member(65001).await;
         let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
         update.next_hop_override = vec![v6_override.clone(); announce.len()].into();
         member.test_drain_outbound(update).await;
+        members.push(member);
         wires.push(wire);
     }
     let (_, terminal) = shared
