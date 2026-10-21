@@ -224,7 +224,7 @@ fn exact_evpn_explain_preserves_policy_counters_events_and_committed_state() {
     let (mut manager, mut out, route) = fixture();
     let chain = policy("add community 65000:7; accept");
     manager.export_chains.insert(TARGET, Some(chain.share()));
-    let before_stats = manager.export_policy_stats.clone();
+    let before_stats = export_policy_snapshots(&manager);
     let metrics_snapshot = |manager: &RibManager| {
         manager
             .metrics
@@ -257,7 +257,7 @@ fn exact_evpn_explain_preserves_policy_counters_events_and_committed_state() {
     assert_eq!(second.gates.last().unwrap().code, "already_advertised");
     assert_eq!(second.staged.unwrap().attributes, staged.attributes);
     assert_eq!(second.advertised.unwrap().attributes, staged.attributes);
-    assert_eq!(manager.export_policy_stats, before_stats);
+    assert_eq!(export_policy_snapshots(&manager), before_stats);
     assert_eq!(chain.hit_counters().evals(), 0);
     assert!(
         chain
@@ -413,7 +413,7 @@ fn srv6_argument_snapshots_keep_best_received_and_committed_advertised_separate(
     rib_out.insert_evpn(imet.clone());
     rib_out.insert_evpn(committed.clone());
     manager.adj_ribs_out.insert(TARGET, rib_out);
-    let before_stats = manager.export_policy_stats.clone();
+    let before_stats = export_policy_snapshots(&manager);
     let mut events = manager.evpn_events_tx.subscribe();
     for (received_from, advertised_to, scope, expected, attributes) in [
         (
@@ -454,7 +454,7 @@ fn srv6_argument_snapshots_keep_best_received_and_committed_advertised_separate(
         assert_eq!(&result.companion.unwrap().attributes, attributes);
         assert_eq!(result.association, "caller_selected");
     }
-    assert_eq!(manager.export_policy_stats, before_stats);
+    assert_eq!(export_policy_snapshots(&manager), before_stats);
     assert!(events.try_recv().is_err());
     assert!(out.try_recv().is_err());
     // A staged export remains available but cannot fill a missing committed pair.
@@ -681,4 +681,15 @@ fn srv6_p2mp_imet_replacement_withdrawal_and_recovery_reach_export_and_inspectio
             assert_eq!(withdrawn, vec![imet.key()]);
         }
     }
+}
+
+/// Every peer's export-policy totals, for before/after comparisons.
+fn export_policy_snapshots(
+    manager: &RibManager,
+) -> std::collections::HashMap<IpAddr, crate::update::NeighborPolicyStats> {
+    manager
+        .export_policy_counters
+        .iter()
+        .map(|(peer, counters)| (*peer, counters.snapshot()))
+        .collect()
 }

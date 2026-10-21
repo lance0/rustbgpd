@@ -611,6 +611,73 @@ fn rpol_deny_term_stops_the_walk_and_claims_no_modifications() {
     );
 }
 
+/// `evaluate_with_deny_validation` reports the validation states the
+/// deciding term's guard tests, from the evaluating walk itself: a
+/// validation condition beside others still counts, and so does one under
+/// `||`; a permit, a default-action deny and a term without one do not.
+#[test]
+fn deciding_term_reports_the_validation_states_it_tests() {
+    use crate::ir::ValidationDimension::{Aspa, Rpki};
+    let tests = |chain: &PolicyChain, ctx: &RouteContext<'_>| {
+        let (result, _, tested) = chain.compiled().evaluate_with_deny_validation(ctx);
+        (result.action, tested)
+    };
+    let mut invalid = plain_ctx(v4_prefix([10, 10, 3, 0], 24));
+    invalid.validation_state = RpkiValidation::Invalid;
+    invalid.aspa_state = rustbgpd_wire::AspaValidation::Invalid;
+
+    let mut toml = stmt(
+        Some(v4_prefix([10, 10, 0, 0], 16)),
+        PolicyAction::Deny,
+        vec![],
+    );
+    toml.le = Some(24);
+    toml.match_rpki_validation = Some(RpkiValidation::Invalid);
+    let toml =
+        PolicyChain::from_named(vec![named("rov", policy(vec![toml], PolicyAction::Permit))]);
+    assert_eq!(tests(&toml, &invalid), (PolicyAction::Deny, vec![Rpki]));
+    // The statement misses a valid route; the default decides.
+    let valid = plain_ctx(v4_prefix([10, 10, 3, 0], 24));
+    assert_eq!(tests(&toml, &valid), (PolicyAction::Permit, vec![]));
+    // A default-action deny after an RPKI statement missed tests nothing.
+    let mut permit_valid = stmt(None, PolicyAction::Permit, vec![]);
+    permit_valid.match_rpki_validation = Some(RpkiValidation::Valid);
+    let default_deny = PolicyChain::from_named(vec![named(
+        "valid-only",
+        policy(vec![permit_valid], PolicyAction::Deny),
+    )]);
+    assert_eq!(tests(&default_deny, &invalid), (PolicyAction::Deny, vec![]));
+
+    let rpol = |source: &str| {
+        let compiled = crate::rpol::RpolFile::parse(source)
+            .expect("clean rpol")
+            .compile_policy("p", &[], &mut crate::sets::SetStore::new())
+            .expect("policy exists");
+        PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "p".to_string(),
+            std::sync::Arc::new(compiled),
+        )])
+    };
+    let either = rpol(
+        "policy p { term t { if route.med == 0 || route.aspa == invalid \
+         || route.rpki == invalid { reject } } }",
+    );
+    assert_eq!(
+        tests(&either, &invalid),
+        (PolicyAction::Deny, vec![Rpki, Aspa])
+    );
+    // The customer-in deny term tests RPKI; a valid route is decided by a
+    // later term that does not.
+    let chain = PolicyChain::from_named(vec![rpol_member(200)]);
+    assert_eq!(tests(&chain, &invalid), (PolicyAction::Deny, vec![Rpki]));
+    assert_eq!(
+        tests(&chain, &plain_ctx(v4_prefix([10, 10, 3, 0], 24))),
+        (PolicyAction::Permit, vec![])
+    );
+    let plain = rpol("policy p { term t { if route.med == 0 { reject } } }");
+    assert_eq!(tests(&plain, &invalid), (PolicyAction::Deny, vec![]));
+}
+
 #[test]
 fn rpol_fallthrough_keeps_continue_mods_under_the_permit_default() {
     let chain = PolicyChain::from_named(vec![rpol_member(200)]);

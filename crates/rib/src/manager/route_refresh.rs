@@ -1099,7 +1099,8 @@ impl RibManager {
                     .copied(),
             );
         }
-        let policy_stats = self.export_policy_stats.entry(peer).or_default();
+        let mut export_tally = crate::update::NeighborPolicyStats::default();
+        let policy_stats = &mut export_tally;
 
         // Stage against an empty outbound view so ROUTE-REFRESH
         // re-advertises the current export set for this family rather than
@@ -1770,6 +1771,7 @@ impl RibManager {
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         }
 
+        crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
         self.replacement_checkpoint(true);
         if member_of.is_some() {
             self.reconcile_peer_otc_blocked(peer, &all_prefixes, grouped_otc_blocked);

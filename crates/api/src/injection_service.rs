@@ -312,6 +312,7 @@ fn export_disposition_to_proto(row: PeerRouteExport) -> proto::PathExportDisposi
         explain_code: row.explain_code.to_string(),
         detail: row.detail,
         advertised_path_id: row.advertised_path_id,
+        deny_validation: row.deny_validation,
     }
 }
 
@@ -2047,14 +2048,26 @@ mod tests {
                 };
                 seen.push((prefix, path_id, after, page_size));
                 let page = (path_id == 7).then(|| RouteExportPage {
-                    peers: vec![PeerRouteExport {
-                        peer: "192.0.2.1".parse().unwrap(),
-                        disposition: RouteExportDisposition::Withheld,
-                        reason: "family_suppressed:missing_ipv6_next_hop".to_string(),
-                        explain_code: "family_not_sendable",
-                        detail: "withheld".to_string(),
-                        advertised_path_id: 0,
-                    }],
+                    peers: vec![
+                        PeerRouteExport {
+                            peer: "192.0.2.1".parse().unwrap(),
+                            disposition: RouteExportDisposition::Withheld,
+                            reason: "family_suppressed:missing_ipv6_next_hop".to_string(),
+                            explain_code: "family_not_sendable",
+                            detail: "withheld".to_string(),
+                            advertised_path_id: 0,
+                            deny_validation: vec![],
+                        },
+                        PeerRouteExport {
+                            peer: "192.0.2.2".parse().unwrap(),
+                            disposition: RouteExportDisposition::Withheld,
+                            reason: "export_policy".to_string(),
+                            explain_code: "policy_denied",
+                            detail: "denied".to_string(),
+                            advertised_path_id: 0,
+                            deny_validation: vec!["rpki_invalid".to_string()],
+                        },
+                    ],
                     more: after.is_none(),
                 });
                 reply.send(page).ok();
@@ -2076,7 +2089,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(first.next_page_token, "192.0.2.1");
+        assert_eq!(first.next_page_token, "192.0.2.2");
         let row = &first.peers[0];
         assert_eq!(row.peer_address, "192.0.2.1");
         assert_eq!(
@@ -2085,6 +2098,7 @@ mod tests {
         );
         assert_eq!(row.reason, "family_suppressed:missing_ipv6_next_hop");
         assert_eq!(row.explain_code, "family_not_sendable");
+        assert_eq!(first.peers[1].deny_validation, ["rpki_invalid"]);
         let last = svc
             .list_path_export_dispositions(request(5000, &first.next_page_token, 7))
             .await
@@ -2111,7 +2125,7 @@ mod tests {
                 (
                     prefix,
                     7,
-                    Some("192.0.2.1".parse().unwrap()),
+                    Some("192.0.2.2".parse().unwrap()),
                     ROUTE_QUERY_MAX_PAGE_SIZE
                 ),
                 (prefix, 8, None, 1),

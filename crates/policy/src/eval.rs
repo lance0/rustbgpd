@@ -30,8 +30,8 @@ use crate::engine::{
 };
 use crate::ir::{
     ArithOp, Cmp, CommunityAttribute, CommunityAttributes, CompiledChain, CompiledPolicy,
-    DatasetProbe, ForEachNode, LoopSource, MatchExpr, TermAction, TermActionView, ValueCmpOp,
-    ValueExpr, ValueField,
+    DatasetProbe, ForEachNode, LoopSource, MatchExpr, Term, TermAction, TermActionView,
+    ValidationDimension, ValueCmpOp, ValueExpr, ValueField,
 };
 use crate::sets::prefix_entry_matches;
 
@@ -871,7 +871,44 @@ impl CompiledChain {
     ) -> (PolicyResult, PolicyEvaluation, Option<String>) {
         hits.evals.fetch_add(1, Ordering::Relaxed);
         let mut fuel: u64 = MAX_EVAL_COST;
-        self.evaluate_fueled::<true, true, true>(ctx, Some(hits), &mut fuel)
+        let (result, evaluation, term) =
+            self.evaluate_fueled::<true, true, true>(ctx, Some(hits), &mut fuel);
+        (result, evaluation, term.and_then(|term| term.name.clone()))
+    }
+
+    /// [`evaluate_with_attribution`](Self::evaluate_with_attribution) plus
+    /// the validation states the deciding term's guard tests, read from the
+    /// same walk and dataset pin, so they describe the term that produced
+    /// the verdict. Non-empty only when a term's own `reject` decided and
+    /// its guard contains an RPKI ([`MatchExpr::RpkiIs`]) or ASPA
+    /// ([`MatchExpr::AspaIs`]) comparison, at any depth: a TOML
+    /// statement's validation condition beside its others, or one operand
+    /// of an `.rpol` `||` or `!`. A loop verdict, a fail-closed bound or
+    /// error, and a default-action deny report none. Explain-only.
+    #[must_use]
+    pub fn evaluate_with_deny_validation(
+        &self,
+        ctx: &RouteContext<'_>,
+    ) -> (PolicyResult, PolicyEvaluation, Vec<ValidationDimension>) {
+        let mut fuel: u64 = MAX_EVAL_COST;
+        let (result, evaluation, term) =
+            self.evaluate_fueled::<false, true, true>(ctx, None, &mut fuel);
+        let mut tested = Vec::new();
+        if let Some(term) = term.filter(|term| matches!(term.action, TermAction::Deny)) {
+            if term
+                .guard
+                .any_node(&|expr| matches!(expr, MatchExpr::RpkiIs(_)))
+            {
+                tested.push(ValidationDimension::Rpki);
+            }
+            if term
+                .guard
+                .any_node(&|expr| matches!(expr, MatchExpr::AspaIs(_)))
+            {
+                tested.push(ValidationDimension::Aspa);
+            }
+        }
+        (result, evaluation, tested)
     }
 
     /// `COUNT` monomorphizes the walk: the non-counting instantiation
@@ -929,7 +966,7 @@ impl CompiledChain {
         ctx: &RouteContext<'_>,
         hits: Option<&PolicyHitCounters>,
         fuel: &mut u64,
-    ) -> (PolicyResult, PolicyEvaluation, Option<String>) {
+    ) -> (PolicyResult, PolicyEvaluation, Option<&Term>) {
         // LAN-305: pin dataset generations ONCE for the whole walk.
         let pinned_frame = self.pin_datasets();
         let pinned = pinned_frame.as_ref().unwrap_or(&NO_DATASETS);
@@ -949,9 +986,7 @@ impl CompiledChain {
             match self.evaluate_policy::<COUNT>(policy, ctx, policy_hits, fuel, pinned) {
                 PolicyDecision::Deny { term_index } => {
                     let matched_term = if TERM {
-                        term_index
-                            .and_then(|index| policy.terms.get(index))
-                            .and_then(|term| term.name.clone())
+                        term_index.and_then(|index| policy.terms.get(index))
                     } else {
                         None
                     };

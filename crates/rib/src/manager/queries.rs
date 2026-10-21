@@ -1950,6 +1950,7 @@ impl RibManager {
             explain_code,
             detail,
             advertised_path_id: 0,
+            deny_validation: Vec::new(),
         };
         if let Some((reason, detail)) = self.unexported_family(peer, family) {
             return row(Withheld, &reason, "family_not_sendable", detail);
@@ -2007,7 +2008,10 @@ impl RibManager {
             }
         } else {
             let (disposition, reason) = self.stopped_export_reason(peer, route, &explanation, code);
-            row(disposition, &reason, code, stop_detail)
+            PeerRouteExport {
+                deny_validation: explanation.deny_validation.clone(),
+                ..row(disposition, &reason, code, stop_detail)
+            }
         };
         if export.disposition != Committed
             && self
@@ -3465,9 +3469,9 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<NeighborPolicyStats>,
     ) {
         let stats = self
-            .export_policy_stats
+            .export_policy_counters
             .get(&peer)
-            .copied()
+            .map(crate::update::ExportPolicyCounters::snapshot)
             .unwrap_or_default();
         let _ = reply.send(stats);
     }
@@ -3503,9 +3507,9 @@ impl RibManager {
                 .grouped_advertised_count(peer)
                 .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
             policy_stats: self
-                .export_policy_stats
+                .export_policy_counters
                 .get(&peer)
-                .copied()
+                .map(crate::update::ExportPolicyCounters::snapshot)
                 .unwrap_or_default(),
             outbound: self.peer_outbound_state(peer),
             remote_asn: self.peer_asn.get(&peer).copied(),

@@ -1354,13 +1354,12 @@ sanity-check on the labeled Prometheus counter:
 |---|---|---|
 | `import_policy_routes_permitted` | import | Daemon lifetime per neighbor — survives session resets and reconfigures; cleared by daemon restart or neighbor deletion. |
 | `import_policy_routes_denied` | import | Daemon lifetime per neighbor — same. |
-| `export_policy_routes_permitted` | export | Per session — the RIB resets it when the session goes down. |
-| `export_policy_routes_denied` | export | Per session — same. |
+| `export_policy_routes_permitted` | export | Daemon lifetime per neighbor — same. |
+| `export_policy_routes_denied` | export | Daemon lifetime per neighbor — same. |
 
-The import totals keep counting across reconnects, like `updates_*` and
-`flap_count`; the export totals start again from zero on each session.
-For a rate or a per-session window in either direction, use
-`increase()` over `bgp_policy_routes_total`.
+Both directions keep counting across reconnects, like `updates_*` and
+`flap_count`. For a rate or a per-session window, use `increase()` over
+`bgp_policy_routes_total`.
 The CLI surfaces these in `rbgp neighbor <peer>` as a Policy Stats
 block:
 

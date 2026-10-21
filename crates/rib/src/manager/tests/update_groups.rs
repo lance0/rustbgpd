@@ -7563,9 +7563,9 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
             assert_eq!(manager.vpn_grouped_member_of(closed).is_some(), !ungrouped);
         }
         let before = manager
-            .export_policy_stats
+            .export_policy_counters
             .get(&closed)
-            .copied()
+            .map(crate::update::ExportPolicyCounters::snapshot)
             .unwrap_or_default();
         let captured = Arc::new(Mutex::new(Vec::new()));
         tracing::subscriber::with_default(
@@ -7606,9 +7606,9 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
         );
         assert_eq!(
             manager
-                .export_policy_stats
+                .export_policy_counters
                 .get(&closed)
-                .copied()
+                .map(crate::update::ExportPolicyCounters::snapshot)
                 .unwrap_or_default(),
             before
         );
@@ -15596,9 +15596,9 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
         .map(|peer| {
             fleet
                 .manager
-                .export_policy_stats
+                .export_policy_counters
                 .get(peer)
-                .map_or(0, |stats| stats.export_policy_routes_permitted)
+                .map_or(0, |stats| stats.snapshot().export_policy_routes_permitted)
         })
         .collect();
     let passes_before = fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones;
@@ -15723,9 +15723,9 @@ fn batched_authoritative_pcb_cohort_commits_in_one_shared_transition() {
     for (index, peer) in fleet.members.iter().enumerate() {
         let permitted = fleet
             .manager
-            .export_policy_stats
+            .export_policy_counters
             .get(peer)
-            .map_or(0, |stats| stats.export_policy_routes_permitted);
+            .map_or(0, |stats| stats.snapshot().export_policy_routes_permitted);
         assert_eq!(
             permitted - permitted_before[index],
             4,
@@ -15882,7 +15882,7 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
         while receiver.try_recv().is_ok() {}
     }
     assert!(fleet.receivers[3].try_recv().is_err());
-    let incumbent_stats = fleet.manager.export_policy_stats[&incumbent];
+    let incumbent_stats = fleet.manager.export_policy_counters[&incumbent].snapshot();
     let hits = Arc::clone(
         fleet.manager.export_chains[&incumbent]
             .as_ref()
@@ -15951,7 +15951,7 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
         prior_dirty
     );
     assert_eq!(
-        fleet.manager.export_policy_stats[&incumbent],
+        fleet.manager.export_policy_counters[&incumbent].snapshot(),
         incumbent_stats
     );
     assert_eq!(

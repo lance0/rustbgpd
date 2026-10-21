@@ -558,9 +558,10 @@ impl ForwardingStateSource {
 ///
 /// Sessions add to it where they add to the Prometheus counters, so every
 /// operator-facing `NeighborState` counter (`flap_count`, `notifications_*`,
-/// `updates_*`, `otc_routes_blocked`, `import_policy_routes_*`) survives a
-/// session reset and a replacement session. The peer manager drops the block
-/// when the neighbor is deleted.
+/// `updates_*`, `otc_routes_blocked`, `import_policy_routes_*`, and through
+/// the RIB `export_policy_routes_*`) survives a session reset and a
+/// replacement session. The peer manager drops the block when the neighbor
+/// is deleted.
 /// It is runtime state, not configuration: two configs compare equal on it.
 #[derive(Clone, Debug, Default)]
 pub struct NeighborCounters(Arc<NeighborCounterBlock>);
@@ -575,6 +576,9 @@ struct NeighborCounterBlock {
     otc_routes_blocked: AtomicU64,
     import_policy_routes_permitted: AtomicU64,
     import_policy_routes_denied: AtomicU64,
+    /// The RIB adds this neighbor's export-policy evaluations here; every
+    /// session stages it for the RIB before `PeerUp`.
+    export_policy: rustbgpd_rib::ExportPolicyCounters,
 }
 
 impl NeighborCounters {
@@ -670,6 +674,12 @@ impl NeighborCounters {
         self.0
             .import_policy_routes_denied
             .fetch_add(denied, Ordering::Relaxed);
+    }
+
+    /// The export-policy totals the RIB counts into for this neighbor.
+    #[must_use]
+    pub fn export_policy(&self) -> &rustbgpd_rib::ExportPolicyCounters {
+        &self.0.export_policy
     }
 
     /// Whether both handles share one block.

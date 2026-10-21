@@ -2127,9 +2127,9 @@ fn pcb_join_counters_replay_lane_permit() {
     m.apply_group_join_counters(OTHER1, PCB_GID, None);
 
     let stats = |peer: IpAddr| {
-        m.export_policy_stats
+        m.export_policy_counters
             .get(&peer)
-            .map_or(0, |stats| stats.export_policy_routes_permitted)
+            .map_or(0, |stats| stats.snapshot().export_policy_routes_permitted)
     };
     assert_eq!(stats(MEMBER), 2);
     assert_eq!(stats(OTHER1), 1);
@@ -3751,9 +3751,9 @@ fn pcb_initial_dump_replays_substitution_and_join_counters_agree() {
     let mut m = staging_manager();
     let mut rx = register_pcb_member(&mut m, MEMBER, replay_group(None));
     let permitted_before = m
-        .export_policy_stats
+        .export_policy_counters
         .get(&MEMBER)
-        .map_or(0, |stats| stats.export_policy_routes_permitted);
+        .map_or(0, |stats| stats.snapshot().export_policy_routes_permitted);
     m.send_initial_table(MEMBER);
     let (announced, withdrawn) = folded_outbound(&mut rx);
     assert_eq!(
@@ -3764,9 +3764,9 @@ fn pcb_initial_dump_replays_substitution_and_join_counters_agree() {
     assert_eq!(announced[&prefix(2)], (OTHER2, Some(NextHopAction::Self_)));
     assert_eq!(withdrawn.len(), 0);
     let permitted = m
-        .export_policy_stats
+        .export_policy_counters
         .get(&MEMBER)
-        .map_or(0, |stats| stats.export_policy_routes_permitted)
+        .map_or(0, |stats| stats.snapshot().export_policy_routes_permitted)
         - permitted_before;
     assert_eq!(
         permitted,
