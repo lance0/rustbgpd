@@ -5006,7 +5006,7 @@ fn pcb_group_restages_from_all_affected_without_best_change() {
     let (announced, withdrawn) = folded_outbound(&mut rx);
     assert_eq!(
         announced.get(&p).map(|(source, _)| *source),
-        Some(PeerId::from_addr(OTHER3.addr())),
+        Some(OTHER3),
         "the member receives the new winner"
     );
     assert_eq!(withdrawn.len(), 0);

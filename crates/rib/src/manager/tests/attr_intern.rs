@@ -783,7 +783,7 @@ fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
                     route
                 })
                 .collect();
-            manager.process_announce_chunk(PeerId::from_addr(peer.addr()), routes, None);
+            manager.process_announce_chunk(peer, routes, None);
         }
         assert_eq!(
             manager.attr_intern.len(),

@@ -359,7 +359,7 @@ fn rpki_invalid_deny_names_the_validation_state() {
 
     let page = query(&mut manager, prefix, 0, None, 10).unwrap();
     for peer in [toml, toml_add_path, rpol] {
-        let export = row(&page, PeerId::from_addr(peer.addr()));
+        let export = row(&page, peer);
         assert_eq!(export.disposition, RouteExportDisposition::Withheld);
         assert_eq!(export.reason, "export_policy");
         assert_eq!(export.explain_code, "policy_denied");
@@ -911,7 +911,7 @@ fn explain_deny_label_names_the_deciding_term_across_a_dataset_refresh() {
         })));
         let (reply, mut explained) = oneshot::channel();
         manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             prefix: v4_prefix(),
             rd: None,
             labeled: false,

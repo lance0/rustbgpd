@@ -2812,7 +2812,7 @@ async fn per_client_best_with_vpn_or_rtc_families_keeps_fallback_reason() {
     ] {
         let (out_tx, _out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             session_id: 0,
             peer_asn: 65001,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -3230,7 +3230,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     }
     for peer in peers {
         assert_eq!(
-            query_first_export_term_hits(&tx, &roster, PeerId::from_addr(peer.addr())).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             (transition_hits.0 + 1, transition_hits.1 + 1),
             "later group evaluations must advance every installed member's shared counters"
         );
@@ -5528,7 +5528,7 @@ async fn strict_next_hop_export_chain_disqualifies_grouping() {
 
     // Content-equal non-strict chains group together.
     for peer in [plain_a, plain_b] {
-        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer.addr()));
+        let mut spec = PeerUpSpec::ibgp(peer);
         spec.export_policy = Some(rpol_chain(plain, "plain"));
         let _rx = peer_up(&tx, spec).await;
     }
@@ -5583,7 +5583,7 @@ async fn family_predicate_export_chain_still_groups() {
     let peer_a = peer_v4(Ipv4Addr::new(10, 0, 3, 1));
     let peer_b = peer_v4(Ipv4Addr::new(10, 0, 3, 2));
     for peer in [peer_a, peer_b] {
-        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer.addr()));
+        let mut spec = PeerUpSpec::ibgp(peer);
         spec.export_policy = Some(rpol_chain(family_gate, "family-gate"));
         let _rx = peer_up(&tx, spec).await;
     }
@@ -5640,14 +5640,14 @@ async fn computed_prepend_export_chains_group_unless_peer_dependent() {
     let self_a = peer_v4(Ipv4Addr::new(10, 0, 4, 1));
     let self_b = peer_v4(Ipv4Addr::new(10, 0, 4, 2));
     for peer in [self_a, self_b] {
-        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer.addr()));
+        let mut spec = PeerUpSpec::ibgp(peer);
         spec.export_policy = Some(rpol_chain(self_pad, "self-pad"));
         let _rx = peer_up(&tx, spec).await;
     }
     let origin_a = peer_v4(Ipv4Addr::new(10, 0, 4, 3));
     let origin_b = peer_v4(Ipv4Addr::new(10, 0, 4, 4));
     for peer in [origin_a, origin_b] {
-        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer.addr()));
+        let mut spec = PeerUpSpec::ibgp(peer);
         spec.export_policy = Some(rpol_chain(origin_pad, "origin-pad"));
         let _rx = peer_up(&tx, spec).await;
     }
@@ -5714,7 +5714,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             peer_asn: 65000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             outbound_tx: out_tx,
@@ -7147,7 +7147,7 @@ fn full_channel_manager(
     for peer in [stuck, live] {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(FULL_CHANNEL_CAPACITY);
         manager.handle_update(RibUpdate::PeerUp {
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             session_id: 0,
             peer_asn: 65_000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -16706,10 +16706,9 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     // moving it back rejoins the original group's instance.
     replace_one(&tx, b, community_chain(0xFDE8_3602)).await;
     let (_, regrouped) = published_ids(&tx, &roster).await;
-    assert_ne!(regrouped[&b], regrouped[&PeerId::from_addr(a.addr())]);
+    assert_ne!(regrouped[&b], regrouped[&a]);
     assert_eq!(
-        regrouped[&PeerId::from_addr(a.addr())],
-        ids[&PeerId::from_addr(a.addr())],
+        regrouped[&a], ids[&a],
         "the remaining member keeps its group"
     );
     // A flap of the only member empties its group: it re-registers into a
@@ -16728,7 +16727,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     let moved = retire_watch(&roster, b);
     replace_one(&tx, b, community_chain(0xFDE8_3601)).await;
     let (_, back) = published_ids(&tx, &roster).await;
-    assert_eq!(back[&b], ids[&PeerId::from_addr(a.addr())]);
+    assert_eq!(back[&b], ids[&a]);
     assert!(
         moved.upgrade().is_none(),
         "the emptied group's instance is released"
@@ -16740,7 +16739,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
         replacements: vec![
             crate::update::PeerExportPolicyReplacement {
-                peer: PeerId::from_addr(a.addr()),
+                peer: a,
                 export_policy: Some(community_chain(0xFDE8_3603)),
             },
             crate::update::PeerExportPolicyReplacement {
@@ -16763,7 +16762,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
         before_batch + 1,
         "one publication for the batch"
     );
-    assert_eq!(batched[&PeerId::from_addr(a.addr())], batched[&b]);
+    assert_eq!(batched[&a], batched[&b]);
     assert!(
         batched
             .iter()
@@ -16779,7 +16778,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     tx.send(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
         replacements: vec![
             crate::update::PeerExportPolicyReplacement {
-                peer: PeerId::from_addr(a.addr()),
+                peer: a,
                 export_policy: Some(community_chain(0xFDE8_3601)),
             },
             crate::update::PeerExportPolicyReplacement {
@@ -16798,19 +16797,13 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
         !restored.contains_key(&c),
         "a departed member is not restored"
     );
-    assert_ne!(
-        restored[&PeerId::from_addr(a.addr())],
-        batched[&PeerId::from_addr(a.addr())]
-    );
+    assert_ne!(restored[&a], batched[&a]);
     assert_eq!(restored[&b], batched[&b]);
 
     // Group emptying, then shutdown: the cell closes and every instance is
     // released once no roster holds it.
-    let last = [
-        retire_watch(&roster, PeerId::from_addr(a.addr())),
-        retire_watch(&roster, b),
-    ];
-    send_peer_down(&tx, PeerId::from_addr(a.addr())).await;
+    let last = [retire_watch(&roster, a), retire_watch(&roster, b)];
+    send_peer_down(&tx, a).await;
     send_peer_down(&tx, b).await;
     let (_, empty) = published_ids(&tx, &roster).await;
     assert!(empty.is_empty());
@@ -17051,25 +17044,21 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
     });
     let mut observations = Vec::new();
     for (peer, receiver) in [(grouped, &mut grouped_rx), (distinct, &mut distinct_rx)] {
-        manager.send_route_refresh_response(
-            PeerId::from_addr(peer.addr()),
-            Afi::Ipv4,
-            Safi::Unicast,
-        );
+        manager.send_route_refresh_response(peer, Afi::Ipv4, Safi::Unicast);
         let mut refresh = Vec::new();
         while let Ok(update) = receiver.try_recv() {
             refresh.push(envelope_summary(&update));
         }
         let policy_filtered = manager
             .policy_filtered_routes
-            .get(&PeerId::from_addr(peer.addr()))
+            .get(&peer)
             .into_iter()
             .flatten()
             .map(|key| format!("{key:?}"))
             .collect();
         let otc_blocked = manager
             .peer_otc_blocked
-            .get(&PeerId::from_addr(peer.addr()))
+            .get(&peer)
             .into_iter()
             .flatten()
             .map(|(prefix, paths)| format!("{prefix}:{paths:?}"))

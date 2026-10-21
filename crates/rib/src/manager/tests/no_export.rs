@@ -232,7 +232,7 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
                 .expect("tagged replacement re-announced to non-suppressed peers");
             assert_eq!(update.announce.len(), 1, "{peer}");
             assert!(update.withdraw.is_empty(), "{peer}");
-            let response = collect_advertised_routes(&tx, PeerId::from_addr(peer.addr())).await;
+            let response = collect_advertised_routes(&tx, peer).await;
             assert_eq!(response.len(), 1, "{peer}");
         }
 

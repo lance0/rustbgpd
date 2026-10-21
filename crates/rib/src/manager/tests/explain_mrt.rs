@@ -771,7 +771,7 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
     ] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             announced: vec![make_multipath_route(prefix, peer_addr, vec![asn], lp)],
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -869,7 +869,7 @@ async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target(
     ] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
             withdrawn: vec![],
             flowspec_announced: vec![],

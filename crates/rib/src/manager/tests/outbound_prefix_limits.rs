@@ -1808,7 +1808,7 @@ fn a_registration_inherits_its_peer_group_unless_the_neighbor_overrides_it() {
     let overriding = peer_v4(Ipv4Addr::new(10, 113, 0, 2));
     for peer in [inheriting, overriding] {
         manager.handle_update(RibUpdate::SetPeerPolicyContext {
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             session_id: 0,
             peer_group: Some("clients".to_string()),
         });

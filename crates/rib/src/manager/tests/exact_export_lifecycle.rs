@@ -177,7 +177,7 @@ fn targeted_retirement_preserves_duplicate_source_identity() {
     let identity = ExactExportKey::Unicast(Prefix::V4(prefix), 0);
     let mut manager = test_manager();
     for peer in [departing, surviving] {
-        let mut rib = AdjRibIn::new(PeerId::from_addr(peer.addr()));
+        let mut rib = AdjRibIn::new(peer);
         rib.insert(make_route(
             prefix,
             match peer.addr() {
@@ -185,8 +185,8 @@ fn targeted_retirement_preserves_duplicate_source_identity() {
                 IpAddr::V6(_) => unreachable!(),
             },
         ));
-        manager.ribs.insert(PeerId::from_addr(peer.addr()), rib);
-        manager.register_unicast_announcer(PeerId::from_addr(peer.addr()), Prefix::V4(prefix));
+        manager.ribs.insert(peer, rib);
+        manager.register_unicast_announcer(peer, Prefix::V4(prefix));
     }
     manager
         .peer_unexportable

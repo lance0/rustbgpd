@@ -977,7 +977,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
 
     for (peer, per_client_best) in [(grouped, false), (private, true)] {
         tx.send(RibUpdate::SetPeerExportContext {
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             session_id: 7,
             local_role: Some(rustbgpd_wire::BgpRole::Customer),
         })
@@ -985,7 +985,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         .unwrap();
         let (out_tx, mut out_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             session_id: 7,
             peer_asn: 65100,
             peer_router_id: Ipv4Addr::UNSPECIFIED,

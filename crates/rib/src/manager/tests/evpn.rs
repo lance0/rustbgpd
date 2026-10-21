@@ -713,7 +713,7 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             peer_asn: 65000,
             peer_router_id: router_id.parse().unwrap(),
             outbound_tx,
@@ -743,7 +743,7 @@ fn evpn_deferral_warns_for_a_full_channel_but_not_a_closed_one() {
         assert!(
             manager
                 .adj_ribs_out
-                .get_mut(&PeerId::from_addr(peer.addr()))
+                .get_mut(&peer)
                 .unwrap()
                 .remove_evpn(&key)
         );

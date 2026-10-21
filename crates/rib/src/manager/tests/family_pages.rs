@@ -403,7 +403,7 @@ fn vpn_grouped_pages_apply_rtc_split_horizon_and_encoder_rejections() {
     for peer in [first, second] {
         let (outbound_tx, outbound_rx) = mpsc::channel(32);
         manager.handle_update(RibUpdate::PeerUp {
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             session_id: 0,
             peer_asn: 65000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,

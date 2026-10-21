@@ -400,8 +400,8 @@ mod tests {
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
                 }],
             });
-        let expected_neighbors = [unknown, waiter, unknown]
-            .map(|peer| manager.neighbor_rib_snapshot(PeerId::from_addr(peer.addr())));
+        let expected_neighbors =
+            [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer));
         manager.with_replacement_summary_reads("restore", |manager| {
             // Mutating these canonical inputs cannot change the captured values.
             manager.selection_deferral = None;

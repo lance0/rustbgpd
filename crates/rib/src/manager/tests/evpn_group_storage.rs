@@ -933,28 +933,23 @@ fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exa
     let mut outputs = Vec::new();
     for peer in [second, third] {
         let (sender, mut output) = mpsc::channel(8);
-        register(&mut manager, PeerId::from_addr(peer.addr()), sender);
+        register(&mut manager, peer, sender);
         while output.try_recv().is_ok() {}
-        assert_eq!(
-            manager.evpn_grouped_member_of(PeerId::from_addr(peer.addr())),
-            Some(gid)
-        );
-        let handle = manager
-            .evpn_recovery_handle(PeerId::from_addr(peer.addr()))
-            .unwrap();
+        assert_eq!(manager.evpn_grouped_member_of(peer), Some(gid));
+        let handle = manager.evpn_recovery_handle(peer).unwrap();
         assert!(
             manager.evpn_recovery.is_dormant(handle)
                 || manager.evpn_recovery.finish_recovery(handle).unwrap()
         );
         // The synthetic owned registration had an empty table; this storage
         // control begins from that known empty clean projection.
-        manager.dirty_peers.remove(&PeerId::from_addr(peer.addr()));
+        manager.dirty_peers.remove(&peer);
         manager
             .group_ribs
             .get_mut(&gid)
             .unwrap()
             .dirty_members
-            .remove(&PeerId::from_addr(peer.addr()));
+            .remove(&peer);
         outputs.push(output);
     }
     let routes = (1..=16)

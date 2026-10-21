@@ -416,11 +416,11 @@ fn rejection_fixture() -> RejectionFixture {
         (other, MockExactExportEncoder::accepting(1)),
     ] {
         manager.handle_update(RibUpdate::SetPeerExportEncoder {
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             session_id: 1,
             encoder,
         });
-        let (up, mut out) = member_up(PeerId::from_addr(peer.addr()), 1);
+        let (up, mut out) = member_up(peer, 1);
         manager.handle_update(up);
         let _ = route_envelopes(&mut out);
         receivers.push(out);

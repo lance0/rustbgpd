@@ -542,7 +542,7 @@ async fn labeled_rr_reflects_non_client_route_to_clients_only() {
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
-            peer: PeerId::from_addr(peer.addr()),
+            peer,
             peer_asn: 65000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             outbound_tx: out_tx,
