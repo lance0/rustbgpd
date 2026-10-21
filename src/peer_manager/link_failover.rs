@@ -9,15 +9,16 @@
 //! does not apply to ignores the command.
 //!
 //! A busy session mailbox does not get a detached waiter per event. Deliveries
-//! that find it full wait in a bounded map keyed by (session, interface): a
-//! flapping link coalesces into one pending entry per session and interface,
-//! keeping the newest event, and distinct interfaces stay distinct.
+//! that find it full wait in a bounded map keyed by (session, interface). A
+//! flapping link coalesces into one pending entry per session and interface
+//! holding the newest link-level event plus each distinct address removal with
+//! its own observation time, and distinct interfaces stay distinct.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustbgpd_transport::{LinkDownEvent, PeerCommand};
+use rustbgpd_transport::{LinkDownCause, LinkDownEvent, PeerCommand};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -28,16 +29,78 @@ use super::{ManagedPeerState, PeerManager};
 /// its hold timer or BFD, as it would without fast external failover.
 pub(super) const LINK_DOWN_PENDING_MAX: usize = 1024;
 const LINK_DOWN_RETRY: Duration = Duration::from_millis(100);
+/// Distinct address removals kept per pending (session, interface) entry.
+/// Past this, a further removal is folded into the oldest one, which keeps
+/// the older observation time: a later connection then ignores the folded
+/// address rather than being stopped by it, so the overflow can only miss a
+/// teardown (the hold timer still applies), never cause a wrong one.
+pub(super) const LINK_DOWN_PENDING_ADDRESSES_MAX: usize = 8;
 
-/// One delivery waiting for mailbox capacity.
+/// Deliveries for one (session, interface) waiting for mailbox capacity.
 pub(super) struct PendingLinkDown {
     commands: mpsc::Sender<PeerCommand>,
-    event: Arc<LinkDownEvent>,
+    /// Newest carrier-loss, admin-down or removal event: it carries every
+    /// address the interface had, so it supersedes older link-level events.
+    pub(super) link: Option<Arc<LinkDownEvent>>,
+    /// Address removals, oldest first, each with its original observation
+    /// time; a removal of one address does not supersede another.
+    pub(super) addresses: Vec<Arc<LinkDownEvent>>,
+}
+
+impl PendingLinkDown {
+    fn new(commands: mpsc::Sender<PeerCommand>) -> Self {
+        Self {
+            commands,
+            link: None,
+            addresses: Vec::new(),
+        }
+    }
+
+    fn merge(&mut self, event: &Arc<LinkDownEvent>) {
+        if event.cause != LinkDownCause::AddressRemoved {
+            self.link = Some(Arc::clone(event));
+        } else if self
+            .addresses
+            .iter()
+            .any(|known| known.addresses == event.addresses)
+        {
+            // Same address again: keep the original observation time.
+        } else if self.addresses.len() < LINK_DOWN_PENDING_ADDRESSES_MAX {
+            self.addresses.push(Arc::clone(event));
+        } else {
+            Arc::make_mut(&mut self.addresses[0])
+                .addresses
+                .extend(event.addresses.iter().copied());
+        }
+    }
+
+    /// Hand queued events to the session in order. True when nothing is left
+    /// to deliver (all sent, or the session exited).
+    fn flush(&mut self) -> bool {
+        loop {
+            let Some(event) = self
+                .link
+                .clone()
+                .or_else(|| self.addresses.first().cloned())
+            else {
+                return true;
+            };
+            match self.commands.try_send(PeerCommand::InterfaceDown(event)) {
+                Ok(()) => {
+                    if self.link.take().is_none() {
+                        self.addresses.remove(0);
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return true,
+                Err(mpsc::error::TrySendError::Full(_)) => return false,
+            }
+        }
+    }
 }
 
 /// The link monitor's event feed (taken into a `run`-local at loop start) and
-/// the deliveries waiting for full mailboxes: one per (session id, ifindex),
-/// newest event kept, at most [`LINK_DOWN_PENDING_MAX`].
+/// the deliveries waiting for full mailboxes: one entry per (session id,
+/// ifindex), at most [`LINK_DOWN_PENDING_MAX`] entries.
 #[derive(Default)]
 pub(super) struct LinkDownDelivery {
     rx: Option<mpsc::Receiver<Arc<LinkDownEvent>>>,
@@ -77,27 +140,27 @@ impl PeerManager {
         for (session_id, commands) in &targets {
             let key = (*session_id, event.ifindex);
             if let Some(pending) = self.link_down.pending.get_mut(&key) {
-                pending.event = Arc::clone(event);
+                pending.merge(event);
                 continue;
             }
             match commands.try_send(PeerCommand::InterfaceDown(Arc::clone(event))) {
                 Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     if self.link_down.pending.len() < LINK_DOWN_PENDING_MAX {
-                        self.link_down.pending.insert(
-                            key,
-                            PendingLinkDown {
-                                commands: commands.clone(),
-                                event: Arc::clone(event),
-                            },
-                        );
+                        let mut pending = PendingLinkDown::new(commands.clone());
+                        pending.merge(event);
+                        self.link_down.pending.insert(key, pending);
                     } else {
                         dropped += 1;
                     }
                 }
             }
         }
-        self.schedule_link_down_retry();
+        // Keep an armed deadline: events arriving faster than the retry
+        // interval must not postpone delivery indefinitely.
+        if self.link_down.retry_at.is_none() {
+            self.schedule_link_down_retry();
+        }
         if dropped > 0 {
             warn!(
                 interface = %event.ifname,
@@ -128,14 +191,7 @@ impl PeerManager {
     /// Retry deliveries that found a full mailbox. A session that exited is
     /// forgotten; a still-full one waits for the next retry.
     pub(super) fn retry_link_down(&mut self) {
-        self.link_down.pending.retain(|_, pending| {
-            matches!(
-                pending
-                    .commands
-                    .try_send(PeerCommand::InterfaceDown(Arc::clone(&pending.event))),
-                Err(mpsc::error::TrySendError::Full(_))
-            )
-        });
+        self.link_down.pending.retain(|_, pending| !pending.flush());
         self.schedule_link_down_retry();
     }
 

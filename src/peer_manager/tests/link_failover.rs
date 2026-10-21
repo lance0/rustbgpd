@@ -174,3 +174,100 @@ async fn link_down_pending_is_coalesced_and_bounded() {
         super::super::link_failover::LINK_DOWN_PENDING_MAX
     );
 }
+
+fn address_removed(ifindex: u32, local: &str) -> Arc<LinkDownEvent> {
+    Arc::new(LinkDownEvent {
+        ifindex,
+        ifname: "eth0".into(),
+        cause: LinkDownCause::AddressRemoved,
+        observed_at: std::time::Instant::now(),
+        addresses: vec![InterfaceAddress {
+            local: local.parse().unwrap(),
+            prefix: local.parse().unwrap(),
+            prefix_len: 32,
+        }],
+    })
+}
+
+fn delivered(rx: &mut mpsc::Receiver<PeerCommand>) -> Option<Arc<LinkDownEvent>> {
+    match rx.try_recv() {
+        Ok(PeerCommand::InterfaceDown(event)) => Some(event),
+        _ => None,
+    }
+}
+
+/// Events arriving faster than the retry interval must not keep pushing the
+/// retry deadline out: the first armed deadline stands.
+#[tokio::test(start_paused = true)]
+async fn link_down_retry_is_not_starved_by_frequent_events() {
+    let mut mgr = test_peer_manager();
+    let (handle, mut rx) = full_handle();
+    insert_test_managed_peer_with_asn(&mut mgr, "10.0.0.2".parse().unwrap(), 65002, handle, false);
+    mgr.handle_link_down(&event_on(4));
+    let armed = mgr.link_down.retry_at.expect("retry armed");
+    for ifindex in 5..12 {
+        tokio::time::advance(Duration::from_millis(50)).await;
+        mgr.handle_link_down(&event_on(ifindex));
+        assert_eq!(
+            mgr.link_down.retry_at,
+            Some(armed),
+            "deadline must not slide"
+        );
+    }
+    // The mailbox frees while events keep arriving; the retry delivers.
+    assert!(matches!(rx.try_recv(), Ok(PeerCommand::Start)));
+    mgr.retry_link_down();
+    assert!(delivered(&mut rx).is_some());
+}
+
+/// Two address removals on one interface while the mailbox is blocked: both
+/// are delivered, each with its own observation time, so the removal of the
+/// session's source address is not overwritten by a later, unrelated one.
+#[tokio::test]
+async fn link_down_pending_keeps_distinct_address_removals() {
+    let mut mgr = test_peer_manager();
+    let (handle, mut rx) = full_handle();
+    insert_test_managed_peer_with_asn(&mut mgr, "10.0.0.2".parse().unwrap(), 65002, handle, false);
+    let source = address_removed(4, "10.0.0.1");
+    let other = address_removed(4, "10.0.9.1");
+    mgr.handle_link_down(&source);
+    // A repeat of the same removal keeps the original observation time.
+    mgr.handle_link_down(&address_removed(4, "10.0.0.1"));
+    mgr.handle_link_down(&other);
+    assert_eq!(mgr.link_down.pending.len(), 1);
+
+    assert!(matches!(rx.try_recv(), Ok(PeerCommand::Start)));
+    mgr.retry_link_down();
+    let first = delivered(&mut rx).expect("source-address removal delivered");
+    assert_eq!(first.addresses, source.addresses);
+    assert_eq!(first.observed_at, source.observed_at);
+    mgr.retry_link_down();
+    let second = delivered(&mut rx).expect("second removal delivered");
+    assert_eq!(second.addresses, other.addresses);
+    mgr.retry_link_down();
+    assert!(mgr.link_down.pending.is_empty());
+    assert!(mgr.link_down.retry_at.is_none());
+}
+
+/// Past the per-entry cap, a further removal folds into the oldest one
+/// rather than being dropped.
+#[tokio::test]
+async fn link_down_pending_address_overflow_folds_instead_of_dropping() {
+    let mut mgr = test_peer_manager();
+    let (handle, _rx) = full_handle();
+    insert_test_managed_peer_with_asn(&mut mgr, "10.0.0.2".parse().unwrap(), 65002, handle, false);
+    let max = super::super::link_failover::LINK_DOWN_PENDING_ADDRESSES_MAX;
+    for host in 0..=max {
+        let host = u8::try_from(host).unwrap();
+        mgr.handle_link_down(&address_removed(4, &format!("10.0.0.{}", host + 1)));
+    }
+    let pending = mgr.link_down.pending.values().next().unwrap();
+    assert_eq!(pending.addresses.len(), max);
+    let overflow: IpAddr = format!("10.0.0.{}", max + 1).parse().unwrap();
+    assert!(
+        pending.addresses[0]
+            .addresses
+            .iter()
+            .any(|address| address.local == overflow)
+    );
+}
