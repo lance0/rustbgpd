@@ -1941,10 +1941,22 @@ fn explain_best_path_to_json(resp: &ExplainBestPathResponse) -> JsonExplainBestP
     JsonExplainBestPathRef(resp)
 }
 
+/// Render a best-path explanation's neighbors in scoped form from the
+/// interfaces the daemon reported. Shared by `--explain` and `lookup`.
+fn scope_explain_best_path(resp: &mut crate::proto::ExplainBestPathResponse) {
+    scope_address(&mut resp.peer_address, &resp.peer_interface);
+    resp.best_route.iter_mut().for_each(scope_route);
+    for candidate in &mut resp.candidates {
+        candidate.route.iter_mut().for_each(scope_route);
+    }
+}
+
 fn print_explain_best_path(
-    resp: &crate::proto::ExplainBestPathResponse,
+    mut resp: crate::proto::ExplainBestPathResponse,
     json: bool,
 ) -> Result<(), CliError> {
+    scope_explain_best_path(&mut resp);
+    let resp = &resp;
     if json {
         output::print_json_pretty(&explain_best_path_to_json(resp))?;
         return Ok(());
@@ -2069,7 +2081,7 @@ pub async fn explain_best_path(
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut resp = read_rpc(
+    let resp = read_rpc(
         "ExplainBestPath",
         client.explain_best_path(ExplainBestPathRequest {
             prefix: addr,
@@ -2079,12 +2091,7 @@ pub async fn explain_best_path(
     )
     .await?
     .into_inner();
-    scope_address(&mut resp.peer_address, &resp.peer_interface);
-    resp.best_route.iter_mut().for_each(scope_route);
-    for candidate in &mut resp.candidates {
-        candidate.route.iter_mut().for_each(scope_route);
-    }
-    print_explain_best_path(&resp, json)
+    print_explain_best_path(resp, json)
 }
 
 /// Find the global Loc-RIB longest-prefix match for an IPv4/IPv6 host or CIDR.
@@ -2109,7 +2116,7 @@ pub async fn lookup_best_path(
     )
     .await?
     .into_inner();
-    print_explain_best_path(&resp, json)
+    print_explain_best_path(resp, json)
 }
 
 pub async fn best(
@@ -3518,6 +3525,25 @@ mod tests {
     /// Seed and consume four distinct RPC responses so the request and matched
     /// prefix cannot accidentally share one canned family/shape. The existing
     /// explain JSON projection pins the exact response that the command prints.
+    /// `lookup` and `--explain` share one rendering step, which scopes every
+    /// neighbor in the explanation from the daemon's interface fields.
+    #[test]
+    fn best_path_explanations_render_scoped_neighbors() {
+        let mut response = lookup_response("203.0.113.0", 24);
+        response.best_route.as_mut().unwrap().peer_address = "fe80::1".into();
+        response.best_route.as_mut().unwrap().peer_interface = "eth0".into();
+        let candidate = response.candidates[0].route.as_mut().unwrap();
+        candidate.peer_address = "fe80::2".into();
+        candidate.peer_interface = "eth1".into();
+        scope_explain_best_path(&mut response);
+        let rendered = serde_json::to_value(explain_best_path_to_json(&response)).unwrap();
+        assert_eq!(rendered["best_route"]["peer_address"], "fe80::1%eth0");
+        assert_eq!(
+            rendered["candidates"][0]["route"]["peer_address"],
+            "fe80::2%eth1"
+        );
+    }
+
     #[tokio::test]
     async fn lookup_best_path_renders_v4_v6_exact_and_less_specific_matches() {
         struct Case {
