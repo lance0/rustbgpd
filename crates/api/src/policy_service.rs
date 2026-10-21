@@ -1868,6 +1868,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     peer_address: chain
                         .peer
                         .map_or_else(|| "global".to_string(), |peer| peer.to_string()),
+                    // The RIB's export map is keyed by bare address; the
+                    // duplicate-address guard makes the managed peer at that
+                    // address unique, so its key supplies the scope.
+                    peer_interface: chain
+                        .peer
+                        .and_then(|peer| roster.unique_peer(peer.addr()))
+                        .and_then(|peer| peer.key.interface.clone())
+                        .unwrap_or_default(),
                     direction: "export".to_string(),
                     routes_evaluated: chain.evals,
                     eval_errors: chain.eval_errors,
@@ -1911,7 +1919,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     .rows
                     .into_iter()
                     .map(|(peer, snapshot)| proto::PolicyChainStats {
-                        peer_address: peer.to_string(),
+                        peer_address: peer.address.to_string(),
+                        peer_interface: peer.interface.unwrap_or_default(),
                         direction: "import".to_string(),
                         routes_evaluated: snapshot.evals,
                         eval_errors: snapshot.eval_errors,
@@ -2262,6 +2271,11 @@ fn run_test_policy_page(
                         prefix: route.prefix.addr_string(),
                         prefix_length: u32::from(route.prefix.prefix_len()),
                         peer: route.peer.to_string(),
+                        peer_interface: route
+                            .peer_interface()
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_string(),
                         changes: render_modification_changes(route, &result.modifications),
                     });
                 }
@@ -2275,6 +2289,11 @@ fn run_test_policy_page(
                         prefix: route.prefix.addr_string(),
                         prefix_length: u32::from(route.prefix.prefix_len()),
                         peer: route.peer.to_string(),
+                        peer_interface: route
+                            .peer_interface()
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_string(),
                     });
             }
         }
@@ -4430,6 +4449,67 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(resp.diffs[0].prefix, "10.10.1.0");
         assert_eq!(resp.diffs[0].prefix_length, 24);
         assert_eq!(resp.diffs[0].changes, vec!["local_pref unset -> 200"]);
+    }
+
+    /// Diff and rejected samples name a link-local source as a bare address
+    /// plus the interface recorded with the route; numbered sources carry
+    /// no interface.
+    #[tokio::test]
+    async fn test_policy_samples_carry_the_source_interface() {
+        let svc = test_policy_service(vec![
+            scoped_route("10.10.1.0", "eth0"),
+            test_route("10.10.2.0", 24),
+            scoped_route("203.0.113.0", "eth1"),
+            test_route("203.0.114.0", 24),
+        ]);
+        let resp = PolicyServiceRpc::test_policy(
+            &svc,
+            Request::new(proto::TestPolicyRequest {
+                show_changes: 2,
+                show_rejected: 2,
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .expect("dry run succeeds")
+        .into_inner();
+        let diffs: Vec<(&str, &str, &str)> = resp
+            .diffs
+            .iter()
+            .map(|d| {
+                (
+                    d.prefix.as_str(),
+                    d.peer.as_str(),
+                    d.peer_interface.as_str(),
+                )
+            })
+            .collect();
+        let numbered = test_route("10.10.2.0", 24).peer.to_string();
+        assert_eq!(
+            diffs,
+            [
+                ("10.10.1.0", LINK_LOCAL, "eth0"),
+                ("10.10.2.0", numbered.as_str(), "")
+            ]
+        );
+        let rejected: Vec<(&str, &str, &str)> = resp
+            .rejected_routes
+            .iter()
+            .map(|r| {
+                (
+                    r.prefix.as_str(),
+                    r.peer.as_str(),
+                    r.peer_interface.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rejected,
+            [
+                ("203.0.113.0", LINK_LOCAL, "eth1"),
+                ("203.0.114.0", numbered.as_str(), "")
+            ]
+        );
     }
 
     #[tokio::test]
@@ -7072,6 +7152,77 @@ policy client-x {
             .unwrap()
             .into_inner();
         assert!(response.compiled);
+    }
+
+    /// Policy stats rows name a link-local neighbor as a bare address plus
+    /// its interface: import rows from the roster key, export rows (keyed by
+    /// bare address in the RIB) from the roster's unique peer at that
+    /// address. Numbered and global rows carry no interface.
+    #[tokio::test]
+    async fn get_policy_stats_rows_carry_a_scoped_neighbor_interface() {
+        let chain = roster_support::chain("customer-in(200)", 1);
+        let (_scoped_publication, scoped_rx) =
+            tokio::sync::watch::channel(Some(roster_support::installed(1, Some(&chain))));
+        let (_numbered_publication, numbered_rx) =
+            tokio::sync::watch::channel(Some(roster_support::installed(1, Some(&chain))));
+        let import = roster_support::publisher(
+            vec![
+                crate::import_roster::ImportRosterPeer {
+                    key: eth0_key(),
+                    session_id: 1,
+                    publication: scoped_rx,
+                },
+                roster_support::peer("10.0.0.2", numbered_rx),
+            ],
+            Vec::new(),
+        );
+        let export_chain = stats_export_chain();
+        let mut export = ExportRosterPublisher::new();
+        export.publish(
+            vec![
+                (
+                    PeerId::from_addr(link_local()),
+                    Some(Arc::clone(export_chain.hit_counters())),
+                ),
+                (
+                    PeerId::from_addr("10.0.0.2".parse().unwrap()),
+                    Some(Arc::clone(export_chain.hit_counters())),
+                ),
+            ],
+            Some(Arc::clone(export_chain.hit_counters())),
+        );
+        let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_import_roster(import.reader())
+            .with_export_roster(export.reader());
+        let resp = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(policy_stats_rpc_request("", "both")),
+        )
+        .await
+        .expect("stats query succeeds")
+        .into_inner();
+        let rows: Vec<(&str, &str, &str)> = resp
+            .chains
+            .iter()
+            .map(|chain| {
+                (
+                    chain.direction.as_str(),
+                    chain.peer_address.as_str(),
+                    chain.peer_interface.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("export", "10.0.0.2", ""),
+                ("export", LINK_LOCAL, "eth0"),
+                ("export", "global", ""),
+                ("import", "10.0.0.2", ""),
+                ("import", LINK_LOCAL, "eth0"),
+            ]
+        );
     }
 
     /// `GetPolicyStats` selects from the one roster snapshot it parsed the

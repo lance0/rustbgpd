@@ -1035,6 +1035,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             slow_peer_threshold_pct: None,
             slow_peer_duration: None,
             slow_peer_isolation: None,
+            fast_external_failover: None,
             max_prefixes: None,
             max_prefixes_ipv4_unicast: None,
             max_prefixes_ipv6_unicast: None,
@@ -1106,6 +1107,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         slow_peer_threshold_pct: None,
         slow_peer_duration: None,
         slow_peer_isolation: None,
+        fast_external_failover: None,
         max_prefixes: None,
         max_prefixes_ipv4_unicast: None,
         max_prefixes_ipv6_unicast: None,
@@ -1187,6 +1189,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         slow_peer_threshold_pct: None,
         slow_peer_duration: None,
         slow_peer_isolation: None,
+        fast_external_failover: None,
         max_prefixes: None,
         max_prefixes_ipv4_unicast: None,
         max_prefixes_ipv6_unicast: None,
@@ -1277,6 +1280,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         slow_peer_threshold_pct: None,
         slow_peer_duration: None,
         slow_peer_isolation: None,
+        fast_external_failover: None,
         max_prefixes: None,
         max_prefixes_ipv4_unicast: None,
         max_prefixes_ipv6_unicast: None,
@@ -2242,6 +2246,26 @@ fn reload_matrix_pins_load_bearing_field_classes() {
         "an all-hot peer-group cap edit hot-applies to static and dynamic \
          members in place: {}",
         cap_rows[1]
+    );
+
+    // Fast external failover: the neighbor and peer-group opt-outs are read at
+    // event time (live, no session reset); the global default is pinned.
+    let ffo_rows = reload_matrix_rows_for(&matrix, "fast_external_failover");
+    assert_eq!(
+        ffo_rows.len(),
+        3,
+        "fast_external_failover needs neighbor, peer-group and global rows"
+    );
+    assert!(ffo_rows[0].contains("| live |"), "{}", ffo_rows[0]);
+    assert!(ffo_rows[1].contains("| live |"), "{}", ffo_rows[1]);
+    assert!(
+        ffo_rows[2].contains("| restart-required |"),
+        "{}",
+        ffo_rows[2]
+    );
+    assert_eq!(
+        config_field_impact("fast_external_failover").map(|(impact, _)| impact),
+        Some(ConfigFieldImpact::HotApplied)
     );
 
     // ADR-0113: the outbound maxima are hot-applied at field level, so a

@@ -8844,6 +8844,7 @@ mod tests {
                     prefix: "203.0.113.66".to_string(),
                     prefix_length: 32,
                     peer_address: "192.0.2.1".to_string(),
+                    peer_interface: String::new(),
                     state: proto::BlackholeDiscardState::Installed as i32,
                     reason: "owned".to_string(),
                 }]

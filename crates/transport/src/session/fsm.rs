@@ -333,6 +333,143 @@ impl PeerSession {
         self.last_error = cause;
     }
 
+    /// The peer's ASN as far as this session knows it (negotiated OPEN first,
+    /// then a non-zero configured value) differs from the local ASN. An
+    /// accept-any child whose OPEN has not arrived is not provably eBGP.
+    fn peer_is_ebgp(&self) -> bool {
+        self.negotiated
+            .as_deref()
+            .or(self.fsm.negotiated())
+            .map(|negotiated| negotiated.peer_asn)
+            .or(Some(self.config.peer.remote_asn).filter(|asn| *asn != 0))
+            .is_some_and(|asn| asn != self.config.peer.local_asn)
+    }
+
+    /// Fast external failover, level-triggered: judge this session's own
+    /// connections against the *current* link snapshot. An invalid snapshot
+    /// proves nothing. Routes retained from a lost connection are purged if
+    /// its interface is down now, independently of any replacement socket
+    /// (closing a replacement before Established emits no `SessionDown`). The
+    /// live connection closes locally, without a NOTIFICATION and without
+    /// GR/LLGR retention, if its interface is down now and the peer is eBGP.
+    /// A link that went down and came back before this check leaves a
+    /// surviving connection alone. The session is not stop-requested, so the
+    /// ordinary reconnect path brings it back.
+    pub(super) async fn handle_check_links(&mut self) {
+        if !self.config.link_state.enabled() {
+            return;
+        }
+        let snapshot = self.config.link_state.current();
+        if !snapshot.valid {
+            return;
+        }
+        self.purge_retained_if_link_down(&snapshot).await;
+        if self.read_half.is_none() {
+            return;
+        }
+        let Some(connection) = self.connection.as_mut() else {
+            return;
+        };
+        if let Some(carrier) = snapshot.carrier(connection.local, connection.remote) {
+            connection.carrier = Some(carrier);
+        }
+        let connection = *connection;
+        let Some(down) =
+            snapshot.connection_down(connection.local, connection.remote, connection.carrier)
+        else {
+            return;
+        };
+        if !self.peer_is_ebgp() {
+            return;
+        }
+        warn!(
+            peer = %self.peer_label,
+            interface = %down.ifname,
+            ifindex = down.ifindex,
+            reason = down.cause.as_str(),
+            state = %self.fsm.state(),
+            "fast external failover: interface down, closing session without NOTIFICATION"
+        );
+        if self.fsm.state() == SessionState::Established {
+            self.last_down_reason = Some(PeerDownReason::LocalNoNotification(
+                super::AUTOMATIC_STOP_FSM_EVENT,
+            ));
+            self.session_telemetry_metric_lease
+                .latch_down_reason(SessionDownReason::LocalNoNotification);
+        }
+        self.record_transport_cause(down.teardown_cause());
+        self.abort_connection().await;
+        self.suppress_gr_retention = true;
+        self.handle_tcp_disconnect();
+        self.drive_fsm(Event::TcpConnectionFails).await;
+        // Only an Established teardown reaches `SessionDown`, which clears
+        // the latch; a pre-Established close must not leak it forward.
+        self.suppress_gr_retention = false;
+    }
+
+    /// Run the check the FSM asked for when the peer's ASN became known.
+    pub(super) async fn run_due_link_check(&mut self) {
+        if std::mem::take(&mut self.link_check_due) {
+            self.handle_check_links().await;
+        }
+    }
+
+    /// Discard everything still queued toward the dead link. Unlike ordinary
+    /// closes, which let the writer drain so a NOTIFICATION or final UPDATE
+    /// reaches the peer, the writer is aborted and joined here, and the
+    /// socket is closed with a zero linger (RST), so no backlog can leave on
+    /// the old connection when carrier returns.
+    async fn abort_connection(&mut self) {
+        if let Some(read_half) = self.read_half.as_ref() {
+            let _ = socket2::SockRef::from(read_half.as_ref()).set_linger(Some(Duration::ZERO));
+        }
+        if let Some(join) = self.writer_join.take() {
+            join.abort();
+            let _ = join.await;
+        }
+    }
+
+    /// An earlier TCP connection failed first and its routes are held under
+    /// GR/LLGR: if that connection's interface is down now, purge them rather
+    /// than wait for retention to expire.
+    async fn purge_retained_if_link_down(&mut self, snapshot: &crate::link::LinkSnapshot) {
+        let Some(retained) = self.gr_retained_connection.as_mut() else {
+            return;
+        };
+        if !retained.ebgp {
+            return;
+        }
+        // Remember the carrier once a valid snapshot proves it, as the live
+        // path does, so a later address or interface removal still maps here.
+        if let Some(carrier) =
+            snapshot.carrier(retained.connection.local, retained.connection.remote)
+        {
+            retained.connection.carrier = Some(carrier);
+        }
+        let connection = retained.connection;
+        let Some(down) =
+            snapshot.connection_down(connection.local, connection.remote, connection.carrier)
+        else {
+            return;
+        };
+        warn!(
+            peer = %self.peer_label,
+            interface = %down.ifname,
+            ifindex = down.ifindex,
+            reason = down.cause.as_str(),
+            "fast external failover: interface down, purging routes retained from the lost connection"
+        );
+        self.gr_retained_connection = None;
+        self.last_error = down.teardown_cause();
+        let _ = self
+            .rib_tx
+            .send(RibUpdate::PeerDown {
+                peer: self.rib_peer(),
+                session_id: self.session_identity.id,
+            })
+            .await;
+    }
+
     /// Handle a hold-timer expiry observed by the select loop.
     ///
     /// ADR-0078 rule 3: pending unprocessed input counts as peer
@@ -734,6 +871,13 @@ impl PeerSession {
                     if old == SessionState::Established {
                         self.config.neighbor_counters.record_flap();
                     }
+                    // The peer's ASN is known from its OPEN now: judge the
+                    // connection once against the current link state, so an
+                    // accept-any eBGP peer whose interface went down while
+                    // the manager could not yet classify it is still caught.
+                    if matches!(new, SessionState::OpenConfirm | SessionState::Established) {
+                        self.link_check_due = true;
+                    }
 
                     // Publish operator-facing lifecycle state changes over one
                     // bounded channel per session so PeerManager can preserve
@@ -805,6 +949,8 @@ impl PeerSession {
                     }
                 }
                 Action::SessionEstablished(legacy_negotiated) => {
+                    // The new session takes over from any GR-retained one.
+                    self.gr_retained_connection = None;
                     let negotiated = if let Some(shared) = self.fsm.negotiated_shared() {
                         debug_assert_eq!(shared.as_ref(), legacy_negotiated.as_ref());
                         drop(legacy_negotiated);
@@ -1234,6 +1380,7 @@ impl PeerSession {
                             && (!self.notification_teardown || neg.peer_notification_gr)
                             && !self.received_hard_reset
                             && !self.sent_hard_reset
+                            && !self.suppress_gr_retention
                         {
                             let gr_families: Vec<(Afi, Safi)> = neg
                                 .peer_gr_families
@@ -1256,6 +1403,14 @@ impl PeerSession {
                             None
                         }
                     });
+                    // Remember which connection the retained routes came
+                    // from, so a confirmed interface-down that arrives after
+                    // this transport loss can still purge them.
+                    let ebgp = self.peer_is_ebgp();
+                    self.gr_retained_connection = gr_update
+                        .as_ref()
+                        .and(self.connection)
+                        .map(|connection| super::RetainedConnection { connection, ebgp });
 
                     self.negotiated = None;
                     self.ipv6_unicast_withheld = false;
@@ -1272,6 +1427,7 @@ impl PeerSession {
                     self.notification_teardown = false;
                     self.received_hard_reset = false;
                     self.sent_hard_reset = false;
+                    self.suppress_gr_retention = false;
                     // The import-side policy totals are not reset here: they
                     // live in the neighbor's counter block for the daemon's
                     // lifetime. The per-session import-decision cache

@@ -1955,6 +1955,10 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "export_policy_chain"
         | "route_flap_dampening"
         | "conditional_advertisements" => (ConfigFieldImpact::HotApplied, "hot-applied"),
+        "fast_external_failover" => (
+            ConfigFieldImpact::HotApplied,
+            "hot-applied: read when the next interface-down event arrives",
+        ),
         "admin_down" => (
             ConfigFieldImpact::HotApplied,
             "hot-applied: setting sends Cease/Administrative Shutdown; clearing enables the peer",
@@ -2144,6 +2148,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(slow_peer_threshold_pct);
     cmp_field!(slow_peer_duration);
     cmp_field!(slow_peer_isolation);
+    cmp_field!(fast_external_failover);
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4_unicast);
     cmp_field!(max_prefixes_ipv6_unicast);
@@ -2295,6 +2300,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.slow_peer_threshold_pct == new.slow_peer_threshold_pct
         && old.slow_peer_duration == new.slow_peer_duration
         && old.slow_peer_isolation == new.slow_peer_isolation
+        && old.fast_external_failover == new.fast_external_failover
         && old.max_prefixes == new.max_prefixes
         && old.max_prefixes_ipv4_unicast == new.max_prefixes_ipv4_unicast
         && old.max_prefixes_ipv6_unicast == new.max_prefixes_ipv6_unicast
@@ -3917,6 +3923,7 @@ fn resolved_session_change(
     probe.gr_eor_grace_time = next.gr_eor_grace_time;
     probe.local_ipv6_nexthop = next.local_ipv6_nexthop;
     probe.remove_private_as = next.remove_private_as;
+    probe.fast_external_failover = next.fast_external_failover;
     if probe != *next {
         return Some(ReloadPeerActionKind::Replace);
     }
@@ -6322,6 +6329,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(hold_time);
     cmp_field!(min_hold_time);
     cmp_field!(send_hold_time);
+    cmp_field!(fast_external_failover);
     cmp_field!(max_prefixes);
     cmp_field!(max_prefixes_ipv4_unicast);
     cmp_field!(max_prefixes_ipv6_unicast);
@@ -6407,6 +6415,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
         slow_peer_threshold_pct,
         slow_peer_duration,
         slow_peer_isolation,
+        fast_external_failover,
         max_prefixes_ipv4_unicast,
         max_prefixes_ipv6_unicast,
         max_prefixes_received_ipv4_unicast,
@@ -6473,6 +6482,7 @@ pub fn copy_peer_group_file_only_fields(target: &mut PeerGroupConfig, source: &P
     target.slow_peer_threshold_pct = slow_peer_threshold_pct;
     target.slow_peer_duration = slow_peer_duration;
     target.slow_peer_isolation = slow_peer_isolation;
+    target.fast_external_failover = fast_external_failover;
     target.max_prefixes_ipv4_unicast = max_prefixes_ipv4_unicast;
     target.max_prefixes_ipv6_unicast = max_prefixes_ipv6_unicast;
     target.max_prefixes_received_ipv4_unicast = max_prefixes_received_ipv4_unicast;

@@ -77,6 +77,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
         slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
         slow_peer_isolation: false,
+        fast_external_failover: true,
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -255,6 +256,7 @@ fn make_dynamic_manager_config() -> Config {
             honor_blackhole: false,
             multipath_relax: false,
             link_bandwidth_weighted: false,
+            fast_external_failover: None,
             install_blackhole_discard: false,
             allow_blackhole_broad_prefixes: false,
             blackhole_discard_max_active: None,
@@ -1248,6 +1250,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         slow_peer_threshold_pct: None,
         slow_peer_duration: None,
         slow_peer_isolation: None,
+        fast_external_failover: None,
         max_prefixes: None,
         max_prefixes_ipv4_unicast: None,
         max_prefixes_ipv6_unicast: None,
@@ -1766,6 +1769,7 @@ mod forwarding_state;
 mod import_roster;
 mod inbound_admission;
 mod lifecycle;
+mod link_failover;
 mod max_prefix;
 mod metrics;
 mod operator_read_wait;

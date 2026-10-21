@@ -44,9 +44,12 @@ mod fib_table_control;
 mod forwarding_state;
 mod gnmi_set_bridge;
 mod kernel_route_notify;
+#[cfg(target_os = "linux")]
+mod link_failover;
 mod metrics_server;
 mod peer_manager;
 mod policy_admin;
+mod ra_discovery;
 mod reload;
 mod runtime_probe;
 mod sd_notify;
@@ -883,6 +886,12 @@ fn fib_runtime_event_to_bgp_event(
         peer_address: peer_address.clone(),
         timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
         reason: event.reason.clone(),
+        peer_interface: event
+            .peer_scope
+            .peer_interface()
+            .as_deref()
+            .unwrap_or_default()
+            .to_string(),
     };
 
     rustbgpd_api::proto::BgpEvent {
@@ -956,7 +965,13 @@ fn bfd_runtime_event_to_bgp_event(
     let old_state = bfd_session_state_to_proto(event.old_state);
     let new_state = bfd_session_state_to_proto(event.new_state);
     let diagnostic = bfd_diagnostic_to_str(event.diagnostic).to_string();
-    let summary = format!("bfd {peer_address} {old_state:?} → {new_state:?} ({diagnostic})");
+    // The summary names the neighbor as operators select it: scoped
+    // (`fe80::1%eth0`) for a link-local peer; the address fields stay bare.
+    let mut peer_label = peer_address.clone();
+    if !event.peer_interface.is_empty() {
+        peer_label = format!("{peer_address}%{}", event.peer_interface);
+    }
+    let summary = format!("bfd {peer_label} {old_state:?} → {new_state:?} ({diagnostic})");
     proto::BgpEvent {
         timestamp_unix_ms: event.timestamp_unix_ms,
         timestamp: timestamp.clone(),
@@ -978,6 +993,7 @@ fn bfd_runtime_event_to_bgp_event(
             new_state: new_state as i32,
             diagnostic,
             reason: String::new(),
+            peer_interface: event.peer_interface.clone(),
         })),
     }
 }
@@ -2271,6 +2287,80 @@ fn bfd_diagnostic_to_str(diag: rustbgpd_bfd::Diagnostic) -> &'static str {
     }
 }
 
+/// Project one BLACKHOLE status row into the public API.
+fn blackhole_status_to_proto(
+    status: &blackhole::BlackholeStatus,
+) -> rustbgpd_api::proto::BlackholeDiscard {
+    rustbgpd_api::proto::BlackholeDiscard {
+        prefix: status.prefix.addr_string(),
+        prefix_length: u32::from(status.prefix.prefix_len()),
+        peer_address: status.peer.to_string(),
+        state: match status.state {
+            blackhole::BlackholeState::Installed => {
+                rustbgpd_api::proto::BlackholeDiscardState::Installed as i32
+            }
+            blackhole::BlackholeState::Rejected => {
+                rustbgpd_api::proto::BlackholeDiscardState::Rejected as i32
+            }
+            blackhole::BlackholeState::Failed => {
+                rustbgpd_api::proto::BlackholeDiscardState::Failed as i32
+            }
+        },
+        reason: status.reason.clone(),
+        peer_interface: status
+            .peer_interface
+            .as_deref()
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+/// Project one FIB status row into the public API.
+fn fib_status_to_proto(
+    status: &fib_runtime::FibRuntimeStatus,
+) -> rustbgpd_api::proto::FibRouteStatus {
+    let sampling = status.sampling.as_ref();
+    rustbgpd_api::proto::FibRouteStatus {
+        table_name: status.table_name.clone(),
+        table_id: status.table_id,
+        metric: status.metric,
+        prefix: status.prefix.addr_string(),
+        prefix_length: u32::from(status.prefix.prefix_len()),
+        next_hop: status
+            .next_hop
+            .map_or_else(String::new, |ip| ip.to_string()),
+        next_hops: status.next_hops.iter().map(ToString::to_string).collect(),
+        peer_address: status.peer.map_or_else(String::new, |ip| ip.to_string()),
+        peer_interface: status
+            .peer_scope
+            .peer_interface()
+            .as_deref()
+            .unwrap_or_default()
+            .to_string(),
+        state: match status.state {
+            fib_runtime::FibRuntimeState::Installed => {
+                rustbgpd_api::proto::FibRouteState::Installed as i32
+            }
+            fib_runtime::FibRuntimeState::Rejected => {
+                rustbgpd_api::proto::FibRouteState::Rejected as i32
+            }
+            fib_runtime::FibRuntimeState::Failed => {
+                rustbgpd_api::proto::FibRouteState::Failed as i32
+            }
+            fib_runtime::FibRuntimeState::Unresolved => {
+                rustbgpd_api::proto::FibRouteState::Unresolved as i32
+            }
+        },
+        reason: status.reason.clone(),
+        sampling_sampled_rows: sampling.map_or(0, |s| s.sampled_rows),
+        sampling_suppressed_rows: sampling.map_or(0, |s| s.suppressed_rows),
+        sampling_total_rows: sampling.map_or(0, |s| s.total_rows),
+        sampling_max_routes: sampling.map_or(0, |s| s.max_routes),
+        sampling_sample_limit: sampling.map_or(0, |s| s.sample_limit),
+        sampling_complete: sampling.is_some_and(|s| s.suppressed_rows == 0),
+    }
+}
+
 /// Project the actor-owned BFD snapshot into the presence-aware public API.
 /// New daemons always publish `Some(false|true)`; `None` is reserved for an
 /// older serving daemon whose field 5 was absent on the wire.
@@ -2282,6 +2372,7 @@ fn bfd_status_to_proto(status: &bfd_runtime::BfdStatus) -> rustbgpd_api::proto::
         strict: status.strict,
         remote_administrative_down: Some(status.remote_admin_down),
         multihop: status.multihop,
+        peer_interface: status.peer_interface.clone(),
     }
 }
 
@@ -4967,6 +5058,13 @@ async fn run<T>(
     let peer_mgr = peer_mgr
         .with_bfd_coupling(bfd_desired_tx, bfd_state_change_rx, configured)
         .with_bfd_reload(bfd_reload_tx);
+    // Fast external failover: confirmed interface-down events. Without the
+    // monitor, sessions keep relying on the hold timer and BFD.
+    #[cfg(target_os = "linux")]
+    let peer_mgr = match link_failover::spawn(metrics.clone()).await {
+        Some(events) => peer_mgr.with_link_failover(events),
+        None => peer_mgr,
+    };
     // Retained: supervised by the shutdown `select!` below and joined by the
     // coordinated teardown after it.
     let mut peer_mgr_handle = tokio::spawn(async move {
@@ -5941,72 +6039,11 @@ async fn run<T>(
         evpn_es_drain: Some(evpn_es_drain),
         blackhole_discard_snapshot: {
             let rx = blackhole_status_rx.clone();
-            Arc::new(move || {
-                rx.borrow()
-                    .iter()
-                    .map(|status| rustbgpd_api::proto::BlackholeDiscard {
-                        prefix: status.prefix.addr_string(),
-                        prefix_length: u32::from(status.prefix.prefix_len()),
-                        peer_address: status.peer.to_string(),
-                        state: match status.state {
-                            blackhole::BlackholeState::Installed => {
-                                rustbgpd_api::proto::BlackholeDiscardState::Installed as i32
-                            }
-                            blackhole::BlackholeState::Rejected => {
-                                rustbgpd_api::proto::BlackholeDiscardState::Rejected as i32
-                            }
-                            blackhole::BlackholeState::Failed => {
-                                rustbgpd_api::proto::BlackholeDiscardState::Failed as i32
-                            }
-                        },
-                        reason: status.reason.clone(),
-                    })
-                    .collect()
-            })
+            Arc::new(move || rx.borrow().iter().map(blackhole_status_to_proto).collect())
         },
         fib_route_snapshot: {
             let rx = fib_status_rx.clone();
-            Arc::new(move || {
-                rx.borrow()
-                    .iter()
-                    .map(|status| {
-                        let sampling = status.sampling.as_ref();
-                        rustbgpd_api::proto::FibRouteStatus {
-                            table_name: status.table_name.clone(),
-                            table_id: status.table_id,
-                            metric: status.metric,
-                            prefix: status.prefix.addr_string(),
-                            prefix_length: u32::from(status.prefix.prefix_len()),
-                            next_hop: status
-                                .next_hop
-                                .map_or_else(String::new, |ip| ip.to_string()),
-                            next_hops: status.next_hops.iter().map(ToString::to_string).collect(),
-                            peer_address: status.peer.map_or_else(String::new, |ip| ip.to_string()),
-                            state: match status.state {
-                                fib_runtime::FibRuntimeState::Installed => {
-                                    rustbgpd_api::proto::FibRouteState::Installed as i32
-                                }
-                                fib_runtime::FibRuntimeState::Rejected => {
-                                    rustbgpd_api::proto::FibRouteState::Rejected as i32
-                                }
-                                fib_runtime::FibRuntimeState::Failed => {
-                                    rustbgpd_api::proto::FibRouteState::Failed as i32
-                                }
-                                fib_runtime::FibRuntimeState::Unresolved => {
-                                    rustbgpd_api::proto::FibRouteState::Unresolved as i32
-                                }
-                            },
-                            reason: status.reason.clone(),
-                            sampling_sampled_rows: sampling.map_or(0, |s| s.sampled_rows),
-                            sampling_suppressed_rows: sampling.map_or(0, |s| s.suppressed_rows),
-                            sampling_total_rows: sampling.map_or(0, |s| s.total_rows),
-                            sampling_max_routes: sampling.map_or(0, |s| s.max_routes),
-                            sampling_sample_limit: sampling.map_or(0, |s| s.sample_limit),
-                            sampling_complete: sampling.is_some_and(|s| s.suppressed_rows == 0),
-                        }
-                    })
-                    .collect()
-            })
+            Arc::new(move || rx.borrow().iter().map(fib_status_to_proto).collect())
         },
         fib_table_control: Some(fib_table_control::make_owned_fib_table_control_fn(
             fib_table_control::FibTableControlDeps {
@@ -6178,6 +6215,7 @@ async fn run<T>(
             slow_peer_threshold_pct: transport_config.slow_peer_threshold_pct,
             slow_peer_duration: transport_config.slow_peer_duration,
             slow_peer_isolation: transport_config.slow_peer_isolation,
+            fast_external_failover: transport_config.fast_external_failover,
             interpret_rfc1997: transport_config.interpret_rfc1997,
             rs_control_communities: transport_config.rs_control_communities,
             remove_private_as: transport_config.remove_private_as,
@@ -8942,6 +8980,7 @@ mod tests {
     fn bfd_status_projection_preserves_remote_admin_down_presence() {
         let mut status = bfd_runtime::BfdStatus {
             peer: "192.0.2.1".parse().unwrap(),
+            peer_interface: String::new(),
             state: rustbgpd_bfd::SessionState::Down,
             diagnostic: rustbgpd_bfd::Diagnostic::None,
             strict: true,
@@ -8960,6 +8999,144 @@ mod tests {
         assert!(
             projected.multihop,
             "RFC 5883 mode must reach the public snapshot"
+        );
+    }
+
+    /// BFD rows and events keep a bare address beside a scoped peer's
+    /// interface; numbered peers report none.
+    #[test]
+    fn bfd_projections_carry_the_peer_interface() {
+        let mut status = bfd_runtime::BfdStatus {
+            peer: "192.0.2.1".parse().unwrap(),
+            peer_interface: String::new(),
+            state: rustbgpd_bfd::SessionState::Up,
+            diagnostic: rustbgpd_bfd::Diagnostic::None,
+            strict: false,
+            remote_admin_down: false,
+            multihop: false,
+        };
+        assert_eq!(bfd_status_to_proto(&status).peer_interface, "");
+        status.peer = "fe80::1".parse().unwrap();
+        status.peer_interface = "eth0".to_string();
+        let projected = bfd_status_to_proto(&status);
+        assert_eq!(
+            (
+                projected.peer_address.as_str(),
+                projected.peer_interface.as_str()
+            ),
+            ("fe80::1", "eth0")
+        );
+
+        let event = bfd_runtime_event_to_bgp_event(&bfd_runtime::BfdRuntimeEvent {
+            peer: "fe80::1".parse().unwrap(),
+            peer_interface: "eth0".to_string(),
+            old_state: rustbgpd_bfd::SessionState::Init,
+            new_state: rustbgpd_bfd::SessionState::Up,
+            diagnostic: rustbgpd_bfd::Diagnostic::None,
+            timestamp_unix_ms: 0,
+        });
+        assert_eq!(event.peer_address, "fe80::1");
+        let Some(rustbgpd_api::proto::bgp_event::Payload::Bfd(payload)) = event.payload else {
+            panic!("BFD payload");
+        };
+        assert_eq!(
+            (
+                payload.peer_address.as_str(),
+                payload.peer_interface.as_str()
+            ),
+            ("fe80::1", "eth0")
+        );
+    }
+
+    /// A BFD event's summary, the line `rbgp events watch` prints, names a
+    /// link-local peer in scoped form; a numbered peer is unchanged.
+    #[test]
+    fn bfd_event_summary_names_the_scoped_peer() {
+        let summary = |peer: &str, interface: &str| {
+            bfd_runtime_event_to_bgp_event(&bfd_runtime::BfdRuntimeEvent {
+                peer: peer.parse().unwrap(),
+                peer_interface: interface.to_string(),
+                old_state: rustbgpd_bfd::SessionState::Init,
+                new_state: rustbgpd_bfd::SessionState::Up,
+                diagnostic: rustbgpd_bfd::Diagnostic::None,
+                timestamp_unix_ms: 0,
+            })
+            .summary
+        };
+        assert_eq!(
+            summary("fe80::1", "eth0"),
+            "bfd fe80::1%eth0 Init → Up (none)"
+        );
+        assert_eq!(summary("192.0.2.1", ""), "bfd 192.0.2.1 Init → Up (none)");
+    }
+
+    /// FIB and BLACKHOLE rows and FIB events keep a bare address beside a
+    /// scoped source neighbor's interface; numbered rows report none.
+    #[test]
+    fn dataplane_projections_carry_the_source_interface() {
+        let prefix: rustbgpd_wire::Prefix = rustbgpd_wire::Prefix::V4(
+            rustbgpd_wire::Ipv4Prefix::new("192.0.2.0".parse().unwrap(), 24),
+        );
+        let scoped = Some(Arc::<str>::from("eth0"));
+        let scope = fib::interface_scope("eth0");
+        let link_local: std::net::IpAddr = "fe80::1".parse().unwrap();
+        let mut fib = fib_runtime::FibRuntimeStatus {
+            table_name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            prefix,
+            next_hop: None,
+            next_hops: Vec::new(),
+            peer: Some(link_local),
+            peer_scope: scope,
+            state: fib_runtime::FibRuntimeState::Installed,
+            reason: "owned".to_string(),
+            sampling: None,
+        };
+        let row = fib_status_to_proto(&fib);
+        assert_eq!(
+            (row.peer_address.as_str(), row.peer_interface.as_str()),
+            ("fe80::1", "eth0")
+        );
+        fib.peer = Some("192.0.2.9".parse().unwrap());
+        fib.peer_scope = rustbgpd_rib::route::AspaContextId::DEFAULT;
+        assert_eq!(fib_status_to_proto(&fib).peer_interface, "");
+
+        let row = blackhole_status_to_proto(&blackhole::BlackholeStatus {
+            prefix,
+            peer: link_local,
+            peer_interface: scoped,
+            state: blackhole::BlackholeState::Installed,
+            reason: "owned".to_string(),
+        });
+        assert_eq!(
+            (row.peer_address.as_str(), row.peer_interface.as_str()),
+            ("fe80::1", "eth0")
+        );
+
+        let event = fib_runtime_event_to_bgp_event(&fib_runtime::FibRuntimeEvent {
+            kind: fib_runtime::FibRuntimeEventKind::Installed,
+            table_name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            prefix,
+            next_hop: None,
+            peer: Some(link_local),
+            peer_scope: scope,
+            timestamp_unix_ms: 0,
+            reason: String::new(),
+        });
+        assert_eq!(event.peer_address, "fe80::1");
+        let Some(rustbgpd_api::proto::bgp_event::Payload::DataplaneRoute(payload)) = event.payload
+        else {
+            panic!("dataplane route payload");
+        };
+        assert_eq!(
+            (
+                payload.peer_address.as_str(),
+                payload.peer_interface.as_str()
+            ),
+            ("fe80::1", "eth0")
         );
     }
 
@@ -10808,6 +10985,7 @@ peer_group = "plain"
                 honor_blackhole: false,
                 multipath_relax: false,
                 link_bandwidth_weighted: false,
+                fast_external_failover: None,
                 install_blackhole_discard: false,
                 allow_blackhole_broad_prefixes: false,
                 blackhole_discard_max_active: None,
@@ -10835,6 +11013,7 @@ peer_group = "plain"
                     slow_peer_threshold_pct: None,
                     slow_peer_duration: None,
                     slow_peer_isolation: None,
+                    fast_external_failover: None,
                     max_prefixes: None,
                     max_prefixes_ipv4_unicast: None,
                     max_prefixes_ipv6_unicast: None,
@@ -10906,6 +11085,7 @@ peer_group = "plain"
                     slow_peer_threshold_pct: None,
                     slow_peer_duration: None,
                     slow_peer_isolation: None,
+                    fast_external_failover: None,
                     max_prefixes: None,
                     max_prefixes_ipv4_unicast: None,
                     max_prefixes_ipv6_unicast: None,
@@ -10977,6 +11157,7 @@ peer_group = "plain"
                     slow_peer_threshold_pct: None,
                     slow_peer_duration: None,
                     slow_peer_isolation: None,
+                    fast_external_failover: None,
                     max_prefixes: None,
                     max_prefixes_ipv4_unicast: None,
                     max_prefixes_ipv6_unicast: None,

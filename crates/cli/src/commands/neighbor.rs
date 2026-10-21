@@ -69,6 +69,13 @@ pub(crate) fn scope_address(address: &mut String, interface: &str) {
     }
 }
 
+/// `address` in the scoped `fe80::1%eth0` form when `interface` is set.
+fn scoped_address(address: &str, interface: &str) -> String {
+    let mut address = address.to_string();
+    scope_address(&mut address, interface);
+    address
+}
+
 fn split_scoped_address(address: &str) -> (String, String) {
     address.rsplit_once('%').map_or_else(
         || (address.to_string(), String::new()),
@@ -401,7 +408,7 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
                 .keys
                 .iter()
                 .map(|key| JsonTcpAoKeyState {
-                    peer_address: key.peer_address.clone(),
+                    peer_address: scoped_address(&key.peer_address, &key.peer_interface),
                     prefix_length: key.prefix_length,
                     send_id: key.send_id,
                     recv_id: key.recv_id,
@@ -821,7 +828,7 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
                 2,
                 format!(
                     "MKT {}/{}: send={} recv={} algorithm={} current={} rnext={} preferred={} deprecated={} vrf-ifindex={} good={} bad={}",
-                    key.peer_address,
+                    scoped_address(&key.peer_address, &key.peer_interface),
                     key.prefix_length,
                     key.send_id,
                     key.recv_id,
@@ -1643,6 +1650,32 @@ pub async fn set_graceful_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link-local TCP-AO key address renders in scoped form; a numbered
+    /// one is unchanged.
+    #[test]
+    fn tcp_ao_key_address_renders_scoped() {
+        let key = |address: &str, interface: &str| crate::proto::TcpAoKeyState {
+            peer_address: address.to_string(),
+            peer_interface: interface.to_string(),
+            ..Default::default()
+        };
+        let state = crate::proto::NeighborState {
+            tcp_ao: Some(crate::proto::TcpAoState {
+                keys: vec![key("fe80::1", "eth0"), key("192.0.2.1", "")],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let keys: Vec<String> = json_neighbor_detail(&state)
+            .tcp_ao
+            .unwrap()
+            .keys
+            .into_iter()
+            .map(|key| key.peer_address)
+            .collect();
+        assert_eq!(keys, ["fe80::1%eth0", "192.0.2.1"]);
+    }
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
 
@@ -1718,6 +1751,7 @@ mod tests {
                 packets_dropped_icmp: 109,
                 keys: vec![crate::proto::TcpAoKeyState {
                     peer_address: "peer_address-value".to_string(),
+                    peer_interface: String::new(),
                     prefix_length: 102,
                     send_id: 103,
                     recv_id: 104,

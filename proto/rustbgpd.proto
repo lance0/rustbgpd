@@ -69,6 +69,9 @@ message BgpProtocolError {
   uint32 error_subcode = 2;
   string description = 3;
   string peer_address = 4;
+  // Interface of a scoped (IPv6 link-local) neighbor named by peer_address;
+  // empty for a numbered one.
+  string peer_interface = 5;
 }
 
 message ResourceLimitError {
@@ -76,6 +79,9 @@ message ResourceLimitError {
   uint64 current_value = 2;
   uint64 max_value = 3;
   string peer_address = 4;
+  // Interface of a scoped (IPv6 link-local) neighbor named by peer_address;
+  // empty for a numbered one.
+  string peer_interface = 5;
 }
 
 message ConfigError {
@@ -1113,6 +1119,10 @@ message TcpAoKeyState {
   // Linux VRF L3-master ifindex (`TCP_AO_KEYF_IFINDEX`), when present.
   // This is not an IPv6 link-local scope ID.
   optional uint32 vrf_ifindex = 12;
+  // Interface of the neighbor whose socket holds this key, when
+  // peer_address is IPv6 link-local; empty otherwise. peer_address stays a
+  // bare IP literal.
+  string peer_interface = 13;
 }
 
 message DynamicNeighborRange {
@@ -2126,12 +2136,19 @@ message TestPolicyDiff {
   // Human-readable attribute changes, e.g. "local_pref 100 - 200" or
   // "communities + 65001:999".
   repeated string changes = 4;
+  // Interface of the scoped (IPv6 link-local) neighbor named by peer; empty
+  // for a numbered neighbor. Recorded with the route, like
+  // Route.peer_interface.
+  string peer_interface = 5;
 }
 
 message TestPolicyRejectedRoute {
   string prefix = 1;
   uint32 prefix_length = 2;
   string peer = 3;
+  // Interface of the scoped (IPv6 link-local) neighbor named by peer; empty
+  // for a numbered neighbor.
+  string peer_interface = 4;
 }
 
 message GetPolicyStatsRequest {
@@ -2204,6 +2221,10 @@ message PolicyChainStats {
   // "KIND in policy NAME term NAME". Empty when no evaluation has
   // errored since chain install.
   string last_error = 7;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // neighbor and the "global" row. peer_address stays a bare IP literal:
+  // the pair (peer_address, peer_interface) identifies the neighbor.
+  string peer_interface = 8;
 }
 
 message GetPolicyStatsResponse {
@@ -2578,6 +2599,10 @@ message BfdSession {
   // requirement). False for single-hop (RFC 5881); a serving daemon that
   // predates this field ran single-hop sessions only, so absent is false.
   bool multihop = 6;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address stays a bare IP literal: the pair (peer_address,
+  // peer_interface) identifies the neighbor.
+  string peer_interface = 7;
 }
 
 message GetBfdSessionsResponse {
@@ -2981,6 +3006,10 @@ message BlackholeDiscard {
   // kernel error summary. route_churn_deferred guards an install or repair;
   // it is not proof that the row is installed in the kernel.
   string reason = 5;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor. Recorded by the session that
+  // received the BLACKHOLE route, like Route.peer_interface.
+  string peer_interface = 6;
 }
 
 message ListBlackholeDiscardsResponse {
@@ -3062,6 +3091,11 @@ message FibRouteStatus {
   // is the selected best route's next-hop and is a member of `next_hops` when
   // the set is non-empty (not necessarily `next_hops[0]`).
   repeated string next_hops = 16;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor or a row with no source
+  // peer. Recorded by the session that received the best route, like
+  // Route.peer_interface.
+  string peer_interface = 17;
 }
 
 message ListFibRoutesResponse {
@@ -3537,6 +3571,9 @@ message DataplaneRouteEvent {
   string timestamp = 10;
   // Stable operator-facing reason/summary string for this event.
   string reason = 11;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor, as on FibRouteStatus.
+  string peer_interface = 12;
 }
 
 message EvpnRouteEvent {
@@ -3572,6 +3609,9 @@ message BfdSessionEvent {
   string diagnostic = 6;
   // Stable operator-facing reason/summary string for this event.
   string reason = 7;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one, as on BfdSession.
+  string peer_interface = 8;
 }
 
 message BgpEvent {

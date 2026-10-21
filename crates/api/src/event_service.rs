@@ -1360,6 +1360,7 @@ mod tests {
             payload: Some(proto::bgp_event::Payload::Bfd(proto::BfdSessionEvent {
                 event_type: event_type as i32,
                 peer_address: peer.to_string(),
+                peer_interface: String::new(),
                 timestamp: "0".to_string(),
                 old_state: proto::BfdSessionState::Down as i32,
                 new_state: proto::BfdSessionState::Up as i32,

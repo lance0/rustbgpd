@@ -426,6 +426,7 @@ mod tests {
                 NetlinkSubscriber::LinkCarrier,
                 NetlinkSubscriber::GeneralFib,
                 NetlinkSubscriber::BlackholeDiscard,
+                NetlinkSubscriber::FastExternalFailover,
             ]
             .into_iter()
             .map(|candidate| {

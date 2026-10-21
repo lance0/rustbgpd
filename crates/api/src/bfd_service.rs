@@ -69,9 +69,9 @@ impl proto::bfd_service_server::BfdService for BfdService {
                     .as_ref()
                     .and_then(|known| known.roster.as_ref()),
             )?;
-            let peer = key.address;
-            let wanted = peer.to_string();
-            sessions.retain(|s| s.peer_address == wanted);
+            let wanted = key.address.to_string();
+            let interface = key.interface.as_deref().unwrap_or_default();
+            sessions.retain(|s| s.peer_address == wanted && s.peer_interface == interface);
             if sessions.is_empty()
                 && let Some(known_peers) = &self.known_peers
             {
@@ -90,6 +90,7 @@ mod tests {
     fn session(peer: &str, state: proto::BfdSessionState) -> proto::BfdSession {
         proto::BfdSession {
             peer_address: peer.to_string(),
+            peer_interface: String::new(),
             state: state as i32,
             diagnostic: "none".to_string(),
             strict: false,
@@ -139,6 +140,40 @@ mod tests {
             .into_inner();
         assert_eq!(resp.sessions.len(), 1);
         assert_eq!(resp.sessions[0].peer_address, "10.0.0.2");
+    }
+
+    /// A scoped selector matches the session on its interface only, and
+    /// rows keep a bare `peer_address` beside `peer_interface`.
+    #[tokio::test]
+    async fn scoped_filter_matches_the_session_interface() {
+        let svc = BfdService::with_snapshot(std::sync::Arc::new(|| {
+            vec![
+                proto::BfdSession {
+                    peer_interface: "eth0".to_string(),
+                    ..session("fe80::1", proto::BfdSessionState::Up)
+                },
+                session("10.0.0.1", proto::BfdSessionState::Up),
+            ]
+        }));
+        let view = |peer: &str| {
+            svc.get_bfd_sessions(Request::new(proto::GetBfdSessionsRequest {
+                peer_address: peer.to_string(),
+            }))
+        };
+        let sessions = view("fe80::1%eth0").await.unwrap().into_inner().sessions;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            (
+                sessions[0].peer_address.as_str(),
+                sessions[0].peer_interface.as_str()
+            ),
+            ("fe80::1", "eth0")
+        );
+        let other_interface = view("fe80::1%eth1").await.unwrap().into_inner();
+        assert_eq!(other_interface.sessions, []);
+        let sessions = view("10.0.0.1").await.unwrap().into_inner().sessions;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].peer_interface, "");
     }
 
     /// Load-bearing: removing the known-peer check makes the unknown row

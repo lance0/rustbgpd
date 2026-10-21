@@ -216,6 +216,7 @@ message BgpProtocolError {
   uint32 error_subcode = 2;     // RFC 4271 §4.5 error subcode
   string description = 3;       // human-readable description
   string peer_address = 4;      // peer involved
+  string peer_interface = 5;    // its interface, if IPv6 link-local
 }
 
 message ResourceLimitError {
@@ -223,6 +224,7 @@ message ResourceLimitError {
   uint64 current_value = 2;     // current usage
   uint64 max_value = 3;         // configured limit
   string peer_address = 4;      // peer involved, if applicable
+  string peer_interface = 5;    // its interface, if IPv6 link-local
 }
 
 message ConfigError {

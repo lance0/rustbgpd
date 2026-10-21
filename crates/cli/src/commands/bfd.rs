@@ -64,7 +64,7 @@ fn human_diagnostic(session: &BfdSession) -> String {
 async fn fetch(connection: Connection, peer: Option<&str>) -> Result<Vec<BfdSession>, CliError> {
     let mut client =
         BfdServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = read_rpc(
+    let mut resp = read_rpc(
         "GetBfdSessions",
         client.get_bfd_sessions(GetBfdSessionsRequest {
             peer_address: peer.unwrap_or_default().to_string(),
@@ -72,6 +72,12 @@ async fn fetch(connection: Connection, peer: Option<&str>) -> Result<Vec<BfdSess
     )
     .await?
     .into_inner();
+    for session in &mut resp.sessions {
+        crate::commands::neighbor::scope_address(
+            &mut session.peer_address,
+            &session.peer_interface,
+        );
+    }
     Ok(resp.sessions)
 }
 
@@ -127,6 +133,7 @@ mod tests {
     ) -> BfdSession {
         BfdSession {
             peer_address: peer.to_string(),
+            peer_interface: String::new(),
             state: state as i32,
             diagnostic: diagnostic.to_string(),
             strict,
@@ -144,6 +151,7 @@ mod tests {
     ) -> rustbgpd_api::proto::BfdSession {
         rustbgpd_api::proto::BfdSession {
             peer_address: peer.to_string(),
+            peer_interface: String::new(),
             state: state as i32,
             diagnostic: diagnostic.to_string(),
             strict,
@@ -253,6 +261,26 @@ mod tests {
             .clone()
             .expect("BFD request captured");
         assert!(request.peer_address.is_empty());
+    }
+
+    /// A scoped session renders as `fe80::1%eth0`; a numbered one is
+    /// unchanged.
+    #[tokio::test]
+    async fn sessions_render_a_scoped_peer() {
+        let server = spawn_mock_server(None).await;
+        *server.state.bfd_sessions.lock().await = vec![
+            rustbgpd_api::proto::BfdSession {
+                peer_interface: "eth0".to_string(),
+                ..server_session("fe80::1", BfdSessionState::Up, "none", false, Some(false))
+            },
+            server_session("192.0.2.1", BfdSessionState::Up, "none", false, Some(false)),
+        ];
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let sessions = fetch(connection, None).await.unwrap();
+
+        let peers: Vec<&str> = sessions.iter().map(|s| s.peer_address.as_str()).collect();
+        assert_eq!(peers, ["fe80::1%eth0", "192.0.2.1"]);
     }
 
     #[tokio::test]
