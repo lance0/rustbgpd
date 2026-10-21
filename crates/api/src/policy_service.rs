@@ -1024,20 +1024,20 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         request: Request<proto::GetNeighborPolicyChainsRequest>,
     ) -> Result<Response<proto::NeighborPolicyChains>, Status> {
         let req = request.into_inner();
-        let address = crate::peer_selector::require_neighbor(
+        // The peer manager matches the scope against its own configuration.
+        let peer = crate::peer_selector::require_neighbor(
             "address",
             &req.address,
             "",
             self.import_roster.as_ref(),
-        )?
-        .address;
+        )?;
         // Capture before the peer-manager read; registration may finish while it waits.
         let initial_roster_pending = self
             .settlement
             .as_ref()
             .is_some_and(|(_, gate)| gate.initial_roster_pending());
         let chains = peer_manager_read(&self.peer_mgr_tx, |reply| {
-            PeerManagerCommand::GetNeighborPolicyChains { address, reply }
+            PeerManagerCommand::GetNeighborPolicyChains { peer, reply }
         })
         .await?
         .ok_or_else(|| {
@@ -1202,7 +1202,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
 
         let reply = peer_manager_read(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::ExplainImportPolicy {
-                address,
+                peer: peer.clone(),
                 afi,
                 safi,
                 prefix,
@@ -1210,7 +1210,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 reply,
             }
         })
-        .await?;
+        .await?
+        .ok_or_else(|| Status::not_found(format!("neighbor {peer} not found")))?;
         let reply: Option<ImportExplainReply> = match reply {
             SessionQueryOutcome::Reply(Ok(reply)) => Some(reply),
             SessionQueryOutcome::Reply(Err(_)) => {
@@ -1313,9 +1314,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let address = peer.address;
 
         let reply = peer_manager_read(&self.peer_mgr_tx, |reply| {
-            PeerManagerCommand::ListRejectedRoutes { address, reply }
+            PeerManagerCommand::ListRejectedRoutes {
+                peer: peer.clone(),
+                reply,
+            }
         })
-        .await?;
+        .await?
+        .ok_or_else(|| Status::not_found(format!("neighbor {peer} not found")))?;
         let reply: Option<RejectedRoutesReply> = match reply {
             SessionQueryOutcome::Reply(reply) => Some(reply),
             SessionQueryOutcome::SessionGone => None,
@@ -1433,11 +1438,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 ));
             }
         };
-        let peer_filter = crate::peer_selector::parse_neighbor_address(
+        let peer_key = crate::peer_selector::parse_neighbor(
             "peer",
             &req.peer,
+            "",
             self.import_roster.as_ref(),
         )?;
+        let peer_filter = peer_key.as_ref().map(|key| key.address);
 
         // Compile the candidate source server-side. Diagnostics are a
         // successful RPC with compiled=false — the dry run's answer.
@@ -1466,19 +1473,19 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         } else {
             RouteQueryScope::Best
         };
+        let row_scope = if import { peer_key.as_ref() } else { None };
         let mut page = query_test_policy_page(rib_tx, query_scope, None, None).await?;
+        require_row_scope(row_scope, &page.routes)?;
         let snapshot_version = page.version;
 
         // Peer context (ASN / peer-group) so guards on peer.* fields
         // see real values.
-        let peer_context: DryRunPeerContext =
-            peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
-                PeerManagerOperatorQuery::ListPeers { reply }
-            })
-            .await?
-            .into_iter()
-            .map(|info| (info.address, (info.remote_asn, info.peer_group)))
-            .collect();
+        let peer_context = dry_run_peer_context(
+            &self.peer_mgr_tx,
+            self.operator_tx.as_ref(),
+            peer_key.as_ref(),
+        )
+        .await?;
 
         let scope = TestPolicyScope {
             import,
@@ -1512,6 +1519,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             drop(page);
             page = query_test_policy_page(rib_tx, query_scope, Some(after), Some(snapshot_version))
                 .await?;
+            require_row_scope(row_scope, &page.routes)?;
         }
         response.term_hits = render_test_policy_term_hits(&chain, &hits);
         Ok(Response::new(response))
@@ -1564,13 +1572,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 ));
             }
         };
-        let target = crate::peer_selector::require_neighbor(
+        let target_key = crate::peer_selector::require_neighbor(
             "peer",
             &req.peer,
             "",
             self.import_roster.as_ref(),
-        )?
-        .address;
+        )?;
+        let target = target_key.address;
 
         let file = match RpolFile::parse(&req.rpol_source) {
             Ok(file) => file,
@@ -1614,8 +1622,16 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             Status::failed_precondition(format!(
                 "peer {target} has no live outbound registration; its export chain is installed per session"
             ))
-        })?
-        .chain;
+        })?;
+        // The chain belongs to the registered session's neighbor, which a
+        // reload may have moved to another interface since the selector was
+        // parsed.
+        if installed.peer_interface.as_deref() != target_key.interface.as_deref() {
+            return Err(Status::not_found(format!(
+                "neighbor {target_key} not found"
+            )));
+        }
+        let installed = installed.chain;
         let local_asn = self
             .local_asn
             .or_else(|| installed.as_ref().and_then(|chain| chain.local_asn));
@@ -1693,14 +1709,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
 
         let mut page = query_test_policy_page(rib_tx, RouteQueryScope::Best, None, None).await?;
         let snapshot_version = page.version;
-        let peer_context: DryRunPeerContext =
-            peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
-                PeerManagerOperatorQuery::ListPeers { reply }
-            })
-            .await?
-            .into_iter()
-            .map(|info| (info.address, (info.remote_asn, info.peer_group)))
-            .collect();
+        let peer_context = dry_run_peer_context(
+            &self.peer_mgr_tx,
+            self.operator_tx.as_ref(),
+            Some(&target_key),
+        )
+        .await?;
 
         let scope = ComparePolicyScope {
             target,
@@ -1771,36 +1785,40 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 "allow_partial requires an unfiltered import or both query",
             ));
         }
-        let peer = crate::peer_selector::parse_neighbor_address(
-            "peer_address",
-            &req.peer_address,
-            self.import_roster.as_ref(),
-        )?;
-        let unavailable =
-            || Status::failed_precondition("policy stats runtime unavailable on this listener");
-        let roster_cell = self.import_roster.as_ref().ok_or_else(unavailable)?;
-        let export_cell = if want_export {
-            Some(self.export_roster.as_ref().ok_or_else(unavailable)?)
-        } else {
-            None
-        };
         // Snapshot before loading the roster: completion publishes it first.
         let initial_roster_pending = self
             .settlement
             .as_ref()
             .is_some_and(|(_, gate)| gate.initial_roster_pending());
-        // One load per roster per request (ADR-0136): peer validation, import
-        // and datasets read this roster, held across the awaits below.
-        let roster = roster_cell.load();
-        let selected = match peer {
-            Some(address) => {
+        // One load per roster per request (ADR-0136): selector parsing, peer
+        // selection, import and datasets read this roster, held across the
+        // awaits below.
+        let roster = self.import_roster.as_ref().map(ImportRosterReader::load);
+        let key = crate::peer_selector::parse_neighbor_in(
+            "peer_address",
+            &req.peer_address,
+            "",
+            roster.as_deref(),
+        )?;
+        let peer = key.as_ref().map(|key| key.address);
+        let unavailable =
+            || Status::failed_precondition("policy stats runtime unavailable on this listener");
+        let roster_cell = self.import_roster.as_ref().ok_or_else(unavailable)?;
+        let roster = roster.ok_or_else(unavailable)?;
+        let export_cell = if want_export {
+            Some(self.export_roster.as_ref().ok_or_else(unavailable)?)
+        } else {
+            None
+        };
+        let selected = match &key {
+            Some(key) => {
                 let selected =
                     policy_stats_request(deadline, "peer_validation", audit.as_ref(), async {
-                        roster.unique_peer(address).ok_or_else(|| {
+                        policy_stats_peer(&roster, key).ok_or_else(|| {
                             if initial_roster_pending {
                                 Status::unavailable("initial configured-peer roster not installed")
                             } else {
-                                Status::not_found(format!("neighbor {address} not found"))
+                                Status::not_found(format!("neighbor {key} not found"))
                             }
                         })
                     })
@@ -1943,6 +1961,56 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             datasets,
         }))
     }
+}
+
+/// The roster row `key` selects: the same address and interface scope, so a
+/// neighbor replaced on another interface is not reported under this key.
+fn policy_stats_peer<'a>(
+    roster: &'a crate::import_roster::ImportRoster,
+    key: &PeerKey,
+) -> Option<&'a crate::import_roster::ImportRosterPeer> {
+    roster.peers().iter().find(|peer| peer.key == *key)
+}
+
+/// `NOT_FOUND` when a received-route page for a scoped selector holds
+/// another interface's routes: the neighbor on that address was replaced
+/// after the selector was parsed. Same rule as `ListReceivedRoutes`.
+fn require_row_scope(key: Option<&PeerKey>, routes: &[rustbgpd_rib::Route]) -> Result<(), Status> {
+    match key {
+        Some(key)
+            if routes
+                .iter()
+                .any(|route| route.peer_interface().as_deref() != key.interface.as_deref()) =>
+        {
+            Err(Status::not_found(format!("neighbor {key} not found")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Dry-run peer context (ASN and peer group) from the peer manager's
+/// inventory, checked against the selector's scope in that same inventory.
+async fn dry_run_peer_context(
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    operator_tx: Option<&mpsc::Sender<EnqueuedOperatorQuery>>,
+    key: Option<&PeerKey>,
+) -> Result<DryRunPeerContext, Status> {
+    let peers = peer_manager_operator_read(peer_mgr_tx, operator_tx, |reply| {
+        PeerManagerOperatorQuery::ListPeers { reply }
+    })
+    .await?;
+    if let Some(key) = key {
+        crate::peer_selector::require_current_scope(
+            key,
+            peers
+                .iter()
+                .map(|info| (info.address, info.interface.as_deref())),
+        )?;
+    }
+    Ok(peers
+        .into_iter()
+        .map(|info| (info.address, (info.remote_asn, info.peer_group)))
+        .collect())
 }
 
 fn posture_dimension_to_proto(
@@ -3068,7 +3136,7 @@ mod tests {
                             .map_or(SessionQueryOutcome::SessionGone, |reply| {
                                 SessionQueryOutcome::Reply(Ok(reply))
                             });
-                        let _ = tx.send(outcome);
+                        let _ = tx.send(Some(outcome));
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -3088,9 +3156,9 @@ mod tests {
             if let Some(PeerManagerCommand::ExplainImportPolicy { reply, .. }) =
                 peer_rx.recv().await
             {
-                let _ = reply.send(SessionQueryOutcome::Reply(Err(
+                let _ = reply.send(Some(SessionQueryOutcome::Reply(Err(
                     rustbgpd_transport::AllPathMatchLimitExceeded,
-                )));
+                ))));
             }
         });
         let error = PolicyServiceRpc::explain_import_policy(&svc, Request::new(explain_request()))
@@ -3114,7 +3182,7 @@ mod tests {
                         let outcome = reply
                             .clone()
                             .map_or(SessionQueryOutcome::SessionGone, SessionQueryOutcome::Reply);
-                        let _ = tx.send(outcome);
+                        let _ = tx.send(Some(outcome));
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -3162,10 +3230,10 @@ mod tests {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::ExplainImportPolicy { reply, .. } => {
-                        let _ = reply.send(SessionQueryOutcome::TimedOut);
+                        let _ = reply.send(Some(SessionQueryOutcome::TimedOut));
                     }
                     PeerManagerCommand::ListRejectedRoutes { reply, .. } => {
-                        let _ = reply.send(SessionQueryOutcome::TimedOut);
+                        let _ = reply.send(Some(SessionQueryOutcome::TimedOut));
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -4012,9 +4080,19 @@ policy customer-in(peer_lp: u32) {
     /// [`test_policy_service_with`] whose RIB also answers the installed
     /// export-chain query (`None` = the peer has no outbound registration).
     fn policy_dry_run_service(
+        routes: Vec<rustbgpd_rib::Route>,
+        failure: Option<(usize, rustbgpd_rib::RoutePageError)>,
+        installed: Option<rustbgpd_rib::InstalledExportChain>,
+    ) -> (PolicyService, Arc<Mutex<Vec<String>>>) {
+        policy_dry_run_service_with_peers(routes, failure, installed, Vec::new())
+    }
+
+    /// [`policy_dry_run_service`] whose peer manager lists `peers`.
+    fn policy_dry_run_service_with_peers(
         mut routes: Vec<rustbgpd_rib::Route>,
         failure: Option<(usize, rustbgpd_rib::RoutePageError)>,
         installed: Option<rustbgpd_rib::InstalledExportChain>,
+        peers: Vec<crate::peer_types::PeerInfo>,
     ) -> (PolicyService, Arc<Mutex<Vec<String>>>) {
         routes.sort_unstable_by_key(rustbgpd_rib::route_query_key);
         let commands = Arc::new(Mutex::new(Vec::new()));
@@ -4026,7 +4104,7 @@ policy customer-in(peer_lp: u32) {
                 match cmd {
                     PeerManagerCommand::ListPeers { reply } => {
                         peer_commands.lock().unwrap().push("peers".to_string());
-                        let _ = reply.send(Vec::new());
+                        let _ = reply.send(peers.clone());
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -4678,6 +4756,7 @@ policy client-x {
             routes,
             None,
             Some(rustbgpd_rib::InstalledExportChain {
+                peer_interface: None,
                 chain: installed.map(rustbgpd_policy::PolicyChain::compiled_shared),
             }),
         );
@@ -6735,5 +6814,274 @@ policy client-x {
             terminal.try_recv().is_err(),
             "a successful owner never fences"
         );
+    }
+
+    // ── Scoped selectors on read paths ──────────────────────────────
+    //
+    // Each read takes `fe80::1%eth0` while the import roster still lists
+    // that neighbor, and the actor that supplies the data has meanwhile
+    // reloaded it onto eth1: the controlled interleaving of a reload that
+    // lands while the request is queued. The read must be NOT_FOUND, never
+    // eth1's data under the eth0 selector.
+
+    const LINK_LOCAL: &str = "fe80::1";
+
+    fn link_local() -> IpAddr {
+        LINK_LOCAL.parse().unwrap()
+    }
+
+    fn eth0_key() -> PeerKey {
+        PeerKey::new(link_local(), Some("eth0".to_string()))
+    }
+
+    /// An import roster publishing `fe80::1%eth0`, so the API edge accepts
+    /// the eth0 selector.
+    fn eth0_roster() -> (ImportRosterPublisher, ImportRosterReader) {
+        let publisher = crate::import_roster::test_support::publisher(
+            vec![crate::import_roster::ImportRosterPeer {
+                key: eth0_key(),
+                session_id: 1,
+                publication: tokio::sync::watch::channel(None).1,
+            }],
+            Vec::new(),
+        );
+        let reader = publisher.reader();
+        (publisher, reader)
+    }
+
+    fn scoped_peer_info(interface: &str) -> crate::peer_types::PeerInfo {
+        let mut info = crate::test_support::peer_info(link_local());
+        info.interface = Some(interface.to_string());
+        info
+    }
+
+    fn scoped_route(prefix: &str, interface: &str) -> rustbgpd_rib::Route {
+        let mut route = test_route(prefix, 24);
+        route.peer = link_local();
+        route.aspa_context = rustbgpd_rib::route::AspaContextId::intern_scoped(
+            rustbgpd_wire::AspaValidationContext::default(),
+            Some(interface),
+        );
+        route
+    }
+
+    /// Peer-manager reads carry the whole key to the actor, which answers
+    /// `None` for a scope it no longer manages; the API maps that to
+    /// `NOT_FOUND`. Numbered selectors reach it with no interface, as before.
+    #[tokio::test]
+    async fn peer_manager_policy_reads_carry_the_scope_and_map_a_stale_one_to_not_found() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let (_roster, reader) = eth0_roster();
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_import_roster(reader);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let actor_seen = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Some(cmd) = peer_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::GetNeighborPolicyChains { peer, reply } => {
+                        actor_seen.lock().unwrap().push(peer);
+                        let _ = reply.send(None);
+                    }
+                    PeerManagerCommand::ExplainImportPolicy { peer, reply, .. } => {
+                        actor_seen.lock().unwrap().push(peer);
+                        let _ = reply.send(None);
+                    }
+                    PeerManagerCommand::ListRejectedRoutes { peer, reply } => {
+                        actor_seen.lock().unwrap().push(peer);
+                        let _ = reply.send(None);
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        for selector in ["fe80::1%eth0", "192.0.2.1"] {
+            let chains = PolicyServiceRpc::get_neighbor_policy_chains(
+                &svc,
+                Request::new(proto::GetNeighborPolicyChainsRequest {
+                    address: selector.into(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            let explain = PolicyServiceRpc::explain_import_policy(
+                &svc,
+                Request::new(proto::ExplainImportPolicyRequest {
+                    peer_address: selector.into(),
+                    ..explain_request()
+                }),
+            )
+            .await
+            .unwrap_err();
+            let rejected = PolicyServiceRpc::list_rejected_routes(
+                &svc,
+                Request::new(proto::ListRejectedRoutesRequest {
+                    peer_address: selector.into(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            for error in [chains, explain, rejected] {
+                assert_eq!(error.code(), tonic::Code::NotFound, "{selector}: {error:?}");
+            }
+        }
+        let numbered = PeerKey::new("192.0.2.1".parse().unwrap(), None);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                eth0_key(),
+                eth0_key(),
+                eth0_key(),
+                numbered.clone(),
+                numbered.clone(),
+                numbered
+            ]
+        );
+    }
+
+    /// `TestPolicy`'s received-route page comes back with eth1's routes for
+    /// the eth0 selector: `NOT_FOUND`, as `ListReceivedRoutes` answers.
+    #[tokio::test]
+    async fn test_policy_import_refuses_routes_from_a_replaced_scope() {
+        let routes = vec![scoped_route("10.10.1.0", "eth1")];
+        let (_roster, reader) = eth0_roster();
+        let (svc, _) = policy_dry_run_service_with_peers(
+            routes.clone(),
+            None,
+            None,
+            vec![scoped_peer_info("eth0")],
+        );
+        let svc = svc.with_import_roster(reader.clone());
+        let request = || proto::TestPolicyRequest {
+            peer: "fe80::1%eth0".into(),
+            ..test_policy_request()
+        };
+        let error = PolicyServiceRpc::test_policy(&svc, Request::new(request()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound, "{error:?}");
+        assert_eq!(error.message(), "neighbor fe80::1%eth0 not found");
+
+        // The same neighbor still on eth0 is evaluated.
+        let (svc, _) = policy_dry_run_service_with_peers(
+            vec![scoped_route("10.10.1.0", "eth0")],
+            None,
+            None,
+            vec![scoped_peer_info("eth0")],
+        );
+        let svc = svc.with_import_roster(reader);
+        let response = PolicyServiceRpc::test_policy(&svc, Request::new(request()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.routes_evaluated, 1);
+    }
+
+    /// The dry-run peer context (ASN and peer group) comes from the peer
+    /// manager's inventory, which now lists the neighbor on eth1: `TestPolicy`
+    /// export and `ComparePolicy` are `NOT_FOUND` rather than evaluating with
+    /// eth1's context.
+    #[tokio::test]
+    async fn dry_run_peer_context_refuses_a_replaced_scope() {
+        let (_roster, reader) = eth0_roster();
+        // One service per RPC: the fake RIB serves one paged walk.
+        let service = || {
+            let (svc, _) = policy_dry_run_service_with_peers(
+                vec![test_route("10.10.1.0", 24)],
+                None,
+                Some(rustbgpd_rib::InstalledExportChain {
+                    chain: None,
+                    peer_interface: Some("eth0".into()),
+                }),
+                vec![scoped_peer_info("eth1")],
+            );
+            svc.with_import_roster(reader.clone())
+        };
+        let error = PolicyServiceRpc::test_policy(
+            &service(),
+            Request::new(proto::TestPolicyRequest {
+                peer: "fe80::1%eth0".into(),
+                direction: "export".into(),
+                ..test_policy_request()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound, "{error:?}");
+        let error = PolicyServiceRpc::compare_policy(
+            &service(),
+            Request::new(proto::ComparePolicyRequest {
+                peer: "fe80::1%eth0".into(),
+                ..compare_request(COMPARE_INSTALLED_RPOL, &["client-x"], "")
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound, "{error:?}");
+    }
+
+    /// `ComparePolicy`'s baseline is the registered session's chain; the RIB
+    /// reports that session's interface, and eth1's chain is not compared
+    /// under the eth0 selector.
+    #[tokio::test]
+    async fn compare_policy_refuses_an_installed_chain_from_a_replaced_scope() {
+        let (_roster, reader) = eth0_roster();
+        let installed = |interface: &str| rustbgpd_rib::InstalledExportChain {
+            chain: None,
+            peer_interface: Some(interface.into()),
+        };
+        let request = || proto::ComparePolicyRequest {
+            peer: "fe80::1%eth0".into(),
+            ..compare_request(COMPARE_INSTALLED_RPOL, &["client-x"], "")
+        };
+        let (svc, commands) = policy_dry_run_service_with_peers(
+            compare_routes(),
+            None,
+            Some(installed("eth1")),
+            vec![scoped_peer_info("eth0")],
+        );
+        let svc = svc.with_import_roster(reader.clone());
+        let error = PolicyServiceRpc::compare_policy(&svc, Request::new(request()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound, "{error:?}");
+        assert_eq!(error.message(), "neighbor fe80::1%eth0 not found");
+        assert_eq!(*commands.lock().unwrap(), ["chain"]);
+
+        let (svc, _) = policy_dry_run_service_with_peers(
+            compare_routes(),
+            None,
+            Some(installed("eth0")),
+            vec![scoped_peer_info("eth0")],
+        );
+        let svc = svc.with_import_roster(reader);
+        let response = PolicyServiceRpc::compare_policy(&svc, Request::new(request()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.compiled);
+    }
+
+    /// `GetPolicyStats` selects from the one roster snapshot it parsed the
+    /// selector against, by address and interface: a snapshot holding the
+    /// address only on eth1 never yields eth1's row for eth0.
+    #[test]
+    fn policy_stats_selects_by_address_and_scope_from_one_snapshot() {
+        let peer =
+            |address: &str, interface: Option<&str>| crate::import_roster::ImportRosterPeer {
+                key: PeerKey::new(address.parse().unwrap(), interface.map(str::to_string)),
+                session_id: 1,
+                publication: tokio::sync::watch::channel(None).1,
+            };
+        let publisher = crate::import_roster::test_support::publisher(
+            vec![peer(LINK_LOCAL, Some("eth1")), peer("192.0.2.1", None)],
+            Vec::new(),
+        );
+        let roster = publisher.reader().load();
+        assert!(policy_stats_peer(&roster, &eth0_key()).is_none());
+        let eth1 = PeerKey::new(link_local(), Some("eth1".to_string()));
+        assert_eq!(policy_stats_peer(&roster, &eth1).unwrap().key, eth1);
+        let numbered = PeerKey::new("192.0.2.1".parse().unwrap(), None);
+        assert_eq!(policy_stats_peer(&roster, &numbered).unwrap().key, numbered);
     }
 }

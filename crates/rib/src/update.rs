@@ -1755,6 +1755,10 @@ pub struct InstalledExportChain {
     /// The compiled IR the live distribution path evaluates, or `None`
     /// when no chain applies.
     pub chain: Option<Arc<rustbgpd_policy::ir::CompiledChain>>,
+    /// Interface of the registered session's scoped (IPv6 link-local)
+    /// neighbor, `None` for a numbered one, so a caller can check that the
+    /// chain belongs to the neighbor its selector named.
+    pub peer_interface: Option<Arc<str>>,
 }
 
 /// Which table a paged route query ([`RibUpdate::QueryRoutesPage`]) reads.

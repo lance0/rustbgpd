@@ -247,7 +247,7 @@ async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
     ));
     let (reply, response) = oneshot::channel();
     tx.send(PeerManagerCommand::ExplainImportPolicy {
-        address: configured,
+        peer: PeerKey::new(configured, None),
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         prefix,
@@ -260,7 +260,7 @@ async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
     tokio::time::advance(EXPLAIN_QUERY_TIMEOUT).await;
     assert!(matches!(
         response.await.unwrap(),
-        SessionQueryOutcome::TimedOut
+        Some(SessionQueryOutcome::TimedOut)
     ));
 
     let roster = import_roster.load();
@@ -282,7 +282,7 @@ async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
 
     let (reply, response) = oneshot::channel();
     tx.send(PeerManagerCommand::ExplainImportPolicy {
-        address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+        peer: PeerKey::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)), None),
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         prefix,
@@ -293,7 +293,7 @@ async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
     .unwrap();
     assert!(matches!(
         response.await.unwrap(),
-        SessionQueryOutcome::SessionGone
+        Some(SessionQueryOutcome::SessionGone)
     ));
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
