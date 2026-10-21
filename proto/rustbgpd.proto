@@ -69,6 +69,9 @@ message BgpProtocolError {
   uint32 error_subcode = 2;
   string description = 3;
   string peer_address = 4;
+  // Interface of a scoped (IPv6 link-local) neighbor named by peer_address;
+  // empty for a numbered one.
+  string peer_interface = 5;
 }
 
 message ResourceLimitError {
@@ -76,6 +79,9 @@ message ResourceLimitError {
   uint64 current_value = 2;
   uint64 max_value = 3;
   string peer_address = 4;
+  // Interface of a scoped (IPv6 link-local) neighbor named by peer_address;
+  // empty for a numbered one.
+  string peer_interface = 5;
 }
 
 message ConfigError {
@@ -1113,6 +1119,10 @@ message TcpAoKeyState {
   // Linux VRF L3-master ifindex (`TCP_AO_KEYF_IFINDEX`), when present.
   // This is not an IPv6 link-local scope ID.
   optional uint32 vrf_ifindex = 12;
+  // Interface of the neighbor whose socket holds this key, when
+  // peer_address is IPv6 link-local; empty otherwise. peer_address stays a
+  // bare IP literal.
+  string peer_interface = 13;
 }
 
 message DynamicNeighborRange {

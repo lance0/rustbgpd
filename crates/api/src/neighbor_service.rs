@@ -1163,6 +1163,13 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
                     packets_good: key.pkt_good,
                     packets_bad: key.pkt_bad,
                     vrf_ifindex: key.vrf_ifindex,
+                    // The key sits on this neighbor's socket, so a
+                    // link-local key address has the neighbor's scope.
+                    peer_interface: if is_ipv6_link_local(key.peer) {
+                        info.interface.clone().unwrap_or_default()
+                    } else {
+                        String::new()
+                    },
                 })
                 .collect(),
         }),
@@ -5044,10 +5051,52 @@ mod tests {
         assert_eq!(ao.packets_dropped_icmp, 4);
         assert_eq!(ao.keys.len(), 1);
         assert_eq!(ao.keys[0].peer_address, "10.0.0.1");
+        assert_eq!(ao.keys[0].peer_interface, "");
         assert_eq!(ao.keys[0].algorithm, "hmac(sha256)");
         assert!(ao.keys[0].preferred);
         assert_eq!(ao.keys[0].vrf_ifindex, None);
         assert_eq!(state.tcp_ao_health, proto::TcpAoHealth::Degraded as i32);
+    }
+
+    /// A link-local TCP-AO key reports the scope of the neighbor whose
+    /// socket holds it, beside a bare `peer_address`.
+    #[test]
+    fn peer_info_to_proto_scopes_a_link_local_tcp_ao_key() {
+        let mut info = peer_info("fe80::1".parse().unwrap());
+        info.interface = Some("eth0".to_string());
+        info.authentication = "tcp_ao".to_string();
+        info.tcp_ao_info = Some(rustbgpd_transport::TcpAoInfoSnapshot {
+            has_current_key: true,
+            has_rnext_key: false,
+            ao_required: true,
+            accept_icmps: false,
+            current_key: 7,
+            rnext_key: 0,
+            pkt_good: 0,
+            pkt_bad: 0,
+            pkt_key_not_found: 0,
+            pkt_ao_required: 0,
+            pkt_dropped_icmp: 0,
+            keys: vec![rustbgpd_transport::TcpAoKeyState {
+                peer: "fe80::1".parse().unwrap(),
+                prefix_len: 128,
+                send_id: 7,
+                recv_id: 7,
+                algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                is_current: true,
+                is_rnext: false,
+                preferred: true,
+                deprecated: false,
+                vrf_ifindex: None,
+                pkt_good: 0,
+                pkt_bad: 0,
+            }],
+        });
+        let key = &peer_info_to_proto(&info).tcp_ao.unwrap().keys[0];
+        assert_eq!(
+            (key.peer_address.as_str(), key.peer_interface.as_str()),
+            ("fe80::1", "eth0")
+        );
     }
 
     #[test]

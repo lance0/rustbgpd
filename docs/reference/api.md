@@ -357,6 +357,8 @@ neighbor; the interface is empty for a numbered neighbor:
 | `BfdSession`, `BfdSessionEvent` | `peer_interface` |
 | `PolicyChainStats` | `peer_interface` (empty on the `global` row) |
 | `TestPolicyDiff`, `TestPolicyRejectedRoute` | `peer_interface` (beside `peer`) |
+| `TcpAoKeyState` | `peer_interface` (the owning neighbor's interface for a link-local key address) |
+| `BgpProtocolError`, `ResourceLimitError` (reserved `ErrorDetail` shapes, not populated today) | `peer_interface` |
 
 Route rows and route events report the interface recorded when the route was
 learned or the event was recorded, not the current neighbor inventory. The
