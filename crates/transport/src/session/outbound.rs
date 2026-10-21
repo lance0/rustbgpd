@@ -385,7 +385,7 @@ impl PeerSession {
                         return;
                     }
                     available -= 1;
-                    self.updates_sent += 1;
+                    self.config.neighbor_counters.record_update_sent();
                     self.metrics.record_message_sent(&self.peer_label, "update");
                 }
                 *next += 1;
@@ -1710,7 +1710,7 @@ impl PeerSession {
                 return;
             }
             info!(peer = %self.peer_label, afi = ?afi, safi = ?safi, "sent End-of-RIB");
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
     }
@@ -1784,7 +1784,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send IPv4 {kind} UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -1871,7 +1871,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, %error, "failed to send {family} {kind} UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
             if idx < entries.len() {
@@ -1955,7 +1955,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN announce UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2000,7 +2000,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN withdrawal UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2053,7 +2053,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send BGP-LS announce UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2098,7 +2098,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send BGP-LS withdrawal UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2164,7 +2164,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send VPN announce UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2210,7 +2210,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send VPN withdrawal UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2270,7 +2270,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send labeled announce UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2322,7 +2322,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send labeled withdrawal UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2375,7 +2375,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send RTC announce UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }
@@ -2421,7 +2421,7 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send RTC withdrawal UPDATE");
                 return false;
             }
-            self.updates_sent += 1;
+            self.config.neighbor_counters.record_update_sent();
             self.metrics.record_message_sent(&self.peer_label, "update");
             idx = end;
         }

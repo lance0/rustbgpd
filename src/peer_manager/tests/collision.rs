@@ -2623,7 +2623,7 @@ async fn establish_inbound(
     mgr: &mut PeerManager,
     rib_rx: &mut mpsc::Receiver<rustbgpd_rib::RibUpdate>,
     peer_addr: IpAddr,
-) -> TcpStream {
+) -> (TcpStream, mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
@@ -2649,16 +2649,21 @@ async fn establish_inbound(
         client.write_all(&bytes).await.unwrap();
     }
     let session_id = mgr.peers[&key(peer_addr)].session_id();
-    loop {
+    let outbound_tx = loop {
         let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
             .await
             .expect("the new session must establish")
             .expect("RIB channel open");
-        if matches!(update, rustbgpd_rib::RibUpdate::PeerUp { session_id: id, .. } if id == session_id)
+        if let rustbgpd_rib::RibUpdate::PeerUp {
+            session_id: id,
+            outbound_tx,
+            ..
+        } = update
+            && id == session_id
         {
-            break;
+            break outbound_tx;
         }
-    }
+    };
     assert_eq!(
         mgr.peers[&key(peer_addr)]
             .handle()
@@ -2668,7 +2673,121 @@ async fn establish_inbound(
             .fsm_state,
         SessionState::Established
     );
-    client
+    (client, outbound_tx)
+}
+
+/// eBGP UPDATE from AS 65002 announcing `prefix`, plus `extra` attributes.
+fn peer_update(prefix: [u8; 4], extra: Option<rustbgpd_wire::PathAttribute>) -> Message {
+    use rustbgpd_wire::{
+        AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, Origin, PathAttribute,
+        UpdateMessage,
+    };
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    attrs.extend(extra);
+    Message::Update(UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::from(prefix), 24),
+        }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    ))
+}
+
+/// Import chain that denies 198.51.100.0/24 and permits everything else.
+fn deny_one_prefix_chain() -> PolicyChain {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
+    PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: Some(rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                Ipv4Addr::new(198, 51, 100, 0),
+                24,
+            ))),
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+/// Drive every traffic counter on an Established session: one permitted and
+/// one denied announcement (under [`deny_one_prefix_chain`]), one
+/// announcement blocked by a malformed OTC attribute (RFC 9234
+/// `malformed_length`, no Role needed), and one End-of-RIB sent. Returns the
+/// session's [`traffic_counters`] once all of them have landed.
+async fn drive_session_traffic(
+    (stream, outbound): &mut (TcpStream, mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>),
+    handle: &PeerHandle,
+) -> (u64, u64, u64, u64, u64) {
+    let malformed_otc = rustbgpd_wire::PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+        flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
+            | rustbgpd_wire::constants::attr_flags::TRANSITIVE,
+        type_code: rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER,
+        data: bytes::Bytes::from_static(&[0, 0, 0]),
+    });
+    for update in [
+        peer_update([203, 0, 113, 0], None),
+        peer_update([198, 51, 100, 0], None),
+        peer_update([192, 0, 2, 0], Some(malformed_otc)),
+    ] {
+        send_bgp_message(stream, &update).await;
+    }
+    outbound
+        .send(rustbgpd_rib::OutboundRouteUpdate {
+            end_of_rib: vec![(Afi::Ipv4, Safi::Unicast)],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let counters = traffic_counters(&handle.query_state().await.unwrap());
+            if counters == (3, 1, 1, 1, 1) {
+                return counters;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("three UPDATEs in, one out, one OTC block, one permit, one deny")
+}
+
+/// The five neighbor counters [`drive_session_traffic`] drives:
+/// `(updates_received, updates_sent, otc_routes_blocked,
+/// import_policy_routes_permitted, import_policy_routes_denied)`.
+fn traffic_counters(state: &PeerSessionState) -> (u64, u64, u64, u64, u64) {
+    (
+        state.updates_received,
+        state.updates_sent,
+        state.otc_routes_blocked,
+        state.import_policy_routes_permitted,
+        state.import_policy_routes_denied,
+    )
 }
 
 /// Sum of one counter family's series for a `peer` label.
@@ -2690,9 +2809,11 @@ fn prometheus_peer_total(metrics: &BgpMetrics, family: &str, peer: &str) -> f64 
 }
 
 /// A peer Hard Reset (Cease 6/9) followed by a reconnect replaces the
-/// session actor. The neighbor's flap and NOTIFICATION counters live in the
-/// neighbor's counter block, shared by both sessions: after the new session
-/// establishes the API still reads the block, and Prometheus agrees.
+/// session actor. Every `NeighborState` counter the session keeps lives in
+/// the neighbor's counter block, shared by both sessions: after the new
+/// session establishes the API still reads the first session's flaps,
+/// NOTIFICATIONs, UPDATEs, OTC blocks and import-policy results, and
+/// Prometheus agrees.
 #[tokio::test]
 async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
@@ -2721,11 +2842,14 @@ async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
         ),
         false,
     );
+    mgr.peers.get_mut(&key(peer_addr)).unwrap().import_policy = Some(deny_one_prefix_chain());
 
     let mut first = establish_inbound(&mut mgr, &mut rib_rx, peer_addr).await;
     let first_session = mgr.peers[&key(peer_addr)].session_id();
+
+    let before = drive_session_traffic(&mut first, mgr.peers[&key(peer_addr)].handle()).await;
     send_bgp_message(
-        &mut first,
+        &mut first.0,
         &Message::Notification(rustbgpd_wire::NotificationMessage::new(
             rustbgpd_wire::notification::NotificationCode::Cease,
             rustbgpd_wire::notification::cease_subcode::HARD_RESET,
@@ -2755,6 +2879,17 @@ async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
     assert_eq!(block.notifications_received(), 1);
     assert_eq!(
         (
+            row.updates_received,
+            row.updates_sent,
+            row.otc_routes_blocked,
+            row.import_policy_routes_permitted,
+            row.import_policy_routes_denied,
+        ),
+        before,
+        "the replacement session reports the first session's traffic counters"
+    );
+    assert_eq!(
+        (
             row.flap_count,
             row.notifications_received,
             row.notifications_sent
@@ -2773,6 +2908,7 @@ async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
             row.notifications_received,
         ),
         ("bgp_notifications_sent_total", row.notifications_sent),
+        ("bgp_otc_routes_blocked_total", row.otc_routes_blocked),
     ] {
         let prometheus = prometheus_peer_total(&mgr.metrics, family, &label);
         assert!(

@@ -3668,12 +3668,10 @@ impl PeerSession {
         for route in &rtc_announced {
             self.known_rtc.insert(route.key());
         }
-        self.import_policy_routes_permitted = self
-            .import_policy_routes_permitted
-            .saturating_add(import_policy_routes_permitted);
-        self.import_policy_routes_denied = self
-            .import_policy_routes_denied
-            .saturating_add(import_policy_routes_denied);
+        self.config.neighbor_counters.record_import_policy_routes(
+            import_policy_routes_permitted,
+            import_policy_routes_denied,
+        );
         if let Some(admission) = path_admission
             && self.enforce_path_receive_admission(admission).await
         {

@@ -89,6 +89,15 @@ fn exact_export_families() -> [((Afi, Safi), &'static str); 12] {
     ]
 }
 
+/// The neighbor's `(import_policy_routes_permitted, import_policy_routes_denied)`.
+fn import_policy_counts(session: &PeerSession) -> (u64, u64) {
+    let counters = &session.config.neighbor_counters;
+    (
+        counters.import_policy_routes_permitted(),
+        counters.import_policy_routes_denied(),
+    )
+}
+
 fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
     let mut peer_config = PeerConfig::new(local_asn, remote_asn, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;

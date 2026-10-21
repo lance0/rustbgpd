@@ -47,7 +47,13 @@ async fn reject_retention_permitted_update_stays_allocation_free() {
         "a session with no retained rejection must hold no LRU allocation"
     );
     assert_eq!(session.known_prefix_count(), 2);
-    assert_eq!(session.import_policy_routes_permitted, 2);
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_permitted(),
+        2
+    );
     let (reply, state) = oneshot::channel();
     let _ = session
         .handle_command(PeerCommand::QueryState { reply })
@@ -452,7 +458,13 @@ async fn reject_retention_disabled_records_nothing_and_reports_disabled() {
     session
         .process_update(retention_update(&[denied], &[]))
         .await;
-    assert_eq!(session.import_policy_routes_denied, 1);
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_denied(),
+        1
+    );
     assert_eq!(rejected_route_prototype_builds(&session), 0);
     assert!(session.rejected_routes.is_empty());
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 0);

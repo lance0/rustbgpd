@@ -655,6 +655,11 @@ message NeighborState {
   uint64 uptime_seconds = 3;
   uint64 prefixes_received = 4;
   uint64 prefixes_sent = 5;
+  // UPDATE messages received from / sent to this neighbor, End-of-RIB
+  // included. Daemon-lifetime per neighbor (address and interface): the
+  // count persists across session resets and re-establishment, including on
+  // a replacement session, and is cleared only by daemon restart or neighbor
+  // deletion. A reconfigure keeps it.
   uint64 updates_received = 6;
   uint64 updates_sent = 7;
   // NOTIFICATION messages received from / sent to this neighbor, all codes:
@@ -682,14 +687,18 @@ message NeighborState {
   // True when both sides advertised compatible BGP Roles.
   bool role_negotiated = 16;
   // Unicast route announcements blocked by RFC 9234 OTC rules.
+  // Daemon-lifetime per neighbor, with the same scope as updates_received.
   uint64 otc_routes_blocked = 17;
-  // Import policy evaluations that permitted a route.
+  // Import policy evaluations that permitted a route. Daemon-lifetime per
+  // neighbor, with the same scope as updates_received.
   uint64 import_policy_routes_permitted = 18;
-  // Import policy evaluations that denied a route.
+  // Import policy evaluations that denied a route (same scope).
   uint64 import_policy_routes_denied = 19;
-  // Export policy evaluations that permitted a route.
+  // Export policy evaluations that permitted a route. Unlike the import
+  // totals, these are per session: the RIB resets them when the session
+  // goes down.
   uint64 export_policy_routes_permitted = 20;
-  // Export policy evaluations that denied a route.
+  // Export policy evaluations that denied a route (same per-session scope).
   uint64 export_policy_routes_denied = 21;
   // Live outbound update-group membership: "group:N" for shared staging, or
   // the private-path reason

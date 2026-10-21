@@ -569,7 +569,7 @@ async fn otc_ingress_wrong_flags_are_role_independent_treat_as_withdraw() {
             type_code: rustbgpd_wire::constants::attr_type::ONLY_TO_CUSTOMER,
             data: Bytes::copy_from_slice(value),
         }));
-        let blocked_before = session.otc_routes_blocked;
+        let blocked_before = session.config.neighbor_counters.otc_routes_blocked();
         let malformed_counter_before = otc_routes_blocked_count(&session, "malformed_length");
         session
             .process_update(UpdateMessage::build(
@@ -593,7 +593,8 @@ async fn otc_ingress_wrong_flags_are_role_independent_treat_as_withdraw() {
         assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
         assert_eq!(session.fsm.state(), SessionState::Established);
         assert_eq!(
-            session.otc_routes_blocked, blocked_before,
+            session.config.neighbor_counters.otc_routes_blocked(),
+            blocked_before,
             "flags errors must not be mislabeled malformed_length"
         );
         assert_eq!(
@@ -620,13 +621,16 @@ fn rib_staged_otc_denial_publishes_existing_egress_diagnostics() {
             otc(64512),
         ],
     );
-    let blocked_before = session.otc_routes_blocked;
+    let blocked_before = session.config.neighbor_counters.otc_routes_blocked();
     let mut update = empty_outbound_update();
     update.otc_blocked.push(route.clone());
 
     session.send_route_update(update);
 
-    assert_eq!(session.otc_routes_blocked, blocked_before + 1);
+    assert_eq!(
+        session.config.neighbor_counters.otc_routes_blocked(),
+        blocked_before + 1
+    );
     assert_eq!(
         otc_routes_blocked_count(&session, "egress_to_upstream_via_otc"),
         1
@@ -707,7 +711,7 @@ async fn otc_ingress_truncated_framing_publishes_malformed_length_diagnostics() 
             "{case}: expected the clean route to be accepted"
         );
 
-        let blocked_before = session.otc_routes_blocked;
+        let blocked_before = session.config.neighbor_counters.otc_routes_blocked();
         let malformed_counter_before = otc_routes_blocked_count(&session, "malformed_length");
         session
             .process_update(rfc7606_update(rfc7606_attr_bytes(malformed_otc), &[prefix]))
@@ -722,7 +726,11 @@ async fn otc_ingress_truncated_framing_publishes_malformed_length_diagnostics() 
         };
         assert!(announced.is_empty(), "{case}");
         assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)], "{case}");
-        assert_eq!(session.otc_routes_blocked, blocked_before + 1, "{case}");
+        assert_eq!(
+            session.config.neighbor_counters.otc_routes_blocked(),
+            blocked_before + 1,
+            "{case}"
+        );
         assert_eq!(
             otc_routes_blocked_count(&session, "malformed_length"),
             malformed_counter_before + 1,
@@ -741,7 +749,7 @@ async fn otc_ingress_counts_mp_reach_v6_prefixes() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Provider);
     install_dual_stack_session(&mut session, false);
-    let blocked_before = session.otc_routes_blocked;
+    let blocked_before = session.config.neighbor_counters.otc_routes_blocked();
     let v6_prefix = Ipv6Prefix::new(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
     let mp_reach = rustbgpd_wire::MpReachNlri {
         afi: Afi::Ipv6,
@@ -770,7 +778,10 @@ async fn otc_ingress_counts_mp_reach_v6_prefixes() {
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
     session.process_update(update).await;
-    assert_eq!(session.otc_routes_blocked, blocked_before + 1);
+    assert_eq!(
+        session.config.neighbor_counters.otc_routes_blocked(),
+        blocked_before + 1
+    );
 }
 
 #[tokio::test]
@@ -805,7 +816,7 @@ async fn otc_ingress_count_excludes_unnegotiated_mp_unicast() {
         otc(65002),
         PathAttribute::MpReachNlri(Box::new(mp_reach)),
     ];
-    let blocked_before = session.otc_routes_blocked;
+    let blocked_before = session.config.neighbor_counters.otc_routes_blocked();
     let otc_counter_before = otc_routes_blocked_count(&session, "ingress_from_customer_rsclient");
     session
         .process_update(UpdateMessage::build(
@@ -821,7 +832,10 @@ async fn otc_ingress_count_excludes_unnegotiated_mp_unicast() {
         ))
         .await;
 
-    assert_eq!(session.otc_routes_blocked, blocked_before + 1);
+    assert_eq!(
+        session.config.neighbor_counters.otc_routes_blocked(),
+        blocked_before + 1
+    );
     assert_eq!(
         otc_routes_blocked_count(&session, "ingress_from_customer_rsclient"),
         otc_counter_before + 1
@@ -838,7 +852,7 @@ async fn otc_ingress_malformed_without_reachable_nlri_resets_without_block_count
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     rfc7606_drain(&mut rib_rx);
-    let baseline_blocked = session.otc_routes_blocked;
+    let baseline_blocked = session.config.neighbor_counters.otc_routes_blocked();
     let baseline_malformed_counter = otc_routes_blocked_count(&session, "malformed_length");
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let mut withdrawn = Vec::new();
@@ -851,7 +865,8 @@ async fn otc_ingress_malformed_without_reachable_nlri_resets_without_block_count
     };
     session.process_update(update).await;
     assert_eq!(
-        session.otc_routes_blocked, baseline_blocked,
+        session.config.neighbor_counters.otc_routes_blocked(),
+        baseline_blocked,
         "rejected=0 must not bump the per-peer counter"
     );
     assert_eq!(
@@ -873,7 +888,7 @@ async fn otc_ingress_no_count_when_no_decision() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     session.config.peer.local_role = Some(BgpRole::Customer);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    let blocked_before = session.otc_routes_blocked;
+    let blocked_before = session.config.neighbor_counters.otc_routes_blocked();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -891,7 +906,10 @@ async fn otc_ingress_no_count_when_no_decision() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-    assert_eq!(session.otc_routes_blocked, blocked_before);
+    assert_eq!(
+        session.config.neighbor_counters.otc_routes_blocked(),
+        blocked_before
+    );
 }
 
 /// Load-bearing role-independent propagation proof: valid canonical and
