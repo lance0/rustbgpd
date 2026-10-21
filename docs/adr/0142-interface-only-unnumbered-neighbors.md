@@ -172,18 +172,19 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   the interop gate demonstrates it.
 - **Opting out.** `router_advertisements = false` is a global opt-out for
   sites where radvd or another daemon already advertises on those interfaces.
-  With sending off, the daemon opens no raw socket: it neither sends RAs or
-  RSs nor receives RAs, and discovers peers only through inbound connections.
-  A peer that learns this router from the other advertiser connects in, and
-  the session forms through the secondary path. This is deliberately not a
-  general RA daemon.
-- **Privilege.** The raw ICMPv6 socket sends and receives, and it needs
-  `CAP_NET_RAW`. It is opened only while sending is enabled and at least one
-  interface-only neighbor is configured, so the capability is needed only in
-  that case. If the socket cannot be opened, the startup or reload that
-  introduces the first such neighbor fails with an explicit error. It does not
-  fall back silently to listen-only. The security reference and the example
-  systemd units are updated to match.
+  It disables sending only: the daemon sends no RAs and no RSs, including the
+  link-up RS, so discovery waits for the peer's next unsolicited RA. RA
+  reception stays on, because discovery depends on it; a host whose RAs come
+  from another advertiser still has to discover its peers. This is
+  deliberately not a general RA daemon.
+- **Privilege.** The raw ICMPv6 socket needs `CAP_NET_RAW`. It receives RAs
+  whenever at least one interface-only neighbor is configured, whether or not
+  sending is enabled, so the capability is required exactly then and not
+  otherwise. Static link-local neighbors need no raw socket. Without the
+  capability, `rustbgpd --check`, startup, and the reload that introduces the
+  first interface-only neighbor fail with an error that names `CAP_NET_RAW`.
+  The daemon never degrades silently to inbound-only discovery. The security
+  reference and the example systemd units are updated to match.
 - **Trust boundary.** The trust boundary is the link, as for any directly
   connected session. An RA or a SYN only proposes a TCP endpoint on that one
   interface, and the session still has to pass OPEN validation. Two hop-limit
@@ -335,7 +336,8 @@ Once the duplicate-address rule is lifted, two further rules apply:
   - discovery still waiting after three RA intervals, with hints: the peer
     sends no RAs, FRR has `no bgp ipv6-auto-ra`, FRR lacks `v6only` and is
     preferring an IPv4 /30 or /31 session, or `router_advertisements = false`
-    leaves only inbound discovery;
+    is set with no other advertiser on the link, so the peer cannot discover
+    this router;
   - multiple routers on a link;
   - an unavailable RA socket;
   - an interface without a link-local address;
@@ -393,7 +395,8 @@ Once the duplicate-address rule is lifted, two further rules apply:
 - Fabric configuration needs only port names: one stanza per port, no
   addresses, no ASN bookkeeping with `remote_asn = "external"`.
 - The daemon gains a raw ICMPv6 socket and therefore `CAP_NET_RAW`, but only
-  for configurations that use this mode with RA sending on. Control-plane-only
+  for configurations with at least one interface-only neighbor, whether or not
+  RA sending is on. Static link-local neighbors and control-plane-only
   route-server and route-reflector deployments keep their current privileges.
 - A non-zero Router Lifetime makes this router a default-router candidate on
   every interface-only link. That is intended for dedicated fabric links.
