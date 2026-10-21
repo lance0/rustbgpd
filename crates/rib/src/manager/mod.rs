@@ -4368,6 +4368,13 @@ impl RibManager {
                 page_size,
                 reply,
             } => self.handle_query_local_route_export(&keys, managed, resume, page_size, reply),
+            RibUpdate::QueryLocalFlowSpecExport {
+                key,
+                managed,
+                resume,
+                page_size,
+                reply,
+            } => self.handle_query_local_flowspec_export(&key, managed, resume, page_size, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
             }

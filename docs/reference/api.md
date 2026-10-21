@@ -96,7 +96,7 @@ and RPCs in it stay alpha; the
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases and a controller replay-complete signal |
+| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases and a controller replay-complete signal |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
@@ -271,7 +271,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `BfdService` | `GetBfdSessions` | None |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
-| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`, `BatchListPathExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
@@ -3112,6 +3112,7 @@ export policy).
 | `DeletePath` | Withdraw a previously injected route |
 | `ListPathExportDispositions` | Per-peer export disposition of one injected unicast route; see [export read-back](#export-read-back) |
 | `BatchListPathExportDispositions` | The same for up to 1000 injected unicast route keys per paged walk; see [batch read-back](#batch-read-back) |
+| `ListFlowSpecExportDispositions` | The same for one injected FlowSpec rule; see [FlowSpec read-back](#flowspec-read-back) |
 | `AddFlowSpec` | Inject a FlowSpec rule with actions |
 | `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
 | `AddLeasedPath` / `AddLeasedFlowSpec` | Inject a route or FlowSpec rule under an owner's lease; see [leased injection](#leased-injection) |
@@ -3485,6 +3486,47 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
                 {"prefix": "203.0.113.9", "prefix_length": 32}],
        "include_configured": true}' \
   localhost:50051 rustbgpd.v1.InjectionService/BatchListPathExportDispositions
+```
+
+##### FlowSpec read-back
+
+`ListFlowSpecExportDispositions` reports the per-peer export disposition of
+one rule added with `AddFlowSpec` or `AddLeasedFlowSpec`, named by the same
+`(afi_safi, components)` key. It is outside v1, like FlowSpec itself
+([ADR-0135](../adr/0135-flowspec-feasibility.md)). Rows, peer order,
+`include_configured`, paging, the page-to-page `ABORTED` check and the token
+rules are those of [`ListPathExportDispositions`](#export-read-back), applied
+to the rule: its content is its path attributes, and the token is bound to
+the rule key. A key with no local rule returns `NOT_FOUND`; a malformed key
+returns `INVALID_ARGUMENT`.
+
+`COMMITTED` means the peer's Adj-RIB-Out holds this key from the local rule,
+with the attributes export would send now. A received rule with the same key
+never counts: when it is the selected rule, the local rule is `WITHHELD` with
+`not_selected`. `advertised_path_id` is always 0. The reasons are a subset of
+the unicast ones:
+
+| `reason` | Disposition | FlowSpec meaning |
+|---|---|---|
+| `family_not_negotiated` | Withheld | The session did not negotiate the rule's FlowSpec family. |
+| `not_selected` | Withheld | A received rule with the same key is selected (no `explain_code`), or no rule is selected (`no_best_route`). |
+| `export_policy` | Withheld | Export policy, or the RFC 8212 default deny, rejects the rule. |
+| `export_rule` | Withheld | A gate before or after policy stops it; `explain_code` is `no_advertise_suppressed`, `no_export_suppressed`, `llgr_stale_suppressed`, `ibgp_split_horizon` or `no_advertise_policy_suppressed`. |
+| `exact_export_rejected` | Withheld | The session's encoder refuses the rule. |
+| `selection_deferred`, `outbound_resync`, `not_yet_committed` | Pending | As for unicast. |
+| `not_established` | Not established | As for unicast, with `include_configured`. |
+
+Export policy evaluates a FlowSpec rule with RPKI state `not_found` and ASPA
+state `unknown`, so `deny_validation` reports `rpki_not_found` or
+`aspa_unknown` when the deciding statement tests them. Each row costs one
+FlowSpec export evaluation, and no policy counters move.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"afi_safi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
+       "components": [{"type": 1, "prefix": "192.0.2.0/24"}],
+       "include_configured": true}' \
+  localhost:50051 rustbgpd.v1.InjectionService/ListFlowSpecExportDispositions
 ```
 
 #### Leased injection
