@@ -19,7 +19,7 @@
 //! distributed first. The deadline still wins when a controller stays
 //! silent.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 
 use rustbgpd_telemetry::reason_labels::GrEorGraceReleaseReason;
@@ -73,16 +73,29 @@ pub enum ReplayComplete {
     NotHolding,
 }
 
-/// The listed replay controllers and the ones that have signalled.
+/// The listed replay controllers and when each first signalled.
 #[derive(Debug, Default)]
 pub(super) struct ReplayWait {
     expected: BTreeSet<String>,
-    signalled: BTreeSet<String>,
+    signalled: BTreeMap<String, tokio::time::Instant>,
 }
 
 impl ReplayWait {
     fn awaiting(&self) -> Vec<String> {
-        self.expected.difference(&self.signalled).cloned().collect()
+        self.awaiting_at(None)
+    }
+
+    /// Listed owners that had not signalled by `deadline` (or at all).
+    fn awaiting_at(&self, deadline: Option<tokio::time::Instant>) -> Vec<String> {
+        self.expected
+            .iter()
+            .filter(|owner| {
+                self.signalled
+                    .get(*owner)
+                    .is_none_or(|at| deadline.is_some_and(|deadline| *at > deadline))
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -139,7 +152,7 @@ impl RibManager {
         self.eor_grace_deadlines = deadlines;
         self.eor_replay = ReplayWait {
             expected: config.replay_owners.into_iter().collect(),
-            signalled: BTreeSet::new(),
+            signalled: BTreeMap::new(),
         };
         if !self.eor_grace.is_empty() && !self.eor_replay.expected.is_empty() {
             info!(
@@ -197,7 +210,10 @@ impl RibManager {
             info!(owner = %owner, "replay-complete signal: no End-of-RIB is held");
             return Ok(ReplayComplete::NotHolding);
         }
-        self.eor_replay.signalled.insert(owner.to_string());
+        self.eor_replay
+            .signalled
+            .entry(owner.to_string())
+            .or_insert(now);
         let awaiting = self.eor_replay.awaiting();
         if !awaiting.is_empty() {
             info!(
@@ -295,14 +311,15 @@ impl RibManager {
             .map(|(&peer, _)| peer)
             .collect();
         let now = tokio::time::Instant::now();
-        let awaiting = self.eor_replay.awaiting();
         for peer in expired {
-            let Some(late_ms) = self.eor_grace_deadlines.get(&peer).map(|deadline| {
-                u64::try_from(now.saturating_duration_since(*deadline).as_millis())
-                    .unwrap_or(u64::MAX)
-            }) else {
+            let Some(&deadline) = self.eor_grace_deadlines.get(&peer) else {
                 continue;
             };
+            let late_ms = u64::try_from(now.saturating_duration_since(deadline).as_millis())
+                .unwrap_or(u64::MAX);
+            // A controller that signalled only after this window's deadline,
+            // while a longer window was still open, missed this one.
+            let awaiting = self.eor_replay.awaiting_at(Some(deadline));
             let (helper_session, held) =
                 self.release_eor_grace_peer(peer, GrEorGraceReleaseReason::Deadline);
             if awaiting.is_empty() {

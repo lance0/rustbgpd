@@ -1188,3 +1188,48 @@ async fn a_signal_after_the_deadline_does_not_claim_the_release() {
         "{events:?}"
     );
 }
+
+/// Mixed windows: a signal at 11 s, applied before the 10 s window's expiry
+/// turn, releases the 120 s window but not the expired one, whose deadline
+/// release still names the controller that missed it.
+#[tokio::test(start_paused = true)]
+async fn a_late_signal_is_named_by_the_window_it_missed() {
+    use std::sync::Mutex;
+
+    let metrics = BgpMetrics::new();
+    let mut config = replay_config(&[UPSTREAM, CLIENT], &[BRIDGE]);
+    let start = tokio::time::Instant::now();
+    config.peers[0].deadline = start + WINDOW;
+    let mut manager = manager_from(config, &metrics);
+    let incarnation = manager.injection_leases.incarnation();
+    let mut short = connect(&mut manager, UPSTREAM, HELPER);
+    let mut long = connect(&mut manager, CLIENT, HELPER);
+    tokio::time::advance(WINDOW + Duration::from_secs(1)).await;
+    assert_eq!(
+        signal(&mut manager, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::Released
+    );
+    assert_eq!(long.try_recv().unwrap().end_of_rib, vec![V4]);
+    assert_no_eor(&mut short, "the expired window, released by the signal");
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = CaptureSubscriber {
+        level: tracing::Level::WARN,
+        events: Arc::clone(&captured),
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        manager.expire_eor_holds(start + WINDOW);
+    });
+    assert_eq!(short.try_recv().unwrap().end_of_rib, vec![V4]);
+    assert!((eor_count(&metrics, UPSTREAM) - 1.0).abs() < f64::EPSILON);
+    assert!((released_count(&metrics, CLIENT, "replay_complete") - 1.0).abs() < f64::EPSILON);
+    let events = captured.lock().unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.0.get("awaiting").map(String::as_str) == Some(BRIDGE)
+                && event.0.get("peer").map(String::as_str) == Some(UPSTREAM.to_string().as_str())
+        }),
+        "{events:?}"
+    );
+}
