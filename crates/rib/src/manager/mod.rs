@@ -1775,6 +1775,9 @@ pub(in crate::manager) const MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP: std::tim
 pub(super) struct LiveSessionRecord {
     session_id: u64,
     source_context: Option<Arc<crate::update::PeerSourceContext>>,
+    /// Interned scope of `source_context`'s interface, resolved at
+    /// registration; `DEFAULT` for a numbered neighbor.
+    peer_scope: crate::route::AspaContextId,
     peer_group: Option<String>,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     peer_asn: u32,
@@ -5194,14 +5197,10 @@ impl RibManager {
             .and_then(|records| {
                 records
                     .iter()
-                    .find_map(|record| record.source_context.as_ref()?.peer_interface.as_deref())
+                    .map(|record| record.peer_scope)
+                    .find(|scope| *scope != crate::route::AspaContextId::DEFAULT)
             })
-            .map_or(crate::route::AspaContextId::DEFAULT, |interface| {
-                crate::route::AspaContextId::intern_scoped(
-                    rustbgpd_wire::AspaValidationContext::default(),
-                    Some(interface),
-                )
-            })
+            .unwrap_or(crate::route::AspaContextId::DEFAULT)
     }
 
     fn publish_route_event(&mut self, mut event: RouteEvent) {
@@ -5263,7 +5262,12 @@ impl RibManager {
             self.policy_filtered_routes.remove(&target_peer);
         }
         let mut newly_filtered = newly_filtered.into_iter();
-        let target_peer_scope = self.session_peer_scope(target_peer);
+        // Resolved only when an event is published.
+        let target_peer_scope = if newly_filtered.as_slice().is_empty() {
+            crate::route::AspaContextId::DEFAULT
+        } else {
+            self.session_peer_scope(target_peer)
+        };
         for key in newly_filtered.by_ref() {
             self.replacement_checkpoint(false);
             let peer_scope = self

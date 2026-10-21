@@ -168,7 +168,11 @@ pub struct AspaContextId(u16);
 /// configured local role and, for a scoped neighbor, its interface, so the
 /// table grows only with distinct combinations seen by the process.
 struct AspaContextTable {
-    ids: FastMap<(AspaValidationContext, Option<Arc<str>>), u16>,
+    /// Ids of unscoped contexts.
+    ids: FastMap<AspaValidationContext, u16>,
+    /// Ids of scoped contexts, by interface; keyed by `Arc<str>` so a lookup
+    /// borrows the caller's `&str` instead of allocating.
+    scoped_ids: FastMap<Arc<str>, FastMap<AspaValidationContext, u16>>,
     contexts: Vec<AspaValidationContext>,
     /// Interface of each context's scoped source neighbor, indexed like
     /// `contexts`.
@@ -181,19 +185,27 @@ impl AspaContextTable {
     fn new() -> Self {
         let default = AspaValidationContext::default();
         Self {
-            ids: std::iter::once(((default, None), 0)).collect(),
+            ids: std::iter::once((default, 0)).collect(),
+            scoped_ids: FastMap::default(),
             contexts: vec![default],
             interfaces: vec![None],
             snapshot: None,
         }
     }
 
+    fn lookup(&self, context: AspaValidationContext, interface: Option<&str>) -> Option<u16> {
+        match interface {
+            None => self.ids.get(&context),
+            Some(interface) => self.scoped_ids.get(interface)?.get(&context),
+        }
+        .copied()
+    }
+
     // Append-only and never shrinks: the ceiling is 65,535 distinct
     // ASN/role/interface combinations per process. Reclaiming ids would need
     // per-context refcounts.
     fn intern(&mut self, context: AspaValidationContext, interface: Option<&str>) -> AspaContextId {
-        let key = (context, interface.map(Arc::from));
-        if let Some(&id) = self.ids.get(&key) {
+        if let Some(id) = self.lookup(context, interface) {
             return AspaContextId(id);
         }
         let id = match u16::try_from(self.contexts.len()) {
@@ -201,8 +213,19 @@ impl AspaContextTable {
             _ => return AspaContextId::UNRESOLVED,
         };
         self.contexts.push(context);
-        self.interfaces.push(key.1.clone());
-        self.ids.insert(key, id);
+        let interface = interface.map(Arc::<str>::from);
+        self.interfaces.push(interface.clone());
+        match interface {
+            None => {
+                self.ids.insert(context, id);
+            }
+            Some(interface) => {
+                self.scoped_ids
+                    .entry(interface)
+                    .or_default()
+                    .insert(context, id);
+            }
+        }
         self.snapshot = None;
         AspaContextId(id)
     }
@@ -238,15 +261,11 @@ impl AspaContextId {
     /// Panics if the table lock is poisoned.
     #[must_use]
     pub fn intern_scoped(context: AspaValidationContext, interface: Option<&str>) -> Self {
-        let known = interface.is_none().then(|| {
-            ASPA_CONTEXTS
-                .read()
-                .expect("ASPA context table poisoned")
-                .ids
-                .get(&(context, None))
-                .copied()
-        });
-        known.flatten().map_or_else(
+        let known = ASPA_CONTEXTS
+            .read()
+            .expect("ASPA context table poisoned")
+            .lookup(context, interface);
+        known.map_or_else(
             || {
                 ASPA_CONTEXTS
                     .write()
