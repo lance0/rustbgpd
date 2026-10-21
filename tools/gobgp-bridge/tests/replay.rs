@@ -3,7 +3,8 @@
 //! never reinstalls a withdrawn path, a daemon that stops answering does not
 //! hold the bridge, the tracking cap is checked before the daemon sees a
 //! new ban, and a liveness probe that sees the daemon come back, or answer
-//! with a new incarnation, replays at once.
+//! with a new incarnation, replays at once and then signals replay complete
+//! for that incarnation.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,8 @@ struct Script {
     incarnation: u64,
     /// CheckLiveness calls answered.
     probes: usize,
+    /// Refuse the next MarkReplayComplete with FAILED_PRECONDITION.
+    stale_mark: bool,
 }
 
 #[derive(Clone, Default)]
@@ -107,6 +110,30 @@ impl InjectionService for Daemon {
         script.calls.push(format!("delete {}", req.prefix));
         script.routes.remove(&req.prefix);
         Ok(Response::new(rbgp::DeletePathResponse::default()))
+    }
+
+    async fn mark_replay_complete(
+        &self,
+        request: Request<rbgp::MarkReplayCompleteRequest>,
+    ) -> Result<Response<rbgp::MarkReplayCompleteResponse>, Status> {
+        let req = request.into_inner();
+        let mut script = self.0.lock().unwrap();
+        if script.down {
+            return Err(Status::unavailable("scripted outage"));
+        }
+        if std::mem::take(&mut script.stale_mark) {
+            script
+                .calls
+                .push(format!("stale {} {}", req.owner, req.incarnation));
+            return Err(Status::failed_precondition("scripted stale incarnation"));
+        }
+        script
+            .calls
+            .push(format!("mark {} {}", req.owner, req.incarnation));
+        Ok(Response::new(rbgp::MarkReplayCompleteResponse {
+            outcome: rbgp::ReplayCompleteOutcome::Released as i32,
+            awaiting: vec![],
+        }))
     }
 }
 
@@ -425,4 +452,62 @@ async fn an_unfinished_pass_after_the_daemon_returns_is_retried() {
         "{:?}",
         held(&daemon)
     );
+}
+
+async fn wait_calls(daemon: &Daemon, done: impl Fn(&[String]) -> bool) -> Vec<String> {
+    for _ in 0..100 {
+        let calls = daemon.0.lock().unwrap().calls.clone();
+        if done(&calls) {
+            return calls;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    daemon.0.lock().unwrap().calls.clone()
+}
+
+/// After the daemon restarts, the watch replays every ban and only then
+/// signals replay complete, as the bridge's owner, for the incarnation its
+/// probe saw. A refused signal (the daemon restarted again) is retried after
+/// another full pass. A daemon that stays up is never signalled.
+#[tokio::test]
+async fn a_complete_post_restart_pass_signals_replay_complete() {
+    let (bridge, daemon) = bridge(8).await;
+    daemon.0.lock().unwrap().incarnation = 1;
+    bridge.spawn_restart_watch(Duration::from_millis(20));
+    bridge.add_path(ban(1, false)).await.unwrap();
+    bridge.add_path(ban(2, false)).await.unwrap();
+    for _ in 0..100 {
+        if daemon.0.lock().unwrap().probes >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    {
+        let mut script = daemon.0.lock().unwrap();
+        assert!(script.probes >= 2, "the watch never probed");
+        assert!(
+            !script.calls.iter().any(|call| call.starts_with("mark")),
+            "signalled without a restart: {:?}",
+            script.calls
+        );
+        script.calls.clear();
+        script.routes.clear();
+        script.incarnation = 2;
+        script.stale_mark = true;
+    }
+    let owner = rustbgpd_gobgp_bridge::REPLAY_OWNER;
+    let calls = wait_calls(&daemon, |calls| {
+        calls.iter().any(|call| call.starts_with("mark"))
+    })
+    .await;
+    // Pass, refused signal, a second full pass, accepted signal.
+    let replay = ["add 203.0.113.1", "add 203.0.113.2"];
+    let mut pass: Vec<&str> = calls[..2].iter().map(String::as_str).collect();
+    pass.sort_unstable();
+    assert_eq!(pass, replay, "{calls:?}");
+    assert_eq!(calls[2], format!("stale {owner} 2"), "{calls:?}");
+    let mut pass: Vec<&str> = calls[3..5].iter().map(String::as_str).collect();
+    pass.sort_unstable();
+    assert_eq!(pass, replay, "{calls:?}");
+    assert_eq!(calls[5..], [format!("mark {owner} 2")], "{calls:?}");
 }
