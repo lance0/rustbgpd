@@ -94,6 +94,7 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   ones. Both are checked against the ASN the peer actually sends in OPEN (the
   four-octet AS capability when present). `"external"` is its own check: it
   does not reuse the dynamic-neighbor `0` sentinel, which also accepts iBGP.
+  The API carries the mode in `remote_asn_mode` (see Operator surfaces).
 - The interface does not need to exist when configuration loads. The neighbor
   waits in `interface_missing` until it appears, and the interface index is
   resolved by name on every link event, never cached across a recreation.
@@ -286,6 +287,24 @@ in the peer manager's single owner, so two links that discover the same
 address at the same time cannot both be admitted, and a static neighbor added
 by reload or RPC is checked against bound learned addresses the same way.
 
+The check covers retained endpoints as well as current bindings, because the
+RIB keys retained state by bare address. Once a learned endpoint is unbound,
+it stays reserved to its neighbor while that neighbor still has retained RIB
+state for it: Graceful Restart stale routes or LLGR routes. The reservation
+is released only when that state is retired, by a purge, by GR or LLGR timer
+expiry, or by deletion of the neighbor. While it is held, both learned
+admission (another interface-only neighbor discovering the address) and
+static admission (a static link-local neighbor added by RPC or reload) are
+refused with `duplicate_link_local_address`, naming the reserving neighbor.
+The reservation is part of the same atomic admission check.
+
+Under the lifecycle rules, confirmed carrier loss, interface removal and an
+actual endpoint replacement purge at once, so their reservation ends with the
+purge. Only ordinary transport loss with GR or LLGR retention keeps a
+reservation alive. That includes the case where the bound source's RA expires
+and the TCP session then fails: the neighbor may be unbound, but its old
+address stays reserved to it until its retained routes are gone.
+
 That covers the common Clos shape, where each fabric link goes to a different
 switch with its own MAC. **Limitation:** parallel links to the same device
 (one router MAC on every port, so one EUI-64 address), or `fe80::1` on every
@@ -312,6 +331,29 @@ Once the duplicate-address rule is lifted, two further rules apply:
 - **API.** `NeighborConfig.address` is empty and `interface` is `swp1`.
   `NeighborState` gains `learned_peer_address`, which is empty until an
   address is bound, and a `discovery_state` enum.
+  - **ASN matching mode.** `NeighborConfig` gains an additive field,
+    `remote_asn_mode`, an enum with `REMOTE_ASN_MODE_UNSPECIFIED`,
+    `REMOTE_ASN_MODE_NUMERIC`, `REMOTE_ASN_MODE_EXTERNAL` and
+    `REMOTE_ASN_MODE_INTERNAL`. UNSPECIFIED means NUMERIC, today's behavior.
+    TOML `remote_asn = "external"` and `"internal"` map to the EXTERNAL and
+    INTERNAL modes, and a number maps to NUMERIC.
+    - With EXTERNAL or INTERNAL, `AddNeighbor` and any other create or
+      update request must leave `remote_asn` at 0. Supplying both a
+      non-numeric mode and a non-zero `remote_asn` is `INVALID_ARGUMENT`.
+    - The existing rule that rejects `remote_asn = 0` applies only to the
+      NUMERIC and UNSPECIFIED modes.
+    - Reads (`ListNeighbors`, `GetNeighborState`) return the configured mode,
+      with `remote_asn` = 0 for a non-numeric mode, so the configured policy
+      round-trips and is never replaced by a resolved number.
+    - The ASN the peer actually sent is session state, not configuration:
+      `NegotiatedSessionState` gains an additive `optional uint32 remote_asn`.
+      There is no such field today.
+    - The mode is not the dynamic-neighbor wildcard: it never uses a zero
+      `remote_asn` to mean "any".
+
+    These fields are additive to a v1 RPC. The stable-surface inventory
+    update lands with the implementation, in its own reviewed inventory
+    commit.
   - Route rows and events keep the scoped identity contract: `peer_address`
     is the learned address recorded in the session's provenance, and
     `peer_interface` is `swp1`.
