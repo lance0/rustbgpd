@@ -25,6 +25,10 @@ const ALL_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2);
 /// back-pressures the readers, and the kernel socket buffer drops the excess.
 const RECEIVE_QUEUE: usize = 256;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long an interface's address list is reused for the own-address check,
+/// which now runs on every RA: a flood of RAs from known sources must not
+/// become one `getifaddrs` netlink dump per packet.
+const LOCAL_ADDRESS_TTL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
@@ -80,6 +84,7 @@ impl RaDiscovery {
             events: event_tx,
             drops: Arc::clone(&drops),
             received_tx,
+            local_addresses: HashMap::new(),
         };
         let task = tokio::spawn(actor.run(command_rx, received_rx));
         Ok((
@@ -276,6 +281,7 @@ struct Actor {
     events: mpsc::UnboundedSender<DiscoveryEvent>,
     drops: Arc<DropCounters>,
     received_tx: mpsc::Sender<Received>,
+    local_addresses: HashMap<String, (Instant, Vec<Ipv6Addr>)>,
 }
 
 impl Actor {
@@ -322,6 +328,7 @@ impl Actor {
 
     fn received(&mut self, packet: &Received) {
         let now = Instant::now();
+        let local = &mut self.local_addresses;
         let result = match packet::parse(&packet.payload, packet.source, packet.hop_limit) {
             Ok(NdMessage::RouterAdvertisement {
                 router_lifetime_secs,
@@ -331,7 +338,7 @@ impl Actor {
                 packet.source,
                 router_lifetime_secs,
                 now,
-                interface_has_address,
+                |name, source| is_local_address(local, name, source, now),
             ),
             Ok(NdMessage::RouterSolicitation) => {
                 self.engine
@@ -433,17 +440,33 @@ impl Actor {
     }
 }
 
-/// Whether `address` is assigned to `interface` (own-advertisement check).
-fn interface_has_address(interface: &str, address: Ipv6Addr) -> bool {
-    nix::ifaddrs::getifaddrs().is_ok_and(|mut addrs| {
-        addrs.any(|a| {
-            a.interface_name == interface
-                && a.address
-                    .as_ref()
-                    .and_then(|s| s.as_sockaddr_in6())
-                    .is_some_and(|s| s.ip() == address)
-        })
-    })
+/// Whether `address` is assigned to `interface` (own-advertisement check),
+/// from an address list at most [`LOCAL_ADDRESS_TTL`] old.
+fn is_local_address(
+    cache: &mut HashMap<String, (Instant, Vec<Ipv6Addr>)>,
+    interface: &str,
+    address: Ipv6Addr,
+    now: Instant,
+) -> bool {
+    let entry = cache
+        .entry(interface.to_owned())
+        .or_insert_with(|| (now, interface_addresses(interface)));
+    if now.duration_since(entry.0) >= LOCAL_ADDRESS_TTL {
+        *entry = (now, interface_addresses(interface));
+    }
+    entry.1.contains(&address)
+}
+
+fn interface_addresses(interface: &str) -> Vec<Ipv6Addr> {
+    nix::ifaddrs::getifaddrs().map_or_else(
+        |_| Vec::new(),
+        |addrs| {
+            addrs
+                .filter(|a| a.interface_name == interface)
+                .filter_map(|a| Some(a.address?.as_sockaddr_in6()?.ip()))
+                .collect()
+        },
+    )
 }
 
 /// The interface's Ethernet address for the Source Link-Layer Address option.

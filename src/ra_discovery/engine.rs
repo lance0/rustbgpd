@@ -288,8 +288,10 @@ impl Engine {
 
     /// A validated RA read on `ifindex` under link `generation`.
     /// `is_own(name, source)` reports whether the source is assigned to the
-    /// receiving interface; it is asked only for a source that is not already
-    /// a candidate.
+    /// receiving interface. It is asked for every RA that is not dropped by
+    /// the candidate cap, including refreshes of a known candidate: an
+    /// address assigned locally after it was learned (a local radvd, say)
+    /// stops being a candidate at its next RA, which is then dropped.
     pub(crate) fn on_router_advertisement(
         &mut self,
         ifindex: u32,
@@ -314,15 +316,24 @@ impl Engine {
         } else {
             Duration::from_secs(u64::from(router_lifetime_secs))
         };
-        if let Some(expiry) = iface.candidates.get_mut(&source) {
-            *expiry = now + hold;
-            return Ok(());
-        }
-        if iface.candidates.len() >= MAX_CANDIDATES_PER_INTERFACE {
+        let known = iface.candidates.contains_key(&source);
+        if !known && iface.candidates.len() >= MAX_CANDIDATES_PER_INTERFACE {
             return Err(DropReason::CandidateLimit);
         }
         if is_own(name, source) {
+            if known {
+                iface.candidates.remove(&source);
+                self.events.push(DiscoveryEvent::CandidateExpired {
+                    interface: name.clone(),
+                    address: source,
+                });
+                reselect(name, iface, &mut self.events);
+            }
             return Err(DropReason::OwnAddress);
+        }
+        if let Some(expiry) = iface.candidates.get_mut(&source) {
+            *expiry = now + hold;
+            return Ok(());
         }
         iface.candidates.insert(source, now + hold);
         self.events.push(DiscoveryEvent::CandidateLearned {

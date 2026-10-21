@@ -91,6 +91,43 @@ fn own_address_ra_is_rejected() {
 }
 
 #[test]
+fn candidate_that_becomes_a_local_address_is_dropped_on_refresh() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    ra(&mut e, 1, 30, t0).unwrap();
+    ra(&mut e, 2, 30, t0).unwrap();
+    e.events.clear();
+    // fe80::1 is now assigned to the interface (a local radvd, say).
+    let g = generation(&e);
+    let t1 = t0 + Duration::from_secs(5);
+    assert_eq!(
+        e.on_router_advertisement(IDX, g, ll(1), 30, t1, |_, src| src == ll(1)),
+        Err(DropReason::OwnAddress)
+    );
+    assert_eq!(
+        e.events,
+        vec![
+            DiscoveryEvent::CandidateExpired {
+                interface: IF.into(),
+                address: ll(1)
+            },
+            DiscoveryEvent::BindingChanged {
+                interface: IF.into(),
+                previous: Some(ep(1)),
+                current: Some(ep(2))
+            },
+        ]
+    );
+    // Further RAs from it are dropped, not refreshed or relearned.
+    e.events.clear();
+    assert_eq!(
+        e.on_router_advertisement(IDX, g, ll(1), 30, t1, |_, src| src == ll(1)),
+        Err(DropReason::OwnAddress)
+    );
+    assert_eq!(e.events, vec![]);
+}
+
+#[test]
 fn first_source_binds_and_second_is_a_sticky_conflict() {
     let t0 = Instant::now();
     let mut e = engine(false, t0);
