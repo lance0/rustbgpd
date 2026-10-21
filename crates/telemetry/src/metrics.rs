@@ -3927,10 +3927,10 @@ impl BgpMetrics {
     // ponytail: one value per bare address holds only while configuration
     // rejects the same link-local address on two interfaces. After an
     // interface move re-registers the address, the old neighbor's RIB
-    // writes queued before its delete and its BFD session's final
-    // transition still resolve to the new value until the new session
-    // republishes them. Emitters carrying full neighbor identity replace
-    // this map.
+    // writes queued before its delete resolve to the new value; they are
+    // gauges the new session republishes, so the error is transient. (BFD
+    // labels its series exactly and does not use this map.) RIB emitters
+    // carrying full neighbor identity replace this map.
     pub fn register_scoped_peer(&self, address: IpAddr, label: &str) {
         let bare = peer_label(address);
         if label == bare {

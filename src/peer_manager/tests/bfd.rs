@@ -43,6 +43,7 @@ fn bfd_params(peer: IpAddr, strict: bool) -> crate::bfd_runtime::BfdSessionParam
     crate::bfd_runtime::BfdSessionParams {
         revision: 0,
         peer,
+        peer_label: peer.to_string(),
         scope_id: None,
         destination: crate::bfd_runtime::bfd_destination(peer, None, false)
             .expect("global test peer destination"),
@@ -571,6 +572,7 @@ async fn republish_preserves_link_local_scope_across_reconcile() {
     let params = crate::bfd_runtime::BfdSessionParams {
         revision: 0,
         peer,
+        peer_label: peer.to_string(),
         scope_id: Some(71),
         destination: crate::bfd_runtime::bfd_destination(peer, Some(71), false)
             .expect("scoped test peer destination"),
