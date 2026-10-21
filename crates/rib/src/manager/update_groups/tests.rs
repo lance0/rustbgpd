@@ -342,7 +342,7 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
         peer,
         session_id: 1,
     });
-    manager.handle_update(crate::RibUpdate::PeerDeleted { peer });
+    manager.handle_update(crate::RibUpdate::PeerDeleted { peer, label: None });
     drop(receiver);
 
     let mut active = GrowthSnapshot {
@@ -400,7 +400,7 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
         );
 
         manager.handle_update(crate::RibUpdate::PeerDown { peer, session_id });
-        manager.handle_update(crate::RibUpdate::PeerDeleted { peer });
+        manager.handle_update(crate::RibUpdate::PeerDeleted { peer, label: None });
         drop(receiver);
         quiescent.key_slots = active.key_slots;
         quiescent.inactive_key_slots = active.key_slots;

@@ -345,7 +345,7 @@ hold_time = 90
             .chain(std::iter::from_fn(|| self.rib_rx.try_recv().ok()))
         {
             assert!(
-                !matches!(update, RibUpdate::PeerDeleted { peer: deleted } if deleted == peer),
+                !matches!(update, RibUpdate::PeerDeleted { peer: deleted, .. } if deleted == peer),
                 "a rejected mutation must not reap the peer's RIB state"
             );
         }

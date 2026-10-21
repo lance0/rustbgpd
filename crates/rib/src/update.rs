@@ -2504,6 +2504,12 @@ pub enum RibUpdate {
     PeerDeleted {
         /// The peer that was deleted.
         peer: IpAddr,
+        /// The deleted neighbor's exact `peer` metric value (`addr%if` for
+        /// a link-local neighbor). The final reap targets it rather than
+        /// the bare address's current registration, which a replacement
+        /// on another interface may already own. `None` reaps the bare
+        /// address.
+        label: Option<Arc<str>>,
     },
     /// Peer session established — register for outbound updates.
     PeerUp {

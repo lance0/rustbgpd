@@ -356,15 +356,23 @@ async fn link_local_neighbor_series_share_one_scoped_peer_value() {
 
     mgr.delete_peer(key, false).await.unwrap();
     assert!(peer_label_values(&metrics).is_empty());
-    // The RIB's teardown emission and its final reap, both bare.
+    // The RIB's bare teardown emission, then its final reap of the exact
+    // value the delete marker carries.
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
-    assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == addr));
+    let RibUpdate::PeerDeleted {
+        peer,
+        label: Some(label),
+    } = update
+    else {
+        panic!("PeerDeleted with the scoped label expected");
+    };
+    assert_eq!((peer, &*label), (addr, "fe80::1%eth0"));
     metrics.set_rib_prefixes("fe80::1", "ipv4_unicast", 0);
     assert_eq!(
         peer_label_values(&metrics),
         BTreeSet::from(["fe80::1%eth0".to_owned()])
     );
-    metrics.reap_peer_series("fe80::1");
+    metrics.reap_exact_peer_series(&label);
     assert!(peer_label_values(&metrics).is_empty());
 }
 
@@ -445,7 +453,7 @@ async fn delete_peer_reaps_metric_series() {
     assert!((fib_installed.get_metric()[0].get_counter().get_value() - 1.0).abs() < f64::EPSILON);
     // The ordered RIB-side reap marker was queued.
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
-    assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == peer_addr));
+    assert!(matches!(update, RibUpdate::PeerDeleted { peer, .. } if peer == peer_addr));
 }
 
 #[tokio::test]
@@ -506,7 +514,7 @@ async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
     assert_eq!(peer_metric_series_count(&metrics_view, peer_label), 0);
     // The ordered RIB-side reap marker was queued
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
-    assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == addr));
+    assert!(matches!(update, RibUpdate::PeerDeleted { peer, .. } if peer == addr));
 }
 
 #[tokio::test]
@@ -741,7 +749,7 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
     );
     assert!(matches!(
         rib_rx.try_recv(),
-        Ok(RibUpdate::PeerDeleted { peer }) if peer == address
+        Ok(RibUpdate::PeerDeleted { peer, .. }) if peer == address
     ));
     let removed = query_session_event_history(
         &mgr,
@@ -1072,7 +1080,7 @@ async fn dynamic_peer_auto_removal_reaps_metric_series() {
     assert!(mgr.peers.is_empty());
     assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), 0);
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
-    assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == peer_addr));
+    assert!(matches!(update, RibUpdate::PeerDeleted { peer, .. } if peer == peer_addr));
 }
 
 /// The 60s BMP stats tick sources RFC 8671 types 15/17 from the RIB's

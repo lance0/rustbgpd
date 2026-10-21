@@ -2074,7 +2074,10 @@ impl PeerManager {
             // Reads stay queued: the caller's removal is only partly applied.
             let _ = self
                 .send_rib_update(
-                    RibUpdate::PeerDeleted { peer: address },
+                    RibUpdate::PeerDeleted {
+                        peer: address,
+                        label: Some(peer_label.into()),
+                    },
                     OperatorReadAdmission::Fenced {
                         reason: "the peer removal is partly applied",
                     },
