@@ -29,6 +29,11 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// which now runs on every RA: a flood of RAs from known sources must not
 /// become one `getifaddrs` netlink dump per packet.
 const LOCAL_ADDRESS_TTL: Duration = Duration::from_secs(1);
+/// Socket-open retry backoff: 1 s, doubling, capped at 60 s. Independent of
+/// the RA timer, so discovery recovers even with sending off and no
+/// candidates to expire.
+const OPEN_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const OPEN_RETRY_MAX: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
@@ -42,7 +47,7 @@ pub enum DiscoveryError {
 /// arrive on the receiver returned by [`RaDiscovery::spawn`].
 pub struct RaDiscovery {
     commands: mpsc::UnboundedSender<Command>,
-    drops: Arc<DropCounters>,
+    counters: Arc<Counters>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -55,13 +60,19 @@ enum Command {
 }
 
 #[derive(Default)]
-struct DropCounters([AtomicU64; DropReason::ALL.len()]);
+struct Counters {
+    drops: [AtomicU64; DropReason::ALL.len()],
+    socket_open_failures: AtomicU64,
+}
 
-impl DropCounters {
+impl Counters {
     fn bump(&self, reason: DropReason) {
-        self.0[reason as usize].fetch_add(1, Ordering::Relaxed);
+        self.drops[reason as usize].fetch_add(1, Ordering::Relaxed);
     }
 }
+
+/// Opens the per-interface socket; replaced by a fake in tests.
+type Opener = Box<dyn FnMut(&str, u32) -> io::Result<Socket> + Send>;
 
 impl RaDiscovery {
     /// Open-probe a raw `ICMPv6` socket, then spawn the actor on the current
@@ -75,22 +86,13 @@ impl RaDiscovery {
             .map_or(0, |d| d.as_secs() ^ u64::from(d.subsec_nanos()))
             ^ u64::from(std::process::id());
         let (commands, command_rx) = mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (received_tx, received_rx) = mpsc::channel(RECEIVE_QUEUE);
-        let drops = Arc::new(DropCounters::default());
-        let actor = Actor {
-            engine: Engine::new(config, seed),
-            sockets: HashMap::new(),
-            events: event_tx,
-            drops: Arc::clone(&drops),
-            received_tx,
-            local_addresses: HashMap::new(),
-        };
+        let (actor, event_rx, received_rx) = Actor::new(config, seed, Box::new(interface_socket));
+        let counters = Arc::clone(&actor.counters);
         let task = tokio::spawn(actor.run(command_rx, received_rx));
         Ok((
             Self {
                 commands,
-                drops,
+                counters,
                 task,
             },
             event_rx,
@@ -125,7 +127,12 @@ impl RaDiscovery {
     }
 
     pub fn dropped(&self, reason: DropReason) -> u64 {
-        self.drops.0[reason as usize].load(Ordering::Relaxed)
+        self.counters.drops[reason as usize].load(Ordering::Relaxed)
+    }
+
+    /// Failed per-interface socket opens (each is retried with backoff).
+    pub fn socket_open_failures(&self) -> u64 {
+        self.counters.socket_open_failures.load(Ordering::Relaxed)
     }
 
     /// Send final lifetime-0 RAs where advertising, close the sockets and
@@ -279,19 +286,68 @@ struct Actor {
     engine: Engine,
     sockets: HashMap<String, InterfaceSocket>,
     events: mpsc::UnboundedSender<DiscoveryEvent>,
-    drops: Arc<DropCounters>,
+    counters: Arc<Counters>,
     received_tx: mpsc::Sender<Received>,
     local_addresses: HashMap<String, (Instant, Vec<Ipv6Addr>)>,
+    opener: Opener,
+    open_retries: HashMap<String, OpenRetry>,
+}
+
+/// A failed open for one (ifindex, generation) and when to try again.
+struct OpenRetry {
+    ifindex: u32,
+    generation: u64,
+    failures: u32,
+    at: Instant,
+}
+
+fn open_backoff(failures: u32) -> Duration {
+    OPEN_RETRY_INITIAL
+        .saturating_mul(1 << failures.saturating_sub(1).min(16))
+        .min(OPEN_RETRY_MAX)
 }
 
 impl Actor {
+    fn new(
+        config: DiscoveryConfig,
+        seed: u64,
+        opener: Opener,
+    ) -> (
+        Self,
+        mpsc::UnboundedReceiver<DiscoveryEvent>,
+        mpsc::Receiver<Received>,
+    ) {
+        let (events, event_rx) = mpsc::unbounded_channel();
+        let (received_tx, received_rx) = mpsc::channel(RECEIVE_QUEUE);
+        let actor = Self {
+            engine: Engine::new(config, seed),
+            sockets: HashMap::new(),
+            events,
+            counters: Arc::default(),
+            received_tx,
+            local_addresses: HashMap::new(),
+            opener,
+            open_retries: HashMap::new(),
+        };
+        (actor, event_rx, received_rx)
+    }
+
+    /// The next engine deadline or socket-open retry.
+    fn next_wake(&self) -> Option<Instant> {
+        let retry = self.open_retries.values().map(|r| r.at).min();
+        match (self.engine.next_deadline(), retry) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     async fn run(
         mut self,
         mut commands: mpsc::UnboundedReceiver<Command>,
         mut received: mpsc::Receiver<Received>,
     ) {
         loop {
-            let deadline = self.engine.next_deadline();
+            let deadline = self.next_wake();
             let sleep = async {
                 match deadline {
                     Some(at) => tokio::time::sleep_until(at.into()).await,
@@ -310,7 +366,7 @@ impl Actor {
                 Some(packet) = received.recv() => self.received(&packet),
                 () = sleep => self.engine.poll(Instant::now()),
             }
-            self.open_sockets();
+            self.open_sockets(Instant::now());
             self.flush();
             self.close_stale_sockets();
         }
@@ -348,7 +404,7 @@ impl Actor {
             Err(reason) => Err(reason),
         };
         if let Err(reason) = result {
-            self.drops.bump(reason);
+            self.counters.bump(reason);
             debug!(
                 ifindex = packet.ifindex,
                 source = %packet.source,
@@ -361,7 +417,7 @@ impl Actor {
     /// Open a socket for every bound interface that lacks one for its
     /// current (ifindex, generation). A new generation gets a new socket, so
     /// anything the kernel buffered for the old link is discarded with it.
-    fn open_sockets(&mut self) {
+    fn open_sockets(&mut self, now: Instant) {
         let wanted: Vec<(String, u32, u64)> = self
             .engine
             .bound_interfaces()
@@ -373,8 +429,17 @@ impl Actor {
             .map(|(name, ifindex, generation)| (name.to_owned(), ifindex, generation))
             .collect();
         for (name, ifindex, generation) in wanted {
-            match interface_socket(&name, ifindex).and_then(AsyncFd::new) {
+            let previous = self
+                .open_retries
+                .get(&name)
+                .filter(|r| (r.ifindex, r.generation) == (ifindex, generation));
+            if previous.is_some_and(|r| r.at > now) {
+                continue;
+            }
+            let failures = previous.map_or(0, |r| r.failures);
+            match (self.opener)(&name, ifindex).and_then(AsyncFd::new) {
                 Ok(socket) => {
+                    self.open_retries.remove(&name);
                     let socket = Arc::new(socket);
                     let reader = AbortOnDropHandle::new(tokio::spawn(reader(
                         Arc::clone(&socket),
@@ -395,7 +460,21 @@ impl Actor {
                     );
                 }
                 Err(error) => {
-                    warn!(interface = %name, ifindex, %error, "cannot open RA socket");
+                    let failures = failures + 1;
+                    let retry_in = open_backoff(failures);
+                    self.counters
+                        .socket_open_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    warn!(interface = %name, ifindex, %error, ?retry_in, "cannot open RA socket");
+                    self.open_retries.insert(
+                        name,
+                        OpenRetry {
+                            ifindex,
+                            generation,
+                            failures,
+                            at: now + retry_in,
+                        },
+                    );
                 }
             }
         }
@@ -409,6 +488,8 @@ impl Actor {
             .collect();
         self.sockets
             .retain(|name, s| live.get(name.as_str()) == Some(&(s.ifindex, s.generation)));
+        self.open_retries
+            .retain(|name, r| live.get(name.as_str()) == Some(&(r.ifindex, r.generation)));
     }
 
     fn flush(&mut self) {
@@ -477,4 +558,68 @@ fn link_layer_address(interface: &str) -> Option<[u8; 6]> {
         }
         a.address.as_ref()?.as_link_addr()?.addr()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
+
+    use socket2::{Domain, Socket, Type};
+
+    use super::{Actor, open_backoff};
+    use crate::ra_discovery::{DiscoveryConfig, LinkEvent, LinkState};
+
+    #[test]
+    fn open_backoff_doubles_to_a_one_minute_cap() {
+        let secs: Vec<u64> = (1..=8).map(|n| open_backoff(n).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 32, 60, 60]);
+        assert_eq!(open_backoff(u32::MAX), Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn socket_open_is_retried_with_backoff_until_it_succeeds() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&attempts);
+        let opener = move |_: &str, _: u32| {
+            if counter.fetch_add(1, Ordering::Relaxed) < 3 {
+                Err(std::io::Error::other("transient"))
+            } else {
+                // Any socket stands in for the raw ICMPv6 one.
+                Socket::new(Domain::IPV6, Type::DGRAM, None)
+            }
+        };
+        // Sending off and no candidates: nothing but the retry can wake us.
+        let (mut actor, _events, _received) =
+            Actor::new(DiscoveryConfig::default(), 1, Box::new(opener));
+        let t0 = Instant::now();
+        actor.engine.start("x");
+        actor.engine.on_link(
+            &LinkEvent {
+                ifindex: 9,
+                name: "x".into(),
+                state: LinkState::Unknown,
+            },
+            t0,
+        );
+        assert_eq!(actor.engine.next_deadline(), None);
+        let secs = Duration::from_secs;
+        for (at, tries, wake) in [
+            (t0, 1, Some(t0 + secs(1))),
+            (t0 + Duration::from_millis(999), 1, Some(t0 + secs(1))),
+            (t0 + secs(1), 2, Some(t0 + secs(3))),
+            (t0 + secs(3), 3, Some(t0 + secs(7))),
+            (t0 + secs(7), 4, None),
+        ] {
+            actor.open_sockets(at);
+            assert_eq!(attempts.load(Ordering::Relaxed), tries);
+            assert_eq!(actor.next_wake(), wake);
+        }
+        assert!(actor.sockets.contains_key("x"));
+        assert_eq!(
+            actor.counters.socket_open_failures.load(Ordering::Relaxed),
+            3
+        );
+    }
 }
