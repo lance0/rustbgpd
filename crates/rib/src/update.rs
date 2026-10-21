@@ -1465,6 +1465,10 @@ pub enum RouteExportDisposition {
     /// Export has not settled: selection, an ORF gate or outbound delivery is
     /// still outstanding.
     Pending,
+    /// A managed peer with no session registered for outbound updates, so
+    /// nothing is exported to it. Listed only when the query names the
+    /// managed peers.
+    NotEstablished,
 }
 
 /// One peer's export disposition for a locally injected unicast route.
@@ -1492,16 +1496,45 @@ pub struct PeerRouteExport {
     pub deny_validation: Vec<String>,
 }
 
-/// One page of [`PeerRouteExport`] rows in peer-address order.
+/// A destination of an export walk: the peer address and, for a scoped
+/// (IPv6 link-local) neighbor, its interface. Walks list destinations in
+/// this tuple's order.
+pub type ExportDestination = (IpAddr, Option<Arc<str>>);
+
+/// The rows one page lists for one queried local route key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRouteExports {
+    /// Index of the key in the query's keys.
+    pub key: usize,
+    /// Whether a local route had this key when this page read it. `false`
+    /// carries no rows. A resumed walk's version check also ensures the key
+    /// had no route on the first page, but not in between.
+    pub found: bool,
+    /// Rows for this key on this page, in destination order. A key whose
+    /// rows continue on the next page is listed there again.
+    pub peers: Vec<PeerRouteExport>,
+}
+
+/// One page of an export walk over one or more local route keys.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteExportPage {
-    /// Rows for this page.
-    pub peers: Vec<PeerRouteExport>,
-    /// Whether peers remain after the last row.
-    pub more: bool,
+    /// Keys this page lists, in query order.
+    pub routes: Vec<LocalRouteExports>,
+    /// Where the next page resumes; `None` when the walk is complete.
+    pub next: Option<RouteExportCursor>,
     /// State this page was read from; a later page resumes only while it
     /// is unchanged.
     pub version: RouteExportVersion,
+}
+
+/// Position of an export walk: the index of the next key to list and, when
+/// that key's rows already began, the last destination listed for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExportCursor {
+    /// Index into the query's keys.
+    pub key: usize,
+    /// Resume this key after this destination; `None` starts the key.
+    pub after: Option<ExportDestination>,
 }
 
 /// Process-local consistency fence for a paged [`RouteExportPage`] walk.
@@ -1510,24 +1543,26 @@ pub struct RouteExportVersion {
     /// Generation of the outbound peer roster; it advances whenever a peer
     /// registers for or leaves outbound updates, so a flap advances it too.
     pub roster: u64,
-    /// Fingerprint of the local route's next hops, attributes and
-    /// validation states. Content, not identity: removing the route and
-    /// restoring identical content leaves it unchanged.
+    /// Fingerprint of every queried key's local route: absent, or its next
+    /// hops, attributes and validation states. Content, not identity:
+    /// removing a route and restoring identical content leaves it unchanged.
     pub route: u64,
     /// Export-policy state of the registered peers: the installed chains'
     /// change version and the generations of the datasets they read.
     pub policy: u64,
+    /// Fingerprint of the managed peers the query named; 0 when it named
+    /// none.
+    pub managed: u64,
 }
 
 /// Why a [`RouteExportPage`] was not served.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteExportPageError {
-    /// No local route has this key, and no walk was being resumed.
-    NoRoute,
-    /// A resumed walk's route content changed (or the route is gone), the
-    /// outbound peer roster changed, or the peers' export policy changed
-    /// since its first page; or, on any page, a dataset the policy reads
-    /// was refreshed while the page's rows were evaluated.
+    /// A resumed walk's route content changed (or a route appeared or was
+    /// removed), the outbound peer roster changed, the peers' export policy
+    /// changed or the named managed peers differ since its first page; or,
+    /// on any page, a dataset the policy reads was refreshed while the
+    /// page's rows were evaluated.
     Invalidated,
 }
 
@@ -3011,19 +3046,22 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Result<ExplainAdvertisedRoute, ExplainAdvertisedRouteError>>,
     },
-    /// Per-peer export disposition of one locally injected unicast route,
-    /// identified by its local Adj-RIB-In key `(prefix, path_id)`. Peers are
-    /// the sessions registered for outbound updates, in address order after
-    /// `after`, at most `page_size` of them.
+    /// Per-peer export dispositions of locally injected unicast routes,
+    /// identified by their local Adj-RIB-In keys `(prefix, path_id)`.
+    /// Destinations are the sessions registered for outbound updates plus,
+    /// when `managed` is set, every managed peer without one, in
+    /// destination order per key, keys in query order, at most `page_size`
+    /// entries per page. The caller bounds `keys` (non-empty, unique, at most
+    /// [`crate::manager::LOCAL_ROUTE_EXPORT_MAX_KEYS`]).
     QueryLocalRouteExport {
-        /// Prefix of the local route.
-        prefix: Prefix,
-        /// Path ID of the local route (the `AddPath` key).
-        path_id: u32,
-        /// Resume after this peer address, provided the walk's state still
-        /// matches the version of the page that ended there.
-        after: Option<(IpAddr, RouteExportVersion)>,
-        /// Peers per page, clamped to `1..=ROUTE_QUERY_MAX_PAGE_SIZE`.
+        /// Local route keys, in walk order.
+        keys: Vec<(Prefix, u32)>,
+        /// Managed peers, listed as not Established unless registered.
+        managed: Option<Vec<ExportDestination>>,
+        /// Resume here, provided the walk's state still matches the version
+        /// of the page that returned this cursor.
+        resume: Option<(RouteExportCursor, RouteExportVersion)>,
+        /// Entries per page, clamped to `1..=ROUTE_QUERY_MAX_PAGE_SIZE`.
         page_size: usize,
         /// Response channel.
         reply: oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
