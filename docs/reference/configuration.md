@@ -2020,7 +2020,8 @@ gr_eor_grace_time = 25   # off by default
   (`CheckLiveness`) before it replays, re-adds its full desired state, then
   calls [`InjectionService.MarkReplayComplete`](api.md#replay-complete-signal)
   with its name and that incarnation. Once every listed controller has
-  signalled, every held End-of-RIB is released at once and
+  signalled, every held End-of-RIB is released at once (a neighbor that
+  establishes later gets End-of-RIB right after its initial table) and
   `bgp_gr_eor_grace_released_total{peer,reason="replay_complete"}`
   increments. The signal travels through the RIB queue behind the
   controller's earlier injections, so the replayed routes reach the helper

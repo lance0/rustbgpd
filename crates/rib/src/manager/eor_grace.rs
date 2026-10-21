@@ -81,18 +81,19 @@ pub(super) struct ReplayWait {
 }
 
 impl ReplayWait {
-    fn awaiting(&self) -> Vec<String> {
+    pub(super) fn awaiting(&self) -> Vec<String> {
         self.awaiting_at(None)
     }
 
-    /// Listed owners that had not signalled by `deadline` (or at all).
+    /// Listed owners that had not signalled before `deadline` (or at all):
+    /// a window is over at its deadline.
     fn awaiting_at(&self, deadline: Option<tokio::time::Instant>) -> Vec<String> {
         self.expected
             .iter()
             .filter(|owner| {
                 self.signalled
                     .get(*owner)
-                    .is_none_or(|at| deadline.is_some_and(|deadline| *at > deadline))
+                    .is_none_or(|at| deadline.is_some_and(|deadline| *at >= deadline))
             })
             .cloned()
             .collect()
@@ -194,12 +195,21 @@ impl RibManager {
             );
             return Ok(ReplayComplete::NotExpected);
         }
+        // Replay completion is a fact about this incarnation, so it is
+        // recorded even when nothing is held. Windows exist per configured
+        // peer from daemon start, whether or not a session is up, so a
+        // release below covers peers that establish later too: their initial
+        // dump then ends in End-of-RIB at once.
+        let now = tokio::time::Instant::now();
+        self.eor_replay
+            .signalled
+            .entry(owner.to_string())
+            .or_insert(now);
         // A window whose deadline has passed is over even before its expiry
         // turn runs: the run loop drains the backlog captured at the
         // deadline first, and a signal in that backlog must not claim the
         // release. The expiry turn counts it as `deadline` and names the
-        // controllers that had not signalled by then.
-        let now = tokio::time::Instant::now();
+        // controllers that had not signalled by that window's deadline.
         let holding: Vec<IpAddr> = self
             .eor_grace_deadlines
             .iter()
@@ -210,10 +220,6 @@ impl RibManager {
             info!(owner = %owner, "replay-complete signal: no End-of-RIB is held");
             return Ok(ReplayComplete::NotHolding);
         }
-        self.eor_replay
-            .signalled
-            .entry(owner.to_string())
-            .or_insert(now);
         let awaiting = self.eor_replay.awaiting();
         if !awaiting.is_empty() {
             info!(

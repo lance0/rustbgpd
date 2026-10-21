@@ -1233,3 +1233,49 @@ async fn a_late_signal_is_named_by_the_window_it_missed() {
         "{events:?}"
     );
 }
+
+/// Windows belong to configured peers from daemon start, not to sessions.
+/// When every listed controller signals before a configured peer has
+/// established, that peer's window is released too: its initial dump ends in
+/// End-of-RIB at once, long before the deadline, counted as
+/// `replay_complete`.
+#[tokio::test(start_paused = true)]
+async fn a_peer_established_after_the_release_gets_end_of_rib_after_its_dump() {
+    let metrics = BgpMetrics::new();
+    let mut manager = replay_manager(&[UPSTREAM, CLIENT], &[BRIDGE], &metrics);
+    let incarnation = manager.injection_leases.incarnation();
+    let mut early = connect(&mut manager, UPSTREAM, HELPER);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    inject(&mut manager, KEPT);
+    assert_eq!(
+        signal(&mut manager, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::Released
+    );
+    let mut helper = Helper::retaining(&[KEPT]);
+    helper.observe(&mut early, |_| true);
+    assert_eq!(helper.eor, vec![V4]);
+
+    // CLIENT establishes only now, 5 s into a 120 s window.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let mut late = connect(&mut manager, CLIENT, HELPER);
+    let mut helper = Helper::retaining(&[KEPT]);
+    assert!(helper.observe(&mut late, |helper| helper.has(KEPT)));
+    assert_eq!(helper.eor, vec![V4], "End-of-RIB waited for the deadline");
+    assert_eq!(helper.log.last().map(String::as_str), Some("eor"));
+    assert!((released_count(&metrics, CLIENT, "replay_complete") - 1.0).abs() < f64::EPSILON);
+    assert_eq!(manager.next_eor_hold_deadline(), None);
+}
+
+/// A signal while nothing is held answers `NotHolding` but is still
+/// recorded: replay completion is a fact about the incarnation.
+#[tokio::test(start_paused = true)]
+async fn a_not_holding_signal_is_recorded_for_the_incarnation() {
+    let metrics = BgpMetrics::new();
+    let mut cold = replay_manager(&[], &[BRIDGE, OTHER], &metrics);
+    let incarnation = cold.injection_leases.incarnation();
+    assert_eq!(
+        signal(&mut cold, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::NotHolding
+    );
+    assert_eq!(cold.eor_replay.awaiting(), vec![OTHER.to_string()]);
+}

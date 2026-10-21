@@ -4167,7 +4167,8 @@ enum ReplayCompleteOutcome {
   // The owner is not in gr_eor_replay_owners. Nothing changed.
   REPLAY_COMPLETE_OUTCOME_NOT_EXPECTED = 3;
   // No End-of-RIB is held: a cold boot, no grace window configured, or the
-  // window already ended (released or past its deadline). Nothing changed.
+  // window already ended (released or past its deadline). Nothing is
+  // released; the signal is still recorded for this incarnation.
   REPLAY_COMPLETE_OUTCOME_NOT_HOLDING = 4;
 }
 

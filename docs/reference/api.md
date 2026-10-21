@@ -3543,14 +3543,17 @@ The signal is sent through the RIB queue after the controller's earlier
 injections, and each add commits before its RPC returns, so every route
 added before the call reaches the helpers ahead of the released End-of-RIB.
 Release needs every listed controller (AND); the window's deadline still
-releases End-of-RIB if one stays silent.
+releases End-of-RIB if one stays silent. Windows belong to the configured
+neighbors from daemon start, so the release also covers a neighbor whose
+session is not up yet: when it establishes, its initial table ends in
+End-of-RIB at once.
 
 | Result | Meaning |
 |--------|---------|
 | OK `RELEASED` | This owner was the last one awaited; the held End-of-RIB was released |
 | OK `RECORDED` | Recorded; `awaiting` lists the listed owners that have not signalled |
 | OK `NOT_EXPECTED` | The owner is not in `gr_eor_replay_owners`; nothing changed (logged at WARN) |
-| OK `NOT_HOLDING` | No End-of-RIB is held: a cold boot, no window configured, or the window already ended |
+| OK `NOT_HOLDING` | No End-of-RIB is held: a cold boot, no window configured, or the window already ended. Nothing is released; the signal is still recorded for this incarnation |
 | `FAILED_PRECONDITION`, `ErrorInfo` reason `INCARNATION_MISMATCH` | `I` is not the current incarnation: the daemon restarted. Nothing changed; read `I` again and replay again |
 
 A repeated signal for the same owner changes nothing. The RPC is
