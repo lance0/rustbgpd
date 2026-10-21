@@ -711,11 +711,11 @@ async fn stop_past_the_flush_budget_discards_the_backlog_and_clears_the_queue_ga
 #[tokio::test]
 async fn shutdown_abandoned_before_the_cease_is_queued_aborts_the_writer() {
     let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
-    let (peer_ip, session_id) = (session.peer_ip, session.session_identity.id);
+    let (rib_peer, session_id) = (session.rib_peer(), session.session_identity.id);
     while session
         .rib_tx
         .try_send(RibUpdate::PeerDown {
-            peer: peer_ip,
+            peer: rib_peer,
             session_id,
         })
         .is_ok()
