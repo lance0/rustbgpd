@@ -3736,6 +3736,16 @@ service InjectionService {
   // the walk. A token for another key list, another include_configured or
   // from another daemon process returns INVALID_ARGUMENT.
   rpc BatchListPathExportDispositions(BatchListPathExportDispositionsRequest) returns (BatchListPathExportDispositionsResponse);
+  // ListPathExportDispositions for one locally injected FlowSpec rule,
+  // identified by its exact AddFlowSpec key (afi_safi, components), with the
+  // same rows, peer order, paging, include_configured, ABORTED and
+  // INVALID_ARGUMENT contract. A received rule with the same key never
+  // counts as this rule's export: when it is the selected rule, this rule is
+  // WITHHELD with reason not_selected. Export policy evaluates a FlowSpec
+  // rule with RPKI state not_found and ASPA state unknown, so deny_validation
+  // carries those states when the deciding statement tests them. A key with
+  // no local rule returns NOT_FOUND. This new diagnostic RPC is outside v1.
+  rpc ListFlowSpecExportDispositions(ListFlowSpecExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request
   // is idempotent, and a request with the same key but different actions or
@@ -4059,6 +4069,18 @@ message BatchListPathExportDispositionsRequest {
   string page_token = 3;
   // As ListPathExportDispositionsRequest.include_configured.
   bool include_configured = 4;
+}
+
+message ListFlowSpecExportDispositionsRequest {
+  // The local rule's AddFlowSpec key, with the same identity and ordering
+  // rules as AddFlowSpecRequest.
+  AddressFamily afi_safi = 1;
+  repeated FlowSpecComponent components = 2;
+  // As ListPathExportDispositionsRequest.page_size, page_token and
+  // include_configured.
+  uint32 page_size = 3;
+  string page_token = 4;
+  bool include_configured = 5;
 }
 
 // The export dispositions of one requested key on one page.
