@@ -400,6 +400,7 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
     // the session's resource-admission interval for this stopped-reader proof.
     session.config.peer.send_hold_time = 1;
     let mut teardown = session.writer_teardown_tx.as_ref().unwrap().subscribe();
+    let (metrics, label) = (session.metrics.clone(), session.peer_label.clone());
     let session_task = tokio::spawn(async move { session.run().await });
     // The peer stops reading until resource expiry. The teardown handshake
     // then releases it to observe the final Cease during the writer's linger.
@@ -490,6 +491,11 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
         updates_on_wire < flood_total,
         "sanity: the flood must have outrun the wire"
     );
+    assert_eq!(
+        metrics.peer_outbound_queue_depth(&label),
+        0,
+        "the discarded backlog must not stay on the queue-depth gauge"
+    );
 }
 
 const WEDGED_BACKLOG: usize = 256;
@@ -518,6 +524,8 @@ async fn wedged_session_with_backlog() -> (
         .set_send_buffer_size(4096)
         .unwrap();
     let peer = connect.await.unwrap();
+    // No send-hold timer: a paused clock must not expire the wedged write.
+    session.config.peer.send_hold_time = 0;
     session.test_install_stream(server);
     establish_test_session(&mut session, 65002).await;
     let mut frame = vec![0u8; 4096];
@@ -600,11 +608,16 @@ async fn ordinary_closes_flush_queued_updates_then_end_with_the_notification() {
     ];
     for (path, command, subcode) in cases {
         let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+        let (metrics, label) = (session.metrics.clone(), session.peer_label.clone());
         let mut senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
         let session_task = tokio::spawn(async move { session.run().await });
         cmd_tx.send(command).await.unwrap();
         // The close is queued behind the backlog before the peer reads.
         assert!(senders_dropped.changed().await.is_err(), "{path}");
+        assert!(
+            metrics.peer_outbound_queue_depth(&label) > 0,
+            "{path}: the writer sampled its backlog before the close"
+        );
 
         let mut wire = Vec::new();
         tokio::time::timeout(Duration::from_secs(15), peer.read_to_end(&mut wire))
@@ -628,6 +641,11 @@ async fn ordinary_closes_flush_queued_updates_then_end_with_the_notification() {
             WEDGED_BACKLOG,
             "{path}: every UPDATE queued before the close is flushed ahead of the Cease"
         );
+        assert_eq!(
+            metrics.peer_outbound_queue_depth(&label),
+            0,
+            "{path}: the queue-depth gauge must read empty once the writer is gone"
+        );
 
         cmd_tx.send(PeerCommand::Shutdown).await.ok();
         tokio::time::timeout(Duration::from_secs(15), session_task)
@@ -636,6 +654,50 @@ async fn ordinary_closes_flush_queued_updates_then_end_with_the_notification() {
             .expect("session task must not panic")
             .expect("run() must return Ok");
     }
+}
+
+/// An administrative stop whose backlog cannot drain within the close flush
+/// budget discards the rest, still ends with the Cease, and leaves the
+/// queue-depth gauge at zero: the session actor stays alive after a stop, so
+/// a stale sample would otherwise persist. The paused clock passes the
+/// budget while the peer is not reading.
+#[tokio::test(start_paused = true)]
+async fn stop_past_the_flush_budget_discards_the_backlog_and_clears_the_queue_gauge() {
+    let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+    let (metrics, label) = (session.metrics.clone(), session.peer_label.clone());
+    let mut senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
+    let session_task = tokio::spawn(async move { session.run().await });
+    cmd_tx
+        .send(PeerCommand::Stop { reason: None })
+        .await
+        .unwrap();
+    assert!(senders_dropped.changed().await.is_err());
+    assert!(metrics.peer_outbound_queue_depth(&label) > 0);
+    // Let the writer, parked in a bulk write, record the close.
+    tokio::task::yield_now().await;
+    tokio::time::advance(writer::CLOSE_FLUSH_BUDGET + Duration::from_millis(1)).await;
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    let frames = parse_wire_frames(&wire);
+    let (last_type, last) = frames.last().expect("frames on the wire");
+    assert_eq!(*last_type, 3, "the NOTIFICATION must be the final frame");
+    assert_eq!(&last[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
+    assert!(
+        frames.iter().filter(|(msg_type, _)| *msg_type == 2).count() < WEDGED_BACKLOG,
+        "the backlog left after the budget must be discarded"
+    );
+    assert_eq!(
+        metrics.peer_outbound_queue_depth(&label),
+        0,
+        "the queue-depth gauge must read empty after the discard"
+    );
+
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    session_task
+        .await
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
 }
 
 /// The flush ahead of the Cease stays inside the per-peer shutdown bound: when

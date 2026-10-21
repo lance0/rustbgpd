@@ -146,7 +146,7 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// NOTIFICATION, so a peer that is reading, however slowly, still receives
 /// its Cease rather than a bare close. Error NOTIFICATIONs have no outer
 /// deadline and use the same budget.
-const CLOSE_FLUSH_BUDGET: Duration = Duration::from_millis(250);
+pub(super) const CLOSE_FLUSH_BUDGET: Duration = Duration::from_millis(250);
 
 /// Whether a queued frame is a BGP NOTIFICATION (type 3).
 fn is_notification(frame: &[u8]) -> bool {
@@ -284,6 +284,18 @@ struct WriterTask {
     send_hold_time: Option<Duration>,
     #[cfg(all(target_os = "linux", feature = "bench-internals"))]
     bench_writer_polls: bool,
+}
+
+/// Once the writer is gone its queue is gone, however it ended: a close
+/// flush, a budget discard, a Cease/8 teardown, a write failure, a send-hold
+/// expiry or an abort. Publish that, so `bgp_peer_outbound_queue_depth` does
+/// not keep the last in-flight sample for a session that stays alive (for
+/// example after an administrative stop).
+impl Drop for WriterTask {
+    fn drop(&mut self) {
+        self.metrics
+            .set_peer_outbound_queue_depth(&self.peer_label, 0);
+    }
 }
 
 /// Resolve once the session has signalled hard teardown. Pends forever
@@ -1429,6 +1441,19 @@ mod keepalive_cadence_tests {
     /// never pinned high after the last enqueue.
     #[tokio::test]
     async fn bulk_queue_depth_gauge_rises_then_drains() {
+        queue_depth_gauge_rises_then_returns_to_zero(false).await;
+    }
+
+    /// The same backlog ended by a closing NOTIFICATION: the close flush and
+    /// discard bypass the run loop's sampling, and an administratively
+    /// stopped session stays alive, so the writer's exit must publish the
+    /// empty queue itself.
+    #[tokio::test]
+    async fn bulk_queue_depth_gauge_returns_to_zero_after_a_closing_notification() {
+        queue_depth_gauge_rises_then_returns_to_zero(true).await;
+    }
+
+    async fn queue_depth_gauge_rises_then_returns_to_zero(close_with_cease: bool) {
         const FRAMES: usize = 200;
         // Shrink both socket buffers so the writer wedges with little data,
         // leaving a large observable backlog in the bulk channel.
@@ -1476,12 +1501,23 @@ mod keepalive_cadence_tests {
             "expected outbound queue depth > 0 while backlogged, got {depth}"
         );
 
-        // Drain the socket so the writer can flush the whole backlog.
-        let mut sink = vec![0u8; FRAMES * 1024];
-        peer.read_exact(&mut sink).await.unwrap();
         let join = handle.join;
-        drop(handle.bulk_tx);
-        drop(handle.priority_tx);
+        if close_with_cease {
+            let mut cease = vec![0xffu8; 16];
+            cease.extend_from_slice(&[0, 21, 3, 6, 2]);
+            handle.priority_tx.send(Bytes::from(cease)).unwrap();
+            drop(handle.bulk_tx);
+            drop(handle.priority_tx);
+            let mut wire = Vec::new();
+            peer.read_to_end(&mut wire).await.unwrap();
+            assert_eq!(&wire[wire.len() - 21..][18..], &[3, 6, 2]);
+        } else {
+            // Drain the socket so the writer can flush the whole backlog.
+            let mut sink = vec![0u8; FRAMES * 1024];
+            peer.read_exact(&mut sink).await.unwrap();
+            drop(handle.bulk_tx);
+            drop(handle.priority_tx);
+        }
         join.await.unwrap().unwrap();
 
         // Shrink: fully drained, the gauge is walked back to 0.
