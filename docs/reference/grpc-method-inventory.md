@@ -229,7 +229,7 @@ shape itself does not raise the tier.
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
 | `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
 
-### InjectionService (14 RPCs)
+### InjectionService (15 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -237,6 +237,7 @@ shape itself does not raise the tier.
 | `DeletePath` | `operator_only` | Withdraws an originated route. Lower-impact than Add, but classifying the inverse separately gives a misleading defense surface — treat as the same risk class. |
 | `ListPathExportDispositions` | `sensitive_read` | Per-peer export disposition of one injected unicast route: committed, withheld with a bounded reason, or pending. Discloses per-peer export policy outcomes like `ExplainAdvertisedRoute`; mutates nothing. |
 | `BatchListPathExportDispositions` | `sensitive_read` | `ListPathExportDispositions` for up to 1000 injected unicast route keys in one paged walk; the same disclosure. |
+| `ListFlowSpecExportDispositions` | `sensitive_read` | `ListPathExportDispositions` for one injected FlowSpec rule; the same disclosure. |
 | `AddFlowSpec` | `operator_only` | Installs RFC 8955 traffic-filter rules. Dataplane impact at line rate; one rule can drop or rate-limit arbitrary traffic. |
 | `DeleteFlowSpec` | `operator_only` | Same risk class as Add. |
 | `AddLeasedPath` | `operator_only` | `AddPath` under an owner's lease (ADR-0141); same risk class as `AddPath`. |
@@ -287,11 +288,11 @@ shape itself does not raise the tier.
 
 | Tier | Count | % |
 |------|------:|--:|
-| `read` | 1 | 0.8% |
-| `sensitive_read` | 82 | 61.7% |
-| `mutating` | 22 | 16.5% |
-| `operator_only` | 28 | 21.1% |
-| **Total** | **133** | **100%** |
+| `read` | 1 | 0.7% |
+| `sensitive_read` | 83 | 61.9% |
+| `mutating` | 22 | 16.4% |
+| `operator_only` | 28 | 20.9% |
+| **Total** | **134** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`
@@ -306,8 +307,8 @@ specific method if the model warrants it.
 
 1. **Tier vs. service granularity.** Every service has at least one
    `sensitive_read` method; `InjectionService` has only
-   `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions` and
-   `BatchListPathExportDispositions`.
+   `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`,
+   `BatchListPathExportDispositions` and `ListFlowSpecExportDispositions`.
    `CheckLiveness` is a `read` method;
    `GetHealth` remains sensitive because it returns peer and route counts.
    `EventService` is pure observability (no mutations at all);
@@ -323,7 +324,7 @@ specific method if the model warrants it.
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
-3. **InjectionService is `operator_only` apart from its four reads.**
+3. **InjectionService is `operator_only` apart from its five reads.**
    Nine of the twenty-seven `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
