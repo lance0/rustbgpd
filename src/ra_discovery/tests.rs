@@ -578,6 +578,61 @@ fn ra_on_an_unstarted_interface_is_ignored() {
     assert_eq!(e.events, vec![]);
 }
 
+/// Wait for a `BindingChanged` to `want`, recording every event in `seen`.
+/// A closed stream or the timeout is an error, never a silent pass.
+async fn wait_for_binding(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent>,
+    seen: &mut Vec<DiscoveryEvent>,
+    want: Option<Endpoint>,
+    limit: Duration,
+) -> Result<(), &'static str> {
+    let found = tokio::time::timeout(limit, async {
+        while let Some(event) = events.recv().await {
+            seen.push(event.clone());
+            if let DiscoveryEvent::BindingChanged { current, .. } = event
+                && current == want
+            {
+                return Ok(());
+            }
+        }
+        Err("event stream closed")
+    })
+    .await;
+    found.unwrap_or(Err("timed out"))
+}
+
+#[tokio::test]
+async fn binding_wait_fails_when_the_stream_closes_or_times_out() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut seen = Vec::new();
+    let unrelated = DiscoveryEvent::CandidateLearned {
+        interface: IF.into(),
+        address: ll(1),
+    };
+    tx.send(unrelated.clone()).unwrap();
+    assert_eq!(
+        wait_for_binding(&mut rx, &mut seen, Some(ep(1)), Duration::from_millis(20)).await,
+        Err("timed out")
+    );
+    drop(tx);
+    assert_eq!(
+        wait_for_binding(&mut rx, &mut seen, Some(ep(1)), Duration::from_secs(5)).await,
+        Err("event stream closed")
+    );
+    assert_eq!(seen, vec![unrelated]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send(DiscoveryEvent::BindingChanged {
+        interface: IF.into(),
+        previous: None,
+        current: Some(ep(1)),
+    })
+    .unwrap();
+    assert_eq!(
+        wait_for_binding(&mut rx, &mut seen, Some(ep(1)), Duration::from_secs(5)).await,
+        Ok(())
+    );
+}
+
 /// Privileged: two network namespaces joined by a veth pair, one discovery
 /// actor in each. Run through
 /// `crates/evpn-linux/tests/docker/run-netns-tests.sh ra_discovery`.
@@ -593,6 +648,7 @@ mod netns {
     use super::super::{
         DiscoveryConfig, DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaDiscovery, RaTiming,
     };
+    use super::wait_for_binding;
 
     const IF_A: &str = "rdisa";
     const IF_B: &str = "rdisb";
@@ -732,18 +788,13 @@ mod netns {
         }
 
         async fn wait_binding(&mut self, want: Option<Endpoint>) {
-            let found = tokio::time::timeout(WAIT, async {
-                while let Some(event) = self.events.recv().await {
-                    self.seen.push(event.clone());
-                    if let DiscoveryEvent::BindingChanged { current, .. } = event
-                        && current == want
-                    {
-                        return;
-                    }
-                }
-            })
-            .await;
-            assert!(found.is_ok(), "no binding to {want:?}; saw {:?}", self.seen);
+            let result = wait_for_binding(&mut self.events, &mut self.seen, want, WAIT).await;
+            assert_eq!(
+                result,
+                Ok(()),
+                "no binding to {want:?}; saw {:?}",
+                self.seen
+            );
         }
 
         async fn shutdown(&mut self) {
