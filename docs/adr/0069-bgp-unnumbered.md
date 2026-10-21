@@ -270,6 +270,12 @@ learned on. The M53 lab negotiates it with one FRR peer and keeps the other on
 the legacy form. Behavior and limits are maintained in the
 [RFC notes](../reference/rfc-notes.md#link-local-next-hop-capability--draft-ietf-idr-linklocal-capability-06).
 
+## Amendment (2026-10-21): interface-only neighbors proposed
+
+The first Deferred item, interface-only autodiscovery, is proposed in
+[ADR-0142](0142-interface-only-unnumbered-neighbors.md). It remains deferred
+until that record is accepted; static link-local neighbors are unchanged.
+
 ## References
 
 - RFC 4007, IPv6 scoped address architecture:
