@@ -85,6 +85,11 @@ impl ExportChains {
         self.global = global;
     }
 
+    /// The change version: it advances with every install or removal.
+    pub(super) fn version(&self) -> u64 {
+        self.version
+    }
+
     /// A reading end for `GetPolicyStats` listeners.
     pub(super) fn reader(&self) -> ExportRosterReader {
         self.publisher.reader()

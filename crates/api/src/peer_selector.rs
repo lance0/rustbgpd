@@ -14,7 +14,7 @@ use std::net::IpAddr;
 
 use tonic::Status;
 
-use crate::import_roster::ImportRosterReader;
+use crate::import_roster::{ImportRoster, ImportRosterReader};
 use crate::peer_types::PeerKey;
 
 /// IPv6 link-local addresses are the only scoped neighbor addresses.
@@ -34,10 +34,9 @@ fn valid_interface_name(name: &str) -> bool {
 }
 
 /// The scoped forms configured at `address`, for an error message.
-fn scoped_candidates(roster: Option<&ImportRosterReader>, address: IpAddr) -> Vec<String> {
+fn scoped_candidates(roster: Option<&ImportRoster>, address: IpAddr) -> Vec<String> {
     roster.map_or_else(Vec::new, |roster| {
         roster
-            .load()
             .peers()
             .iter()
             .filter(|peer| peer.key.address == address && peer.key.interface.is_some())
@@ -68,6 +67,18 @@ pub(crate) fn parse_neighbor(
     value: &str,
     interface: &str,
     roster: Option<&ImportRosterReader>,
+) -> Result<Option<PeerKey>, Status> {
+    let roster = roster.map(ImportRosterReader::load);
+    parse_neighbor_in(field, value, interface, roster.as_deref())
+}
+
+/// [`parse_neighbor`] against a roster snapshot the caller already holds,
+/// so selection and the data it reads come from one publication.
+pub(crate) fn parse_neighbor_in(
+    field: &str,
+    value: &str,
+    interface: &str,
+    roster: Option<&ImportRoster>,
 ) -> Result<Option<PeerKey>, Status> {
     let interface = interface.trim();
     if value.is_empty() {
@@ -122,6 +133,29 @@ pub(crate) fn parse_neighbor(
             }
             Ok(Some(key))
         }
+    }
+}
+
+/// `NOT_FOUND` when a scoped `key` names an address that the data source's
+/// own snapshot (`neighbors`, as address and interface) holds only on other
+/// interfaces: a reload replaced the neighbor after the selector was parsed.
+/// A numbered key, or an address absent from the snapshot, is left to the
+/// caller, as in [`parse_neighbor`].
+pub(crate) fn require_current_scope<'a>(
+    key: &PeerKey,
+    neighbors: impl IntoIterator<Item = (IpAddr, Option<&'a str>)>,
+) -> Result<(), Status> {
+    let Some(interface) = key.interface.as_deref() else {
+        return Ok(());
+    };
+    let mut on_address = neighbors
+        .into_iter()
+        .filter(|(address, _)| *address == key.address)
+        .peekable();
+    if on_address.peek().is_none() || on_address.any(|(_, scope)| scope == Some(interface)) {
+        Ok(())
+    } else {
+        Err(Status::not_found(format!("neighbor {key} not found")))
     }
 }
 

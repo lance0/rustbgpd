@@ -3,7 +3,10 @@
 //! withheld with a bounded reason, or pending, one row per registered peer.
 
 use super::*;
-use crate::update::{PeerRouteExport, RouteExportDisposition, RouteExportPage};
+use crate::update::{
+    PeerRouteExport, RouteExportDisposition, RouteExportPage, RouteExportPageError,
+    RouteExportVersion,
+};
 
 fn manager() -> (RibManager, mpsc::Sender<RibUpdate>) {
     let (tx, rx) = mpsc::channel(8);
@@ -94,9 +97,9 @@ fn query(
     manager: &mut RibManager,
     prefix: Prefix,
     path_id: u32,
-    after: Option<IpAddr>,
+    after: Option<(IpAddr, RouteExportVersion)>,
     page_size: usize,
-) -> Option<RouteExportPage> {
+) -> Result<RouteExportPage, RouteExportPageError> {
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryLocalRouteExport {
         prefix,
@@ -449,7 +452,7 @@ fn peers_page_in_address_order_within_the_bound() {
         vec![v4(1), v4(2)]
     );
     assert!(first.more);
-    let rest = query(&mut manager, prefix, 0, Some(v4(2)), 2).unwrap();
+    let rest = query(&mut manager, prefix, 0, Some((v4(2), first.version)), 2).unwrap();
     assert_eq!(
         rest.peers.iter().map(|row| row.peer).collect::<Vec<_>>(),
         vec![v4(3)]
@@ -475,9 +478,15 @@ fn unknown_local_route_is_not_found() {
     let (mut manager, _tx) = manager();
     let _rx = peer_up(&mut manager, v4(1), ipv4_sendable(), None, 0, 64);
     let prefix = v4_prefix();
-    assert!(query(&mut manager, prefix, 0, None, 10).is_none());
+    assert_eq!(
+        query(&mut manager, prefix, 0, None, 10),
+        Err(RouteExportPageError::NoRoute)
+    );
     inject(&mut manager, local_route(prefix, 0));
-    assert!(query(&mut manager, prefix, 3, None, 10).is_none());
+    assert_eq!(
+        query(&mut manager, prefix, 3, None, 10),
+        Err(RouteExportPageError::NoRoute)
+    );
 }
 
 /// Each row reports its destination's scope from the registered session's
@@ -506,4 +515,291 @@ fn rows_report_the_destination_scope() {
     let page = query(&mut manager, prefix, 0, None, 10).unwrap();
     assert_eq!(row(&page, scoped).peer_interface.as_deref(), Some("eth0"));
     assert_eq!(row(&page, numbered).peer_interface, None);
+}
+
+fn peers_of(page: &RouteExportPage) -> Vec<IpAddr> {
+    page.peers.iter().map(|row| row.peer).collect()
+}
+
+/// Peers 10.0.0.2..=4 and the local route, with a first page of two peers.
+fn walk_started() -> (
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    RouteExportPage,
+) {
+    let (mut manager, _tx) = manager();
+    let receivers = [2, 3, 4]
+        .into_iter()
+        .map(|octet| peer_up(&mut manager, v4(octet), ipv4_sendable(), None, 0, 64))
+        .collect();
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
+    assert_eq!(peers_of(&first), vec![v4(2), v4(3)]);
+    assert!(first.more);
+    (manager, receivers, first)
+}
+
+fn resume(
+    manager: &mut RibManager,
+    first: &RouteExportPage,
+) -> Result<RouteExportPage, RouteExportPageError> {
+    let last = first.peers.last().unwrap().peer;
+    query(manager, v4_prefix(), 0, Some((last, first.version)), 2)
+}
+
+fn withdraw(manager: &mut RibManager, prefix: Prefix, path_id: u32) {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix,
+        path_id,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+}
+
+/// A route removed between pages invalidates the resumed walk instead of
+/// answering as if the key never existed; a fresh walk then reports no
+/// route. Red proof: answering a resumed walk's missing route with `NoRoute`
+/// fails the first assertion.
+#[test]
+fn route_removed_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started();
+    withdraw(&mut manager, v4_prefix(), 0);
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+    assert_eq!(
+        query(&mut manager, v4_prefix(), 0, None, 2),
+        Err(RouteExportPageError::NoRoute)
+    );
+}
+
+/// Replacing the route under the same key between pages also invalidates
+/// the walk: the first page described different route state.
+#[test]
+fn route_replaced_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started();
+    let mut replacement = local_route(v4_prefix(), 0);
+    replacement.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Incomplete),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+    ]);
+    inject(&mut manager, replacement);
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+/// A peer that joins before the cursor between pages would be skipped by
+/// an address-ordered resume; the walk is invalidated instead. Red proof:
+/// not advancing the roster generation on registration fails this test.
+#[test]
+fn peer_joining_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, mut receivers, first) = walk_started();
+    receivers.push(peer_up(&mut manager, v4(1), ipv4_sendable(), None, 0, 64));
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+    // A restarted walk lists the new peer.
+    let restarted = query(&mut manager, v4_prefix(), 0, None, 10).unwrap();
+    assert_eq!(peers_of(&restarted), vec![v4(1), v4(2), v4(3), v4(4)]);
+}
+
+/// A listed peer that leaves between pages invalidates the walk, and so does
+/// a flap that leaves the roster's membership unchanged: the first page's
+/// row described the previous session. Red proof: not advancing the roster
+/// generation on deregistration fails both halves.
+#[test]
+fn peer_leaving_or_flapping_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started();
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: v4(2),
+        session_id: 0,
+    });
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+
+    let (mut manager, mut receivers, first) = walk_started();
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: v4(2),
+        session_id: 0,
+    });
+    receivers.push(peer_up(&mut manager, v4(2), ipv4_sendable(), None, 0, 64));
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+/// The fence is scoped to this walk: another local route's churn and a
+/// stale `PeerDown` for an unregistered address leave the walk resumable,
+/// and it completes with the remaining peer. A single-page walk reports no
+/// more peers.
+#[test]
+fn unrelated_changes_leave_the_walk_resumable() {
+    let (mut manager, _receivers, first) = walk_started();
+    let other = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 8), 32));
+    inject(&mut manager, local_route(other, 0));
+    withdraw(&mut manager, other, 0);
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: v4(9),
+        session_id: 0,
+    });
+    let rest = resume(&mut manager, &first).unwrap();
+    assert_eq!(peers_of(&rest), vec![v4(4)]);
+    assert!(!rest.more);
+    assert_eq!(rest.version, first.version);
+
+    let single = query(&mut manager, v4_prefix(), 0, None, 10).unwrap();
+    assert_eq!(peers_of(&single), vec![v4(2), v4(3), v4(4)]);
+    assert!(!single.more);
+}
+
+/// The route fence is content, not identity, by design: removing the route
+/// and restoring identical content between pages leaves the walk valid,
+/// because every disposition is a function of that content.
+#[test]
+fn identical_route_restored_mid_walk_leaves_the_walk_resumable() {
+    let (mut manager, _receivers, first) = walk_started();
+    withdraw(&mut manager, v4_prefix(), 0);
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    let rest = resume(&mut manager, &first).unwrap();
+    assert_eq!(peers_of(&rest), vec![v4(4)]);
+    assert!(!rest.more);
+}
+
+/// Replacing a listed peer's export policy between pages, as a reload does
+/// without resetting the session, invalidates the walk. Red proof: leaving
+/// the chains' change version out of the policy version fails this test.
+#[test]
+fn export_policy_replaced_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first) = walk_started();
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: v4(2),
+        export_policy: Some(deny_prefixes_chain(&[v4_prefix()])),
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+fn allowed_dataset(listed: bool) -> rustbgpd_policy::datasets::DatasetData {
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
+    rustbgpd_policy::datasets::DatasetData::Prefix(PrefixSet::new(listed.then_some(
+        PrefixSetEntry {
+            prefix: v4_prefix(),
+            ge: None,
+            le: None,
+        },
+    )))
+}
+
+/// Peers 10.0.0.2..=4 whose export chain accepts the local route only while
+/// it is listed in the returned dataset, and the route itself.
+fn dataset_walk_setup() -> (
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    Arc<rustbgpd_policy::datasets::DatasetHandle>,
+) {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::sets::SetStore;
+
+    let handle = Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        allowed_dataset(true),
+    ));
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::clone(&handle));
+    let compiled = rustbgpd_policy::rpol::RpolFile::parse(
+        "dataset prefix-set allowed\npolicy p { term t { if route.prefix in allowed { accept } reject } }",
+    )
+    .unwrap()
+    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+    .unwrap()
+    .unwrap();
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )]);
+
+    let (mut manager, _tx) = manager();
+    let receivers = [2, 3, 4]
+        .into_iter()
+        .map(|octet| {
+            peer_up(
+                &mut manager,
+                v4(octet),
+                ipv4_sendable(),
+                Some(chain.clone()),
+                0,
+                64,
+            )
+        })
+        .collect();
+    inject(&mut manager, local_route(v4_prefix(), 0));
+    (manager, receivers, handle)
+}
+
+/// A dataset swap is visible to the next explain before any RIB message
+/// arrives, so a swap of a dataset a listed peer's export chain reads
+/// invalidates the walk with no RIB update in between. Red proof: leaving
+/// the dataset generations out of the policy version fails this test.
+#[test]
+fn export_dataset_swapped_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, handle) = dataset_walk_setup();
+    let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
+    assert!(first.more);
+
+    handle.refresh(allowed_dataset(false));
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+}
+
+/// A dataset refresh runs outside the RIB actor, so it can land after a
+/// page's version check while its rows evaluate. The final page has no
+/// continuation token, so the page itself is refused; a first page is
+/// refused too rather than issuing a token its rows were not read under.
+/// The hook lands the refresh in exactly that window. Red proof: removing
+/// the post-collection recheck returns both pages.
+#[test]
+fn export_dataset_swapped_while_a_page_evaluates_invalidates_the_page() {
+    use crate::manager::queries::BEFORE_EXPORT_ROWS;
+
+    let (mut manager, _receivers, handle) = dataset_walk_setup();
+    let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
+    assert!(first.more);
+    let refresh = Arc::clone(&handle);
+    BEFORE_EXPORT_ROWS.set(Some(Box::new(move || {
+        refresh.refresh(allowed_dataset(false));
+    })));
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+
+    let refresh = Arc::clone(&handle);
+    BEFORE_EXPORT_ROWS.set(Some(Box::new(move || {
+        refresh.refresh(allowed_dataset(true));
+    })));
+    assert_eq!(
+        query(&mut manager, v4_prefix(), 0, None, 2),
+        Err(RouteExportPageError::Invalidated)
+    );
+    // Without a refresh in the window, a restarted walk is served.
+    assert!(query(&mut manager, v4_prefix(), 0, None, 2).is_ok());
 }

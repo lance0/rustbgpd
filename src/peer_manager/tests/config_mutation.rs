@@ -1748,3 +1748,86 @@ async fn neighbor_mutation_with_a_stale_scope_is_not_found() {
     }
     assert_eq!(mgr.current_config.neighbors, before);
 }
+
+/// The policy reads that resolve a neighbor in the peer manager keep the
+/// selector's scope to the owning actor, as mutations do. The API parsed
+/// `fe80::2%eth0`; by the time the read is served the neighbor on that
+/// address is configured on `eth1`, so each read answers `None` (`NOT_FOUND`)
+/// instead of eth1's chains, import decisions or rejected routes. The
+/// current scope and a numbered address still resolve.
+/// Red proof: matching by address alone returns eth1's chains, and dropping
+/// the stale-scope check reports no session instead of `NOT_FOUND`.
+#[tokio::test]
+async fn neighbor_policy_reads_with_a_stale_scope_are_not_found() {
+    use rustbgpd_wire::{Afi, Ipv4Prefix, Prefix, Safi};
+
+    let mut mgr = test_peer_manager();
+    let peer = IpAddr::V6("fe80::2".parse().unwrap());
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        peer,
+        "eth1",
+        11,
+        1,
+        fake_peer_handle(
+            peer,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.interface = Some("eth1".to_string());
+    neighbor.import_policy_chain = vec!["edge".to_string()];
+    mgr.current_config.neighbors.push(neighbor);
+    let numbered = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    mgr.current_config
+        .neighbors
+        .push(config_neighbor(numbered, 65003));
+
+    for (key, configured) in [
+        (PeerKey::new(peer, Some("eth0".to_string())), false),
+        (PeerKey::new(peer, Some("eth1".to_string())), true),
+        (PeerKey::new(numbered, None), true),
+    ] {
+        let (reply, response) = oneshot::channel();
+        let _ = Box::pin(
+            mgr.dispatch_command(PeerManagerCommand::GetNeighborPolicyChains {
+                peer: key.clone(),
+                reply,
+            }),
+        )
+        .await;
+        assert_eq!(response.await.unwrap().is_some(), configured, "{key}");
+    }
+
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    for (key, managed) in [
+        (PeerKey::new(peer, Some("eth0".to_string())), false),
+        (PeerKey::new(peer, Some("eth1".to_string())), true),
+    ] {
+        let (reply, response) = oneshot::channel();
+        let _ = Box::pin(
+            mgr.dispatch_command(PeerManagerCommand::ExplainImportPolicy {
+                peer: key.clone(),
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                prefix,
+                path_id: None,
+                reply,
+            }),
+        )
+        .await;
+        assert_eq!(response.await.unwrap().is_some(), managed, "{key}");
+
+        let (reply, response) = oneshot::channel();
+        let _ = Box::pin(
+            mgr.dispatch_command(PeerManagerCommand::ListRejectedRoutes {
+                peer: key.clone(),
+                reply,
+            }),
+        )
+        .await;
+        assert_eq!(response.await.unwrap().is_some(), managed, "{key}");
+    }
+}

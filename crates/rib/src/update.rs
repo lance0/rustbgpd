@@ -1499,6 +1499,36 @@ pub struct RouteExportPage {
     pub peers: Vec<PeerRouteExport>,
     /// Whether peers remain after the last row.
     pub more: bool,
+    /// State this page was read from; a later page resumes only while it
+    /// is unchanged.
+    pub version: RouteExportVersion,
+}
+
+/// Process-local consistency fence for a paged [`RouteExportPage`] walk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RouteExportVersion {
+    /// Generation of the outbound peer roster; it advances whenever a peer
+    /// registers for or leaves outbound updates, so a flap advances it too.
+    pub roster: u64,
+    /// Fingerprint of the local route's next hops, attributes and
+    /// validation states. Content, not identity: removing the route and
+    /// restoring identical content leaves it unchanged.
+    pub route: u64,
+    /// Export-policy state of the registered peers: the installed chains'
+    /// change version and the generations of the datasets they read.
+    pub policy: u64,
+}
+
+/// Why a [`RouteExportPage`] was not served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteExportPageError {
+    /// No local route has this key, and no walk was being resumed.
+    NoRoute,
+    /// A resumed walk's route content changed (or the route is gone), the
+    /// outbound peer roster changed, or the peers' export policy changed
+    /// since its first page; or, on any page, a dataset the policy reads
+    /// was refreshed while the page's rows were evaluated.
+    Invalidated,
 }
 
 /// Outcome of explicit RFC 9819 cross-route Argument inspection.
@@ -1725,6 +1755,10 @@ pub struct InstalledExportChain {
     /// The compiled IR the live distribution path evaluates, or `None`
     /// when no chain applies.
     pub chain: Option<Arc<rustbgpd_policy::ir::CompiledChain>>,
+    /// Interface of the registered session's scoped (IPv6 link-local)
+    /// neighbor, `None` for a numbered one, so a caller can check that the
+    /// chain belongs to the neighbor its selector named.
+    pub peer_interface: Option<Arc<str>>,
 }
 
 /// Which table a paged route query ([`RibUpdate::QueryRoutesPage`]) reads.
@@ -2980,19 +3014,19 @@ pub enum RibUpdate {
     /// Per-peer export disposition of one locally injected unicast route,
     /// identified by its local Adj-RIB-In key `(prefix, path_id)`. Peers are
     /// the sessions registered for outbound updates, in address order after
-    /// `after`, at most `page_size` of them. `None` when no such local route
-    /// exists.
+    /// `after`, at most `page_size` of them.
     QueryLocalRouteExport {
         /// Prefix of the local route.
         prefix: Prefix,
         /// Path ID of the local route (the `AddPath` key).
         path_id: u32,
-        /// Resume after this peer address.
-        after: Option<IpAddr>,
+        /// Resume after this peer address, provided the walk's state still
+        /// matches the version of the page that ended there.
+        after: Option<(IpAddr, RouteExportVersion)>,
         /// Peers per page, clamped to `1..=ROUTE_QUERY_MAX_PAGE_SIZE`.
         page_size: usize,
         /// Response channel.
-        reply: oneshot::Sender<Option<RouteExportPage>>,
+        reply: oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
     },
     /// One page of the injected keys `owner` holds in
     /// [`crate::injection_lease::InjectedKeyCursor`] order, at most

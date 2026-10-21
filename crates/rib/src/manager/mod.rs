@@ -680,6 +680,9 @@ pub struct RibManager {
     export_chains: export_chains::ExportChains,
     /// Families the transport can actually serialize per peer.
     peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
+    /// Advances whenever a peer joins or leaves `peer_sendable_families`, so
+    /// a paged export-disposition walk detects a roster change between pages.
+    outbound_roster_generation: u64,
     /// Families for which each registered outbound peer advertised the
     /// Long-Lived Graceful Restart capability (RFC 9494). Gates the
     /// export of LLGR-stale routes: absent family + eBGP target =
@@ -2387,6 +2390,7 @@ impl RibManager {
             // fallback's counters.
             export_chains: export_chains::ExportChains::new(export_policy),
             peer_sendable_families: HashMap::new(),
+            outbound_roster_generation: 0,
             peer_advertised_llgr_families: HashMap::new(),
             peer_is_ebgp: HashMap::new(),
             peer_is_rr_client: HashMap::new(),
@@ -4307,6 +4311,7 @@ impl RibManager {
                         chain: self
                             .export_policy_for(peer)
                             .map(PolicyChain::compiled_shared),
+                        peer_interface: self.session_peer_scope(peer).peer_interface(),
                     }
                 });
                 if reply.send(installed).is_err() {
