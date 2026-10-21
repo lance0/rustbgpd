@@ -1453,8 +1453,9 @@ impl PeerManager {
 
     /// `NOT_FOUND` when a scoped selector names an address whose managed
     /// neighbors all use other interfaces, so a mutation keyed by address
-    /// never lands on a neighbor the caller did not select. Checked when the
-    /// mutation is applied, after any concurrent reload has settled.
+    /// never lands on, and a read never reports, a neighbor the caller did
+    /// not select. Checked when the command is served, after any concurrent
+    /// reload has settled.
     pub(super) fn stale_neighbor_scope(&self, key: &PeerKey) -> Option<CatalogMutationError> {
         let keys = self.peer_keys_for_address(key.address);
         (!keys.is_empty() && !keys.contains(key))
@@ -2087,23 +2088,21 @@ impl PeerManager {
                 let _ = reply.send(self.validation_policy_posture());
             }
             PeerManagerCommand::ExplainImportPolicy {
-                address,
+                peer,
                 afi,
                 safi,
                 prefix,
                 path_id,
                 reply,
             } => {
-                // Resolve the unique session for this address and
-                // forward to its task. A missing/exited task is a
+                // Resolve the selected neighbor's session, scope included,
+                // and forward to its task. A missing/exited task is a
                 // genuine no-session result; timeout remains
                 // distinct so overload cannot masquerade as
                 // absence (LAN-661).
-                let result = match self
-                    .unique_peer_key_for_address(address)
-                    .and_then(|key| self.peers.get(&key))
-                {
-                    Some(managed) => {
+                let result = match self.peers.get(&peer) {
+                    _ if self.stale_neighbor_scope(&peer).is_some() => None,
+                    Some(managed) => Some(
                         managed
                             .handle()
                             .explain_import_policy_timeout(
@@ -2113,28 +2112,26 @@ impl PeerManager {
                                 path_id,
                                 EXPLAIN_QUERY_TIMEOUT,
                             )
-                            .await
-                    }
-                    None => SessionQueryOutcome::SessionGone,
+                            .await,
+                    ),
+                    None => Some(SessionQueryOutcome::SessionGone),
                 };
                 let _ = reply.send(result);
             }
-            PeerManagerCommand::ListRejectedRoutes { address, reply } => {
+            PeerManagerCommand::ListRejectedRoutes { peer, reply } => {
                 // LAN-472: same resolution + bounded-forward
                 // shape as ExplainImportPolicy. A missing/exited
                 // session maps to NOT_FOUND, while a stalled live
                 // task remains an explicit timeout.
-                let result = match self
-                    .unique_peer_key_for_address(address)
-                    .and_then(|key| self.peers.get(&key))
-                {
-                    Some(managed) => {
+                let result = match self.peers.get(&peer) {
+                    _ if self.stale_neighbor_scope(&peer).is_some() => None,
+                    Some(managed) => Some(
                         managed
                             .handle()
                             .list_rejected_routes_timeout(EXPLAIN_QUERY_TIMEOUT)
-                            .await
-                    }
-                    None => SessionQueryOutcome::SessionGone,
+                            .await,
+                    ),
+                    None => Some(SessionQueryOutcome::SessionGone),
                 };
                 let _ = reply.send(result);
             }
@@ -2254,10 +2251,10 @@ impl PeerManager {
                 }
                 let _ = reply.send(result);
             }
-            PeerManagerCommand::GetNeighborPolicyChains { address, reply } => {
+            PeerManagerCommand::GetNeighborPolicyChains { peer, reply } => {
                 let _ = reply.send(neighbor_policy_chains_from_config(
                     &self.current_config,
-                    address,
+                    &peer,
                 ));
             }
             PeerManagerCommand::SetNeighborImportChain {

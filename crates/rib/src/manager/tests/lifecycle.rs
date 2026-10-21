@@ -2162,6 +2162,18 @@ fn session_peer_scope_reads_only_the_active_session() {
         manager.session_peer_scope(peer).peer_interface().as_deref(),
         Some("eth0")
     );
+    // The installed export chain reports the same scope, so ComparePolicy
+    // can refuse a chain that belongs to another interface.
+    let installed_interface = |manager: &mut RibManager| {
+        let (reply, mut answer) = tokio::sync::oneshot::channel();
+        manager.handle_update(RibUpdate::QueryInstalledExportChain { peer, reply });
+        answer
+            .try_recv()
+            .unwrap()
+            .expect("registered peer")
+            .peer_interface
+    };
+    assert_eq!(installed_interface(&mut manager).as_deref(), Some("eth0"));
     manager.handle_update(RibUpdate::SetPeerSourceContext {
         peer,
         session_id: 2,
@@ -2173,6 +2185,7 @@ fn session_peer_scope_reads_only_the_active_session() {
         manager.session_peer_scope(peer),
         crate::route::AspaContextId::DEFAULT
     );
+    assert_eq!(installed_interface(&mut manager), None);
 }
 
 #[tokio::test]

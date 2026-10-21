@@ -1318,8 +1318,9 @@ pub enum PeerManagerCommand {
     /// Side-effect-free. The typed reply keeps a stalled live session
     /// distinct from an exited session task (LAN-661).
     ExplainImportPolicy {
-        /// Peer whose import-decision cache to consult.
-        address: IpAddr,
+        /// Neighbor whose import-decision cache to consult, with the
+        /// selector's interface scope.
+        peer: PeerKey,
         /// Address family of the queried NLRI.
         afi: Afi,
         /// Subsequent address family of the queried NLRI.
@@ -1328,9 +1329,11 @@ pub enum PeerManagerCommand {
         prefix: Prefix,
         /// Optional Add-Path identifier; `None` = all paths.
         path_id: Option<u32>,
-        /// Reply channel carrying the bounded session-query outcome.
+        /// Reply channel carrying the bounded session-query outcome, or
+        /// `None` when `peer`'s address is now managed only on other
+        /// interfaces (a stale scope, `NOT_FOUND`).
         reply: oneshot::Sender<
-            SessionQueryOutcome<Result<ImportExplainReply, AllPathMatchLimitExceeded>>,
+            Option<SessionQueryOutcome<Result<ImportExplainReply, AllPathMatchLimitExceeded>>>,
         >,
     },
     /// LAN-472: list a peer's retained rejected routes with their
@@ -1338,10 +1341,12 @@ pub enum PeerManagerCommand {
     /// Side-effect-free. The typed reply keeps timeout distinct from
     /// an exited session task.
     ListRejectedRoutes {
-        /// Peer whose retention store to consult.
-        address: IpAddr,
-        /// Reply channel carrying the bounded session-query outcome.
-        reply: oneshot::Sender<SessionQueryOutcome<RejectedRoutesReply>>,
+        /// Neighbor whose retention store to consult, with the selector's
+        /// interface scope.
+        peer: PeerKey,
+        /// Reply channel carrying the bounded session-query outcome, or
+        /// `None` for a stale scope, as for `ExplainImportPolicy`.
+        reply: oneshot::Sender<Option<SessionQueryOutcome<RejectedRoutesReply>>>,
     },
     /// Query a single named policy definition.
     GetPolicy {
@@ -1441,9 +1446,10 @@ pub enum PeerManagerCommand {
     },
     /// Query per-neighbor named import/export chains.
     GetNeighborPolicyChains {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Reply channel returning configured chain names if the neighbor exists.
+        /// Neighbor, with the selector's interface scope.
+        peer: PeerKey,
+        /// Reply channel returning configured chain names if the neighbor
+        /// exists on that address and interface.
         reply: oneshot::Sender<Option<PolicyChainAssignment>>,
     },
     /// Replace the per-neighbor import policy chain.

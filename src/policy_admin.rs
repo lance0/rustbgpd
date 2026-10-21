@@ -5,8 +5,8 @@ use std::net::IpAddr;
 use rustbgpd_api::peer_types::{
     AddPathDefinition, CatalogMutationError, ConfigEvent, FibTableSnapshot,
     NamedNeighborSetSnapshot, NamedPeerGroupSnapshot, NamedPolicyDefinition, NamedPolicySnapshot,
-    NeighborSetDefinition, PeerGroupDefinition, PolicyAsPathPrependConfig, PolicyChainAssignment,
-    PolicyStatementDefinition, PresenceAwareNeighborCreate,
+    NeighborSetDefinition, PeerGroupDefinition, PeerKey, PolicyAsPathPrependConfig,
+    PolicyChainAssignment, PolicyStatementDefinition, PresenceAwareNeighborCreate,
 };
 
 use crate::config::{
@@ -987,12 +987,12 @@ pub fn neighbor_peer_group_from_config(config: &Config, address: IpAddr) -> Opti
 /// Return the configured per-neighbor named policy chains.
 pub fn neighbor_policy_chains_from_config(
     config: &Config,
-    address: IpAddr,
+    peer: &PeerKey,
 ) -> Option<PolicyChainAssignment> {
-    let neighbor = config
-        .neighbors
-        .iter()
-        .find(|neighbor| neighbor.address == address.to_string())?;
+    let address = peer.address.to_string();
+    let neighbor = config.neighbors.iter().find(|neighbor| {
+        neighbor.address == address && neighbor.interface.as_deref() == peer.interface.as_deref()
+    })?;
     Some(PolicyChainAssignment {
         import_policy_names: neighbor.import_policy_chain.clone(),
         export_policy_names: neighbor.export_policy_chain.clone(),
@@ -1469,7 +1469,9 @@ peer_group = "fabric"
             neighbor_peer_group_from_config(&config, address),
             Some(Some("fabric".to_string()))
         );
-        assert!(neighbor_policy_chains_from_config(&config, address).is_some());
+        assert!(
+            neighbor_policy_chains_from_config(&config, &PeerKey::new(address, None)).is_some()
+        );
     }
 
     fn test_neighbor_config(
