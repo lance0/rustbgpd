@@ -1,9 +1,10 @@
 use super::{
-    AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, NeighborPolicyStats,
+    AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, Ipv4Addr, LocRib, NeighborPolicyStats,
     OutboundCommitBatch, PolicyChain, Prefix, RibManager, RouteContext, RouteFamily, Safi,
     gauge_val, record_export_policy_eval, route_type, rtc_routes_equal, should_suppress_ibgp_inner,
     warn,
 };
+use crate::PeerId;
 use crate::attr_set::AttrSet;
 
 impl RibManager {
@@ -16,7 +17,7 @@ impl RibManager {
     /// precedent) — memberships are small, present only for RTC peers.
     pub(in crate::manager) fn rtc_export_filter(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         sendable: Option<&Vec<(Afi, Safi)>>,
     ) -> Option<crate::manager::RtcMembership> {
         if sendable.is_some_and(|f| f.contains(&crate::route::RtcRibRouteKey::afi_safi())) {
@@ -44,9 +45,9 @@ impl RibManager {
     pub(in crate::manager) fn stage_rtc_routes_with_checkpoint(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         keys: &HashSet<crate::route::RtcRibRouteKey>,
-        target_peer: IpAddr,
+        target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
@@ -179,7 +180,7 @@ impl RibManager {
                 origin_asn,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                peer_address: Some(target_peer),
+                peer_address: Some(target_peer.addr()),
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(best.origin_type)),
@@ -280,7 +281,7 @@ impl RibManager {
             .set_loc_rib_prefixes("rtc", gauge_val(self.loc_rib.rtc_len()));
 
         let rtc_family = crate::route::RtcRibRouteKey::afi_safi();
-        let peers: Vec<IpAddr> = self
+        let peers: Vec<PeerId> = self
             .outbound_peers
             .keys()
             .inspect(|_| checkpoint())

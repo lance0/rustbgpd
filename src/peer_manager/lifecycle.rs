@@ -1,3 +1,4 @@
+use rustbgpd_rib::PeerId;
 use std::collections::BTreeSet;
 
 use rustbgpd_api::peer_types::{
@@ -2075,7 +2076,7 @@ impl PeerManager {
             let _ = self
                 .send_rib_update(
                     RibUpdate::PeerDeleted {
-                        peer: address,
+                        peer: PeerId::from_addr(address),
                         label: Some(peer_label.into()),
                     },
                     OperatorReadAdmission::Fenced {
@@ -2387,7 +2388,10 @@ impl PeerManager {
                 return Err(timed_out());
             }
             let (reply, response) = oneshot::channel();
-            permit.send(RibUpdate::RefreshPeerOutbound { peer, reply });
+            permit.send(RibUpdate::RefreshPeerOutbound {
+                peer: PeerId::from_addr(peer),
+                reply,
+            });
             response
                 .await
                 .map_err(|_| format!("RIB dropped reply for outbound refresh of peer {peer}"))

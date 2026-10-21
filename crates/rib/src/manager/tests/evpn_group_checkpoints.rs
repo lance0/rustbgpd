@@ -1,5 +1,6 @@
 use super::evpn_group_storage::{fixture, received, stage};
 use super::*;
+use crate::test_support::peer_v4;
 use crate::update::ExactExportKey;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -160,8 +161,8 @@ fn evpn_denial_replacement_checkpoints_retained_and_inserted_rows() {
         group.evpn_policy_denied.insert(route.key(), old.clone());
     }
     let new = make_evpn_imet(Ipv4Addr::new(198, 51, 100, 99), 1);
-    let replacement = (IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77)), None, Vec::new());
-    let inserted = (IpAddr::V4(Ipv4Addr::new(192, 0, 2, 88)), None, Vec::new());
+    let replacement = (peer_v4(Ipv4Addr::new(192, 0, 2, 77)), None, Vec::new());
+    let inserted = (peer_v4(Ipv4Addr::new(192, 0, 2, 88)), None, Vec::new());
     let keys = HashSet::from([routes[0].key(), routes[1].key()]);
     let mut visits = 0;
     group.replace_evpn_denials_with_checkpoint(

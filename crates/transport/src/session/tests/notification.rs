@@ -952,7 +952,7 @@ async fn notification_teardown_without_n_bit_uses_peer_down() {
     session.notification_teardown = true;
     session.execute_actions(vec![Action::SessionDown]).await;
     match rib_rx.try_recv().unwrap() {
-        RibUpdate::PeerDown { peer, .. } => assert_eq!(peer, session.peer_ip),
+        RibUpdate::PeerDown { peer, .. } => assert_eq!(peer, PeerId::from_addr(session.peer_ip)),
         _ => panic!("expected PeerDown"),
     }
 }
@@ -974,7 +974,9 @@ async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
     session.notification_teardown = true;
     session.execute_actions(vec![Action::SessionDown]).await;
     match rib_rx.try_recv().unwrap() {
-        RibUpdate::PeerGracefulRestart { peer, .. } => assert_eq!(peer, session.peer_ip),
+        RibUpdate::PeerGracefulRestart { peer, .. } => {
+            assert_eq!(peer, PeerId::from_addr(session.peer_ip));
+        }
         _ => panic!("expected PeerGracefulRestart"),
     }
 }
@@ -1066,7 +1068,7 @@ async fn hard_reset_always_bypasses_gr_even_with_n_bit() {
     session.received_hard_reset = true;
     session.execute_actions(vec![Action::SessionDown]).await;
     match rib_rx.try_recv().unwrap() {
-        RibUpdate::PeerDown { peer, .. } => assert_eq!(peer, session.peer_ip),
+        RibUpdate::PeerDown { peer, .. } => assert_eq!(peer, PeerId::from_addr(session.peer_ip)),
         _ => panic!("expected PeerDown"),
     }
 }

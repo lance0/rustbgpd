@@ -2,9 +2,8 @@
 //! before best-path selection. Unicast routes are keyed by
 //! `(Prefix, path_id)` for Add-Path, and LLGR stale tagging is tracked here.
 
+use crate::PeerId;
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
-
-use std::net::IpAddr;
 
 // Route-bearing maps use FxHash (rustc-hash) rather than the default SipHash
 // for a pure insert/lookup speedup on the convergence + churn hot path.
@@ -298,7 +297,7 @@ impl<K, V> std::ops::Deref for StaleTracked<K, V> {
 /// (LAN-336), so this struct only stores whatever `Arc`s it is handed.
 #[derive(Debug)]
 pub struct AdjRibIn {
-    peer: IpAddr,
+    peer: PeerId,
     /// Unicast route bodies, stored densely behind `u32` handles (LAN-335).
     /// The `(prefix, path_id)` identity lives on the routes themselves and in
     /// `prefix_index`; there is no separate keyed route map — a hashbrown
@@ -388,13 +387,13 @@ impl AdjRibIn {
 
     /// Create a new empty Adj-RIB-In for the given peer.
     #[must_use]
-    pub fn new(peer: IpAddr) -> Self {
+    pub fn new(peer: PeerId) -> Self {
         Self::with_capacity(peer, 0, 0)
     }
 
     /// Create a new Adj-RIB-In with estimated capacities for the first batch.
     #[must_use]
-    pub fn with_capacity(peer: IpAddr, route_capacity: usize, flowspec_capacity: usize) -> Self {
+    pub fn with_capacity(peer: PeerId, route_capacity: usize, flowspec_capacity: usize) -> Self {
         let route_capacity = route_capacity.max(16);
         let flowspec_capacity = flowspec_capacity.max(4);
         Self {
@@ -424,7 +423,7 @@ impl AdjRibIn {
 
     /// Return the peer address this RIB belongs to.
     #[must_use]
-    pub fn peer(&self) -> IpAddr {
+    pub fn peer(&self) -> PeerId {
         self.peer
     }
 
@@ -2953,7 +2952,7 @@ mod tests {
     /// path identity is counted once in its own AFI.
     #[test]
     fn unicast_lens_split_paths_by_afi() {
-        let mut rib = AdjRibIn::new("192.0.2.1".parse().unwrap());
+        let mut rib = AdjRibIn::new(PeerId::from_addr("192.0.2.1".parse().unwrap()));
         let v4 = Prefix::V4(Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 8));
         let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
         for (prefix, path_id) in [(v4, 0), (v6, 1), (v6, 2), (v6, 2)] {
@@ -3026,11 +3025,11 @@ mod tests {
         nlri: rustbgpd_wire::bgpls::BgpLsNlri,
         peer_oct: u8,
     ) -> BgpLsRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         BgpLsRibRoute {
             family,
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             peer,
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
@@ -3051,10 +3050,10 @@ mod tests {
     }
 
     fn make_vpn_route(nlri: VpnNlri, peer_oct: u8) -> VpnRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         VpnRibRoute {
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer,
@@ -3070,7 +3069,7 @@ mod tests {
 
     #[test]
     fn insert_and_get() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
@@ -3082,7 +3081,7 @@ mod tests {
 
     #[test]
     fn rpki_path_counts_follow_insert_replace_withdraw_clear_and_revalidation() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
         let v6 = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 48);
@@ -3157,7 +3156,7 @@ mod tests {
 
     #[test]
     fn accounted_route_mutation_preserves_rpki_counts_and_withdrawal() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
         let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
@@ -3186,7 +3185,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "whole-route mutation must preserve indexed route identity")]
     fn accounted_route_mutation_rejects_identity_changes() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
         assert!(!rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))));
@@ -3198,7 +3197,7 @@ mod tests {
 
     #[test]
     fn vpn_insert_get_replace_withdraw_round_trip() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
         let key = VpnRibRouteKey {
@@ -3229,7 +3228,7 @@ mod tests {
 
     #[test]
     fn vpn_withdraw_all_returns_keys_and_empties_table() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let a = vpn_nlri([10, 0, 1, 0], 24, 100);
         let b = vpn_nlri([10, 0, 2, 0], 24, 200);
@@ -3257,7 +3256,7 @@ mod tests {
 
     #[test]
     fn vpn_insert_reports_replacement_for_intern_gc() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let mut intern = crate::attr_intern::AttrInternTable::new();
         let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
@@ -3284,7 +3283,7 @@ mod tests {
 
     #[test]
     fn vpn_storage_is_isolated_from_unicast_index() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 9, 0], 24, 100), 1));
 
@@ -3303,10 +3302,10 @@ mod tests {
     }
 
     fn make_rtc_route(nlri: RtcNlri, peer_oct: u8) -> RtcRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         RtcRibRoute {
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             peer,
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
@@ -3320,7 +3319,7 @@ mod tests {
 
     #[test]
     fn rtc_insert_get_replace_withdraw_round_trip() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = rtc_nlri(100);
         let key = RtcRibRouteKey { nlri, path_id: 0 };
@@ -3348,7 +3347,7 @@ mod tests {
 
     #[test]
     fn rtc_withdraw_all_returns_keys_and_empties_table() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let a = rtc_nlri(100);
         let b = rtc_nlri(200);
@@ -3376,7 +3375,7 @@ mod tests {
 
     #[test]
     fn rtc_insert_reports_replacement_for_intern_gc() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let mut intern = crate::attr_intern::AttrInternTable::new();
         let nlri = rtc_nlri(100);
@@ -3403,7 +3402,7 @@ mod tests {
 
     #[test]
     fn rtc_storage_is_isolated_from_unicast_and_vpn_tables() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         rib.insert_rtc(make_rtc_route(rtc_nlri(100), 1));
 
@@ -3419,7 +3418,7 @@ mod tests {
 
     #[test]
     fn withdraw_returns_true_if_present() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
@@ -3430,7 +3429,7 @@ mod tests {
 
     #[test]
     fn withdraw_returns_false_if_absent() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -3439,7 +3438,7 @@ mod tests {
 
     #[test]
     fn clear_removes_all() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         rib.insert(make_route(
             Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
@@ -3457,7 +3456,7 @@ mod tests {
 
     #[test]
     fn bgpls_insert_replace_withdraw_preserves_opaque_key() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = bgpls_nlri(1);
         let key = BgpLsRouteKey {
@@ -3488,7 +3487,7 @@ mod tests {
 
     #[test]
     fn bgpls_base_and_vpn_keys_are_distinct() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let base = bgpls_nlri(7);
         let vpn = bgpls_vpn_nlri(7);
@@ -3514,7 +3513,7 @@ mod tests {
 
     #[test]
     fn bgpls_insert_reports_replacement_for_intern_gc() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let mut intern = crate::attr_intern::AttrInternTable::new();
         let nlri = bgpls_nlri(8);
@@ -3541,7 +3540,7 @@ mod tests {
 
     #[test]
     fn bgpls_clear_removes_routes_and_keeps_unicast_index_isolated() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(9), 1));
 
@@ -3555,7 +3554,7 @@ mod tests {
 
     #[test]
     fn mark_stale_by_family() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
@@ -3567,7 +3566,7 @@ mod tests {
 
     #[test]
     fn mark_stale_ignores_wrong_family() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
@@ -3578,7 +3577,7 @@ mod tests {
 
     #[test]
     fn clear_stale_by_family() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
@@ -3592,7 +3591,7 @@ mod tests {
 
     #[test]
     fn sweep_stale_removes_stale_routes() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let p2 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
@@ -3611,7 +3610,7 @@ mod tests {
 
     #[test]
     fn mark_stale_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let gr_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let llgr_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
@@ -3659,7 +3658,7 @@ mod tests {
     /// after every step (LAN-191).
     #[test]
     fn llgr_stale_flag_implies_community_across_mutations() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let family = (Afi::Ipv4, Safi::Unicast);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -3721,7 +3720,7 @@ mod tests {
         let gr_stale = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
         let llgr_stale = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
         let setup = || {
-            let mut rib = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+            let mut rib = AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
             for prefix in [gr_stale, llgr_stale] {
                 rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
             }
@@ -3794,7 +3793,7 @@ mod tests {
         let paths = [0, 7, 11, 23, 31, 41];
         let setup =
             || {
-                let mut rib = AdjRibIn::new(IpAddr::V4(peer));
+                let mut rib = AdjRibIn::new(PeerId::from_addr(IpAddr::V4(peer)));
                 for prefix in [v4, v6] {
                     for path_id in paths {
                         let mut route = make_route(Ipv4Prefix::new(peer, 32), peer);
@@ -3875,7 +3874,7 @@ mod tests {
 
     #[test]
     fn sweep_llgr_stale_family_scopes_to_family() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
@@ -3896,7 +3895,7 @@ mod tests {
 
     #[test]
     fn insert_replaces_existing() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -3912,7 +3911,7 @@ mod tests {
 
     #[test]
     fn withdraw_families_except_removes_non_matching() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
@@ -3935,7 +3934,7 @@ mod tests {
 
     #[test]
     fn withdraw_families_except_keeps_all_when_matching() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         rib.insert(make_route(v4, Ipv4Addr::new(10, 0, 0, 1)));
@@ -3948,7 +3947,7 @@ mod tests {
 
     #[test]
     fn insert_same_prefix_different_path_ids() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -3968,7 +3967,7 @@ mod tests {
 
     #[test]
     fn take_route_moves_only_selected_path_and_cleans_indexes() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let mut selected = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
@@ -3998,7 +3997,7 @@ mod tests {
 
     #[test]
     fn withdraw_specific_path_id() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
@@ -4018,7 +4017,7 @@ mod tests {
 
     #[test]
     fn iter_prefix_yields_all_path_ids() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         let other = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
@@ -4037,7 +4036,7 @@ mod tests {
 
     #[test]
     fn clear_llgr_stale_preserves_peer_originated_llgr_stale_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
 
@@ -4056,7 +4055,7 @@ mod tests {
 
     #[test]
     fn clear_llgr_stale_removes_locally_added_llgr_stale_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
@@ -4083,7 +4082,7 @@ mod tests {
 
     #[test]
     fn clear_llgr_stale_flowspec_removes_locally_added_llgr_stale_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
 
         let mut route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
@@ -4107,7 +4106,7 @@ mod tests {
 
     #[test]
     fn mark_stale_flowspec_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let llgr_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
         let llgr_rule = llgr_route.rule.clone();
@@ -4160,7 +4159,7 @@ mod tests {
 
     #[test]
     fn sweep_llgr_stale_flowspec_family_scopes_to_family() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let mut v4_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
         v4_route.is_llgr_stale = true;
@@ -4194,7 +4193,7 @@ mod tests {
 
         use crate::attr_intern::AttrInternTable;
 
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let mut intern = AttrInternTable::new();
 
@@ -4235,7 +4234,7 @@ mod tests {
 
         use crate::attr_intern::AttrInternTable;
 
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let mut intern = AttrInternTable::new();
 
@@ -4264,7 +4263,7 @@ mod tests {
     #[test]
     fn evpn_insert_and_withdraw() {
         use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnRoute, EvpnRouteKey, RouteDistinguisher};
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
 
         let rd = RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]);
@@ -4277,7 +4276,7 @@ mod tests {
         });
         let route = EvpnRibRoute {
             route: imet,
-            next_hop: peer_ip,
+            next_hop: peer_ip.addr(),
             link_local_next_hop: None,
             peer: peer_ip,
             attributes: AttrSet::new(vec![]),
@@ -4324,7 +4323,7 @@ mod tests {
             route,
             next_hop: IpAddr::V4(peer),
             link_local_next_hop: None,
-            peer: IpAddr::V4(peer),
+            peer: PeerId::from_addr(IpAddr::V4(peer)),
             attributes: AttrSet::new(attrs),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
@@ -4338,7 +4337,7 @@ mod tests {
     #[test]
     fn get_evpn_hit_miss_and_after_withdraw() {
         use rustbgpd_wire::{EthernetTagId, RouteDistinguisher};
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
         let sibling = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
@@ -4366,7 +4365,9 @@ mod tests {
         // full scan returned, for every key on a populated multi-peer set.
         let mut ribs = Vec::new();
         for i in 1..=3u8 {
-            ribs.push(AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, i))));
+            ribs.push(AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                10, 0, 0, i,
+            )))));
         }
         // Same IMET identity (originator + tag) advertised by two peers,
         // plus a unique key per rib.
@@ -4401,7 +4402,7 @@ mod tests {
 
     #[test]
     fn mark_stale_evpn_tags_l2vpn_evpn_only() {
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
 
         // Mix of unicast + EVPN routes
@@ -4429,7 +4430,7 @@ mod tests {
 
     #[test]
     fn mark_stale_evpn_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
 
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
@@ -4459,7 +4460,7 @@ mod tests {
 
     #[test]
     fn clear_stale_evpn_strips_local_llgr_community() {
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
 
@@ -4485,7 +4486,7 @@ mod tests {
     fn clear_stale_evpn_preserves_peer_originated_llgr_community() {
         // Route arrives *already* carrying LLGR_STALE (peer injected it, e.g.
         // during its own LLGR window). Our clear_stale_evpn must not strip it.
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
         let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, peer_attrs);
@@ -4510,7 +4511,7 @@ mod tests {
         // LLGR_STALE off the fresh route, mistaking it for our local injection.
         // (Unicast `insert` and FlowSpec `insert_flowspec` already clear their
         // stale tags on the same path.)
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
 
@@ -4551,7 +4552,7 @@ mod tests {
     fn withdraw_evpn_clears_llgr_stale_local_tag() {
         // A withdrawn key can no longer carry a locally-injected LLGR_STALE
         // tag; leaving it set would mistag a later re-insert at the same key.
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
         rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
@@ -4572,7 +4573,7 @@ mod tests {
     fn promote_to_llgr_stale_evpn_drops_no_llgr_routes() {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
         let keep_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
         let no_llgr_key = insert_evpn_imet(
@@ -4609,7 +4610,7 @@ mod tests {
         // Promoting one must only mutate that route's copy, not the shared
         // Arc — otherwise both routes would gain LLGR_STALE when only one
         // is being promoted.
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
         let key_a = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
         let key_b = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
@@ -4646,7 +4647,7 @@ mod tests {
 
     #[test]
     fn sweep_stale_family_evpn_ignores_non_evpn_family() {
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer_ip = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer_ip);
         let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
         rib.evpn_routes.update(&key, |route| route.is_stale = true);
@@ -4723,7 +4724,7 @@ mod tests {
 
     #[test]
     fn mark_stale_vpn_scopes_to_family_tuple() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         let v6_key = insert_vpn_with(&mut rib, vpn_nlri_v6(1, 48, 200), vec![]);
@@ -4743,7 +4744,7 @@ mod tests {
 
     #[test]
     fn mark_stale_vpn_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
 
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
@@ -4770,7 +4771,7 @@ mod tests {
 
     #[test]
     fn clear_stale_vpn_strips_local_llgr_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
 
@@ -4790,7 +4791,7 @@ mod tests {
 
     #[test]
     fn clear_stale_vpn_preserves_peer_originated_llgr_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
         let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), peer_attrs);
@@ -4804,7 +4805,7 @@ mod tests {
 
     #[test]
     fn sweep_stale_family_vpn_sweeps_only_matching_tuple() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         let v6_key = insert_vpn_with(&mut rib, vpn_nlri_v6(1, 48, 200), vec![]);
@@ -4825,7 +4826,7 @@ mod tests {
     fn promote_to_llgr_stale_vpn_drops_no_llgr_and_scopes_to_tuple() {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let keep_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         let no_llgr_key = insert_vpn_with(
@@ -4869,7 +4870,7 @@ mod tests {
         // Regression mirror of insert_evpn_clears_llgr_stale_local_tag_on_readvertise:
         // a re-advertised key must drop our local-injection record so a later
         // EoR does not strip a peer-originated LLGR_STALE community.
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
         let key = insert_vpn_with(&mut rib, nlri.clone(), vec![]);
@@ -4898,7 +4899,7 @@ mod tests {
 
     #[test]
     fn withdraw_vpn_clears_llgr_stale_local_tag() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         rib.mark_stale_vpn(VPN_V4);
@@ -4927,10 +4928,10 @@ mod tests {
     }
 
     fn make_labeled_route(nlri: LabeledNlri, peer_oct: u8) -> LabeledRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         LabeledRibRoute {
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer,
@@ -4958,7 +4959,7 @@ mod tests {
 
     #[test]
     fn labeled_insert_get_replace_withdraw_round_trip() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
         let key = LabeledRibRouteKey {
@@ -4999,7 +5000,7 @@ mod tests {
 
     #[test]
     fn labeled_path_ids_are_distinct_keys_and_iterable_per_prefix() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
 
@@ -5014,7 +5015,7 @@ mod tests {
         let prefix = nlri.key();
         let mut peers: Vec<_> = rib
             .iter_labeled_for_prefix(&prefix)
-            .map(|r| r.peer)
+            .map(|r| r.peer.addr())
             .collect();
         peers.sort();
         assert_eq!(
@@ -5034,7 +5035,7 @@ mod tests {
 
     #[test]
     fn labeled_withdraw_all_returns_keys_and_empties_table() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let a = labeled_nlri([10, 0, 1, 0], 24, 100);
         let b = labeled_nlri([10, 0, 2, 0], 24, 200);
@@ -5062,7 +5063,7 @@ mod tests {
 
     #[test]
     fn labeled_insert_reports_replacement_for_intern_gc() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let mut intern = crate::attr_intern::AttrInternTable::new();
         let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
@@ -5089,7 +5090,7 @@ mod tests {
 
     #[test]
     fn labeled_storage_is_isolated_from_unicast_and_vpn_tables() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
 
         // Unicast route at the *same prefix* as the labeled route: the two
@@ -5119,7 +5120,7 @@ mod tests {
 
     #[test]
     fn mark_stale_labeled_scopes_to_family_tuple() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         let v6_key = insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 200), vec![]);
@@ -5139,7 +5140,7 @@ mod tests {
 
     #[test]
     fn mark_stale_labeled_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
 
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
@@ -5166,7 +5167,7 @@ mod tests {
 
     #[test]
     fn clear_stale_labeled_strips_local_llgr_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
 
@@ -5186,7 +5187,7 @@ mod tests {
 
     #[test]
     fn clear_stale_labeled_preserves_peer_originated_llgr_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
         let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), peer_attrs);
@@ -5200,7 +5201,7 @@ mod tests {
 
     #[test]
     fn sweep_stale_family_labeled_sweeps_only_matching_tuple() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         let v6_key = insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 200), vec![]);
@@ -5225,7 +5226,7 @@ mod tests {
     fn promote_to_llgr_stale_labeled_drops_no_llgr_and_scopes_to_tuple() {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let keep_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         let no_llgr_key = insert_labeled_with(
@@ -5267,7 +5268,7 @@ mod tests {
 
     #[test]
     fn sweep_llgr_stale_family_labeled_scopes_to_tuple() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let v4_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         insert_labeled_with(&mut rib, labeled_nlri_v6(1, 48, 200), vec![]);
@@ -5290,7 +5291,7 @@ mod tests {
         // Regression mirror of insert_vpn_clears_llgr_stale_local_tag_on_readvertise:
         // a re-advertised key must drop our local-injection record so a later
         // EoR does not strip a peer-originated LLGR_STALE community.
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
         let key = insert_labeled_with(&mut rib, nlri.clone(), vec![]);
@@ -5319,7 +5320,7 @@ mod tests {
 
     #[test]
     fn withdraw_labeled_clears_llgr_stale_local_tag() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         rib.mark_stale_labeled(LU_V4);
@@ -5332,7 +5333,7 @@ mod tests {
 
     #[test]
     fn mark_stale_bgpls_scopes_to_family_tuple() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let base_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         let vpn_key = insert_bgpls_with(
@@ -5357,7 +5358,7 @@ mod tests {
 
     #[test]
     fn mark_stale_bgpls_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
 
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
@@ -5384,7 +5385,7 @@ mod tests {
 
     #[test]
     fn clear_stale_bgpls_strips_local_llgr_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
 
@@ -5407,7 +5408,7 @@ mod tests {
 
     #[test]
     fn clear_stale_bgpls_preserves_peer_originated_llgr_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
         let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), peer_attrs);
@@ -5421,7 +5422,7 @@ mod tests {
 
     #[test]
     fn sweep_stale_family_bgpls_sweeps_only_matching_tuple() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let base_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         let vpn_key = insert_bgpls_with(
@@ -5450,7 +5451,7 @@ mod tests {
     fn promote_to_llgr_stale_bgpls_drops_no_llgr_and_scopes_to_tuple() {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let keep_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         let no_llgr_key = insert_bgpls_with(
@@ -5494,7 +5495,7 @@ mod tests {
 
     #[test]
     fn insert_bgpls_clears_llgr_stale_local_tag_on_readvertise() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = bgpls_nlri(1);
         let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, nlri.clone(), vec![]);
@@ -5522,7 +5523,7 @@ mod tests {
 
     #[test]
     fn withdraw_bgpls_clears_llgr_stale_local_tag() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         rib.mark_stale_bgpls(LS_BASE);
@@ -5535,7 +5536,7 @@ mod tests {
 
     #[test]
     fn mark_stale_rtc_scopes_to_family_tuple() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
 
@@ -5549,7 +5550,7 @@ mod tests {
 
     #[test]
     fn mark_stale_rtc_consecutive_restart_deletes_gr_stale_and_retains_llgr_stale() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
 
         // First cycle: one route goes GR-stale, then promotes to LLGR-stale.
@@ -5576,7 +5577,7 @@ mod tests {
 
     #[test]
     fn clear_stale_rtc_strips_local_llgr_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
 
@@ -5599,7 +5600,7 @@ mod tests {
 
     #[test]
     fn clear_stale_rtc_preserves_peer_originated_llgr_community() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), peer_attrs);
@@ -5613,7 +5614,7 @@ mod tests {
 
     #[test]
     fn sweep_stale_family_rtc_ignores_non_rtc_family() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
         rib.mark_stale_rtc(RTC_FAM);
@@ -5631,7 +5632,7 @@ mod tests {
     fn promote_to_llgr_stale_rtc_drops_no_llgr_routes() {
         use rustbgpd_wire::COMMUNITY_NO_LLGR;
 
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let keep_key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
         let no_llgr_key = insert_rtc_with(
@@ -5663,7 +5664,7 @@ mod tests {
 
     #[test]
     fn insert_rtc_clears_llgr_stale_local_tag_on_readvertise() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let nlri = rtc_nlri(100);
         let key = insert_rtc_with(&mut rib, nlri, vec![]);
@@ -5690,7 +5691,7 @@ mod tests {
 
     #[test]
     fn withdraw_rtc_clears_llgr_stale_local_tag() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         let key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
         rib.mark_stale_rtc(RTC_FAM);
@@ -5703,7 +5704,7 @@ mod tests {
 
     #[test]
     fn clear_resets_llgr_stale_local_tags_for_vpn_bgpls_rtc() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
@@ -5731,7 +5732,7 @@ mod tests {
 
     #[test]
     fn withdraw_all_resets_llgr_stale_local_tags_per_family() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut rib = AdjRibIn::new(peer);
         insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
@@ -5762,7 +5763,7 @@ mod tests {
     /// without bound.
     #[test]
     fn withdraw_reinsert_churn_reuses_slab_slots() {
-        let mut rib = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut rib = AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
         let prefixes: Vec<Ipv4Prefix> = (0..100u8)
             .map(|i| Ipv4Prefix::new(Ipv4Addr::new(10, 1, i, 0), 24))
             .collect();
@@ -5806,7 +5807,7 @@ mod tests {
 
         #[test]
         fn detached_retirement_visits_all_family_storage_and_owned_tags() {
-            let peer = Ipv4Addr::new(10, 0, 0, 1).into();
+            let peer = PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 1).into());
             let mut empty_visits = 0;
             AdjRibIn::new(peer).retire_with(&mut || empty_visits += 1);
             for family in 0..rustbgpd_wire::CONFIGURED_FAMILIES.len() {
@@ -5978,7 +5979,7 @@ mod tests {
                         route,
                         next_hop: IpAddr::V4(peer),
                         link_local_next_hop: None,
-                        peer: IpAddr::V4(peer),
+                        peer: PeerId::from_addr(IpAddr::V4(peer)),
                         attributes: attr_set,
                         received_at: Instant::now(),
                         origin_type: crate::route::RouteOrigin::Ibgp,
@@ -6171,7 +6172,7 @@ mod tests {
             fn maintained_stale_counters_match_a_scan_after_every_step(
                 ops in proptest::collection::vec(op(), 1..80),
             ) {
-                let mut rib = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+                let mut rib = AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
                 let mut intern = crate::attr_intern::AttrInternTable::new();
                 for (step, op) in ops.iter().enumerate() {
                     apply(&mut rib, &mut intern, op);

@@ -2,6 +2,7 @@
 //! and other daemon tasks, the separate readiness and summary query lanes,
 //! and the query, explain, paging and update-group planning types they carry.
 
+use crate::PeerId;
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -32,7 +33,7 @@ pub enum EvpnRecoveryResetOutcome {
 /// Ask the session lifecycle owner to reset exactly the exhausted generation.
 #[derive(Clone, Debug)]
 pub struct EvpnRecoveryReset {
-    pub peer: IpAddr,
+    pub peer: PeerId,
     pub session_id: u64,
     /// The outbound channel changes on reconnect even when the actor ID stays
     /// the same. The session validates this token when executing the reset.
@@ -40,7 +41,7 @@ pub struct EvpnRecoveryReset {
     pub cause: EvpnRecoveryExhaustionCause,
     /// The peer whose temporary metadata/key charge refused admission. This
     /// can differ from the initiating peer during a shared metadata resize.
-    pub limiting_peer: Option<IpAddr>,
+    pub limiting_peer: Option<PeerId>,
     pub attempted_peer_bytes: usize,
     pub attempted_daemon_bytes: usize,
     pub peer_limit_bytes: usize,
@@ -94,9 +95,9 @@ pub enum RibSummaryQuery {
     /// Snapshot the RIB-owned portion of neighbor state.
     NeighborRibSnapshots {
         /// Requested peers in response order.
-        peers: Vec<IpAddr>,
+        peers: Vec<PeerId>,
         /// Optional update-group comparison.
-        comparison: Option<(IpAddr, IpAddr)>,
+        comparison: Option<(PeerId, PeerId)>,
         /// Also return a row for every peer the RIB retains GR/LLGR stale
         /// routes for that `peers` does not name (a down dynamic neighbor
         /// has left the neighbor inventory). Bounded by the retained-peer
@@ -270,7 +271,7 @@ pub fn classify_update_group(mut input: UpdateGroupClassifierInput) -> UpdateGro
 /// One established peer in the side-effect-free planner snapshot.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct UpdateGroupPeerSnapshot {
-    pub peer: IpAddr,
+    pub peer: PeerId,
     pub input: UpdateGroupClassifierInput,
     pub classification: UpdateGroupClassification,
     pub runtime_membership: String,
@@ -350,7 +351,7 @@ impl PlannedGroupability {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateGroupFamilyImpact {
-    pub peer: IpAddr,
+    pub peer: PeerId,
     pub afi: u16,
     pub safi: u8,
     pub current: PlannedGroupability,
@@ -978,7 +979,7 @@ pub trait ExactExportEncoder: Send + Sync {
 
 /// Per-peer post-policy Adj-RIB-Out route counts per AFI/SAFI —
 /// the RFC 8671 BMP stat type 15/17 source.
-pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
+pub type AdjRibOutCounts = HashMap<PeerId, Vec<((Afi, Safi), u64)>>;
 
 /// Exact post-policy Adj-RIB-In path counts by RPKI origin-validation state.
 ///
@@ -1027,7 +1028,7 @@ impl RpkiValidationCounts {
 }
 
 /// Exact post-policy Adj-RIB-In RPKI counts for every peer and family.
-pub type AdjRibInRpkiCounts = HashMap<IpAddr, Vec<((Afi, Safi), RpkiValidationCounts)>>;
+pub type AdjRibInRpkiCounts = HashMap<PeerId, Vec<((Afi, Safi), RpkiValidationCounts)>>;
 
 /// One actor-owned snapshot used by the periodic per-peer BMP statistics tick.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1050,7 +1051,7 @@ pub struct BmpPeerStats {
 #[derive(Clone)]
 pub struct PeerExportPolicyReplacement {
     /// The target peer.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// New effective export policy (`None` = permit-all/global fallback resolved already).
     pub export_policy: Option<PolicyChain>,
 }
@@ -1060,14 +1061,14 @@ pub struct PeerExportPolicyReplacement {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PeerExportPolicyRestoreReceipt {
     /// The peer was registered and its prior export policy was restored.
-    Restored { peer: IpAddr },
+    Restored { peer: PeerId },
     /// The peer was no longer registered when the rollback batch executed.
-    NotFound { peer: IpAddr },
+    NotFound { peer: PeerId },
 }
 
 impl PeerExportPolicyRestoreReceipt {
     #[must_use]
-    pub const fn peer(self) -> IpAddr {
+    pub const fn peer(self) -> PeerId {
         match self {
             Self::Restored { peer } | Self::NotFound { peer } => peer,
         }
@@ -1124,7 +1125,7 @@ pub struct OutboundRouteUpdate {
     /// Set by preflighted shared group fanout when transport-side exclusion
     /// is exactly equivalent to materializing the member's split-horizon
     /// view.
-    pub announce_source_exclusion: Option<IpAddr>,
+    pub announce_source_exclusion: Option<PeerId>,
     /// Routes to announce to this peer. `Arc`-shared so an update-group
     /// fanout enqueues ONE staged announce vector to every in-sync
     /// member instead of cloning the `Route` shells per member
@@ -1277,7 +1278,7 @@ pub struct ExportPolicyTermHits {
     /// Peer the chain is installed for; `None` = the shared global
     /// fallback chain instance (peers evaluated against the fallback
     /// before any per-peer install).
-    pub peer: Option<IpAddr>,
+    pub peer: Option<PeerId>,
     /// Process-wide id of the counter instance
     /// ([`PolicyHitCounters::id`](rustbgpd_policy::PolicyHitCounters::id)):
     /// nonzero, and a new id means the counters restarted.
@@ -1382,7 +1383,7 @@ impl std::error::Error for ExplainAdvertisedRouteError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RouteSourceIdentity {
     /// Peer that advertised the path.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// RFC 7911 inbound path identifier. Zero is a valid identity.
     pub path_id: u32,
 }
@@ -1393,7 +1394,7 @@ pub struct ExplainAdvertisedRoute {
     /// Final decision for this peer/prefix.
     pub decision: ExplainDecision,
     /// Target peer address.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Prefix being explained.
     pub prefix: Prefix,
     /// Resolved next-hop if the route would be advertised.
@@ -1401,7 +1402,7 @@ pub struct ExplainAdvertisedRoute {
     /// Add-Path identifier for the advertised route.
     pub path_id: u32,
     /// Peer that originated the selected best route.
-    pub route_peer: Option<IpAddr>,
+    pub route_peer: Option<PeerId>,
     /// Adj-RIB-In path ID of the selected unicast route at `route_peer`,
     /// its source identity together with `route_peer`. `None` before the
     /// ladder selects a route, and for other families.
@@ -1475,7 +1476,7 @@ pub enum RouteExportDisposition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRouteExport {
     /// Destination peer.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Interface of `peer` when it is a scoped (IPv6 link-local) neighbor,
     /// from its registered session's accepted source context.
     pub peer_interface: Option<Arc<str>>,
@@ -1598,7 +1599,7 @@ pub struct ExplainSrv6Argument {
 #[derive(Debug, Clone)]
 pub struct ExplainEvpnRoute {
     pub key: EvpnRouteKey,
-    pub received_from: Option<IpAddr>,
+    pub received_from: Option<PeerId>,
     /// Retained accepted source route; absence is not import-rejection history.
     pub received: Option<EvpnRibRoute>,
     /// Installed Loc-RIB route, which may lag current candidates during deferral.
@@ -1620,7 +1621,7 @@ pub struct ExplainEvpnRoute {
 /// Current installed-best export eligibility alongside committed send-side state.
 #[derive(Debug, Clone)]
 pub struct ExplainEvpnExport {
-    pub peer: IpAddr,
+    pub peer: PeerId,
     pub decision: ExplainDecision,
     pub reasons: Vec<ExplainReason>,
     pub gates: Vec<ExportGateStep>,
@@ -1683,7 +1684,7 @@ pub struct ExportGateStep {
 #[derive(Debug, Clone)]
 pub struct OrrExplainCandidate {
     /// Adj-RIB-In source peer of this candidate path.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Interface of `peer` when it is a scoped (IPv6 link-local) neighbor,
     /// from the candidate route's recorded source provenance.
     pub peer_interface: Option<Arc<str>>,
@@ -1732,7 +1733,7 @@ pub struct ExplainBestPath {
     pub candidates: Vec<BestPathCandidate>,
     /// Peer this explanation was scoped to, when the request named one.
     /// `None` = global Loc-RIB view (the pre-Add-Path explain shape).
-    pub peer: Option<IpAddr>,
+    pub peer: Option<PeerId>,
     /// Resolved RFC 9107 ORR vantage used for this peer-scoped
     /// explanation. `None` for the global view, a non-ORR peer, or an
     /// ORR peer whose vantage has no usable SPF result (which falls back
@@ -1802,7 +1803,7 @@ pub enum RouteQueryScope {
     /// Adj-RIB-In routes, optionally narrowed to one peer.
     Received {
         /// Optional peer filter; `None` reads all peers.
-        peer: Option<IpAddr>,
+        peer: Option<PeerId>,
     },
     /// Loc-RIB best routes.
     Best,
@@ -1810,7 +1811,7 @@ pub enum RouteQueryScope {
     /// synthesized view for an update-grouped member).
     Advertised {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
     },
 }
 
@@ -1823,7 +1824,7 @@ pub type RouteQueryKey = (Prefix, IpAddr, u32);
 /// Identity key of a route within a paged-query scope.
 #[must_use]
 pub fn route_query_key(route: &Route) -> RouteQueryKey {
-    (route.prefix, route.peer, route.path_id)
+    (route.prefix, route.peer.addr(), route.path_id)
 }
 
 /// Row filter evaluated inside the RIB task during a paged route query.
@@ -2078,7 +2079,7 @@ pub struct DataplaneVersions {
 /// Versioned snapshot of per-peer peer-group membership.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedPeerGroups {
-    pub groups: HashMap<IpAddr, String>,
+    pub groups: HashMap<PeerId, String>,
     pub observed_version: RoutePageVersion,
 }
 
@@ -2155,7 +2156,7 @@ pub struct PeerOutboundState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeighborRibSnapshot {
     /// Peer whose outbound state was read.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Prefixes currently advertised to this peer.
     pub advertised_count: usize,
     /// Route-policy evaluation counters for this peer.
@@ -2307,7 +2308,7 @@ impl OutboundPrefixLimitPair {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutboundPrefixLimitConfig {
     /// Per-neighbor overrides, keyed by neighbor address.
-    pub neighbors: HashMap<IpAddr, OutboundPrefixLimitPair>,
+    pub neighbors: HashMap<PeerId, OutboundPrefixLimitPair>,
     /// Peer-group defaults, keyed by group name.
     pub groups: HashMap<String, OutboundPrefixLimitPair>,
 }
@@ -2318,7 +2319,7 @@ pub struct OutboundPrefixLimitConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundPrefixLimitViolation {
     /// The peer whose advertised state blocks the edit.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// `ipv4_unicast` or `ipv6_unicast`.
     pub family: String,
     /// Distinct prefixes currently advertised.
@@ -2357,7 +2358,7 @@ pub struct SelectionDeferralPeerFamilyState {
 /// No import-policy or validation authority is inferred from this wrapper.
 pub struct WireRoutesReceived {
     /// Source transport peer.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Exact sending session.
     pub session_id: u64,
     /// Accepted unicast announcements.
@@ -2487,7 +2488,7 @@ pub enum RibUpdate {
     /// Peer session sent us routes.
     RoutesReceived {
         /// Source peer address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity (peer-manager scoped generation) of
         /// the session that received these routes. The RIB manager
         /// discards a batch whose id doesn't match the peer's registered
@@ -2519,7 +2520,7 @@ pub enum RibUpdate {
     /// Peer session sent us BGP-LS routes (RFC 9552).
     BgpLsRoutesReceived {
         /// Source peer address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the session that received these routes.
         session_id: u64,
         /// Newly announced BGP-LS routes.
@@ -2530,7 +2531,7 @@ pub enum RibUpdate {
     /// Peer session sent us VPNv4/VPNv6 routes (RFC 4364 / RFC 4659).
     VpnRoutesReceived {
         /// Source peer address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the session that received these routes.
         session_id: u64,
         /// Newly announced VPN routes.
@@ -2541,7 +2542,7 @@ pub enum RibUpdate {
     /// Peer session sent us IPv4/IPv6 labeled-unicast routes (RFC 8277).
     LabeledRoutesReceived {
         /// Source peer address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the session that received these routes.
         session_id: u64,
         /// Newly announced labeled routes.
@@ -2552,7 +2553,7 @@ pub enum RibUpdate {
     /// Peer session sent us RT-Constrain routes (RFC 4684).
     RtcRoutesReceived {
         /// Source peer address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the session that received these routes.
         session_id: u64,
         /// Newly announced RT-Constrain routes.
@@ -2563,7 +2564,7 @@ pub enum RibUpdate {
     /// Peer session went down — clear all routes from this peer.
     PeerDown {
         /// The peer whose session went down.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity (peer-manager scoped generation) of
         /// the session that went down. The RIB manager discards a
         /// `PeerDown` whose id doesn't match the currently registered
@@ -2582,7 +2583,7 @@ pub enum RibUpdate {
     /// emissions it cleans up.
     PeerDeleted {
         /// The peer that was deleted.
-        peer: IpAddr,
+        peer: PeerId,
         /// The deleted neighbor's exact `peer` metric value (`addr%if` for
         /// a link-local neighbor). The final reap targets it rather than
         /// the bare address's current registration, which a replacement
@@ -2593,7 +2594,7 @@ pub enum RibUpdate {
     /// Peer session established — register for outbound updates.
     PeerUp {
         /// The peer whose session came up.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity (peer-manager scoped generation).
         /// Recorded by the RIB manager at registration so that later
         /// `PeerDown`/`PeerGracefulRestart` events can be matched to the
@@ -2651,7 +2652,7 @@ pub enum RibUpdate {
     /// Family-local effective Add-Path caps after applying peer Paths-Limit.
     PeerAddPathLimits {
         /// Peer address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity; stale sessions are ignored.
         session_id: u64,
         /// Effective limit per negotiated Add-Path send family.
@@ -2664,7 +2665,7 @@ pub enum RibUpdate {
     /// `EoR`. Additive only: a family is never removed mid-session.
     PeerFamilySendable {
         /// Peer address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity; a superseded session is ignored.
         session_id: u64,
         /// The family to start exporting.
@@ -2678,7 +2679,7 @@ pub enum RibUpdate {
     /// re-evaluate this peer's Adj-RIB-Out.
     PeerOrfUpdate {
         /// The peer that sent the ORF entries.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the emitting session. ORF state
         /// is per-session (RFC 5291), so a stale ORF push from a
         /// superseded session is discarded rather than installed as the
@@ -2703,7 +2704,7 @@ pub enum RibUpdate {
     /// regroups it through the ordinary regroup baseline-diff seam.
     PeerSlowState {
         /// The peer whose slow flag changed.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the emitting session — a stale
         /// signal from a superseded session must not (de)isolate the
         /// replacement session (see `RoutesReceived::session_id`).
@@ -2715,7 +2716,7 @@ pub enum RibUpdate {
     /// collision promotion. This does not commit an outbound policy change.
     SetPeerSessionExportPolicy {
         /// Peer whose session accepted the policy.
-        peer: IpAddr,
+        peer: PeerId,
         /// Identity of the accepting transport session, including a survivor
         /// temporarily displaced by a newer outbound registration.
         session_id: u64,
@@ -2726,7 +2727,7 @@ pub enum RibUpdate {
     /// session consumes it; collision failback preserves the surviving value.
     SetPeerSourceContext {
         /// Remote transport address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session that will register with `PeerUp`.
         session_id: u64,
         /// Immutable accepted provenance; does not authorize dampening.
@@ -2737,7 +2738,7 @@ pub enum RibUpdate {
     /// publishes it; a displaced session keeps its value for collision failback.
     SetPeerPolicyContext {
         /// Peer whose policy identity is being updated.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity that emitted the update.
         session_id: u64,
         /// Optional peer-group membership.
@@ -2751,7 +2752,7 @@ pub enum RibUpdate {
     /// it; a session registered without one counts into a fresh handle.
     SetPeerExportPolicyCounters {
         /// Peer whose export totals handle is being staged.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity that will accompany `PeerUp`.
         session_id: u64,
         /// The neighbor's export-policy totals.
@@ -2762,7 +2763,7 @@ pub enum RibUpdate {
     /// collision loser from overwriting the winner's role.
     SetPeerExportContext {
         /// Peer whose export context is being staged.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity that will accompany `PeerUp`.
         session_id: u64,
         /// Local RFC 9234 BGP Role, if configured.
@@ -2776,7 +2777,7 @@ pub enum RibUpdate {
     /// deferral for a family we will not advertise. No route is exported.
     SetPeerWithheldFamilies {
         /// Peer whose withheld families are being staged.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity that will accompany `PeerUp`.
         session_id: u64,
         /// Negotiated families absent from `sendable_families`, each with
@@ -2790,7 +2791,7 @@ pub enum RibUpdate {
     /// `None`) means the session does not interpret control communities.
     SetPeerRsControl {
         /// Peer whose control-community context is being staged.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity that will accompany `PeerUp`.
         session_id: u64,
         /// The route server's local ASN for this session when
@@ -2803,7 +2804,7 @@ pub enum RibUpdate {
     /// prevents a queued collision loser from replacing the winner's encoder.
     SetPeerExportEncoder {
         /// Peer whose exact encoder is being staged.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity that will accompany `PeerUp`.
         session_id: u64,
         /// Session-owned replaceable encoder.
@@ -2814,7 +2815,7 @@ pub enum RibUpdate {
     /// exclude Restart-State/non-GR peers and stamp the remaining `EoR` waiter.
     SetPeerGracefulRestartContext {
         /// Peer whose OPEN was negotiated.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport generation that owns this immutable OPEN context.
         session_id: u64,
         /// Peer's RFC 4724 Restart State bit.
@@ -2981,14 +2982,14 @@ pub enum RibUpdate {
     /// `None` when the peer has no outbound registration.
     QueryInstalledExportChain {
         /// Target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Response channel.
         reply: oneshot::Sender<Option<InstalledExportChain>>,
     },
     /// Query: return the current per-peer peer-group map.
     QueryPeerGroups {
         /// Response channel.
-        reply: oneshot::Sender<HashMap<IpAddr, String>>,
+        reply: oneshot::Sender<HashMap<PeerId, String>>,
     },
     /// Query: explain why a particular route was selected as best for a prefix.
     ExplainBestPath {
@@ -3013,7 +3014,7 @@ pub enum RibUpdate {
         /// therefore not always present in the candidates list.
         /// When `None`, returns the global Loc-RIB view (every
         /// candidate carries `advertised_path_id = 0`).
-        peer: Option<IpAddr>,
+        peer: Option<PeerId>,
         /// Response channel. `None` = unknown peer (peer was set but
         /// not registered with this RIB).
         reply: oneshot::Sender<Option<ExplainBestPath>>,
@@ -3029,7 +3030,7 @@ pub enum RibUpdate {
     /// Query: explain whether the current best route for a prefix would be advertised to a peer.
     ExplainAdvertisedRoute {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Prefix to explain. For a VPN explain (`rd` set) this is the
         /// RD-scoped inner prefix.
         prefix: Prefix,
@@ -3113,7 +3114,7 @@ pub enum RibUpdate {
         /// Optional peer filter. Matches both the current and previous
         /// best-path peer so peer-scoped queries include withdraws and
         /// best-path moves away from the peer.
-        peer: Option<IpAddr>,
+        peer: Option<PeerId>,
         /// Interface of a scoped `peer`, matched against the interface each
         /// event recorded. `None` selects a numbered peer.
         peer_interface: Option<Arc<str>>,
@@ -3140,7 +3141,7 @@ pub enum RibUpdate {
     /// Query recent EVPN best-path change events from the bounded in-memory history.
     QueryEvpnRouteEventHistory {
         /// Optional peer filter. Matches both the current and previous best-path peer.
-        peer: Option<IpAddr>,
+        peer: Option<PeerId>,
         /// Optional EVPN route type filter. `None` = all route types.
         route_type: Option<u8>,
         /// Optional Route Distinguisher filter. `None` = all RDs.
@@ -3156,7 +3157,7 @@ pub enum RibUpdate {
     /// End-of-RIB marker received from a peer for a given address family.
     EndOfRib {
         /// The peer that sent the `EoR`.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the emitting session. A stale
         /// `EoR` from a superseded session must not complete the
         /// registered session's GR/LLGR stale sweep for the family (see
@@ -3170,7 +3171,7 @@ pub enum RibUpdate {
     /// Peer entered graceful restart — preserve routes but mark stale.
     PeerGracefulRestart {
         /// The restarting peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity (peer-manager scoped generation) of
         /// the session that went down with GR. Subject to the same
         /// stale-teardown discard rule as `PeerDown::session_id` — a GR
@@ -3206,7 +3207,7 @@ pub enum RibUpdate {
     /// Query: return the number of prefixes advertised to a specific peer.
     QueryAdvertisedCount {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Response channel.
         reply: oneshot::Sender<usize>,
     },
@@ -3221,14 +3222,14 @@ pub enum RibUpdate {
     /// ADR forbids.
     QueryPeerRetainedStale {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Response channel.
         reply: oneshot::Sender<usize>,
     },
     /// Query: return aggregate route-policy counters for a specific peer.
     QueryNeighborPolicyStats {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Response channel.
         reply: oneshot::Sender<NeighborPolicyStats>,
     },
@@ -3238,14 +3239,14 @@ pub enum RibUpdate {
     /// when no outbound registration exists.
     QueryPeerUpdateGroup {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Response channel.
         reply: oneshot::Sender<String>,
     },
     /// Query: atomically return neighbor-facing live outbound state.
     QueryPeerOutboundState {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Response channel.
         reply: oneshot::Sender<PeerOutboundState>,
     },
@@ -3255,9 +3256,9 @@ pub enum RibUpdate {
     /// rows in `ListNeighbors` and `GetNeighborState`.
     QueryNeighborRibSnapshots {
         /// Peers to snapshot, in the desired response order.
-        peers: Vec<IpAddr>,
+        peers: Vec<PeerId>,
         /// Optional `(primary, comparison)` update-group comparison.
-        comparison: Option<(IpAddr, IpAddr)>,
+        comparison: Option<(PeerId, PeerId)>,
         /// Also return a row for every peer the RIB retains GR/LLGR stale
         /// routes for that `peers` does not name (a down dynamic neighbor
         /// has left the neighbor inventory). Bounded by the retained-peer
@@ -3279,8 +3280,8 @@ pub enum RibUpdate {
     },
     /// Query: compare two live update-group registrations in one actor turn.
     QueryUpdateGroupComparison {
-        primary: IpAddr,
-        comparison: IpAddr,
+        primary: PeerId,
+        comparison: PeerId,
         reply: oneshot::Sender<UpdateGroupPeerComparison>,
     },
     /// TEST ONLY: a peer's advertised VPN view recomputed from manager
@@ -3291,9 +3292,9 @@ pub enum RibUpdate {
     #[cfg(test)]
     TestQueryVpnAdvertised {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Response channel: `(Debug-formatted VpnRouteKey, source peer)`.
-        reply: oneshot::Sender<Vec<(String, IpAddr)>>,
+        reply: oneshot::Sender<Vec<(String, PeerId)>>,
     },
     /// Test/benchmark transient outbound-distribution state that must be
     /// empty after a differential-oracle scenario reaches quiescence.
@@ -3319,7 +3320,7 @@ pub enum RibUpdate {
     #[cfg(test)]
     TestQueryPeerOutboundDirty {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Whether the peer has a deferred outbound update.
         reply: oneshot::Sender<bool>,
     },
@@ -3369,7 +3370,7 @@ pub enum RibUpdate {
     /// Replace the effective export policy for a peer and resync outbound state.
     ReplacePeerExportPolicy {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// New effective export policy (`None` = permit-all/global fallback resolved already).
         export_policy: Option<PolicyChain>,
         /// Response channel for success/failure.
@@ -3443,7 +3444,7 @@ pub enum RibUpdate {
     /// transaction fails before the transition command is sent.
     PrepareExportPolicyDestination {
         /// Exemplar cohort member; its peer flags seed the group profile.
-        peer: IpAddr,
+        peer: PeerId,
         /// The destination export chain (`None` = permit-all resolved).
         export_policy: Option<PolicyChain>,
         /// Resolves once the destination is fully staged, or with the
@@ -3457,7 +3458,7 @@ pub enum RibUpdate {
     /// is never removed.
     DiscardPreparedExportPolicyDestination {
         /// The exemplar peer passed to the matching prepare.
-        peer: IpAddr,
+        peer: PeerId,
         /// The destination export chain passed to the matching prepare.
         export_policy: Option<PolicyChain>,
     },
@@ -3468,7 +3469,7 @@ pub enum RibUpdate {
     /// recomputation and distribution responsibility, not remote receipt.
     ReevaluatePeerExportPolicies {
         /// Peers whose installed export policies must be re-evaluated.
-        peers: Vec<IpAddr>,
+        peers: Vec<PeerId>,
         /// Every dataset content swap since the targets' exports were last
         /// settled. With `Some`, the RIB re-evaluates only routes whose
         /// prefix or origin AS the swaps answer differently, when it can
@@ -3526,7 +3527,7 @@ pub enum RibUpdate {
     /// Explicit, bounded unicast wire replay for the named live session.
     ReplayPeerOutbound {
         /// Target peer address.
-        peer: IpAddr,
+        peer: PeerId,
         /// Exact outbound registration that accepted the operator command.
         session_id: u64,
         /// Complete negotiated unicast set, including unsendable empty families.
@@ -3542,14 +3543,14 @@ pub enum RibUpdate {
     /// attach toggle) so the peer sees the updated wire form.
     RefreshPeerOutbound {
         /// The target peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
     RouteRefreshRequest {
         /// The requesting peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the emitting session. A stale
         /// request from a superseded session would only trigger a
         /// spurious re-advertisement, but it is discarded by the same
@@ -3570,7 +3571,7 @@ pub enum RibUpdate {
     /// Peer sent Beginning-of-RIB-Refresh (RFC 7313) for this family.
     BeginRouteRefresh {
         /// The peer that sent `BoRR`.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the emitting session. A stale
         /// `BoRR` from a superseded session must not open an enhanced-
         /// refresh window over the registered session's Adj-RIB-In (see
@@ -3584,7 +3585,7 @@ pub enum RibUpdate {
     /// Peer sent End-of-RIB-Refresh (RFC 7313) for this family.
     EndRouteRefresh {
         /// The peer that sent `EoRR`.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity of the emitting session. A stale
         /// `EoRR` from a superseded session must not close the registered
         /// session's enhanced-refresh window early and sweep its
@@ -3600,7 +3601,7 @@ pub enum RibUpdate {
     /// for an RFC 7313 `EoRR` received from the peer.
     RouteRefreshTimeout {
         /// Peer whose refresh accounting window expired.
-        peer: IpAddr,
+        peer: PeerId,
         /// Transport session identity owning the accounting window.
         session_id: u64,
         /// Address family identifier.
@@ -3693,7 +3694,7 @@ pub enum RibUpdate {
     /// Query committed post-export-policy `FlowSpec` rows toward one peer.
     QueryAdvertisedFlowSpecRoutes {
         /// Destination peer; returned routes retain their source peer.
-        peer: IpAddr,
+        peer: PeerId,
         /// Row filter evaluated before copying, inside the RIB task.
         filter: Option<RibRowFilter<FlowSpecRoute>>,
         /// Response channel; abandoning it cancels this diagnostic read.
@@ -3702,7 +3703,7 @@ pub enum RibUpdate {
     /// Query retained received `FlowSpec` candidates, including infeasible rows.
     QueryReceivedFlowSpecRoutes {
         /// Exact source peer whose Adj-RIB-In is inspected.
-        peer: IpAddr,
+        peer: PeerId,
         /// Row filter evaluated during cancellation-aware RIB traversal.
         filter: Option<RibRowFilter<ReceivedFlowSpecRoute>>,
         /// Response channel; abandoning it cancels only this diagnostic read.
@@ -3711,8 +3712,8 @@ pub enum RibUpdate {
     /// Explain a typed EVPN key without changing selection, counters, or outbound state.
     ExplainEvpnRoute {
         key: EvpnRouteKey,
-        received_from: Option<IpAddr>,
-        advertised_to: Option<IpAddr>,
+        received_from: Option<PeerId>,
+        advertised_to: Option<PeerId>,
         srv6_argument_companion: Option<EvpnRouteKey>,
         reply: oneshot::Sender<ExplainEvpnRoute>,
     },
@@ -4024,7 +4025,7 @@ impl WarmMrtSnapshotBudget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarmMrtSnapshotView {
     /// Configured numbered peer address.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Peer-manager generation of the active session.
     pub session_id: u64,
     /// Remote ASN negotiated by that session.
@@ -4042,7 +4043,7 @@ pub struct WarmMrtSnapshotView {
 impl WarmMrtSnapshotView {
     /// Stable ordering key independent of enum declaration order.
     #[must_use]
-    pub fn sort_key(&self) -> (IpAddr, u16, u8, u64, u32, Ipv4Addr, bool) {
+    pub fn sort_key(&self) -> (PeerId, u16, u8, u64, u32, Ipv4Addr, bool) {
         (
             self.peer,
             self.afi as u16,
@@ -4086,7 +4087,7 @@ pub struct PeerSourceContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceivedRouteSource {
     /// Remote transport address.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Transport session identity; never an owner incarnation token.
     pub session_id: u64,
     /// Negotiated OPEN ASN, absent for legacy senders without a registration.

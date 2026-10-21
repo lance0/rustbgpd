@@ -1,7 +1,7 @@
 //! Actor-owned retained feasibility and resumable received-candidate walks.
 
+use crate::PeerId;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::net::IpAddr;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::ops::ControlFlow;
 use std::time::Instant;
@@ -19,7 +19,7 @@ use crate::update::{FlowSpecValidationStatus, ReceivedFlowSpecRoute, RibRowFilte
 const VALIDATION_VISITS_PER_TURN: usize = 256;
 const DEPENDENCY_RULES_PER_TURN: usize = 16;
 
-type CandidateId = (FlowSpecKey, IpAddr, u32);
+type CandidateId = (FlowSpecKey, PeerId, u32);
 
 /// Retained payload copy: the Adj-RIB-In row is overwritten before this
 /// reconciliation runs, so an exact comparison needs the previous payload.
@@ -37,7 +37,7 @@ struct Job {
     id: CandidateId,
     revision: u64,
     check: MoreSpecificCheck,
-    peers: Vec<IpAddr>,
+    peers: Vec<PeerId>,
     peer_index: usize,
     after: Option<(Prefix, usize)>,
 }
@@ -126,7 +126,7 @@ fn prefix_covers(cover: Prefix, prefix: Prefix) -> bool {
 pub(super) struct ValidationState {
     local_as: Option<u32>,
     destinations: FamilyPrefixMap<BTreeSet<FlowSpecRule>>,
-    candidates: HashMap<FlowSpecKey, HashMap<(IpAddr, u32), Candidate>>,
+    candidates: HashMap<FlowSpecKey, HashMap<(PeerId, u32), Candidate>>,
     revision: u64,
     unicast_revision: u64,
     changes: HashMap<DependencyScope, Change>,
@@ -142,7 +142,7 @@ impl ValidationState {
     pub(super) fn selection_candidates<'a>(
         &self,
         key: &FlowSpecKey,
-        ribs: &'a HashMap<IpAddr, AdjRibIn>,
+        ribs: &'a HashMap<PeerId, AdjRibIn>,
         loc: &LocRib,
         checkpoint: &impl Fn(),
     ) -> Vec<&'a FlowSpecRoute> {
@@ -227,7 +227,7 @@ impl ValidationState {
     fn sync_rules(
         &mut self,
         affected: &HashSet<FlowSpecKey>,
-        ribs: &HashMap<IpAddr, AdjRibIn>,
+        ribs: &HashMap<PeerId, AdjRibIn>,
         loc: &LocRib,
         checkpoint: &impl Fn(),
     ) {
@@ -362,7 +362,7 @@ impl ValidationState {
     fn invalidate_rule(
         &mut self,
         key: &FlowSpecKey,
-        ribs: &HashMap<IpAddr, AdjRibIn>,
+        ribs: &HashMap<PeerId, AdjRibIn>,
         loc: &LocRib,
         change: Change,
         checkpoint: &impl Fn(),
@@ -469,7 +469,7 @@ fn begin_for_route(
 impl RibManager {
     pub(super) fn send_received_flowspec(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         filter: Option<&RibRowFilter<ReceivedFlowSpecRoute>>,
         reply: tokio::sync::oneshot::Sender<Vec<ReceivedFlowSpecRoute>>,
     ) {
@@ -480,7 +480,7 @@ impl RibManager {
 
     fn collect_received_flowspec(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         filter: Option<&RibRowFilter<ReceivedFlowSpecRoute>>,
         mut canceled: impl FnMut() -> bool,
     ) -> Option<Vec<ReceivedFlowSpecRoute>> {
@@ -898,6 +898,7 @@ impl RibManager {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1156,7 +1157,7 @@ mod tests {
         let (mut manager, _tx, mut flow, _cover) = fixture();
         drain(&mut manager);
         assert!(selected(&manager, &flow));
-        let downstream = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+        let downstream = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)));
         let (out_tx, mut out_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
             peer: downstream,

@@ -717,7 +717,7 @@ fn make_bgpls_route(payload_tag: u8) -> rustbgpd_rib::BgpLsRibRoute {
         family: rustbgpd_rib::BgpLsFamily::LinkState,
         nlri,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -817,7 +817,7 @@ fn make_smet_route(flags: u8) -> rustbgpd_rib::EvpnRibRoute {
         }),
         next_hop: "192.0.2.7".parse().unwrap(),
         link_local_next_hop: None,
-        peer: "10.0.0.2".parse().unwrap(),
+        peer: PeerId::from_addr("10.0.0.2".parse().unwrap()),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -859,7 +859,7 @@ fn make_route(local_pref: u32) -> Route {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -892,7 +892,7 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
         next_hop: IpAddr::V6(next_hop),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -919,7 +919,7 @@ fn make_flowspec_route() -> FlowSpecRoute {
             ))],
         },
         afi: Afi::Ipv4,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: vec![PathAttribute::Origin(Origin::Igp)],
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -1111,11 +1111,11 @@ async fn spawn_rib_with_one_route() -> (mpsc::Sender<RibUpdate>, tokio::task::Jo
     let manager = tokio::spawn(
         rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
     );
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
     let mut route = make_route(100);
     route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     route.peer = source;
-    route.next_hop = source;
+    route.next_hop = source.addr();
     route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -1398,7 +1398,7 @@ async fn accepted_query_test_session_with_config(
 fn make_sourced_route(source: Ipv4Addr, prefix: Ipv4Prefix, asn: u32) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
-        peer: IpAddr::V4(source),
+        peer: PeerId::from_addr(IpAddr::V4(source)),
         next_hop: IpAddr::V4(source),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1430,7 +1430,7 @@ fn shared_group_envelope(
 ) -> OutboundRouteUpdate {
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
-    update.announce_source_exclusion = Some(IpAddr::V4(excluded_source));
+    update.announce_source_exclusion = Some(PeerId::from_addr(IpAddr::V4(excluded_source)));
     update.announce = announce.to_vec().into();
     update.next_hop_override = vec![None; announce.len()].into();
     update.shared_group_encode = Some(Arc::clone(shared));
@@ -1460,7 +1460,7 @@ fn make_vpn_rib_route(label: u32) -> rustbgpd_rib::VpnRibRoute {
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -1487,7 +1487,7 @@ fn make_labeled_rib_route(label: u32) -> rustbgpd_rib::LabeledRibRoute {
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -1512,7 +1512,7 @@ fn make_rtc_rib_route(local_admin: u16) -> rustbgpd_rib::RtcRibRoute {
         )
         .unwrap(),
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -1849,7 +1849,7 @@ fn sample_update_message() -> bytes::BytesMut {
 fn placeholder_routes_received() -> RibUpdate {
     RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))),
         announced: vec![],
         withdrawn: vec![],
         flowspec_announced: vec![],

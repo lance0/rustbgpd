@@ -220,7 +220,7 @@ impl PeerSession {
             if self
                 .rib_tx
                 .send(rustbgpd_rib::RibUpdate::RouteRefreshTimeout {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     afi,
                     safi,

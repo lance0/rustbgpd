@@ -2,6 +2,8 @@
 //! labels, gauges, ungrouped reasons, and — the risk-3 property — key
 //! stability under a content-identical export-policy reinstall.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::any::Any;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -265,7 +267,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
         manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: std::time::Duration::from_secs(1),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: "192.0.2.51".parse().unwrap(),
+                peer: PeerId::from_addr("192.0.2.51".parse().unwrap()),
                 families: ipv4_sendable(),
             }],
         });
@@ -289,7 +291,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
     let mut receivers = Vec::new();
 
     for index in 0..GROUPED_PEERS + FALLBACK_PEERS {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 51, 0, u8::try_from(index + 1).unwrap()));
+        let peer = peer_v4(Ipv4Addr::new(10, 51, 0, u8::try_from(index + 1).unwrap()));
         peers.push(peer);
         let encoder: Arc<dyn crate::update::ExactExportEncoder> = if index < GROUPED_PEERS {
             Arc::new(CohortExactEncoder {
@@ -339,18 +341,18 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
         receivers.push(outbound_rx);
     }
 
-    assert!(
-        peers[..GROUPED_PEERS]
-            .iter()
-            .all(|peer| manager.grouped_member_of(*peer).is_some())
-    );
+    assert!(peers[..GROUPED_PEERS].iter().all(|peer| {
+        manager
+            .grouped_member_of(PeerId::from_addr((*peer).addr()))
+            .is_some()
+    }));
     assert!(peers[GROUPED_PEERS..].iter().all(|peer| matches!(
-        manager.update_groups.membership(*peer),
+        manager.update_groups.membership(PeerId::from_addr((*peer).addr())),
         Some(crate::manager::update_groups::GroupMembership::PolicyPeerContext)
     )));
 
     let source_v4 = Ipv4Addr::new(192, 0, 2, 51);
-    let source = IpAddr::V4(source_v4);
+    let source = peer_v4(source_v4);
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -466,7 +468,7 @@ fn peer_context_chain() -> PolicyChain {
 
 /// `PeerUp` with update-group-relevant knobs; the rest defaulted.
 struct PeerUpSpec {
-    peer: IpAddr,
+    peer: PeerId,
     peer_asn: u32,
     export_policy: Option<PolicyChain>,
     is_ebgp: bool,
@@ -479,7 +481,7 @@ struct PeerUpSpec {
 }
 
 impl PeerUpSpec {
-    fn ibgp(peer: IpAddr) -> Self {
+    fn ibgp(peer: PeerId) -> Self {
         Self {
             peer,
             peer_asn: 65000,
@@ -494,7 +496,7 @@ impl PeerUpSpec {
         }
     }
 
-    fn ebgp(peer: IpAddr) -> Self {
+    fn ebgp(peer: PeerId) -> Self {
         Self {
             is_ebgp: true,
             ..Self::ibgp(peer)
@@ -560,7 +562,7 @@ async fn peer_up_with_cohort_encoder(
     peer_up(tx, spec).await
 }
 
-async fn query_update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
+async fn query_update_group(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> String {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerUpdateGroup {
         peer,
@@ -625,7 +627,7 @@ struct ExactPrecommitState {
 
 fn register_direct_exact_peer(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     encoder: Arc<dyn crate::update::ExactExportEncoder>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     manager.handle_update(RibUpdate::SetPeerExportEncoder {
@@ -659,14 +661,14 @@ fn register_direct_exact_peer(
 
 fn register_direct_peer(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     register_direct_peer_with_families(manager, peer, ipv4_sendable())
 }
 
 fn register_direct_peer_with_families(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sendable_families: Vec<(Afi, Safi)>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     register_direct_peer_session(manager, peer, sendable_families, 0)
@@ -674,7 +676,7 @@ fn register_direct_peer_with_families(
 
 fn register_direct_peer_session(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sendable_families: Vec<(Afi, Safi)>,
     session_id: u64,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -706,7 +708,7 @@ fn distribute_direct_routes(
     prefixes: impl IntoIterator<Item = Ipv4Prefix>,
 ) {
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: prefixes
             .into_iter()
@@ -746,13 +748,13 @@ fn installed_export_chain_query_ignores_update_grouping() {
         IpAddr::V4(Ipv4Addr::new(10, 63, 9, 1)),
         IpAddr::V4(Ipv4Addr::new(10, 63, 9, 2)),
     ];
-    let ungrouped = IpAddr::V4(Ipv4Addr::new(10, 63, 9, 3));
+    let ungrouped = peer_v4(Ipv4Addr::new(10, 63, 9, 3));
     let mut receivers = Vec::new();
     // Add-Path send disqualifies a peer from update-group sharing.
-    for (peer, add_path_send_max) in [(grouped[0], 0), (grouped[1], 0), (ungrouped, 2)] {
+    for (peer, add_path_send_max) in [(grouped[0], 0), (grouped[1], 0), (ungrouped.addr(), 2)] {
         let (outbound_tx, outbound_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65_000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -775,11 +777,11 @@ fn installed_export_chain_query_ignores_update_grouping() {
         });
         receivers.push(outbound_rx);
     }
-    assert!(
-        grouped
-            .iter()
-            .all(|peer| manager.grouped_member_of(*peer).is_some())
-    );
+    assert!(grouped.iter().all(|peer| {
+        manager
+            .grouped_member_of(PeerId::from_addr(*peer))
+            .is_some()
+    }));
     assert!(manager.grouped_member_of(ungrouped).is_none());
 
     let mut query = |peer| {
@@ -788,11 +790,11 @@ fn installed_export_chain_query_ignores_update_grouping() {
         answer.try_recv().unwrap()
     };
     let expected = chain().compiled().clone();
-    for peer in [grouped[0], grouped[1], ungrouped] {
-        let installed = query(peer).expect("registered peer has a baseline");
+    for peer in [grouped[0], grouped[1], ungrouped.addr()] {
+        let installed = query(PeerId::from_addr(peer)).expect("registered peer has a baseline");
         assert_eq!(installed.chain.as_deref(), Some(&expected), "{peer}");
     }
-    assert!(query(IpAddr::V4(Ipv4Addr::new(10, 63, 9, 4))).is_none());
+    assert!(query(peer_v4(Ipv4Addr::new(10, 63, 9, 4))).is_none());
 }
 
 #[test]
@@ -804,7 +806,7 @@ fn distribution_clones_metrics_once_per_pass() {
     let mut outbound = Vec::with_capacity(PEERS);
     for index in 0..PEERS {
         let host = u8::try_from(index + 1).expect("four peers fit in an IPv4 host octet");
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, host));
+        let peer = peer_v4(Ipv4Addr::new(10, 63, 2, host));
         let mut receiver = register_direct_peer(&mut manager, peer);
         assert_eq!(receiver.try_recv().unwrap().end_of_rib, ipv4_sendable());
         assert!(manager.grouped_member_of(peer).is_some());
@@ -851,7 +853,7 @@ fn grouped_source_exceptions_share_payload_and_exact_proof() {
     for (index, &peer) in peers.iter().enumerate() {
         receivers.push(register_direct_exact_peer(
             &mut manager,
-            peer,
+            PeerId::from_addr(peer),
             Arc::new(CohortExactEncoder {
                 owner: u64::try_from(index + 1).unwrap(),
                 profile: 63,
@@ -862,7 +864,7 @@ fn grouped_source_exceptions_share_payload_and_exact_proof() {
                 reuses: Arc::clone(&reuses),
             }),
         ));
-        assert!(manager.grouped_member_of(peer).is_some());
+        assert!(manager.grouped_member_of(PeerId::from_addr(peer)).is_some());
     }
 
     manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
@@ -933,7 +935,7 @@ fn grouped_source_exceptions_share_payload_and_exact_proof() {
 fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 4, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 4, 1));
     let probes = Arc::new(AtomicUsize::new(0));
     manager.handle_update(RibUpdate::SetPeerExportContext {
         peer,
@@ -954,7 +956,7 @@ fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
         }),
     );
 
-    let IpAddr::V4(peer_source) = peer else {
+    let IpAddr::V4(peer_source) = peer.addr() else {
         unreachable!()
     };
     let own_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
@@ -1017,7 +1019,7 @@ fn distribution_skips_pristine_otc_prefix_visits() {
     let mut outbound = Vec::with_capacity(PEERS);
     for index in 0..PEERS {
         let host = u8::try_from(index + 1).expect("four peers fit in an IPv4 host octet");
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, host));
+        let peer = peer_v4(Ipv4Addr::new(10, 63, 2, host));
         let mut receiver = register_direct_peer(&mut manager, peer);
         assert_eq!(receiver.try_recv().unwrap().end_of_rib, ipv4_sendable());
         assert!(manager.grouped_member_of(peer).is_some());
@@ -1093,7 +1095,7 @@ fn clean_grouped_fanout_without_actions_skips_action_suppression_scan() {
         let mut outbound = Vec::with_capacity(PEERS);
         for host in 1..=PEERS {
             let host = u8::try_from(host).expect("four peers fit in an IPv4 host octet");
-            let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 4, host));
+            let peer = peer_v4(Ipv4Addr::new(10, 63, 4, host));
             let mut receiver = register_direct_peer_with_policy(&mut manager, peer, policy.clone());
             assert_eq!(receiver.try_recv().unwrap().end_of_rib, ipv4_sendable());
             assert!(manager.grouped_member_of(peer).is_some());
@@ -1124,7 +1126,7 @@ fn clean_grouped_fanout_without_actions_skips_action_suppression_scan() {
 fn otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 3, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 3, 1));
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     let route = crate::test_support::make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
@@ -1162,7 +1164,7 @@ fn otc_reconcile_non_pristine_state_uses_prefix_loop_and_clears_exactly() {
 fn grouped_peer_private_unicast_stays_unallocated_during_distribution() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 1));
     let mut outbound = register_direct_peer(&mut manager, peer);
     assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
     assert!(manager.grouped_member_of(peer).is_some());
@@ -1189,7 +1191,7 @@ fn grouped_late_join_private_unicast_stays_unallocated_during_initial_dump() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
     distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 2), prefix);
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 2));
     let mut outbound = register_direct_peer(&mut manager, peer);
     let dump = outbound.try_recv().unwrap();
     assert_eq!(dump.announce.len(), 1);
@@ -1213,7 +1215,7 @@ fn grouped_join_replay_reserves_only_retained_entries() {
 
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 5));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 5));
     let mut outbound = register_direct_peer(&mut manager, peer);
     assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
 
@@ -1235,7 +1237,7 @@ fn grouped_join_replay_reserves_only_retained_entries() {
         })
         .collect();
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced,
         withdrawn: vec![],
@@ -1272,7 +1274,7 @@ fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
     distribute_direct_route(&mut manager, Ipv4Addr::new(192, 0, 2, 3), prefix);
     assert_eq!(manager.loc_rib.len(), 1);
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 3));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 3));
     let mut outbound =
         register_direct_peer_with_families(&mut manager, peer, ipv4_flowspec_sendable());
     assert_eq!(
@@ -1299,7 +1301,7 @@ fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
 /// unicast (`SetPeerWithheldFamilies` staged before `PeerUp`).
 fn register_withheld_v6_peer(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
         peer,
@@ -1322,7 +1324,7 @@ fn distribute_dual_stack_routes(
     let mut v6_route = crate::test_support::make_route(v4, source);
     v6_route.prefix = Prefix::V6(v6);
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![crate::test_support::make_route(v4, source), v6_route],
         withdrawn: vec![],
@@ -1347,7 +1349,7 @@ fn withheld_family_gets_an_empty_eor_after_the_initial_dump() {
     let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 5, 0, 0, 0, 0, 0), 48);
     distribute_dual_stack_routes(&mut manager, Ipv4Addr::new(192, 0, 2, 14), v4, v6);
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 3, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 3, 1));
     let mut outbound = register_withheld_v6_peer(&mut manager, peer);
     let updates: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
     let announced: Vec<_> = updates
@@ -1372,7 +1374,7 @@ fn withheld_family_gets_an_empty_eor_after_the_initial_dump() {
 fn withheld_family_eor_is_deferred_for_an_orf_gated_restarter() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 3, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 3, 2));
     let ipv6 = (Afi::Ipv6, Safi::Unicast);
     manager.gr_peers.insert(peer, HashSet::new());
     manager
@@ -1396,7 +1398,7 @@ fn withheld_family_unlock_after_its_eor_still_exports_the_table() {
     let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 6, 0, 0, 0, 0, 0), 48);
     distribute_dual_stack_routes(&mut manager, Ipv4Addr::new(192, 0, 2, 15), v4, v6);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 3, 3));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 3, 3));
     let mut outbound = register_withheld_v6_peer(&mut manager, peer);
     let ipv6 = (Afi::Ipv6, Safi::Unicast);
     let initial: Vec<_> = std::iter::from_fn(|| outbound.try_recv().ok()).collect();
@@ -1428,8 +1430,8 @@ fn withheld_family_unlock_after_its_eor_still_exports_the_table() {
 fn family_made_sendable_mid_session_exports_its_table_then_eor() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 1));
-    let other = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 1));
+    let other = peer_v4(Ipv4Addr::new(10, 63, 2, 2));
     let mut outbound = register_direct_peer(&mut manager, peer);
     let mut other_outbound = register_direct_peer(&mut manager, other);
     for rx in [&mut outbound, &mut other_outbound] {
@@ -1444,7 +1446,7 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
     let mut v6_route = crate::test_support::make_route(v4, source);
     v6_route.prefix = Prefix::V6(v6);
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![crate::test_support::make_route(v4, source), v6_route],
         withdrawn: vec![],
@@ -1506,9 +1508,9 @@ fn family_made_sendable_mid_session_exports_its_table_then_eor() {
 fn family_made_sendable_mid_session_joins_an_existing_group() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let dual = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 4));
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 5));
-    let v4_only = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 6));
+    let dual = peer_v4(Ipv4Addr::new(10, 63, 2, 4));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 5));
+    let v4_only = peer_v4(Ipv4Addr::new(10, 63, 2, 6));
     let mut dual_rx = register_direct_peer_with_families(&mut manager, dual, dual_stack_sendable());
     let mut peer_rx = register_direct_peer(&mut manager, peer);
     let mut v4_rx = register_direct_peer(&mut manager, v4_only);
@@ -1529,7 +1531,7 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
     let mut v6_route = crate::test_support::make_route(v4, source);
     v6_route.prefix = Prefix::V6(v6);
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![crate::test_support::make_route(v4, source), v6_route],
         withdrawn: vec![],
@@ -1585,7 +1587,7 @@ fn family_made_sendable_mid_session_joins_an_existing_group() {
 fn family_made_sendable_defers_eor_for_an_orf_gated_restarter() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 8));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 8));
     let mut outbound = register_direct_peer(&mut manager, peer);
     assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
     let ipv6 = (Afi::Ipv6, Safi::Unicast);
@@ -1619,7 +1621,7 @@ fn family_unlock_from_a_superseded_session_survives_failback() {
     let (_tx, rx) = mpsc::channel(1);
     let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 9));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 9));
     let mut a_rx = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 1);
     assert_eq!(a_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
     let mut b_rx = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 2);
@@ -1631,7 +1633,7 @@ fn family_unlock_from_a_superseded_session_survives_failback() {
     let mut v6_route = crate::test_support::make_route(v4, source);
     v6_route.prefix = Prefix::V6(v6);
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![crate::test_support::make_route(v4, source), v6_route],
         withdrawn: vec![],
@@ -1701,7 +1703,7 @@ fn stale_family_sendable_is_discarded_and_counted() {
     let (_tx, rx) = mpsc::channel(1);
     let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 7));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 7));
     let mut outbound = register_direct_peer_session(&mut manager, peer, ipv4_sendable(), 2);
     assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
 
@@ -1740,7 +1742,7 @@ fn stale_family_sendable_is_discarded_and_counted() {
 fn family_made_sendable_mid_session_installs_its_add_path_limit() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 2, 3));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 2, 3));
     let mut outbound = register_direct_peer(&mut manager, peer);
     assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
     assert!(manager.grouped_member_of(peer).is_some());
@@ -1753,7 +1755,7 @@ fn family_made_sendable_mid_session_installs_its_add_path_limit() {
         );
         route.prefix = Prefix::V6(v6);
         manager.handle_update(RibUpdate::RoutesReceived {
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             session_id: 0,
             announced: vec![route],
             withdrawn: vec![],
@@ -1798,7 +1800,7 @@ fn family_made_sendable_mid_session_installs_its_add_path_limit() {
 fn grouped_peer_slow_round_trip_releases_private_unicast_without_wire_delta() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 4));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 4));
     let mut outbound = register_direct_peer(&mut manager, peer);
     assert_eq!(outbound.try_recv().unwrap().end_of_rib, ipv4_sendable());
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
@@ -1855,7 +1857,7 @@ fn grouped_peer_slow_round_trip_releases_private_unicast_without_wire_delta() {
 fn grouped_peer_slow_round_trip_releases_private_vpn_without_wire_delta() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 5));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 5));
     let mut outbound = register_direct_peer_with_families(&mut manager, peer, vpn_sendable());
     assert_eq!(outbound.try_recv().unwrap().end_of_rib, vpn_sendable());
     let mut route = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 7), 31, 100, 100);
@@ -1943,9 +1945,9 @@ fn grouped_peer_slow_round_trip_releases_private_vpn_without_wire_delta() {
 
 fn drive_exact_precommit_step(
     manager: &mut RibManager,
-    peers: [IpAddr; 2],
+    peers: [PeerId; 2],
     receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>; 2],
-    source: IpAddr,
+    source: PeerId,
     route: Route,
 ) -> (ExactPrecommitState, u64) {
     let hits_before = manager.test_exact_export_fast_path_hits;
@@ -1995,8 +1997,8 @@ fn run_exact_precommit_differential(
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_exact_export_slow_path = force_slow;
     let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 90, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 90, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 90, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 90, 0, 2)),
     ];
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
@@ -2016,7 +2018,7 @@ fn run_exact_precommit_differential(
             }),
         )
     });
-    let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 90));
+    let source = peer_v4(Ipv4Addr::new(192, 0, 2, 90));
     routes
         .iter()
         .cloned()
@@ -2113,7 +2115,7 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
                     RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
                 manager.test_force_ungrouped = ungrouped;
                 manager.test_force_exact_export_slow_path = force_slow;
-                let seed = IpAddr::V4(Ipv4Addr::new(10, 90, 1, 2));
+                let seed = peer_v4(Ipv4Addr::new(10, 90, 1, 2));
                 let _seed_outbound = register_direct_peer(&mut manager, seed);
                 for route in &routes {
                     manager.handle_update(RibUpdate::RoutesReceived {
@@ -2131,7 +2133,7 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
                 }
                 let probes = Arc::new(AtomicUsize::new(0));
                 manager.handle_update(RibUpdate::SetPeerExportEncoder {
-                    peer: peer.into(),
+                    peer: peer_v4(peer),
                     session_id: 0,
                     encoder: Arc::new(CohortExactEncoder {
                         owner: 1,
@@ -2144,11 +2146,19 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
                     }),
                 });
                 let hits_before = manager.test_exact_export_fast_path_hits;
-                let mut outbound = register_direct_peer(&mut manager, peer.into());
-                assert_eq!(manager.grouped_member_of(peer.into()).is_none(), ungrouped);
+                let mut outbound = register_direct_peer(&mut manager, peer_v4(peer));
+                assert_eq!(
+                    manager.grouped_member_of(peer_v4(peer)).is_none(),
+                    ungrouped
+                );
                 let mut update = outbound.try_recv().unwrap();
                 Arc::make_mut(&mut update.announce).sort_by_key(|route| route.prefix);
-                assert!(update.announce.iter().all(|route| route.peer != peer));
+                assert!(
+                    update
+                        .announce
+                        .iter()
+                        .all(|route| route.peer != peer_v4(peer))
+                );
                 assert_eq!(update.announce.len(), if limited { 1 } else { 2 });
                 assert_eq!(update.withdraw, []);
                 assert_eq!(update.end_of_rib, []);
@@ -2163,12 +2173,12 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
                 assert_eq!(
                     manager
                         .peer_unexportable
-                        .get(&peer.into())
+                        .get(&peer_v4(peer))
                         .cloned()
                         .unwrap_or_default(),
                     expected_rejected
                 );
-                assert!(!manager.dirty_peers.contains(&peer.into()));
+                assert!(!manager.dirty_peers.contains(&peer_v4(peer)));
                 let hits = manager.test_exact_export_fast_path_hits - hits_before;
                 assert_eq!(hits, u64::from(!force_slow && !limited));
                 exact_update_semantic(&update)
@@ -2181,7 +2191,7 @@ fn initial_table_exact_precommit_fast_and_slow_paths_are_equivalent() {
 async fn query_first_export_term_hits(
     tx: &mpsc::Sender<RibUpdate>,
     roster: &crate::export_roster::ExportRosterReader,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> (u64, u64) {
     let hits = published_export_rows(tx, roster, Some(peer)).await;
     assert_eq!(hits.len(), 1, "peer must report its installed chain");
@@ -2195,7 +2205,7 @@ async fn query_first_export_term_hits(
 
 async fn query_peer_outbound_state(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> crate::PeerOutboundState {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerOutboundState {
@@ -2209,7 +2219,7 @@ async fn query_peer_outbound_state(
 
 async fn apply_authoritative_policy_handoff(
     tx: &mpsc::Sender<RibUpdate>,
-    peers: &[IpAddr],
+    peers: &[PeerId],
     export_policy: Option<PolicyChain>,
     outcome: crate::update::ExportPolicyCohortOutcome,
 ) {
@@ -2251,8 +2261,8 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     let old_policy = community_chain(0xFDE8_0001);
     let next_policy = community_chain(0xFDE8_0002);
     let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 25, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 25, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 25, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 25, 0, 2)),
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
@@ -2279,18 +2289,18 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     let third_source = Ipv4Addr::new(192, 0, 2, 14);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(third_source),
+        peer: peer_v4(third_source),
         announced: vec![
             crate::test_support::make_route(
                 Ipv4Prefix::new(Ipv4Addr::new(203, 0, 117, 0), 24),
-                match peers[0] {
+                match peers[0].addr() {
                     IpAddr::V4(value) => value,
                     IpAddr::V6(_) => unreachable!(),
                 },
             ),
             crate::test_support::make_route(
                 Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 0), 24),
-                match peers[1] {
+                match peers[1].addr() {
                     IpAddr::V4(value) => value,
                     IpAddr::V6(_) => unreachable!(),
                 },
@@ -2439,7 +2449,7 @@ fn assert_metric(observed: f64, expected: f64, what: &str) {
 #[tokio::test]
 async fn replace_export_policy_after_peer_down_returns_typed_not_found() {
     let RunningManager { tx, handle } = spawn_running_manager(16, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 42));
     let _outbound = peer_up(&tx, PeerUpSpec::ibgp(peer)).await;
 
     tx.send(RibUpdate::PeerDown {
@@ -2470,8 +2480,8 @@ async fn identical_peers_group_together_and_gauges_track_membership() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
-    let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let b = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let _rx_a = peer_up(&tx, PeerUpSpec::ibgp(a)).await;
     let _rx_b = peer_up(&tx, PeerUpSpec::ibgp(b)).await;
 
@@ -2500,7 +2510,7 @@ async fn identical_peers_group_together_and_gauges_track_membership() {
     );
 
     // A fingerprint-different peer (eBGP) lands in a second group.
-    let c = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let c = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut spec = PeerUpSpec::ibgp(c);
     spec.is_ebgp = true;
     let _rx_c = peer_up(&tx, spec).await;
@@ -2557,11 +2567,11 @@ async fn ungrouped_reasons_surface_per_disqualifier() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
-    let policy_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
-    let add_path_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 2));
-    let orr_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 3));
-    let orf_negotiated_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 4));
-    let per_client_best_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 5));
+    let policy_peer = peer_v4(Ipv4Addr::new(10, 0, 1, 1));
+    let add_path_peer = peer_v4(Ipv4Addr::new(10, 0, 1, 2));
+    let orr_peer = peer_v4(Ipv4Addr::new(10, 0, 1, 3));
+    let orf_negotiated_peer = peer_v4(Ipv4Addr::new(10, 0, 1, 4));
+    let per_client_best_peer = peer_v4(Ipv4Addr::new(10, 0, 1, 5));
 
     let mut spec = PeerUpSpec::ibgp(policy_peer);
     spec.export_policy = Some(peer_context_chain());
@@ -2702,10 +2712,10 @@ async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
     // Conceptually: rs1/rs2 are RS-transparent members, plain is not.
     // The manager sees identical staging inputs for all three — the
     // transparency flag lives in transport (outbound attribute prep).
-    let rs1 = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1));
-    let rs2 = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 2));
-    let plain = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 3));
-    let pcb = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 4));
+    let rs1 = peer_v4(Ipv4Addr::new(10, 0, 3, 1));
+    let rs2 = peer_v4(Ipv4Addr::new(10, 0, 3, 2));
+    let plain = peer_v4(Ipv4Addr::new(10, 0, 3, 3));
+    let pcb = peer_v4(Ipv4Addr::new(10, 0, 3, 4));
 
     let mut rx1 = peer_up(&tx, PeerUpSpec::ebgp(rs1)).await;
     let mut rx2 = peer_up(&tx, PeerUpSpec::ebgp(rs2)).await;
@@ -2748,7 +2758,7 @@ async fn rs_transparent_peers_group_per_client_best_groups_on_own_key() {
     // Shared staging feeds the grouped members identically; the
     // per-client-best group stages the same (sole) candidate.
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 9));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 3, 9));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -2788,8 +2798,8 @@ async fn per_client_best_with_vpn_or_rtc_families_keeps_fallback_reason() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
-    let vpn_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
-    let rtc_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 2));
+    let vpn_peer = peer_v4(Ipv4Addr::new(10, 0, 4, 1));
+    let rtc_peer = peer_v4(Ipv4Addr::new(10, 0, 4, 2));
     for (peer, families) in [
         (
             vpn_peer,
@@ -2802,7 +2812,7 @@ async fn per_client_best_with_vpn_or_rtc_families_keeps_fallback_reason() {
     ] {
         let (out_tx, _out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer.addr()),
             session_id: 0,
             peer_asn: 65001,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2846,7 +2856,7 @@ async fn content_identical_policy_replace_is_key_stable() {
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 2, 1));
     let mut spec = PeerUpSpec::ibgp(peer);
     spec.export_policy = Some(deny_chain(prefix));
     let _out_rx = peer_up(&tx, spec).await;
@@ -3052,7 +3062,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     let mut receivers = Vec::new();
 
     for index in 0..MEMBER_COUNT {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 20, 0, u8::try_from(index + 1).unwrap()));
+        let peer = peer_v4(Ipv4Addr::new(10, 20, 0, u8::try_from(index + 1).unwrap()));
         peers.push(peer);
         let mut spec = PeerUpSpec::ibgp(peer);
         spec.route_reflector_client = true;
@@ -3086,7 +3096,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
         .collect();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -3202,7 +3212,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(later_prefix, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -3220,7 +3230,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     }
     for peer in peers {
         assert_eq!(
-            query_first_export_term_hits(&tx, &roster, peer).await,
+            query_first_export_term_hits(&tx, &roster, PeerId::from_addr(peer.addr())).await,
             (transition_hits.0 + 1, transition_hits.1 + 1),
             "later group evaluations must advance every installed member's shared counters"
         );
@@ -3243,7 +3253,7 @@ async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
     let next_policy = community_chain(0xFDE8_1003);
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policies[index].clone());
         receivers.push(
@@ -3264,8 +3274,8 @@ async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
         );
     }
     let source_groups = [
-        query_update_group(&tx, peers[0]).await,
-        query_update_group(&tx, peers[1]).await,
+        query_update_group(&tx, PeerId::from_addr(peers[0])).await,
+        query_update_group(&tx, PeerId::from_addr(peers[1])).await,
     ];
     assert_ne!(source_groups[0], source_groups[1]);
 
@@ -3274,7 +3284,7 @@ async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
         replacements: peers
             .iter()
             .map(|&peer| crate::update::PeerExportPolicyReplacement {
-                peer,
+                peer: PeerId::from_addr(peer),
                 export_policy: Some(next_policy.clone()),
             })
             .collect(),
@@ -3286,8 +3296,14 @@ async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
         response.await.unwrap().unwrap(),
         crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
     );
-    assert_eq!(query_update_group(&tx, peers[0]).await, source_groups[0]);
-    assert_eq!(query_update_group(&tx, peers[1]).await, source_groups[1]);
+    assert_eq!(
+        query_update_group(&tx, PeerId::from_addr(peers[0])).await,
+        source_groups[0]
+    );
+    assert_eq!(
+        query_update_group(&tx, PeerId::from_addr(peers[1])).await,
+        source_groups[1]
+    );
     assert!(
         receivers
             .iter_mut()
@@ -3321,7 +3337,7 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
     ];
     let mut cohort_receivers = Vec::new();
     for (index, peer) in cohort.iter().copied().enumerate() {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         cohort_receivers.push(
@@ -3342,7 +3358,7 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         );
     }
 
-    let dirty_peer = IpAddr::V4(Ipv4Addr::new(10, 41, 0, 3));
+    let dirty_peer = peer_v4(Ipv4Addr::new(10, 41, 0, 3));
     tx.send(RibUpdate::SetPeerExportEncoder {
         peer: dirty_peer,
         session_id: 0,
@@ -3367,7 +3383,7 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
     let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             announced,
             withdrawn,
             flowspec_announced: vec![],
@@ -3410,7 +3426,7 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         replacements: cohort
             .iter()
             .map(|&peer| crate::update::PeerExportPolicyReplacement {
-                peer,
+                peer: PeerId::from_addr(peer),
                 export_policy: Some(next_policy.clone()),
             })
             .collect(),
@@ -3468,10 +3484,10 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     let old_policy = community_chain(0xFDE8_0001);
     let next_policy = community_chain(0xFDE8_0002);
     let moving = [
-        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 27, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 27, 0, 2)),
     ];
-    let destination_member = IpAddr::V4(Ipv4Addr::new(10, 27, 0, 3));
+    let destination_member = peer_v4(Ipv4Addr::new(10, 27, 0, 3));
     let mut moving_receivers = Vec::new();
     for (index, peer) in moving.iter().copied().enumerate() {
         let mut spec = PeerUpSpec::ibgp(peer);
@@ -3516,7 +3532,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     let first_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 53, 0, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(first_prefix, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -3566,7 +3582,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 53, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(later_prefix, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -3622,7 +3638,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         receivers.push(
@@ -3645,7 +3661,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     let source = Ipv4Addr::new(192, 0, 2, 14);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: (0..ROUTE_COUNT)
             .map(|index| {
                 crate::test_support::make_route(
@@ -3670,7 +3686,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     let replacements = peers
         .iter()
         .map(|&peer| crate::update::PeerExportPolicyReplacement {
-            peer,
+            peer: PeerId::from_addr(peer),
             export_policy: Some(next_policy.clone()),
         })
         .collect::<Vec<_>>();
@@ -3824,8 +3840,14 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     for reply in general_replies {
         assert_eq!(reply.await.unwrap(), ROUTE_COUNT);
     }
-    assert_eq!(query_update_group(&query_tx, peers[0]).await, "group:1");
-    assert_eq!(query_update_group(&query_tx, peers[1]).await, "group:1");
+    assert_eq!(
+        query_update_group(&query_tx, PeerId::from_addr(peers[0])).await,
+        "group:1"
+    );
+    assert_eq!(
+        query_update_group(&query_tx, PeerId::from_addr(peers[1])).await,
+        "group:1"
+    );
 
     drop(tx);
     drop(query_tx);
@@ -3849,7 +3871,7 @@ async fn rejected_policy_transition_batches_leave_observability_idle() {
     let (invalid_reply, invalid_response) = oneshot::channel();
     manager.handle_replace_peer_export_policies(
         vec![crate::update::PeerExportPolicyReplacement {
-            peer: "192.0.2.250".parse().unwrap(),
+            peer: PeerId::from_addr("192.0.2.250".parse().unwrap()),
             export_policy: None,
         }],
         invalid_reply,
@@ -3961,7 +3983,7 @@ async fn abandoned_authoritative_replacement_batch_is_skipped() {
 
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.254".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.254".parse().unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::channel(1);
     manager.outbound_peers.insert(peer, outbound_tx);
 
@@ -4025,7 +4047,7 @@ async fn duplicate_pending_policy_transition_returns_internal_error_without_gaug
     let (_tx, rx) = mpsc::channel(1);
     let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let peer: IpAddr = "192.0.2.251".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.251".parse().unwrap());
     let (outbound_tx, _outbound_rx) = mpsc::channel(1);
     manager.outbound_peers.insert(peer, outbound_tx);
     let replacement = crate::update::PeerExportPolicyReplacement {
@@ -4079,7 +4101,7 @@ async fn accepted_policy_transition_does_not_drain_prequeued_general_queries() {
 
     let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(rx, query_rx, None, None, metrics.clone());
-    let peer: IpAddr = "192.0.2.252".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.252".parse().unwrap());
     let (outbound_tx, _outbound_rx) = mpsc::channel(1);
     manager.outbound_peers.insert(peer, outbound_tx);
     let (transition_reply, mut transition_response) = oneshot::channel();
@@ -4175,7 +4197,7 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         receivers.push(
@@ -4198,7 +4220,7 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 117, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 15)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 15)),
         announced: vec![crate::test_support::make_route(
             prefix,
             Ipv4Addr::new(192, 0, 2, 15),
@@ -4221,7 +4243,7 @@ async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
         replacements: peers
             .iter()
             .map(|&peer| crate::update::PeerExportPolicyReplacement {
-                peer,
+                peer: PeerId::from_addr(peer),
                 export_policy: Some(next_policy.clone()),
             })
             .collect(),
@@ -4274,8 +4296,8 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     let old_policy = community_chain(0xFDE8_0001);
     let next_policy = community_chain(0xFDE8_0002);
     let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 21, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 21, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 21, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 21, 0, 2)),
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
@@ -4302,7 +4324,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 10)),
         announced: vec![crate::test_support::make_route(
             prefix,
             Ipv4Addr::new(192, 0, 2, 10),
@@ -4401,7 +4423,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 1, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 10)),
         announced: vec![crate::test_support::make_route(
             later_prefix,
             Ipv4Addr::new(192, 0, 2, 10),
@@ -4468,7 +4490,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     let post_rollback_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 2, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 10)),
         announced: vec![crate::test_support::make_route(
             post_rollback_prefix,
             Ipv4Addr::new(192, 0, 2, 10),
@@ -4505,8 +4527,8 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
     let old_policy = community_chain(0xFDE8_0001);
     let next_policy = community_chain(0xFDE8_0002);
     let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 22, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 22, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 22, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 22, 0, 2)),
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
@@ -4535,7 +4557,7 @@ async fn clean_policy_transition_falls_back_wholesale_for_add_path_member() {
     }
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 11)),
         announced: vec![crate::test_support::make_route(
             Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24),
             Ipv4Addr::new(192, 0, 2, 11),
@@ -4650,7 +4672,7 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
     let mut peers = Vec::new();
     let mut receivers = Vec::new();
     for index in 0..MEMBER_COUNT {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 61, 0, u8::try_from(index + 1).unwrap()));
+        let peer = peer_v4(Ipv4Addr::new(10, 61, 0, u8::try_from(index + 1).unwrap()));
         peers.push(peer);
         let mut spec = PeerUpSpec::ebgp(peer);
         spec.peer_asn = 65001 + u32::try_from(index).unwrap();
@@ -4685,7 +4707,7 @@ async fn clean_policy_transition_admits_rs_control_members_on_untagged_inventory
         .collect();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -4783,8 +4805,8 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
         ..RouteModifications::default()
     });
     let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 62, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 62, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 62, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 62, 0, 2)),
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
@@ -4818,7 +4840,7 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
     });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![steered],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -4905,8 +4927,8 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
     let old_policy = community_chain(0xFDE8_0001);
     let next_policy = community_chain(0xFDE8_0002);
     let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 23, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 23, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 23, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 23, 0, 2)),
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
@@ -4932,7 +4954,7 @@ async fn clean_policy_transition_saturation_falls_back_and_heals_without_duplica
     }
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 12)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 12)),
         announced: vec![crate::test_support::make_route(
             Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24),
             Ipv4Addr::new(192, 0, 2, 12),
@@ -5025,8 +5047,8 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
     let old_policy = community_chain(0xFDE8_0001);
     let next_policy = community_chain(0xFDE8_0002);
     let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 24, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 24, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 24, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 24, 0, 2)),
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
@@ -5052,7 +5074,7 @@ async fn clean_policy_transition_generation_change_rejects_stale_plan() {
     }
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 13)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 13)),
         announced: vec![crate::test_support::make_route(
             Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
             Ipv4Addr::new(192, 0, 2, 13),
@@ -5122,7 +5144,7 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
     let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 5, 9)),
+            peer: peer_v4(Ipv4Addr::new(10, 0, 5, 9)),
             announced,
             withdrawn,
             flowspec_announced: vec![],
@@ -5137,7 +5159,7 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
 
     // Grouped member with a capacity-1 outbound channel so a second
     // update jams it (the wedged-writer shape from the seam sweep).
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 5, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 5, 1));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -5223,7 +5245,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
     let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 5, 9)),
+            peer: peer_v4(Ipv4Addr::new(10, 0, 5, 9)),
             announced,
             withdrawn,
             flowspec_announced: vec![],
@@ -5238,7 +5260,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
 
     // Grouped member with a capacity-1 outbound channel so a second
     // update jams it.
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 5, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 5, 1));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -5340,7 +5362,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
 /// reset — "since install" semantics).
 #[tokio::test]
 async fn content_identical_replace_keeps_export_term_hit_counters() {
-    async fn send_route(tx: &mpsc::Sender<RibUpdate>, source: IpAddr, prefix: Ipv4Prefix) {
+    async fn send_route(tx: &mpsc::Sender<RibUpdate>, source: PeerId, prefix: Ipv4Prefix) {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
             peer: source,
@@ -5364,7 +5386,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     async fn hits_for(
         tx: &mpsc::Sender<RibUpdate>,
         roster: &crate::export_roster::ExportRosterReader,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> (u64, u64) {
         let hits = published_export_rows(tx, roster, Some(peer)).await;
         assert_eq!(hits.len(), 1, "peer must report an installed chain");
@@ -5378,8 +5400,8 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     let handle = tokio::spawn(manager.run());
 
     let denied = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 9));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 4, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 4, 9));
     let mut spec = PeerUpSpec::ibgp(peer);
     spec.export_policy = Some(deny_chain(denied));
     let mut out_rx = peer_up(&tx, spec).await;
@@ -5496,9 +5518,9 @@ async fn strict_next_hop_export_chain_disqualifies_grouping() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
-    let strict_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
-    let plain_a = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
-    let plain_b = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3));
+    let strict_peer = peer_v4(Ipv4Addr::new(10, 0, 2, 1));
+    let plain_a = peer_v4(Ipv4Addr::new(10, 0, 2, 2));
+    let plain_b = peer_v4(Ipv4Addr::new(10, 0, 2, 3));
 
     let mut spec = PeerUpSpec::ibgp(strict_peer);
     spec.export_policy = Some(rpol_chain(strict_nh, "strict-nh"));
@@ -5506,7 +5528,7 @@ async fn strict_next_hop_export_chain_disqualifies_grouping() {
 
     // Content-equal non-strict chains group together.
     for peer in [plain_a, plain_b] {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer.addr()));
         spec.export_policy = Some(rpol_chain(plain, "plain"));
         let _rx = peer_up(&tx, spec).await;
     }
@@ -5558,10 +5580,10 @@ async fn family_predicate_export_chain_still_groups() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
-    let peer_a = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1));
-    let peer_b = IpAddr::V4(Ipv4Addr::new(10, 0, 3, 2));
+    let peer_a = peer_v4(Ipv4Addr::new(10, 0, 3, 1));
+    let peer_b = peer_v4(Ipv4Addr::new(10, 0, 3, 2));
     for peer in [peer_a, peer_b] {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer.addr()));
         spec.export_policy = Some(rpol_chain(family_gate, "family-gate"));
         let _rx = peer_up(&tx, spec).await;
     }
@@ -5615,22 +5637,22 @@ async fn computed_prepend_export_chains_group_unless_peer_dependent() {
 
     // Two peers sharing a `prepend as self` chain and two sharing a
     // `prepend as origin` chain: both pairs must group.
-    let self_a = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
-    let self_b = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 2));
+    let self_a = peer_v4(Ipv4Addr::new(10, 0, 4, 1));
+    let self_b = peer_v4(Ipv4Addr::new(10, 0, 4, 2));
     for peer in [self_a, self_b] {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer.addr()));
         spec.export_policy = Some(rpol_chain(self_pad, "self-pad"));
         let _rx = peer_up(&tx, spec).await;
     }
-    let origin_a = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 3));
-    let origin_b = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 4));
+    let origin_a = peer_v4(Ipv4Addr::new(10, 0, 4, 3));
+    let origin_b = peer_v4(Ipv4Addr::new(10, 0, 4, 4));
     for peer in [origin_a, origin_b] {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer.addr()));
         spec.export_policy = Some(rpol_chain(origin_pad, "origin-pad"));
         let _rx = peer_up(&tx, spec).await;
     }
     // A `prepend as peer` chain disqualifies its peer from grouping.
-    let peer_dep = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 5));
+    let peer_dep = peer_v4(Ipv4Addr::new(10, 0, 4, 5));
     let mut spec = PeerUpSpec::ibgp(peer_dep);
     spec.export_policy = Some(rpol_chain(peer_pad, "peer-pad"));
     let _rx = peer_up(&tx, spec).await;
@@ -5673,9 +5695,9 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let grouped = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let ungrouped = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let grouped = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let ungrouped = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     // Unresolved ORR vantage: disqualifies grouping but leaves
     // single-best selection and the permit-all verdict untouched, so the
     // two peers must report identical counters at every step.
@@ -5692,7 +5714,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
-            peer,
+            peer: PeerId::from_addr(peer.addr()),
             peer_asn: 65000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             outbound_tx: out_tx,
@@ -5782,7 +5804,7 @@ fn direct_clean_transition_manager(
     readiness_rx: Option<mpsc::Receiver<crate::update::RibReadinessQuery>>,
 ) -> (
     RibManager,
-    Vec<IpAddr>,
+    Vec<PeerId>,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
 ) {
     direct_clean_transition_manager_with_policy(
@@ -5802,7 +5824,7 @@ fn direct_clean_transition_manager_with_policy(
     readiness_rx: Option<mpsc::Receiver<crate::update::RibReadinessQuery>>,
 ) -> (
     RibManager,
-    Vec<IpAddr>,
+    Vec<PeerId>,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
 ) {
     let (_tx, rx) = mpsc::channel(1);
@@ -5818,7 +5840,7 @@ fn direct_clean_transition_manager_with_policy(
     let mut peers = Vec::new();
     let mut receivers = Vec::new();
     for index in 0..member_count {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 42, 0, u8::try_from(index + 1).unwrap()));
+        let peer = peer_v4(Ipv4Addr::new(10, 42, 0, u8::try_from(index + 1).unwrap()));
         peers.push(peer);
         manager.handle_update(RibUpdate::SetPeerExportEncoder {
             peer,
@@ -5867,7 +5889,7 @@ fn direct_clean_transition_manager_with_policy(
         .collect();
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -5917,7 +5939,7 @@ fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static s
 
 fn start_clean_transition(
     manager: &mut RibManager,
-    peers: &[IpAddr],
+    peers: &[PeerId],
     next_policy: &PolicyChain,
 ) -> oneshot::Receiver<Result<crate::update::ExportPolicyCohortOutcome, String>> {
     let (reply, response) = oneshot::channel();
@@ -6060,7 +6082,7 @@ async fn commit_flush_batches_are_bounded_and_drain_monotonically() {
 fn advertised_page_at_transition_seam(
     manager: &mut RibManager,
     query_tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     between_polls: bool,
 ) -> Option<crate::update::RoutePage> {
     let (reply, mut response) = oneshot::channel();
@@ -6206,7 +6228,7 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
     manager.traced(PostCommitWork::PrimaryUpdate, |manager| {
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42)),
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 42)),
             announced,
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -6361,8 +6383,8 @@ async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
     let old_policy = community_chain(0xFDE8_2201);
     let next_policy = community_chain(0xFDE8_2202);
     let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 2)),
+        peer_v4(Ipv4Addr::new(10, 27, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 27, 0, 2)),
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
@@ -6389,7 +6411,7 @@ async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
     let source = Ipv4Addr::new(192, 0, 2, 16);
     let routes_received = |prefix: Ipv4Prefix| RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(prefix, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -6634,7 +6656,7 @@ async fn snapshot_rows_carry_content_stable_policy_fingerprints() {
     let chains = [shared.clone(), shared.clone(), distinct.clone()];
     let mut peers = Vec::new();
     for (index, chain) in chains.into_iter().enumerate() {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 44, 0, u8::try_from(index + 1).unwrap()));
+        let peer = peer_v4(Ipv4Addr::new(10, 44, 0, u8::try_from(index + 1).unwrap()));
         peers.push(peer);
         let (outbound_tx, _outbound_rx) = mpsc::channel(8);
         manager.handle_update(RibUpdate::PeerUp {
@@ -6663,7 +6685,7 @@ async fn snapshot_rows_carry_content_stable_policy_fingerprints() {
         snapshot
             .peers
             .iter()
-            .find(|row| row.peer == peer)
+            .find(|row| row.peer == PeerId::from_addr(peer))
             .expect("snapshot row per registered peer")
             .input
             .policy_fingerprint
@@ -6671,13 +6693,13 @@ async fn snapshot_rows_carry_content_stable_policy_fingerprints() {
             .expect("snapshot rows carry the planning fingerprint")
     };
     assert_eq!(
-        fingerprint_of(peers[0]),
-        fingerprint_of(peers[1]),
+        fingerprint_of(peers[0].addr()),
+        fingerprint_of(peers[1].addr()),
         "content-equal chain instances share one planning fingerprint"
     );
     assert_ne!(
-        fingerprint_of(peers[0]),
-        fingerprint_of(peers[2]),
+        fingerprint_of(peers[0].addr()),
+        fingerprint_of(peers[2].addr()),
         "different chain content yields a different planning fingerprint"
     );
 }
@@ -6812,7 +6834,7 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
     let mut peers = Vec::new();
     let mut receivers = Vec::new();
     for index in 0..MEMBER_COUNT {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 43, 0, u8::try_from(index + 1).unwrap()));
+        let peer = peer_v4(Ipv4Addr::new(10, 43, 0, u8::try_from(index + 1).unwrap()));
         peers.push(peer);
         let mut spec = PeerUpSpec::ibgp(peer);
         spec.route_reflector_client = true;
@@ -6845,7 +6867,7 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
         .collect();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -6878,7 +6900,7 @@ async fn fence_holds_queued_work_until_commit_flush_terminal() {
     let later_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(later_prefix, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -7092,7 +7114,7 @@ fn full_channel_pass(manager: &mut RibManager, announce: &[u8], withdraw: &[u8])
         .collect();
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(FULL_CHANNEL_SOURCE),
+        peer: peer_v4(FULL_CHANNEL_SOURCE),
         announced,
         withdrawn,
         flowspec_announced: vec![],
@@ -7111,21 +7133,21 @@ fn full_channel_manager(
     ungrouped: bool,
 ) -> (
     RibManager,
-    IpAddr,
-    IpAddr,
+    PeerId,
+    PeerId,
     mpsc::Receiver<OutboundRouteUpdate>,
     mpsc::Receiver<OutboundRouteUpdate>,
 ) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = ungrouped;
-    let stuck = IpAddr::V4(Ipv4Addr::new(10, 43, 0, 1));
-    let live = IpAddr::V4(Ipv4Addr::new(10, 43, 0, 2));
+    let stuck = peer_v4(Ipv4Addr::new(10, 43, 0, 1));
+    let live = peer_v4(Ipv4Addr::new(10, 43, 0, 2));
     let mut receivers = Vec::new();
     for peer in [stuck, live] {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(FULL_CHANNEL_CAPACITY);
         manager.handle_update(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer.addr()),
             session_id: 0,
             peer_asn: 65_000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7447,7 +7469,7 @@ fn family_distribution_cases() -> [(Afi, Safi, bool); 7] {
 
 fn announce_family_route(manager: &mut RibManager, source: Ipv4Addr, safi: Safi, index: u8) {
     use crate::route::RouteOrigin;
-    let peer = IpAddr::V4(source);
+    let peer = peer_v4(source);
     let update = match safi {
         Safi::MplsVpn => RibUpdate::VpnRoutesReceived {
             peer,
@@ -7548,8 +7570,8 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
         let mut manager =
             RibManager::new(rx, dummy_query_rx(), Some(policy), None, BgpMetrics::new());
         manager.test_force_ungrouped = ungrouped;
-        let closed: IpAddr = "10.43.0.1".parse().unwrap();
-        let healthy: IpAddr = "10.43.0.2".parse().unwrap();
+        let closed = PeerId::from_addr("10.43.0.1".parse().unwrap());
+        let healthy = PeerId::from_addr("10.43.0.2".parse().unwrap());
         let family = vec![(afi, safi)];
         drop(register_direct_peer_with_families(
             &mut manager,
@@ -7585,7 +7607,7 @@ fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
                     );
                 }
                 manager.handle_update(RibUpdate::PeerDown {
-                    peer: source.into(),
+                    peer: peer_v4(source),
                     session_id: 0,
                 });
                 assert_eq!(
@@ -7677,14 +7699,14 @@ fn full_family_receiver(
     ungrouped: bool,
 ) -> (
     RibManager,
-    IpAddr,
+    PeerId,
     mpsc::Receiver<OutboundRouteUpdate>,
     Vec<mpsc::OwnedPermit<OutboundRouteUpdate>>,
 ) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = ungrouped;
-    let peer: IpAddr = "10.43.0.1".parse().unwrap();
+    let peer = PeerId::from_addr("10.43.0.1".parse().unwrap());
     let mut receiver = register_direct_peer_with_families(&mut manager, peer, vec![(afi, safi)]);
     while receiver.try_recv().is_ok() {}
     let permits = (0..8)
@@ -7739,9 +7761,9 @@ fn distribution_skips_closed_receivers_before_peer_down() {
         })
         .collect();
     for &peer in &closed {
-        drop(register_direct_peer(&mut manager, peer));
+        drop(register_direct_peer(&mut manager, PeerId::from_addr(peer)));
     }
-    let healthy: IpAddr = "10.43.0.1".parse().unwrap();
+    let healthy = PeerId::from_addr("10.43.0.1".parse().unwrap());
     let mut healthy_rx = register_direct_peer(&mut manager, healthy);
     assert_eq!(healthy_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -7768,7 +7790,7 @@ fn distribution_skips_closed_receivers_before_peer_down() {
             // The source's real teardown must still withdraw all routes from
             // the healthy member, despite the unrelated closed registrations.
             manager.handle_update(RibUpdate::PeerDown {
-                peer: source.into(),
+                peer: peer_v4(source),
                 session_id: 0,
             });
             let update = healthy_rx.try_recv().unwrap();
@@ -7795,10 +7817,14 @@ fn distribution_skips_closed_receivers_before_peer_down() {
         "outbound failed sends",
     );
     manager.handle_update(RibUpdate::PeerDown {
-        peer: closed[0],
+        peer: PeerId::from_addr(closed[0]),
         session_id: 0,
     });
-    assert!(!manager.outbound_peers.contains_key(&closed[0]));
+    assert!(
+        !manager
+            .outbound_peers
+            .contains_key(&PeerId::from_addr(closed[0]))
+    );
 }
 
 #[test]
@@ -7988,7 +8014,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         receivers.push(
@@ -8011,7 +8037,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     let source = Ipv4Addr::new(192, 0, 2, 61);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![
             crate::test_support::make_route(
                 Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
@@ -8037,7 +8063,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
 
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::PrepareExportPolicyDestination {
-        peer: peers[0],
+        peer: PeerId::from_addr(peers[0]),
         export_policy: Some(next_policy.clone()),
         reply,
     })
@@ -8055,7 +8081,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
     let churned = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(churned, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -8075,7 +8101,7 @@ async fn prepared_destination_commits_with_interleaved_churn() {
         replacements: peers
             .iter()
             .map(|&peer| crate::update::PeerExportPolicyReplacement {
-                peer,
+                peer: PeerId::from_addr(peer),
                 export_policy: Some(next_policy.clone()),
             })
             .collect(),
@@ -8126,7 +8152,7 @@ async fn discarded_prepared_destination_is_removed() {
     ];
     let mut receivers = Vec::new();
     for peer in peers {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         receivers.push(peer_up(&tx, spec).await);
@@ -8134,7 +8160,7 @@ async fn discarded_prepared_destination_is_removed() {
     let source = Ipv4Addr::new(192, 0, 2, 62);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(
             Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
             source,
@@ -8154,7 +8180,7 @@ async fn discarded_prepared_destination_is_removed() {
 
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::PrepareExportPolicyDestination {
-        peer: peers[0],
+        peer: PeerId::from_addr(peers[0]),
         export_policy: Some(next_policy.clone()),
         reply,
     })
@@ -8164,7 +8190,7 @@ async fn discarded_prepared_destination_is_removed() {
     assert_eq!(query_uncommitted_policy_transition_groups(&tx).await, 1);
 
     tx.send(RibUpdate::DiscardPreparedExportPolicyDestination {
-        peer: peers[0],
+        peer: PeerId::from_addr(peers[0]),
         export_policy: Some(next_policy),
     })
     .await
@@ -8196,7 +8222,7 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
     ];
     let mut receivers = Vec::new();
     for (index, peer) in peers.iter().copied().enumerate() {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         receivers.push(
@@ -8219,7 +8245,7 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
     let source = Ipv4Addr::new(192, 0, 2, 63);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(
             Ipv4Prefix::new(Ipv4Addr::new(203, 0, 117, 0), 24),
             source,
@@ -8241,7 +8267,7 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
     // preparation mid-walk or find it complete — both must commit cleanly.
     let (prepare_reply, prepare_response) = oneshot::channel();
     tx.send(RibUpdate::PrepareExportPolicyDestination {
-        peer: peers[0],
+        peer: PeerId::from_addr(peers[0]),
         export_policy: Some(next_policy.clone()),
         reply: prepare_reply,
     })
@@ -8252,7 +8278,7 @@ async fn transition_immediately_after_prepare_commits_without_leaks() {
         replacements: peers
             .iter()
             .map(|&peer| crate::update::PeerExportPolicyReplacement {
-                peer,
+                peer: PeerId::from_addr(peer),
                 export_policy: Some(next_policy.clone()),
             })
             .collect(),
@@ -8302,7 +8328,7 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
     ];
     let mut receivers = Vec::new();
     for peer in peers {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         receivers.push(peer_up(&tx, spec).await);
@@ -8318,7 +8344,7 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
         .collect();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -8338,13 +8364,13 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
     // on the still-partial prestaged table.
     let (reply, prepare_response) = oneshot::channel();
     tx.send(RibUpdate::PrepareExportPolicyDestination {
-        peer: peers[0],
+        peer: PeerId::from_addr(peers[0]),
         export_policy: Some(next_policy.clone()),
         reply,
     })
     .await
     .unwrap();
-    let stranger = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 3));
+    let stranger = peer_v4(Ipv4Addr::new(10, 99, 0, 3));
     let (stranger_tx, mut stranger_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -8383,7 +8409,7 @@ async fn prestage_mid_walk_join_of_prestaged_destination() {
     let churned = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(churned, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -8440,7 +8466,7 @@ async fn prestage_control_join_without_prestage() {
     ];
     let mut receivers = Vec::new();
     for peer in peers {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         receivers.push(peer_up(&tx, spec).await);
@@ -8456,7 +8482,7 @@ async fn prestage_control_join_without_prestage() {
         .collect();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -8472,7 +8498,7 @@ async fn prestage_control_join_without_prestage() {
     }
 
     // The same join as the regression test above, with no prestage queued.
-    let stranger = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 3));
+    let stranger = peer_v4(Ipv4Addr::new(10, 99, 0, 3));
     let (stranger_tx, mut stranger_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -8507,7 +8533,7 @@ async fn prestage_control_join_without_prestage() {
     let churned = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![crate::test_support::make_route(churned, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -8561,7 +8587,7 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
     ];
     let mut receivers = Vec::new();
     for peer in peers {
-        let mut spec = PeerUpSpec::ibgp(peer);
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
         spec.route_reflector_client = true;
         spec.export_policy = Some(old_policy.clone());
         receivers.push(peer_up(&tx, spec).await);
@@ -8577,7 +8603,7 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
         .collect();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -8595,7 +8621,7 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
     // Prepare one destination and let the walk complete.
     let (prepare_reply, prepare_response) = oneshot::channel();
     tx.send(RibUpdate::PrepareExportPolicyDestination {
-        peer: peers[0],
+        peer: PeerId::from_addr(peers[0]),
         export_policy: Some(prepared_policy.clone()),
         reply: prepare_reply,
     })
@@ -8609,7 +8635,7 @@ async fn prestage_discarded_when_cohort_resolves_different_destination() {
         replacements: peers
             .iter()
             .map(|&peer| crate::update::PeerExportPolicyReplacement {
-                peer,
+                peer: PeerId::from_addr(peer),
                 export_policy: Some(committed_policy.clone()),
             })
             .collect(),
@@ -8642,8 +8668,8 @@ async fn slow_peer_isolation_moves_member_to_fallback_and_back() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
 
-    let a = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
-    let b = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2));
+    let a = peer_v4(Ipv4Addr::new(10, 0, 2, 1));
+    let b = peer_v4(Ipv4Addr::new(10, 0, 2, 2));
     let _rx_a = peer_up(&tx, PeerUpSpec::ibgp(a)).await;
     let _rx_b = peer_up(&tx, PeerUpSpec::ibgp(b)).await;
     assert_eq!(query_update_group(&tx, a).await, "group:0");
@@ -8727,7 +8753,7 @@ fn ranked_rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
         next_hop: IpAddr::V4(src),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(src),
+        peer: peer_v4(src),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -8771,7 +8797,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     let members = [a, b, c];
     let mut receivers = Vec::new();
     for member in members {
-        let mut spec = PeerUpSpec::ebgp(IpAddr::V4(member));
+        let mut spec = PeerUpSpec::ebgp(peer_v4(member));
         spec.per_client_best = true;
         receivers.push(peer_up(&tx, spec).await);
     }
@@ -8781,16 +8807,13 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     // seam that changes no staging input.
     for member in members {
         tx.send(RibUpdate::PeerSlowState {
-            peer: IpAddr::V4(member),
+            peer: peer_v4(member),
             session_id: 0,
             slow: true,
         })
         .await
         .unwrap();
-        assert_eq!(
-            query_update_group(&tx, IpAddr::V4(member)).await,
-            "slow_peer"
-        );
+        assert_eq!(query_update_group(&tx, peer_v4(member)).await, "slow_peer");
     }
 
     // Overlapping announcements from the members themselves:
@@ -8812,7 +8835,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     ] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             announced: routes,
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -8827,7 +8850,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     let _ = query_best_routes(&tx).await;
     // Converged: drain the ungrouped convergence traffic and verify
     // each member's final wire state (fold announce/withdraw order).
-    let mut folded: HashMap<Ipv4Addr, HashMap<Prefix, IpAddr>> = HashMap::new();
+    let mut folded: HashMap<Ipv4Addr, HashMap<Prefix, PeerId>> = HashMap::new();
     for (member, out_rx) in members.iter().zip(receivers.iter_mut()) {
         let table = folded.entry(*member).or_default();
         while let Ok(update) = out_rx.try_recv() {
@@ -8842,10 +8865,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     let expect = |m: Ipv4Addr, w1: Ipv4Addr, w2: Ipv4Addr| {
         assert_eq!(
             folded[&m],
-            HashMap::from([
-                (Prefix::V4(p1), IpAddr::V4(w1)),
-                (Prefix::V4(p2), IpAddr::V4(w2)),
-            ]),
+            HashMap::from([(Prefix::V4(p1), peer_v4(w1)), (Prefix::V4(p2), peer_v4(w2)),]),
             "ungrouped converged view for {m}"
         );
     };
@@ -8857,17 +8877,17 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     // `recompute_update_group` with an adv(m)-aware baseline.
     for member in members {
         tx.send(RibUpdate::PeerSlowState {
-            peer: IpAddr::V4(member),
+            peer: peer_v4(member),
             session_id: 0,
             slow: false,
         })
         .await
         .unwrap();
     }
-    let label = query_update_group(&tx, IpAddr::V4(a)).await;
+    let label = query_update_group(&tx, peer_v4(a)).await;
     assert!(label.starts_with("group:"), "regrouped label: {label}");
     for member in [b, c] {
-        assert_eq!(query_update_group(&tx, IpAddr::V4(member)).await, label);
+        assert_eq!(query_update_group(&tx, peer_v4(member)).await, label);
     }
     // The regroup diff is consumed by the distribute pass inside the
     // slow-state handler; advance past the resync interval anyway so
@@ -8905,7 +8925,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     for (member, w1, w2) in [(a, b, b), (b, a, c), (c, a, b)] {
         tx.send(RibUpdate::RouteRefreshRequest {
             queued: Arc::default(),
-            peer: IpAddr::V4(member),
+            peer: peer_v4(member),
             session_id: 0,
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
@@ -8923,10 +8943,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
         }
         assert_eq!(
             replayed,
-            HashMap::from([
-                (Prefix::V4(p1), IpAddr::V4(w1)),
-                (Prefix::V4(p2), IpAddr::V4(w2)),
-            ]),
+            HashMap::from([(Prefix::V4(p1), peer_v4(w1)), (Prefix::V4(p2), peer_v4(w2)),]),
             "refresh replay of adv({member}) must match the ungrouped view"
         );
     }
@@ -8943,7 +8960,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
 /// probe-gated like the clean transition's).
 fn register_direct_pcb_peer_capacity(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     export_policy: Option<PolicyChain>,
     encoder: Arc<dyn crate::update::ExactExportEncoder>,
     capacity: usize,
@@ -8995,7 +9012,7 @@ fn register_direct_pcb_peer_capacity(
 
 struct BatchedPcbFleet {
     manager: RibManager,
-    members: Vec<IpAddr>,
+    members: Vec<PeerId>,
     receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
     shared_prefix: Ipv4Prefix,
     probes: Arc<AtomicUsize>,
@@ -9010,9 +9027,9 @@ fn batched_pcb_fleet_n(export_policy: Option<&PolicyChain>, member_count: u16) -
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
-    let members: Vec<IpAddr> = (0..member_count)
+    let members: Vec<PeerId> = (0..member_count)
         .map(|index| {
-            IpAddr::V4(Ipv4Addr::new(
+            peer_v4(Ipv4Addr::new(
                 10,
                 40,
                 u8::try_from(index / 254).unwrap(),
@@ -9039,7 +9056,7 @@ fn batched_pcb_fleet_n(export_policy: Option<&PolicyChain>, member_count: u16) -
         ));
     }
     for (index, &peer) in members.iter().enumerate() {
-        let IpAddr::V4(source) = peer else {
+        let IpAddr::V4(source) = peer.addr() else {
             unreachable!()
         };
         distribute_direct_route(
@@ -9058,7 +9075,7 @@ fn batched_pcb_fleet_n(export_policy: Option<&PolicyChain>, member_count: u16) -
     }
     let shared_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     for &peer in &members[..2] {
-        let IpAddr::V4(source) = peer else {
+        let IpAddr::V4(source) = peer.addr() else {
             unreachable!()
         };
         distribute_direct_route(&mut manager, source, shared_prefix);
@@ -9128,8 +9145,8 @@ fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
     manager.flush_poll_budget = Duration::ZERO;
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
-    let members: Vec<IpAddr> = (1..=4)
-        .map(|index| IpAddr::V4(Ipv4Addr::new(10, 54, 0, index)))
+    let members: Vec<PeerId> = (1..=4)
+        .map(|index| peer_v4(Ipv4Addr::new(10, 54, 0, index)))
         .collect();
     let mut receivers = Vec::new();
     for (index, &peer) in members.iter().enumerate() {
@@ -9163,11 +9180,11 @@ fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
             Ipv6Prefix::new(address.parse().unwrap(), 48),
             "2001:db8::54".parse().unwrap(),
         );
-        set_peer(&mut route, IpAddr::V4(source));
+        set_peer(&mut route, peer_v4(source));
         announced.push(route);
     }
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced,
         withdrawn: vec![],
@@ -9198,7 +9215,7 @@ fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
 
 fn queue_refresh(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     afi: Afi,
 ) -> Arc<AtomicBool> {
@@ -9387,7 +9404,7 @@ async fn queued_refresh_keeps_route_mutations_between_cohorts() {
     queue_refresh(&tx, fleet.members[0], 0, Afi::Ipv4);
     queue_refresh(&tx, fleet.members[1], 0, Afi::Ipv4);
     tx.try_send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 54)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 54)),
         session_id: 0,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(fleet.shared_prefix), 0)],
@@ -9617,7 +9634,7 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
     ] {
         let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
         fleet.manager.test_force_ungrouped = ungrouped;
-        let peer = "10.54.1.1".parse().unwrap();
+        let peer = PeerId::from_addr("10.54.1.1".parse().unwrap());
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
         let registration = RibUpdate::PeerUp {
             peer,
@@ -9873,7 +9890,10 @@ fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
 async fn ingest_cold_capture_services_readiness_and_fences_other_lanes() {
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let (stuck, live) = ("10.43.1.1".parse().unwrap(), "10.43.1.2".parse().unwrap());
+    let (stuck, live) = (
+        PeerId::from_addr("10.43.1.1".parse().unwrap()),
+        PeerId::from_addr("10.43.1.2".parse().unwrap()),
+    );
     let mut receivers = Vec::new();
     for peer in [stuck, live] {
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
@@ -9948,7 +9968,7 @@ async fn ingest_cold_capture_services_readiness_and_fences_other_lanes() {
     });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: FULL_CHANNEL_SOURCE.into(),
+        peer: PeerId::from_addr(FULL_CHANNEL_SOURCE.into()),
         announced: vec![],
         withdrawn: vec![(full_channel_prefix(0), 0)],
         flowspec_announced: vec![],
@@ -10385,7 +10405,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
     manager.flush_poll_budget = Duration::ZERO;
     let source = Ipv4Addr::new(192, 0, 2, 35);
     let survivor = Ipv4Addr::new(192, 0, 2, 36);
-    let peer: IpAddr = Ipv4Addr::new(10, 223, 5, 1).into();
+    let peer = PeerId::from_addr(Ipv4Addr::new(10, 223, 5, 1).into());
     let (outbound_tx, mut output) = mpsc::channel(64);
     let mut registration = super::update_groups_recovery::peer_up(peer, outbound_tx, None);
     if let RibUpdate::PeerUp {
@@ -10423,7 +10443,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
         validated_with: None,
     };
     manager.handle_update(received(
-        source.into(),
+        peer_v4(source),
         (0..8)
             .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
             .collect(),
@@ -10434,7 +10454,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
         survivor,
     );
     let retained_prefix = retained.prefix;
-    manager.handle_update(received(survivor.into(), vec![retained]));
+    manager.handle_update(received(peer_v4(survivor), vec![retained]));
     while manager.process_next_route_chunk() {}
     for safi in [
         Safi::FlowSpec,
@@ -10448,7 +10468,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
             announce_family_route(&mut manager, source, safi, index);
         }
     }
-    let rib = &manager.ribs[&IpAddr::V4(source)];
+    let rib = &manager.ribs[&peer_v4(source)];
     assert_eq!(
         [
             rib.len(),
@@ -10511,7 +10531,7 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
         manager
     });
     tx.send(RibUpdate::PeerDown {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
     })
     .await
@@ -10559,11 +10579,11 @@ async fn assert_source_peer_down_readiness(recompute: bool) {
     }
     let mut manager = actor.await.unwrap();
     manager.replacement_readiness_test_hook = None;
-    assert!(!manager.ribs.contains_key(&IpAddr::V4(source)));
+    assert!(!manager.ribs.contains_key(&peer_v4(source)));
     assert_eq!(manager.loc_rib.len(), 1);
     assert_eq!(
         manager.loc_rib.get(&retained_prefix).unwrap().peer,
-        IpAddr::V4(survivor)
+        peer_v4(survivor)
     );
     assert_eq!(
         [
@@ -10698,7 +10718,7 @@ fn source_peer_down_preserves_nested_owner_kind_identity_and_age() {
             let original = manager.replacement_readiness.clone().unwrap();
             let started = original.state.lock().unwrap().started;
             manager.handle_update(RibUpdate::PeerDown {
-                peer: source.into(),
+                peer: peer_v4(source),
                 session_id: 0,
             });
             assert!(Arc::ptr_eq(
@@ -10709,7 +10729,7 @@ fn source_peer_down_preserves_nested_owner_kind_identity_and_age() {
             assert_eq!((state.kind, state.started, state.count), (kind, started, 0));
             drop(state);
             assert_eq!(manager.loc_rib.vpn_len(), 0);
-            assert!(!manager.ribs.contains_key(&IpAddr::V4(source)));
+            assert!(!manager.ribs.contains_key(&peer_v4(source)));
             assert_eq!(*observed.lock().unwrap(), Some(Ok(Err(expected))));
             assert!(
                 manager
@@ -10738,9 +10758,9 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
         BgpMetrics::new(),
     );
     manager.flush_poll_budget = Duration::ZERO;
-    let peer: IpAddr = Ipv4Addr::new(10, 223, 4, 1).into();
+    let peer = PeerId::from_addr(Ipv4Addr::new(10, 223, 4, 1).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);
-    let source_peer = IpAddr::V4(source);
+    let source_peer = peer_v4(source);
     let empty_credit = manager.pending_group_admitted.bytes();
     if matches!(kind, PeerRetirement::Regroup) {
         manager.handle_update(RibUpdate::PeerSlowState {
@@ -10897,11 +10917,11 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
             Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32),
             survivor,
         );
-        manager.handle_update(received(survivor.into(), vec![route]));
+        manager.handle_update(received(peer_v4(survivor), vec![route]));
         while manager.process_next_route_chunk() {}
         assert_eq!(output.try_recv().unwrap().announce.len(), 1);
         Some(Arc::downgrade(
-            &manager.ribs[&IpAddr::V4(survivor)]
+            &manager.ribs[&peer_v4(survivor)]
                 .iter()
                 .next()
                 .unwrap()
@@ -11151,7 +11171,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
         BgpMetrics::new(),
     );
     manager.flush_poll_budget = Duration::ZERO;
-    let peer: IpAddr = Ipv4Addr::new(10, 222, 24, 1).into();
+    let peer = PeerId::from_addr(Ipv4Addr::new(10, 222, 24, 1).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);
     let (outbound_tx, mut outbound) = mpsc::channel(8);
     let mut registration = super::update_groups_recovery::peer_up(peer, outbound_tx, None);
@@ -11171,7 +11191,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
     );
     while outbound.try_recv().is_ok() {}
     manager.handle_update(RibUpdate::VpnRoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: (0..128)
             .map(|n| make_vpn_rib_route(source, n, 100, 100))
@@ -11185,7 +11205,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
     assert_eq!(initial.vpn_withdraw, []);
     for n in 128..136 {
         manager.handle_update(RibUpdate::VpnRoutesReceived {
-            peer: source.into(),
+            peer: peer_v4(source),
             session_id: 0,
             announced: vec![make_vpn_rib_route(source, n, 100, 100)],
             withdrawn: vec![],
@@ -11196,7 +11216,7 @@ async fn vpn_export_retirement_readiness(stage: &'static str) {
     let withdrawn = make_vpn_rib_route(source, 0, 100, 100).key();
     let empty_credit = manager.pending_group_admitted.bytes();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![],
         withdrawn: vec![withdrawn.clone()],
@@ -11335,7 +11355,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
 
     let family = (Afi::Ipv4, Safi::MplsVpn);
     let source = Ipv4Addr::new(192, 0, 2, 1);
-    let peer: IpAddr = Ipv4Addr::new(10, 223, 4, 1).into();
+    let peer = PeerId::from_addr(Ipv4Addr::new(10, 223, 4, 1).into());
     let (tx, rx) = mpsc::channel(8);
     let (query_tx, query_rx) = mpsc::channel(8);
     let (readiness_tx, readiness_rx) = mpsc::channel(8);
@@ -11350,7 +11370,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
     .with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: source.into(),
+            peer: peer_v4(source),
             families: vec![family],
         }],
     });
@@ -11374,7 +11394,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
     while output.try_recv().is_ok() {}
     let empty_credit = manager.pending_group_admitted.bytes();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: (0..128)
             .map(|n| make_vpn_rib_route(source, n, 100, 100))
@@ -11384,7 +11404,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
     while manager.process_next_route_chunk() {}
     let never_admitted = make_vpn_rib_route(source, 0, 100, 100).key();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![],
         withdrawn: vec![never_admitted],
@@ -11538,7 +11558,7 @@ async fn evpn_refusal_prior_retirement_readiness(
         .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
         .collect();
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: routes.clone(),
         withdrawn: vec![],
@@ -11732,7 +11752,7 @@ async fn evpn_refusal_prior_retirement_readiness(
 
 struct UnicastCleanupFixture {
     manager: RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     output: mpsc::Receiver<OutboundRouteUpdate>,
     routes: Vec<Route>,
     encoder: Arc<super::exportability::MockExactExportEncoder>,
@@ -11749,7 +11769,7 @@ fn unicast_cleanup_fixture(grouped: bool) -> UnicastCleanupFixture {
     );
     manager.test_force_ungrouped = !grouped;
     manager.flush_poll_budget = Duration::ZERO;
-    let peer: IpAddr = Ipv4Addr::new(10, 223, 4, 2).into();
+    let peer = PeerId::from_addr(Ipv4Addr::new(10, 223, 4, 2).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);
     let (sender, mut output) = mpsc::channel(8);
     let mut registration = super::update_groups_recovery::peer_up(peer, sender, None);
@@ -11770,7 +11790,7 @@ fn unicast_cleanup_fixture(grouped: bool) -> UnicastCleanupFixture {
         .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, n), 32), source))
         .collect();
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: routes.clone(),
         withdrawn: vec![],
@@ -11848,7 +11868,7 @@ impl ExportCleanupHold {
 )]
 async fn hold_export_cleanup<T: Send + 'static>(
     mut manager: RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     stage: &'static str,
     tracked: Vec<std::sync::Weak<AttrSet>>,
     operation: impl FnOnce(&mut RibManager) -> T + Send + 'static,
@@ -12240,7 +12260,7 @@ async fn evpn_refused_arc_retirement(
     let encoder = super::exportability::MockExactExportEncoder::accepting(1);
     manager.peer_export_encoders.insert(peer, encoder.clone());
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: routes.clone(),
         withdrawn: vec![],
@@ -12437,7 +12457,7 @@ async fn ingest_dirty_replay_readiness(ungrouped: bool) {
     });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: FULL_CHANNEL_SOURCE.into(),
+        peer: PeerId::from_addr(FULL_CHANNEL_SOURCE.into()),
         announced: (20..if ungrouped { 22 } else { 21 })
             .map(|third| {
                 crate::test_support::make_route(
@@ -12593,7 +12613,7 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
         .iter()
         .flat_map(|peer| {
             (0..8).map(|_| {
-                manager.outbound_peers[peer]
+                manager.outbound_peers[&*peer]
                     .clone()
                     .try_reserve_owned()
                     .unwrap()
@@ -12867,7 +12887,7 @@ async fn dirty_resync_timer_member_ages(ages: &[Duration]) {
         .iter()
         .flat_map(|peer| {
             (0..8).map(|_| {
-                manager.outbound_peers[peer]
+                manager.outbound_peers[&*peer]
                     .clone()
                     .try_reserve_owned()
                     .unwrap()
@@ -12875,7 +12895,7 @@ async fn dirty_resync_timer_member_ages(ages: &[Duration]) {
         })
         .collect();
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(FULL_CHANNEL_SOURCE),
+        peer: peer_v4(FULL_CHANNEL_SOURCE),
         session_id: 0,
         announced: vec![],
         withdrawn: vec![(removed, 0)],
@@ -13343,7 +13363,7 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
         let source = Ipv4Addr::new(192, 0, 2, 54);
         mutation_tx
             .try_send(RibUpdate::RoutesReceived {
-                peer: IpAddr::V4(source),
+                peer: peer_v4(source),
                 session_id: 0,
                 announced: vec![make_route(
                     Ipv4Prefix::new(Ipv4Addr::new(198, 18, 54, 0), 24),
@@ -13508,7 +13528,7 @@ fn replacement_readiness_terminal_paths_restore_service_before_ack() {
         let mut replacements = batch_replacements(&fleet.members, &next);
         match case {
             "empty" => replacements.clear(),
-            "missing" => replacements[0].peer = "192.0.2.254".parse().unwrap(),
+            "missing" => replacements[0].peer = PeerId::from_addr("192.0.2.254".parse().unwrap()),
             "duplicate" | "rollback_duplicate" => replacements.push(replacements[0].clone()),
             "precondition" => {
                 fleet.manager.pending_clean_policy_transition = Some(
@@ -13709,7 +13729,7 @@ fn replacement_readiness_closed_forward_and_rollback_replies_keep_their_semantic
 )]
 fn replacement_readiness_services_each_family_commit_without_changing_loc_rib_count() {
     let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
-    let peer = "10.54.0.9".parse().unwrap();
+    let peer = PeerId::from_addr("10.54.0.9".parse().unwrap());
     fleet
         .manager
         .handle_update(RibUpdate::SetPeerExportEncoder {
@@ -13861,7 +13881,7 @@ fn replacement_readiness_services_each_family_commit_without_changing_loc_rib_co
 }
 
 fn batch_replacements(
-    members: &[IpAddr],
+    members: &[PeerId],
     export_policy: &PolicyChain,
 ) -> Vec<crate::update::PeerExportPolicyReplacement> {
     members
@@ -13898,7 +13918,7 @@ fn rpol_community_chain(community: u32) -> PolicyChain {
 }
 
 fn detached_rpol_replacements(
-    members: &[IpAddr],
+    members: &[PeerId],
     community: u32,
 ) -> Vec<crate::update::PeerExportPolicyReplacement> {
     let policy = rpol_community_chain(community);
@@ -14117,7 +14137,7 @@ fn authoritative_reclamation_keeps_later_preclassified_destinations() {
 /// left to retry, returned by `direct_clean_transition_manager`.
 fn refreshed_grouped_member_manager() -> (
     RibManager,
-    Vec<IpAddr>,
+    Vec<PeerId>,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
 ) {
     let (mut manager, peers, mut receivers) = direct_clean_transition_manager(2, 2, None);
@@ -14276,7 +14296,7 @@ fn churn_fixture_source(manager: &mut RibManager, announced: Vec<Route>, withdra
     let source = Ipv4Addr::new(192, 0, 2, 42);
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced,
         withdrawn: withdrawn.into_iter().map(|prefix| (prefix, 0)).collect(),
         flowspec_announced: vec![],
@@ -14422,7 +14442,7 @@ fn prestaged_inventory_recheck_matches_fenced_rebuild_after_churn() {
 
 fn install_prestage_test_encoder(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     owner: u64,
     max_len: usize,
     probes: &Arc<AtomicUsize>,
@@ -15043,7 +15063,7 @@ fn community_chain_with(community: u32, edit: impl FnOnce(&mut RouteModification
 /// (source, destination) group pair.
 fn complete_prestage(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     policy: &PolicyChain,
 ) -> (usize, usize) {
     let source = manager.grouped_member_of(peer).unwrap();
@@ -15517,7 +15537,7 @@ fn rollback_batch_reverses_order_reports_missing_and_rejects_duplicates() {
     let prior = community_chain(0xFDE8_0001);
     let candidate = community_chain(0xFDE8_0002);
     let mut fleet = batched_pcb_fleet(Some(&candidate));
-    let missing = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1));
+    let missing = peer_v4(Ipv4Addr::new(10, 99, 0, 1));
     let supplied = vec![
         PeerExportPolicyReplacement {
             peer: fleet.members[0],
@@ -15806,7 +15826,7 @@ fn batched_authoritative_apply_skips_unregistered_and_degrades_dead_channels() {
     // Kill the last member's outbound channel before the batch.
     let dead = fleet.members[3];
     drop(fleet.receivers.pop().unwrap());
-    let unregistered = IpAddr::V4(Ipv4Addr::new(10, 40, 9, 9));
+    let unregistered = peer_v4(Ipv4Addr::new(10, 40, 9, 9));
     let mut replacements = batch_replacements(&fleet.members, &next_policy);
     replacements.push(crate::update::PeerExportPolicyReplacement {
         peer: unregistered,
@@ -16540,7 +16560,7 @@ fn replacement_summaries_keep_abandoned_apply_and_restore_ownership_rules() {
 // -- ADR-0136 export roster ------------------------------------------------
 
 /// Each designated peer's counter-instance id in `roster`.
-fn designated_ids(roster: &crate::export_roster::ExportRoster) -> BTreeMap<IpAddr, Option<u64>> {
+fn designated_ids(roster: &crate::export_roster::ExportRoster) -> BTreeMap<PeerId, Option<u64>> {
     roster
         .peers()
         .iter()
@@ -16553,7 +16573,7 @@ fn designated_ids(roster: &crate::export_roster::ExportRoster) -> BTreeMap<IpAdd
 async fn published_ids(
     tx: &mpsc::Sender<RibUpdate>,
     roster: &crate::export_roster::ExportRosterReader,
-) -> (u64, BTreeMap<IpAddr, Option<u64>>) {
+) -> (u64, BTreeMap<PeerId, Option<u64>>) {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryLocRibCount { reply })
         .await
@@ -16566,7 +16586,7 @@ async fn published_ids(
 /// A `Weak` to the instance the roster designates for `peer`.
 fn retire_watch(
     roster: &crate::export_roster::ExportRosterReader,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> std::sync::Weak<rustbgpd_policy::PolicyHitCounters> {
     Arc::downgrade(roster.load().for_peer(peer).expect("an installed instance"))
 }
@@ -16582,7 +16602,7 @@ fn peer_context_chain_for(asn: u32) -> PolicyChain {
     chain
 }
 
-async fn send_peer_down(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) {
+async fn send_peer_down(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) {
     tx.send(RibUpdate::PeerDown {
         peer,
         session_id: 0,
@@ -16591,7 +16611,7 @@ async fn send_peer_down(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) {
     .unwrap();
 }
 
-async fn replace_one(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, chain: PolicyChain) {
+async fn replace_one(tx: &mpsc::Sender<RibUpdate>, peer: PeerId, chain: PolicyChain) {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
         peer,
@@ -16620,9 +16640,9 @@ async fn replace_one(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, chain: PolicyCh
 async fn export_roster_follows_the_rib_through_every_owner_transition() {
     let (RunningManager { tx, handle }, roster) =
         spawn_running_manager_with_roster(64, BgpMetrics::new());
-    let a = IpAddr::V4(Ipv4Addr::new(10, 36, 0, 1));
-    let b = IpAddr::V4(Ipv4Addr::new(10, 36, 0, 2));
-    let c = IpAddr::V4(Ipv4Addr::new(10, 36, 0, 3));
+    let a = peer_v4(Ipv4Addr::new(10, 36, 0, 1));
+    let b = peer_v4(Ipv4Addr::new(10, 36, 0, 2));
+    let c = peer_v4(Ipv4Addr::new(10, 36, 0, 3));
     let grouped = |peer| {
         let mut spec = PeerUpSpec::ibgp(peer);
         spec.export_policy = Some(community_chain(0xFDE8_3601));
@@ -16686,9 +16706,10 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     // moving it back rejoins the original group's instance.
     replace_one(&tx, b, community_chain(0xFDE8_3602)).await;
     let (_, regrouped) = published_ids(&tx, &roster).await;
-    assert_ne!(regrouped[&b], regrouped[&a]);
+    assert_ne!(regrouped[&b], regrouped[&PeerId::from_addr(a.addr())]);
     assert_eq!(
-        regrouped[&a], ids[&a],
+        regrouped[&PeerId::from_addr(a.addr())],
+        ids[&PeerId::from_addr(a.addr())],
         "the remaining member keeps its group"
     );
     // A flap of the only member empties its group: it re-registers into a
@@ -16707,7 +16728,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     let moved = retire_watch(&roster, b);
     replace_one(&tx, b, community_chain(0xFDE8_3601)).await;
     let (_, back) = published_ids(&tx, &roster).await;
-    assert_eq!(back[&b], ids[&a]);
+    assert_eq!(back[&b], ids[&PeerId::from_addr(a.addr())]);
     assert!(
         moved.upgrade().is_none(),
         "the emptied group's instance is released"
@@ -16719,7 +16740,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
         replacements: vec![
             crate::update::PeerExportPolicyReplacement {
-                peer: a,
+                peer: PeerId::from_addr(a.addr()),
                 export_policy: Some(community_chain(0xFDE8_3603)),
             },
             crate::update::PeerExportPolicyReplacement {
@@ -16742,7 +16763,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
         before_batch + 1,
         "one publication for the batch"
     );
-    assert_eq!(batched[&a], batched[&b]);
+    assert_eq!(batched[&PeerId::from_addr(a.addr())], batched[&b]);
     assert!(
         batched
             .iter()
@@ -16758,7 +16779,7 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
     tx.send(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
         replacements: vec![
             crate::update::PeerExportPolicyReplacement {
-                peer: a,
+                peer: PeerId::from_addr(a.addr()),
                 export_policy: Some(community_chain(0xFDE8_3601)),
             },
             crate::update::PeerExportPolicyReplacement {
@@ -16777,13 +16798,19 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
         !restored.contains_key(&c),
         "a departed member is not restored"
     );
-    assert_ne!(restored[&a], batched[&a]);
+    assert_ne!(
+        restored[&PeerId::from_addr(a.addr())],
+        batched[&PeerId::from_addr(a.addr())]
+    );
     assert_eq!(restored[&b], batched[&b]);
 
     // Group emptying, then shutdown: the cell closes and every instance is
     // released once no roster holds it.
-    let last = [retire_watch(&roster, a), retire_watch(&roster, b)];
-    send_peer_down(&tx, a).await;
+    let last = [
+        retire_watch(&roster, PeerId::from_addr(a.addr())),
+        retire_watch(&roster, b),
+    ];
+    send_peer_down(&tx, PeerId::from_addr(a.addr())).await;
     send_peer_down(&tx, b).await;
     let (_, empty) = published_ids(&tx, &roster).await;
     assert!(empty.is_empty());
@@ -16869,7 +16896,7 @@ async fn export_roster_switches_a_grouped_cohort_once_at_the_terminal_commit() {
             let switched = peers
                 .iter()
                 .filter(|peer| {
-                    manager.export_chains[*peer]
+                    manager.export_chains[&**peer]
                         .as_ref()
                         .and_then(PolicyChain::installed_hit_counters)
                         .map(|c| c.id())
@@ -16901,7 +16928,7 @@ async fn export_roster_switches_a_grouped_cohort_once_at_the_terminal_commit() {
 
 fn register_direct_peer_with_policy(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     export_policy: Option<PolicyChain>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(8);
@@ -16972,9 +16999,9 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
     let absent = Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 15);
     let absent_otc = Ipv4Prefix::new(Ipv4Addr::new(100, 64, 0, 0), 10);
     let churned = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
-    let grouped = IpAddr::V4(Ipv4Addr::new(10, 26, 0, 1));
-    let sibling = IpAddr::V4(Ipv4Addr::new(10, 26, 0, 2));
-    let distinct = IpAddr::V4(Ipv4Addr::new(10, 26, 0, 3));
+    let grouped = peer_v4(Ipv4Addr::new(10, 26, 0, 1));
+    let sibling = peer_v4(Ipv4Addr::new(10, 26, 0, 2));
+    let distinct = peer_v4(Ipv4Addr::new(10, 26, 0, 3));
     let mut grouped_rx =
         register_direct_peer_with_policy(&mut manager, grouped, Some(deny_chain(denied)));
     let mut sibling_rx =
@@ -16995,7 +17022,7 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
 
     let key = |prefix: Ipv4Prefix| PolicyFilteredRouteKey {
         target_peer: grouped,
-        source_peer: IpAddr::V4(source),
+        source_peer: peer_v4(source),
         prefix: Prefix::V4(prefix),
         path_id: 0,
     };
@@ -17012,7 +17039,7 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
     // Churn queued, not yet drained: a new route and a withdrawal the
     // refresh must not overtake or duplicate.
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![crate::test_support::make_route(churned, source)],
         withdrawn: vec![(Prefix::V4(permitted), 0)],
@@ -17024,21 +17051,25 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
     });
     let mut observations = Vec::new();
     for (peer, receiver) in [(grouped, &mut grouped_rx), (distinct, &mut distinct_rx)] {
-        manager.send_route_refresh_response(peer, Afi::Ipv4, Safi::Unicast);
+        manager.send_route_refresh_response(
+            PeerId::from_addr(peer.addr()),
+            Afi::Ipv4,
+            Safi::Unicast,
+        );
         let mut refresh = Vec::new();
         while let Ok(update) = receiver.try_recv() {
             refresh.push(envelope_summary(&update));
         }
         let policy_filtered = manager
             .policy_filtered_routes
-            .get(&peer)
+            .get(&PeerId::from_addr(peer.addr()))
             .into_iter()
             .flatten()
             .map(|key| format!("{key:?}"))
             .collect();
         let otc_blocked = manager
             .peer_otc_blocked
-            .get(&peer)
+            .get(&PeerId::from_addr(peer.addr()))
             .into_iter()
             .flatten()
             .map(|(prefix, paths)| format!("{prefix}:{paths:?}"))
@@ -17093,8 +17124,8 @@ fn grouped_refresh_repairs_residue_like_ungrouped_oracle_during_churn() {
         format!(
             "{:?}",
             PolicyFilteredRouteKey {
-                target_peer: IpAddr::V4(Ipv4Addr::new(10, 26, 0, 1)),
-                source_peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 26)),
+                target_peer: peer_v4(Ipv4Addr::new(10, 26, 0, 1)),
+                source_peer: peer_v4(Ipv4Addr::new(192, 0, 2, 26)),
                 prefix: Prefix::V4(Ipv4Prefix::new(addr, len)),
                 path_id: 0,
             }
@@ -17132,7 +17163,7 @@ fn vpn_dirty_resync_case(
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = !grouped;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 1, 5));
+    let peer = peer_v4(Ipv4Addr::new(10, 63, 1, 5));
     let mut outbound = register_direct_peer_with_families(&mut manager, peer, vpn_sendable());
     while outbound.try_recv().is_ok() {}
     let routes: Vec<VpnRibRoute> = (0..routes)
@@ -17143,7 +17174,7 @@ fn vpn_dirty_resync_case(
         })
         .collect();
     manager.handle_update(RibUpdate::VpnRoutesReceived {
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 7)),
         session_id: 0,
         announced: routes.clone(),
         withdrawn: vec![],
@@ -17159,7 +17190,7 @@ fn vpn_dirty_resync_case(
             .map(|_| sender.clone().try_reserve_owned().unwrap())
             .collect();
         manager.handle_update(RibUpdate::VpnRoutesReceived {
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 7)),
             session_id: 0,
             announced: vec![],
             withdrawn: routes.iter().map(VpnRibRoute::key).collect(),

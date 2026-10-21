@@ -1,9 +1,10 @@
 use super::{
-    AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
+    AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, Ipv4Addr, LOCAL_PEER, LocRib,
     NeighborPolicyStats, OutboundCommitBatch, PolicyChain, Prefix, RibCommandError, RibManager,
     RouteContext, Safi, debug, flowspec_route_family, record_export_policy_eval, route_type,
     should_suppress_ibgp_inner, warn,
 };
+use crate::PeerId;
 use crate::attr_set::AttrSet;
 use crate::injection_lease::{InjectedKey, LeaseGeneration};
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
@@ -12,7 +13,7 @@ use crate::update::InjectOutcome;
 impl RibManager {
     pub(super) fn process_flowspec_withdraw_chunk(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         flowspec_withdrawn: Vec<FlowSpecKey>,
     ) {
         let active_refresh = self
@@ -82,7 +83,7 @@ impl RibManager {
 
     pub(super) fn process_flowspec_announce_chunk(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
     ) {
         let active_refresh = self
@@ -301,9 +302,9 @@ impl RibManager {
     pub(in crate::manager) fn stage_flowspec_rules_with_checkpoint(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         keys: &HashSet<FlowSpecKey>,
-        target_peer: IpAddr,
+        target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
@@ -380,7 +381,7 @@ impl RibManager {
                             Ipv4Addr::UNSPECIFIED,
                             0,
                         )),
-                        next_hop: best.peer,
+                        next_hop: best.peer.addr(),
                         link_local_next_hop: None,
                         next_hop_scope: None,
                         peer: best.peer,
@@ -431,7 +432,7 @@ impl RibManager {
                     origin_asn,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                     aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                    peer_address: Some(target_peer),
+                    peer_address: Some(target_peer.addr()),
                     peer_asn: target_peer_asn,
                     peer_group: target_peer_group,
                     route_type: Some(route_type(best.origin_type)),
@@ -559,7 +560,7 @@ impl RibManager {
         );
 
         // Distribute FlowSpec changes to outbound peers
-        let peers: Vec<IpAddr> = self
+        let peers: Vec<PeerId> = self
             .outbound_peers
             .keys()
             .inspect(|_| checkpoint())

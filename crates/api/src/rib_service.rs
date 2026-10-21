@@ -1,5 +1,6 @@
 //! gRPC RIB service — route listing, filtering, and bounded event history.
 
+use rustbgpd_rib::PeerId;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -336,7 +337,7 @@ impl RibService {
             "",
             self.roster(),
         )?;
-        let peer = key.address;
+        let peer = PeerId::from_addr(key.address);
         let scope = if advertised {
             RouteQueryScope::Advertised { peer }
         } else {
@@ -386,7 +387,7 @@ impl RibService {
                 "EVPN pagination unavailable because its process-local generation is exhausted",
             ),
         })?;
-        self.require_known_peer_if_empty(peer, page.routes.is_empty())
+        self.require_known_peer_if_empty(peer.addr(), page.routes.is_empty())
             .await?;
         let next_page_token = if page.has_more {
             page.routes
@@ -425,7 +426,7 @@ impl RibService {
         source: Option<RouteSourceIdentity>,
     ) -> Result<ExplainAdvertisedRoute, Status> {
         rib_manager_read(&self.rib_tx, |reply| RibUpdate::ExplainAdvertisedRoute {
-            peer,
+            peer: PeerId::from_addr(peer),
             prefix,
             rd,
             labeled,
@@ -443,7 +444,7 @@ impl RibService {
     ) -> Result<Option<ExplainBestPath>, Status> {
         rib_manager_read(&self.rib_tx, |reply| RibUpdate::ExplainBestPath {
             prefix,
-            peer,
+            peer: peer.map(PeerId::from_addr),
             reply,
         })
         .await
@@ -1042,13 +1043,15 @@ fn parse_route_page_scope_token(token: &str) -> Option<RouteQueryScope> {
     }
     if let Some(peer) = token.strip_prefix("received:") {
         return Some(RouteQueryScope::Received {
-            peer: Some(peer.parse().ok()?),
+            peer: Some(PeerId::from_addr(peer.parse().ok()?)),
         });
     }
     token
         .strip_prefix("advertised:")
         .and_then(|peer| peer.parse().ok())
-        .map(|peer| RouteQueryScope::Advertised { peer })
+        .map(|peer| RouteQueryScope::Advertised {
+            peer: PeerId::from_addr(peer),
+        })
 }
 
 /// Canonical semantic identity of every route-listing predicate. OR filters
@@ -1191,9 +1194,11 @@ fn family_page_scope(
     let peer = key.as_ref().map(|key| key.address);
     let scope = match view {
         proto::FamilyRouteView::Best => RouteQueryScope::Best,
-        proto::FamilyRouteView::Received => RouteQueryScope::Received { peer },
+        proto::FamilyRouteView::Received => RouteQueryScope::Received {
+            peer: peer.map(PeerId::from_addr),
+        },
         proto::FamilyRouteView::Advertised => RouteQueryScope::Advertised {
-            peer: peer.expect("peer view requires a validated neighbor"),
+            peer: PeerId::from_addr(peer.expect("peer view requires a validated neighbor")),
         },
         proto::FamilyRouteView::Unspecified => unreachable!("unspecified view rejected above"),
     };
@@ -1612,7 +1617,7 @@ fn evpn_loc_filter(
         req.vni_filter,
     )?;
     let key = parse_optional_peer_filter("source_peer_filter", &req.source_peer_filter, roster)?;
-    let peer = key.as_ref().map(|key| key.address);
+    let peer = key.as_ref().map(|key| PeerId::from_addr(key.address));
     let identity = crate::peer_selector::scoped_identity(
         family_query_identity("evpn-loc", &format!("{base_identity}:{peer:?}")),
         key.as_ref(),
@@ -2591,7 +2596,7 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
         prefix_length: u32::from(event.prefix.prefix_len()),
         peer_address: event
             .peer
-            .map_or_else(String::new, |p: IpAddr| p.to_string()),
+            .map_or_else(String::new, |p: PeerId| p.to_string()),
         afi_safi: match event.prefix {
             Prefix::V4(_) => proto::AddressFamily::Ipv4Unicast,
             Prefix::V6(_) => proto::AddressFamily::Ipv6Unicast,
@@ -2601,12 +2606,12 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
         timestamp_unix_ms: event.timestamp_unix_ms,
         previous_peer_address: event
             .previous_peer
-            .map_or_else(String::new, |p: IpAddr| p.to_string()),
+            .map_or_else(String::new, |p: PeerId| p.to_string()),
         path_id: event.path_id,
         event_id: event.event_id,
         target_peer_address: event
             .target_peer
-            .map_or_else(String::new, |p: IpAddr| p.to_string()),
+            .map_or_else(String::new, |p: PeerId| p.to_string()),
         peer_interface: event
             .peer_interface()
             .as_deref()
@@ -2655,7 +2660,9 @@ impl proto::rib_service_server::RibService for RibService {
             route_page_query_identity(req.afi_safi, &filters),
             key.as_ref(),
         );
-        let scope = RouteQueryScope::Received { peer };
+        let scope = RouteQueryScope::Received {
+            peer: peer.map(PeerId::from_addr),
+        };
         let ((after, expected_version, known_total), page_size) =
             parse_route_page_params(&req, scope, &query_identity)?;
         let page = self
@@ -2738,7 +2745,7 @@ impl proto::rib_service_server::RibService for RibService {
             "",
             self.roster(),
         )?;
-        let peer = key.address;
+        let peer = PeerId::from_addr(key.address);
 
         let filters = RouteFilters::from_request(&req)?;
         let query_identity = crate::peer_selector::scoped_identity(
@@ -2757,7 +2764,7 @@ impl proto::rib_service_server::RibService for RibService {
                 page_size,
             )
             .await?;
-        self.require_known_peer_if_empty(peer, page.routes.is_empty())
+        self.require_known_peer_if_empty(peer.addr(), page.routes.is_empty())
             .await?;
         Ok(Response::new(route_page_to_response(
             &page,
@@ -2813,7 +2820,7 @@ impl proto::rib_service_server::RibService for RibService {
             .as_ref()
             .zip(source_key.as_ref())
             .map(|(source, key)| RouteSourceIdentity {
-                peer: key.address,
+                peer: PeerId::from_addr(key.address),
                 path_id: source.path_id,
             });
         let explain = self
@@ -2822,7 +2829,7 @@ impl proto::rib_service_server::RibService for RibService {
         // The explained source route records its scope; a selector naming
         // another interface does not identify it.
         if let Some(key) = &source_key
-            && explain.route_peer == Some(key.address)
+            && explain.route_peer == Some(PeerId::from_addr(key.address))
             && explain.route_peer_interface.as_deref() != key.interface.as_deref()
         {
             return Err(Status::not_found(format!(
@@ -2936,7 +2943,7 @@ impl proto::rib_service_server::RibService for RibService {
             .map(std::sync::Arc::<str>::from);
 
         let events = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRouteEventHistory {
-            peer,
+            peer: peer.map(PeerId::from_addr),
             peer_interface,
             afi,
             prefix,
@@ -2981,7 +2988,7 @@ impl proto::rib_service_server::RibService for RibService {
             });
             let matched = rib_manager_read(&self.rib_tx, |reply| {
                 RibUpdate::QueryReceivedFlowSpecRoutes {
-                    peer,
+                    peer: PeerId::from_addr(peer),
                     filter,
                     reply,
                 }
@@ -3016,7 +3023,7 @@ impl proto::rib_service_server::RibService for RibService {
         )?;
         let matched = rib_manager_read(&self.rib_tx, |reply| match advertised_peer {
             Some(peer) => RibUpdate::QueryAdvertisedFlowSpecRoutes {
-                peer,
+                peer: PeerId::from_addr(peer),
                 filter,
                 reply,
             },
@@ -3064,7 +3071,7 @@ impl proto::rib_service_server::RibService for RibService {
                 if type_filter != 0 && u32::from(r.route_type()) != type_filter {
                     return false;
                 }
-                if peer_filter.is_some_and(|peer| r.peer != peer) {
+                if peer_filter.is_some_and(|peer| r.peer != PeerId::from_addr(peer)) {
                     return false;
                 }
                 if let Some(rd_filter) = rd_filter {
@@ -3153,8 +3160,8 @@ impl proto::rib_service_server::RibService for RibService {
         }
         let explanation = rib_manager_read(&self.rib_tx, |reply| RibUpdate::ExplainEvpnRoute {
             key,
-            received_from,
-            advertised_to,
+            received_from: received_from.map(PeerId::from_addr),
+            advertised_to: advertised_to.map(PeerId::from_addr),
             srv6_argument_companion,
             reply,
         })
@@ -3211,7 +3218,7 @@ impl proto::rib_service_server::RibService for RibService {
                 {
                     return false;
                 }
-                if peer_filter.is_some_and(|peer| route.peer != peer) {
+                if peer_filter.is_some_and(|peer| route.peer != PeerId::from_addr(peer)) {
                     return false;
                 }
                 if type_filter != 0 && u32::from(route.nlri.nlri_type.as_u16()) != type_filter {
@@ -3260,7 +3267,7 @@ impl proto::rib_service_server::RibService for RibService {
                 if !family_filter.is_empty() && vpn_family_label(route) != family_filter {
                     return false;
                 }
-                if peer_filter.is_some_and(|peer| route.peer != peer) {
+                if peer_filter.is_some_and(|peer| route.peer != PeerId::from_addr(peer)) {
                     return false;
                 }
                 true
@@ -3317,7 +3324,7 @@ impl proto::rib_service_server::RibService for RibService {
                 if !family_filter.is_empty() && labeled_family_label(route) != family_filter {
                     return false;
                 }
-                if peer_filter.is_some_and(|peer| route.peer != peer) {
+                if peer_filter.is_some_and(|peer| route.peer != PeerId::from_addr(peer)) {
                     return false;
                 }
                 true
@@ -3347,7 +3354,7 @@ impl proto::rib_service_server::RibService for RibService {
         )?;
 
         let filter = row_filter(peer_filter.is_some(), move |route: &RtcRibRoute| {
-            peer_filter.is_none_or(|peer| route.peer == peer)
+            peer_filter.is_none_or(|peer| route.peer == PeerId::from_addr(peer))
         });
 
         let matched = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRtcRoutes {
@@ -3395,7 +3402,8 @@ impl proto::rib_service_server::RibService for RibService {
         let filter = Some(Box::new(move |route: &VpnRibRoute| {
             family_prefix_matches(afi, prefix, longer, family_ip_prefix(route.nlri.prefix))
                 && rd.is_none_or(|rd| route.nlri.route_distinguisher == rd)
-                && (scope != RouteQueryScope::Best || peer.is_none_or(|peer| route.peer == peer))
+                && (scope != RouteQueryScope::Best
+                    || peer.is_none_or(|peer| route.peer == PeerId::from_addr(peer)))
         }) as RibRowFilter<VpnRibRoute>);
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryVpnRoutesPage {
             scope,
@@ -3475,7 +3483,8 @@ impl proto::rib_service_server::RibService for RibService {
         )?;
         let filter = Some(Box::new(move |route: &LabeledRibRoute| {
             family_prefix_matches(afi, prefix, longer, route.nlri.prefix)
-                && (scope != RouteQueryScope::Best || peer.is_none_or(|peer| route.peer == peer))
+                && (scope != RouteQueryScope::Best
+                    || peer.is_none_or(|peer| route.peer == PeerId::from_addr(peer)))
         }) as RibRowFilter<LabeledRibRoute>);
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLabeledRoutesPage {
             scope,
@@ -3553,7 +3562,8 @@ impl proto::rib_service_server::RibService for RibService {
                 && rt.is_none_or(|rt| {
                     route.nlri.prefix_len == 96 && route.nlri.route_target_bits == rt
                 })
-                && (scope != RouteQueryScope::Best || peer.is_none_or(|peer| route.peer == peer))
+                && (scope != RouteQueryScope::Best
+                    || peer.is_none_or(|peer| route.peer == PeerId::from_addr(peer)))
         }) as RibRowFilter<RtcRibRoute>);
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRtcRoutesPage {
             scope,
@@ -3630,7 +3640,8 @@ impl proto::rib_service_server::RibService for RibService {
         let filter = Some(Box::new(move |route: &BgpLsRibRoute| {
             family.is_none_or(|family| route.family == family)
                 && (nlri_type == 0 || u32::from(route.nlri.nlri_type.as_u16()) == nlri_type)
-                && (scope != RouteQueryScope::Best || peer.is_none_or(|peer| route.peer == peer))
+                && (scope != RouteQueryScope::Best
+                    || peer.is_none_or(|peer| route.peer == PeerId::from_addr(peer)))
         }) as RibRowFilter<BgpLsRibRoute>);
         let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryBgpLsRoutesPage {
             scope,
@@ -4768,6 +4779,7 @@ fn format_bitmask_ops(ops: &[rustbgpd_wire::BitmaskMatch]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rustbgpd_rib::PeerId;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5300,7 +5312,7 @@ mod tests {
     /// a populated listing is never delayed or failed by the check.
     #[tokio::test]
     async fn populated_peer_scoped_view_skips_known_peer_check() {
-        let peer: IpAddr = "192.0.2.99".parse().unwrap();
+        let peer = PeerId::from_addr("192.0.2.99".parse().unwrap());
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         tokio::spawn(async move {
             let Some(RibUpdate::QueryRoutesPage { reply, .. }) = rib_rx.recv().await else {
@@ -5383,7 +5395,7 @@ mod tests {
                 .pop()
                 .unwrap(),
             next_hop: peer,
-            peer,
+            peer: PeerId::from_addr(peer),
             attributes: AttrSet::new(Vec::new()),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
@@ -5440,7 +5452,7 @@ mod tests {
             }),
             next_hop: peer,
             link_local_next_hop: None,
-            peer: common.0,
+            peer: PeerId::from_addr(common.0),
             attributes: Arc::clone(&common.1),
             received_at: common.2,
             origin_type: common.3,
@@ -5458,7 +5470,7 @@ mod tests {
             next_hop: peer,
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: common.0,
+            peer: PeerId::from_addr(common.0),
             attributes: Arc::clone(&common.1),
             received_at: common.2,
             origin_type: common.3,
@@ -5475,7 +5487,7 @@ mod tests {
             next_hop: peer,
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: common.0,
+            peer: PeerId::from_addr(common.0),
             attributes: Arc::clone(&common.1),
             received_at: common.2,
             origin_type: common.3,
@@ -5487,7 +5499,7 @@ mod tests {
         let rtc = RtcRibRoute {
             nlri: rustbgpd_wire::RtcNlri::DEFAULT,
             next_hop: peer,
-            peer: common.0,
+            peer: PeerId::from_addr(common.0),
             attributes: common.1,
             received_at: common.2,
             origin_type: common.3,
@@ -5986,8 +5998,8 @@ mod tests {
 
     #[test]
     fn smet_view_selector_filters_and_cursor_preserve_independent_fields() {
-        let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        let (mut route, ..) = non_unicast_routes(peer);
+        let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
+        let (mut route, ..) = non_unicast_routes(peer.addr());
         let smet = rustbgpd_wire::EvpnSmet {
             rd: "65000:100".parse().unwrap(),
             ethernet_tag: rustbgpd_wire::EthernetTagId(100),
@@ -6034,14 +6046,14 @@ mod tests {
         });
         let token = encode_evpn_page_token(scope, "6:65000:100", &route, version).unwrap();
         assert_eq!(decode_evpn_page_token(&token).unwrap().after, before.after);
-        assert_eq!(before.after, (route.key(), peer));
+        assert_eq!(before.after, (route.key(), peer.addr()));
         assert!(token.len() <= 1024);
     }
 
     #[tokio::test]
     async fn smet_list_received_and_advertised_keep_typed_payload_and_filters() {
-        let peer: IpAddr = "192.0.2.1".parse().unwrap();
-        let (mut route, ..) = non_unicast_routes(peer);
+        let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
+        let (mut route, ..) = non_unicast_routes(peer.addr());
         route.route = EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
             rd: "65000:100".parse().unwrap(),
             ethernet_tag: rustbgpd_wire::EthernetTagId(100),
@@ -6127,7 +6139,7 @@ mod tests {
                 decode_evpn_page_token(&response.next_page_token)
                     .unwrap()
                     .after,
-                (expected_key, peer)
+                (expected_key, peer.addr())
             );
         }
         actor.await.unwrap();
@@ -6566,7 +6578,7 @@ mod tests {
     #[tokio::test]
     async fn srv6_argument_forwards_explicit_companion_and_one_scope() {
         use rustbgpd_rib::update::{ExplainSrv6Argument, Srv6ArgumentStatus};
-        let peer: IpAddr = "192.0.2.9".parse().unwrap();
+        let peer = PeerId::from_addr("192.0.2.9".parse().unwrap());
         for (scope, received_from, advertised_to, scope_name) in [
             (RouteQueryScope::Best, None, None, "best"),
             (
@@ -6653,7 +6665,7 @@ mod tests {
         let primary = evpn_explain_request().key.unwrap();
         let companion_selector = srv6_argument_companion_selector();
         let companion_key = parse_evpn_selector(&companion_selector).unwrap();
-        let peer: IpAddr = "192.0.2.9".parse().unwrap();
+        let peer = PeerId::from_addr("192.0.2.9".parse().unwrap());
         let mut companion = non_unicast_routes("192.0.2.7".parse().unwrap()).0;
         companion.route = EvpnRoute::EadPerEs(rustbgpd_wire::EvpnEadPerEs {
             rd: "65000:200".parse().unwrap(),
@@ -6751,8 +6763,8 @@ mod tests {
                         panic!("expected exact EVPN explain query")
                     };
                     assert_eq!(key, expected_key);
-                    assert_eq!(received, received_from);
-                    assert_eq!(advertised, advertised_to);
+                    assert_eq!(received, received_from.map(PeerId::from_addr));
+                    assert_eq!(advertised, advertised_to.map(PeerId::from_addr));
                     assert!(srv6_argument_companion.is_none());
                     reply
                         .send(rustbgpd_rib::update::ExplainEvpnRoute {
@@ -6835,7 +6847,7 @@ mod tests {
             reason_detail: "local preference 200 versus 100".into(),
             selection_deferred: true,
             export: Some(ExplainEvpnExport {
-                peer: "192.0.2.9".parse().unwrap(),
+                peer: PeerId::from_addr("192.0.2.9".parse().unwrap()),
                 decision: ExplainDecision::Advertise,
                 reasons: vec![ExplainReason {
                     code: "export_permitted",
@@ -6926,13 +6938,13 @@ mod tests {
         use rustbgpd_wire::{
             EthernetSegmentIdentifier, EthernetTagId, EvpnEs, EvpnMacIp, MacAddress, MplsLabel,
         };
-        let peer = "192.0.2.1".parse().unwrap();
+        let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
         let scope = RouteQueryScope::Advertised { peer };
         let version = RoutePageVersion {
             epoch: 5,
             generation: 17,
         };
-        let (mut route, ..) = non_unicast_routes(peer);
+        let (mut route, ..) = non_unicast_routes(peer.addr());
         let rd = "65000:100".parse().unwrap();
         let mut variants = vec![route.route.clone()];
         variants.push(EvpnRoute::Es(EvpnEs {
@@ -6976,7 +6988,7 @@ mod tests {
             route.route = variant;
             let token = encode_evpn_page_token(scope, "0:", &route, version).unwrap();
             let cursor = decode_evpn_page_token(&token).unwrap();
-            assert_eq!(cursor.after, (route.key(), peer));
+            assert_eq!(cursor.after, (route.key(), peer.addr()));
             assert_eq!(cursor.scope, scope);
             assert_eq!(cursor.version, version);
             assert!(token.len() < 1024);
@@ -7020,8 +7032,8 @@ mod tests {
     async fn evpn_peer_pages_validate_scope_filters_and_map_stale_tokens() {
         let (tx, mut rx) = mpsc::channel(8);
         let svc = RibService::new(tx);
-        let peer = "192.0.2.1".parse().unwrap();
-        let (route, ..) = non_unicast_routes(peer);
+        let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
+        let (route, ..) = non_unicast_routes(peer.addr());
         let version = RoutePageVersion {
             epoch: 2,
             generation: 3,
@@ -7054,7 +7066,7 @@ mod tests {
                 panic!("expected EVPN page");
             };
             assert_eq!(scope, RouteQueryScope::Received { peer: Some(peer) });
-            assert_eq!(after, Some((route.key(), peer)));
+            assert_eq!(after, Some((route.key(), peer.addr())));
             assert_eq!(expected_version, Some(version));
             assert_eq!(page_size, 1);
             assert!(filter.as_ref().unwrap()(&route));
@@ -7119,7 +7131,7 @@ mod tests {
     #[tokio::test]
     async fn evpn_peer_page_response_preserves_source_and_bounded_metadata() {
         let source = "192.0.2.1".parse().unwrap();
-        let destination = "192.0.2.2".parse().unwrap();
+        let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
         let (route, ..) = non_unicast_routes(source);
         let expected_key = route.key();
         let (tx, mut rx) = mpsc::channel(8);
@@ -7183,7 +7195,7 @@ mod tests {
             assert_eq!(
                 scope,
                 RouteQueryScope::Advertised {
-                    peer: "192.0.2.2".parse().unwrap(),
+                    peer: PeerId::from_addr("192.0.2.2".parse().unwrap()),
                 }
             );
             reply.send(Err(RoutePageError::ResyncInProgress)).unwrap();
@@ -7211,7 +7223,7 @@ mod tests {
             assert_eq!(
                 scope,
                 RouteQueryScope::Advertised {
-                    peer: "192.0.2.2".parse().unwrap(),
+                    peer: PeerId::from_addr("192.0.2.2".parse().unwrap()),
                 }
             );
             reply.send(Err(RoutePageError::ResyncInProgress)).unwrap();
@@ -7525,7 +7537,7 @@ mod tests {
             family: BgpLsFamily::LinkStateVpn,
             nlri,
             next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
-            peer: Ipv4Addr::new(192, 0, 2, 2).into(),
+            peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 2).into()),
             attributes: AttrSet::new(vec![
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
@@ -7579,7 +7591,7 @@ mod tests {
             next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: Ipv4Addr::new(192, 0, 2, 2).into(),
+            peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 2).into()),
             attributes: AttrSet::new(vec![
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
@@ -7624,7 +7636,7 @@ mod tests {
             next_hop: "192.0.2.1".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: "192.0.2.2".parse().unwrap(),
+            peer: PeerId::from_addr("192.0.2.2".parse().unwrap()),
             attributes: AttrSet::new(vec![]),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -7663,7 +7675,7 @@ mod tests {
             // RT:65001:100 from origin AS 65001, /96.
             nlri: rustbgpd_wire::RtcNlri::new(65001, 0x0002_FDE9_0000_0064, 96).unwrap(),
             next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
-            peer: Ipv4Addr::new(192, 0, 2, 2).into(),
+            peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 2).into()),
             attributes: AttrSet::new(vec![
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
@@ -7692,7 +7704,7 @@ mod tests {
         let default = RtcRibRoute {
             nlri: rustbgpd_wire::RtcNlri::DEFAULT,
             next_hop: Ipv4Addr::UNSPECIFIED.into(),
-            peer: Ipv4Addr::UNSPECIFIED.into(),
+            peer: PeerId::from_addr(Ipv4Addr::UNSPECIFIED.into()),
             attributes: AttrSet::new(vec![]),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Local,
@@ -7990,7 +8002,7 @@ mod tests {
         let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
         let best = test_route(prefix, vec![PathAttribute::LocalPref(200)]);
         let mut loser = test_route(prefix, vec![PathAttribute::LocalPref(100)]);
-        loser.peer = "10.0.0.2".parse().unwrap();
+        loser.peer = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let explanation = rustbgpd_rib::ExplainBestPath {
             prefix,
             best: Some(best),
@@ -8033,7 +8045,7 @@ mod tests {
             prefix,
             best: Some(test_route(prefix, vec![PathAttribute::LocalPref(100)])),
             candidates: vec![],
-            peer: Some("10.0.0.9".parse().unwrap()),
+            peer: Some(PeerId::from_addr("10.0.0.9".parse().unwrap())),
             orr_vantage: Some(vantage),
             add_path_send_max: 0,
             best_reason: None,
@@ -8228,7 +8240,10 @@ mod tests {
                 limit,
                 reply,
             } => {
-                assert_eq!(peer, Some("192.0.2.1".parse::<IpAddr>().unwrap()));
+                assert_eq!(
+                    peer,
+                    Some(PeerId::from_addr("192.0.2.1".parse::<IpAddr>().unwrap()))
+                );
                 assert_eq!(peer_interface, None);
                 assert_eq!(afi, Some(Afi::Ipv4));
                 assert_eq!(
@@ -8249,8 +8264,8 @@ mod tests {
                 event_id: 0,
                 event_type: RouteEventType::BestChanged,
                 prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
-                peer: Some("192.0.2.1".parse().unwrap()),
-                previous_peer: Some("192.0.2.2".parse().unwrap()),
+                peer: Some(PeerId::from_addr("192.0.2.1".parse().unwrap())),
+                previous_peer: Some(PeerId::from_addr("192.0.2.2".parse().unwrap())),
                 target_peer: None,
                 peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
                 previous_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
@@ -8279,7 +8294,7 @@ mod tests {
             next_hop: "10.0.0.1".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: "10.0.0.1".parse().unwrap(),
+            peer: PeerId::from_addr("10.0.0.1".parse().unwrap()),
             attributes: AttrSet::new(vec![]),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -8297,7 +8312,7 @@ mod tests {
             next_hop: "2001:db8::1".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: "2001:db8::1".parse().unwrap(),
+            peer: PeerId::from_addr("2001:db8::1".parse().unwrap()),
             attributes: AttrSet::new(vec![]),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -8480,11 +8495,14 @@ mod tests {
                 else {
                     panic!("expected advertised FlowSpec query");
                 };
-                assert_eq!(peer, "2001:db8::1".parse::<IpAddr>().unwrap());
+                assert_eq!(
+                    peer,
+                    PeerId::from_addr("2001:db8::1".parse::<IpAddr>().unwrap())
+                );
                 let mut row = FlowSpecRoute {
                     rule: rustbgpd_wire::FlowSpecRule { components: vec![] },
                     afi,
-                    peer: "0.0.0.0".parse().unwrap(),
+                    peer: PeerId::from_addr("0.0.0.0".parse().unwrap()),
                     attributes: vec![],
                     received_at: Instant::now(),
                     origin_type: rustbgpd_rib::RouteOrigin::Local,
@@ -8602,7 +8620,10 @@ mod tests {
             else {
                 panic!("expected received FlowSpec query")
             };
-            assert_eq!(peer, "192.0.2.1".parse::<IpAddr>().unwrap());
+            assert_eq!(
+                peer,
+                PeerId::from_addr("192.0.2.1".parse::<IpAddr>().unwrap())
+            );
             let mut row = ReceivedFlowSpecRoute {
                 route: FlowSpecRoute {
                     rule: rustbgpd_wire::FlowSpecRule {
@@ -8719,7 +8740,7 @@ mod tests {
                 )],
             },
             afi: Afi::Ipv4,
-            peer: "192.0.2.1".parse().unwrap(),
+            peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
             attributes: vec![PathAttribute::ExtendedCommunities(ecs.clone())],
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -9370,13 +9391,16 @@ mod tests {
                 source,
                 reply,
             } => {
-                assert_eq!(peer, "192.0.2.1".parse::<IpAddr>().unwrap());
+                assert_eq!(
+                    peer,
+                    PeerId::from_addr("192.0.2.1".parse::<IpAddr>().unwrap())
+                );
                 assert_eq!(rd, None);
                 assert!(!labeled);
                 assert_eq!(
                     source,
                     Some(RouteSourceIdentity {
-                        peer: "198.51.100.2".parse().unwrap(),
+                        peer: PeerId::from_addr("198.51.100.2".parse().unwrap()),
                         path_id: 0,
                     })
                 );
@@ -9391,11 +9415,11 @@ mod tests {
         reply
             .send(Ok(ExplainAdvertisedRoute {
                 decision: ExplainDecision::Advertise,
-                peer: "192.0.2.1".parse().unwrap(),
+                peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
                 prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
                 next_hop: Some("198.51.100.1".parse().unwrap()),
                 path_id: 0,
-                route_peer: Some("198.51.100.2".parse().unwrap()),
+                route_peer: Some(PeerId::from_addr("198.51.100.2".parse().unwrap())),
                 route_path_id: Some(0),
                 route_peer_interface: None,
                 route_type: Some(rustbgpd_policy::RouteType::External),
@@ -9407,7 +9431,7 @@ mod tests {
                 orr_vantage: Some("10.0.1.1".parse().unwrap()),
                 orr_candidates: vec![
                     rustbgpd_rib::OrrExplainCandidate {
-                        peer: "198.51.100.2".parse().unwrap(),
+                        peer: PeerId::from_addr("198.51.100.2".parse().unwrap()),
                         peer_interface: None,
                         path_id: 0,
                         next_hop: "198.51.100.1".parse().unwrap(),
@@ -9415,7 +9439,7 @@ mod tests {
                         selected: true,
                     },
                     rustbgpd_rib::OrrExplainCandidate {
-                        peer: "198.51.100.3".parse().unwrap(),
+                        peer: PeerId::from_addr("198.51.100.3".parse().unwrap()),
                         peer_interface: None,
                         path_id: 0,
                         next_hop: "198.51.100.4".parse().unwrap(),
@@ -9434,7 +9458,7 @@ mod tests {
                 already_advertised: true,
                 rd: None,
                 source: Some(RouteSourceIdentity {
-                    peer: "198.51.100.2".parse().unwrap(),
+                    peer: PeerId::from_addr("198.51.100.2".parse().unwrap()),
                     path_id: 0,
                 }),
             }))
@@ -9593,7 +9617,7 @@ mod tests {
             next_hop: "10.0.0.1".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: "10.0.0.1".parse().unwrap(),
+            peer: PeerId::from_addr("10.0.0.1".parse().unwrap()),
             attributes: AttrSet::new(attributes),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -9713,7 +9737,7 @@ mod tests {
             next_hop: "10.0.0.1".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: "10.0.0.1".parse().unwrap(),
+            peer: PeerId::from_addr("10.0.0.1".parse().unwrap()),
             attributes: AttrSet::new(vec![]),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -9762,7 +9786,7 @@ mod tests {
             next_hop: "10.0.0.1".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: "10.0.0.1".parse().unwrap(),
+            peer: PeerId::from_addr("10.0.0.1".parse().unwrap()),
             attributes: AttrSet::new(vec![PathAttribute::Communities(vec![community_val])]),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -9810,7 +9834,7 @@ mod tests {
             next_hop: "10.0.0.1".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: "10.0.0.1".parse().unwrap(),
+            peer: PeerId::from_addr("10.0.0.1".parse().unwrap()),
             attributes: AttrSet::new(vec![PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001, 65002, 65003])],
             })]),
@@ -10072,11 +10096,11 @@ mod tests {
             for scope in [
                 RouteQueryScope::Received { peer: None },
                 RouteQueryScope::Received {
-                    peer: Some("2001:db8::5".parse().unwrap()),
+                    peer: Some(PeerId::from_addr("2001:db8::5".parse().unwrap())),
                 },
                 RouteQueryScope::Best,
                 RouteQueryScope::Advertised {
-                    peer: "192.0.2.9".parse().unwrap(),
+                    peer: PeerId::from_addr("192.0.2.9".parse().unwrap()),
                 },
             ] {
                 let token = encode_route_page_token(scope, &query_identity, &key, version, 37);
@@ -10127,7 +10151,7 @@ mod tests {
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 7), 32)),
             Vec::new(),
         );
-        route.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        route.peer = PeerId::LOCAL;
         let page = RoutePage {
             routes: vec![route.clone(), route],
             total: 2,
@@ -10424,7 +10448,7 @@ mod tests {
         // The RPC forwards cursor + page size to the actor and turns the
         // page's last key into the next_page_token when more rows remain.
         let (tx, mut rx) = mpsc::channel(16);
-        let peer: IpAddr = "192.0.2.1".parse().unwrap();
+        let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
         let route = {
             let mut route = test_route(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
@@ -10523,7 +10547,7 @@ mod tests {
             "a bare selector never reaches the actor"
         );
 
-        let peer: IpAddr = "fe80::1".parse().unwrap();
+        let peer = PeerId::from_addr("fe80::1".parse().unwrap());
         let mut route = test_route(
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             vec![],
@@ -10595,7 +10619,7 @@ mod tests {
             RouteQueryScope::Received { peer: None },
             RouteQueryScope::Best,
             RouteQueryScope::Advertised {
-                peer: "192.0.2.9".parse().unwrap(),
+                peer: PeerId::from_addr("192.0.2.9".parse().unwrap()),
             },
         ] {
             let (tx, mut rx) = mpsc::channel(1);

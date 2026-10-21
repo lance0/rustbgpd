@@ -464,7 +464,7 @@ fn eligible_next_hops(
     candidate
         .next_hops
         .iter()
-        .filter(|next_hop| peer_allowed(next_hop.peer))
+        .filter(|next_hop| peer_allowed(next_hop.peer.addr()))
         .filter_map(|next_hop| fib_next_hop_from_install(prefix, next_hop).ok())
         .take(max_paths)
         .collect()
@@ -695,11 +695,11 @@ impl FibIntentBuilder {
                 if !table.allows_prefix(route.prefix) {
                     continue;
                 }
-                if !table.allows_peer(route.peer, &self.peer_groups) {
+                if !table.allows_peer(route.peer.addr(), &self.peer_groups) {
                     state.intent.drops.push(FibDrop::PeerNotAllowed {
                         table_name: table.name.to_string(),
                         prefix: route.prefix,
-                        peer: route.peer,
+                        peer: route.peer.addr(),
                     });
                     continue;
                 }
@@ -765,7 +765,7 @@ impl FibIntentBuilder {
                             table.name,
                             key,
                             route.next_hop,
-                            route.peer,
+                            route.peer.addr(),
                             limit,
                             &mut state.route_limit_drops,
                         );
@@ -779,7 +779,7 @@ impl FibIntentBuilder {
                     // present by the check above) so the scalar surface stays
                     // consistent with the row's best-route metadata.
                     target: FibRouteTarget::from_set_with_best_hop(best_next_hop, eligible),
-                    peer: route.peer,
+                    peer: route.peer.addr(),
                     origin_type: route.origin_type,
                     path_id: route.path_id,
                 };
@@ -1055,6 +1055,7 @@ fn cmp_prefix(left: Prefix, right: Prefix) -> Ordering {
 
 #[cfg(test)]
 mod tests {
+    use rustbgpd_rib::PeerId;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use rustbgpd_rib::{FibInstallNextHop, Route, RouteOrigin};
@@ -1100,7 +1101,7 @@ mod tests {
                 next_hop: ip(nh),
                 link_local_next_hop: None,
                 next_hop_scope: None,
-                peer: ip("198.51.100.2"),
+                peer: PeerId::from_addr(ip("198.51.100.2")),
                 path_id: u32::try_from(idx).unwrap() + 1,
                 weight: 1,
             });
@@ -1129,7 +1130,7 @@ mod tests {
                 next_hop: ip(nh),
                 link_local_next_hop: None,
                 next_hop_scope: None,
-                peer: ip("198.51.100.2"),
+                peer: PeerId::from_addr(ip("198.51.100.2")),
                 path_id: u32::try_from(idx).unwrap() + 1,
                 weight: *weight,
             });

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::peer_v4;
 
 #[test]
 fn evpn_withdraw_gcs_attr_intern_under_mac_mobility() {
@@ -11,7 +12,7 @@ fn evpn_withdraw_gcs_attr_intern_under_mac_mobility() {
     // ~258 MB/h RSS leak on every node, RR included, in the M67 link-drain soak).
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     // Churn well past the bounded event-history ring so an unbounded intern
@@ -52,7 +53,7 @@ fn evpn_announce_replace_reclaims_attr_intern() {
     // re-advertise churn leaks unbounded.
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let moves = u32::try_from(EVPN_ROUTE_EVENT_HISTORY_CAPACITY).unwrap() + 2000;
@@ -116,7 +117,7 @@ fn unicast_withdraw_reclaims_selected_attr_intern_after_loc_rib_recompute() {
     // attribute set alive and a pre-recompute GC cannot reclaim it.
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
@@ -178,7 +179,7 @@ fn unicast_inject_replace_reclaims_attr_intern_after_loc_rib_recompute() {
 
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
-        Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        Some(peer_v4(Ipv4Addr::new(10, 0, 0, 1)))
     );
     assert_eq!(
         manager.attr_intern.len(),
@@ -225,7 +226,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
     // interned set survives until an unrelated future GC event.
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -303,7 +304,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
 fn llgr_promotion_preserves_global_attribute_sharing() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let prefixes = [
@@ -361,7 +362,7 @@ fn gr_expiry_reclaims_stale_attr_intern_after_loc_rib_recompute() {
     // expired selected route.
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
@@ -410,7 +411,7 @@ fn unicast_announce_replace_reclaims_attr_intern() {
     // all-new-keys initial-load flood pays nothing.
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
@@ -445,7 +446,7 @@ fn bgpls_withdraw_reclaims_attr_intern_after_loc_rib_recompute() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let moves = 256u32;
@@ -485,7 +486,7 @@ fn bgpls_pure_add_records_global_attr_intern_size() {
     let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let route = make_bgpls_route(peer_addr, 24, 100);
@@ -512,7 +513,7 @@ fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
     // withdraw happens to run GC for this peer.
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let rib = manager
         .ribs
         .entry(peer)
@@ -562,7 +563,7 @@ fn graceful_restart_entry_gcs_attr_intern_for_loc_rib_selected_bgpls() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let count = 64u32;
@@ -617,7 +618,7 @@ fn enhanced_route_refresh_bgpls_eorr_gcs_attr_intern_for_swept_route() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let survivor = make_bgpls_route(peer_addr, 21, 100);
@@ -663,7 +664,7 @@ fn enhanced_route_refresh_vpn_eorr_gcs_attr_intern_for_swept_route() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(peer_addr);
+    let peer = peer_v4(peer_addr);
     manager.ribs.insert(peer, AdjRibIn::new(peer));
 
     let survivor = make_vpn_rib_route(peer_addr, 21, 100, 100);
@@ -708,8 +709,8 @@ fn cross_peer_identical_attrs_share_one_global_intern_entry() {
     // across Adj-RIB-Ins — per-peer tables could never produce this).
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     manager.ribs.insert(peer1, AdjRibIn::new(peer1));
     manager.ribs.insert(peer2, AdjRibIn::new(peer2));
 
@@ -757,8 +758,8 @@ fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
     // them); tearing down the last peer drops the table to zero.
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     manager.ribs.insert(peer1, AdjRibIn::new(peer1));
     manager.ribs.insert(peer2, AdjRibIn::new(peer2));
 
@@ -782,7 +783,7 @@ fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
                     route
                 })
                 .collect();
-            manager.process_announce_chunk(peer, routes, None);
+            manager.process_announce_chunk(PeerId::from_addr(peer.addr()), routes, None);
         }
         assert_eq!(
             manager.attr_intern.len(),
@@ -806,10 +807,10 @@ fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
     );
 }
 
-fn diverse_unicast_fixture(metrics: BgpMetrics) -> (RibManager, mpsc::Sender<RibUpdate>, IpAddr) {
+fn diverse_unicast_fixture(metrics: BgpMetrics) -> (RibManager, mpsc::Sender<RibUpdate>, PeerId) {
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
     let routes = (0..=ATTR_INTERN_GC_DISPLACED_LIMIT)
         .map(|index| diverse_unicast_route(index, u32::try_from(index).unwrap()))

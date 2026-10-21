@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 
@@ -305,7 +306,9 @@ async fn clean_state_session_gone_compensates_with_closed_code() {
         assert_eq!(replacements.len(), 1);
         reply
             .send(Ok(vec![
-                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer },
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                    peer: PeerId::from_addr(peer),
+                },
             ]))
             .unwrap();
     };
@@ -354,8 +357,8 @@ async fn clean_state_non_established_carries_pending_intent_and_commits() {
 async fn clean_state_retry_survives_long_rib_leg_between_peers() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
-    let first = IpAddr::V4(Ipv4Addr::new(10, 43, 2, 1));
-    let second = IpAddr::V4(Ipv4Addr::new(10, 43, 2, 2));
+    let first = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 43, 2, 1)));
+    let second = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 43, 2, 2)));
     let (rib_tx, mut rib_rx) = mpsc::channel(16);
     let (_command_tx, command_rx) = mpsc::channel(16);
     let mut manager = PeerManager::new(
@@ -372,9 +375,9 @@ async fn clean_state_retry_survives_long_rib_leg_between_peers() {
     for (peer, counter) in [first, second].into_iter().zip(&queries) {
         insert_test_managed_peer(
             &mut manager,
-            peer,
+            peer.addr(),
             clean_state_test_session(
-                peer,
+                peer.addr(),
                 CleanStateReplyMode::FirstTimeoutThenEstablished,
                 Arc::clone(counter),
             ),
@@ -385,13 +388,13 @@ async fn clean_state_retry_survives_long_rib_leg_between_peers() {
     // and both peers take the per-peer authoritative walk in order.
     let targets = vec![
         ResolvedPeerPolicy {
-            address: first,
+            address: first.addr(),
             interface: None,
             import_policy: None,
             export_policy: Some(deny_policy_chain()),
         },
         ResolvedPeerPolicy {
-            address: second,
+            address: second.addr(),
             interface: None,
             import_policy: Some(deny_policy_chain()),
             export_policy: None,
@@ -423,11 +426,15 @@ async fn clean_state_retry_survives_long_rib_leg_between_peers() {
         "the second peer retried its missed probe after the long RIB step"
     );
     assert_eq!(
-        manager.peers.get(&key(first)).unwrap().export_policy,
+        manager.peers.get(&key(first.addr())).unwrap().export_policy,
         Some(deny_policy_chain())
     );
     assert_eq!(
-        manager.peers.get(&key(second)).unwrap().import_policy,
+        manager
+            .peers
+            .get(&key(second.addr()))
+            .unwrap()
+            .import_policy,
         Some(deny_policy_chain())
     );
 }
@@ -447,7 +454,9 @@ async fn clean_state_retry_exhaustion_compensates_with_closed_code() {
         };
         reply
             .send(Ok(vec![
-                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer },
+                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                    peer: PeerId::from_addr(peer),
+                },
             ]))
             .unwrap();
     };
@@ -524,7 +533,7 @@ async fn clean_state_cohort_shares_retry_window_and_compensates_on_late_exhausti
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers
         );
@@ -542,7 +551,7 @@ async fn clean_state_cohort_shares_retry_window_and_compensates_on_late_exhausti
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers
         );
@@ -968,7 +977,7 @@ async fn import_tolerant_cohort_rib_failure_restores_both_chains() {
     let singles = rib_task.await.unwrap();
     assert_eq!(
         singles,
-        vec![peers[1], peers[0]],
+        vec![PeerId::from_addr(peers[1]), PeerId::from_addr(peers[0])],
         "rollback RIB restores run newest-first"
     );
 }
@@ -1283,7 +1292,7 @@ async fn export_only_snapshot_handoff_batches_the_authoritative_apply() {
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers.to_vec()
         );
@@ -1478,7 +1487,7 @@ async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first()
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers.to_vec()
         );
@@ -1498,7 +1507,7 @@ async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first()
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers
         );
@@ -1507,7 +1516,11 @@ async fn export_only_snapshot_handoff_failure_restores_every_peer_newest_first()
             .send(Ok(order
                 .iter()
                 .copied()
-                .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                .map(
+                    |peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: PeerId::from_addr(peer),
+                    },
+                )
                 .collect()))
             .unwrap();
         order
@@ -1635,7 +1648,7 @@ async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_c
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers.to_vec()
         );
@@ -1667,7 +1680,7 @@ async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_c
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers
         );
@@ -1681,7 +1694,11 @@ async fn export_only_snapshot_handoff_timeout_restores_after_the_owned_forward_c
             .send(Ok(rollback_order
                 .iter()
                 .copied()
-                .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                .map(
+                    |peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: PeerId::from_addr(peer),
+                    },
+                )
                 .collect()))
             .unwrap();
         rollback_order
@@ -1764,7 +1781,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
             else {
                 panic!("expected forward RIB restore");
             };
-            assert_eq!(peer, *expected_peer);
+            assert_eq!(peer, PeerId::from_addr(*expected_peer));
             reply.send(Ok(())).unwrap();
         }
 
@@ -1778,13 +1795,13 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers
         );
         let restores = peers.iter().rev().copied().collect::<Vec<_>>();
         let later_tx = lifecycle_tx.clone();
-        let recreated = peers[0];
+        let recreated = PeerId::from_addr(peers[0]);
         let lifecycle_task = tokio::spawn(async move {
             later_tx
                 .send(RibUpdate::PeerDeleted {
@@ -1820,7 +1837,11 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
             .send(Ok(restores
                 .iter()
                 .copied()
-                .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                .map(
+                    |peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: PeerId::from_addr(peer),
+                    },
+                )
                 .collect()))
             .unwrap();
 
@@ -1838,14 +1859,14 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
                 RibUpdate::PeerDeleted { peer, .. } => {
                     // LOAD-BEARING: removing reverse-order pre-registration
                     // lets this later delete overtake an unregistered restore.
-                    assert_eq!(peer, peers[0]);
+                    assert_eq!(peer, PeerId::from_addr(peers[0]));
                     saw_delete = true;
                 }
                 RibUpdate::PeerUp {
                     peer, session_id, ..
                 } => {
                     assert!(saw_delete);
-                    assert_eq!(peer, peers[0]);
+                    assert_eq!(peer, PeerId::from_addr(peers[0]));
                     assert_eq!(session_id, 99);
                     saw_recreate = true;
                 }
@@ -1925,7 +1946,7 @@ async fn policy_rollback_registered_rib_futures_survive_caller_cancellation() {
     assert_eq!(
         replacements
             .iter()
-            .map(|replacement| replacement.peer)
+            .map(|replacement| replacement.peer.addr())
             .collect::<Vec<_>>(),
         peers[..peers.len() - 1]
     );
@@ -1941,7 +1962,11 @@ async fn policy_rollback_registered_rib_futures_survive_caller_cancellation() {
             .send(Ok(restored
                 .iter()
                 .copied()
-                .map(|peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer })
+                .map(
+                    |peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: PeerId::from_addr(peer)
+                    }
+                )
                 .collect()))
             .is_ok(),
         "detached rollback task must retain the late receiver"
@@ -1962,7 +1987,7 @@ async fn policy_rollback_registered_rib_futures_survive_caller_cancellation() {
 async fn rollback_batch_can_complete_after_the_old_five_second_window() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 47, 0, 1));
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 47, 0, 1)));
     let attempts = Arc::new(AtomicUsize::new(0));
     let (rib_tx, mut rib_rx) = mpsc::channel(16);
     let (_command_tx, command_rx) = mpsc::channel(16);
@@ -1978,12 +2003,12 @@ async fn rollback_batch_can_complete_after_the_old_five_second_window() {
     );
     insert_test_managed_peer(
         &mut manager,
-        peer,
-        established_export_policy_test_session(peer, attempts, Some(1)),
+        peer.addr(),
+        established_export_policy_test_session(peer.addr(), attempts, Some(1)),
         false,
     );
     let apply = manager.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
-        address: peer,
+        address: peer.addr(),
         interface: None,
         import_policy: None,
         export_policy: Some(deny_policy_chain()),
@@ -2008,7 +2033,7 @@ async fn rollback_batch_can_complete_after_the_old_five_second_window() {
             .is_err_and(|error| error.contains("already-applied peers restored")),
         "a six-second exact rollback remains fully compensated: {result:?}"
     );
-    let peer_state = manager.peers.get(&key(peer)).unwrap();
+    let peer_state = manager.peers.get(&key(peer.addr())).unwrap();
     assert!(!peer_state.pending_export_apply);
     assert!(!peer_state.pending_refresh);
 }
@@ -2017,7 +2042,7 @@ async fn rollback_batch_can_complete_after_the_old_five_second_window() {
 async fn rollback_batch_timeout_keeps_late_repair_owned_and_pending_armed() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 48, 0, 1));
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 48, 0, 1)));
     let attempts = Arc::new(AtomicUsize::new(0));
     let (rib_tx, mut rib_rx) = mpsc::channel(16);
     let (_command_tx, command_rx) = mpsc::channel(16);
@@ -2033,14 +2058,14 @@ async fn rollback_batch_timeout_keeps_late_repair_owned_and_pending_armed() {
     );
     insert_test_managed_peer(
         &mut manager,
-        peer,
-        established_export_policy_test_session(peer, attempts, Some(1)),
+        peer.addr(),
+        established_export_policy_test_session(peer.addr(), attempts, Some(1)),
         false,
     );
     let apply_task = tokio::spawn(async move {
         let result = manager
             .apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
-                address: peer,
+                address: peer.addr(),
                 interface: None,
                 import_policy: None,
                 export_policy: Some(deny_policy_chain()),
@@ -2062,7 +2087,7 @@ async fn rollback_batch_timeout_keeps_late_repair_owned_and_pending_armed() {
             .is_err_and(|error| error.contains("policy_rollback_batch_timeout")),
         "timeout must remain an explicit ambiguous repair: {result:?}"
     );
-    let peer_state = manager.peers.get(&key(peer)).unwrap();
+    let peer_state = manager.peers.get(&key(peer.addr())).unwrap();
     assert!(peer_state.pending_export_apply);
     assert!(
         late_reply
@@ -2583,7 +2608,10 @@ async fn export_only_snapshot_restores_newest_first_after_rib_batch_failure() {
         manager.delete_peer(key(peer), false).await.unwrap();
     }
     drop(manager);
-    assert_eq!(rib_task.await.unwrap(), vec![second, first]);
+    assert_eq!(
+        rib_task.await.unwrap(),
+        vec![PeerId::from_addr(second), PeerId::from_addr(first)]
+    );
 }
 
 /// Session model for the deferred-refresh dispatch regressions: answers every
@@ -2700,11 +2728,14 @@ async fn deferred_refresh_dispatch_keeps_target_order_and_stops_at_failing_membe
                     replacements,
                     reply,
                 } => {
-                    let peers: Vec<IpAddr> = replacements
+                    let peers: Vec<PeerId> = replacements
                         .iter()
                         .map(|replacement| replacement.peer)
                         .collect();
-                    rib_restored.lock().unwrap().extend(peers.iter().copied());
+                    rib_restored
+                        .lock()
+                        .unwrap()
+                        .extend(peers.iter().map(|peer| peer.addr()));
                     let _ = reply.send(Ok(peers
                         .into_iter()
                         .rev()

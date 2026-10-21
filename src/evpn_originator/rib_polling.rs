@@ -619,6 +619,7 @@ pub(super) async fn query_evpn_routes(
 
 #[cfg(test)]
 mod partial_extended_community_tests {
+    use rustbgpd_rib::PeerId;
     use std::time::Instant;
 
     use rustbgpd_evpn::EvpnInstanceTable;
@@ -645,7 +646,7 @@ mod partial_extended_community_tests {
             }),
             next_hop: ipa("10.0.0.2"),
             link_local_next_hop: None,
-            peer: ipa("10.0.0.99"),
+            peer: PeerId::from_addr(ipa("10.0.0.99")),
             attributes: AttrSet::new(vec![attribute]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,

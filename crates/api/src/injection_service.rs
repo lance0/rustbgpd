@@ -1,5 +1,6 @@
 //! gRPC injection service — unicast, `FlowSpec`, and EVPN route add/delete RPCs.
 
+use rustbgpd_rib::PeerId;
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
@@ -834,7 +835,7 @@ fn build_injected_route(req: proto::AddPathRequest) -> Result<Route, Status> {
         next_hop: next_hop_ip,
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: LOCAL_PEER,
+        peer: PeerId::LOCAL,
         attributes: AttrSet::new(attributes),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Local,
@@ -885,7 +886,7 @@ fn build_injected_flowspec(req: proto::AddFlowSpecRequest) -> Result<FlowSpecRou
     Ok(FlowSpecRoute {
         rule,
         afi,
-        peer: LOCAL_PEER,
+        peer: PeerId::LOCAL,
         attributes,
         received_at: std::time::Instant::now(),
         origin_type: RouteOrigin::Local,
@@ -1432,7 +1433,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             route: evpn_route,
             next_hop,
             link_local_next_hop: None,
-            peer: LOCAL_PEER,
+            peer: PeerId::LOCAL,
             attributes: AttrSet::new(attributes),
             received_at: std::time::Instant::now(),
             origin_type: RouteOrigin::Local,
@@ -2171,6 +2172,7 @@ pub(crate) fn parse_route_target(s: &str) -> Result<ExtendedCommunity, Status> {
 mod tests {
     use super::*;
     use proto::injection_service_server::InjectionService as _;
+    use rustbgpd_rib::PeerId;
     use rustbgpd_wire::flowspec::FlowSpecAction;
 
     fn make_service() -> InjectionService {
@@ -2303,10 +2305,10 @@ mod tests {
             managed: 0,
         };
         let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8::7".parse().unwrap(), 128));
-        let peer2: IpAddr = "192.0.2.2".parse().unwrap();
+        let peer2 = PeerId::from_addr("192.0.2.2".parse().unwrap());
         let cursor = RouteExportCursor {
             key: 0,
-            after: Some((peer2, Some(Arc::from("eth0")))),
+            after: Some((peer2.addr(), Some(Arc::from("eth0")))),
         };
         let (tx, mut rx) = mpsc::channel(16);
         let svc = InjectionService::new(tx, AccessMode::ReadOnly, Arc::new(InjectionLeases::new()));
@@ -2344,7 +2346,7 @@ mod tests {
                             found: true,
                             peers: vec![
                                 PeerRouteExport {
-                                    peer: "192.0.2.1".parse().unwrap(),
+                                    peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
                                     peer_interface: None,
                                     disposition: RouteExportDisposition::Withheld,
                                     reason: "family_suppressed:missing_ipv6_next_hop".to_string(),
@@ -2575,7 +2577,7 @@ mod tests {
             let (outbound_tx, outbound_rx) = mpsc::channel(64);
             outbound.push(outbound_rx);
             RibUpdate::PeerUp {
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
+                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))),
                 session_id: 0,
                 peer_asn: 65_010,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2625,7 +2627,7 @@ mod tests {
         assert_eq!(first.peers.len(), 2);
         rib_tx
             .send(RibUpdate::PeerDown {
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
                 session_id: 0,
             })
             .await
@@ -2713,7 +2715,7 @@ mod tests {
             let (outbound_tx, outbound_rx) = mpsc::channel(64);
             outbound.push(outbound_rx);
             RibUpdate::PeerUp {
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
+                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))),
                 session_id: 0,
                 peer_asn: 65_010,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4376,7 +4378,7 @@ mod tests {
 
         // A received rule with the same key and a higher LOCAL_PREF now owns
         // Loc-RIB, so a local replacement no longer changes selection.
-        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let components = parse_flowspec_components(&flowspec_rule_components(), Afi::Ipv4)
             .expect("valid test rule");
         rib_tx
@@ -5581,7 +5583,7 @@ mod tests {
         )
         .with_eor_grace(rustbgpd_rib::EorGraceConfig {
             peers: vec![rustbgpd_rib::EorGracePeerConfig {
-                peer: "192.0.2.2".parse().unwrap(),
+                peer: PeerId::from_addr("192.0.2.2".parse().unwrap()),
                 deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(600),
                 families: vec![(Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
             }],

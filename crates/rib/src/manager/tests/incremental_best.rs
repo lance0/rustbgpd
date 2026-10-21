@@ -18,6 +18,8 @@
 //!    GR/LLGR and live-session maps intentionally permit empty values;
 //!    VPN/RTC extra-withdraw residue is outside this unicast generator.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::time::Instant;
 
 use proptest::prelude::*;
@@ -46,7 +48,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
     let topology_peer = Ipv4Addr::new(10, 9, 9, 9);
     manager.handle_update(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
-        peer: topology_peer.into(),
+        peer: peer_v4(topology_peer),
         announced: crate::orr::fixtures::square_topology(topology_peer),
         withdrawn: vec![],
     });
@@ -57,7 +59,7 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
         (32, 0, true, None),
         (33, 0, false, Some(vantage_at_node_a())),
     ] {
-        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet));
+        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, octet));
         let (outbound_tx, mut out) = mpsc::channel(16);
         manager.handle_update(RibUpdate::PeerUp {
             per_client_best,
@@ -313,8 +315,8 @@ fn srv6_local_injection_retains_invalid_input_without_selecting_it() {
     );
 }
 
-fn peer_addr(peer: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10 + peer))
+fn peer_addr(peer: u8) -> PeerId {
+    peer_v4(Ipv4Addr::new(10, 0, 0, 10 + peer))
 }
 
 fn prefix_of(index: u8) -> Prefix {
@@ -329,7 +331,7 @@ fn prefix_of(index: u8) -> Prefix {
 fn build_route(peer: u8, prefix: u8, path_id: u8, variant: u8, received_at: Instant) -> Route {
     Route {
         prefix: prefix_of(prefix),
-        next_hop: peer_addr(peer),
+        next_hop: peer_addr(peer).addr(),
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: peer_addr(peer),

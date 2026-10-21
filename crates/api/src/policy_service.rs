@@ -1,5 +1,6 @@
 //! gRPC policy service — named policy definitions and chain assignment.
 
+use rustbgpd_rib::PeerId;
 use std::net::IpAddr;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -1469,7 +1470,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             Status::failed_precondition("route snapshot runtime unavailable on this listener")
         })?;
         let query_scope = if import {
-            RouteQueryScope::Received { peer: peer_filter }
+            RouteQueryScope::Received {
+                peer: peer_filter.map(PeerId::from_addr),
+            }
         } else {
             RouteQueryScope::Best
         };
@@ -1578,7 +1581,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "",
             self.import_roster.as_ref(),
         )?;
-        let target = target_key.address;
+        let target = PeerId::from_addr(target_key.address);
 
         let file = match RpolFile::parse(&req.rpol_source) {
             Ok(file) => file,
@@ -1717,7 +1720,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         .await?;
 
         let scope = ComparePolicyScope {
-            target,
+            target: target.addr(),
             family_filter,
             limit: req.limit as usize,
             max_samples: req.max_samples as usize,
@@ -1848,7 +1851,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             // The RIB's published export roster, held across the awaits below.
             let export_roster = export_cell.load();
             let chains = policy_stats_request(deadline, "export", audit.as_ref(), async {
-                capture_export(&export_roster, peer, deadline)
+                capture_export(&export_roster, peer.map(PeerId::from_addr), deadline)
                     .await
                     .map_err(|error| match error {
                         ExportCaptureError::TimedOut => {
@@ -2239,10 +2242,15 @@ fn run_test_policy_page(
         let ctx_peer = if scope.import {
             Some(route.peer)
         } else {
-            scope.target_peer
+            scope.target_peer.map(PeerId::from_addr)
         };
         let as_path_str = dry_run_as_path_string(route, needs_as_path_string);
-        let ctx = dry_run_route_context(route, &as_path_str, ctx_peer, peer_context);
+        let ctx = dry_run_route_context(
+            route,
+            &as_path_str,
+            ctx_peer.map(PeerId::addr),
+            peer_context,
+        );
         response.routes_evaluated += 1;
         let result = chain.evaluate_recording_hits(&ctx, hits);
         if result.action == PolicyAction::Permit {
@@ -2584,6 +2592,7 @@ fn render_modification_changes(
 
 #[cfg(test)]
 mod tests {
+    use rustbgpd_rib::PeerId;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -4018,7 +4027,7 @@ policy customer-in(peer_lp: u32) {
             next_hop: "10.0.0.9".parse().unwrap(),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: "10.0.0.9".parse().unwrap(),
+            peer: PeerId::from_addr("10.0.0.9".parse().unwrap()),
             attributes: AttrSet::new(Vec::new()),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -4220,7 +4229,10 @@ policy customer-in(peer_lp: u32) {
             settle_time: Duration::from_secs(5),
             settle_remaining: Some(Duration::from_millis(3_750)),
             selection_deferred: false,
-            attached_peers: vec!["192.0.2.1".parse().unwrap(), "2001:db8::2".parse().unwrap()],
+            attached_peers: vec![
+                PeerId::from_addr("192.0.2.1".parse().unwrap()),
+                PeerId::from_addr("2001:db8::2".parse().unwrap()),
+            ],
         }
     }
 
@@ -5407,8 +5419,8 @@ policy client-x {
 
     #[tokio::test]
     async fn test_policy_import_one_peer_uses_received_scope_filter() {
-        let selected: IpAddr = "10.0.0.9".parse().unwrap();
-        let other: IpAddr = "10.0.0.10".parse().unwrap();
+        let selected = PeerId::from_addr("10.0.0.9".parse().unwrap());
+        let other = PeerId::from_addr("10.0.0.10".parse().unwrap());
         let routes = (0..1001)
             .map(|index| {
                 let mut route = customer_route(index);
@@ -5493,7 +5505,7 @@ policy client-x {
             customer_route(1),
         ];
         for (index, route) in routes.iter_mut().enumerate() {
-            route.peer = peers[index % 2];
+            route.peer = PeerId::from_addr(peers[index % 2]);
             route.path_id = u32::try_from(4 - index).expect("fixture path ID fits in u32");
             route.next_hop = format!("192.0.2.{}", index + 1).parse().unwrap();
         }
@@ -5639,7 +5651,7 @@ policy client-x {
         let mut publisher = ExportRosterPublisher::new();
         publisher.publish(
             vec![(
-                "10.0.0.2".parse().unwrap(),
+                PeerId::from_addr("10.0.0.2".parse().unwrap()),
                 Some(Arc::clone(chain.hit_counters())),
             )],
             None,
@@ -6857,7 +6869,7 @@ policy client-x {
 
     fn scoped_route(prefix: &str, interface: &str) -> rustbgpd_rib::Route {
         let mut route = test_route(prefix, 24);
-        route.peer = link_local();
+        route.peer = PeerId::from_addr(link_local());
         route.aspa_context = rustbgpd_rib::route::AspaContextId::intern_scoped(
             rustbgpd_wire::AspaValidationContext::default(),
             Some(interface),

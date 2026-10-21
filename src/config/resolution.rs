@@ -1,5 +1,6 @@
 //! Neighbor, effective-policy, and inherited per-peer configuration resolution.
 
+use rustbgpd_rib::PeerId;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use rustbgpd_fsm::PeerConfig;
@@ -1485,7 +1486,7 @@ impl Config {
                 })
                 .filter_map(|neighbor| {
                     Some((
-                        neighbor.address.parse().ok()?,
+                        rustbgpd_rib::PeerId::from_addr(neighbor.address.parse().ok()?),
                         pair(
                             neighbor.max_prefixes_out_ipv4_unicast,
                             neighbor.max_prefixes_out_ipv6_unicast,
@@ -1808,7 +1809,7 @@ impl Config {
                 .map(|name| std::sync::Arc::from(name.as_str()))
                 .collect();
             attached.extend(effective.iter().cloned());
-            set.attachments.insert(address, names);
+            set.attachments.insert(PeerId::from_addr(address), names);
         }
         let mut store = SetStore::new();
         for name in attached {

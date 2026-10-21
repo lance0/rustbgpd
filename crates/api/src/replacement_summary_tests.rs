@@ -2,6 +2,7 @@
 //! regression the encoder holds two production probes; the peer-manager
 //! harness supplies the independent first/last RPC stages.
 
+use rustbgpd_rib::PeerId;
 use std::any::Any;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -124,7 +125,7 @@ fn route(index: u8) -> Route {
     let source = Ipv4Addr::new(192, 0, 2, 9);
     Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, index, 0), 24)),
-        peer: source.into(),
+        peer: PeerId::from_addr(source.into()),
         next_hop: source.into(),
         link_local_next_hop: None,
         next_hop_scope: None,
@@ -169,7 +170,7 @@ async fn neighbors(service: &NeighborService) -> proto::ListNeighborsResponse {
     reason = "one end-to-end fixture holds an actual RIB restore and checks both API projections before its acknowledgement"
 )]
 async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let hold = Arc::new(ProbeHold {
@@ -191,7 +192,7 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
         while let Some(query) = operator_rx.recv().await {
             match query.query {
                 PeerManagerOperatorQuery::ListPeers { reply } => {
-                    let _ = reply.send(vec![crate::test_support::peer_info(peer)]);
+                    let _ = reply.send(vec![crate::test_support::peer_info(peer.addr())]);
                 }
                 _ => panic!("unexpected operator query"),
             }
@@ -250,7 +251,7 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
         .unwrap();
     rib_tx
         .send(RibUpdate::RoutesReceived {
-            peer: "192.0.2.9".parse().unwrap(),
+            peer: PeerId::from_addr("192.0.2.9".parse().unwrap()),
             session_id: 0,
             announced: (0..4).map(route).collect(),
             withdrawn: vec![],
@@ -273,7 +274,7 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
     })
     .await
     .unwrap();
-    let baseline_stats = stats(&policy, peer).await;
+    let baseline_stats = stats(&policy, peer.addr()).await;
     assert!(baseline_stats.chains[0].routes_evaluated >= 4);
     assert_ne!(baseline_stats.chains[0].terms.len(), 0);
     hold.armed.store(true, Ordering::SeqCst);
@@ -306,7 +307,7 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
     // Export statistics read the RIB's published roster (ADR-0136): they
     // complete while the restore still holds the RIB, reporting the
     // instances of the last completed operation.
-    let actual_stats = tokio::time::timeout(Duration::from_secs(1), stats(&policy, peer))
+    let actual_stats = tokio::time::timeout(Duration::from_secs(1), stats(&policy, peer.addr()))
         .await
         .expect("export statistics do not wait for the held RIB");
     let mut neighbor_request = tokio::spawn({
@@ -396,8 +397,8 @@ enum HeldExport {
 )]
 async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
     let selection_release = mode == HeldExport::SelectionRelease;
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
-    let source: IpAddr = "192.0.2.9".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
+    let source = PeerId::from_addr("192.0.2.9".parse().unwrap());
     let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let hold = Arc::new(ProbeHold {
@@ -427,7 +428,7 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
         while let Some(query) = peer_readiness_rx.recv().await {
             match query {
                 PeerManagerReadinessQuery::ListPeers { reply } => {
-                    let _ = reply.send(vec![crate::test_support::peer_info(peer)]);
+                    let _ = reply.send(vec![crate::test_support::peer_info(peer.addr())]);
                 }
                 PeerManagerReadinessQuery::Ping { .. } => panic!("unexpected readiness query"),
             }
@@ -461,7 +462,7 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
             .await
             .unwrap();
         rib_tx
-            .send(export_peer_up(source, 1, source_tx))
+            .send(export_peer_up(source.addr(), 1, source_tx))
             .await
             .unwrap();
     }
@@ -491,7 +492,7 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
         .unwrap();
     let (outbound_tx, mut outbound_rx) = mpsc::channel(32);
     rib_tx
-        .send(export_peer_up(peer, 0, outbound_tx))
+        .send(export_peer_up(peer.addr(), 0, outbound_tx))
         .await
         .unwrap();
     if selection_release {
@@ -664,7 +665,7 @@ fn export_peer_up(
     outbound_tx: mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
-        peer,
+        peer: PeerId::from_addr(peer),
         session_id,
         peer_asn: 65001,
         peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -695,7 +696,7 @@ fn export_peer_up(
     reason = "one actual-RIB fixture walks GR entry, both reads, and the sweep"
 )]
 async fn down_dynamic_neighbor_retention_row_lasts_until_sweep() {
-    let peer: IpAddr = "192.0.2.9".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.9".parse().unwrap());
     let (rib_tx, rib_rx) = mpsc::channel(16);
     let (query_tx, query_rx) = mpsc::channel(8);
     let manager = RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
@@ -733,7 +734,7 @@ async fn down_dynamic_neighbor_retention_row_lasts_until_sweep() {
 
     let (outbound_tx, _outbound_rx) = mpsc::channel(32);
     rib_tx
-        .send(export_peer_up(peer, 0, outbound_tx))
+        .send(export_peer_up(peer.addr(), 0, outbound_tx))
         .await
         .unwrap();
     rib_tx

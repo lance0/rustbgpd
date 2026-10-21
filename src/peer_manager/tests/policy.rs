@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 
@@ -787,7 +788,7 @@ async fn dataset_export_refresh_batches_only_dependent_peers_for_reevaluation() 
                 );
             };
             peers.sort();
-            batches.push(peers);
+            batches.push(peers.iter().map(|peer| peer.addr()).collect::<Vec<_>>());
             reply.send(Ok(())).unwrap();
         }
         batches
@@ -899,7 +900,7 @@ async fn dataset_refresh_discovers_conditional_advertisement_predicates() {
             condition_policy: Some(dataset_chain("primary")),
             settle_time: Duration::from_secs(5),
         }],
-        attachments: [(attached, vec![Arc::from("backup")])]
+        attachments: [(PeerId::from_addr(attached), vec![Arc::from("backup")])]
             .into_iter()
             .collect(),
     };
@@ -1540,7 +1541,7 @@ async fn owned_policy_failure_diagnostic_never_carries_rib_secret_text() {
     use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
 
     const SECRET: &str = "super-secret-rib-token";
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 11));
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 11)));
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
     let (_command_tx, command_rx) = mpsc::channel(16);
     let mut mgr = PeerManager::new(
@@ -1555,11 +1556,11 @@ async fn owned_policy_failure_diagnostic_never_carries_rib_secret_text() {
     );
     insert_test_managed_peer(
         &mut mgr,
-        peer,
-        acking_policy_handle(peer, SessionState::Established),
+        peer.addr(),
+        acking_policy_handle(peer.addr(), SessionState::Established),
         false,
     );
-    let mut neighbor = config_neighbor(peer, 65002);
+    let mut neighbor = config_neighbor(peer.addr(), 65002);
     neighbor.export_policy_chain = vec!["edge-export".to_string()];
     mgr.current_config.neighbors = vec![neighbor];
 
@@ -1572,7 +1573,7 @@ async fn owned_policy_failure_diagnostic_never_carries_rib_secret_text() {
             },
             ack: None,
         },
-        Some(vec![peer]),
+        Some(vec![peer.addr()]),
     );
     let rib = async {
         let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx.recv().await.unwrap() else {
@@ -2535,7 +2536,7 @@ async fn conditional_install_shares_one_deadline_across_send_and_reply() {
     // Fill the mailbox so the install waits for admission.
     rib_tx
         .send(RibUpdate::PeerDeleted {
-            peer: Ipv4Addr::new(192, 0, 2, 1).into(),
+            peer: PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 1).into()),
             label: None,
         })
         .await
@@ -2551,8 +2552,10 @@ async fn conditional_install_shares_one_deadline_across_send_and_reply() {
         drop(held);
     });
     let mut set = rustbgpd_rib::ConditionalAdvertisementSet::default();
-    set.attachments
-        .insert(Ipv4Addr::new(10, 0, 0, 1).into(), vec![Arc::from("backup")]);
+    set.attachments.insert(
+        PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 1).into()),
+        vec![Arc::from("backup")],
+    );
     let started = tokio::time::Instant::now();
     let error = mgr
         .install_conditional_advertisements(set, &[])

@@ -7,7 +7,9 @@
 //! `distribution::no_export_export_suppressed`.
 
 use super::*;
+use crate::PeerId;
 use crate::attr_set::AttrSet;
+use crate::test_support::peer_v4;
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
 fn no_export_chain(add: bool) -> PolicyChain {
@@ -58,7 +60,7 @@ fn with_communities(mut route: Route, communities: Vec<u32>) -> Route {
 /// `PeerUp` for a unicast peer with explicit eBGP / RFC 1997 knobs.
 async fn unicast_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     is_ebgp: bool,
     interpret_rfc1997: bool,
     export_policy: Option<PolicyChain>,
@@ -93,7 +95,7 @@ async fn unicast_peer_up(
     out_rx
 }
 
-async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, source: IpAddr, routes: Vec<Route>) {
+async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, source: PeerId, routes: Vec<Route>) {
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -109,7 +111,7 @@ async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, source: IpAddr, routes: 
     .unwrap();
 }
 
-async fn query_update_group_label(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
+async fn query_update_group_label(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> String {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
         .await
@@ -154,9 +156,9 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let honor: IpAddr = "192.0.2.60".parse().unwrap();
-    let transparent: IpAddr = "192.0.2.61".parse().unwrap();
-    let internal: IpAddr = "192.0.2.62".parse().unwrap();
+    let honor = PeerId::from_addr("192.0.2.60".parse().unwrap());
+    let transparent = PeerId::from_addr("192.0.2.61".parse().unwrap());
+    let internal = PeerId::from_addr("192.0.2.62".parse().unwrap());
 
     let mut honor_rx = unicast_peer_up(&tx, honor, true, true, None, 0).await;
     let mut transparent_rx = unicast_peer_up(&tx, transparent, true, false, None, 0).await;
@@ -178,7 +180,7 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
     );
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 10));
     let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 10));
     announce_unicast(&tx, source, vec![plain.clone()]).await;
     let _ = query_best_routes(&tx).await;
@@ -230,7 +232,7 @@ async fn no_export_suppresses_honor_ebgp_only_and_splits_update_groups() {
                 .expect("tagged replacement re-announced to non-suppressed peers");
             assert_eq!(update.announce.len(), 1, "{peer}");
             assert!(update.withdraw.is_empty(), "{peer}");
-            let response = collect_advertised_routes(&tx, peer).await;
+            let response = collect_advertised_routes(&tx, PeerId::from_addr(peer.addr())).await;
             assert_eq!(response.len(), 1, "{peer}");
         }
 
@@ -257,8 +259,8 @@ async fn policy_added_no_export_is_delivered_and_policy_removed_does_not_bypass(
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let adder: IpAddr = "192.0.2.70".parse().unwrap();
-    let remover: IpAddr = "192.0.2.71".parse().unwrap();
+    let adder = PeerId::from_addr("192.0.2.70".parse().unwrap());
+    let remover = PeerId::from_addr("192.0.2.71".parse().unwrap());
 
     let mut adder_rx =
         unicast_peer_up(&tx, adder, true, true, Some(no_export_chain(true)), 0).await;
@@ -266,7 +268,7 @@ async fn policy_added_no_export_is_delivered_and_policy_removed_does_not_bypass(
         unicast_peer_up(&tx, remover, true, true, Some(no_export_chain(false)), 0).await;
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 11));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 11));
     let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 11));
 
     // Policy-added NO_EXPORT: the modified route goes out carrying it.
@@ -344,7 +346,7 @@ async fn vpn_no_export_source_route_suppressed_to_honor_ebgp_only() {
     for (peer, interpret) in [(honor, true), (transparent, false)] {
         let (out_tx, mut out_rx) = mpsc::channel(32);
         tx.send(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65100,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -367,7 +369,7 @@ async fn vpn_no_export_source_route_suppressed_to_honor_ebgp_only() {
         receivers.push((peer, out_rx));
     }
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let plain = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
     let key = plain.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -430,7 +432,7 @@ async fn labeled_no_export_source_route_suppressed_to_honor_ebgp_only() {
     for (peer, interpret) in [(honor, true), (transparent, false)] {
         let (out_tx, mut out_rx) = mpsc::channel(32);
         tx.send(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65100,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -453,7 +455,7 @@ async fn labeled_no_export_source_route_suppressed_to_honor_ebgp_only() {
         receivers.push((peer, out_rx));
     }
 
-    let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+    let source = peer_v4(Ipv4Addr::new(192, 0, 2, 11));
     let plain = make_labeled_rib_route(Ipv4Addr::new(192, 0, 2, 11), 44, 100, 100);
     let key = plain.key();
     tx.send(RibUpdate::LabeledRoutesReceived {
@@ -513,8 +515,8 @@ async fn explain_best_path_candidate_walk_matches_live_no_export_staging() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let honor: IpAddr = "192.0.2.100".parse().unwrap();
-    let transparent: IpAddr = "192.0.2.101".parse().unwrap();
+    let honor = PeerId::from_addr("192.0.2.100".parse().unwrap());
+    let transparent = PeerId::from_addr("192.0.2.101".parse().unwrap());
     let mut honor_rx = unicast_peer_up(&tx, honor, true, true, None, 2).await;
     let mut transparent_rx = unicast_peer_up(&tx, transparent, true, false, None, 2).await;
 
@@ -526,21 +528,21 @@ async fn explain_best_path_candidate_walk_matches_live_no_export_staging() {
         make_route_with_lp(prefix, source_b, 100),
         vec![rustbgpd_wire::COMMUNITY_NO_EXPORT],
     );
-    announce_unicast(&tx, IpAddr::V4(source_a), vec![best]).await;
-    announce_unicast(&tx, IpAddr::V4(source_b), vec![sibling]).await;
+    announce_unicast(&tx, peer_v4(source_a), vec![best]).await;
+    announce_unicast(&tx, peer_v4(source_b), vec![sibling]).await;
     let _ = query_best_routes(&tx).await;
 
     // Live: the honor peer stages only the clean path; the transparent
     // peer stages both ranks.
-    let honor_state: Vec<(IpAddr, u32)> = {
+    let honor_state: Vec<(PeerId, u32)> = {
         let mut ranks = Vec::new();
         while let Ok(update) = honor_rx.try_recv() {
             ranks.extend(update.announce.iter().map(|r| (r.peer, r.path_id)));
         }
         ranks
     };
-    assert_eq!(honor_state, vec![(IpAddr::V4(source_a), 1)]);
-    let transparent_state: Vec<IpAddr> = {
+    assert_eq!(honor_state, vec![(peer_v4(source_a), 1)]);
+    let transparent_state: Vec<PeerId> = {
         let mut peers = Vec::new();
         while let Ok(update) = transparent_rx.try_recv() {
             peers.extend(update.announce.iter().map(|r| r.peer));
@@ -556,7 +558,7 @@ async fn explain_best_path_candidate_walk_matches_live_no_export_staging() {
     let tagged = explain
         .candidates
         .iter()
-        .find(|candidate| candidate.route.peer == IpAddr::V4(source_b))
+        .find(|candidate| candidate.route.peer == peer_v4(source_b))
         .expect("tagged sibling present in the candidate walk");
     assert_eq!(
         tagged.advertised_path_id, 0,
@@ -568,7 +570,7 @@ async fn explain_best_path_candidate_walk_matches_live_no_export_staging() {
     let tagged = explain
         .candidates
         .iter()
-        .find(|candidate| candidate.route.peer == IpAddr::V4(source_b))
+        .find(|candidate| candidate.route.peer == peer_v4(source_b))
         .expect("tagged sibling present in the candidate walk");
     assert_ne!(
         tagged.advertised_path_id, 0,
@@ -590,7 +592,7 @@ async fn received_llgr_stale_no_export_form_suppressed_despite_llgr_eligibility(
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let peer: IpAddr = "192.0.2.110".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.110".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(32);
     tx.send(RibUpdate::PeerUp {
         peer,
@@ -616,7 +618,7 @@ async fn received_llgr_stale_no_export_form_suppressed_despite_llgr_eligibility(
     drain_eor(&mut out_rx).await;
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 30));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 30));
     let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 30));
 
     // Carried LLGR_STALE alone: eligible (peer advertised LLGR).

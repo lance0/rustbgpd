@@ -726,7 +726,7 @@ async fn multi_label_routes_are_withheld_for_every_label_stack_family() {
     reason = "one ordered RIB-to-outbound scenario across both label-stack SAFIs"
 )]
 async fn one_to_two_label_replacement_withdraws_the_advertised_copy() {
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
     let rib_metrics = BgpMetrics::new();
     let (mut session, rib_rx) =
         make_test_session_with_metrics_and_identity(BgpMetrics::new(), SessionIdentity::primary(7));
@@ -746,7 +746,7 @@ async fn one_to_two_label_replacement_withdraws_the_advertised_copy() {
     session
         .rib_tx
         .send(RibUpdate::SetPeerExportEncoder {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id: 7,
             encoder: session.export_encoder.clone(),
         })
@@ -755,7 +755,7 @@ async fn one_to_two_label_replacement_withdraws_the_advertised_copy() {
     session
         .rib_tx
         .send(RibUpdate::PeerUp {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id: 7,
             peer_asn: 65002,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),

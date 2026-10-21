@@ -1,4 +1,6 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
 #[tokio::test]
 async fn export_policy_counter_records_single_best_permit() {
@@ -7,8 +9,8 @@ async fn export_policy_counter_records_single_best_permit() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -90,8 +92,8 @@ async fn graceful_restart_clears_export_policy_stats() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -165,8 +167,8 @@ async fn explain_advertised_route_does_not_increment_export_policy_counter() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -257,7 +259,7 @@ async fn export_policy_blocks_denied() {
     );
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -281,7 +283,7 @@ async fn export_policy_blocks_denied() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     // This route matches the deny entry
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -327,7 +329,7 @@ async fn query_advertised_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -350,7 +352,7 @@ async fn query_advertised_routes() {
     .await
     .unwrap();
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -412,8 +414,8 @@ async fn per_peer_export_policy() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
 
     let (send_filtered, mut recv_filtered) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
@@ -462,7 +464,7 @@ async fn per_peer_export_policy() {
     drain_eor(&mut recv_unfiltered).await;
 
     // Source peer sends both prefixes
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -531,7 +533,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     // The target session's accepted context names its interface; the event
     // records it as the target's scope.
@@ -569,7 +571,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     // The source route records the interface it was learned on.
     let mut source_route = make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1));
     source_route.aspa_context = crate::route::AspaContextId::intern_scoped(
@@ -695,7 +697,7 @@ async fn export_policy_match_next_hop_filters_route() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -720,7 +722,7 @@ async fn export_policy_match_next_hop_filters_route() {
     drain_eor(&mut out_rx).await;
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -750,7 +752,7 @@ async fn explain_advertised_route_reports_no_best_route() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -796,8 +798,8 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -904,8 +906,8 @@ async fn export_as_path_regex_still_filters_through_distribution() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -998,8 +1000,8 @@ async fn explain_advertised_route_reports_modifications() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1115,8 +1117,8 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1205,8 +1207,8 @@ async fn export_ipv4_next_hop_does_not_apply_to_an_ipv6_route() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1266,7 +1268,7 @@ async fn peer_down_cleans_up_export_policy() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, _out_rx) = mpsc::channel(64);
     let policy = Some(PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
@@ -1373,8 +1375,8 @@ policy chain_default_permit {
     let roster = manager.export_roster();
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1468,12 +1470,12 @@ policy chain_default_permit {
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].terms[0].hits, 1);
     let missing =
-        published_export_rows(&tx, &roster, Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)))).await;
+        published_export_rows(&tx, &roster, Some(peer_v4(Ipv4Addr::new(192, 0, 2, 99)))).await;
     assert!(missing.is_empty());
 
     // An anonymous `.rpol` Deny has no stable member identity. Its term must
     // not escape into the operator label as `inline:<term>`.
-    let anonymous_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let anonymous_target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let (anonymous_out_tx, mut anonymous_out_rx) = mpsc::channel(8);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1607,7 +1609,7 @@ async fn export_memo_shares_identical_modified_attrs_and_keys_peer_varying_chain
             per_client_best: false,
             interpret_rfc1997: true,
             session_id: 0,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, host)),
+            peer: peer_v4(Ipv4Addr::new(10, 0, 0, host)),
             peer_asn: asn,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             outbound_tx: out_tx,
@@ -1633,7 +1635,7 @@ async fn export_memo_shares_identical_modified_attrs_and_keys_peer_varying_chain
     let source_attrs = Arc::clone(&route.attributes);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        peer: peer_v4(Ipv4Addr::new(10, 0, 0, 1)),
         announced: vec![route],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -1723,7 +1725,7 @@ async fn single_best_policy_added_no_advertise_emits_policy_filtered_event() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1747,7 +1749,7 @@ async fn single_best_policy_added_no_advertise_emits_policy_filtered_event() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1835,7 +1837,7 @@ async fn grouped_join_inherits_group_export_policy_denials() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let peer_up = |peer: IpAddr, outbound_tx| RibUpdate::PeerUp {
+    let peer_up = |peer: PeerId, outbound_tx| RibUpdate::PeerUp {
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1854,12 +1856,12 @@ async fn grouped_join_inherits_group_export_policy_denials() {
         negotiated_llgr_families: Vec::new(),
     };
 
-    let founder = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let founder = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (founder_tx, mut founder_rx) = mpsc::channel(64);
     tx.send(peer_up(founder, founder_tx)).await.unwrap();
     drain_eor(&mut founder_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1880,7 +1882,7 @@ async fn grouped_join_inherits_group_export_policy_denials() {
     assert_eq!(update.announce.len(), 1);
     assert_eq!(update.announce[0].prefix, Prefix::V4(permitted_prefix));
 
-    let joiner = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let joiner = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let (joiner_tx, mut joiner_rx) = mpsc::channel(64);
     tx.send(peer_up(joiner, joiner_tx)).await.unwrap();
     let initial = joiner_rx.recv().await.unwrap();

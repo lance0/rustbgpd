@@ -1,10 +1,11 @@
+use crate::test_support::peer_v4;
 use std::future::Future;
 use std::task::{Context, Waker};
 
 use super::*;
 
 fn timer_manager(rx: mpsc::Receiver<RibUpdate>, query_rx: mpsc::Receiver<RibUpdate>) -> RibManager {
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new())
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(1),
@@ -21,7 +22,7 @@ fn timer_manager(rx: mpsc::Receiver<RibUpdate>, query_rx: mpsc::Receiver<RibUpda
 
 fn routes(peer: Ipv4Addr, first: usize, count: usize) -> RibUpdate {
     RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: (first..first + count)
             .map(|index| {
@@ -196,7 +197,7 @@ async fn timer_drain_invalidates_a_page_before_the_next_route_chunk() {
 
 #[tokio::test(start_paused = true)]
 async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (tx, rx) = mpsc::channel(8);
     let (query_tx, query_rx) = mpsc::channel(8);
     let (readiness_tx, readiness_rx) = mpsc::channel(8);

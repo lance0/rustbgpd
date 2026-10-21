@@ -981,7 +981,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::SetPeerExportContext {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             local_role: self.config.peer.local_role,
                         })
@@ -995,7 +995,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::SetPeerRsControl {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             rs_control_asn: self
                                 .config
@@ -1011,7 +1011,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::SetPeerExportEncoder {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             encoder: self.export_encoder.clone(),
                         })
@@ -1023,7 +1023,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::SetPeerExportPolicyCounters {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             counters: self.config.neighbor_counters.export_policy().clone(),
                         })
@@ -1036,7 +1036,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::SetPeerGracefulRestartContext {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             peer_restart_state,
                             peer_gr_helper,
@@ -1061,7 +1061,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::SetPeerPolicyContext {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             peer_group: self.config.peer_group.clone(),
                         })
@@ -1070,7 +1070,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::SetPeerSourceContext {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             context: std::sync::Arc::new(rustbgpd_rib::update::PeerSourceContext {
                                 dampening_admission: self.config.dampening_admission.clone(),
@@ -1088,7 +1088,7 @@ impl PeerSession {
                         let _ = self
                             .rib_tx
                             .send(RibUpdate::SetPeerWithheldFamilies {
-                                peer: self.peer_ip,
+                                peer: self.rib_peer(),
                                 session_id: self.session_identity.id,
                                 families: withheld_families,
                             })
@@ -1099,7 +1099,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::PeerUp {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             peer_asn,
                             peer_router_id: self
@@ -1137,7 +1137,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::PeerAddPathLimits {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             limits: add_path_send_limits,
                         })
@@ -1241,7 +1241,7 @@ impl PeerSession {
                                 .map(|f| (f.afi, f.safi))
                                 .collect();
                             Some(RibUpdate::PeerGracefulRestart {
-                                peer: self.peer_ip,
+                                peer: self.rib_peer(),
                                 session_id: self.session_identity.id,
                                 restart_time: neg
                                     .peer_restart_time
@@ -1317,7 +1317,7 @@ impl PeerSession {
                     self.outbound_rx = new_rx;
 
                     let rib_msg = gr_update.unwrap_or(RibUpdate::PeerDown {
-                        peer: self.peer_ip,
+                        peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                     });
                     let _ = self.rib_tx.send(rib_msg).await;

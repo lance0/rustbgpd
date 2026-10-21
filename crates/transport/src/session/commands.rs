@@ -1408,7 +1408,7 @@ impl PeerSession {
             }
             PeerCommand::ResetEvpnRecoverySession { request, reply } => {
                 if self.fsm.state() != SessionState::Established
-                    || request.peer != self.peer_ip
+                    || request.peer != self.rib_peer()
                     || request.session_id != self.session_identity.id
                     || request.outbound.is_closed()
                     || !request.outbound.same_channel(&self.outbound_tx)
@@ -1612,7 +1612,7 @@ impl PeerSession {
                 let policy = policy.map(|policy| *policy);
                 self.export_policy = policy;
                 permit.send(RibUpdate::SetPeerSessionExportPolicy {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     export_policy: self.export_policy.clone(),
                 });
@@ -1708,7 +1708,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::PeerFamilySendable {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                             family,
                             add_path_send_limit: neg
@@ -1864,7 +1864,7 @@ impl PeerSession {
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::PeerDown {
-                            peer: self.peer_ip,
+                            peer: self.rib_peer(),
                             session_id: self.session_identity.id,
                         })
                         .await;

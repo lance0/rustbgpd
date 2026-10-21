@@ -131,7 +131,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: Arc::clone(&attrs),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -224,7 +224,7 @@ async fn send_route_update_packs_equal_attributes_from_distinct_allocations() {
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             attributes: AttrSet::new(attrs.clone()),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -291,7 +291,7 @@ async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(attrs.clone()),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -332,7 +332,7 @@ fn v4_route_with(attributes: Arc<AttrSet>, third_octet: u8, next_hop: Ipv4Addr) 
         next_hop: IpAddr::V4(next_hop),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes,
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -408,7 +408,7 @@ async fn value_grouping_packs_ipv4_mp_reach_from_distinct_allocations() {
             route.next_hop = IpAddr::V6("fe80::2".parse().unwrap());
             route.link_local_next_hop = Some("fe80::2".parse().unwrap());
             route.next_hop_scope = session.link_local_next_hop_scope.clone().map(Box::new);
-            route.peer = IpAddr::V6("fe80::2".parse().unwrap());
+            route.peer = PeerId::from_addr(IpAddr::V6("fe80::2".parse().unwrap()));
             route
         })
         .collect();
@@ -522,7 +522,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: Arc::clone(&attrs),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -627,7 +627,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: Arc::clone(&attrs),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -798,7 +798,7 @@ async fn send_route_update_splits_oversized_ipv4_mp_reach_across_updates() {
             next_hop: IpAddr::V6("fe80::2".parse().unwrap()),
             link_local_next_hop: Some("fe80::2".parse().unwrap()),
             next_hop_scope: session.link_local_next_hop_scope.clone().map(Box::new),
-            peer: IpAddr::V6("fe80::2".parse().unwrap()),
+            peer: PeerId::from_addr(IpAddr::V6("fe80::2".parse().unwrap())),
             attributes: Arc::clone(&attrs),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -967,7 +967,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
             next_hop: IpAddr::V6("2001:db8::2".parse().unwrap()),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
             attributes: Arc::clone(&attrs),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -1202,7 +1202,7 @@ async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
             next_hop: IpAddr::V6("2001:db8::2".parse().unwrap()),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
             attributes: Arc::clone(&attrs),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -1300,7 +1300,7 @@ async fn extended_flowspec_chunk_probe_grows_and_preserves_exact_order() {
         .map(|rule| FlowSpecRoute {
             rule,
             afi: Afi::Ipv6,
-            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
             attributes: vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
@@ -1432,7 +1432,7 @@ async fn extended_flowspec_chunk_probe_resets_failed_upper_for_smaller_entries()
         .map(|rule| FlowSpecRoute {
             rule,
             afi: Afi::Ipv6,
-            peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            peer: PeerId::from_addr(IpAddr::V6("2001:db8::2".parse().unwrap())),
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -1510,7 +1510,7 @@ async fn destinationless_flowspec_withdrawal_uses_explicit_afi() {
     let route = |afi| FlowSpecRoute {
         rule: rule.clone(),
         afi,
-        peer: "192.0.2.1".parse().unwrap(),
+        peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
         attributes: vec![PathAttribute::Origin(Origin::Igp)],
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -1614,7 +1614,7 @@ async fn send_route_update_chunks_flowspec_without_infallible_build() {
             (0..count).map(move |i| FlowSpecRoute {
                 rule: rule(afi, i),
                 afi,
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
                 attributes: vec![PathAttribute::Origin(Origin::Igp)],
                 received_at: Instant::now(),
                 origin_type: rustbgpd_rib::RouteOrigin::Ebgp,

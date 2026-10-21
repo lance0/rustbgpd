@@ -4,6 +4,8 @@
 //! feeds it. Nothing outside these tests configures a limit, so the seam
 //! tests also pin the unlimited path that every peer takes today.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -163,13 +165,13 @@ fn a_freed_prefix_reannounced_in_the_same_batch_retakes_its_slot() {
 
 // --- export seam ---
 
-fn register_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<OutboundRouteUpdate> {
+fn register_peer(manager: &mut RibManager, peer: PeerId) -> mpsc::Receiver<OutboundRouteUpdate> {
     register_peer_with_families(manager, peer, &ipv4_sendable())
 }
 
 fn register_peer_with_families(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sendable_families: &[(Afi, Safi)],
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     register_peer_with_selection(manager, peer, sendable_families, false, 0)
@@ -177,7 +179,7 @@ fn register_peer_with_families(
 
 fn register_peer_with_selection(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sendable_families: &[(Afi, Safi)],
     per_client_best: bool,
     add_path_send_max: u32,
@@ -210,7 +212,7 @@ fn register_peer_with_selection(
     outbound_rx
 }
 
-fn set_ipv4_limit(manager: &mut RibManager, peer: IpAddr, cap: u32) {
+fn set_ipv4_limit(manager: &mut RibManager, peer: PeerId, cap: u32) {
     manager
         .outbound_prefix_limits
         .entry(peer)
@@ -220,7 +222,7 @@ fn set_ipv4_limit(manager: &mut RibManager, peer: IpAddr, cap: u32) {
         .limit = Some(limit(cap));
 }
 
-fn announce(manager: &mut RibManager, source: IpAddr, announced: Vec<Route>) {
+fn announce(manager: &mut RibManager, source: PeerId, announced: Vec<Route>) {
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -235,7 +237,7 @@ fn announce(manager: &mut RibManager, source: IpAddr, announced: Vec<Route>) {
     while manager.process_next_route_chunk() {}
 }
 
-fn withdraw(manager: &mut RibManager, source: IpAddr, withdrawn: Vec<(Prefix, u32)>) {
+fn withdraw(manager: &mut RibManager, source: PeerId, withdrawn: Vec<(Prefix, u32)>) {
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -291,7 +293,7 @@ fn source_v6_routes(source: Ipv6Addr, segments: &[u16]) -> Vec<Route> {
 
 fn explain_export(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     prefix: Prefix,
 ) -> crate::update::ExplainAdvertisedRoute {
     let (reply, mut response) = oneshot::channel();
@@ -306,7 +308,7 @@ fn explain_export(
     response.try_recv().unwrap().unwrap()
 }
 
-fn advertised_prefixes(manager: &mut RibManager, peer: IpAddr) -> HashSet<Prefix> {
+fn advertised_prefixes(manager: &mut RibManager, peer: PeerId) -> HashSet<Prefix> {
     let (reply, mut response) = oneshot::channel();
     manager.handle_query_routes_page_versioned(
         crate::update::RouteQueryScope::Advertised { peer },
@@ -331,15 +333,15 @@ fn export_explain_limit_fixture(
     per_client_best: bool,
 ) -> (
     RibManager,
-    IpAddr,
+    PeerId,
     HashSet<Prefix>,
     [mpsc::Receiver<OutboundRouteUpdate>; 2],
 ) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = ungrouped;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
-    let sibling = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let sibling = peer_v4(Ipv4Addr::new(10, 113, 0, 2));
     let mut peer_rx =
         register_peer_with_selection(&mut manager, peer, &ipv4_sendable(), per_client_best, 0);
     let mut sibling_rx =
@@ -348,7 +350,7 @@ fn export_explain_limit_fixture(
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
 
@@ -496,17 +498,13 @@ fn export_explain_allows_existing_add_path_slots_at_outbound_limit() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx =
         register_peer_with_selection(&mut manager, peer, &ipv4_sendable(), false, 2);
     set_ipv4_limit(&mut manager, peer, 1);
     let sources = [Ipv4Addr::new(192, 0, 2, 113), Ipv4Addr::new(192, 0, 2, 114)];
     for source in sources {
-        announce(
-            &mut manager,
-            IpAddr::V4(source),
-            source_routes(source, &[1]),
-        );
+        announce(&mut manager, peer_v4(source), source_routes(source, &[1]));
     }
     assert_eq!(wire_prefixes(&mut outbound_rx), HashSet::from([v4(1)]));
     assert_eq!(
@@ -524,7 +522,7 @@ fn export_explain_allows_existing_add_path_slots_at_outbound_limit() {
             rd: None,
             labeled: false,
             source: Some(crate::update::RouteSourceIdentity {
-                peer: IpAddr::V4(source),
+                peer: peer_v4(source),
                 path_id: 0,
             }),
             reply,
@@ -548,10 +546,10 @@ fn export_explain_allows_existing_add_path_slots_at_outbound_limit() {
 fn source_excluded_route_does_not_consume_grouped_capacity() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 9));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 9));
     set_ipv4_limit(&mut manager, peer, 1);
 
-    let IpAddr::V4(peer_source) = peer else {
+    let IpAddr::V4(peer_source) = peer.addr() else {
         unreachable!()
     };
     let own_route = crate::test_support::make_route(
@@ -595,13 +593,13 @@ fn an_unlimited_peer_admits_every_prefix_and_allocates_no_admission_state() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
 
@@ -627,14 +625,14 @@ fn an_ungrouped_peer_at_its_cap_blocks_the_excess_prefix() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
     set_ipv4_limit(&mut manager, peer, 2);
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
 
@@ -668,14 +666,14 @@ fn operator_force_refresh_preserves_outbound_prefix_cap() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
     set_ipv4_limit(&mut manager, peer, 1);
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2]),
     );
     let admitted = wire_prefixes(&mut outbound_rx);
@@ -699,14 +697,14 @@ fn freed_capacity_readmits_previously_blocked_intent() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
     set_ipv4_limit(&mut manager, peer, 2);
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     let advertised = wire_prefixes(&mut outbound_rx);
@@ -723,7 +721,7 @@ fn freed_capacity_readmits_previously_blocked_intent() {
     //
     // Load-bearing break: scheduling a peer-wide resync instead re-derives
     // every family this peer carries, not the one that regained capacity.
-    withdraw(&mut manager, IpAddr::V4(source), vec![(admitted, 0)]);
+    withdraw(&mut manager, peer_v4(source), vec![(admitted, 0)]);
     assert_eq!(
         manager.outbound_limit_recovery_for(peer),
         vec![Afi::Ipv4],
@@ -756,8 +754,8 @@ fn freed_capacity_readmits_previously_blocked_intent() {
 fn a_limited_group_member_blocks_alone() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let limited = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
-    let sibling = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2));
+    let limited = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let sibling = peer_v4(Ipv4Addr::new(10, 113, 0, 2));
     let mut limited_rx = register_peer(&mut manager, limited);
     let mut sibling_rx = register_peer(&mut manager, sibling);
     set_ipv4_limit(&mut manager, limited, 2);
@@ -765,7 +763,7 @@ fn a_limited_group_member_blocks_alone() {
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
 
@@ -815,20 +813,20 @@ fn peer_teardown_clears_admission_state() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
     set_ipv4_limit(&mut manager, peer, 2);
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     let advertised = wire_prefixes(&mut outbound_rx);
     assert!(manager.outbound_prefix_limits.contains_key(&peer));
     let admitted = *advertised.iter().next().expect("the cap admitted prefixes");
-    withdraw(&mut manager, IpAddr::V4(source), vec![(admitted, 0)]);
+    withdraw(&mut manager, peer_v4(source), vec![(admitted, 0)]);
     assert_eq!(
         manager.outbound_limit_recovery_for(peer),
         vec![Afi::Ipv4],
@@ -853,7 +851,7 @@ fn peer_teardown_clears_admission_state() {
 // --- configuration, transaction, and observability ---
 
 fn limit_config(
-    neighbors: &[(IpAddr, Option<u32>, Option<u32>)],
+    neighbors: &[(PeerId, Option<u32>, Option<u32>)],
     groups: &[(&str, Option<u32>, Option<u32>)],
 ) -> OutboundPrefixLimitConfig {
     let pair = |ipv4: Option<u32>, ipv6: Option<u32>| OutboundPrefixLimitPair {
@@ -919,11 +917,11 @@ fn install(manager: &mut RibManager, txn: u64, config: OutboundPrefixLimitConfig
     apply(manager, txn, true).expect("activation passes");
 }
 
-fn ipv4_row(manager: &RibManager, peer: IpAddr) -> OutboundPrefixLimitFamilyState {
+fn ipv4_row(manager: &RibManager, peer: PeerId) -> OutboundPrefixLimitFamilyState {
     family_row(manager, peer, "ipv4_unicast")
 }
 
-fn family_row(manager: &RibManager, peer: IpAddr, family: &str) -> OutboundPrefixLimitFamilyState {
+fn family_row(manager: &RibManager, peer: PeerId, family: &str) -> OutboundPrefixLimitFamilyState {
     manager
         .outbound_prefix_limit_rows(peer)
         .into_iter()
@@ -934,17 +932,17 @@ fn family_row(manager: &RibManager, peer: IpAddr, family: &str) -> OutboundPrefi
 fn manager_with_queued_ipv4_recovery(
     metrics: BgpMetrics,
     peer_octet: u8,
-) -> (RibManager, IpAddr, mpsc::Receiver<OutboundRouteUpdate>) {
+) -> (RibManager, PeerId, mpsc::Receiver<OutboundRouteUpdate>) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics);
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, peer_octet));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, peer_octet));
     let mut outbound_rx = register_peer(&mut manager, peer);
     install(&mut manager, 1, limit_config(&[(peer, Some(1), None)], &[]));
     let source = Ipv4Addr::new(192, 0, 2, peer_octet);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[41, 42]),
     );
     assert_eq!(wire_prefixes(&mut outbound_rx).len(), 1);
@@ -963,7 +961,7 @@ fn only_an_active_outbound_limit_apply_attempt_records_an_apply_batch() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let _outbound_rx = register_peer(&mut manager, peer);
 
     assert_eq!(
@@ -1004,7 +1002,7 @@ fn only_an_active_outbound_limit_apply_attempt_records_an_apply_batch() {
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2]),
     );
     assert!(
@@ -1044,13 +1042,13 @@ fn only_a_real_withheld_prefix_recovery_records_a_recovery_batch() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
     install(&mut manager, 1, limit_config(&[(peer, Some(2), None)], &[]));
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
@@ -1086,11 +1084,7 @@ fn recovery_ticks_slice_peers_in_order_and_keep_each_slice_truthful() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     manager.test_force_ungrouped = true;
-    let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2)),
-        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 3)),
-    ];
+    let peers = [1, 2, 3].map(|host| peer_v4(Ipv4Addr::new(10, 113, 0, host)));
     let mut outbound = peers
         .into_iter()
         .map(|peer| register_peer(&mut manager, peer))
@@ -1110,7 +1104,7 @@ fn recovery_ticks_slice_peers_in_order_and_keep_each_slice_truthful() {
     let source = Ipv4Addr::new(192, 0, 2, 114);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[11, 12]),
     );
     for receiver in &mut outbound {
@@ -1200,12 +1194,7 @@ fn backpressured_recovery_rotates_past_healthy_peers_and_retries() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peers = [
-        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2)),
-        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 3)),
-        IpAddr::V4(Ipv4Addr::new(10, 113, 0, 4)),
-    ];
+    let peers = [1, 2, 3, 4].map(|host| peer_v4(Ipv4Addr::new(10, 113, 0, host)));
     let mut outbound = peers
         .into_iter()
         .map(|peer| register_peer(&mut manager, peer))
@@ -1215,7 +1204,7 @@ fn backpressured_recovery_rotates_past_healthy_peers_and_retries() {
     let source = Ipv4Addr::new(192, 0, 2, 120);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[61, 62]),
     );
     for receiver in &mut outbound {
@@ -1306,16 +1295,16 @@ fn stale_recovery_head_is_skipped(closed_registration: bool) {
     ];
     let mut outbound = peers
         .into_iter()
-        .map(|peer| register_peer(&mut manager, peer))
+        .map(|peer| register_peer(&mut manager, PeerId::from_addr(peer)))
         .collect::<Vec<_>>();
     install(
         &mut manager,
         1,
         limit_config(
             &[
-                (peers[0], Some(1), None),
-                (peers[1], Some(1), None),
-                (peers[2], Some(1), None),
+                (PeerId::from_addr(peers[0]), Some(1), None),
+                (PeerId::from_addr(peers[1]), Some(1), None),
+                (PeerId::from_addr(peers[2]), Some(1), None),
             ],
             &[],
         ),
@@ -1323,7 +1312,7 @@ fn stale_recovery_head_is_skipped(closed_registration: bool) {
     let source = Ipv4Addr::new(192, 0, 2, 115);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[21, 22]),
     );
     for receiver in &mut outbound {
@@ -1334,9 +1323,9 @@ fn stale_recovery_head_is_skipped(closed_registration: bool) {
         2,
         limit_config(
             &[
-                (peers[0], Some(2), None),
-                (peers[1], Some(2), None),
-                (peers[2], Some(2), None),
+                (PeerId::from_addr(peers[0]), Some(2), None),
+                (PeerId::from_addr(peers[1]), Some(2), None),
+                (PeerId::from_addr(peers[2]), Some(2), None),
             ],
             &[],
         ),
@@ -1344,21 +1333,27 @@ fn stale_recovery_head_is_skipped(closed_registration: bool) {
 
     drop(outbound.remove(0));
     if !closed_registration {
-        manager.outbound_peers.remove(&peers[0]);
+        manager.outbound_peers.remove(&PeerId::from_addr(peers[0]));
     }
-    let before = closed_registration.then(|| ipv4_row(&manager, peers[0]));
+    let before = closed_registration.then(|| ipv4_row(&manager, PeerId::from_addr(peers[0])));
     assert!(manager.resync_tick_pending());
     assert!(manager.drain_outbound_limit_recovery());
-    assert_eq!(manager.outbound_limit_recovery_for(peers[0]), vec![]);
-    assert_eq!(manager.outbound_limit_recovery_for(peers[1]), vec![]);
     assert_eq!(
-        manager.outbound_limit_recovery_for(peers[2]),
+        manager.outbound_limit_recovery_for(PeerId::from_addr(peers[0])),
+        vec![]
+    );
+    assert_eq!(
+        manager.outbound_limit_recovery_for(PeerId::from_addr(peers[1])),
+        vec![]
+    );
+    assert_eq!(
+        manager.outbound_limit_recovery_for(PeerId::from_addr(peers[2])),
         vec![Afi::Ipv4]
     );
     assert_eq!(wire_prefixes(&mut outbound[0]).len(), 2);
     assert_eq!(wire_prefixes(&mut outbound[1]), HashSet::new());
-    assert_eq!(ipv4_row(&manager, peers[1]).usage, 2);
-    assert_eq!(ipv4_row(&manager, peers[2]).usage, 1);
+    assert_eq!(ipv4_row(&manager, PeerId::from_addr(peers[1])).usage, 2);
+    assert_eq!(ipv4_row(&manager, PeerId::from_addr(peers[2])).usage, 1);
     assert!(manager.drain_outbound_limit_recovery());
     assert_eq!(wire_prefixes(&mut outbound[0]), HashSet::new());
     assert_eq!(wire_prefixes(&mut outbound[1]).len(), 2);
@@ -1372,11 +1367,19 @@ fn stale_recovery_head_is_skipped(closed_registration: bool) {
             < f64::EPSILON
     );
     if let Some(before) = before {
-        assert_eq!(ipv4_row(&manager, peers[0]).usage, before.usage);
-        assert_eq!(ipv4_row(&manager, peers[0]).blocking, before.blocking);
+        assert_eq!(
+            ipv4_row(&manager, PeerId::from_addr(peers[0])).usage,
+            before.usage
+        );
+        assert_eq!(
+            ipv4_row(&manager, PeerId::from_addr(peers[0])).blocking,
+            before.blocking
+        );
     }
     assert_eq!(
-        manager.outbound_peers.contains_key(&peers[0]),
+        manager
+            .outbound_peers
+            .contains_key(&PeerId::from_addr(peers[0])),
         closed_registration
     );
 }
@@ -1390,7 +1393,7 @@ fn gated_closed_recovery_is_cleaned_once_without_clearing_protocol_gates() {
             manager = manager.with_selection_deferral(SelectionDeferralConfig {
                 timeout: std::time::Duration::from_mins(1),
                 waiters: vec![SelectionDeferralWaiterConfig {
-                    peer: "10.113.1.8".parse().unwrap(),
+                    peer: PeerId::from_addr("10.113.1.8".parse().unwrap()),
                     families: ipv4_sendable(),
                 }],
             });
@@ -1443,7 +1446,7 @@ fn ipv4_recovery_is_family_only_and_emits_no_refresh_or_eor_markers() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 4));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 4));
     let mut outbound_rx = register_peer_with_families(&mut manager, peer, &dual_stack_sendable());
     install(
         &mut manager,
@@ -1453,13 +1456,13 @@ fn ipv4_recovery_is_family_only_and_emits_no_refresh_or_eor_markers() {
     let source4 = Ipv4Addr::new(192, 0, 2, 116);
     announce(
         &mut manager,
-        IpAddr::V4(source4),
+        peer_v4(source4),
         source_routes(source4, &[31, 32]),
     );
     let source6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 116, 0, 0, 0, 1);
     announce(
         &mut manager,
-        IpAddr::V6(source6),
+        PeerId::from_addr(IpAddr::V6(source6)),
         source_v6_routes(source6, &[31, 32]),
     );
     assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
@@ -1529,7 +1532,7 @@ fn ipv4_recovery_is_family_only_and_emits_no_refresh_or_eor_markers() {
 fn selection_held_recovery_parks_without_protocol_state_or_timer_spin() {
     let metrics = BgpMetrics::new();
     let (manager, peer, mut outbound_rx) = manager_with_queued_ipv4_recovery(metrics.clone(), 5);
-    let waiter = IpAddr::V4(Ipv4Addr::new(10, 113, 1, 5));
+    let waiter = peer_v4(Ipv4Addr::new(10, 113, 1, 5));
     let mut manager = manager.with_selection_deferral(SelectionDeferralConfig {
         timeout: std::time::Duration::from_mins(1),
         waiters: vec![SelectionDeferralWaiterConfig {
@@ -1801,11 +1804,11 @@ fn a_registration_inherits_its_peer_group_unless_the_neighbor_overrides_it() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let inheriting = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
-    let overriding = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2));
+    let inheriting = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let overriding = peer_v4(Ipv4Addr::new(10, 113, 0, 2));
     for peer in [inheriting, overriding] {
         manager.handle_update(RibUpdate::SetPeerPolicyContext {
-            peer,
+            peer: PeerId::from_addr(peer.addr()),
             session_id: 0,
             peer_group: Some("clients".to_string()),
         });
@@ -1825,7 +1828,7 @@ fn a_registration_inherits_its_peer_group_unless_the_neighbor_overrides_it() {
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
 
@@ -1842,7 +1845,7 @@ fn replacement_peer_policy_context_limits_initial_dump() {
         let (_tx, rx) = mpsc::channel(1);
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
         manager.test_force_ungrouped = true;
-        let peer: IpAddr = "10.113.0.1".parse().unwrap();
+        let peer = PeerId::from_addr("10.113.0.1".parse().unwrap());
         let mut old_rx = register_peer(&mut manager, peer);
         install(
             &mut manager,
@@ -1852,7 +1855,7 @@ fn replacement_peer_policy_context_limits_initial_dump() {
         let source = Ipv4Addr::new(192, 0, 2, 113);
         announce(
             &mut manager,
-            source.into(),
+            peer_v4(source),
             source_routes(source, &[1, 2, 3]),
         );
         assert_eq!(
@@ -1901,7 +1904,7 @@ fn repeated_peer_up_preserves_only_matching_policy_context() {
             let (_tx, rx) = mpsc::channel(1);
             let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
             manager.test_force_ungrouped = true;
-            let peer: IpAddr = "10.113.0.1".parse().unwrap();
+            let peer = PeerId::from_addr("10.113.0.1".parse().unwrap());
             install(
                 &mut manager,
                 1,
@@ -1910,7 +1913,7 @@ fn repeated_peer_up_preserves_only_matching_policy_context() {
             let source = Ipv4Addr::new(192, 0, 2, 113);
             announce(
                 &mut manager,
-                source.into(),
+                peer_v4(source),
                 source_routes(source, &[1, 2, 3]),
             );
             manager.handle_update(RibUpdate::SetPeerPolicyContext {
@@ -1965,14 +1968,14 @@ fn a_lowering_below_current_usage_rejects_the_whole_edit() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let over = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
-    let under = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2));
+    let over = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let under = peer_v4(Ipv4Addr::new(10, 113, 0, 2));
     let mut over_rx = register_peer(&mut manager, over);
     let mut under_rx = register_peer(&mut manager, under);
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     drop(wire_prefixes(&mut over_rx));
@@ -2017,7 +2020,7 @@ fn a_stale_apply_preserves_the_newer_prepared_transaction() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let _outbound_rx = register_peer(&mut manager, peer);
 
     prepare(&mut manager, 1, limit_config(&[(peer, Some(1), None)], &[]))
@@ -2040,7 +2043,7 @@ fn a_raise_schedules_one_family_scoped_recovery_and_activates_once() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
     install(
         &mut manager,
@@ -2051,7 +2054,7 @@ fn a_raise_schedules_one_family_scoped_recovery_and_activates_once() {
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
@@ -2089,13 +2092,13 @@ fn removing_a_maximum_reports_unlimited_without_inventing_a_number() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
     install(&mut manager, 1, limit_config(&[(peer, Some(2), None)], &[]));
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
@@ -2114,7 +2117,7 @@ fn removing_a_maximum_reports_unlimited_without_inventing_a_number() {
 }
 
 /// One peer/family capacity gauge, or `None` when the series is absent.
-fn capacity_gauge(metrics: &BgpMetrics, name: &str, peer: IpAddr, family: &str) -> Option<f64> {
+fn capacity_gauge(metrics: &BgpMetrics, name: &str, peer: PeerId, family: &str) -> Option<f64> {
     let peer = peer.to_string();
     let gathered = metrics.registry().gather();
     let gauge = gathered.iter().find(|group| group.name() == name)?;
@@ -2146,14 +2149,14 @@ fn a_blocking_family_publishes_the_committed_usage_not_the_pre_batch_one() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     manager.test_force_ungrouped = true;
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
     let mut outbound_rx = register_peer(&mut manager, peer);
     set_ipv4_limit(&mut manager, peer, 2);
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2);
@@ -2184,8 +2187,8 @@ fn a_limited_grouped_member_reports_only_what_it_advertised() {
     let metrics = BgpMetrics::new();
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let member = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
-    let sibling = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2));
+    let member = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let sibling = peer_v4(Ipv4Addr::new(10, 113, 0, 2));
     let mut member_rx = register_peer(&mut manager, member);
     let mut sibling_rx = register_peer(&mut manager, sibling);
     install(
@@ -2197,7 +2200,7 @@ fn a_limited_grouped_member_reports_only_what_it_advertised() {
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     let advertised = wire_prefixes(&mut member_rx);
@@ -2353,7 +2356,13 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
     install_over_channel(
         &tx,
         1,
-        limit_config(&[(peers[0], Some(1), None), (peers[1], Some(1), None)], &[]),
+        limit_config(
+            &[
+                (PeerId::from_addr(peers[0]), Some(1), None),
+                (PeerId::from_addr(peers[1]), Some(1), None),
+            ],
+            &[],
+        ),
     )
     .await;
 
@@ -2361,7 +2370,7 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
     for peer in peers {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65_000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2385,7 +2394,7 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
 
     let source = Ipv4Addr::new(192, 0, 2, 113);
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: source_routes(source, &[1, 2]),
         withdrawn: vec![],
@@ -2410,7 +2419,13 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
     install_over_channel(
         &tx,
         2,
-        limit_config(&[(peers[0], Some(2), None), (peers[1], Some(2), None)], &[]),
+        limit_config(
+            &[
+                (PeerId::from_addr(peers[0]), Some(2), None),
+                (PeerId::from_addr(peers[1]), Some(2), None),
+            ],
+            &[],
+        ),
     )
     .await;
 
@@ -2440,14 +2455,14 @@ async fn a_raise_delivers_the_withheld_prefixes_on_a_quiescent_daemon() {
 fn a_grouped_member_materializes_and_carries_its_admitted_set() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let member = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 1));
-    let sibling = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 2));
+    let member = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let sibling = peer_v4(Ipv4Addr::new(10, 113, 0, 2));
     let mut member_rx = register_peer(&mut manager, member);
     let _sibling_rx = register_peer(&mut manager, sibling);
     let source = Ipv4Addr::new(192, 0, 2, 113);
     announce(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         source_routes(source, &[1, 2, 3]),
     );
     let advertised = wire_prefixes(&mut member_rx);

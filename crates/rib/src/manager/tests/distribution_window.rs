@@ -7,6 +7,8 @@
 //! grouped and per-peer sides must agree, and the coalesced run must reach
 //! the same final advertised state as the one-pass-per-message reference.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use rustbgpd_wire::{Afi, Safi};
 
 use super::exportability::MockExactExportEncoder;
@@ -50,7 +52,7 @@ pub(super) fn untimed_window(manager: &mut RibManager) {
 fn routes(from: Ipv4Addr, announced: Vec<Route>, withdrawn: Vec<Ipv4Prefix>) -> RibUpdate {
     RibUpdate::RoutesReceived {
         session_id: SESSION,
-        peer: IpAddr::V4(from),
+        peer: peer_v4(from),
         announced,
         withdrawn: withdrawn
             .into_iter()
@@ -83,7 +85,7 @@ where
 
 /// A member's route-bearing messages (setup `EoR` markers excluded).
 fn route_messages(streams: &Streams, member: Ipv4Addr) -> Vec<&NormMsg> {
-    streams[&IpAddr::V4(member)]
+    streams[&peer_v4(member)]
         .iter()
         .filter(|msg| !msg.announce.is_empty() || !msg.withdraw.is_empty())
         .collect()
@@ -92,8 +94,8 @@ fn route_messages(streams: &Streams, member: Ipv4Addr) -> Vec<&NormMsg> {
 fn route_message_count(streams: &Streams) -> usize {
     streams
         .keys()
-        .map(|peer| match peer {
-            IpAddr::V4(peer) => route_messages(streams, *peer).len(),
+        .map(|peer| match peer.addr() {
+            IpAddr::V4(peer) => route_messages(streams, peer).len(),
             IpAddr::V6(_) => unreachable!("oracle members are IPv4"),
         })
         .sum()
@@ -221,7 +223,7 @@ async fn queued_tagged_rs_control_window_matches_oracle() {
     assert_coalesced_equivalence(&queued, &ungrouped, &sequential);
     let folded = fold(&queued);
     for member in [A, B] {
-        let table = &folded[&IpAddr::V4(member)];
+        let table = &folded[&peer_v4(member)];
         assert!(!table.contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
         assert!(table.contains_key(&(Prefix::V4(pfx(2, 0)), 0)));
         assert!(table.contains_key(&(Prefix::V4(pfx(3, 0)), 0)));
@@ -236,24 +238,24 @@ async fn barrier_update_settles_window_before_it_applies() {
     type Barrier = fn() -> RibUpdate;
     let barriers: [(&str, Barrier); 5] = [
         ("end_of_rib", || RibUpdate::EndOfRib {
-            peer: IpAddr::V4(A),
+            peer: peer_v4(A),
             session_id: SESSION,
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
         }),
         ("route_refresh", || RibUpdate::RouteRefreshRequest {
             queued: Arc::default(),
-            peer: IpAddr::V4(B),
+            peer: peer_v4(B),
             session_id: SESSION,
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
         }),
         ("peer_down", || RibUpdate::PeerDown {
-            peer: IpAddr::V4(A),
+            peer: peer_v4(A),
             session_id: SESSION,
         }),
         ("export_policy", || RibUpdate::ReplacePeerExportPolicy {
-            peer: IpAddr::V4(B),
+            peer: peer_v4(B),
             export_policy: Some(deny_prefix_chain(pfx(2, 0))),
             reply: oneshot::channel().0,
         }),
@@ -353,7 +355,7 @@ fn unregistered_routes(announced: Vec<Route>, withdrawn: Vec<Ipv4Prefix>) -> Rib
     }
 }
 
-fn member_up(peer: IpAddr, session_id: u64) -> (RibUpdate, mpsc::Receiver<OutboundRouteUpdate>) {
+fn member_up(peer: PeerId, session_id: u64) -> (RibUpdate, mpsc::Receiver<OutboundRouteUpdate>) {
     let (outbound_tx, outbound_rx) = mpsc::channel(64);
     let update = RibUpdate::PeerUp {
         peer,
@@ -390,7 +392,7 @@ fn route_envelopes(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<Outbound
 struct RejectionFixture {
     tx: mpsc::Sender<RibUpdate>,
     manager: RibManager,
-    target: IpAddr,
+    target: PeerId,
     /// `[target, other]` outbound receivers.
     receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
     p: Ipv4Prefix,
@@ -402,8 +404,8 @@ fn rejection_fixture() -> RejectionFixture {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     untimed_window(&mut manager);
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 1));
-    let other = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 7, 1));
+    let other = peer_v4(Ipv4Addr::new(10, 0, 7, 2));
     let p = pfx(7, 0);
     let key_p = ExactExportKey::Unicast(Prefix::V4(p), 0);
     let rejecting = MockExactExportEncoder::accepting(1);
@@ -414,11 +416,11 @@ fn rejection_fixture() -> RejectionFixture {
         (other, MockExactExportEncoder::accepting(1)),
     ] {
         manager.handle_update(RibUpdate::SetPeerExportEncoder {
-            peer,
+            peer: PeerId::from_addr(peer.addr()),
             session_id: 1,
             encoder,
         });
-        let (up, mut out) = member_up(peer, 1);
+        let (up, mut out) = member_up(PeerId::from_addr(peer.addr()), 1);
         manager.handle_update(up);
         let _ = route_envelopes(&mut out);
         receivers.push(out);
@@ -499,7 +501,7 @@ fn windows_for(
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.distribution_window_limits = limits;
-    let (up, mut out) = member_up(IpAddr::V4(Ipv4Addr::new(10, 0, 8, 1)), 1);
+    let (up, mut out) = member_up(peer_v4(Ipv4Addr::new(10, 0, 8, 1)), 1);
     manager.handle_update(up);
     let _ = route_envelopes(&mut out);
     for message in messages {
@@ -688,7 +690,7 @@ async fn window_never_waits_and_admits_one_message_per_turn() {
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     untimed_window(&mut manager);
-    let (up, mut out) = member_up(IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1)), 1);
+    let (up, mut out) = member_up(peer_v4(Ipv4Addr::new(10, 0, 9, 1)), 1);
     manager.handle_update(up);
     let _ = route_envelopes(&mut out);
 
@@ -785,11 +787,11 @@ async fn window_dequeues_at_most_one_message_per_turn_including_stale() {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     untimed_window(&mut manager);
-    let member = IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1));
+    let member = peer_v4(Ipv4Addr::new(10, 0, 9, 1));
     let (up, mut out) = member_up(member, 1);
     manager.handle_update(up);
     let _ = route_envelopes(&mut out);
-    let IpAddr::V4(member_v4) = member else {
+    let IpAddr::V4(member_v4) = member.addr() else {
         unreachable!()
     };
     let stale = |prefix| {

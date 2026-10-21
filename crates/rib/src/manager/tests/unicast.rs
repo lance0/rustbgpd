@@ -1,5 +1,7 @@
 use super::*;
+use crate::PeerId;
 use crate::attr_set::AttrSet;
+use crate::test_support::peer_v4;
 use rustbgpd_policy::{
     NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
 };
@@ -104,8 +106,8 @@ async fn partial_communities_enforce_no_export_and_no_advertise() {
     let (tx, rx) = mpsc::channel(32);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "192.0.2.90".parse().unwrap();
-    let source: IpAddr = "198.51.100.90".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.90".parse().unwrap());
+    let source = PeerId::from_addr("198.51.100.90".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: target,
@@ -293,8 +295,8 @@ async fn partial_community_attributes_survive_policy_update_group_and_wire_encod
     let (tx, rx) = mpsc::channel(32);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "192.0.2.91".parse().unwrap();
-    let source: IpAddr = "198.51.100.91".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.91".parse().unwrap());
+    let source = PeerId::from_addr("198.51.100.91".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: target,
@@ -388,7 +390,7 @@ async fn seed_three_dual_stack_candidates(
 }
 
 fn dual_stack_add_path_peer_up(
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
 ) -> RibUpdate {
@@ -449,7 +451,7 @@ async fn deferred_registration_stages_current_session_paths_limit() {
     manager.initial_dump_defer_min_routes = 0;
     let handle = tokio::spawn(manager.run());
     let (v4, v6) = seed_three_dual_stack_candidates(&tx).await;
-    let peer: IpAddr = "192.0.2.70".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.70".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(32);
 
     tx.try_send(dual_stack_add_path_peer_up(peer, 7, out_tx))
@@ -481,7 +483,7 @@ async fn deferred_registration_rejects_superseded_session_paths_limit() {
     manager.initial_dump_defer_min_routes = 0;
     let handle = tokio::spawn(manager.run());
     let (v4, v6) = seed_three_dual_stack_candidates(&tx).await;
-    let peer: IpAddr = "192.0.2.71".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.71".parse().unwrap());
     let (old_tx, mut old_rx) = mpsc::channel(32);
     let (new_tx, mut new_rx) = mpsc::channel(32);
 
@@ -546,8 +548,8 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "192.0.2.30".parse().unwrap();
-    let sibling: IpAddr = "192.0.2.31".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.30".parse().unwrap());
+    let sibling = PeerId::from_addr("192.0.2.31".parse().unwrap());
     let sibling_deny = PolicyChain::new(vec![Policy {
         entries: vec![],
         default_action: PolicyAction::Deny,
@@ -600,7 +602,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     let withdrawn_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![
             make_route(kept_prefix, source),
             make_route(withdrawn_prefix, source),
@@ -618,7 +620,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![],
         withdrawn: vec![(Prefix::V4(withdrawn_prefix), 0)],
         flowspec_announced: vec![],
@@ -633,7 +635,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     // A target-sourced route is present in the Loc-RIB but split-horizon
     // excluded for that target. A NO_ADVERTISE route and a VPN route that
     // neither peer negotiated are likewise never part of its exportable view.
-    let target_source = match target {
+    let target_source = match target.addr() {
         IpAddr::V4(address) => address,
         IpAddr::V6(_) => unreachable!("fixture is IPv4"),
     };
@@ -659,7 +661,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     ));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![rejected],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -687,7 +689,7 @@ async fn refresh_peer_outbound_replays_only_the_target_exportable_inventory() {
     .unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![make_vpn_rib_route(source, 117, 16, 100)],
         withdrawn: vec![],
     })
@@ -788,7 +790,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     for (peer, peer_context) in [(grouped_a, false), (grouped_b, false), (private, true)] {
         let (out_tx, mut out_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 0,
             peer_asn: 65100,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -812,7 +814,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     }
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 10));
     let plain = make_route(prefix, Ipv4Addr::new(198, 51, 100, 10));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -858,10 +860,11 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
         );
         assert_eq!(update.withdraw, vec![(Prefix::V4(prefix), 0)]);
 
-        let response = collect_advertised_routes(&tx, *peer).await;
+        let response = collect_advertised_routes(&tx, PeerId::from_addr(*peer)).await;
         assert!(response.is_empty());
 
-        let explain = query_explain_advertised_route(&tx, *peer, Prefix::V4(prefix)).await;
+        let explain =
+            query_explain_advertised_route(&tx, PeerId::from_addr(*peer), Prefix::V4(prefix)).await;
         assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
         assert_eq!(
             explain.update_group_id.is_some(),
@@ -910,7 +913,7 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
     for (peer, _) in &receivers {
         let (reply, response) = oneshot::channel();
         tx.send(RibUpdate::ReplacePeerExportPolicy {
-            peer: *peer,
+            peer: PeerId::from_addr(*peer),
             export_policy: Some(no_advertise_addition_chain(*peer == private)),
             reply,
         })
@@ -931,10 +934,11 @@ async fn no_advertise_precedes_policy_for_grouped_and_private_single_best() {
         }
         assert!(saw_withdraw, "policy replacement must withdraw from {peer}");
 
-        let response = collect_advertised_routes(&tx, *peer).await;
+        let response = collect_advertised_routes(&tx, PeerId::from_addr(*peer)).await;
         assert!(response.is_empty());
 
-        let explain = query_explain_advertised_route(&tx, *peer, Prefix::V4(prefix)).await;
+        let explain =
+            query_explain_advertised_route(&tx, PeerId::from_addr(*peer), Prefix::V4(prefix)).await;
         assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
         assert_eq!(
             explain.update_group_id.is_some(),
@@ -967,13 +971,13 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let grouped: IpAddr = "192.0.2.10".parse().unwrap();
-    let private: IpAddr = "192.0.2.11".parse().unwrap();
+    let grouped = PeerId::from_addr("192.0.2.10".parse().unwrap());
+    let private = PeerId::from_addr("192.0.2.11".parse().unwrap());
     let mut receivers = Vec::new();
 
     for (peer, per_client_best) in [(grouped, false), (private, true)] {
         tx.send(RibUpdate::SetPeerExportContext {
-            peer,
+            peer: PeerId::from_addr(peer.addr()),
             session_id: 7,
             local_role: Some(rustbgpd_wire::BgpRole::Customer),
         })
@@ -981,7 +985,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         .unwrap();
         let (out_tx, mut out_rx) = mpsc::channel(16);
         tx.send(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer.addr()),
             session_id: 7,
             peer_asn: 65100,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1093,8 +1097,12 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
                 .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer(64512)))
         );
 
-        let explain =
-            query_explain_advertised_route(&tx, *peer, Prefix::V4(never_advertised_prefix)).await;
+        let explain = query_explain_advertised_route(
+            &tx,
+            PeerId::from_addr((*peer).addr()),
+            Prefix::V4(never_advertised_prefix),
+        )
+        .await;
         assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
         let stop = explain
             .gates
@@ -1106,9 +1114,12 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
 
     for (peer, _) in &receivers {
         let (reply, result) = oneshot::channel();
-        tx.send(RibUpdate::RefreshPeerOutbound { peer: *peer, reply })
-            .await
-            .unwrap();
+        tx.send(RibUpdate::RefreshPeerOutbound {
+            peer: PeerId::from_addr((*peer).addr()),
+            reply,
+        })
+        .await
+        .unwrap();
         assert_eq!(result.await.unwrap(), Ok(()));
     }
     let _ = query_best_routes(&tx).await;
@@ -1129,7 +1140,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     for (peer, _) in &receivers {
         tx.send(RibUpdate::RouteRefreshRequest {
             queued: Arc::default(),
-            peer: *peer,
+            peer: PeerId::from_addr((*peer).addr()),
             session_id: 7,
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
@@ -1236,7 +1247,7 @@ async fn assert_otc_backpressure_dedup(per_client_best: bool) {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "192.0.2.20".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.20".parse().unwrap());
     tx.send(RibUpdate::SetPeerExportContext {
         peer: target,
         session_id: 7,
@@ -1345,7 +1356,7 @@ async fn grouped_otc_source_withdraw_clears_pending_diagnostic_before_recovery()
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "192.0.2.21".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.21".parse().unwrap());
     tx.send(RibUpdate::SetPeerExportContext {
         peer: target,
         session_id: 8,
@@ -1471,7 +1482,7 @@ fn assert_one_dual_stack_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
 fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(16);
     let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
@@ -1608,7 +1619,7 @@ fn paths_limit_updates_resync_only_for_effective_unicast_changes() {
 fn paths_limit_ignores_entries_outside_negotiated_send_families() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.2".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(8);
     let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
@@ -1658,7 +1669,7 @@ fn paths_limit_ignores_entries_outside_negotiated_send_families() {
 fn paths_limit_survives_collision_failback() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.3".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.3".parse().unwrap());
     let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
     let peer_up = |session_id, outbound_tx| RibUpdate::PeerUp {
@@ -1775,7 +1786,7 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
         .unwrap();
     assert_eq!(sync_rx.await.unwrap(), 2);
 
-    let target: IpAddr = "192.0.2.9".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.9".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
@@ -1900,7 +1911,7 @@ async fn routes_received_and_queried() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
@@ -1954,7 +1965,7 @@ async fn large_routes_received_batch_preserves_final_state() {
     let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let next_hop = Ipv4Addr::new(10, 0, 0, 1);
     let routes: Vec<Route> = (0..2500).map(|i| make_indexed_route(i, next_hop)).collect();
 
@@ -2001,7 +2012,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
     let handle = tokio::spawn(manager.run());
 
     // Register an outbound observer peer first and drain its initial EoR.
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2026,7 +2037,7 @@ async fn multi_chunk_flood_coalesces_into_one_outbound_batch() {
     drain_eor(&mut out_rx).await;
 
     // Flood 2500 routes (3 chunks at the 1024 chunk size) from a source peer.
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let next_hop = Ipv4Addr::new(10, 0, 0, 1);
     let route_count = 2500_u32;
     let routes: Vec<Route> = (0..route_count)
@@ -2078,7 +2089,7 @@ async fn query_channel_observes_partial_progress_during_large_batch() {
     let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let next_hop = Ipv4Addr::new(10, 0, 0, 1);
     let route_count = 20_000_u32;
     let routes: Vec<Route> = (0..route_count)
@@ -2128,7 +2139,7 @@ async fn peer_down_clears_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
 
@@ -2166,7 +2177,7 @@ async fn withdrawal_removes_route() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
@@ -2215,8 +2226,8 @@ async fn query_all_peers() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer1 = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2268,8 +2279,8 @@ async fn best_routes_returns_winner() {
     let handle = tokio::spawn(manager.run());
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-    let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
+    let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
 
     // Peer1: local_pref 100
     tx.send(RibUpdate::RoutesReceived {
@@ -2324,8 +2335,8 @@ async fn peer_down_promotes_second_best() {
     let handle = tokio::spawn(manager.run());
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-    let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
+    let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2386,8 +2397,8 @@ async fn withdrawal_updates_best() {
     let handle = tokio::spawn(manager.run());
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-    let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
+    let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2456,8 +2467,8 @@ async fn different_best_per_prefix() {
 
     let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
     let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 16);
-    let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
-    let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
+    let peer1 = peer_v4(Ipv4Addr::new(1, 0, 0, 1));
+    let peer2 = peer_v4(Ipv4Addr::new(1, 0, 0, 2));
 
     // Peer1 wins prefix_a (higher LP), peer2 wins prefix_b (higher LP)
     tx.send(RibUpdate::RoutesReceived {
@@ -2528,8 +2539,8 @@ async fn peer_up_triggers_initial_table_dump() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Inject a route from source
@@ -2586,7 +2597,7 @@ async fn route_change_distributes_to_peer() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2610,7 +2621,7 @@ async fn route_change_distributes_to_peer() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2640,7 +2651,7 @@ async fn single_best_send_normalizes_path_id_to_zero() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2697,7 +2708,7 @@ async fn split_horizon_prevents_echo() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2760,7 +2771,7 @@ async fn query_peer_groups_returns_current_policy_context() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::SetPeerPolicyContext {
         peer,
         session_id: 0,
@@ -2804,7 +2815,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         next_hop: IpAddr::V4(next_hop),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(next_hop),
+        peer: peer_v4(next_hop),
         attributes: AttrSet::new(vec![]),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
@@ -2826,7 +2837,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
     let handle = tokio::spawn(manager.run());
 
     // Source: iBGP peer
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2843,7 +2854,7 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
     .unwrap();
 
     // Target: iBGP peer (is_ebgp: false)
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2881,7 +2892,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
     let handle = tokio::spawn(manager.run());
 
     // Source: iBGP peer
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2898,7 +2909,7 @@ async fn ibgp_route_sent_to_ebgp_peer() {
     .unwrap();
 
     // Target: eBGP peer (is_ebgp: true)
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2940,7 +2951,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
     let handle = tokio::spawn(manager.run());
 
     // Source: eBGP peer
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -2957,7 +2968,7 @@ async fn ebgp_route_sent_to_ibgp_peer() {
     .unwrap();
 
     // Target: iBGP peer (is_ebgp: false)
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -2999,8 +3010,8 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     let handle = tokio::spawn(manager.run());
 
     // Setup: eBGP source announces route, iBGP target receives it
-    let ebgp_source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let ibgp_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let ebgp_source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let ibgp_target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Register iBGP target peer
@@ -3057,7 +3068,7 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     assert_eq!(update.withdraw.len(), 1);
 
     // iBGP source announces the same prefix
-    let ibgp_source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let ibgp_source = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: ibgp_source,
@@ -3096,7 +3107,7 @@ async fn local_route_sent_to_ibgp_peer() {
     let handle = tokio::spawn(manager.run());
 
     // Register iBGP target peer first
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -3194,7 +3205,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
     let _ = reply_rx.await;
 
     // Register iBGP target peer — should receive local route in initial dump
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -3235,7 +3246,7 @@ async fn peer_down_cleans_up_outbound() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -3279,7 +3290,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -3361,7 +3372,7 @@ async fn withdraw_injected_removes_and_distributes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -3448,7 +3459,7 @@ async fn distribute_changes_filters_unsendable_families() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
 
     // Register peer with IPv4-only sendable families
@@ -3474,7 +3485,7 @@ async fn distribute_changes_filters_unsendable_families() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
 
@@ -3488,7 +3499,7 @@ async fn distribute_changes_filters_unsendable_families() {
         attributes: AttrSet::new(vec![]),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: session_router_id(source),
+        peer_router_id: session_router_id(source.addr()),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -3536,7 +3547,7 @@ async fn send_initial_table_filters_unsendable_families() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
 
@@ -3550,7 +3561,7 @@ async fn send_initial_table_filters_unsendable_families() {
         attributes: AttrSet::new(vec![]),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: session_router_id(source),
+        peer_router_id: session_router_id(source.addr()),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -3577,7 +3588,7 @@ async fn send_initial_table_filters_unsendable_families() {
 
     // Register peer with IPv4-only sendable families — initial dump
     // should filter out the IPv6 route
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -3623,7 +3634,7 @@ async fn dual_stack_peer_receives_both_families() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
 
@@ -3637,7 +3648,7 @@ async fn dual_stack_peer_receives_both_families() {
         attributes: AttrSet::new(vec![]),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: session_router_id(source),
+        peer_router_id: session_router_id(source.addr()),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -3663,7 +3674,7 @@ async fn dual_stack_peer_receives_both_families() {
     .unwrap();
 
     // Register peer with dual-stack sendable families
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -3703,9 +3714,9 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
-    let client_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let nonclient_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
+    let client_target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let nonclient_target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
 
     // Register source as iBGP client
     let (out_tx_src, _) = mpsc::channel(16);
@@ -3820,8 +3831,8 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     let handle = tokio::spawn(manager.run());
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)); // non-client
-    let client_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let nonclient_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client_target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let nonclient_target = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
 
     // Register source as non-client
     let (out_tx_src, _) = mpsc::channel(16);
@@ -3829,7 +3840,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
-        peer: source,
+        peer: PeerId::from_addr(source),
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx_src,
@@ -3898,7 +3909,7 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: source,
+        peer: PeerId::from_addr(source),
         announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -3935,8 +3946,8 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
 
     // Register target first (Loc-RIB empty, clean EoR)
     let (out_tx, mut out_rx) = mpsc::channel(16);
@@ -4006,7 +4017,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
-        peer: target,
+        peer: PeerId::from_addr(target),
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
@@ -4026,7 +4037,7 @@ async fn rr_ebgp_route_to_all_ibgp() {
 
     // eBGP source sends a route
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 5));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -4059,7 +4070,7 @@ async fn rr_local_route_to_all_ibgp() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
 
     // Register target first (Loc-RIB empty, clean EoR)
     let (out_tx, mut out_rx) = mpsc::channel(16);
@@ -4133,7 +4144,7 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     let (tx, rx) = mpsc::channel(32);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "2001:db8::90".parse().unwrap();
+    let target = PeerId::from_addr("2001:db8::90".parse().unwrap());
     let source: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
@@ -4163,7 +4174,7 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     route.link_local_next_hop = Some("fe80::1".parse().unwrap());
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V6(source),
+        peer: PeerId::from_addr(IpAddr::V6(source)),
         announced: vec![route.clone()],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -4185,7 +4196,7 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
     route.link_local_next_hop = Some("fe80::2".parse().unwrap());
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V6(source),
+        peer: PeerId::from_addr(IpAddr::V6(source)),
         announced: vec![route],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -4216,7 +4227,7 @@ async fn link_local_next_hop_scope_change_is_re_advertised() {
     let (tx, rx) = mpsc::channel(32);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "2001:db8::90".parse().unwrap();
+    let target = PeerId::from_addr("2001:db8::90".parse().unwrap());
     let source: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
@@ -4256,7 +4267,7 @@ async fn link_local_next_hop_scope_change_is_re_advertised() {
         });
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V6(source),
+            peer: PeerId::from_addr(IpAddr::V6(source)),
             announced: vec![route.clone()],
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -4301,7 +4312,7 @@ async fn otc_tagged_unicast_is_advertised_toward_customer_and_route_server_clien
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
-        let peer: IpAddr = "192.0.2.10".parse().unwrap();
+        let peer = PeerId::from_addr("192.0.2.10".parse().unwrap());
         tx.send(RibUpdate::SetPeerExportContext {
             peer,
             session_id: 7,
@@ -4422,7 +4433,7 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "192.0.2.91".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.91".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: target,
@@ -4482,7 +4493,7 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
     ]);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![received],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -4495,9 +4506,9 @@ async fn local_unicast_inject_outcome_tracks_local_adj_rib_in() {
     .unwrap();
     let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
-    assert_eq!(best[0].peer, IpAddr::V4(source));
+    assert_eq!(best[0].peer, peer_v4(source));
     let update = out_rx.try_recv().expect("received route takes over");
-    assert_eq!(update.announce[0].peer, IpAddr::V4(source));
+    assert_eq!(update.announce[0].peer, peer_v4(source));
 
     assert_eq!(
         inject_local_unicast(&tx, specific, vec![3]).await,
@@ -4571,7 +4582,7 @@ async fn install_vrp_10_0_0_0_24_as65000(tx: &mpsc::Sender<RibUpdate>) {
 async fn ebgp_target_up(tx: &mpsc::Sender<RibUpdate>) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
-        peer: "192.0.2.92".parse().unwrap(),
+        peer: PeerId::from_addr("192.0.2.92".parse().unwrap()),
         session_id: 0,
         peer_asn: 65_100,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4624,7 +4635,7 @@ async fn unchanged_reinjection_keeps_rpki_state_and_selection() {
     });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![received],
         withdrawn: vec![],
         flowspec_announced: vec![],

@@ -1,5 +1,6 @@
 //! Read-only RIB query, export-explain, and snapshot handlers.
 
+use crate::PeerId;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -134,14 +135,14 @@ pub(super) fn send_mrt_snapshot(
 }
 
 fn materialize_neighbor_rib_snapshot(
-    peers: Vec<IpAddr>,
-    comparison: Option<(IpAddr, IpAddr)>,
-    retained_candidates: BTreeSet<IpAddr>,
+    peers: Vec<PeerId>,
+    comparison: Option<(PeerId, PeerId)>,
+    retained_candidates: BTreeSet<PeerId>,
     mut is_canceled: impl FnMut() -> bool,
-    mut build_row: impl FnMut(IpAddr) -> NeighborRibSnapshot,
-    build_comparison: impl FnOnce(IpAddr, IpAddr) -> UpdateGroupPeerComparison,
+    mut build_row: impl FnMut(PeerId) -> NeighborRibSnapshot,
+    build_comparison: impl FnOnce(PeerId, PeerId) -> UpdateGroupPeerComparison,
 ) -> Option<NeighborRibSnapshotResponse> {
-    let requested: HashSet<IpAddr> = if retained_candidates.is_empty() {
+    let requested: HashSet<PeerId> = if retained_candidates.is_empty() {
         HashSet::new()
     } else {
         peers.iter().copied().collect()
@@ -186,11 +187,11 @@ fn materialize_neighbor_rib_snapshot(
 /// returned as `retained` rows when they still retain something.
 pub(super) fn send_neighbor_rib_snapshot(
     reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
-    peers: Vec<IpAddr>,
-    comparison: Option<(IpAddr, IpAddr)>,
-    retained_candidates: BTreeSet<IpAddr>,
-    build_row: impl FnMut(IpAddr) -> NeighborRibSnapshot,
-    build_comparison: impl FnOnce(IpAddr, IpAddr) -> UpdateGroupPeerComparison,
+    peers: Vec<PeerId>,
+    comparison: Option<(PeerId, PeerId)>,
+    retained_candidates: BTreeSet<PeerId>,
+    build_row: impl FnMut(PeerId) -> NeighborRibSnapshot,
+    build_comparison: impl FnOnce(PeerId, PeerId) -> UpdateGroupPeerComparison,
 ) {
     let Some(snapshot) = materialize_neighbor_rib_snapshot(
         peers,
@@ -374,7 +375,9 @@ fn page_evpn_routes<'a>(
     after: Option<EvpnRouteQueryKey>,
     page_size: usize,
 ) -> EvpnRoutePage {
-    let page = page_family_rows(routes, filter, after, page_size, |r| (r.key(), r.peer));
+    let page = page_family_rows(routes, filter, after, page_size, |r| {
+        (r.key(), r.peer.addr())
+    });
     EvpnRoutePage {
         routes: page.routes,
         total: page.total,
@@ -496,7 +499,7 @@ impl RibManager {
     /// out. Only matching committed rows are cloned; no export re-evaluation.
     pub(super) fn collect_advertised_flowspec(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         filter: Option<&RibRowFilter<crate::route::FlowSpecRoute>>,
         mut canceled: impl FnMut() -> bool,
     ) -> Option<Vec<crate::route::FlowSpecRoute>> {
@@ -766,7 +769,7 @@ impl RibManager {
             {
                 return Err(RoutePageError::ResyncInProgress);
             }
-            let key = |r: &crate::route::VpnRibRoute| (r.nlri.key(), r.peer, r.path_id);
+            let key = |r: &crate::route::VpnRibRoute| (r.nlri.key(), r.peer.addr(), r.path_id);
             let mut page = match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
                     self.ribs
@@ -830,7 +833,7 @@ impl RibManager {
             {
                 return Err(RoutePageError::Invalidated);
             }
-            let key = |r: &crate::route::LabeledRibRoute| (r.nlri.prefix, r.peer, r.path_id);
+            let key = |r: &crate::route::LabeledRibRoute| (r.nlri.prefix, r.peer.addr(), r.path_id);
             let mut page = match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
                     self.ribs
@@ -895,7 +898,7 @@ impl RibManager {
                     r.nlri.nlri_type.as_u16(),
                     r.nlri.route_distinguisher,
                     r.nlri.payload.clone(),
-                    r.peer,
+                    r.peer.addr(),
                     r.path_id,
                 )
             };
@@ -1067,7 +1070,7 @@ impl RibManager {
             {
                 return Err(RoutePageError::Invalidated);
             }
-            let key = |r: &crate::route::RtcRibRoute| (r.nlri, r.peer, r.path_id);
+            let key = |r: &crate::route::RtcRibRoute| (r.nlri, r.peer.addr(), r.path_id);
             let mut page = match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
                     self.ribs
@@ -1419,7 +1422,7 @@ impl RibManager {
         siblings.sort_by(|a, b| {
             a.next_hop
                 .cmp(&b.next_hop)
-                .then(a.peer.cmp(&b.peer))
+                .then(a.peer.addr().cmp(&b.peer.addr()))
                 .then(a.path_id.cmp(&b.path_id))
         });
         let mut next_hops = Vec::new();
@@ -1836,7 +1839,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_peer_groups(
         &mut self,
-        reply: tokio::sync::oneshot::Sender<std::collections::HashMap<IpAddr, String>>,
+        reply: tokio::sync::oneshot::Sender<std::collections::HashMap<PeerId, String>>,
     ) {
         if reply.send(self.peer_group.clone()).is_err() {
             warn!("query caller dropped before receiving peer-group map");
@@ -1844,7 +1847,7 @@ impl RibManager {
     }
     pub(super) fn handle_explain_advertised_route(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         prefix: Prefix,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
         labeled: bool,
@@ -2024,9 +2027,9 @@ impl RibManager {
                 .iter()
                 .map(|(peer, scope, registered)| {
                     if *registered {
-                        self.local_route_export(*peer, route)
+                        self.local_route_export(PeerId::from_addr(*peer), route)
                     } else {
-                        not_established_export(*peer, scope.clone())
+                        not_established_export(PeerId::from_addr(*peer), scope.clone())
                     }
                 })
                 .collect();
@@ -2095,15 +2098,19 @@ impl RibManager {
         &'a self,
         managed: &'a [ExportDestination],
     ) -> impl Iterator<Item = ExportCandidate> + 'a {
-        let registered = self
-            .peer_sendable_families
-            .keys()
-            .map(|&peer| (peer, self.session_peer_scope(peer).peer_interface(), true));
+        let registered = self.peer_sendable_families.keys().map(|&peer| {
+            (
+                peer.addr(),
+                self.session_peer_scope(peer).peer_interface(),
+                true,
+            )
+        });
         let unregistered = managed
             .iter()
             .filter(|(peer, scope)| {
-                !(self.peer_sendable_families.contains_key(peer)
-                    && self.session_peer_scope(*peer).peer_interface() == *scope)
+                let peer = PeerId::from_addr(*peer);
+                !(self.peer_sendable_families.contains_key(&peer)
+                    && self.session_peer_scope(peer).peer_interface() == *scope)
             })
             .map(|(peer, scope)| (*peer, scope.clone(), false));
         registered.chain(unregistered)
@@ -2133,7 +2140,7 @@ impl RibManager {
     /// peer. Committed means the explain found an identical entry for this
     /// exact source in the peer's Adj-RIB-Out (or its group view); a route
     /// from any other source, or another local path ID, never counts.
-    fn local_route_export(&mut self, peer: IpAddr, route: &crate::route::Route) -> PeerRouteExport {
+    fn local_route_export(&mut self, peer: PeerId, route: &crate::route::Route) -> PeerRouteExport {
         use RouteExportDisposition::{Committed, Pending, Withheld};
         let prefix = route.prefix;
         let family = prefix_family(&prefix);
@@ -2232,7 +2239,7 @@ impl RibManager {
     /// Reason and detail when the peer's session does not export `family`
     /// at all: withheld by the session, or never negotiated. No resync or
     /// selection deferral can change either, so they are checked first.
-    fn unexported_family(&self, peer: IpAddr, family: (Afi, Safi)) -> Option<(String, String)> {
+    fn unexported_family(&self, peer: PeerId, family: (Afi, Safi)) -> Option<(String, String)> {
         let label = rustbgpd_wire::family_label(family.0, family.1).unwrap_or("this family");
         if let Some((_, code)) = self
             .registered_withheld_families(peer)
@@ -2260,7 +2267,7 @@ impl RibManager {
     /// this route at the gate named `code`.
     fn stopped_export_reason(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         route: &crate::route::Route,
         explanation: &ExplainAdvertisedRoute,
         code: &str,
@@ -2290,7 +2297,7 @@ impl RibManager {
     /// longer reproduces the rejection.
     fn exact_export_rejection_reason(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         route: &crate::route::Route,
         explanation: &ExplainAdvertisedRoute,
     ) -> Option<&'static str> {
@@ -2310,7 +2317,7 @@ impl RibManager {
     /// still held by the RFC 5291 §6 initial-ORF gate — live staging
     /// skips the family wholesale, before any per-prefix work.
     fn orf_gated_explain(
-        peer: IpAddr,
+        peer: PeerId,
         prefix: Prefix,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
     ) -> ExplainAdvertisedRoute {
@@ -2329,8 +2336,8 @@ impl RibManager {
     pub(super) fn explain_evpn_route(
         &self,
         key: rustbgpd_wire::EvpnRouteKey,
-        received_from: Option<IpAddr>,
-        advertised_to: Option<IpAddr>,
+        received_from: Option<PeerId>,
+        advertised_to: Option<PeerId>,
         srv6_argument_companion: Option<rustbgpd_wire::EvpnRouteKey>,
     ) -> crate::update::ExplainEvpnRoute {
         use crate::loc_rib::{evpn_cmp_with_reason, evpn_reason_detail};
@@ -2390,8 +2397,8 @@ impl RibManager {
         &self,
         key: rustbgpd_wire::EvpnRouteKey,
         companion_key: rustbgpd_wire::EvpnRouteKey,
-        received_from: Option<IpAddr>,
-        advertised_to: Option<IpAddr>,
+        received_from: Option<PeerId>,
+        advertised_to: Option<PeerId>,
     ) -> crate::update::ExplainSrv6Argument {
         use crate::update::RouteQueryScope;
         let scope = if let Some(peer) = received_from {
@@ -2423,7 +2430,7 @@ impl RibManager {
     fn explain_evpn_export(
         &self,
         key: rustbgpd_wire::EvpnRouteKey,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> crate::update::ExplainEvpnExport {
         use crate::update::{ExplainDecision, ExplainReason, ExportGateStep, ExportGateVerdict};
         let empty = AdjRibOut::new(peer);
@@ -2516,7 +2523,7 @@ impl RibManager {
 
     fn apply_exact_export_overlay_to_explain(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         key: &ExactExportKey,
         mut explanation: ExplainAdvertisedRoute,
     ) -> ExplainAdvertisedRoute {
@@ -2548,7 +2555,7 @@ impl RibManager {
     /// Apply the live unicast commit gates after the staging dry run.
     fn apply_unicast_export_overlays_to_explain(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         explanation: ExplainAdvertisedRoute,
     ) -> ExplainAdvertisedRoute {
         let mut explanation = self.apply_exact_export_overlay_to_explain(
@@ -2604,7 +2611,7 @@ impl RibManager {
     /// Its group view is then desired state, and no per-key record says
     /// which entries changed after the missed send, so unicast export explain
     /// and the advertised listing both refuse until the resync completes.
-    fn grouped_unicast_admission_unknown(&self, peer: IpAddr) -> bool {
+    fn grouped_unicast_admission_unknown(&self, peer: PeerId) -> bool {
         self.grouped_member_of(peer).is_some()
             && (self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer))
             && !self.pending_regroup_baseline.contains_key(&peer)
@@ -2615,7 +2622,7 @@ impl RibManager {
     /// state is unknown. A closed channel remains unsettled without retry flags.
     fn grouped_dirty_unicast_baseline(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<&update_groups::RegroupBaseline> {
         self.grouped_member_of(peer)?;
         if !self.dirty_peers.contains(&peer) && !self.outbound_channel_gone(peer) {
@@ -2635,7 +2642,7 @@ impl RibManager {
     /// ([`Self::grouped_unicast_admission_unknown`]). The advertised listing
     /// applies the same rule, so the two agree. Explain reads only the
     /// explained prefix, so the view holds only that prefix's entries.
-    fn grouped_unicast_explain_view(&self, peer: IpAddr, prefix: &Prefix) -> Option<AdjRibOut> {
+    fn grouped_unicast_explain_view(&self, peer: PeerId, prefix: &Prefix) -> Option<AdjRibOut> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let mut view = AdjRibOut::new(peer);
         if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
@@ -2695,7 +2702,7 @@ impl RibManager {
     )]
     fn explain_unicast_export(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         prefix: Prefix,
         source: Option<crate::update::RouteSourceIdentity>,
     ) -> ExplainAdvertisedRoute {
@@ -2840,7 +2847,7 @@ impl RibManager {
     )]
     fn explain_vpn_export(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         prefix: Prefix,
         rd: rustbgpd_wire::RouteDistinguisher,
     ) -> ExplainAdvertisedRoute {
@@ -2984,7 +2991,7 @@ impl RibManager {
     /// advertised-state diff all come from the same code live
     /// reflection runs. Labeled-unicast has no update-group staging,
     /// so the explain always diffs the peer's private Adj-RIB-Out.
-    fn explain_labeled_export(&mut self, peer: IpAddr, prefix: Prefix) -> ExplainAdvertisedRoute {
+    fn explain_labeled_export(&mut self, peer: PeerId, prefix: Prefix) -> ExplainAdvertisedRoute {
         let family = match prefix {
             Prefix::V4(_) => (Afi::Ipv4, Safi::LabeledUnicast),
             Prefix::V6(_) => (Afi::Ipv6, Safi::LabeledUnicast),
@@ -3079,7 +3086,7 @@ impl RibManager {
     pub(super) fn handle_explain_best_path(
         &mut self,
         prefix: Prefix,
-        peer: Option<IpAddr>,
+        peer: Option<PeerId>,
         reply: tokio::sync::oneshot::Sender<Option<ExplainBestPath>>,
     ) {
         use crate::best_path::{
@@ -3205,7 +3212,7 @@ impl RibManager {
         // contract is deliberate — operators trust explain only if it
         // produces the same selection that distribution would, modulo state
         // changes between the two calls.
-        let mut advertised: Vec<(IpAddr, u32, u32)> = Vec::new();
+        let mut advertised: Vec<(PeerId, u32, u32)> = Vec::new();
         let mut add_path_send_max: u32 = 0;
         if let Some(peer_addr) = peer {
             let target_is_ebgp = self.peer_is_ebgp.get(&peer_addr).copied().unwrap_or(true);
@@ -3309,7 +3316,7 @@ impl RibManager {
                         origin_asn,
                         validation_state: cand.validation_state,
                         aspa_state: cand.aspa_state,
-                        peer_address: Some(peer_addr),
+                        peer_address: Some(peer_addr.addr()),
                         peer_asn: target_peer_asn,
                         peer_group: target_peer_group,
                         route_type: Some(route_type_for(cand.origin_type)),
@@ -3361,7 +3368,7 @@ impl RibManager {
         // candidate count rather than quadratic. With Add-Path
         // peers commonly carrying tens of paths per prefix this is
         // a meaningful difference at scale.
-        let advertised_rank: HashMap<(IpAddr, u32), u32> = advertised
+        let advertised_rank: HashMap<(PeerId, u32), u32> = advertised
             .into_iter()
             .map(|(peer, inbound_path_id, outbound_rank)| ((peer, inbound_path_id), outbound_rank))
             .collect();
@@ -3511,7 +3518,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_route_event_history(
         &mut self,
-        peer: Option<(IpAddr, Option<&str>)>,
+        peer: Option<(PeerId, Option<&str>)>,
         afi: Option<Afi>,
         prefix: Option<Prefix>,
         limit: usize,
@@ -3556,7 +3563,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_evpn_route_event_history(
         &mut self,
-        peer: Option<IpAddr>,
+        peer: Option<PeerId>,
         route_type: Option<u8>,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
         event_types: &std::collections::BTreeSet<RouteEventType>,
@@ -3596,7 +3603,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_advertised_count(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         reply: tokio::sync::oneshot::Sender<usize>,
     ) {
         // Grouped members synthesize: group table len − own-sourced.
@@ -3612,7 +3619,7 @@ impl RibManager {
     /// one.
     pub(super) fn handle_query_peer_retained_stale(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         reply: tokio::sync::oneshot::Sender<usize>,
     ) {
         let retained = self.ribs.get(&peer).map_or(0, |rib| {
@@ -3657,7 +3664,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_neighbor_policy_stats(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         reply: tokio::sync::oneshot::Sender<NeighborPolicyStats>,
     ) {
         let stats = self
@@ -3673,8 +3680,8 @@ impl RibManager {
     /// not a second notion of neighbor state.
     pub(super) fn handle_query_neighbor_rib_snapshots(
         &self,
-        peers: Vec<IpAddr>,
-        comparison: Option<(IpAddr, IpAddr)>,
+        peers: Vec<PeerId>,
+        comparison: Option<(PeerId, PeerId)>,
         include_retained: bool,
         reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     ) {
@@ -3692,7 +3699,7 @@ impl RibManager {
             |primary, comparison| self.update_group_comparison(primary, comparison),
         );
     }
-    pub(super) fn neighbor_rib_snapshot(&self, peer: IpAddr) -> NeighborRibSnapshot {
+    pub(super) fn neighbor_rib_snapshot(&self, peer: PeerId) -> NeighborRibSnapshot {
         NeighborRibSnapshot {
             peer,
             advertised_count: self
@@ -3712,7 +3719,7 @@ impl RibManager {
 
     /// The count is pending under the same rule the advertised listing uses
     /// to leave the group view: an unsettled grouped member.
-    fn outbound_resync_state(&self, peer: IpAddr) -> crate::update::OutboundResyncState {
+    fn outbound_resync_state(&self, peer: PeerId) -> crate::update::OutboundResyncState {
         let pending = self.dirty_peers.contains(&peer);
         crate::update::OutboundResyncState {
             pending,
@@ -3751,7 +3758,7 @@ impl RibManager {
                     .peer_orr_vantage
                     .iter()
                     .filter(|&(_, &bound)| bound == vantage)
-                    .map(|(&peer, _)| peer)
+                    .map(|(&peer, _)| peer.addr())
                     .collect();
                 peers.sort();
                 crate::orr::OrrVantageStatus {
@@ -3789,7 +3796,7 @@ impl RibManager {
                 .peer_asn
                 .iter()
                 .map(|(&addr, &asn)| MrtPeerEntry {
-                    peer_addr: addr,
+                    peer_addr: addr.addr(),
                     peer_bgp_id: self
                         .peer_bgp_id
                         .get(&addr)
@@ -3860,8 +3867,8 @@ impl RibManager {
             );
         }
 
-        let mut peer_identity = HashMap::<IpAddr, (u64, u32, Ipv4Addr)>::new();
-        let mut families = HashMap::<IpAddr, HashSet<(Afi, Safi)>>::new();
+        let mut peer_identity = HashMap::<PeerId, (u64, u32, Ipv4Addr)>::new();
+        let mut families = HashMap::<PeerId, HashSet<(Afi, Safi)>>::new();
         for view in views {
             budget.check()?;
             if !matches!(
@@ -3916,8 +3923,8 @@ impl RibManager {
 
         let mut peers: Vec<_> = peer_identity
             .iter()
-            .map(|(&peer_addr, &(_, peer_asn, peer_bgp_id))| MrtPeerEntry {
-                peer_addr,
+            .map(|(&peer, &(_, peer_asn, peer_bgp_id))| MrtPeerEntry {
+                peer_addr: peer.addr(),
                 peer_bgp_id,
                 peer_asn,
             })
@@ -4054,7 +4061,7 @@ fn local_routes_fingerprint(routes: &[Option<crate::route::Route>]) -> u64 {
 
 /// The row of a managed peer with no session registered for outbound
 /// updates: nothing is exported to it, and no explain runs.
-fn not_established_export(peer: IpAddr, peer_interface: Option<Arc<str>>) -> PeerRouteExport {
+fn not_established_export(peer: PeerId, peer_interface: Option<Arc<str>>) -> PeerRouteExport {
     PeerRouteExport {
         peer,
         peer_interface,
@@ -4092,7 +4099,7 @@ mod cancellation_tests {
     #[test]
     fn family_continuation_starts_at_cursor_and_reads_one_lookahead() {
         let peer = Ipv4Addr::new(192, 0, 2, 1);
-        let mut rib = AdjRibIn::new(peer.into());
+        let mut rib = AdjRibIn::new(PeerId::from_addr(peer.into()));
         for octet in 0..6 {
             rib.insert(crate::test_support::make_route(
                 rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24),
@@ -4114,7 +4121,7 @@ mod cancellation_tests {
     #[test]
     fn ipv6_family_first_page_and_continuation_are_lazy_and_complete() {
         let peer = Ipv4Addr::new(192, 0, 2, 1);
-        let mut rib = AdjRibIn::new(peer.into());
+        let mut rib = AdjRibIn::new(PeerId::from_addr(peer.into()));
         for octet in 0..4 {
             rib.insert(crate::test_support::make_route(
                 rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24),
@@ -4213,7 +4220,10 @@ mod cancellation_tests {
                 u8::try_from(index / 256).unwrap(),
                 u8::try_from(index % 256).unwrap(),
             ));
-            manager.ribs.insert(peer, AdjRibIn::new(peer));
+            manager.ribs.insert(
+                PeerId::from_addr(peer),
+                AdjRibIn::new(PeerId::from_addr(peer)),
+            );
         }
 
         let checks = std::cell::Cell::new(0);
@@ -4229,7 +4239,7 @@ mod cancellation_tests {
     #[test]
     fn fib_snapshot_cancels_inside_high_fanout_sibling_gathering() {
         let prefix = rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
         let best = crate::test_support::make_route(prefix, Ipv4Addr::new(192, 0, 2, 1));
         let mut manager = manager_with_best(&best);
         let mut rib = AdjRibIn::new(peer);
@@ -4265,7 +4275,7 @@ mod cancellation_tests {
         drop(receiver);
         send_neighbor_rib_snapshot(
             reply,
-            vec!["192.0.2.1".parse().unwrap()],
+            vec![PeerId::from_addr("192.0.2.1".parse().unwrap())],
             None,
             BTreeSet::new(),
             |_| panic!("canceled query materialized"),
@@ -4286,8 +4296,15 @@ mod cancellation_tests {
         const CLOSE_AFTER: usize = 7;
         let canceled = Rc::new(std::cell::Cell::new(false));
         let visited = Rc::new(RefCell::new(Vec::new()));
-        let peers: Vec<IpAddr> = (1..=PEERS)
-            .map(|octet| IpAddr::V4(Ipv4Addr::new(192, 0, 2, u8::try_from(octet).unwrap())))
+        let peers: Vec<PeerId> = (1..=PEERS)
+            .map(|octet| {
+                PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                    192,
+                    0,
+                    2,
+                    u8::try_from(octet).unwrap(),
+                )))
+            })
             .collect();
 
         let response = materialize_neighbor_rib_snapshot(
@@ -4337,8 +4354,11 @@ mod cancellation_tests {
     fn canceled_neighbor_rib_snapshot_skips_comparison_after_last_row() {
         let canceled = std::cell::Cell::new(false);
         let response = materialize_neighbor_rib_snapshot(
-            vec!["192.0.2.1".parse().unwrap()],
-            Some(("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap())),
+            vec![PeerId::from_addr("192.0.2.1".parse().unwrap())],
+            Some((
+                PeerId::from_addr("192.0.2.1".parse().unwrap()),
+                PeerId::from_addr("192.0.2.2".parse().unwrap()),
+            )),
             BTreeSet::new(),
             || canceled.get(),
             |peer| {
@@ -4372,7 +4392,10 @@ mod cancellation_tests {
         let canceled = std::cell::Cell::new(false);
         let response = materialize_neighbor_rib_snapshot(
             Vec::new(),
-            Some(("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap())),
+            Some((
+                PeerId::from_addr("192.0.2.1".parse().unwrap()),
+                PeerId::from_addr("192.0.2.2".parse().unwrap()),
+            )),
             BTreeSet::new(),
             || canceled.get(),
             |_| unreachable!("no rows requested"),

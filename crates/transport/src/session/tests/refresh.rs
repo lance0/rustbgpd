@@ -442,7 +442,7 @@ async fn refresh_timeout_precedes_next_buffered_update_after_rib_backpressure() 
     session
         .rib_tx
         .try_send(RibUpdate::BeginRouteRefresh {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id: session.session_identity.id,
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
@@ -502,7 +502,7 @@ async fn full_rib_channel_delays_marker_accounting_mutation_until_acceptance() {
     session
         .rib_tx
         .try_send(RibUpdate::BeginRouteRefresh {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id: session.session_identity.id,
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
@@ -547,7 +547,7 @@ async fn full_rib_channel_delays_marker_accounting_mutation_until_acceptance() {
     session
         .rib_tx
         .try_send(RibUpdate::BeginRouteRefresh {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id: session.session_identity.id,
             afi: Afi::Ipv6,
             safi: Safi::Unicast,

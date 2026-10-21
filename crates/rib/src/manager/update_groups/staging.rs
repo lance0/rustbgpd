@@ -1,8 +1,9 @@
+use crate::PeerId;
 use crate::manager::{replacement_readiness_checkpoint, retire_vec};
 
 use super::payload::PriorGroupSlots;
 use super::{
-    GroupDelta, GroupRibOut, GroupStageOutput, HashMap, HashSet, IpAddr, LaneDelta, PolicyAction,
+    GroupDelta, GroupRibOut, GroupStageOutput, HashMap, HashSet, LaneDelta, PolicyAction,
     PolicyChain, PolicyFilteredRouteKey, PolicyLabel, Prefix, RibManager, RunnerUp,
     VpnDenialRecord, VpnGroupDelta, VpnGroupStageOutput, VpnRibRoute, VpnRibRouteKey, VpnRouteKey,
     capture_source_attrs, source_control_input,
@@ -46,7 +47,7 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
         memo: &mut crate::manager::distribution::ExportMemo,
-        targets: Option<&HashSet<IpAddr>>,
+        targets: Option<&HashSet<PeerId>>,
     ) -> HashMap<usize, GroupStageOutput> {
         let mut staged = HashMap::new();
         if self.group_ribs.is_empty() || (best_changed.is_empty() && all_affected.is_empty()) {
@@ -477,7 +478,7 @@ impl RibManager {
             // Record it as an extra (over-)withdraw at staging; the
             // resync's `member_retains` guard drops it if the source
             // flips back before the resync runs.
-            let dirty: Vec<IpAddr> = group
+            let dirty: Vec<PeerId> = group
                 .dirty_members
                 .iter()
                 .map(|member| {
@@ -521,7 +522,7 @@ impl RibManager {
     pub(in crate::manager) fn stage_vpn_update_groups(
         &mut self,
         changed: &HashSet<VpnRouteKey>,
-        targets: Option<&HashSet<IpAddr>>,
+        targets: Option<&HashSet<PeerId>>,
     ) -> HashMap<usize, VpnGroupStageOutput> {
         let mut staged = HashMap::new();
         if changed.is_empty() || self.group_ribs.is_empty() {

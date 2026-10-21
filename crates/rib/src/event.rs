@@ -2,7 +2,7 @@
 //! identifies the changed prefix and the peers involved but carries no route;
 //! an [`EvpnRouteEvent`] carries the full new and previous best route.
 
-use std::net::IpAddr;
+use crate::PeerId;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,11 +33,11 @@ pub struct RouteEvent {
     /// The affected prefix.
     pub prefix: Prefix,
     /// The peer advertising the current best route, if any.
-    pub peer: Option<IpAddr>,
+    pub peer: Option<PeerId>,
     /// The peer that previously held the best route, if any.
-    pub previous_peer: Option<IpAddr>,
+    pub previous_peer: Option<PeerId>,
     /// Outbound peer whose export policy filtered the route, if any.
-    pub target_peer: Option<IpAddr>,
+    pub target_peer: Option<PeerId>,
     /// Interned source context of `peer`, which records its interface when
     /// it is a scoped (IPv6 link-local) neighbor. Captured when the event
     /// is built, so history keeps the interface the route was learned on
@@ -81,8 +81,8 @@ impl RouteEvent {
     /// current, previous or target peer. A scoped neighbor matches only on
     /// the interface the event recorded; a numbered one has none.
     #[must_use]
-    pub fn involves(&self, peer: IpAddr, interface: Option<&str>) -> bool {
-        let named = |address: Option<IpAddr>, scope: AspaContextId| {
+    pub fn involves(&self, peer: PeerId, interface: Option<&str>) -> bool {
+        let named = |address: Option<PeerId>, scope: AspaContextId| {
             address == Some(peer) && scope.peer_interface().as_deref() == interface
         };
         named(self.peer, self.peer_scope)
@@ -129,9 +129,9 @@ pub struct EvpnRouteEvent {
     /// without a back-channel query.
     pub previous_best: Option<EvpnRibRoute>,
     /// Peer that holds the new best (`None` for `Withdrawn`).
-    pub peer: Option<IpAddr>,
+    pub peer: Option<PeerId>,
     /// Peer that previously held best (`None` for `Added`).
-    pub previous_peer: Option<IpAddr>,
+    pub previous_peer: Option<PeerId>,
     /// Event time in Unix epoch milliseconds, captured when the event is
     /// built (see [`unix_time_ms_now`]).
     pub timestamp_unix_ms: i64,

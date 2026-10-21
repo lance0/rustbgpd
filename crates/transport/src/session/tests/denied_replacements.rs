@@ -11,7 +11,9 @@ async fn query_received_routes(
         let (reply, response) = oneshot::channel();
         rib_tx
             .send(RibUpdate::QueryRoutesPage {
-                scope: rustbgpd_rib::RouteQueryScope::Received { peer: Some(peer) },
+                scope: rustbgpd_rib::RouteQueryScope::Received {
+                    peer: Some(PeerId::from_addr(peer)),
+                },
                 filter: None,
                 after,
                 expected_version,

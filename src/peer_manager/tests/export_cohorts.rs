@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 /// Session model for an ambiguous import apply: it installs every supplied
 /// chain, drops the first reply after mutation, and acknowledges subsequent
@@ -154,9 +155,9 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
         }])
     }
 
-    let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let (handle_a, counters_a) = fake_session(a);
+    let (handle_a, counters_a) = fake_session(a.addr());
     let (handle_b, counters_b) = fake_session(b);
 
     // RIB drainer counting ReplacePeerExportPolicy per peer.
@@ -206,7 +207,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
         rib_tx,
         None,
     );
-    insert_test_managed_peer(&mut mgr, a, handle_a, false);
+    insert_test_managed_peer(&mut mgr, a.addr(), handle_a, false);
     insert_test_managed_peer(&mut mgr, b, handle_b, false);
 
     // Initial install through the atomic fan-out both edits ride.
@@ -217,7 +218,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
         export_policy: Some(chain),
     };
     mgr.apply_resolved_policy_snapshot(vec![
-        target(a, permit_policy_chain()),
+        target(a.addr(), permit_policy_chain()),
         target(b, permit_policy_chain()),
     ])
     .await
@@ -230,7 +231,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
     // content moved; A resolves to a content-equal (fresh-instance)
     // chain.
     mgr.apply_resolved_policy_snapshot(vec![
-        target(a, permit_policy_chain()),
+        target(a.addr(), permit_policy_chain()),
         target(b, deny_policy_chain()),
     ])
     .await
@@ -451,13 +452,13 @@ async fn export_only_snapshot_selects_largest_local_policy_pair() {
                     batches.push(
                         replacements
                             .into_iter()
-                            .map(|replacement| replacement.peer)
+                            .map(|replacement| replacement.peer.addr())
                             .collect::<Vec<_>>(),
                     );
                     let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
                 }
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    singles.push(peer);
+                    singles.push(peer.addr());
                     let _ = reply.send(Ok(()));
                 }
                 _ => {}
@@ -671,13 +672,13 @@ async fn export_only_snapshot_partitions_first_eligible_cohort_and_stable_remain
                     batches.push(
                         replacements
                             .into_iter()
-                            .map(|replacement| replacement.peer)
+                            .map(|replacement| replacement.peer.addr())
                             .collect::<Vec<_>>(),
                     );
                     let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
                 }
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    singles.push(peer);
+                    singles.push(peer.addr());
                     let _ = reply.send(Ok(()));
                 }
                 _ => {}
@@ -844,7 +845,7 @@ async fn export_only_snapshot_duplicate_key_disables_partitioning_wholesale() {
                     let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
                 }
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    singles.push(peer);
+                    singles.push(peer.addr());
                     let _ = reply.send(Ok(()));
                 }
                 _ => {}
@@ -922,7 +923,7 @@ async fn export_only_snapshot_cohort_failure_leaves_remainder_untouched() {
                     let _ = reply.send(Err("injected cohort failure".to_string()));
                 }
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    singles.push(peer);
+                    singles.push(peer.addr());
                     let _ = reply.send(Ok(()));
                 }
                 RibUpdate::RestorePeerExportPoliciesAuthoritatively {
@@ -935,7 +936,7 @@ async fn export_only_snapshot_cohort_failure_leaves_remainder_untouched() {
                         .iter()
                         .rev()
                         .map(|replacement| {
-                            singles.push(replacement.peer);
+                            singles.push(replacement.peer.addr());
                             rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
                                 peer: replacement.peer,
                             }
@@ -1048,7 +1049,7 @@ async fn export_only_snapshot_remainder_failure_restores_remainder_then_cohort()
                     let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
                 }
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    singles.push(peer);
+                    singles.push(peer.addr());
                     let _ = reply.send(Ok(()));
                 }
                 RibUpdate::RestorePeerExportPoliciesAuthoritatively {
@@ -1062,7 +1063,7 @@ async fn export_only_snapshot_remainder_failure_restores_remainder_then_cohort()
                         .iter()
                         .rev()
                         .map(|replacement| {
-                            singles.push(replacement.peer);
+                            singles.push(replacement.peer.addr());
                             rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
                                 peer: replacement.peer,
                             }
@@ -1247,7 +1248,7 @@ async fn policy_rollback_rib_wait_has_one_cross_partition_deadline() {
             else {
                 panic!("expected remainder forward command");
             };
-            assert_eq!(peer, expected_peer);
+            assert_eq!(peer, PeerId::from_addr(expected_peer));
             if index == 0 {
                 reply.send(Ok(())).unwrap();
             } else {
@@ -1272,7 +1273,7 @@ async fn policy_rollback_rib_wait_has_one_cross_partition_deadline() {
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers[2..]
         );
@@ -1322,7 +1323,7 @@ async fn policy_rollback_rib_wait_has_one_cross_partition_deadline() {
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers[..2]
         );
@@ -1431,7 +1432,7 @@ async fn policy_rollback_rib_deadline_starts_after_session_restores() {
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers[..peers.len() - 1]
         );
@@ -1525,7 +1526,7 @@ async fn timed_out_policy_rollback_rearms_import_and_export_retry_intent() {
             else {
                 panic!("expected forward RIB command");
             };
-            assert_eq!(peer, expected_peer);
+            assert_eq!(peer, PeerId::from_addr(expected_peer));
             if index == 0 {
                 reply.send(Ok(())).unwrap();
             } else {
@@ -1546,7 +1547,7 @@ async fn timed_out_policy_rollback_rearms_import_and_export_retry_intent() {
         assert_eq!(
             replacements
                 .iter()
-                .map(|replacement| replacement.peer)
+                .map(|replacement| replacement.peer.addr())
                 .collect::<Vec<_>>(),
             peers
         );
@@ -1630,14 +1631,14 @@ async fn policy_rollback_skips_refresh_when_rib_restore_cannot_register() {
         else {
             panic!("expected first forward RIB command");
         };
-        assert_eq!(peer, peers[0]);
+        assert_eq!(peer, PeerId::from_addr(peers[0]));
         reply.send(Ok(())).unwrap();
 
         let RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } = rib_rx.recv().await.unwrap()
         else {
             panic!("expected second forward RIB command");
         };
-        assert_eq!(peer, peers[1]);
+        assert_eq!(peer, PeerId::from_addr(peers[1]));
         reply
             .send(Err(rustbgpd_rib::RibCommandError::internal(
                 "force rollback after one completed peer",
@@ -1694,13 +1695,13 @@ async fn export_only_snapshot_reasserts_prior_import_after_remainder_ack_loss() 
                     batches.push(
                         replacements
                             .into_iter()
-                            .map(|replacement| replacement.peer)
+                            .map(|replacement| replacement.peer.addr())
                             .collect::<Vec<_>>(),
                     );
                     let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
                 }
                 RibUpdate::ReplacePeerExportPolicy { peer, reply, .. } => {
-                    singles.push(peer);
+                    singles.push(peer.addr());
                     let _ = reply.send(Ok(()));
                 }
                 RibUpdate::RestorePeerExportPoliciesAuthoritatively {
@@ -1713,7 +1714,7 @@ async fn export_only_snapshot_reasserts_prior_import_after_remainder_ack_loss() 
                         .iter()
                         .rev()
                         .map(|replacement| {
-                            singles.push(replacement.peer);
+                            singles.push(replacement.peer.addr());
                             rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
                                 peer: replacement.peer,
                             }

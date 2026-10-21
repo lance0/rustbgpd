@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
+
+use rustbgpd_rib::PeerId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -80,7 +82,7 @@ fn publish(publisher: &mut ExportRosterPublisher, map: &HashMap<IpAddr, Option<P
         .iter()
         .map(|(peer, chain)| {
             (
-                *peer,
+                PeerId::from_addr(*peer),
                 chain.as_ref().map(|chain| Arc::clone(chain.hit_counters())),
             )
         })

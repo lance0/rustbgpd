@@ -1,3 +1,5 @@
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -394,7 +396,7 @@ fn observe_group_prior_materialization(manager: &mut RibManager) -> Arc<AtomicUs
 
 fn register_exact_target(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     encoder: Arc<dyn ExactExportEncoder>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (tx, rx) = mpsc::channel(16);
@@ -403,7 +405,7 @@ fn register_exact_target(
     rx
 }
 
-fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bool {
+fn commit_batch(manager: &mut RibManager, peer: PeerId, batch: ExactBatch) -> bool {
     let next_hop_override = vec![None; batch.announce.len()].into();
     manager
         .try_send_and_commit_outbound_update(
@@ -430,7 +432,7 @@ fn commit_batch(manager: &mut RibManager, peer: IpAddr, batch: ExactBatch) -> bo
 
 fn commit_shared_unicast_with_cache(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     announce: Arc<Vec<Route>>,
     next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     group_prior: HashSet<ExactExportKey>,
@@ -449,7 +451,7 @@ fn commit_shared_unicast_with_cache(
 
 fn commit_shared_unicast_with_precommit(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     announce: Arc<Vec<Route>>,
     next_hop_override: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     group_prior: HashSet<ExactExportKey>,
@@ -472,7 +474,7 @@ fn commit_shared_unicast_with_precommit(
 
 #[test]
 fn lazy_clean_group_prior_falls_back_when_identity_or_stage_is_missing() {
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 40));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 40));
     let staged: HashMap<usize, Vec<crate::manager::update_groups::GroupDelta>> = HashMap::new();
 
     // Restoring either former `expect` makes one of these missing-input
@@ -499,8 +501,8 @@ fn lazy_clean_group_prior_falls_back_when_identity_or_stage_is_missing() {
 
 #[test]
 fn lazy_clean_group_prior_defers_only_for_a_resolved_eligible_stage() {
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 41));
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 41));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 41));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 41));
     let route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
         Ipv4Addr::new(198, 51, 100, 41),
@@ -552,7 +554,7 @@ fn exact_export_error_detail_is_bounded_by_unicode_scalars() {
 
 #[tokio::test]
 async fn private_route_rejection_withdraws_once_then_recovers() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let route = make_route(prefix, Ipv4Addr::new(198, 51, 100, 1));
     let key = ExactExportKey::Unicast(route.prefix, route.path_id);
@@ -628,7 +630,7 @@ async fn private_route_rejection_withdraws_once_then_recovers() {
 
 #[test]
 fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 61));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 61));
     let route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 116, 0), 24),
         Ipv4Addr::new(198, 51, 100, 61),
@@ -693,7 +695,7 @@ fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
 
 #[tokio::test]
 async fn every_route_family_is_probed_before_commit() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
     let source = Ipv4Addr::new(198, 51, 100, 2);
     let unicast = make_route(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24), source);
     let flowspec = make_flowspec_route(source);
@@ -790,7 +792,7 @@ async fn every_route_family_is_probed_before_commit() {
 
 #[tokio::test]
 async fn batched_probe_results_filter_the_matching_family_in_order() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 22));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 22));
     let source = Ipv4Addr::new(198, 51, 100, 22);
     let unicast = make_route(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 22, 0), 24), source);
     let flowspec = make_flowspec_route(source);
@@ -836,7 +838,7 @@ async fn batched_probe_results_filter_the_matching_family_in_order() {
 
 #[test]
 fn route_bearing_commit_without_encoder_fails_closed() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 3));
     let route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 2, 0), 24),
         Ipv4Addr::new(198, 51, 100, 3),
@@ -859,7 +861,7 @@ fn route_bearing_commit_without_encoder_fails_closed() {
 
 #[test]
 fn mismatched_unicast_payload_is_unrepresentable_and_nonretryable() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 34));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 34));
     let route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 34, 0), 24),
         Ipv4Addr::new(198, 51, 100, 34),
@@ -891,7 +893,7 @@ fn mismatched_unicast_payload_is_unrepresentable_and_nonretryable() {
 
 #[tokio::test]
 async fn malformed_batch_probe_cardinality_falls_back_to_scalar() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 33));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 33));
     let route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 33, 0), 24),
         Ipv4Addr::new(198, 51, 100, 33),
@@ -918,7 +920,7 @@ async fn malformed_batch_probe_cardinality_falls_back_to_scalar() {
 
 #[test]
 fn missing_encoder_does_not_consume_retry_state() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 4));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 4));
     let route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 3, 0), 24),
         Ipv4Addr::new(198, 51, 100, 4),
@@ -950,8 +952,8 @@ fn missing_encoder_does_not_consume_retry_state() {
 
 #[test]
 fn rejection_pruning_follows_sparse_overlay_liveness() {
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5));
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 5));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 5));
     let mut route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(10, 0, 4, 0), 24),
         Ipv4Addr::new(198, 51, 100, 5),
@@ -1007,7 +1009,7 @@ fn rejection_pruning_follows_sparse_overlay_liveness() {
 
 async fn peer_up_with_encoder(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     encoder: Arc<dyn ExactExportEncoder>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     tx.send(RibUpdate::SetPeerExportEncoder {
@@ -1044,7 +1046,7 @@ async fn peer_up_with_encoder(
 
 async fn vpn_peer_up_with_encoder(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     encoder: Arc<dyn ExactExportEncoder>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     tx.send(RibUpdate::SetPeerExportEncoder {
@@ -1081,7 +1083,7 @@ async fn vpn_peer_up_with_encoder(
 
 async fn add_path_peer_up_with_encoder(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     encoder: Arc<dyn ExactExportEncoder>,
     send_max: u32,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -1117,7 +1119,7 @@ async fn add_path_peer_up_with_encoder(
     out_rx
 }
 
-async fn advertised_count(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> usize {
+async fn advertised_count(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> usize {
     let (reply, result) = oneshot::channel();
     tx.send(RibUpdate::QueryAdvertisedCount { peer, reply })
         .await
@@ -1125,11 +1127,11 @@ async fn advertised_count(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> usize {
     result.await.unwrap()
 }
 
-async fn advertised_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
+async fn advertised_routes(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> Vec<Route> {
     collect_advertised_routes(tx, peer).await
 }
 
-async fn update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
+async fn update_group(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> String {
     let (reply, result) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
         .await
@@ -1139,8 +1141,8 @@ async fn update_group(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
 
 #[test]
 fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
-    let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 40));
-    let limited = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 41));
+    let source = peer_v4(Ipv4Addr::new(192, 0, 2, 40));
+    let limited = peer_v4(Ipv4Addr::new(192, 0, 2, 41));
     let source_encoder = ReusableExactExportEncoder::with_limits(40, 77, 512, 4_096);
     let limited_encoder = ReusableExactExportEncoder::with_limits(41, 77, 512, 128);
     let mut manager = test_manager();
@@ -1189,8 +1191,8 @@ fn cached_success_rechecks_target_ceiling_and_emits_owed_withdrawal() {
 
 #[test]
 fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() {
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42));
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 42));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 42));
     let encoder = ReusableExactExportEncoder::new(4_242, 17);
     let mut manager = test_manager();
     let mut rx = register_exact_target(&mut manager, target, encoder);
@@ -1240,8 +1242,8 @@ fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() 
     reason = "one fixture keeps prior delivery, grouped ownership, cached rejection and the owed withdrawal together"
 )]
 fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
-    let source = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 43));
-    let limited = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44));
+    let source = peer_v4(Ipv4Addr::new(192, 0, 2, 43));
+    let limited = peer_v4(Ipv4Addr::new(192, 0, 2, 44));
     let source_encoder = ReusableExactExportEncoder::with_limits(43, 88, 8_192, 65_535);
     let limited_encoder = ReusableExactExportEncoder::with_limits(44, 88, 8_192, 4_096);
     let mut manager = test_manager();
@@ -1355,7 +1357,7 @@ fn clean_group_cached_failure_materializes_prior_and_emits_owed_withdrawal() {
 
 #[test]
 fn clean_plain_shared_withdrawal_skips_prior_materialization() {
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 7).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 7).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);
     let route = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 1), 32), source);
     let key = (route.prefix, route.path_id);
@@ -1425,8 +1427,8 @@ fn clean_plain_shared_withdrawal_skips_prior_materialization() {
 
 #[test]
 fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 45));
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 45));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 45));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 45));
     let encoder = ReusableExactExportEncoder::new(45, 19);
     let mut manager = test_manager();
     let mut rx = register_exact_target(&mut manager, target, encoder);
@@ -1484,7 +1486,7 @@ async fn grouped_shared_unicast_probes_once_per_compatible_wire_profile() {
     let mut receivers = Vec::new();
     let mut encoders = Vec::new();
     for octet in 10..74 {
-        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet));
+        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, octet));
         let encoder = ReusableExactExportEncoder::new(u64::from(octet), u64::from(octet % 2));
         receivers.push(peer_up_with_encoder(&tx, peer, encoder.clone()).await);
         encoders.push(encoder);
@@ -1495,7 +1497,7 @@ async fn grouped_shared_unicast_probes_once_per_compatible_wire_profile() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![make_route(prefix, source)],
         withdrawn: Vec::new(),
         flowspec_announced: Vec::new(),
@@ -1529,8 +1531,8 @@ async fn grouped_shared_unicast_does_not_reuse_when_snapshot_refuses() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let a = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20));
-    let b = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 21));
+    let a = peer_v4(Ipv4Addr::new(192, 0, 2, 20));
+    let b = peer_v4(Ipv4Addr::new(192, 0, 2, 21));
     let encoder_a = MockExactExportEncoder::accepting(41);
     let encoder_b = MockExactExportEncoder::accepting(41);
     let mut receiver_a = peer_up_with_encoder(&tx, a, encoder_a.clone()).await;
@@ -1542,7 +1544,7 @@ async fn grouped_shared_unicast_does_not_reuse_when_snapshot_refuses() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![make_route(prefix, source)],
         withdrawn: Vec::new(),
         flowspec_announced: Vec::new(),
@@ -1572,8 +1574,8 @@ async fn grouped_shared_unicast_falls_back_on_wrong_reuse_cardinality() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let a = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
-    let b = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31));
+    let a = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
+    let b = peer_v4(Ipv4Addr::new(192, 0, 2, 31));
     let encoder_a = ReusableExactExportEncoder::with_wrong_reuse_cardinality(30, 9);
     let encoder_b = ReusableExactExportEncoder::with_wrong_reuse_cardinality(31, 9);
     let mut receiver_a = peer_up_with_encoder(&tx, a, encoder_a.clone()).await;
@@ -1585,7 +1587,7 @@ async fn grouped_shared_unicast_falls_back_on_wrong_reuse_cardinality() {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![make_route(prefix, source)],
         withdrawn: Vec::new(),
         flowspec_announced: Vec::new(),
@@ -1614,7 +1616,7 @@ async fn grouped_link_local_scope_change_withdraws_and_restores_with_fixed_profi
     let (tx, rx) = mpsc::channel(32);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
     let source = Ipv4Addr::new(198, 51, 100, 10);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let encoder = MockExactExportEncoder::accepting(1);
@@ -1634,7 +1636,7 @@ async fn grouped_link_local_scope_change_withdraws_and_restores_with_fixed_profi
         }));
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             announced: vec![route.clone()],
             withdrawn: Vec::new(),
             flowspec_announced: Vec::new(),
@@ -1685,7 +1687,7 @@ async fn grouped_refresh_probe_failure_withdraws_once_and_recovers_like_private(
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
         manager.test_force_ungrouped = force_ungrouped;
         let handle = tokio::spawn(manager.run());
-        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 51));
+        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 51));
         let source = Ipv4Addr::new(198, 51, 100, 51);
         let delivered = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24), source);
         let rejected = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24), source);
@@ -1699,7 +1701,7 @@ async fn grouped_refresh_probe_failure_withdraws_once_and_recovers_like_private(
         }
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             announced: vec![delivered.clone(), rejected],
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -1777,8 +1779,8 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let classic = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
-    let extended = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+    let classic = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
+    let extended = peer_v4(Ipv4Addr::new(192, 0, 2, 11));
     let source_a = Ipv4Addr::new(198, 51, 100, 10);
     let source_b = Ipv4Addr::new(198, 51, 100, 11);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -1795,7 +1797,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source_a),
+        peer: peer_v4(source_a),
         announced: vec![route_a],
         withdrawn: Vec::new(),
         flowspec_announced: Vec::new(),
@@ -1833,7 +1835,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     // rejection overlay just because the source peer changed.
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source_b),
+        peer: peer_v4(source_b),
         announced: vec![route_b],
         withdrawn: Vec::new(),
         flowspec_announced: Vec::new(),
@@ -1849,11 +1851,11 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     assert!(classic_flip.announce.is_empty());
     assert_eq!(classic_flip.withdraw.len(), 0);
     assert_eq!(extended_flip.announce.len(), 1);
-    assert_eq!(extended_flip.announce[0].peer, IpAddr::V4(source_b));
+    assert_eq!(extended_flip.announce[0].peer, peer_v4(source_b));
     assert_eq!(advertised_count(&tx, classic).await, 0);
     assert_eq!(
         advertised_routes(&tx, extended).await[0].peer,
-        IpAddr::V4(source_b)
+        peer_v4(source_b)
     );
 
     // A content change moves only the classic peer to a new group. Its
@@ -1892,7 +1894,7 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     for source in [source_a, source_b] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             announced: Vec::new(),
             withdrawn: vec![(Prefix::V4(prefix), 0)],
             flowspec_announced: Vec::new(),
@@ -1928,9 +1930,9 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
-    let sibling = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31));
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 30));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
+    let sibling = peer_v4(Ipv4Addr::new(192, 0, 2, 31));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 30));
     let route = make_vpn_rib_route(Ipv4Addr::new(198, 51, 100, 30), 30, 1030, 100);
     let key = route.key();
     let exact_key = ExactExportKey::Vpn(key.clone());
@@ -2010,8 +2012,8 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
-    let sibling = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
+    let sibling = peer_v4(Ipv4Addr::new(192, 0, 2, 31));
     let source = Ipv4Addr::new(198, 51, 100, 30);
     let mut route = make_vpn_rib_route(source, 30, 1030, 100);
     let key = route.key();
@@ -2025,7 +2027,7 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     );
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
-        peer: source.into(),
+        peer: peer_v4(source),
         announced: vec![route.clone()],
         withdrawn: Vec::new(),
     })
@@ -2041,7 +2043,7 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
     route.next_hop = "2001:db8::7".parse().unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
-        peer: source.into(),
+        peer: peer_v4(source),
         announced: vec![route],
         withdrawn: Vec::new(),
     })
@@ -2073,7 +2075,7 @@ async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
 
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
-        peer: source.into(),
+        peer: peer_v4(source),
         announced: Vec::new(),
         withdrawn: vec![key.clone()],
     })
@@ -2097,7 +2099,7 @@ async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 20));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24);
     let encoder = MockExactExportEncoder::accepting(41);
     encoder.set_profile(41, [ExactExportKey::Unicast(Prefix::V4(prefix), 2)]);
@@ -2110,7 +2112,7 @@ async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
     ] {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             announced: vec![make_route_with_lp(prefix, source, local_pref)],
             withdrawn: Vec::new(),
             flowspec_announced: Vec::new(),
@@ -2129,7 +2131,7 @@ async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
     let rejected = explain
         .candidates
         .iter()
-        .find(|candidate| candidate.route.peer == IpAddr::V4(Ipv4Addr::new(198, 51, 100, 21)))
+        .find(|candidate| candidate.route.peer == peer_v4(Ipv4Addr::new(198, 51, 100, 21)))
         .expect("rank-two candidate");
     assert_eq!(rejected.advertised_path_id, 0);
 
@@ -2138,7 +2140,7 @@ async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
         target,
         Prefix::V4(prefix),
         crate::update::RouteSourceIdentity {
-            peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 21)),
+            peer: peer_v4(Ipv4Addr::new(198, 51, 100, 21)),
             path_id: 0,
         },
     )
@@ -2163,7 +2165,7 @@ fn action_only_admitted_residue_survives_refusal_and_rejection() {
     use rustbgpd_policy::NextHopAction;
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let target: IpAddr = "192.0.2.2".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (outbound, mut receiver) = mpsc::channel(1);
     let encoder = MockExactExportEncoder::accepting(1);
     manager.outbound_peers.insert(target, outbound);
@@ -2242,7 +2244,7 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
     use rustbgpd_policy::NextHopAction;
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let target: IpAddr = "192.0.2.2".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (outbound, mut receiver) = mpsc::channel(1);
     let encoder = MockExactExportEncoder::accepting(1);
     encoder.config.write().unwrap().equivalent_next_hop_actions = true;

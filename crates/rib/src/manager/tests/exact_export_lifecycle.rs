@@ -1,11 +1,13 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
 fn test_manager() -> RibManager {
     let (_tx, rx) = mpsc::channel(8);
     RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
 }
 
-fn peer_up(manager: &mut RibManager, peer: IpAddr, session_id: u64) {
+fn peer_up(manager: &mut RibManager, peer: PeerId, session_id: u64) {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
         peer,
@@ -28,12 +30,12 @@ fn peer_up(manager: &mut RibManager, peer: IpAddr, session_id: u64) {
 }
 
 fn stable_overlay(manager: &mut RibManager) {
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 200));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 200));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let mut rib = AdjRibIn::new(source);
     rib.insert(make_route(
         prefix,
-        match source {
+        match source.addr() {
             IpAddr::V4(source) => source,
             IpAddr::V6(_) => unreachable!(),
         },
@@ -41,14 +43,14 @@ fn stable_overlay(manager: &mut RibManager) {
     manager.ribs.insert(source, rib);
     manager.register_unicast_announcer(source, Prefix::V4(prefix));
     manager.peer_unexportable.insert(
-        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 200)),
+        peer_v4(Ipv4Addr::new(192, 0, 2, 200)),
         HashSet::from([ExactExportKey::Unicast(Prefix::V4(prefix), 0)]),
     );
 }
 
 #[test]
 fn collision_and_stale_peer_down_skip_full_exact_export_prune() {
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
     let mut manager = test_manager();
     stable_overlay(&mut manager);
     peer_up(&mut manager, peer, 1);
@@ -67,7 +69,7 @@ fn collision_and_stale_peer_down_skip_full_exact_export_prune() {
     rib.insert(make_route(prefix, Ipv4Addr::new(192, 0, 2, 1)));
     manager.ribs.insert(peer, rib);
     manager.register_unicast_announcer(peer, Prefix::V4(prefix));
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 202));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 202));
     manager
         .peer_unexportable
         .insert(target, HashSet::from([identity]));
@@ -87,7 +89,7 @@ fn collision_and_stale_peer_down_skip_full_exact_export_prune() {
 
 #[test]
 fn authoritative_peer_down_keeps_full_exact_export_prune() {
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 201));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 201));
     let dead = ExactExportKey::Unicast(
         Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
         0,
@@ -101,16 +103,19 @@ fn authoritative_peer_down_keeps_full_exact_export_prune() {
             .peer_unexportable
             .insert(target, HashSet::from([dead.clone()]));
         if register {
-            peer_up(&mut manager, peer, session_id);
+            peer_up(&mut manager, PeerId::from_addr(peer), session_id);
         }
-        manager.handle_update(RibUpdate::PeerDown { peer, session_id });
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: PeerId::from_addr(peer),
+            session_id,
+        });
         assert_eq!(manager.test_exact_export_full_prune_calls, 1);
         assert!(!manager.peer_unexportable.contains_key(&target));
     }
 }
 
-fn all_family_rib(peer: IpAddr) -> (AdjRibIn, HashSet<ExactExportKey>) {
-    let source = match peer {
+fn all_family_rib(peer: PeerId) -> (AdjRibIn, HashSet<ExactExportKey>) {
+    let source = match peer.addr() {
         IpAddr::V4(peer) => peer,
         IpAddr::V6(_) => unreachable!(),
     };
@@ -143,8 +148,8 @@ fn all_family_rib(peer: IpAddr) -> (AdjRibIn, HashSet<ExactExportKey>) {
 
 #[test]
 fn peer_clear_retires_departing_exact_export_identities_for_all_families() {
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 4));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 4));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 4));
     let (rib, identities) = all_family_rib(source);
     assert_eq!(identities.len(), 7);
     let mut manager = test_manager();
@@ -165,23 +170,23 @@ fn peer_clear_retires_departing_exact_export_identities_for_all_families() {
 
 #[test]
 fn targeted_retirement_preserves_duplicate_source_identity() {
-    let departing = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5));
-    let surviving = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 6));
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5));
+    let departing = peer_v4(Ipv4Addr::new(198, 51, 100, 5));
+    let surviving = peer_v4(Ipv4Addr::new(198, 51, 100, 6));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 5));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 5, 0), 24);
     let identity = ExactExportKey::Unicast(Prefix::V4(prefix), 0);
     let mut manager = test_manager();
     for peer in [departing, surviving] {
-        let mut rib = AdjRibIn::new(peer);
+        let mut rib = AdjRibIn::new(PeerId::from_addr(peer.addr()));
         rib.insert(make_route(
             prefix,
-            match peer {
+            match peer.addr() {
                 IpAddr::V4(peer) => peer,
                 IpAddr::V6(_) => unreachable!(),
             },
         ));
-        manager.ribs.insert(peer, rib);
-        manager.register_unicast_announcer(peer, Prefix::V4(prefix));
+        manager.ribs.insert(PeerId::from_addr(peer.addr()), rib);
+        manager.register_unicast_announcer(PeerId::from_addr(peer.addr()), Prefix::V4(prefix));
     }
     manager
         .peer_unexportable

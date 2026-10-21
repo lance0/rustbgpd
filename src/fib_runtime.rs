@@ -948,7 +948,14 @@ async fn query_peer_groups_versioned(
     let groups = tokio::time::timeout_at(deadline, query)
         .await
         .map_err(|_| "timeout")??;
-    Ok((groups.groups.into_iter().collect(), groups.observed_version))
+    Ok((
+        groups
+            .groups
+            .into_iter()
+            .map(|(peer, group)| (peer.addr(), group))
+            .collect(),
+        groups.observed_version,
+    ))
 }
 
 async fn query_versions(
@@ -3308,6 +3315,7 @@ fn netlink_errno(err: &rtnetlink::Error) -> Option<i32> {
 mod tests {
     use super::*;
     use prometheus::Registry;
+    use rustbgpd_rib::PeerId;
     use rustbgpd_rib::{FibInstallNextHop, Route, RouteEvent, RouteOrigin};
     use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Safi};
     use std::collections::BTreeMap;
@@ -3823,7 +3831,11 @@ mod tests {
                     }
                     RibUpdate::QueryPeerGroupsVersioned { reply, .. } => {
                         let _ = reply.send(Ok(rustbgpd_rib::VersionedPeerGroups {
-                            groups: peer_groups.clone().into_iter().collect(),
+                            groups: peer_groups
+                                .clone()
+                                .into_iter()
+                                .map(|(peer, group)| (PeerId::from_addr(peer), group))
+                                .collect(),
                             observed_version: rustbgpd_rib::RoutePageVersion::default(),
                         }));
                     }
@@ -6293,7 +6305,7 @@ mod tests {
             outbound.push(out_rx);
             rib_tx
                 .send(RibUpdate::PeerUp {
-                    peer: ip(peer),
+                    peer: PeerId::from_addr(ip(peer)),
                     session_id: 0,
                     peer_asn: 65000 + u32::from(octet),
                     peer_router_id: Ipv4Addr::new(192, 0, 2, octet),
@@ -6348,7 +6360,7 @@ mod tests {
         ) {
             self.rib_tx
                 .send(RibUpdate::RoutesReceived {
-                    peer: ip(peer),
+                    peer: PeerId::from_addr(ip(peer)),
                     session_id: 0,
                     announced,
                     withdrawn,
@@ -6432,7 +6444,7 @@ mod tests {
         harness
             .rib_tx
             .send(RibUpdate::PeerDown {
-                peer: ip(PEER_B),
+                peer: PeerId::from_addr(ip(PEER_B)),
                 session_id: 0,
             })
             .await
@@ -9915,7 +9927,7 @@ mod tests {
                     next_hop: ip("192.0.2.1"),
                     link_local_next_hop: None,
                     next_hop_scope: None,
-                    peer: ip("198.51.100.1"),
+                    peer: PeerId::from_addr(ip("198.51.100.1")),
                     path_id: 0,
                     weight: 256,
                 },
@@ -9923,7 +9935,7 @@ mod tests {
                     next_hop: ip("192.0.2.3"),
                     link_local_next_hop: None,
                     next_hop_scope: None,
-                    peer: ip("198.51.100.1"),
+                    peer: PeerId::from_addr(ip("198.51.100.1")),
                     path_id: 0,
                     weight: 64,
                 },

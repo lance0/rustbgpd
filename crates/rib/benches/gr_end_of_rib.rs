@@ -31,6 +31,7 @@
 //!
 //!   cargo bench -p rustbgpd-rib --features bench-internals --bench gr_end_of_rib -- --mode dual
 
+use rustbgpd_rib::PeerId;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
@@ -146,7 +147,7 @@ fn route(prefix: Prefix, attributes: &Arc<AttrSet>) -> Route {
         },
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: SOURCE,
+        peer: PeerId::from_addr(SOURCE),
         attributes: Arc::clone(attributes),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -243,7 +244,7 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize, attribute_sets: usize) {
         "{} clients must take the intended distribution path",
         mode.name()
     );
-    manager.bench_gr_restart(SOURCE, mode.gr_families());
+    manager.bench_gr_restart(PeerId::from_addr(SOURCE), mode.gr_families());
     manager.bench_seed_loc_rib(table(ipv4, ipv6, &attributes));
     drain(&mut receivers);
     let intern = manager.bench_attr_intern_inventory();
@@ -254,7 +255,7 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize, attribute_sets: usize) {
 
     let mut eors = Vec::new();
     for &(afi, safi) in mode.gr_families() {
-        let receipt = manager.bench_end_of_rib(SOURCE, afi, safi);
+        let receipt = manager.bench_end_of_rib(PeerId::from_addr(SOURCE), afi, safi);
         let envelopes = drain(&mut receivers);
         eors.push(format!(
             "{{\"family\":\"{afi:?}/{safi:?}\",\"total_ns\":{},\"recompute_ns\":{},\"distribute_ns\":{},\"affected\":{},\"changed\":{},\"retained_stale\":{},\"gr_complete\":{},\"attr_gc_ns\":{},\"stale_count_ns\":{},\"stale_resolution_ns\":{},\"envelopes\":{envelopes}}}",

@@ -234,7 +234,7 @@ impl PeerSession {
             let rib_tx = self.rib_tx.clone();
             self.await_replay_admission(
                 rib_tx.send(RibUpdate::ReplayPeerOutbound {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     families,
                     replay: Arc::clone(&replay),

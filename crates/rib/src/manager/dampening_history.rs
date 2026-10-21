@@ -481,11 +481,7 @@ impl RibManager {
             .is_some_and(DampeningAdmission::is_blocked)
     }
 
-    pub(super) fn dampening_session_blocked(
-        &self,
-        peer: std::net::IpAddr,
-        session_id: u64,
-    ) -> bool {
+    pub(super) fn dampening_session_blocked(&self, peer: crate::PeerId, session_id: u64) -> bool {
         self.live_sessions
             .get(&peer)
             .and_then(|sessions| {

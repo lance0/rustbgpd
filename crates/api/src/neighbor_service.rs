@@ -1,5 +1,6 @@
 //! gRPC neighbor service — add, remove, enable, disable, and list BGP peers.
 
+use rustbgpd_rib::PeerId;
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -460,8 +461,9 @@ async fn query_neighbor_rib_snapshots(
         RIB_SNAPSHOT_TIMEOUT,
         rib_summary_read(rib_tx, summary_tx, |reply| {
             RibSummaryQuery::NeighborRibSnapshots {
-                peers,
-                comparison,
+                peers: peers.into_iter().map(PeerId::from_addr).collect(),
+                comparison: comparison
+                    .map(|(primary, other)| (PeerId::from_addr(primary), PeerId::from_addr(other))),
                 include_retained,
                 reply,
             }
@@ -1376,7 +1378,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let mut neighbors = Vec::with_capacity(infos.len());
         for (info, snapshot) in infos.iter().zip(snapshots.snapshots) {
-            if snapshot.peer != info.address {
+            if snapshot.peer != PeerId::from_addr(info.address) {
                 return Err(Status::internal(
                     "RIB snapshot did not preserve requested neighbor order",
                 ));
@@ -1396,7 +1398,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                     snapshots
                         .retained
                         .iter()
-                        .map(|snapshot| (snapshot.peer, retention_only_neighbor(snapshot))),
+                        .map(|snapshot| (snapshot.peer.addr(), retention_only_neighbor(snapshot))),
                 )
                 .collect();
             keyed.sort_by_key(|(address, _)| *address);
@@ -1467,7 +1469,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .snapshots
             .into_iter()
             .next()
-            .filter(|snapshot| snapshot.peer == peer.address && !snapshot.gr_retention.is_empty())
+            .filter(|snapshot| {
+                snapshot.peer == PeerId::from_addr(peer.address)
+                    && !snapshot.gr_retention.is_empty()
+            })
             .ok_or_else(|| missing_peer(&peer))?;
             return Ok(Response::new(retention_only_neighbor(&snapshot)));
         };
@@ -1503,7 +1508,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .snapshots
             .into_iter()
             .next()
-            .filter(|snapshot| snapshot.peer == info.address)
+            .filter(|snapshot| snapshot.peer == PeerId::from_addr(info.address))
             .ok_or_else(|| Status::internal("RIB snapshot did not include requested neighbor"))?;
         let mut state = peer_info_to_proto(&info);
         apply_rib_snapshot(&mut state, &snapshot);
@@ -1814,6 +1819,7 @@ mod tests {
     use crate::test_support::peer_info;
     use prost::Message;
     use proto::neighbor_service_server::NeighborService as _;
+    use rustbgpd_rib::PeerId;
     use std::sync::Arc;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::oneshot;
@@ -2148,7 +2154,7 @@ mod tests {
                     reply,
                     include_retained: _,
                 } = summary_rx.recv().await.unwrap();
-                assert_eq!(peers, ["192.0.2.1".parse::<IpAddr>().unwrap()]);
+                assert_eq!(peers, [PeerId::from_addr("192.0.2.1".parse().unwrap())]);
                 assert!(comparison.is_none());
                 reply
                     .send(NeighborRibSnapshotResponse {
@@ -3847,11 +3853,11 @@ mod tests {
                         reply,
                         include_retained: _,
                     } => {
-                        assert_eq!(peers, vec![addr]);
+                        assert_eq!(peers, vec![PeerId::from_addr(addr)]);
                         assert!(comparison.is_none());
                         let _ = reply.send(NeighborRibSnapshotResponse {
                             snapshots: vec![NeighborRibSnapshot {
-                                peer: addr,
+                                peer: PeerId::from_addr(addr),
                                 advertised_count: 7,
                                 policy_stats: rustbgpd_rib::NeighborPolicyStats {
                                     export_policy_routes_permitted: 3,
@@ -3956,20 +3962,25 @@ mod tests {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
-        let second: IpAddr = "10.0.0.2".parse().unwrap();
-        let tenth: IpAddr = "10.0.0.10".parse().unwrap();
-        let link_local: IpAddr = "fe80::1".parse().unwrap();
+        let second = PeerId::from_addr("10.0.0.2".parse().unwrap());
+        let tenth = PeerId::from_addr("10.0.0.10".parse().unwrap());
+        let link_local = PeerId::from_addr("fe80::1".parse().unwrap());
 
         let peer_task = tokio::spawn(async move {
             let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
                 panic!("ListNeighbors must request one peer-manager snapshot");
             };
-            let mut eth1 = peer_info(link_local);
+            let mut eth1 = peer_info(link_local.addr());
             eth1.interface = Some("eth1".into());
-            let mut eth0 = peer_info(link_local);
+            let mut eth0 = peer_info(link_local.addr());
             eth0.interface = Some("eth0".into());
             reply
-                .send(vec![peer_info(tenth), peer_info(second), eth1, eth0])
+                .send(vec![
+                    peer_info(tenth.addr()),
+                    peer_info(second.addr()),
+                    eth1,
+                    eth0,
+                ])
                 .unwrap();
         });
         let rib_task = tokio::spawn(async move {
@@ -4098,8 +4109,8 @@ mod tests {
         let (operator_tx, mut operator_rx) = mpsc::channel(1);
         let (svc, mut rib_rx) = read_service(peer_tx);
         let svc = svc.with_operator_queries(operator_tx);
-        let first: IpAddr = "10.0.0.1".parse().unwrap();
-        let second: IpAddr = "10.0.0.2".parse().unwrap();
+        let first = PeerId::from_addr("10.0.0.1".parse().unwrap());
+        let second = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let started = tokio::time::Instant::now();
         let read = tokio::spawn(async move {
             svc.list_neighbors(Request::new(proto::ListNeighborsRequest {}))
@@ -4116,7 +4127,7 @@ mod tests {
         assert!(rib_rx.try_recv().is_err());
         tokio::time::advance(Duration::from_millis(800)).await;
         reply
-            .send(vec![peer_info(second), peer_info(first)])
+            .send(vec![peer_info(second.addr()), peer_info(first.addr())])
             .unwrap();
         let Some(RibUpdate::QueryNeighborRibSnapshots {
             peers,
@@ -4220,7 +4231,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
         let addr: IpAddr = "192.0.2.1".parse().unwrap();
-        let wrong: IpAddr = "192.0.2.2".parse().unwrap();
+        let wrong = PeerId::from_addr("192.0.2.2".parse().unwrap());
         let peer = tokio::spawn(async move {
             let PeerManagerCommand::GetPeerState { reply, .. } = peer_rx.recv().await.unwrap()
             else {
@@ -4273,8 +4284,8 @@ mod tests {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
-        let primary: IpAddr = "192.0.2.1".parse().unwrap();
-        let comparison: IpAddr = "192.0.2.2".parse().unwrap();
+        let primary = PeerId::from_addr("192.0.2.1".parse().unwrap());
+        let comparison = PeerId::from_addr("192.0.2.2".parse().unwrap());
         let peer = tokio::spawn(async move {
             for expected in [primary, comparison] {
                 let PeerManagerCommand::GetPeerState { peer, reply } =
@@ -4282,8 +4293,8 @@ mod tests {
                 else {
                     panic!("expected peer lookup");
                 };
-                assert_eq!(peer.address, expected);
-                reply.send(Some(peer_info(expected))).unwrap();
+                assert_eq!(peer.address, expected.addr());
+                reply.send(Some(peer_info(expected.addr()))).unwrap();
             }
         });
         let rib = tokio::spawn(async move {
@@ -4411,15 +4422,15 @@ mod tests {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
-        let primary: IpAddr = "10.0.0.1".parse().unwrap();
-        let comparison: IpAddr = "10.0.0.2".parse().unwrap();
+        let primary = PeerId::from_addr("10.0.0.1".parse().unwrap());
+        let comparison = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let peer_task = tokio::spawn(async move {
             for expected in [primary, comparison] {
                 let Some(PeerManagerCommand::GetPeerState { peer, reply }) = peer_rx.recv().await else {
                     panic!("expected configured-peer validation");
                 };
-                assert_eq!(peer.address, expected);
-                reply.send(Some(peer_info(expected))).unwrap();
+                assert_eq!(peer.address, expected.addr());
+                reply.send(Some(peer_info(expected.addr()))).unwrap();
             }
         });
         let rib_task = tokio::spawn(async move {
@@ -4498,7 +4509,7 @@ mod tests {
     #[test]
     fn rib_snapshot_maps_outbound_resync_state() {
         let mut snapshot = NeighborRibSnapshot {
-            peer: "10.0.0.1".parse().unwrap(),
+            peer: PeerId::from_addr("10.0.0.1".parse().unwrap()),
             advertised_count: 7,
             policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
             outbound: rustbgpd_rib::PeerOutboundState {
@@ -4550,8 +4561,8 @@ mod tests {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
-        let primary: IpAddr = "10.0.0.1".parse().unwrap();
-        let secondary: IpAddr = "10.0.0.2".parse().unwrap();
+        let primary = PeerId::from_addr("10.0.0.1".parse().unwrap());
+        let secondary = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let snapshot = NeighborRibSnapshot {
             peer: primary,
             advertised_count: 7,
@@ -4591,8 +4602,8 @@ mod tests {
                 else {
                     panic!("expected configured-peer validation");
                 };
-                assert_eq!(peer.address, expected);
-                reply.send(Some(peer_info(expected))).unwrap();
+                assert_eq!(peer.address, expected.addr());
+                reply.send(Some(peer_info(expected.addr()))).unwrap();
             }
         });
         let rib_task = tokio::spawn(async move {

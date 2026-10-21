@@ -1,3 +1,4 @@
+use rustbgpd_rib::PeerId;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -104,7 +105,7 @@ pub(crate) fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         event_id: 1,
         event_type: RouteEventType::Added,
         prefix,
-        peer: Some(peer),
+        peer: Some(PeerId::from_addr(peer)),
         previous_peer: None,
         target_peer: None,
         peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
@@ -130,7 +131,7 @@ fn evpn_route(peer: IpAddr, mac_byte: u8) -> rustbgpd_rib::route::EvpnRibRoute {
         route,
         next_hop: peer,
         link_local_next_hop: None,
-        peer,
+        peer: PeerId::from_addr(peer),
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: std::time::Instant::now(),
         origin_type: rustbgpd_rib::route::RouteOrigin::Ibgp,
@@ -157,8 +158,8 @@ pub(crate) fn evpn_event(
         key,
         best: route,
         previous_best,
-        peer,
-        previous_peer,
+        peer: peer.map(PeerId::from_addr),
+        previous_peer: previous_peer.map(PeerId::from_addr),
         timestamp_unix_ms: 123_000,
     }
 }

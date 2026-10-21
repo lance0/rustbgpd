@@ -1,6 +1,8 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
-pub(super) async fn advertised(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<FlowSpecRoute> {
+pub(super) async fn advertised(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> Vec<FlowSpecRoute> {
     let (reply, rx) = oneshot::channel();
     tx.send(RibUpdate::QueryAdvertisedFlowSpecRoutes {
         peer,
@@ -22,9 +24,9 @@ async fn advertised_flowspec_tracks_committed_policy_and_withdrawal() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let task = tokio::spawn(manager.run());
-    let target: IpAddr = "192.0.2.1".parse().unwrap();
-    let denied: IpAddr = "192.0.2.2".parse().unwrap();
-    let no_family: IpAddr = "192.0.2.3".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.1".parse().unwrap());
+    let denied = PeerId::from_addr("192.0.2.2".parse().unwrap());
+    let no_family = PeerId::from_addr("192.0.2.3".parse().unwrap());
     let added = (65000 << 16) | 0x002a;
     let mut entry = super::flowspec::flowspec_policy_statement(
         0,
@@ -104,7 +106,7 @@ async fn advertised_flowspec_tracks_committed_policy_and_withdrawal() {
         let rows = advertised(&tx, target).await;
         assert_eq!(rows.len(), usize::from(!suppressed));
         if let Some(row) = rows.first() {
-            assert_eq!(row.peer, IpAddr::V4(local));
+            assert_eq!(row.peer, peer_v4(local));
             assert!(row.communities().contains(&added));
         }
         assert!(advertised(&tx, denied).await.is_empty());
@@ -130,7 +132,7 @@ async fn advertised_flowspec_tracks_committed_policy_and_withdrawal() {
 fn advertised_flowspec_filters_before_clone_and_cancels_filtered_walk() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let mut out = crate::adj_rib_out::AdjRibOut::new(peer);
     for n in 0..600u16 {
         let mut route = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
@@ -161,7 +163,7 @@ fn advertised_flowspec_filters_before_clone_and_cancels_filtered_walk() {
         assert_eq!(rows.len(), 300);
         assert!(
             rows.iter()
-                .all(|row| row.afi == afi && row.peer == IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+                .all(|row| row.afi == afi && row.peer == peer_v4(Ipv4Addr::UNSPECIFIED))
         );
     }
     let (reply, rx) = oneshot::channel();
@@ -190,7 +192,7 @@ fn advertised_flowspec_retains_prior_until_full_channel_withdrawal_commits() {
     use crate::manager::distribution::OutboundCommitBatch;
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(1);
     manager.outbound_peers.insert(peer, out_tx);
     manager

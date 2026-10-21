@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rustbgpd_api::proto;
 use rustbgpd_api::proto::rib_service_server::RibService as RibServiceTrait;
 use rustbgpd_api::rib_service::{RibService, VpnQueryServiceReceipt};
-use rustbgpd_rib::AttrSet;
+use rustbgpd_rib::{AttrSet, PeerId};
 use rustbgpd_rib::{RibManager, RibUpdate, RouteOrigin, VpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -245,7 +245,7 @@ fn route(index: usize, attributes: &Arc<AttrSet>) -> VpnRibRoute {
         next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: peer.into(),
+        peer: PeerId::from_addr(peer.into()),
         attributes: Arc::clone(attributes),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,
@@ -395,7 +395,7 @@ async fn run(
                 break;
             }
             let update = RibUpdate::VpnRoutesReceived {
-                peer,
+                peer: PeerId::from_addr(peer),
                 session_id: 0,
                 announced,
                 withdrawn: Vec::new(),

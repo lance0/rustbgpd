@@ -1134,6 +1134,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// (the square topology here is the same shape the M76 interop injects).
 #[cfg(test)]
 pub(crate) mod fixtures {
+    use crate::PeerId;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Instant;
 
@@ -1267,7 +1268,7 @@ pub(crate) mod fixtures {
             family: BgpLsFamily::LinkState,
             nlri,
             next_hop: IpAddr::V4(peer),
-            peer: IpAddr::V4(peer),
+            peer: PeerId::from_addr(IpAddr::V4(peer)),
             attributes: AttrSet::new(attributes),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,

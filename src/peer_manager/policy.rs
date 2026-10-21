@@ -1,3 +1,4 @@
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::IpAddr;
@@ -724,7 +725,7 @@ impl PeerManager {
                 return Err(timed_out());
             }
             permit.send(RibUpdate::QueryPeerRetainedStale {
-                peer,
+                peer: PeerId::from_addr(peer),
                 reply: reply_tx,
             });
             reply_rx
@@ -1592,7 +1593,7 @@ impl PeerManager {
         } else {
             let (reply_tx, reply_rx) = oneshot::channel();
             let rib_tx = self.rib_tx.clone();
-            let peer = targets[0].address;
+            let peer = PeerId::from_addr(targets[0].address);
             let export_policy = targets[0].export_policy.clone();
             let round_trip = async move {
                 if rib_tx
@@ -1896,7 +1897,7 @@ impl PeerManager {
         let replacements: Vec<_> = targets
             .iter()
             .map(|target| PeerExportPolicyReplacement {
-                peer: target.address,
+                peer: PeerId::from_addr(target.address),
                 export_policy: target.export_policy.clone(),
             })
             .collect();
@@ -2120,7 +2121,7 @@ impl PeerManager {
         let _ = self
             .send_rib_update(
                 RibUpdate::DiscardPreparedExportPolicyDestination {
-                    peer: target.address,
+                    peer: PeerId::from_addr(target.address),
                     export_policy: target.export_policy.clone(),
                 },
                 OperatorReadAdmission::Fenced {
@@ -2249,7 +2250,7 @@ impl PeerManager {
                 return Err(timed_out());
             }
             permit.send(RibUpdate::ReplacePeerExportPolicy {
-                peer,
+                peer: PeerId::from_addr(peer),
                 export_policy,
                 reply: reply_tx,
             });
@@ -2370,7 +2371,7 @@ impl PeerManager {
                 plan.export_restore
                     .as_ref()
                     .map(|(export_policy, _)| PeerExportPolicyReplacement {
-                        peer: plan.peer_key.address,
+                        peer: PeerId::from_addr(plan.peer_key.address),
                         export_policy: export_policy.clone(),
                     })
             })
@@ -2650,7 +2651,7 @@ impl PeerManager {
                         .collect::<Vec<_>>();
                     if receipts.len() == export_plans.len() {
                         for (plan, receipt) in export_plans.into_iter().zip(receipts) {
-                            if receipt.peer() != plan.peer_key.address {
+                            if receipt.peer() != PeerId::from_addr(plan.peer_key.address) {
                                 let code = RuntimeConfigPolicyFailureCode::RollbackBatchReplyLost;
                                 failure_code.get_or_insert(code);
                                 errors.push(code.as_str().to_string());
@@ -3220,7 +3221,8 @@ impl PeerManager {
             let mut import = references(&managed.import_policy);
             let mut export = references(&managed.export_policy)
                 || self.conditional_advertise_policy_references(peer.address, changed)
-                || candidate_conditional.advertise_policy_references(peer.address, changed);
+                || candidate_conditional
+                    .advertise_policy_references(PeerId::from_addr(peer.address), changed);
             let neighbor = candidate
                 .neighbors
                 .iter()
@@ -3381,7 +3383,7 @@ impl PeerManager {
         }
         let (reply, response) = oneshot::channel();
         permit.send(RibUpdate::ReevaluatePeerExportPolicies {
-            peers,
+            peers: peers.into_iter().map(PeerId::from_addr).collect(),
             swaps,
             reply,
         });

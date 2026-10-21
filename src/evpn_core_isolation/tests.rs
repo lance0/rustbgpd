@@ -1,6 +1,7 @@
 //! ADR-0140 planner, discovery and controller tests. The `netns` module
 //! drives the real controller against kernel bonds and veths.
 
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -522,7 +523,7 @@ fn remote_type4(
         }),
         next_hop: ip(originator),
         link_local_next_hop: None,
-        peer: ip(originator),
+        peer: PeerId::from_addr(ip(originator)),
         attributes: rustbgpd_rib::AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
             ExtendedCommunity::es_import_rt(crate::evpn_segment::es_import_rt_from_esi(id)),
         ])]),

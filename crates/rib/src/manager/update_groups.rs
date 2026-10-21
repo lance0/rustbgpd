@@ -32,6 +32,7 @@
 //! slice) skips the resync entirely. Mutable dataset contents are not part
 //! of that key; dataset swaps explicitly re-evaluate affected staged output.
 
+use crate::PeerId;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -112,12 +113,12 @@ fn send_update_group_snapshot(
 static SNAPSHOT_PEER_ORDER_KEY_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-fn snapshot_peer_order_key(peer: &IpAddr) -> [u8; 17] {
+fn snapshot_peer_order_key(peer: &PeerId) -> [u8; 17] {
     #[cfg(test)]
     SNAPSHOT_PEER_ORDER_KEY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let mut key = [0; 17];
-    match peer {
+    match peer.addr() {
         IpAddr::V4(addr) => key[1..5].copy_from_slice(&addr.octets()),
         IpAddr::V6(addr) => {
             key[0] = 1;
@@ -129,8 +130,8 @@ fn snapshot_peer_order_key(peer: &IpAddr) -> [u8; 17] {
 
 fn materialize_update_group_snapshot(
     reply: &tokio::sync::oneshot::Sender<UpdateGroupSnapshot>,
-    peers: &mut [IpAddr],
-    mut build_row: impl FnMut(IpAddr) -> UpdateGroupPeerSnapshot,
+    peers: &mut [PeerId],
+    mut build_row: impl FnMut(PeerId) -> UpdateGroupPeerSnapshot,
 ) -> Option<UpdateGroupSnapshot> {
     if reply.is_closed() {
         return None;
@@ -378,7 +379,7 @@ pub(super) struct UpdateGroupRegistry {
     /// creating their group tables. Its local IDs stay pinned until return.
     pub(in crate::manager) reclamation_deferred: bool,
     /// Membership (group id or ungrouped reason) per registered peer.
-    pub(super) members: HashMap<IpAddr, GroupMembership>,
+    pub(super) members: HashMap<PeerId, GroupMembership>,
 }
 
 impl UpdateGroupRegistry {
@@ -419,7 +420,7 @@ impl UpdateGroupRegistry {
     }
 
     /// A registered peer's membership, if any.
-    pub(super) fn membership(&self, peer: IpAddr) -> Option<&GroupMembership> {
+    pub(super) fn membership(&self, peer: PeerId) -> Option<&GroupMembership> {
         self.members.get(&peer)
     }
 
@@ -564,7 +565,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// count synthesis (`len − own`), one slot per staged family
     /// (v4-unicast, v6-unicast, vpnv4, vpnv6) for the BMP stat-17
     /// family counts.
-    source_counts: AddrMap<IpAddr, [usize; 4]>,
+    source_counts: AddrMap<PeerId, [usize; 4]>,
     /// Running column sums of `source_counts`, so a per-family count stays
     /// O(1) instead of walking every source. Maintained at the only two
     /// sites that move a slot.
@@ -576,8 +577,8 @@ pub(in crate::manager) struct GroupRibOut {
     pub(in crate::manager) tombstones: HashSet<(Prefix, u32)>,
     /// VPN sibling of `tombstones` (`path_id` fixed at 0).
     pub(in crate::manager) vpn_tombstones: HashSet<VpnRouteKey>,
-    pub(in crate::manager) members: HashSet<IpAddr>,
-    pub(in crate::manager) dirty_members: HashSet<IpAddr>,
+    pub(in crate::manager) members: HashSet<PeerId>,
+    pub(in crate::manager) dirty_members: HashSet<PeerId>,
     /// Persistent group-verdict export-policy denials with the denying
     /// policy's label for join-time counter replay, keyed by prefix so
     /// a scoped per-member query probes the pass's staged set instead
@@ -588,7 +589,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// readers restamp the concrete member. Inner maps are never left
     /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
     /// so outer emptiness remains "no denials".
-    policy_filtered: FastMap<Prefix, AddrMap<(IpAddr, u32), Option<PolicyLabel>>>,
+    policy_filtered: FastMap<Prefix, AddrMap<(PeerId, u32), Option<PolicyLabel>>>,
     /// Default-Permit label for every staged unicast and VPN entry.
     /// Export-chain identity is group-uniform and immutable, and a chain
     /// Permit is always attributed to the shared chain sentinel, so retaining
@@ -616,21 +617,21 @@ pub(in crate::manager) struct GroupRibOut {
     /// the table — their residue names never-staged routes, so
     /// subtracting it would double-count.
     otc_blocked_totals: [usize; 2],
-    otc_blocked_sources: AddrMap<IpAddr, [usize; 2]>,
+    otc_blocked_sources: AddrMap<PeerId, [usize; 2]>,
     /// Lane sibling of `otc_blocked_sources`: per-winner-source counts
     /// of lane entries whose runner-up is OTC-blocked toward this
     /// group — the substitution term of the same subtraction (the
     /// member sourcing the winner receives the runner-up, so ITS
     /// suppressed slot is the lane's, never the winner's). Maintained
     /// entirely by [`Self::apply_lane`], exactly like `lane_counts`.
-    lane_otc_blocked_counts: AddrMap<IpAddr, [usize; 2]>,
+    lane_otc_blocked_counts: AddrMap<PeerId, [usize; 2]>,
     /// Per-member advertised VPN counts `[vpnv4, vpnv6]`, maintained
     /// ONLY for RTC-negotiated groups (Φ makes the counts non-derivable
     /// from `source_counts`; design §2.4) at the emit seams: staging
     /// emit, membership delta, join, and resync recompute-by-walk. A
     /// dirty window may drift them; the member's resync recompute
     /// restores exactness. Non-RTC groups keep the O(1) synthesis.
-    vpn_member_counts: AddrMap<IpAddr, [i64; 2]>,
+    vpn_member_counts: AddrMap<PeerId, [i64; 2]>,
     /// ADR-0126 Decision 3 exception lane: the per-prefix runner-up
     /// sidecar of a per-client-best group. Populated only where a
     /// distinct-source permitted runner-up exists — O(overlapped
@@ -648,7 +649,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// by [`Self::apply_lane`], zeroed rows dropped (the
     /// `inc_source`/`dec_source` hygiene). Always empty for plain
     /// groups.
-    pub(in crate::manager) lane_counts: AddrMap<IpAddr, [usize; 2]>,
+    pub(in crate::manager) lane_counts: AddrMap<PeerId, [usize; 2]>,
     // Group-uniform staging inputs, snapshot at group creation from the
     // first member (all members are key-equal by construction; a key
     // change moves peers to a different group, so these never mutate).
@@ -683,7 +684,7 @@ pub(in crate::manager) struct GroupRibOut {
 /// Placeholder target for group-level policy-denial records; restamped
 /// with the concrete member at emit time. `LOCAL_PEER` can never be an
 /// outbound target.
-const GROUP_FILTERED_PLACEHOLDER: IpAddr = LOCAL_PEER;
+const GROUP_FILTERED_PLACEHOLDER: PeerId = LOCAL_PEER;
 
 impl GroupRibOut {
     #[cfg(test)]
@@ -878,7 +879,7 @@ impl GroupRibOut {
     #[cfg(test)]
     pub(in crate::manager) fn otc_blocked_for_member(
         &self,
-        member: IpAddr,
+        member: PeerId,
         prefixes: Option<&HashSet<Prefix>>,
     ) -> Vec<Route> {
         self.otc_blocked_for_member_with_checkpoint(member, prefixes, &mut || {})
@@ -886,7 +887,7 @@ impl GroupRibOut {
 
     pub(in crate::manager) fn otc_blocked_for_member_with_checkpoint(
         &self,
-        member: IpAddr,
+        member: PeerId,
         prefixes: Option<&HashSet<Prefix>>,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Route> {
@@ -978,7 +979,7 @@ impl GroupRibOut {
         }
     }
 
-    fn dec_source_slot(&mut self, peer: IpAddr, slot: usize) {
+    fn dec_source_slot(&mut self, peer: PeerId, slot: usize) {
         let Some(counts) = self.source_counts.get_mut(&peer) else {
             return;
         };
@@ -995,16 +996,16 @@ impl GroupRibOut {
         }
     }
 
-    fn inc_source_slot(&mut self, peer: IpAddr, slot: usize) {
+    fn inc_source_slot(&mut self, peer: PeerId, slot: usize) {
         self.source_counts.entry(peer).or_default()[slot] += 1;
         self.family_totals[slot] += 1;
     }
 
-    fn dec_source(&mut self, peer: IpAddr, prefix: &Prefix) {
+    fn dec_source(&mut self, peer: PeerId, prefix: &Prefix) {
         self.dec_source_slot(peer, Self::count_slot(prefix));
     }
 
-    fn inc_source(&mut self, peer: IpAddr, prefix: &Prefix) {
+    fn inc_source(&mut self, peer: PeerId, prefix: &Prefix) {
         self.inc_source_slot(peer, Self::count_slot(prefix));
     }
 
@@ -1215,7 +1216,7 @@ impl GroupRibOut {
     /// source attributes are not resolved.
     pub(in crate::manager) fn member_retains(
         &self,
-        member: IpAddr,
+        member: PeerId,
         prefix: &Prefix,
         path_id: u32,
         rs_control: Option<(u32, u32)>,
@@ -1255,7 +1256,7 @@ impl GroupRibOut {
     /// the VPN maps are an ADR-0126 non-goal.
     pub(in crate::manager) fn adv_entry(
         &self,
-        member: IpAddr,
+        member: PeerId,
         prefix: &Prefix,
         path_id: u32,
     ) -> Option<AdvEntry<'_>> {
@@ -1299,7 +1300,7 @@ impl GroupRibOut {
     /// this reduces to `adv_entry` there.
     pub(in crate::manager) fn adv_entry_post_backstop(
         &self,
-        member: IpAddr,
+        member: PeerId,
         prefix: &Prefix,
         path_id: u32,
     ) -> Option<AdvEntry<'_>> {
@@ -1313,7 +1314,7 @@ impl GroupRibOut {
     /// the count synthesis applies so it reports the backstop's
     /// outcome. Zero for plain groups: the aggregates are only
     /// maintained where the residue describes staged winners.
-    fn otc_suppressed_counts(&self, member: IpAddr) -> [usize; 2] {
+    fn otc_suppressed_counts(&self, member: PeerId) -> [usize; 2] {
         if !self.per_client_best {
             return [0; 2];
         }
@@ -1338,7 +1339,7 @@ impl GroupRibOut {
     /// lane substitutions, minus the slots the RFC 9234 backstop
     /// suppresses (the family-summed count of
     /// [`Self::adv_entry_post_backstop`], ADR-0126 Decision 4). O(1).
-    pub(in crate::manager) fn advertised_count_for(&self, member: IpAddr) -> usize {
+    pub(in crate::manager) fn advertised_count_for(&self, member: PeerId) -> usize {
         let own = self
             .source_counts
             .get(&member)
@@ -1355,7 +1356,7 @@ impl GroupRibOut {
     /// group: the group VPN table minus the member's own-sourced entries,
     /// O(1). RTC group: the maintained per-member counter (Φ makes the
     /// count non-derivable from `source_counts`).
-    pub(in crate::manager) fn vpn_advertised_count_for(&self, member: IpAddr) -> usize {
+    pub(in crate::manager) fn vpn_advertised_count_for(&self, member: PeerId) -> usize {
         if self.rtc_negotiated() {
             return self
                 .vpn_member_counts
@@ -1377,7 +1378,7 @@ impl GroupRibOut {
     /// table); resyncs and joins are rare. No-op for non-RTC groups.
     pub(in crate::manager) fn recompute_vpn_member_counts(
         &mut self,
-        member: IpAddr,
+        member: PeerId,
         filter: Option<&RtcMembership>,
         checkpoint: &mut impl FnMut(),
     ) {
@@ -1392,7 +1393,7 @@ impl GroupRibOut {
     /// invariant reference the incremental counters are checked against).
     pub(in crate::manager) fn vpn_member_counts_from_table(
         &self,
-        member: IpAddr,
+        member: PeerId,
         filter: Option<&RtcMembership>,
         checkpoint: &mut impl FnMut(),
     ) -> [i64; 2] {
@@ -1410,7 +1411,7 @@ impl GroupRibOut {
     /// matrix output). No-op for non-RTC groups (O(1) synthesis).
     pub(in crate::manager) fn apply_vpn_member_count_delta(
         &mut self,
-        member: IpAddr,
+        member: PeerId,
         delta: [i64; 2],
     ) {
         if !self.rtc_negotiated() || delta == [0, 0] {
@@ -1426,7 +1427,7 @@ impl GroupRibOut {
     /// `adv(m)` permit slots of a group with no exception lane.
     pub(in crate::manager) fn plain_permit_count(
         &self,
-        member: IpAddr,
+        member: PeerId,
         family: Option<(Afi, Safi)>,
     ) -> u64 {
         debug_assert!(!self.per_client_best, "lane slots are not derivable");
@@ -1444,7 +1445,7 @@ impl GroupRibOut {
     /// member's lane substitutions minus its RFC 9234
     /// backstop-suppressed slots, per unicast slot (ADR-0126
     /// Decision 4). Zero-count families omitted.
-    pub(in crate::manager) fn family_counts_for(&self, member: IpAddr) -> Vec<((Afi, Safi), u64)> {
+    pub(in crate::manager) fn family_counts_for(&self, member: PeerId) -> Vec<((Afi, Safi), u64)> {
         const FAMILIES: [(Afi, Safi); 4] = [
             (Afi::Ipv4, Safi::Unicast),
             (Afi::Ipv6, Safi::Unicast),
@@ -1490,7 +1491,7 @@ impl GroupRibOut {
     #[cfg(test)]
     fn member_view_snapshot(
         &self,
-        member: IpAddr,
+        member: PeerId,
         rs_control: Option<(u32, u32)>,
         rejected: &HashSet<ExactExportKey>,
     ) -> FastMap<(Prefix, u32), Route> {
@@ -1500,7 +1501,7 @@ impl GroupRibOut {
 
     fn member_view_snapshot_with_checkpoint(
         &self,
-        member: IpAddr,
+        member: PeerId,
         rs_control: Option<(u32, u32)>,
         rejected: &HashSet<ExactExportKey>,
         checkpoint: &mut impl FnMut(bool),
@@ -1552,7 +1553,7 @@ impl GroupRibOut {
     #[cfg(test)]
     fn member_vpn_view_snapshot(
         &self,
-        member: IpAddr,
+        member: PeerId,
         filter: Option<&RtcMembership>,
         rejected: &HashSet<ExactExportKey>,
     ) -> FastMap<VpnRouteKey, VpnRibRoute> {
@@ -1561,7 +1562,7 @@ impl GroupRibOut {
 
     fn member_vpn_view_snapshot_with_checkpoint(
         &self,
-        member: IpAddr,
+        member: PeerId,
         filter: Option<&RtcMembership>,
         rejected: &HashSet<ExactExportKey>,
         checkpoint: &mut impl FnMut(bool),
@@ -1623,7 +1624,7 @@ impl GroupRibOut {
     #[cfg(test)]
     pub(in crate::manager) fn policy_filtered_for_member(
         &self,
-        member: IpAddr,
+        member: PeerId,
         prefixes: &HashSet<Prefix>,
     ) -> Vec<PolicyFilteredRouteKey> {
         self.policy_filtered_for_member_with_checkpoint(member, prefixes, &mut || {})
@@ -1631,7 +1632,7 @@ impl GroupRibOut {
 
     pub(in crate::manager) fn policy_filtered_for_member_with_checkpoint(
         &self,
-        member: IpAddr,
+        member: PeerId,
         prefixes: &HashSet<Prefix>,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<PolicyFilteredRouteKey> {
@@ -1660,7 +1661,7 @@ impl GroupRibOut {
         };
         let mut restamped = Vec::with_capacity(capacity);
         let mut collect = |prefix: Prefix,
-                           denials: &AddrMap<(IpAddr, u32), Option<PolicyLabel>>,
+                           denials: &AddrMap<(PeerId, u32), Option<PolicyLabel>>,
                            checkpoint: &mut dyn FnMut()| {
             checkpoint();
             restamped.extend(
@@ -1736,7 +1737,7 @@ impl From<admitted_recovery::FailureCause> for RecoveryFallbackCause {
 
 impl RibManager {
     /// The group id a registered peer is a member of, if any.
-    pub(in crate::manager) fn grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
+    pub(in crate::manager) fn grouped_member_of(&self, peer: PeerId) -> Option<usize> {
         match self.update_groups.members.get(&peer) {
             Some(GroupMembership::Grouped(id)) => Some(*id),
             _ => None,
@@ -1747,7 +1748,7 @@ impl RibManager {
     /// the peer is deregistered, or its session receiver has been dropped
     /// (the session is gone). A full-but-open channel is NOT gone — it
     /// drains and the ordinary dirty resync retries it.
-    pub(in crate::manager) fn outbound_channel_gone(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn outbound_channel_gone(&self, peer: PeerId) -> bool {
         self.outbound_peers
             .get(&peer)
             .is_none_or(tokio::sync::mpsc::Sender::is_closed)
@@ -1755,7 +1756,7 @@ impl RibManager {
 
     /// Whether `peer`'s open outbound channel has no free slot, so a send
     /// attempted now is certain to fail.
-    pub(in crate::manager) fn outbound_channel_full(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn outbound_channel_full(&self, peer: PeerId) -> bool {
         self.outbound_peers
             .get(&peer)
             .is_some_and(|sender| sender.capacity() == 0)
@@ -1763,7 +1764,7 @@ impl RibManager {
 
     pub(in crate::manager) fn group_recovery_fallback(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<RecoveryFallbackCause> {
         let session = *self.outbound_session_ids.get(&peer)?;
         let sender = self.outbound_peers.get(&peer)?;
@@ -1778,7 +1779,7 @@ impl RibManager {
     /// Whether this peer reads a fallback now, or would read back one that a
     /// refusal records now: the newest live record is its current outbound
     /// registration.
-    pub(in crate::manager) fn group_recovery_fallback_durable(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn group_recovery_fallback_durable(&self, peer: PeerId) -> bool {
         if self.group_recovery_fallback(peer).is_some() {
             return true;
         }
@@ -1798,7 +1799,7 @@ impl RibManager {
 
     pub(in crate::manager) fn set_group_recovery_fallback(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         cause: RecoveryFallbackCause,
     ) {
         if self.group_recovery_fallback(peer).is_some() {
@@ -1815,7 +1816,7 @@ impl RibManager {
 
     pub(in crate::manager) fn record_group_recovery_refusal(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         error: admitted_recovery::Failure,
         mark_dirty_on_refusal: bool,
     ) {
@@ -1852,7 +1853,7 @@ impl RibManager {
     /// Capture the actual OLD admitted projection before any desired mutation.
     /// A dirty member without proof must retain fallback, never reconstruct
     /// from its already-advanced desired table.
-    pub(in crate::manager) fn capture_group_admitted_keys(&mut self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn capture_group_admitted_keys(&mut self, peer: PeerId) -> bool {
         self.capture_group_admitted_keys_inner(peer, true)
     }
 
@@ -1860,14 +1861,14 @@ impl RibManager {
     /// retains fallback until admission succeeds or schedules the actual retry.
     pub(in crate::manager) fn capture_group_admitted_keys_for_send(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> bool {
         self.capture_group_admitted_keys_inner(peer, false)
     }
 
     fn capture_group_admitted_keys_inner(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         mark_dirty_on_refusal: bool,
     ) -> bool {
         if self.pending_group_admitted.contains_record(peer)
@@ -1892,7 +1893,7 @@ impl RibManager {
     )]
     fn capture_group_admitted_keys_with_readiness(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         mark_dirty_on_refusal: bool,
     ) -> bool {
         use admitted_recovery::Key;
@@ -2042,7 +2043,7 @@ impl RibManager {
 
     pub(in crate::manager) fn prepare_empty_group_recovery_admission<A>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         candidates: A,
     ) where
         A: Clone + Iterator<Item = admitted_recovery::Key>,
@@ -2094,7 +2095,7 @@ impl RibManager {
         }
     }
 
-    pub(in crate::manager) fn release_group_admitted_keys(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn release_group_admitted_keys(&mut self, peer: PeerId) {
         let readiness = self.replacement_readiness.clone();
         self.pending_group_admitted
             .remove_with_checkpoint(&peer, &mut |force| {
@@ -2110,7 +2111,7 @@ impl RibManager {
 
     /// A full channel may drain before the ordinary delta is admitted. Such
     /// speculative capture must neither mark the peer dirty nor outlive a pass.
-    pub(in crate::manager) fn release_speculative_group_admitted_keys(&mut self, peers: &[IpAddr]) {
+    pub(in crate::manager) fn release_speculative_group_admitted_keys(&mut self, peers: &[PeerId]) {
         for &peer in peers {
             if !self.dirty_peers.contains(&peer)
                 && !self.pending_regroup_baseline.contains_key(&peer)
@@ -2127,7 +2128,7 @@ impl RibManager {
     /// can heal only candidates covered by its actual admitted-key proof.
     pub(in crate::manager) fn defer_unsent_outbound_pass(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         member_of: Option<usize>,
         group_stage: &HashMap<usize, GroupStageOutput>,
         checkpoint: &impl Fn(),
@@ -2170,7 +2171,7 @@ impl RibManager {
     /// the TCP sessions down) would otherwise livelock the actor loop and
     /// block process exit. Session teardown proper stays with the
     /// `PeerDown` path; this only stops the retry.
-    pub(in crate::manager) fn drop_gone_dirty_peer(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn drop_gone_dirty_peer(&mut self, peer: PeerId) {
         self.dirty_peers.remove(&peer);
         self.release_group_admitted_keys(peer);
         if let Some(gid) = self.grouped_member_of(peer)
@@ -2190,7 +2191,7 @@ impl RibManager {
     /// withdrawal.
     pub(in crate::manager) fn handle_reevaluate_peer_export_policies(
         &mut self,
-        peers: &[IpAddr],
+        peers: &[PeerId],
         swaps: Option<&[DatasetSwap]>,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
@@ -2265,7 +2266,7 @@ impl RibManager {
     /// conditional advertisement.
     fn dataset_swap_bound(
         &self,
-        peers: &[IpAddr],
+        peers: &[PeerId],
         swaps: &[DatasetSwap],
     ) -> Option<DatasetSwapBound> {
         let readiness = self.replacement_readiness.clone();
@@ -2350,7 +2351,7 @@ impl RibManager {
     /// release with only best-changed keys staged, dropping the forced
     /// verdicts), and no conditional advertisement is installed. `None`
     /// leaves the per-member full resync.
-    fn dataset_reevaluation_targets(&self, peers: &[IpAddr]) -> Option<HashSet<IpAddr>> {
+    fn dataset_reevaluation_targets(&self, peers: &[PeerId]) -> Option<HashSet<PeerId>> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         if peers
@@ -2360,7 +2361,7 @@ impl RibManager {
         {
             return None;
         }
-        let mut targets: HashSet<IpAddr> = peers.iter().copied().collect();
+        let mut targets: HashSet<PeerId> = peers.iter().copied().collect();
         for peer in peers {
             if let Some(group) = self
                 .grouped_member_of(*peer)
@@ -2399,7 +2400,7 @@ impl RibManager {
     /// group; VPN deltas are emitted and encoded per member. Ungrouped targets re-evaluate
     /// against their own Adj-RIB-Out; dirty and channel-full members keep
     /// their ordinary resync and deferral handling.
-    fn reevaluate_full_pass_by_group(&mut self, targets: &HashSet<IpAddr>) {
+    fn reevaluate_full_pass_by_group(&mut self, targets: &HashSet<PeerId>) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let groups: HashSet<usize> = targets
@@ -2489,7 +2490,7 @@ impl RibManager {
     )]
     fn reevaluate_peer_export_policies_synchronously(
         &mut self,
-        peers: &[IpAddr],
+        peers: &[PeerId],
     ) -> Result<(), RibCommandError> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -2507,7 +2508,7 @@ impl RibManager {
             .inspect(|_| checkpoint())
             .filter_map(|peer| self.grouped_member_of(*peer))
             .collect();
-        let mut targets: HashSet<IpAddr> =
+        let mut targets: HashSet<PeerId> =
             peers.iter().inspect(|_| checkpoint()).copied().collect();
         for gid in &groups {
             if let Some(group) = self.group_ribs.get(gid) {
@@ -2663,13 +2664,13 @@ impl RibManager {
     ///
     /// Returns `false` for a closed channel, so a caller's "channel full"
     /// warning is not emitted for a session that is already going down.
-    pub(in crate::manager) fn mark_outbound_dirty(&mut self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn mark_outbound_dirty(&mut self, peer: PeerId) -> bool {
         self.mark_outbound_dirty_inner(peer, true)
     }
 
     pub(in crate::manager) fn mark_outbound_dirty_inner(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         capture: bool,
     ) -> bool {
         if self.outbound_channel_gone(peer) {
@@ -2725,7 +2726,7 @@ impl RibManager {
     /// grouped→ungrouped move — the group half is a no-op for it.
     /// Callers must have emitted the pending extra withdraws (or shown
     /// them empty/retained) before calling: this drops them.
-    pub(in crate::manager) fn clear_grouped_member_synced(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn clear_grouped_member_synced(&mut self, peer: PeerId) {
         if !self.finish_evpn_recovery(peer) {
             return;
         }
@@ -2761,7 +2762,7 @@ impl RibManager {
     /// Whether `peer` is a grouped member whose VPN advertised state is
     /// group-owned (member of a group that stages VPN — RTC groups
     /// included since v2 slice 2).
-    pub(in crate::manager) fn vpn_grouped_member_of(&self, peer: IpAddr) -> Option<usize> {
+    pub(in crate::manager) fn vpn_grouped_member_of(&self, peer: PeerId) -> Option<usize> {
         let gid = self.grouped_member_of(peer)?;
         self.group_ribs
             .get(&gid)
@@ -2773,7 +2774,7 @@ impl RibManager {
     /// the peer is grouped*: VPN sendable. Pure function of the
     /// session's (fixed) sendable set, so it answers
     /// membership-transition seams before the destination group exists.
-    fn peer_vpn_groupable(&self, peer: IpAddr) -> bool {
+    fn peer_vpn_groupable(&self, peer: PeerId) -> bool {
         self.peer_sendable_families
             .get(&peer)
             .is_some_and(|families| families.iter().any(|&(_, safi)| safi == Safi::MplsVpn))
@@ -2782,7 +2783,7 @@ impl RibManager {
     /// A grouped member's Φ — the RFC 4684 VPN filter resolved from its
     /// RT membership (`Some` iff the peer negotiated SAFI 132, absent
     /// membership ⇒ strict empty; the [`Self::rtc_export_filter`] rule).
-    pub(in crate::manager) fn member_rt_filter(&self, peer: IpAddr) -> Option<RtcMembership> {
+    pub(in crate::manager) fn member_rt_filter(&self, peer: PeerId) -> Option<RtcMembership> {
         self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer))
     }
 
@@ -2798,7 +2799,7 @@ impl RibManager {
     /// Φ-write function (design risk 1).
     pub(in crate::manager) fn apply_rtc_membership_delta_to_grouped_member(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         gid: usize,
         old: &RtcMembership,
         new: &RtcMembership,
@@ -2927,7 +2928,7 @@ impl RibManager {
 
     /// Apply aggregated export-policy verdict rows to a peer's counters
     /// (integer adds — no per-(prefix × peer) prometheus lookups).
-    fn bump_export_counters(&mut self, peer: IpAddr, rows: &[(Option<String>, PolicyAction, u64)]) {
+    fn bump_export_counters(&mut self, peer: PeerId, rows: &[(Option<String>, PolicyAction, u64)]) {
         let readiness = self.replacement_readiness.clone();
         let mut stats = crate::update::NeighborPolicyStats::default();
         let peer_label = peer.to_string();
@@ -2959,12 +2960,12 @@ impl RibManager {
         super::add_export_tally(&mut self.export_policy_counters, peer, stats);
     }
 
-    fn leave_group(&mut self, gid: usize, peer: IpAddr) {
+    fn leave_group(&mut self, gid: usize, peer: PeerId) {
         self.leave_group_without_gauge_refresh(gid, peer);
         self.refresh_group_residue_gauge();
     }
 
-    fn leave_group_without_gauge_refresh(&mut self, gid: usize, peer: IpAddr) {
+    fn leave_group_without_gauge_refresh(&mut self, gid: usize, peer: PeerId) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let Some(group) = self.group_ribs.get_mut(&gid) else {
@@ -2994,7 +2995,7 @@ impl RibManager {
     /// Drop a departing peer's membership and group state (the
     /// `clear_outbound_peer_state` seam — `PeerDown`, `PeerDeleted`, GR
     /// teardown, and collision replacement all route through it).
-    pub(super) fn remove_update_group_member(&mut self, peer: IpAddr) {
+    pub(super) fn remove_update_group_member(&mut self, peer: PeerId) {
         if let Some(membership) = self.update_groups.members.remove(&peer) {
             if let GroupMembership::Grouped(gid) = membership {
                 self.leave_group(gid, peer);
@@ -3011,7 +3012,7 @@ impl RibManager {
     /// recovered one regroups through the ordinary baseline diff).
     /// Same recipe as the export-policy replacement seam: recompute,
     /// mark dirty unless key-stable, distribute.
-    pub(super) fn handle_peer_slow_state(&mut self, peer: IpAddr, slow: bool) {
+    pub(super) fn handle_peer_slow_state(&mut self, peer: PeerId, slow: bool) {
         let changed = if slow {
             self.slow_isolated_peers.insert(peer)
         } else {
@@ -3049,7 +3050,7 @@ impl RibManager {
     /// [`RibUpdate::PeerFamilySendable`]: crate::update::RibUpdate::PeerFamilySendable
     pub(super) fn handle_peer_family_sendable(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         family: (Afi, Safi),
         add_path_send_limit: Option<u32>,
@@ -3151,7 +3152,7 @@ impl RibManager {
     /// their chain-content dimension.
     fn update_group_classifier_input(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         chain: Option<&PolicyChain>,
         orf_installed: bool,
         with_policy_fingerprint: bool,
@@ -3244,8 +3245,8 @@ impl RibManager {
 
     pub(super) fn handle_query_update_group_comparison(
         &self,
-        primary: IpAddr,
-        comparison: IpAddr,
+        primary: PeerId,
+        comparison: PeerId,
         reply: tokio::sync::oneshot::Sender<UpdateGroupPeerComparison>,
     ) {
         let _ = reply.send(self.update_group_comparison(primary, comparison));
@@ -3256,8 +3257,8 @@ impl RibManager {
     /// peer row, so both values describe one manager generation.
     pub(super) fn update_group_comparison(
         &self,
-        primary: IpAddr,
-        comparison: IpAddr,
+        primary: PeerId,
+        comparison: PeerId,
     ) -> UpdateGroupPeerComparison {
         compare_update_groups(&self.update_groups.members, primary, comparison, |group| {
             self.update_groups.group_key(group)
@@ -3412,11 +3413,11 @@ impl RibManager {
     #[cfg(test)]
     pub(super) fn handle_test_query_vpn_advertised(
         &mut self,
-        peer: IpAddr,
-        reply: tokio::sync::oneshot::Sender<Vec<(String, IpAddr)>>,
+        peer: PeerId,
+        reply: tokio::sync::oneshot::Sender<Vec<(String, PeerId)>>,
     ) {
         let filter = self.member_rt_filter(peer);
-        let view: Vec<(String, IpAddr)> = match self
+        let view: Vec<(String, PeerId)> = match self
             .vpn_grouped_member_of(peer)
             .and_then(|gid| self.group_ribs.get(&gid))
         {
@@ -3461,7 +3462,7 @@ impl RibManager {
     /// outbound registration.
     pub(super) fn handle_query_peer_update_group(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         reply: tokio::sync::oneshot::Sender<String>,
     ) {
         let label = self
@@ -3475,14 +3476,14 @@ impl RibManager {
     /// Answer the neighbor API's combined outbound-state query atomically.
     pub(super) fn handle_query_peer_outbound_state(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         reply: tokio::sync::oneshot::Sender<crate::update::PeerOutboundState>,
     ) {
         let _ = reply.send(self.peer_outbound_state(peer));
     }
 
     /// Compute the atomically-read outbound projection for one peer.
-    pub(super) fn peer_outbound_state(&self, peer: IpAddr) -> crate::update::PeerOutboundState {
+    pub(super) fn peer_outbound_state(&self, peer: PeerId) -> crate::update::PeerOutboundState {
         use crate::update::PeerOutboundState;
         let update_group = self
             .update_groups
@@ -3543,7 +3544,7 @@ fn classify_effective_distribution_mode(
 /// What a dataset swap provably changes: the re-evaluation targets and
 /// the unicast prefixes and VPN identities whose export verdict differs.
 struct DatasetSwapBound {
-    targets: HashSet<IpAddr>,
+    targets: HashSet<PeerId>,
     prefixes: HashSet<Prefix>,
     vpn: HashSet<VpnRouteKey>,
 }
@@ -3553,9 +3554,9 @@ mod tests;
 
 /// Shared comparison logic for live state and the temporary replacement view.
 pub(super) fn compare_update_groups<'a>(
-    members: &HashMap<IpAddr, GroupMembership>,
-    primary: IpAddr,
-    comparison: IpAddr,
+    members: &HashMap<PeerId, GroupMembership>,
+    primary: PeerId,
+    comparison: PeerId,
     group_key: impl Fn(usize) -> Option<&'a GroupKey>,
 ) -> UpdateGroupPeerComparison {
     let primary_runtime = members.get(&primary);
@@ -3626,7 +3627,7 @@ impl GroupRibOut {
     pub(in crate::manager) fn evpn_member_projection_before_deltas<'a>(
         &'a self,
         deltas: &'a [EvpnGroupDelta],
-        member: IpAddr,
+        member: PeerId,
         cluster_id: Option<std::net::Ipv4Addr>,
         membership: Option<&'a RtcMembership>,
         rejected: Option<&'a HashSet<ExactExportKey>>,
@@ -3657,7 +3658,7 @@ impl GroupRibOut {
     #[cfg(test)]
     pub(in crate::manager) fn evpn_member_projection<'a>(
         &'a self,
-        member: IpAddr,
+        member: PeerId,
         cluster_id: Option<std::net::Ipv4Addr>,
         membership: Option<&'a RtcMembership>,
         rejected: Option<&'a HashSet<ExactExportKey>>,
@@ -3669,7 +3670,7 @@ impl GroupRibOut {
     /// received-input, source, RTC or exact-rejection projection.
     pub(in crate::manager) fn evpn_member_projection_with_checkpoint<'a>(
         &'a self,
-        member: IpAddr,
+        member: PeerId,
         cluster_id: Option<std::net::Ipv4Addr>,
         membership: Option<&'a RtcMembership>,
         rejected: Option<&'a HashSet<ExactExportKey>>,

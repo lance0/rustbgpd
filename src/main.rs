@@ -53,6 +53,7 @@ mod sd_notify;
 #[cfg(test)]
 mod test_support;
 
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
@@ -1049,7 +1050,7 @@ fn eor_grace_config(
             .map(|neighbor| &neighbor.transport_config)
             .filter(|transport| transport.peer.graceful_restart && transport.gr_eor_grace_time > 0)
             .map(|transport| rustbgpd_rib::EorGracePeerConfig {
-                peer: transport.remote_addr.ip(),
+                peer: PeerId::from_addr(transport.remote_addr.ip()),
                 deadline: (start_time + Duration::from_secs(transport.gr_eor_grace_time.into()))
                     .min(restart_deadline),
                 families: transport
@@ -1593,7 +1594,7 @@ fn build_warm_checkpoint_plan(
                 session.peer
             ));
         }
-        let peer = session.peer.address;
+        let peer = PeerId::from_addr(session.peer.address);
         for &(afi, safi) in &session.peer_gr_families {
             if !session.negotiated_families.contains(&(afi, safi)) {
                 continue;
@@ -1610,7 +1611,7 @@ fn build_warm_checkpoint_plan(
             }
             let view = WarmBundleViewV1 {
                 kind: WarmBundleViewKindV1::AdjRibInPostImportPolicy,
-                peer,
+                peer: peer.addr(),
                 peer_asn: session.peer_asn,
                 peer_router_id: session.peer_router_id,
                 family,
@@ -1632,7 +1633,7 @@ fn build_warm_checkpoint_plan(
             });
             if receives_add_path {
                 add_path_receive.push(rustbgpd_mrt::codec::MrtAddPathReceiveProfile {
-                    peer,
+                    peer: peer.addr(),
                     afi,
                     safi,
                 });
@@ -4607,7 +4608,7 @@ async fn run<T>(
             .iter()
             .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
             .map(|neighbor| rustbgpd_rib::SelectionDeferralWaiterConfig {
-                peer: neighbor.transport_config.remote_addr.ip(),
+                peer: PeerId::from_addr(neighbor.transport_config.remote_addr.ip()),
                 families: neighbor
                     .transport_config
                     .peer
@@ -7418,6 +7419,7 @@ async fn drain_runtime_config<R>(
 
 #[cfg(test)]
 mod tests {
+    use rustbgpd_rib::PeerId;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
 
@@ -10481,7 +10483,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
                         route,
                         next_hop: "192.0.2.9".parse().unwrap(),
                         link_local_next_hop: None,
-                        peer: session.peer.address,
+                        peer: PeerId::from_addr(session.peer.address),
                         attributes: rustbgpd_rib::AttrSet::new(vec![PathAttribute::Origin(
                             Origin::Igp,
                         )]),

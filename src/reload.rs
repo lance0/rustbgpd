@@ -4755,6 +4755,8 @@ fn acknowledge_partial(
 mod tests {
     #![expect(clippy::large_futures, reason = "T288 keeps authority unboxed")]
 
+    use rustbgpd_rib::PeerId;
+
     use std::fmt::Write as _;
     use std::path::PathBuf;
 
@@ -9318,7 +9320,7 @@ import_policy_chain = ["origin-guard"]
                         } => {
                             let limit = config
                                 .neighbors
-                                .get(&"10.0.0.2".parse::<IpAddr>().unwrap())
+                                .get(&PeerId::from_addr("10.0.0.2".parse::<IpAddr>().unwrap()))
                                 .and_then(|pair| pair.ipv4);
                             seen.push(format!("prepare({limit:?})"));
                             let _ = reply.send(if restore_ok || seen.len() < 3 {

@@ -66,6 +66,7 @@
 //!   load-bearing convergence mechanism)
 //! - RFC 7432 §15.1 (sequence rules; encoded in `crates/evpn`)
 
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
@@ -103,7 +104,7 @@ use tracing::{debug, info, warn};
 /// The RIB indexes locally-injected routes under this synthetic peer
 /// IP; setting `EvpnRibRoute.peer` to the same value keeps the route
 /// recognizable as locally-originated downstream of the inject path.
-pub(crate) const LOCAL_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+pub(crate) const LOCAL_PEER: PeerId = PeerId::LOCAL;
 const ACTION_INJECT: &str = "inject";
 const ACTION_WITHDRAW: &str = "withdraw";
 

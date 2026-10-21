@@ -1,8 +1,9 @@
 use super::{
-    AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LocRib, NeighborPolicyStats,
+    AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, Ipv4Addr, LocRib, NeighborPolicyStats,
     OutboundCommitBatch, PolicyChain, Prefix, RibManager, RouteContext, Safi, bgpls_route_family,
     bgpls_routes_equal, record_export_policy_eval, route_type, should_suppress_ibgp_inner, warn,
 };
+use crate::PeerId;
 use crate::attr_set::AttrSet;
 
 impl RibManager {
@@ -22,9 +23,9 @@ impl RibManager {
     pub(in crate::manager) fn stage_bgpls_routes_with_checkpoint(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         keys: &HashSet<crate::route::BgpLsRouteKey>,
-        target_peer: IpAddr,
+        target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
@@ -156,7 +157,7 @@ impl RibManager {
                 origin_asn,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                peer_address: Some(target_peer),
+                peer_address: Some(target_peer.addr()),
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(best.origin_type)),
@@ -267,7 +268,7 @@ impl RibManager {
             self.loc_rib.family_lens().bgpls,
         );
 
-        let peers: Vec<IpAddr> = self
+        let peers: Vec<PeerId> = self
             .outbound_peers
             .keys()
             .inspect(|_| checkpoint())

@@ -1,15 +1,15 @@
 use super::{
-    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
-    OutboundCommitBatch, PolicyChain, Prefix, RibCommandError, RibManager, RouteContext,
-    RouteFamily, Safi, debug, evpn_routes_equal, gauge_val, route_type, should_suppress_ibgp_inner,
-    warn,
+    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, Ipv4Addr, LOCAL_PEER, LocRib, OutboundCommitBatch,
+    PolicyChain, Prefix, RibCommandError, RibManager, RouteContext, RouteFamily, Safi, debug,
+    evpn_routes_equal, gauge_val, route_type, should_suppress_ibgp_inner, warn,
 };
+use crate::PeerId;
 use crate::attr_set::AttrSet;
 
 impl RibManager {
     pub(in crate::manager) fn process_evpn_withdraw_chunk(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
     ) {
         let active_refresh = self
@@ -51,7 +51,7 @@ impl RibManager {
 
     pub(in crate::manager) fn process_evpn_announce_chunk(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         evpn_announced: Vec<crate::route::EvpnRibRoute>,
     ) {
         let active_refresh = self
@@ -163,7 +163,7 @@ impl RibManager {
     pub(in crate::manager) fn stage_evpn_routes(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
@@ -208,7 +208,7 @@ impl RibManager {
     pub(in crate::manager) fn stage_evpn_routes_with_checkpoint(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
@@ -413,7 +413,7 @@ impl RibManager {
             // back with ORIGINATOR_ID set to its own router-id — FRR and
             // others drop such reflections, but RFC 4456 hygiene says we
             // shouldn't emit them in the first place.
-            if Some(best.peer) == target_peer {
+            if Some(best.peer) == target.split_horizon_peer() {
                 target.gate(
                     "split_horizon",
                     "source_peer",
@@ -752,7 +752,7 @@ impl RibManager {
         self.metrics
             .set_loc_rib_prefixes("l2vpn_evpn", gauge_val(self.loc_rib.evpn_len()));
 
-        let peers: Vec<IpAddr> = self
+        let peers: Vec<PeerId> = self
             .outbound_peers
             .keys()
             .inspect(|_| checkpoint())
@@ -788,7 +788,7 @@ impl RibManager {
     /// the RT-Constrain membership-change restage.
     pub(in crate::manager) fn distribute_evpn_keys_to_peer(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
         checkpoint: &mut impl FnMut(),
     ) {

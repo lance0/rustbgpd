@@ -1,3 +1,4 @@
+use rustbgpd_rib::PeerId;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
@@ -400,7 +401,7 @@ fn make_route_with_attributes(prefix: Prefix, peer_idx: u32, attributes: Arc<Att
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1))),
         attributes,
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -521,7 +522,7 @@ fn bench_attr_hashing_adj_rib_in_insert(c: &mut Criterion) {
                     || {
                         (
                             AdjRibIn::with_capacity(
-                                IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+                                PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
                                 routes.len(),
                                 0,
                             ),
@@ -557,13 +558,13 @@ fn bench_attr_hashing_bulk_initial_load(c: &mut Criterion) {
                     || {
                         (
                             AdjRibIn::with_capacity(
-                                IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+                                PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
                                 routes.len(),
                                 0,
                             ),
                             LocRib::with_capacity(routes.len()),
                             AdjRibOut::with_capacity(
-                                IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+                                PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
                                 routes.len(),
                             ),
                             AttrInternTable::new(),
@@ -617,12 +618,12 @@ fn bench_attr_hashing_route_churn(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let mut rib = AdjRibIn::with_capacity(
-                            IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+                            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
                             base_routes.len(),
                             0,
                         );
                         let rib2 = AdjRibIn::with_capacity(
-                            IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+                            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
                             churn_routes.len(),
                             0,
                         );
@@ -825,7 +826,7 @@ fn bench_adj_rib_in_insert(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     (
-                        AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+                        AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)))),
                         AttrInternTable::new(),
                     )
                 },
@@ -981,10 +982,16 @@ fn bench_rib_pipeline(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         (
-                            AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
-                            AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
+                            AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                                10, 0, 1, 1,
+                            )))),
+                            AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                                10, 0, 2, 1,
+                            )))),
                             LocRib::new(),
-                            AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(10, 0, 3, 1))),
+                            AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                                10, 0, 3, 1,
+                            )))),
                             AttrInternTable::new(),
                         )
                     },
@@ -1039,13 +1046,13 @@ fn bench_bulk_initial_load(c: &mut Criterion) {
                     || {
                         (
                             AdjRibIn::with_capacity(
-                                IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+                                PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
                                 routes.len(),
                                 0,
                             ),
                             LocRib::with_capacity(routes.len()),
                             AdjRibOut::with_capacity(
-                                IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+                                PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
                                 routes.len(),
                             ),
                             AttrInternTable::new(),
@@ -1227,8 +1234,9 @@ fn bench_route_churn(c: &mut Criterion) {
     group.bench_function("10k_base_1k_churn", |b| {
         b.iter_batched(
             || {
-                let mut rib = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)));
-                let rib2 = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)));
+                let mut rib =
+                    AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))));
+                let rib2 = AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))));
                 let mut loc = LocRib::new();
                 let mut intern = AttrInternTable::new();
                 for route in &base_routes {

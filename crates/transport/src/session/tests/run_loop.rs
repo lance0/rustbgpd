@@ -442,7 +442,10 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
             .expect("rib channel must stay open");
         match msg {
             RibUpdate::PeerDown { peer, .. } => {
-                assert_eq!(peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+                assert_eq!(
+                    peer,
+                    PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+                );
                 break;
             }
             RibUpdate::PeerGracefulRestart { .. } => {
@@ -522,7 +525,7 @@ async fn full_rib_channel_parks_session_and_never_drops_routes() {
     let placeholder = rib_rx.recv().await.expect("pre-filled update");
     assert!(matches!(
         placeholder,
-        RibUpdate::RoutesReceived { peer, .. } if peer == IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))
+        RibUpdate::RoutesReceived { peer, .. } if peer == PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)))
     ));
     tokio::time::timeout(Duration::from_secs(5), &mut process)
         .await
