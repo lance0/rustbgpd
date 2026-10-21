@@ -888,7 +888,9 @@ impl RibManager {
         self.metrics
             .reap_outbound_prefix_capacity(&peer.to_string());
         self.export_chains.remove(&peer);
-        self.peer_sendable_families.remove(&peer);
+        if self.peer_sendable_families.remove(&peer).is_some() {
+            self.outbound_roster_generation = self.outbound_roster_generation.wrapping_add(1);
+        }
         self.peer_advertised_llgr_families.remove(&peer);
         self.peer_is_ebgp.remove(&peer);
         self.peer_local_roles.remove(&peer);
@@ -1623,6 +1625,7 @@ impl RibManager {
         );
         self.export_chains.insert(peer, export_policy);
         self.peer_sendable_families.insert(peer, sendable_families);
+        self.outbound_roster_generation = self.outbound_roster_generation.wrapping_add(1);
         self.peer_advertised_llgr_families
             .insert(peer, negotiated_llgr_families);
         // (peer_is_ebgp / peer_is_rr_client / peer_local_roles /

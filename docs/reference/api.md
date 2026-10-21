@@ -3363,6 +3363,28 @@ A non-empty `next_page_token` continues after the last peer returned. The
 call is a `sensitive_read`, served on read-only listeners, and each page costs
 one single-prefix export explain per peer.
 
+Pages are read live, one call at a time, but a walk is fenced against the two
+changes that would make its pages disagree:
+
+- The route is removed, or replaced under its key with other next hops,
+  attributes or validation state.
+- A peer joins or leaves the Established set. A flap, where the peer goes
+  down and comes back, counts even though the set ends up the same.
+
+When either happens between pages, the next page returns `ABORTED` instead
+of resuming. Discard the rows already collected and restart the walk with an
+empty `page_token`. A restarted walk for a removed route returns `NOT_FOUND`,
+so `NOT_FOUND` on a first page always means no local route has the key, and a
+route deleted mid-walk is never reported as one that never existed. Changes
+to other routes do not abort the walk. A peer's disposition can still change
+between pages, as it can between any two reads; the fence keeps the walk to
+one route state and one peer set, so it can neither skip nor repeat a peer.
+
+The `next_page_token` is opaque. It is bound to the route key and the daemon
+process that issued it. A token for another key, an altered token, or one
+from before a daemon restart returns `INVALID_ARGUMENT`; restart the walk
+with an empty `page_token`.
+
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"prefix": "2001:db8::7", "prefix_length": 128}' \

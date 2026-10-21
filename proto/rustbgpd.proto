@@ -3661,7 +3661,11 @@ service InjectionService {
   // Established. COMMITTED means the
   // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
   // not received, accepted or installed by the peer, which BGP does not
-  // report. A key with no local route returns NOT_FOUND.
+  // report. A key with no local route returns NOT_FOUND. A paged walk
+  // returns ABORTED when the route is removed or replaced, or a peer joins
+  // or leaves the Established set, between pages; restart it with an empty
+  // page_token. A token for another key or from another daemon process
+  // returns INVALID_ARGUMENT.
   rpc ListPathExportDispositions(ListPathExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request
@@ -3907,7 +3911,7 @@ message ListPathExportDispositionsRequest {
   uint32 path_id = 3;
   // Peers per page: 0 selects 100, and larger values are capped at 1000.
   uint32 page_size = 4;
-  // next_page_token of the previous page; empty for the first page.
+  // next_page_token of the previous page; empty for the first page. Opaque.
   string page_token = 5;
 }
 

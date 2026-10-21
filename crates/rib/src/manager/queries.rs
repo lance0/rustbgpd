@@ -23,10 +23,10 @@ use crate::update::{
     ExactFibInstallCandidates, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, FibInstallCandidatesPage, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats,
     NeighborRibSnapshot, NeighborRibSnapshotResponse, PeerRouteExport, RibRowFilter,
-    RouteExportDisposition, RouteExportPage, RoutePage, RoutePageError, RoutePageVersion,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
-    VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query,
-    route_query_key,
+    RouteExportDisposition, RouteExportPage, RouteExportPageError, RouteExportVersion, RoutePage,
+    RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
+    UpdateGroupPeerComparison, VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
+    ordered_route_query, route_query_key,
 };
 
 /// Full-snapshot queries check cancellation at bounded work intervals instead
@@ -1910,9 +1910,9 @@ impl RibManager {
         &mut self,
         prefix: Prefix,
         path_id: u32,
-        after: Option<IpAddr>,
+        after: Option<(IpAddr, RouteExportVersion)>,
         page_size: usize,
-        reply: tokio::sync::oneshot::Sender<Option<RouteExportPage>>,
+        reply: tokio::sync::oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
     ) {
         let page = self.local_route_export_page(prefix, path_id, after, page_size);
         if reply.send(page).is_err() {
@@ -1922,30 +1922,56 @@ impl RibManager {
 
     /// One page of per-peer export dispositions for the local route
     /// `(prefix, path_id)`: one prefix-local export explain per listed peer,
-    /// so the page size bounds the work.
+    /// so the page size bounds the work. A resumed walk is served only while
+    /// its route and the outbound peer roster match its first page, so a
+    /// route removed mid-walk is not reported as never having existed and a
+    /// peer that joins or leaves is neither skipped nor counted twice.
     fn local_route_export_page(
         &mut self,
         prefix: Prefix,
         path_id: u32,
-        after: Option<IpAddr>,
+        after: Option<(IpAddr, RouteExportVersion)>,
         page_size: usize,
-    ) -> Option<RouteExportPage> {
-        let route = self
+    ) -> Result<RouteExportPage, RouteExportPageError> {
+        let Some(route) = self
             .ribs
-            .get(&LOCAL_PEER)?
-            .iter_prefix(&prefix)
-            .find(|route| route.path_id == path_id)?
-            .clone();
+            .get(&LOCAL_PEER)
+            .and_then(|rib| {
+                rib.iter_prefix(&prefix)
+                    .find(|route| route.path_id == path_id)
+            })
+            .cloned()
+        else {
+            return Err(if after.is_some() {
+                RouteExportPageError::Invalidated
+            } else {
+                RouteExportPageError::NoRoute
+            });
+        };
+        let version = RouteExportVersion {
+            roster: self.outbound_roster_generation,
+            route: local_route_fingerprint(&route),
+        };
+        if after.is_some_and(|(_, expected)| expected != version) {
+            return Err(RouteExportPageError::Invalidated);
+        }
         let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
-        let mut peers =
-            smallest_keys_after(self.peer_sendable_families.keys().copied(), after, n + 1);
+        let mut peers = smallest_keys_after(
+            self.peer_sendable_families.keys().copied(),
+            after.map(|(peer, _)| peer),
+            n + 1,
+        );
         let more = peers.len() > n;
         peers.truncate(n);
         let peers = peers
             .into_iter()
             .map(|peer| self.local_route_export(peer, &route))
             .collect();
-        Some(RouteExportPage { peers, more })
+        Ok(RouteExportPage {
+            peers,
+            more,
+            version,
+        })
     }
 
     /// The export disposition of the local `route` toward one registered
@@ -3841,6 +3867,22 @@ impl RibManager {
             evpn_routes,
         })
     }
+}
+
+/// Fingerprint of the local route state that export reads, for
+/// [`RouteExportVersion::route`].
+fn local_route_fingerprint(route: &crate::route::Route) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        route.next_hop,
+        route.link_local_next_hop,
+        &*route.attributes,
+        route.validation_state,
+        route.aspa_state,
+    )
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]
