@@ -38,6 +38,12 @@
 //! `PeerSession::trigger_outbound_out_of_resources_teardown`; this module
 //! owns the discard/flush/close mechanics.
 //!
+//! Every other NOTIFICATION ends an ordinary close, and it is the last
+//! frame too (RFC 4271 §4.5): the writer flushes the bulk frames queued
+//! before it, writes the NOTIFICATION, and writes nothing after it (see
+//! `WriterTask::close_with_notification`). Priority preemption applies to
+//! KEEPALIVE, OPEN and ROUTE-REFRESH frames only.
+//!
 //! # Bulk write coalescing (LAN-332)
 //!
 //! Per-message `write_all + flush` made writer+syscalls the largest
@@ -131,6 +137,11 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// send-hold deadline and the teardown linger bound roughly the same
 /// wire time as before, while amortizing the syscall + flush cost.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
+
+/// Whether a queued frame is a BGP NOTIFICATION (type 3).
+fn is_notification(frame: &[u8]) -> bool {
+    frame.get(18) == Some(&3)
+}
 
 /// Coalesce already-queued bulk frames behind `first` into one
 /// contiguous buffer, up to [`MAX_BATCH_FRAMES`] / [`MAX_BATCH_BYTES`].
@@ -341,6 +352,9 @@ impl WriterTask {
                 }
                 msg = self.priority_rx.recv(), if priority_open => {
                     if let Some(b) = msg {
+                        if is_notification(&b) {
+                            return self.close_with_notification(b).await;
+                        }
                         (b, false)
                     } else {
                         priority_open = false;
@@ -387,14 +401,57 @@ impl WriterTask {
             };
             self.write_message(&bytes).await?;
             if from_bulk {
-                let next = (*self.completed_tx.borrow())
-                    .checked_add(bytes.len() as u64)
-                    .ok_or_else(|| {
-                        WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
-                    })?;
-                self.completed_tx.send_replace(next);
+                self.record_bulk_completed(bytes.len())?;
             }
         }
+    }
+
+    fn record_bulk_completed(&self, len: usize) -> Result<(), WriterExit> {
+        let next = (*self.completed_tx.borrow())
+            .checked_add(len as u64)
+            .ok_or_else(|| {
+                WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
+            })?;
+        self.completed_tx.send_replace(next);
+        Ok(())
+    }
+
+    /// RFC 4271 §4.5 closes the connection right after a NOTIFICATION, so it
+    /// must be the final frame. An ordinary close first writes the bulk
+    /// frames the session admitted before it (UPDATEs, End-of-RIB markers,
+    /// and the EVPN withdraws that shutdown drains ahead of the Cease), then
+    /// the NOTIFICATION, and nothing after. A hard teardown signalled
+    /// meanwhile stops the flush, so its backlog is discarded as before. A
+    /// write that fails or exceeds the send hold time ends the task without
+    /// the NOTIFICATION. The session always drops its senders right after the
+    /// NOTIFICATION; the writer waits for that, discarding anything queued
+    /// later, so the session observes its exit only after the close.
+    async fn close_with_notification(mut self, notification: Bytes) -> Result<(), WriterExit> {
+        while !*self.teardown_rx.borrow() {
+            let Ok(first) = self.bulk_rx.try_recv() else {
+                break;
+            };
+            let batch = coalesce_bulk(first, &mut self.bulk_rx);
+            self.write_message(&batch).await?;
+            self.record_bulk_completed(batch.len())?;
+        }
+        self.write_message(&notification).await?;
+        let (mut bulk_open, mut priority_open, mut teardown_open) = (true, true, true);
+        while (bulk_open || priority_open) && !*self.teardown_rx.borrow() {
+            tokio::select! {
+                biased;
+                changed = self.teardown_rx.changed(), if teardown_open => {
+                    teardown_open = changed.is_ok();
+                }
+                msg = self.priority_rx.recv(), if priority_open => priority_open = msg.is_some(),
+                msg = self.bulk_rx.recv(), if bulk_open => bulk_open = msg.is_some(),
+            }
+        }
+        if *self.teardown_rx.borrow() {
+            return Err(WriterExit::TornDown);
+        }
+        debug!("writer: NOTIFICATION written, senders dropped, exiting cleanly");
+        Ok(())
     }
 
     /// `write_all + flush` one message (or one coalesced batch of

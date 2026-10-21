@@ -492,17 +492,20 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
     );
 }
 
-/// A session task that ends on `Shutdown` must not resolve while its writer
-/// still holds the Cease. The daemon exits right after the peer manager joins
-/// every session task, and a detached writer dies with the runtime, so an
-/// early return lets the socket close with no NOTIFICATION on the wire.
-#[tokio::test]
-async fn shutdown_resolves_only_after_the_writer_flushes_the_cease() {
-    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+const WEDGED_BACKLOG: usize = 256;
+
+/// An Established session whose writer is wedged behind a stopped reader,
+/// with [`WEDGED_BACKLOG`] 4 KiB UPDATE frames still queued: small socket
+/// buffers fill after a few frames, so any close runs with a real backlog.
+async fn wedged_session_with_backlog() -> (
+    PeerSession,
+    mpsc::Sender<PeerCommand>,
+    mpsc::Receiver<RibUpdate>,
+    tokio::net::TcpStream,
+) {
+    let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
     session.commands = cmd_rx;
-    // Small buffers and a stopped reader wedge the writer in a bulk write,
-    // so the Cease can only reach the wire after the peer drains.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let connect = tokio::spawn(async move {
@@ -514,7 +517,7 @@ async fn shutdown_resolves_only_after_the_writer_flushes_the_cease() {
     socket2::SockRef::from(&server)
         .set_send_buffer_size(4096)
         .unwrap();
-    let mut peer = connect.await.unwrap();
+    let peer = connect.await.unwrap();
     session.test_install_stream(server);
     establish_test_session(&mut session, 65002).await;
     let mut frame = vec![0u8; 4096];
@@ -522,10 +525,21 @@ async fn shutdown_resolves_only_after_the_writer_flushes_the_cease() {
     frame[16..18].copy_from_slice(&4096u16.to_be_bytes());
     frame[18] = 2;
     let frame = Bytes::from(frame);
-    for _ in 0..256 {
+    for _ in 0..WEDGED_BACKLOG {
         session.enqueue_bulk_encoded(frame.clone(), false).unwrap();
     }
+    (session, cmd_tx, rib_rx, peer)
+}
+
+/// A session task that ends on `Shutdown` must not resolve while its writer
+/// still holds the Cease. The daemon exits right after the peer manager joins
+/// every session task, and a detached writer dies with the runtime, so an
+/// early return lets the socket close with no NOTIFICATION on the wire.
+#[tokio::test]
+async fn shutdown_resolves_only_after_the_writer_flushes_the_cease() {
+    let (session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
     let mut senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
+    let mut session = session;
     let session_task = tokio::spawn(async move { session.run().await });
 
     cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
@@ -551,6 +565,116 @@ async fn shutdown_resolves_only_after_the_writer_flushes_the_cease() {
         &cease.1[19..21],
         &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN],
         "NOTIFICATION must be Cease/Administrative Shutdown"
+    );
+}
+
+/// RFC 4271 §4.5: the connection closes right after a NOTIFICATION, so no
+/// frame may follow it. Every ordinary close flushes the UPDATEs it had
+/// already queued (shutdown drains EVPN withdraws ahead of the Cease for
+/// this), then ends with its NOTIFICATION. The Cease/8 hard teardown, which
+/// discards its backlog, is pinned by
+/// `saturation_teardown_from_run_loop_ceases_closes_and_deregisters`.
+#[tokio::test]
+async fn ordinary_closes_flush_queued_updates_then_end_with_the_notification() {
+    let cases = [
+        (
+            "stop",
+            PeerCommand::Stop { reason: None },
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        ),
+        (
+            "shutdown",
+            PeerCommand::Shutdown,
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        ),
+        (
+            "purge reset",
+            PeerCommand::PurgeReset,
+            cease_subcode::ADMINISTRATIVE_RESET,
+        ),
+        (
+            "collision dump",
+            PeerCommand::CollisionDump,
+            cease_subcode::CONNECTION_COLLISION_RESOLUTION,
+        ),
+    ];
+    for (path, command, subcode) in cases {
+        let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+        let mut senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
+        let session_task = tokio::spawn(async move { session.run().await });
+        cmd_tx.send(command).await.unwrap();
+        // The close is queued behind the backlog before the peer reads.
+        assert!(senders_dropped.changed().await.is_err(), "{path}");
+
+        let mut wire = Vec::new();
+        tokio::time::timeout(Duration::from_secs(15), peer.read_to_end(&mut wire))
+            .await
+            .unwrap_or_else(|_| panic!("{path}: the writer must close after the NOTIFICATION"))
+            .unwrap();
+        let frames = parse_wire_frames(&wire);
+        let (last_type, last) = frames.last().expect("frames on the wire");
+        assert_eq!(
+            *last_type, 3,
+            "{path}: the NOTIFICATION must be the final frame"
+        );
+        assert_eq!(&last[19..21], &[6, subcode], "{path}: NOTIFICATION code");
+        assert_eq!(
+            frames.iter().filter(|(msg_type, _)| *msg_type == 3).count(),
+            1,
+            "{path}: exactly one NOTIFICATION"
+        );
+        assert_eq!(
+            frames.iter().filter(|(msg_type, _)| *msg_type == 2).count(),
+            WEDGED_BACKLOG,
+            "{path}: every UPDATE queued before the close is flushed ahead of the Cease"
+        );
+
+        cmd_tx.send(PeerCommand::Shutdown).await.ok();
+        tokio::time::timeout(Duration::from_secs(15), session_task)
+            .await
+            .unwrap_or_else(|_| panic!("{path}: session task must finish"))
+            .expect("session task must not panic")
+            .expect("run() must return Ok");
+    }
+}
+
+/// The flush ahead of the Cease stays inside the per-peer shutdown bound: when
+/// the owner gives up on a session whose peer stopped reading (as
+/// `PeerHandle::shutdown_timeout` does by aborting the task), the writer is
+/// aborted with it instead of draining on, detached, past the deadline. The
+/// Cease is then lost, but nothing ever follows one.
+#[tokio::test]
+async fn abandoned_shutdown_aborts_the_flushing_writer() {
+    let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+    let mut senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
+    let session_task = tokio::spawn(async move { session.run().await });
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    assert!(senders_dropped.changed().await.is_err());
+    session_task.abort();
+    assert!(session_task.await.unwrap_err().is_cancelled());
+
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), peer.read_to_end(&mut wire))
+        .await
+        .expect("the aborted writer must close the socket")
+        .unwrap();
+    let mut rest = wire.as_slice();
+    let mut updates = 0;
+    while rest.len() >= 19 {
+        let len = usize::from(u16::from_be_bytes([rest[16], rest[17]]));
+        if rest.len() < len {
+            break;
+        }
+        assert_ne!(
+            rest[18], 3,
+            "no NOTIFICATION may be written after the deadline"
+        );
+        updates += usize::from(rest[18] == 2);
+        rest = &rest[len..];
+    }
+    assert!(
+        updates < WEDGED_BACKLOG,
+        "the writer kept flushing after its session was abandoned"
     );
 }
 

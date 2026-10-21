@@ -604,16 +604,25 @@ impl PeerSession {
     /// task returns while its detached writer still holds the NOTIFICATION,
     /// and a process exit that follows it closes the socket first. The
     /// caller's deadline bounds the wait: `PeerHandle::shutdown_timeout`
-    /// aborts the session task when it expires.
+    /// aborts the session task when it expires, and the writer is aborted
+    /// with it, so a backlog flushed ahead of the Cease to a peer that has
+    /// stopped reading cannot outlive that deadline.
     pub(super) async fn join_closed_writer(&mut self) {
+        struct AbortOnDrop(tokio::task::AbortHandle);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
         debug_assert!(
             self.writer_priority_tx.is_none() && self.writer_bulk_tx.is_none(),
             "join the writer only after its senders are dropped"
         );
-        if let Some(join) = self.writer_join.take()
-            && let Err(error) = join.await
-        {
-            warn!(peer = %self.peer_label, %error, "writer task failed during session close");
+        if let Some(join) = self.writer_join.take() {
+            let _abort = AbortOnDrop(join.abort_handle());
+            if let Err(error) = join.await {
+                warn!(peer = %self.peer_label, %error, "writer task failed during session close");
+            }
         }
     }
 
