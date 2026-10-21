@@ -2912,6 +2912,31 @@ mod tests {
     /// while JSON keeps the string and adds the same instant as a number.
     /// A value that is not integer seconds is shown as received and has no
     /// numeric form.
+    /// The text line for a scoped BFD event prints the daemon's summary,
+    /// which names the peer as `fe80::1%eth0`.
+    #[test]
+    fn bfd_event_line_renders_the_scoped_peer() {
+        let event = BgpEvent {
+            timestamp: "1790132714".to_string(),
+            category: EventCategory::Bfd as i32,
+            event_type: BgpEventType::BfdSessionUp as i32,
+            peer_address: "fe80::1".to_string(),
+            summary: "bfd fe80::1%eth0 Init → Up (none)".to_string(),
+            payload: Some(crate::proto::bgp_event::Payload::Bfd(
+                crate::proto::BfdSessionEvent {
+                    peer_address: "fe80::1".to_string(),
+                    peer_interface: "eth0".to_string(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_bgp_event_line(&event),
+            "[2026-09-23T03:05:14Z] bfd_up bfd fe80::1%eth0 Init → Up (none)"
+        );
+    }
+
     #[test]
     fn event_timestamps_render_rfc3339_in_text_and_epoch_in_json() {
         let session = BgpEvent {

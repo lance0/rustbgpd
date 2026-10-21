@@ -961,7 +961,13 @@ fn bfd_runtime_event_to_bgp_event(
     let old_state = bfd_session_state_to_proto(event.old_state);
     let new_state = bfd_session_state_to_proto(event.new_state);
     let diagnostic = bfd_diagnostic_to_str(event.diagnostic).to_string();
-    let summary = format!("bfd {peer_address} {old_state:?} → {new_state:?} ({diagnostic})");
+    // The summary names the neighbor as operators select it: scoped
+    // (`fe80::1%eth0`) for a link-local peer; the address fields stay bare.
+    let mut peer_label = peer_address.clone();
+    if !event.peer_interface.is_empty() {
+        peer_label = format!("{peer_address}%{}", event.peer_interface);
+    }
+    let summary = format!("bfd {peer_label} {old_state:?} → {new_state:?} ({diagnostic})");
     proto::BgpEvent {
         timestamp_unix_ms: event.timestamp_unix_ms,
         timestamp: timestamp.clone(),
@@ -9027,6 +9033,28 @@ mod tests {
             ),
             ("fe80::1", "eth0")
         );
+    }
+
+    /// A BFD event's summary, the line `rbgp events watch` prints, names a
+    /// link-local peer in scoped form; a numbered peer is unchanged.
+    #[test]
+    fn bfd_event_summary_names_the_scoped_peer() {
+        let summary = |peer: &str, interface: &str| {
+            bfd_runtime_event_to_bgp_event(&bfd_runtime::BfdRuntimeEvent {
+                peer: peer.parse().unwrap(),
+                peer_interface: interface.to_string(),
+                old_state: rustbgpd_bfd::SessionState::Init,
+                new_state: rustbgpd_bfd::SessionState::Up,
+                diagnostic: rustbgpd_bfd::Diagnostic::None,
+                timestamp_unix_ms: 0,
+            })
+            .summary
+        };
+        assert_eq!(
+            summary("fe80::1", "eth0"),
+            "bfd fe80::1%eth0 Init → Up (none)"
+        );
+        assert_eq!(summary("192.0.2.1", ""), "bfd 192.0.2.1 Init → Up (none)");
     }
 
     /// FIB and BLACKHOLE rows and FIB events keep a bare address beside a
