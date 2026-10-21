@@ -415,10 +415,17 @@ pub enum NetlinkSubscriber {
     GeneralFib,
     /// BLACKHOLE-discard kernel-route watcher.
     BlackholeDiscard,
+    /// Fast external failover link/address watcher.
+    FastExternalFailover,
 }
 
 impl NetlinkSubscriber {
-    const ALL: [Self; 3] = [Self::LinkCarrier, Self::GeneralFib, Self::BlackholeDiscard];
+    const ALL: [Self; 4] = [
+        Self::LinkCarrier,
+        Self::GeneralFib,
+        Self::BlackholeDiscard,
+        Self::FastExternalFailover,
+    ];
 
     /// Stable Prometheus actor-label value for this bounded subscriber.
     #[must_use]
@@ -427,6 +434,7 @@ impl NetlinkSubscriber {
             Self::LinkCarrier => "link_carrier",
             Self::GeneralFib => "general_fib",
             Self::BlackholeDiscard => "blackhole_discard",
+            Self::FastExternalFailover => "fast_external_failover",
         }
     }
 }

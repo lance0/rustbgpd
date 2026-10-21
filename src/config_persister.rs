@@ -458,6 +458,7 @@ log_format = "json"
             slow_peer_threshold_pct: None,
             slow_peer_duration: None,
             slow_peer_isolation: None,
+            fast_external_failover: None,
             max_prefixes: None,
             max_prefixes_ipv4_unicast: None,
             max_prefixes_ipv6_unicast: None,

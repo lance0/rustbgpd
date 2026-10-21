@@ -256,6 +256,7 @@ fn build_transport_config_reflects_every_transport_field() {
         slow_peer_threshold_pct: 77,
         slow_peer_duration: 120,
         slow_peer_isolation: true,
+        fast_external_failover: false,
         max_prefixes: Some(1000),
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
@@ -363,6 +364,7 @@ fn build_transport_config_reflects_every_transport_field() {
         slow_peer_threshold_pct,
         slow_peer_duration,
         slow_peer_isolation,
+        fast_external_failover,
         interpret_rfc1997,
         rs_control_communities,
         remove_private_as,
@@ -487,6 +489,11 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(
         t.slow_peer_isolation, *slow_peer_isolation,
         "slow_peer_isolation"
+    );
+    // Fixture value (false) differs from the TransportConfig::new default.
+    assert_eq!(
+        t.fast_external_failover, *fast_external_failover,
+        "fast_external_failover"
     );
     // Same class of pin for the RFC 1997 egress knob: the fixture value
     // (false) differs from the TransportConfig::new default (true), so a

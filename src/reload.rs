@@ -249,6 +249,7 @@ pub(crate) fn build_peer_mgr_config(
         slow_peer_threshold_pct: tc.slow_peer_threshold_pct,
         slow_peer_duration: tc.slow_peer_duration,
         slow_peer_isolation: tc.slow_peer_isolation,
+        fast_external_failover: tc.fast_external_failover,
         interpret_rfc1997: tc.interpret_rfc1997,
         rs_control_communities: tc.rs_control_communities,
         remove_private_as: tc.remove_private_as,
@@ -1985,6 +1986,7 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
     new_config.global.worker_threads = current.global.worker_threads;
     new_config.global.multipath_relax = current.global.multipath_relax;
     new_config.global.link_bandwidth_weighted = current.global.link_bandwidth_weighted;
+    new_config.global.fast_external_failover = current.global.fast_external_failover;
     new_config.global.warm_cache_checkpoint_on_shutdown =
         current.global.warm_cache_checkpoint_on_shutdown;
     new_config.global.max_as_path_length = current.global.max_as_path_length;
@@ -10873,6 +10875,7 @@ honor_graceful_shutdown = true
 honor_blackhole = true
 multipath_relax = true
 link_bandwidth_weighted = true
+fast_external_failover = false
 warm_cache_checkpoint_on_shutdown = true
 max_as_path_length = 901
 gr_eor_replay_owners = ["gobgp-bridge"]
@@ -10928,6 +10931,10 @@ hold_time = 90
             assert_eq!(
                 runtime.global.link_bandwidth_weighted,
                 startup.global.link_bandwidth_weighted
+            );
+            assert_eq!(
+                runtime.global.fast_external_failover,
+                startup.global.fast_external_failover
             );
             assert_eq!(
                 runtime.global.warm_cache_checkpoint_on_shutdown,
@@ -12840,6 +12847,7 @@ remote_asn = 65002
                     slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
                     slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
                     slow_peer_isolation: false,
+                    fast_external_failover: true,
                     interpret_rfc1997: true,
                     rs_control_communities: false,
                     remove_private_as: RemovePrivateAs::Disabled,
@@ -12963,6 +12971,7 @@ remote_asn = 65002
                     slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
                     slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
                     slow_peer_isolation: false,
+                    fast_external_failover: true,
                     interpret_rfc1997: true,
                     rs_control_communities: false,
                     remove_private_as: RemovePrivateAs::Disabled,

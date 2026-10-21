@@ -497,6 +497,13 @@ pub enum PeerCommand {
     },
     /// Tear down an established session because BFD transitioned to Down.
     BfdDown,
+    /// Fast external failover: the kernel link state changed. The session
+    /// re-reads the current [`crate::LinkSnapshot`] and, only if the interface
+    /// carrying its own connection is down now, closes it locally without a
+    /// NOTIFICATION and without Graceful Restart retention (or purges routes
+    /// it retained from a lost connection on that interface). The session
+    /// stays administratively up and reconnects normally.
+    CheckLinks,
     /// Shut down the task entirely.
     Shutdown,
     /// Tear down the task with an administrative reset that cannot retain

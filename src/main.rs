@@ -44,6 +44,8 @@ mod fib_table_control;
 mod forwarding_state;
 mod gnmi_set_bridge;
 mod kernel_route_notify;
+#[cfg(target_os = "linux")]
+mod link_failover;
 mod metrics_server;
 mod peer_manager;
 mod policy_admin;
@@ -5055,6 +5057,13 @@ async fn run<T>(
     let peer_mgr = peer_mgr
         .with_bfd_coupling(bfd_desired_tx, bfd_state_change_rx, configured)
         .with_bfd_reload(bfd_reload_tx);
+    // Fast external failover: confirmed interface-down events. Without the
+    // monitor, sessions keep relying on the hold timer and BFD.
+    #[cfg(target_os = "linux")]
+    let peer_mgr = match link_failover::spawn(metrics.clone()).await {
+        Some(events) => peer_mgr.with_link_failover(events),
+        None => peer_mgr,
+    };
     // Retained: supervised by the shutdown `select!` below and joined by the
     // coordinated teardown after it.
     let mut peer_mgr_handle = tokio::spawn(async move {
@@ -6205,6 +6214,7 @@ async fn run<T>(
             slow_peer_threshold_pct: transport_config.slow_peer_threshold_pct,
             slow_peer_duration: transport_config.slow_peer_duration,
             slow_peer_isolation: transport_config.slow_peer_isolation,
+            fast_external_failover: transport_config.fast_external_failover,
             interpret_rfc1997: transport_config.interpret_rfc1997,
             rs_control_communities: transport_config.rs_control_communities,
             remove_private_as: transport_config.remove_private_as,
@@ -10973,6 +10983,7 @@ peer_group = "plain"
                 honor_blackhole: false,
                 multipath_relax: false,
                 link_bandwidth_weighted: false,
+                fast_external_failover: None,
                 install_blackhole_discard: false,
                 allow_blackhole_broad_prefixes: false,
                 blackhole_discard_max_active: None,
@@ -11000,6 +11011,7 @@ peer_group = "plain"
                     slow_peer_threshold_pct: None,
                     slow_peer_duration: None,
                     slow_peer_isolation: None,
+                    fast_external_failover: None,
                     max_prefixes: None,
                     max_prefixes_ipv4_unicast: None,
                     max_prefixes_ipv6_unicast: None,
@@ -11071,6 +11083,7 @@ peer_group = "plain"
                     slow_peer_threshold_pct: None,
                     slow_peer_duration: None,
                     slow_peer_isolation: None,
+                    fast_external_failover: None,
                     max_prefixes: None,
                     max_prefixes_ipv4_unicast: None,
                     max_prefixes_ipv6_unicast: None,
@@ -11142,6 +11155,7 @@ peer_group = "plain"
                     slow_peer_threshold_pct: None,
                     slow_peer_duration: None,
                     slow_peer_isolation: None,
+                    fast_external_failover: None,
                     max_prefixes: None,
                     max_prefixes_ipv4_unicast: None,
                     max_prefixes_ipv6_unicast: None,

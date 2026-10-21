@@ -237,11 +237,16 @@ connection that wins fixes the session's endpoint.
 States: `interface_missing`, `link_down`, `awaiting_discovery`, then the
 ordinary FSM states once an address is bound.
 
-- **Carrier loss or interface removal.** Confirmed carrier loss or removal of
-  the interface tears the session down at once with a Cease NOTIFICATION,
-  matching FRR's default fast external failover, and clears the binding and
-  candidates. This is a local stop, not a transport failure: Graceful Restart
-  and LLGR routes are purged, not retained
+- **Carrier loss or interface removal.** Confirmed carrier loss, admin down
+  or removal of the interface tears the session down at once, and the
+  transport closes without a NOTIFICATION, because the link cannot carry one.
+  This matches FRR's default fast external failover (`BGP_Stop` closes
+  silently) and rustbgpd's fast external failover for numbered and static
+  link-local neighbors. Removal of the session's source address is closed the
+  same way: a NOTIFICATION could still leave on a live link, but it stays
+  silent for consistency, and the address it would come from is gone. The
+  stop also clears the binding and candidates. This is a local stop, not a
+  transport failure: Graceful Restart and LLGR routes are purged, not retained
   ([ADR-0024](0024-graceful-restart.md), [ADR-0042](0042-llgr.md)).
   Their next hop sits behind a down or deleted interface. A monitor state
   that cannot be read is not confirmed carrier loss.
