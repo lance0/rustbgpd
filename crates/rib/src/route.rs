@@ -173,6 +173,8 @@ struct AspaContextTable {
     /// Ids of scoped contexts, by interface; keyed by `Arc<str>` so a lookup
     /// borrows the caller's `&str` instead of allocating.
     scoped_ids: FastMap<Arc<str>, FastMap<AspaValidationContext, u16>>,
+    /// The table has filled and the overflow was logged once.
+    overflow_reported: bool,
     contexts: Vec<AspaValidationContext>,
     /// Interface of each context's scoped source neighbor, indexed like
     /// `contexts`.
@@ -187,6 +189,7 @@ impl AspaContextTable {
         Self {
             ids: std::iter::once((default, 0)).collect(),
             scoped_ids: FastMap::default(),
+            overflow_reported: false,
             contexts: vec![default],
             interfaces: vec![None],
             snapshot: None,
@@ -210,7 +213,19 @@ impl AspaContextTable {
         }
         let id = match u16::try_from(self.contexts.len()) {
             Ok(id) if id < AspaContextId::UNRESOLVED.0 => id,
-            _ => return AspaContextId::UNRESOLVED,
+            _ => {
+                if !self.overflow_reported {
+                    self.overflow_reported = true;
+                    tracing::warn!(
+                        capacity = self.contexts.len(),
+                        "route source context table is full: new sessions' routes keep \
+                         their stored ASPA verdicts on revalidation, and routes from new \
+                         IPv6 link-local neighbor sessions report no interface, so scoped \
+                         selectors do not find them until the daemon restarts"
+                    );
+                }
+                return AspaContextId::UNRESOLVED;
+            }
         };
         self.contexts.push(context);
         let interface = interface.map(Arc::<str>::from);
@@ -1648,6 +1663,7 @@ mod tests {
             "existing ids still resolve"
         );
         assert_eq!(table.contexts.len(), usize::from(u16::MAX));
+        assert!(table.overflow_reported, "the first refusal is logged once");
     }
 
     fn bgpls_route(family: BgpLsFamily, nlri: BgpLsNlri) -> BgpLsRibRoute {

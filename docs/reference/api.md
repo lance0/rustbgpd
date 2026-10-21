@@ -354,7 +354,12 @@ neighbor; the interface is empty for a numbered neighbor:
 | `SessionEvent`, `NotificationEvent`, `PolicyEvent` | `peer_interface` |
 
 Route rows and route events report the interface recorded when the route was
-learned or the event was recorded, not the current neighbor inventory.
+learned or the event was recorded, not the current neighbor inventory. The
+record lives in a per-process table of session contexts; if that table ever
+fills (65,535 distinct neighbor ASN, role and interface combinations), the
+daemon logs a warning once and routes from sessions established afterwards
+report an empty `peer_interface` even for a link-local `peer_address`, so a
+scoped selector does not find them until the daemon restarts.
 Routes retained across a Graceful Restart and the history of a deleted
 neighbor keep the interface they had. A `BgpEvent` envelope's
 `peer_address`, `previous_peer_address` and `target_peer_address` are bare IP
