@@ -418,10 +418,19 @@ impl Control {
         atomic_write(&self.dir, RELEASE, self.command(checkpoint).as_bytes());
     }
 
+    /// Latest instant the armed owner can still claim its checkpoint. Exec,
+    /// connect and admission are harness setup time, bounded like a daemon
+    /// spawn; once registered, the owner's own budget bounds the rest. Past
+    /// the budget the watchdog fences and the daemon exits 70 within the
+    /// grace, which `assert_running` reports before this deadline does.
+    fn receipt_deadline(&self) -> Instant {
+        Instant::now() + SPAWN_LIMIT + self.budget + GRACE + EXIT_JITTER
+    }
+
     fn wait_for_receipt(&self, checkpoint: &str, pid: u32, daemon: &mut Daemon) {
         let expected_command = self.command(checkpoint);
         let expected_receipt = format!("{expected_command}pid={pid}\n");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = self.receipt_deadline();
         loop {
             if let Ok(receipt) = std::fs::read_to_string(self.dir.join(RECEIPT)) {
                 assert_eq!(receipt, expected_receipt);
@@ -454,12 +463,7 @@ impl Control {
     /// Wait for the row's armed checkpoint to be claimed, or for the
     /// daemon's own proof that a host stall decided the attempt first.
     fn wait_for_hold(&self, row: MatrixRow, daemon: &mut Daemon) -> Result<(), HostStall> {
-        self.wait_for_hold_until(
-            row,
-            daemon,
-            Instant::now() + Duration::from_secs(10),
-            |_| {},
-        )
+        self.wait_for_hold_until(row, daemon, self.receipt_deadline(), |_| {})
     }
 
     /// The callback lets a regression complete the daemon's exit after the
