@@ -2957,6 +2957,8 @@ mod tests {
                         "term customer-routes: route.communities has 65001:100 => accept [matched]"
                             .into(),
                     ],
+                    tests_rpki: false,
+                    tests_aspa: false,
                 },
                 StatementAttribution {
                     policy_index: 1,
@@ -2967,6 +2969,8 @@ mod tests {
                     modifications: vec![],
                     term_name: None,
                     term_traces: vec![],
+                    tests_rpki: false,
+                    tests_aspa: false,
                 },
             ],
         };

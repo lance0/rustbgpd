@@ -238,6 +238,7 @@ async fn rd_output_round_trips_vpn_explain_and_filter() {
                             modifications: rustbgpd_policy::RouteModifications::default(),
                             orr_vantage: None,
                             orr_candidates: vec![],
+                            deny_validation: vec![],
                             gates: vec![],
                             update_group_id: None,
                             already_advertised: false,

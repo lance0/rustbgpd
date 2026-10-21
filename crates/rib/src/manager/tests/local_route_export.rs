@@ -272,6 +272,105 @@ fn add_path_rank_and_export_policy() {
     assert_eq!(export.disposition, RouteExportDisposition::Withheld);
     assert_eq!(export.reason, "export_policy");
     assert_eq!(export.explain_code, "policy_denied");
+    // A prefix-only deny tests no validation state.
+    assert_eq!(export.deny_validation, Vec::<String>::new());
+}
+
+/// `deny_prefixes_chain` with the RPKI condition added to each statement.
+fn deny_prefixes_if_rpki(prefixes: &[Prefix], state: RpkiValidation) -> PolicyChain {
+    let mut chain = deny_prefixes_chain(prefixes);
+    for statement in &mut chain.policies[0].policy.entries {
+        statement.match_rpki_validation = Some(state);
+    }
+    PolicyChain::from_named(chain.policies)
+}
+
+fn rpol_chain(source: &str, name: &str) -> PolicyChain {
+    let compiled = rustbgpd_policy::rpol::RpolFile::parse(source)
+        .expect("clean rpol")
+        .compile_policy(name, &[], &mut rustbgpd_policy::sets::SetStore::new())
+        .expect("policy exists");
+    PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        name.to_string(),
+        Arc::new(compiled),
+    )])
+}
+
+/// An ROV deny names the validation state its deciding statement tests,
+/// on the single-best and the Add-Path explain arms, whether the policy is
+/// TOML (prefix AND RPKI) or rpol.
+#[test]
+fn rpki_invalid_deny_names_the_validation_state() {
+    let (mut manager, _tx) = manager();
+    let prefix = v4_prefix();
+    let toml = v4(1);
+    let toml_add_path = v4(2);
+    let rpol = v4(3);
+    let rov = || deny_prefixes_if_rpki(&[prefix], RpkiValidation::Invalid);
+    let _toml_rx = peer_up(&mut manager, toml, ipv4_sendable(), Some(rov()), 0, 64);
+    let _add_path_rx = peer_up(
+        &mut manager,
+        toml_add_path,
+        ipv4_sendable(),
+        Some(rov()),
+        2,
+        64,
+    );
+    let _rpol_rx = peer_up(
+        &mut manager,
+        rpol,
+        ipv4_sendable(),
+        Some(rpol_chain(
+            "policy rov { term invalid { if route.rpki == invalid { reject } } \
+             term rest { accept } }",
+            "rov",
+        )),
+        0,
+        64,
+    );
+    let mut route = local_route(prefix, 0);
+    route.validation_state = RpkiValidation::Invalid;
+    inject(&mut manager, route);
+
+    let page = query(&mut manager, prefix, 0, None, 10).unwrap();
+    for peer in [toml, toml_add_path, rpol] {
+        let export = row(&page, peer);
+        assert_eq!(export.disposition, RouteExportDisposition::Withheld);
+        assert_eq!(export.reason, "export_policy");
+        assert_eq!(export.explain_code, "policy_denied");
+        assert_eq!(export.deny_validation, ["rpki_invalid"], "peer {peer}");
+    }
+}
+
+/// An RPKI-valid route that an earlier RPKI statement permits and a later
+/// policy's prefix statement denies: the deciding statement tests no
+/// validation state, so the deny is a plain policy deny.
+#[test]
+fn deny_after_an_rpki_permit_names_no_validation_state() {
+    let (mut manager, _tx) = manager();
+    let prefix = v4_prefix();
+    let target = v4(1);
+    let mut permit_valid = deny_prefixes_if_rpki(&[prefix], RpkiValidation::Valid);
+    permit_valid.policies[0].policy.entries[0].action = rustbgpd_policy::PolicyAction::Permit;
+    let mut policies = permit_valid.policies;
+    policies.extend(deny_prefixes_chain(&[prefix]).policies);
+    let _rx = peer_up(
+        &mut manager,
+        target,
+        ipv4_sendable(),
+        Some(PolicyChain::from_named(policies)),
+        0,
+        64,
+    );
+    let mut route = local_route(prefix, 0);
+    route.validation_state = RpkiValidation::Valid;
+    inject(&mut manager, route);
+
+    let page = query(&mut manager, prefix, 0, None, 10).unwrap();
+    let export = row(&page, target);
+    assert_eq!(export.reason, "export_policy");
+    assert_eq!(export.explain_code, "policy_denied");
+    assert_eq!(export.deny_validation, Vec::<String>::new());
 }
 
 /// A per-client-best peer whose export policy denies every candidate,

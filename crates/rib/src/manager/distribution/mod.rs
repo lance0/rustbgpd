@@ -1441,20 +1441,43 @@ fn policy_label_with_term(
     action: PolicyAction,
     matched_policy: Option<&str>,
 ) -> String {
-    let term_suffix = if action == PolicyAction::Deny {
-        matched_policy.and_then(|matched_policy| {
-            rustbgpd_policy::explain_chain_statements(chain, ctx)
-                .steps
-                .last()
-                .filter(|step| step.policy_name.as_deref() == Some(matched_policy))
-                .and_then(|step| step.term_name.as_deref())
-                .map(|term| format!(":{term}"))
-        })
-    } else {
-        None
+    policy_deny_attribution(chain, ctx, action, matched_policy).0
+}
+
+/// [`policy_label_with_term`] plus the validation codes of a Deny: one
+/// `rpki_<state>` / `aspa_<state>` entry, carrying the route's state in
+/// `ctx`, for each validation state the deciding statement's match tests
+/// (see `StatementAttribution::tests_rpki`). Empty for a Permit.
+fn policy_deny_attribution(
+    chain: Option<&PolicyChain>,
+    ctx: &RouteContext<'_>,
+    action: PolicyAction,
+    matched_policy: Option<&str>,
+) -> (String, Vec<String>) {
+    let label = matched_policy.unwrap_or("inline");
+    if action != PolicyAction::Deny {
+        return (label.to_string(), Vec::new());
     }
-    .unwrap_or_default();
-    format!("{}{term_suffix}", matched_policy.unwrap_or("inline"))
+    let trace = rustbgpd_policy::explain_chain_statements(chain, ctx);
+    let Some(step) = trace
+        .steps
+        .last()
+        .filter(|step| step.policy_name.as_deref() == matched_policy)
+    else {
+        return (label.to_string(), Vec::new());
+    };
+    let mut validation = Vec::new();
+    if step.tests_rpki {
+        validation.push(format!("rpki_{}", ctx.validation_state));
+    }
+    if step.tests_aspa {
+        validation.push(format!("aspa_{}", ctx.aspa_state));
+    }
+    let label = match (matched_policy, step.term_name.as_deref()) {
+        (Some(policy), Some(term)) => format!("{policy}:{term}"),
+        _ => label.to_string(),
+    };
+    (label, validation)
 }
 
 /// The consumer identity for the shared single-best export tail
@@ -1519,6 +1542,8 @@ pub(in crate::manager) struct ExportGateTrace {
     /// chain, or `"<policy>"` / `"<policy>:<term>"` for Deny. `None` means
     /// the chain is absent or genuinely empty.
     pub policy_label: Option<String>,
+    /// Validation codes of an export-policy deny (`policy_deny_attribution`).
+    pub deny_validation: Vec<String>,
     /// Post-modification next hop the route would be staged with.
     pub staged_next_hop: Option<IpAddr>,
     /// Post-modification Add-Path identifier (always 0 on single-best).
@@ -1610,6 +1635,7 @@ impl ExportGateTrace {
             modifications: self.modifications,
             orr_vantage: None,
             orr_candidates: Vec::new(),
+            deny_validation: self.deny_validation,
             gates: self.gates,
             update_group_id,
             already_advertised: self.suppressed_identical,

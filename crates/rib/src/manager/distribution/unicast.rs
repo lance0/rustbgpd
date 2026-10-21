@@ -7,7 +7,7 @@ use super::{
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
     RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, debug,
-    evaluate_chain_with_attribution, family_label, policy_label_with_term, prefix_family,
+    evaluate_chain_with_attribution, family_label, policy_deny_attribution, prefix_family,
     record_export_policy_eval, route_type, route_type_label, route_type_message,
     rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
     validate_route_aspa, validate_route_rpki,
@@ -451,6 +451,7 @@ impl RibManager {
             modifications: rustbgpd_policy::RouteModifications::default(),
             orr_vantage: None,
             orr_candidates: Vec::new(),
+            deny_validation: Vec::new(),
             gates: Vec::new(),
             update_group_id: None,
             already_advertised: false,
@@ -1185,7 +1186,7 @@ impl RibManager {
                 },
             ),
         };
-        let policy_label = super::policy_label_with_term(
+        let (policy_label, deny_validation) = super::policy_deny_attribution(
             export_pol,
             &ctx,
             evaluation.action,
@@ -1195,6 +1196,9 @@ impl RibManager {
             explain.decision = ExplainDecision::Deny;
             let (code, message) =
                 export_deny_attribution(evaluation.matched_policy.as_deref(), &policy_label);
+            if code == "policy_denied" {
+                explain.deny_validation = deny_validation;
+            }
             gate(
                 &mut explain.gates,
                 "export_policy",
@@ -2713,20 +2717,26 @@ impl RibManager {
             // deciding rpol member with its term through an explain-only
             // statement-trace re-walk, pinned to agree with the evaluation by
             // policy-crate agreement tests. TOML members carry no term name.
-            trace.policy_label = export_pol.map(|chain| {
-                policy_label_with_term(
+            let (label, deny_validation) = export_pol.map_or_else(Default::default, |chain| {
+                let (label, validation) = policy_deny_attribution(
                     Some(chain),
                     &ctx,
                     evaluation.action,
                     evaluation.matched_policy.as_deref(),
-                )
+                );
+                (Some(label), validation)
             });
+            trace.policy_label = label;
+            trace.deny_validation = deny_validation;
         }
         if policy_result.action != PolicyAction::Permit {
             if let Some(trace) = target.trace() {
                 let label = trace.policy_label.clone().unwrap_or_default();
                 let (code, message) =
                     export_deny_attribution(evaluation.matched_policy.as_deref(), &label);
+                if code != "policy_denied" {
+                    trace.deny_validation.clear();
+                }
                 trace.push(
                     "export_policy",
                     code,
