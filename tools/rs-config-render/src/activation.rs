@@ -57,10 +57,11 @@ mod unix {
     use std::ffi::OsString;
     use std::fmt::Write as _;
     use std::fs::{self, File, OpenOptions};
-    use std::io::{Read as _, Write as _};
+    use std::io::{self, Read, Write as _};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
     use std::path::{Component, Path, PathBuf};
     use std::process::{Child, Command, Output, Stdio};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -636,10 +637,39 @@ mod unix {
         Ok(comparison)
     }
 
+    /// Output above this is not a page any probe here trusts.
+    const MAX_OUTPUT_BYTES: u64 = 64 << 20;
+
+    /// Read `pipe` to EOF (at most one byte past [`MAX_OUTPUT_BYTES`]) on its
+    /// own thread, so a full pipe never stalls the child.
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<io::Result<Vec<u8>>> {
+        let (sender, receiver) = mpsc::channel();
+        match pipe {
+            // ponytail: a reader still blocked at the deadline stays parked
+            // until whoever holds the pipe closes it; this process exits first.
+            Some(pipe) => {
+                thread::spawn(move || {
+                    let mut bytes = Vec::new();
+                    let read = pipe.take(MAX_OUTPUT_BYTES + 1).read_to_end(&mut bytes);
+                    let _ = sender.send(read.map(|_| bytes));
+                });
+            }
+            None => {
+                let _ = sender.send(Ok(Vec::new()));
+            }
+        }
+        receiver
+    }
+
+    /// The child's output, or `None` unless it exited and both pipes reached
+    /// EOF by `deadline`. A descendant that inherited a pipe can hold it open
+    /// long after the child exits, so EOF is bounded by the same deadline.
     fn wait_output(mut child: Child, deadline: Instant) -> Option<Output> {
-        loop {
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(_)) => return child.wait_with_output().ok(),
+                Ok(Some(status)) => break status,
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
                 Ok(None) | Err(_) => {
                     let _ = child.kill();
@@ -647,7 +677,17 @@ mod unix {
                     return None;
                 }
             }
-        }
+        };
+        let collect = |pipe: mpsc::Receiver<io::Result<Vec<u8>>>| {
+            pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok()?
+                .ok()
+        };
+        Some(Output {
+            status,
+            stdout: collect(stdout)?,
+            stderr: collect(stderr)?,
+        })
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -738,31 +778,16 @@ mod unix {
         settling: bool,
     }
 
-    /// Output above this is not a metrics page this probe trusts.
-    const MAX_METRICS_BYTES: u64 = 64 << 20;
-
     fn reloads(rbgp: &Path, rbgp_addr: &str, deadline: Instant) -> Option<Reloads> {
-        let mut child = Command::new(rbgp)
+        let child = Command::new(rbgp)
             .args(["--addr", rbgp_addr, "metrics"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
-        // Drain stdout while waiting: a large page would fill the pipe and
-        // stall the child until the deadline.
-        let stdout = child.stdout.take()?;
-        let reader = thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stdout
-                .take(MAX_METRICS_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
-        if !wait_output(child, deadline)?.status.success() {
-            return None;
-        }
-        let bytes = reader.join().ok()?.ok()?;
-        if bytes.len() as u64 > MAX_METRICS_BYTES {
+        let output = wait_output(child, deadline)?;
+        let bytes = output.stdout;
+        if !output.status.success() || bytes.len() as u64 > MAX_OUTPUT_BYTES {
             return None;
         }
         let mut process_start = None;
