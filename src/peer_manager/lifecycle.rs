@@ -536,6 +536,7 @@ impl PeerManager {
             slow_peer_threshold_pct: tc.slow_peer_threshold_pct,
             slow_peer_duration: tc.slow_peer_duration,
             slow_peer_isolation: tc.slow_peer_isolation,
+            fast_external_failover: tc.fast_external_failover,
             interpret_rfc1997: tc.interpret_rfc1997,
             rs_control_communities: tc.rs_control_communities,
             remove_private_as: tc.remove_private_as,
@@ -1396,6 +1397,7 @@ impl PeerManager {
         managed.transport_config.gr_peer_restart_time_max = config.gr_peer_restart_time_max;
         managed.transport_config.local_ipv6_nexthop = config.local_ipv6_nexthop;
         managed.transport_config.remove_private_as = config.remove_private_as;
+        managed.transport_config.fast_external_failover = config.fast_external_failover;
         self.publish_peer_info_metric(&peer);
         info!(%peer, "hot-applied neighbor config change in place (no session rebuild)");
         Ok(())

@@ -57,7 +57,8 @@ which cannot carry the config-file-only group fields: `admin_down`,
 the per-family and received prefix limits, `max_prefix_action`,
 `max_prefix_warning_percent`, `next_hop_ownership`, `interpret_rfc1997`,
 `rs_control_communities`, `send_non_transitive_extended_communities`,
-`log_level`, `route_flap_dampening`, and `conditional_advertisements`. A sequential candidate that adds or changes one of them is
+`fast_external_failover`, `log_level`, `route_flap_dampening`, and
+`conditional_advertisements`. A sequential candidate that adds or changes one of them is
 rejected, and the reason names the group and field, for example
 `peer group "edge" strict_role changed together with listener inbound
 MD5/GTSM inventory`. Split the reload: apply the TCP-AO or listener change
@@ -122,7 +123,7 @@ Static-neighbor edits whose **every** changed field is hot-applied
 `max_prefix_action`, `max_prefix_warning_percent`, `max_prefixes_out_ipv4_unicast`,
 `max_prefixes_out_ipv6_unicast`, `max_prefix_restart_seconds`,
 `gr_peer_restart_time_max`, `gr_stale_routes_time`, `gr_eor_grace_time`,
-`local_ipv6_nexthop`, `remove_private_as`, `log_level`, the
+`local_ipv6_nexthop`, `remove_private_as`, `fast_external_failover`, `log_level`, the
 import/export policy and chain fields, and `conditional_advertisements` on
 the generation route) are applied **in place** without
 replacing the session task. Policy edits trigger the usual Route Refresh /
@@ -230,6 +231,7 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `slow_peer_threshold_pct` | live (session reset) | Slow-peer detection backlog threshold, percent of the outbound writer buffer. Captured into the session's transport config; on SIGHUP the reconciler rebuilds the session immediately, so the new value applies right away. Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
 | `slow_peer_duration` | live (session reset) | Seconds the backlog must persist before the slow-peer flag raises; 0 disables detection. Same capture and session-rebuild semantics as the threshold. |
 | `slow_peer_isolation` | live (session reset) | Move a flagged-slow peer to the per-peer update path. Same capture and session-rebuild semantics as the threshold. |
+| `fast_external_failover` | live | Fast external failover opt-out. Hot-applied in place: the peer manager reads it when the next interface-down event arrives, so no session is reset. |
 | `max_prefixes` | live | Threshold re-evaluated on every received UPDATE. |
 | `max_prefixes_ipv4_unicast` | live | Per-family IPv4-unicast inbound cap (ADR-0108), enforced independently of the aggregate `max_prefixes`. Hot-applied in place; the new threshold governs the next received UPDATE. |
 | `max_prefixes_ipv6_unicast` | live | IPv6-unicast sibling of `max_prefixes_ipv4_unicast` (ADR-0108). |
@@ -328,6 +330,7 @@ static neighbors.
 | `slow_peer_threshold_pct` | live (session reset) | Same as neighbor; a group slow_peer edit is never all-hot, so static members are session-reshaped via the conservative fallback. |
 | `slow_peer_duration` | live (session reset) | Same as neighbor; same conservative-reshape fallback as the threshold. |
 | `slow_peer_isolation` | live (session reset) | Same as neighbor; same conservative-reshape fallback as the threshold. |
+| `fast_external_failover` | live | Same as neighbor. Config-file-only, so the sequential route rejects a change to it alongside a TCP-AO or listener edit (see above). |
 | `max_prefixes` | live | Same as neighbor. |
 | `max_prefixes_ipv4_unicast` | live | Same as neighbor; per-family ADR-0108 cap inherited by group members. |
 | `max_prefixes_ipv6_unicast` | live | Same as neighbor. |
@@ -440,6 +443,7 @@ that are stood up once at startup. Three fields are not restart-required:
 | `blackhole_discard_install_burst` | restart-required | The reconciler captures the install-attempt burst at startup; SIGHUP pins the running value. |
 | `multipath_relax` | restart-required | RIB best-path tie-break behavior; reconciling mid-flight would require an Adj-RIB-Out rebuild. |
 | `link_bandwidth_weighted` | restart-required | Weighted-multipath behavior (ADR-0068). |
+| `fast_external_failover` | restart-required | Daemon-wide default for the neighbor and peer-group knob. SIGHUP pins the running value; set the neighbor or peer-group key to change one session without a restart. |
 | `max_as_path_length` | restart-required | Threaded into each session's transport config when the peer is built; running sessions keep the ceiling they started with. |
 | `dynamic_neighbor_limit` | reload-applied | Admission cap compared live against the dynamic-peer counter (inbound admission and LRU eviction bound); nothing is pre-allocated. SIGHUP updates the admission ceiling immediately; existing dynamic sessions are preserved even if the new limit is below current occupancy, and headroom metrics update on the snapshot swap. |
 | `worker_threads` | restart-required | Tokio runtime worker-thread count; the runtime is built once at startup. Unset caps to `min(CPU parallelism, 8)`; `RUSTBGPD_WORKER_THREADS` overrides. |

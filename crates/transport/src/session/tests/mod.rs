@@ -2217,6 +2217,7 @@ mod family_max_prefix;
 mod forwarding_state;
 mod import_policy;
 mod inbound_update;
+mod interface_down;
 mod labeled;
 mod local_revalidation;
 mod loop_detection;

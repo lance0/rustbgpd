@@ -211,6 +211,7 @@ Required. Defines the local BGP speaker identity.
 | `ebgp_requires_policy` | bool | no       | epoch-dependent (`false` at epoch 1, `true` at epoch 2) | RFC 8212: require explicit operator import/export policy on eBGP sessions. Raw omission is retained alongside `config_epoch`: epoch-less/epoch-1 omission remains effective false, while omission under `config_epoch = 2` resolves to the activated secure default, effective true (source `epoch_2_default`). An explicit value always keeps its stated meaning. **Restart-required** — see below |
 | `multipath_relax`   | bool   | no       | `false`              | ADR-0066 multipath-relax: group unicast ECMP candidates by `AS_PATH` *length* instead of an exact `AS_PATH` match (FRR's `bgp bestpath as-path multipath-relax`). Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
 | `link_bandwidth_weighted` | bool | no   | `false`              | ADR-0068 weighted multipath: weight unicast ECMP next-hops by the lowest finite nonnegative RFC 10005 Link Bandwidth value when the whole equal-cost group carries a positive one; zero, missing, or unusable values fall back to equal cost. Best-path-wide; inert unless a `[[fib_tables]]` sets `maximum_paths`, `maximum_paths_ebgp`, or `maximum_paths_ibgp` above `1` |
+| `fast_external_failover` | bool | no | `true` | Daemon-wide default for [fast external failover](#fast-external-failover): close a directly connected eBGP session as soon as the kernel confirms its interface is down. A peer-group or neighbor value overrides it. Restart-required |
 
 Startup validation rejects local AS 0 (RFC 7607 §2) and BGP Identifier zero
 (RFC 6286 §2.1) before any listener or peer session starts.
@@ -958,6 +959,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `slow_peer_threshold_pct` | u8    | no       | 50      | Slow-peer detection: backlog threshold as a percentage (1--100) of the outbound writer buffer. The peer is a slow-peer candidate while its buffered outbound updates stay at or above this fraction |
 | `slow_peer_duration`   | u32      | no       | 30      | How long (seconds) the backlog must persist above the threshold before the peer is flagged slow (neighbor status flag, warn log, `bgp_peer_slow` metric). 0 disables detection. Purely observational unless `slow_peer_isolation` is set |
 | `slow_peer_isolation`  | bool     | no       | false   | Move a flagged-slow peer onto its own per-peer update path so it stops holding back its update-group's shared encode; it regroups automatically when the flag clears. Requires detection (`slow_peer_duration > 0`) |
+| `fast_external_failover` | bool  | no       | true    | Close this session at once when the kernel confirms the interface carrying it is down, instead of waiting for the hold timer. Applies only to eBGP sessions proven directly connected; see [Fast external failover](#fast-external-failover). Inherits from the peer group, then `[global]` |
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted from the peer, all families together. Crossing it applies `max_prefix_action`: `shutdown` (default) tears the session down with Cease/1 and latches it off until explicit enable, unless `max_prefix_restart_seconds` is set; `warning` logs and keeps accepting. `block` applies only to the per-family bounds and is rejected while this is set |
 | `max_prefixes_ipv4_unicast`    | u32      | no       | --      | Maximum unique IPv4-unicast prefixes accepted (after import policy) before `max_prefix_action` applies; under the default `shutdown`, a latched teardown. Without Notification GR, Cease/1 carries RFC 4486 AFI/SAFI/bound data; with the N-bit, RFC 8538 Cease/9 encapsulates that complete Cease/1. Enforced independently of `max_prefixes` — each configured bound applies to its own count, the aggregate stays a global backstop (ADR-0108) |
 | `max_prefixes_ipv6_unicast`    | u32      | no       | --      | IPv6-unicast sibling of `max_prefixes_ipv4_unicast` (ADR-0108) |
@@ -1409,6 +1411,49 @@ only when no listener family remains usable, or when strict explicit endpoint
 binding requires the failed socket. The per-implementation comparison and its
 sourcing live in [COMPARISON.md](../explanation/comparison.md).
 
+### Fast external failover
+
+A directly connected eBGP session does not have to wait for its hold timer
+when its link fails. rustbgpd watches the kernel's link and address
+notifications and closes a session at once when the interface that carries it:
+
+- loses carrier (`IFF_LOWER_UP` clears while the interface is up);
+- is set administratively down (`IFF_UP` clears);
+- is removed; or
+- loses the local address the session is sourced from.
+
+This is on by default, like FRR's `bgp fast-external-failover` and Cisco's
+`bgp fast-external-fallover`. Turn it off with `fast_external_failover = false`
+in `[global]`, a peer group, or a neighbor; the most specific value wins.
+
+A session is affected only when its own TCP connection proves it is directly
+connected. The connection's local address must be configured on the interface,
+and the peer must be inside that address's connected prefix (the remote end on
+a point-to-point address). For a [link-local neighbor](#scoped-neighbor-identity),
+the socket's interface scope must be that interface. Nothing is inferred from
+TTL, GTSM, or eBGP status. Multihop sessions, sessions sourced from a loopback,
+iBGP sessions and sessions on other interfaces are untouched. A bond or VLAN
+interface is judged by its own carrier, so losing one bond member does not stop
+a session while the bond stays up.
+
+The stop is local. No NOTIFICATION is sent, because the link it would travel on
+is gone. Routes from the session are withdrawn rather than retained under
+Graceful Restart or LLGR, because their next hop sits behind the dead link.
+The neighbor stays enabled and reconnects on its normal retry timer when the
+link returns. The teardown cause names the interface and the reason, for
+example `fast external failover: interface eth1 (ifindex 4) carrier lost`. It
+appears as the neighbor's last error and as the `reason` of the session-lost
+event, and `bgp_session_down_total` counts it under
+`reason="local_no_notification"`.
+
+Only an explicit kernel message counts as down. If the monitor misses messages
+(a netlink receive-buffer overrun, counted by
+`bgp_netlink_subscription_overruns_total{actor="fast_external_failover"}`), the
+link state is treated as unknown and nothing is stopped; the hold timer or BFD
+still covers the session. There is no debounce. A flapping link flaps its
+sessions, so dampen carrier at the link (for example the bond's `downdelay`).
+The monitor runs on Linux only.
+
 ### BFD (RFC 5880 / 5881 / 5882 / 5883)
 
 Asynchronous BFD (ADR-0067) gives sub-second peer-failure detection
@@ -1687,13 +1732,14 @@ receive-side Prefix ORF, `disable_ipv4_unicast`, `link_local_next_hop`,
 private-AS handling, MD5/GTSM, BFD, `tcp_mss`,
 `local_ipv6_nexthop`, `log_level`, slow-peer detection
 (`slow_peer_threshold_pct`, `slow_peer_duration`, `slow_peer_isolation`),
-and import/export inline policy or named chains, and
+`fast_external_failover`, and import/export inline policy or named chains, and
 `conditional_advertisements` (static members only). TCP-AO is intentionally not inherited through peer groups; static
 neighbors and dynamic ranges configure their startup key directly.
 A gRPC `SetPeerGroup` replaces only the fields its definition carries; the
 config-file-only group fields (such as `role`, `strict_role`,
 `prefix_orf_receive`, `disable_ipv4_unicast`, `link_local_next_hop`, `bfd`,
-`conditional_advertisements`, and the per-family prefix limits) keep their
+`fast_external_failover`, `conditional_advertisements`, and the per-family
+prefix limits) keep their
 configured values. See [PeerGroupService](api.md#peergroupservice).
 
 `conditional_advertisements` follows the `export_policy_chain` rule: a static

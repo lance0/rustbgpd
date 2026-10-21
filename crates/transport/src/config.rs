@@ -884,6 +884,12 @@ pub struct TransportConfig {
     /// `slow_peer_isolation`. Default off — detection alone is purely
     /// observational.
     pub slow_peer_isolation: bool,
+    /// Fast external failover: the peer manager forwards confirmed
+    /// interface-down events to this session (which still checks that the
+    /// interface carries its connection). Read by the manager at event time,
+    /// so a change applies without a session reset. Operator knob:
+    /// `fast_external_failover`. Default on.
+    pub fast_external_failover: bool,
     /// The neighbor's lifetime counter block. [`TransportConfig::new`]
     /// starts a standalone one; the peer manager installs the block it owns
     /// for the neighbor before spawning any session.
@@ -959,6 +965,7 @@ impl TransportConfig {
             slow_peer_threshold_pct: DEFAULT_SLOW_PEER_THRESHOLD_PCT,
             slow_peer_duration: DEFAULT_SLOW_PEER_DURATION_SECS,
             slow_peer_isolation: false,
+            fast_external_failover: true,
             neighbor_counters: NeighborCounters::default(),
         }
     }

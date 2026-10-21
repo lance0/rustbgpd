@@ -602,6 +602,10 @@ pub(crate) struct PeerSession {
     received_hard_reset: bool,
     /// RFC 8538: we sent Cease/Hard Reset — skip GR on this teardown.
     sent_hard_reset: bool,
+    /// Fast external failover is closing this session: the interface that
+    /// carried it is down, so retained routes would point into a dead link.
+    /// Skip GR/LLGR retention on this teardown.
+    suppress_gr_retention: bool,
     /// Whether the import-decision cache is populated (ADR-0073
     /// `[policy.explain].enabled`). Read on the inbound UPDATE hot path
     /// to skip the decision snapshot build/clone entirely when explain
@@ -874,6 +878,11 @@ const BMP_STREAM_REPAIR_RETRY: Duration = Duration::from_secs(1);
 /// §4.2, extending the RFC 4271 §8.1 event numbering that RFC 7854 §4.9
 /// references for "Local system closed, no NOTIFICATION").
 const SEND_HOLD_TIMER_EXPIRES_FSM_EVENT: u16 = 29;
+
+/// FSM event code carried in the BMP Peer Down reason-2 body when fast
+/// external failover closes the session: RFC 4271 §8.1 Event 8,
+/// `AutomaticStop` (the local system stops the connection on its own).
+const AUTOMATIC_STOP_FSM_EVENT: u16 = 8;
 
 /// The writer's RFC 9687 `SendHoldTime` for this session, as a
 /// `Duration`. `0` in config means disabled (`None`).
@@ -2267,6 +2276,7 @@ impl PeerSession {
             notification_teardown: false,
             received_hard_reset: false,
             sent_hard_reset: false,
+            suppress_gr_retention: false,
             import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
                 explain_cache_size,

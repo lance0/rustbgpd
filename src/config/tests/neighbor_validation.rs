@@ -474,6 +474,89 @@ slow_peer_isolation = false
     assert!(!peers[1].0.slow_peer_isolation);
 }
 
+/// Fast external failover resolves neighbor > peer group > global > on.
+#[test]
+fn fast_external_failover_precedence_neighbor_group_global_default() {
+    let base = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+GLOBAL
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.on]
+fast_external_failover = true
+
+[peer_groups.plain]
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65002
+peer_group = "on"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65002
+peer_group = "on"
+fast_external_failover = false
+
+[[neighbors]]
+address = "10.0.0.5"
+remote_asn = 65002
+peer_group = "plain"
+fast_external_failover = true
+"#;
+    let resolved = |global: &str| -> Vec<bool> {
+        parse(&base.replace("GLOBAL", global))
+            .unwrap()
+            .to_peer_configs()
+            .unwrap()
+            .iter()
+            .map(|(transport, ..)| transport.fast_external_failover)
+            .collect()
+    };
+    // Unset global: on by default; the neighbor opt-out wins over its group.
+    assert_eq!(resolved(""), [true, true, false, true]);
+    assert_eq!(
+        resolved("fast_external_failover = true"),
+        [true, true, false, true]
+    );
+    // Global opt-out: plain neighbors follow it, a group or neighbor opt-in
+    // overrides it.
+    assert_eq!(
+        resolved("fast_external_failover = false"),
+        [false, true, false, true]
+    );
+}
+
+#[test]
+fn fast_external_failover_edits_are_hot_applied() {
+    let old = parse(valid_toml()).unwrap();
+    let mut neighbor = old.neighbors[0].clone();
+    neighbor.fast_external_failover = Some(false);
+    assert!(crate::config::neighbor_change_hot_applicable(
+        &old.neighbors[0],
+        &neighbor
+    ));
+    let group = crate::config::PeerGroupConfig::default();
+    let edited = crate::config::PeerGroupConfig {
+        fast_external_failover: Some(false),
+        ..Default::default()
+    };
+    assert!(crate::config::peer_group_change_hot_applicable(
+        &group, &edited
+    ));
+}
+
 #[test]
 fn to_peer_configs_maps_correctly() {
     let config = parse(valid_toml()).unwrap();

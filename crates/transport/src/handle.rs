@@ -497,6 +497,12 @@ pub enum PeerCommand {
     },
     /// Tear down an established session because BFD transitioned to Down.
     BfdDown,
+    /// Fast external failover: the kernel confirmed an interface went down.
+    /// The session closes its connection locally, without a NOTIFICATION and
+    /// without Graceful Restart retention, only when its own socket proves the
+    /// interface carries it; otherwise the command is ignored. The session
+    /// stays administratively up and reconnects normally.
+    InterfaceDown(std::sync::Arc<crate::link::LinkDownEvent>),
     /// Shut down the task entirely.
     Shutdown,
     /// Tear down the task with an administrative reset that cannot retain

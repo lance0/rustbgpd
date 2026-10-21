@@ -42,6 +42,7 @@ const NOT_MIRRORED: &[&str] = &[
     "fib_table_control",
     "gnmi_set_bridge",
     "kernel_route_notify",
+    "link_failover",
     "metrics_server",
     "peer_manager",
     "policy_admin",

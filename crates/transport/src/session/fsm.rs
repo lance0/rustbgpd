@@ -333,6 +333,47 @@ impl PeerSession {
         self.last_error = cause;
     }
 
+    /// Fast external failover. Close the connection locally, without a
+    /// NOTIFICATION (the link it would travel on is gone) and without GR/LLGR
+    /// retention, when this session's own socket proves the downed interface
+    /// carries it. Anything else (no connection, a different interface, or an
+    /// unreadable socket address) leaves the session alone. The session is not
+    /// stop-requested, so the ordinary reconnect path brings it back.
+    pub(super) async fn handle_interface_down(&mut self, event: &crate::link::LinkDownEvent) {
+        let Some(read_half) = self.read_half.as_ref() else {
+            return;
+        };
+        let (Ok(local), Ok(remote)) = (read_half.local_addr(), read_half.peer_addr()) else {
+            return;
+        };
+        if !event.carries(local, remote) {
+            return;
+        }
+        let cause = event.teardown_cause();
+        warn!(
+            peer = %self.peer_label,
+            interface = %event.ifname,
+            ifindex = event.ifindex,
+            reason = event.cause.as_str(),
+            state = %self.fsm.state(),
+            "fast external failover: interface down, closing session without NOTIFICATION"
+        );
+        if self.fsm.state() == SessionState::Established {
+            self.last_down_reason = Some(PeerDownReason::LocalNoNotification(
+                super::AUTOMATIC_STOP_FSM_EVENT,
+            ));
+            self.session_telemetry_metric_lease
+                .latch_down_reason(SessionDownReason::LocalNoNotification);
+        }
+        self.record_transport_cause(cause);
+        self.suppress_gr_retention = true;
+        self.handle_tcp_disconnect();
+        self.drive_fsm(Event::TcpConnectionFails).await;
+        // Only an Established teardown reaches `SessionDown`, which clears
+        // the latch; a pre-Established close must not leak it forward.
+        self.suppress_gr_retention = false;
+    }
+
     /// Handle a hold-timer expiry observed by the select loop.
     ///
     /// ADR-0078 rule 3: pending unprocessed input counts as peer
@@ -1234,6 +1275,7 @@ impl PeerSession {
                             && (!self.notification_teardown || neg.peer_notification_gr)
                             && !self.received_hard_reset
                             && !self.sent_hard_reset
+                            && !self.suppress_gr_retention
                         {
                             let gr_families: Vec<(Afi, Safi)> = neg
                                 .peer_gr_families
@@ -1272,6 +1314,7 @@ impl PeerSession {
                     self.notification_teardown = false;
                     self.received_hard_reset = false;
                     self.sent_hard_reset = false;
+                    self.suppress_gr_retention = false;
                     // The import-side policy totals are not reset here: they
                     // live in the neighbor's counter block for the daemon's
                     // lifetime. The per-session import-decision cache

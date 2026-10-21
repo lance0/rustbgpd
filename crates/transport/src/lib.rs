@@ -14,6 +14,7 @@ pub mod error;
 mod fast_hash;
 pub mod framing;
 pub mod handle;
+pub mod link;
 pub mod listener;
 pub(crate) mod session;
 #[allow(
@@ -70,6 +71,7 @@ pub use handle::{
     SessionNotificationReceiver, SessionNotificationSender, SessionQueryOutcome, SessionRole,
     StateQueryOutcome, ValidationDelta, WarmCheckpointSessionState, session_notification_channel,
 };
+pub use link::{InterfaceAddress, LinkDownCause, LinkDownEvent};
 pub use listener::{
     AcceptedConnection, BgpListener, ListenerSocketOptions, Md5ListenerKey,
     TcpAoListenerGeneration, TcpAoListenerHandle, TcpAoListenerKey, TcpAoListenerOwnerKind,

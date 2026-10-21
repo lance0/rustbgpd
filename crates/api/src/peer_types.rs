@@ -2275,6 +2275,9 @@ pub struct PeerManagerNeighborConfig {
     /// Move a flagged-slow peer onto the per-peer update path
     /// (resolved; config default false).
     pub slow_peer_isolation: bool,
+    /// Forward confirmed interface-down events to this peer's session (fast
+    /// external failover; resolved, config default true).
+    pub fast_external_failover: bool,
 }
 
 /// Crate-boundary mirror of a binary `FibTableConfig` (`[[fib_tables]]`).
