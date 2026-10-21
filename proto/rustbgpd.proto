@@ -694,11 +694,10 @@ message NeighborState {
   uint64 import_policy_routes_permitted = 18;
   // Import policy evaluations that denied a route (same scope).
   uint64 import_policy_routes_denied = 19;
-  // Export policy evaluations that permitted a route. Unlike the import
-  // totals, these are per session: the RIB resets them when the session
-  // goes down.
+  // Export policy evaluations that permitted a route. Daemon-lifetime per
+  // neighbor, with the same scope as updates_received.
   uint64 export_policy_routes_permitted = 20;
-  // Export policy evaluations that denied a route (same per-session scope).
+  // Export policy evaluations that denied a route (same scope).
   uint64 export_policy_routes_denied = 21;
   // Live outbound update-group membership: "group:N" for shared staging, or
   // the private-path reason

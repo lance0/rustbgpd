@@ -9,6 +9,5 @@
   deleting the neighbor clears them. Previously the import-policy totals reset
   on every session-down, and all five restarted at 0 whenever the session
   re-established on a new session actor (an inbound reconnect, for example),
-  so their scope depended on which side reconnected. The export-policy totals
-  are unchanged and remain per session. Use `uptime_seconds` and `flap_count`
-  to tell sessions apart.
+  so their scope depended on which side reconnected. Use `uptime_seconds` and
+  `flap_count` to tell sessions apart.
