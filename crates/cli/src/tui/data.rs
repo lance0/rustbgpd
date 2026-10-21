@@ -745,7 +745,15 @@ fn route_event_entry(event: BgpEvent) -> Option<RouteEventEntry> {
     }
 }
 
-fn route_entry(event_type: &str, event: RouteEvent) -> RouteEventEntry {
+fn route_entry(event_type: &str, mut event: RouteEvent) -> RouteEventEntry {
+    // Render scoped neighbors as `address%interface`, like the CLI views.
+    use crate::commands::neighbor::scope_address;
+    scope_address(&mut event.peer_address, &event.peer_interface);
+    scope_address(
+        &mut event.previous_peer_address,
+        &event.previous_peer_interface,
+    );
+    scope_address(&mut event.target_peer_address, &event.target_peer_interface);
     RouteEventEntry {
         kind: RouteEventKind::Route,
         timestamp: event.timestamp,
@@ -767,6 +775,25 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    /// The route-event pane keeps every scoped neighbor's interface.
+    #[test]
+    fn route_event_entries_render_scoped_neighbors() {
+        let entry = route_entry(
+            "best changed",
+            RouteEvent {
+                peer_address: "fe80::1".into(),
+                peer_interface: "eth0".into(),
+                previous_peer_address: "fe80::2".into(),
+                previous_peer_interface: "eth1".into(),
+                target_peer_address: "192.0.2.1".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(entry.peer_address, "fe80::1%eth0");
+        assert_eq!(entry.previous_peer_address, "fe80::2%eth1");
+        assert_eq!(entry.target_peer_address, "192.0.2.1");
+    }
 
     fn list_query(
         view: RibView,
