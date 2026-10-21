@@ -9,7 +9,7 @@ use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfEntries, OrfMatch, OrfType};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinError;
 use tracing::Instrument;
 
 const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
@@ -604,7 +604,10 @@ impl PeerSession {
     /// task returns while its detached writer still holds the NOTIFICATION,
     /// and a process exit that follows it closes the socket first. The
     /// caller's deadline bounds the wait: `PeerHandle::shutdown_timeout`
-    /// aborts the session task when it expires.
+    /// aborts the session task when it expires, and dropping the
+    /// [`super::writer::WriterJoin`] aborts the writer with it, so a backlog
+    /// flushed ahead of the Cease to a peer that has stopped reading cannot
+    /// outlive that deadline.
     pub(super) async fn join_closed_writer(&mut self) {
         debug_assert!(
             self.writer_priority_tx.is_none() && self.writer_bulk_tx.is_none(),
@@ -1468,7 +1471,7 @@ pub(super) async fn read_tcp(
 /// `writer_join = None` before the next select iteration — polling a
 /// completed `JoinHandle` a second time panics per tokio semantics.
 pub(super) async fn await_writer_join(
-    handle: &mut Option<JoinHandle<Result<(), super::writer::WriterExit>>>,
+    handle: &mut Option<super::writer::WriterJoin>,
 ) -> Result<Result<(), super::writer::WriterExit>, JoinError> {
     let join = handle
         .as_mut()
