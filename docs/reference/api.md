@@ -3263,6 +3263,28 @@ reason, the same vocabulary as `ExplainAdvertisedRoute`, and `detail` is
 human-readable text that may change. A key with no local route returns
 `NOT_FOUND`.
 
+`deny_validation` tells a validation deny, such as route-origin validation
+dropping an RPKI-Invalid blackhole, from any other policy deny without parsing
+`detail`. It is empty unless `explain_code` is `policy_denied`. Then it holds
+one code for each validation state the deciding export-policy statement's match
+tests, carrying the route's state at evaluation: `rpki_valid`, `rpki_invalid`
+or `rpki_not_found`, then `aspa_valid`, `aspa_invalid` or `aspa_unknown`.
+
+| Deciding statement | `deny_validation` |
+|---|---|
+| TOML statement with `match_rpki_validation = "invalid"`, alone or with other conditions such as a prefix | `["rpki_invalid"]` |
+| rpol term whose guard compares `route.rpki` and whose `reject` decides, such as `if route.rpki == invalid { reject }` | `["rpki_invalid"]` for an Invalid route |
+| Statement testing both RPKI and ASPA | `["rpki_invalid", "aspa_invalid"]`, with the route's states |
+| Statement testing no validation state, such as a prefix-list deny | empty |
+| Later statement's deny after a statement that tested RPKI permitted | empty |
+| RFC 8212 default deny, per-client-best deny of every candidate | empty; `explain_code` is not `policy_denied` |
+
+The code records what the deciding statement tests, not that validation alone
+decided. Statement conditions AND together, so other conditions also matched.
+Inside an rpol guard under `||` or `!`, the validation comparison need not be
+the operand that held. An rpol term decided by a loop, a fail-closed evaluation
+error or a fail-closed bound reports no codes. New codes may be added.
+
 `page_size` 0 returns up to 100 peers, and larger values are capped at 1000.
 A non-empty `next_page_token` continues after the last peer returned. The
 call is a `sensitive_read`, served on read-only listeners, and each page costs
