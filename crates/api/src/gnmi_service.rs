@@ -1747,7 +1747,14 @@ fn parse_neighbors_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status
     // like every other neighbor selector.
     let address = match neighbor.key.get("neighbor-address") {
         Some(raw) if raw == "*" => None,
-        Some(raw) => crate::peer_selector::parse_neighbor("neighbor-address key", raw, "", None)?,
+        // An explicit key must name a neighbor: an empty one is malformed,
+        // not a wildcard.
+        Some(raw) => Some(crate::peer_selector::require_neighbor(
+            "neighbor-address key",
+            raw,
+            "",
+            None,
+        )?),
         None if neighbor.key.is_empty() => None,
         None => {
             return Err(Status::invalid_argument(
@@ -3326,6 +3333,9 @@ mod tests {
 
         let bare = service.get(get_request(path("fe80::1"))).await.unwrap_err();
         assert_eq!(bare.code(), tonic::Code::InvalidArgument, "{bare}");
+        // An explicit empty key is malformed, never every neighbor.
+        let empty = service.get(get_request(path(""))).await.unwrap_err();
+        assert_eq!(empty.code(), tonic::Code::InvalidArgument, "{empty}");
         let other = service
             .get(get_request(path("fe80::1%eth1")))
             .await
