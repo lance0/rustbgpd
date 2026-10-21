@@ -1440,10 +1440,16 @@ a session while the bond stays up. An accept-any dynamic neighbor is affected
 only once its OPEN shows an external AS.
 
 The check is against the state at the moment it runs, not against a queue of
-past events. A carrier bounce (down, then up), or an address removed and added
-back, that completes before the check leaves the session alone: its TCP
-connection survived, so there is nothing to tear down. In practice the check
-runs within milliseconds of the kernel notification.
+past events. This differs from FRR, which queues `BGP_Stop` from its
+interface-down callback, so every confirmed down resets the session.
+rustbgpd evaluates the current link and address state when the session
+checks. A down that has already recovered by then, with the TCP connection
+still up, does not force a reset: there is no current local failure requiring
+teardown. That does not prove forwarding is healthy, and BFD and the session
+hold timer still apply independently and catch failures this check does not.
+There is no fixed threshold for how short an outage is absorbed; it depends on
+scheduling, and the check normally runs within milliseconds of the kernel
+notification.
 
 The stop is local. No NOTIFICATION is sent, because the link it would travel on
 is gone, and anything still queued for the peer is discarded: the socket is
@@ -1452,8 +1458,8 @@ retained under Graceful Restart or LLGR, because their next hop sits behind
 the dead link. If the TCP connection already failed on its own (for example
 with "network unreachable" after its address was removed) and its routes are
 being retained, they are purged once that connection's interface is down, even
-while a replacement connection is still being set up; a replacement over a
-healthy interface is left alone. The neighbor stays enabled and reconnects on
+while a replacement connection is still being set up; a replacement whose
+interface shows no current local failure is left alone. The neighbor stays enabled and reconnects on
 its normal retry timer when the link returns. The teardown cause names the
 interface and the reason, for example
 `fast external failover: interface eth1 (ifindex 4) carrier lost`. It appears

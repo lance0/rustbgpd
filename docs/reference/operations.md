@@ -1355,7 +1355,13 @@ Look for:
 - `bgp_session_down_total{reason="local_no_notification"}` increasing.
 
 The session's routes are withdrawn, not held under Graceful Restart, and the
-session reconnects on its normal retry timer once the link is back. Nothing is
+session reconnects on its normal retry timer once the link is back. Unlike FRR,
+which resets the session on every confirmed interface-down, rustbgpd checks the
+current state: a down that recovered before the session checked, with the TCP
+connection still up, finds no current local failure requiring teardown and
+leaves the session up. How short an outage this absorbs depends on scheduling
+and is not a fixed threshold. A surviving session does not prove forwarding is
+healthy; BFD and the hold timer still apply. Nothing is
 stopped while the link state is unknown: when
 `bgp_netlink_subscription_overruns_total{actor="fast_external_failover"}`
 increases, sessions are checked again only after a fresh interface dump
