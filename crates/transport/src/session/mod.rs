@@ -301,7 +301,9 @@ pub(crate) struct PeerSession {
     /// from [`rustbgpd_telemetry::peer_label`], never the transport
     /// endpoint's `addr:port`. It must equal what the RIB manager and
     /// the BFD runtime emit for the same peer, or `by (peer)` queries
-    /// split. Diagnostics only; nothing dials or compares against it.
+    /// split. `BgpMetrics` maps a link-local neighbor's bare address to
+    /// its registered scoped value. Diagnostics only; nothing dials or
+    /// compares against it.
     peer_label: String,
     peer_ip: IpAddr,
     /// Cached scope for IPv6 link-local next-hop recursion on static

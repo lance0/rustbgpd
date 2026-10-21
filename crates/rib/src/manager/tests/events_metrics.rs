@@ -1754,10 +1754,42 @@ async fn peer_deleted_reaps_metric_series_peer_down_does_not() {
 
     // A deletion: the PeerDeleted marker (queued by the peer manager
     // behind the session's PeerDown) removes the label sets entirely.
-    manager.handle_update(RibUpdate::PeerDeleted { peer });
+    manager.handle_update(RibUpdate::PeerDeleted { peer, label: None });
     assert_eq!(peer_series_count(&metrics, "10.0.0.2"), 0);
 
     // Re-deleting an already-reaped peer is a no-op (no panic).
-    manager.handle_update(RibUpdate::PeerDeleted { peer });
+    manager.handle_update(RibUpdate::PeerDeleted { peer, label: None });
     assert_eq!(peer_series_count(&metrics, "10.0.0.2"), 0);
+}
+
+/// The final reap targets the deleted neighbor's exact scoped value, so a
+/// replacement already registered for the same link-local address on
+/// another interface keeps its series.
+#[tokio::test]
+async fn peer_deleted_reaps_the_carried_label_not_the_current_registration() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer: IpAddr = "fe80::1".parse().unwrap();
+    metrics.register_scoped_peer(peer, "fe80::1%eth0");
+    metrics.set_rib_prefixes("fe80::1", "ipv4_unicast", 3);
+    metrics.register_scoped_peer(peer, "fe80::1%eth1");
+    metrics.set_rib_prefixes("fe80::1", "ipv4_unicast", 7);
+
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer,
+        label: Some("fe80::1%eth0".into()),
+    });
+
+    let peers: Vec<String> = metrics
+        .registry()
+        .gather()
+        .iter()
+        .filter(|family| family.name() == "bgp_rib_prefixes")
+        .flat_map(|family| family.get_metric().iter())
+        .flat_map(|metric| metric.get_label().iter())
+        .filter(|label| label.name() == "peer")
+        .map(|label| label.value().to_owned())
+        .collect();
+    assert_eq!(peers, ["fe80::1%eth1"]);
 }

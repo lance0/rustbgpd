@@ -57,7 +57,7 @@ async fn send_max_prefix_start_before(
 impl PeerManager {
     pub(super) fn publish_peer_admin_enabled_metric(&self, peer: &PeerKey, enabled: bool) {
         self.metrics.set_peer_admin_enabled(
-            &rustbgpd_telemetry::peer_label(peer.address),
+            &peer.label(),
             peer.interface.as_deref().unwrap_or(""),
             enabled,
         );
@@ -70,7 +70,7 @@ impl PeerManager {
     fn publish_max_prefix_latched_metric(&self, peer: &PeerKey, latched: bool) {
         if self.peers.contains_key(peer) {
             self.metrics.set_max_prefix_latched(
-                &rustbgpd_telemetry::peer_label(peer.address),
+                &peer.label(),
                 peer.interface.as_deref().unwrap_or(""),
                 latched,
             );
@@ -85,7 +85,7 @@ impl PeerManager {
             return;
         };
         self.metrics.set_peer_info(
-            &rustbgpd_telemetry::peer_label(peer.address),
+            &peer.label(),
             peer.interface.as_deref().unwrap_or(""),
             managed.remote_asn,
             &managed.description,
@@ -94,7 +94,7 @@ impl PeerManager {
     }
 
     pub(super) fn seed_peer_truth_metrics(&self, peer: &PeerKey, enabled: bool) {
-        let peer_label = rustbgpd_telemetry::peer_label(peer.address);
+        let peer_label = peer.label();
         let interface = peer.interface.as_deref().unwrap_or("");
         self.metrics
             .set_peer_admin_enabled(&peer_label, interface, enabled);
@@ -125,10 +125,8 @@ impl PeerManager {
             let _ = self
                 .shutdown_handle_bounded(peer.address, context, handle)
                 .await;
-            self.metrics.reap_peer_identity_series(
-                &rustbgpd_telemetry::peer_label(peer.address),
-                peer.interface.as_deref().unwrap_or(""),
-            );
+            self.metrics
+                .reap_peer_identity_series(&peer.label(), peer.interface.as_deref().unwrap_or(""));
             return Err(error);
         }
         Ok(handle)
@@ -778,6 +776,11 @@ impl PeerManager {
         let hold_time = Some(transport.peer.hold_time);
         let max_prefixes = transport.max_prefixes;
 
+        // Before the session's first emission: emitters that know only the
+        // bare address (RIB, BFD, transport) label this neighbor's series
+        // with its scoped value.
+        self.metrics
+            .register_scoped_peer(peer_key.address, &peer_key.label());
         let session_id = self.allocate_session_id();
         #[cfg(test)]
         if let Some(observations) = &mut self.dataset_generations_at_peer_construction {
@@ -2016,13 +2019,6 @@ impl PeerManager {
         Ok(removed_config)
     }
 
-    /// Remove a deleted peer's per-peer metric series.
-    ///
-    /// Every emission site — transport session, RIB manager, BFD
-    /// runtime — labels `peer` with the canonical bare address, so one
-    /// reap covers them all. Call only after the peer has been removed
-    /// from `self.peers` and its session task joined or was aborted and
-    /// awaited by bounded shutdown.
     /// The lifetime counter block for `peer`: its retained block, or a new
     /// one that [`Self::retain_neighbor_counters`] keeps once the neighbor
     /// is installed, so a refused accept leaves nothing behind.
@@ -2046,11 +2042,19 @@ impl PeerManager {
         }
     }
 
+    /// Remove a deleted peer's per-peer metric series.
+    ///
+    /// Every emission site — transport session, RIB manager, BFD
+    /// runtime — labels `peer` with the neighbor's one value (the bare
+    /// address, or `addr%if` for a link-local neighbor), so one reap
+    /// covers them all. Call only after the peer has been removed from
+    /// `self.peers` and its session task joined or was aborted and
+    /// awaited by bounded shutdown.
     pub(super) async fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
         // A deleted neighbor's counters end with it; a re-add starts at 0.
         self.neighbor_counters.remove(peer);
         let address = peer.address;
-        let peer_label = rustbgpd_telemetry::peer_label(address);
+        let peer_label = peer.label();
         self.publish_peer_lifecycle_event(
             peer,
             SessionLifecycleEventType::PeerRemoved,
@@ -2058,11 +2062,10 @@ impl PeerManager {
         );
         self.metrics
             .reap_peer_identity_series(&peer_label, peer.interface.as_deref().unwrap_or(""));
-        // The label can be shared with a surviving peer (the same
-        // link-local address on another interface) — leave it alone
-        // unless this peer was the last user of the address.
+        self.metrics.reap_peer_series(&peer_label);
+        // The RIB is keyed by bare address: a surviving peer on the same
+        // link-local address (another interface) still owns its state.
         if self.peer_keys_for_address(address).is_empty() {
-            self.metrics.reap_peer_series(&peer_label);
             // The RIB manager emits bare-address series from its own
             // task; this marker is queued behind the session's final
             // `PeerDown`, so the RIB manager reaps again *after* its
@@ -2071,7 +2074,10 @@ impl PeerManager {
             // Reads stay queued: the caller's removal is only partly applied.
             let _ = self
                 .send_rib_update(
-                    RibUpdate::PeerDeleted { peer: address },
+                    RibUpdate::PeerDeleted {
+                        peer: address,
+                        label: Some(peer_label.into()),
+                    },
                     OperatorReadAdmission::Fenced {
                         reason: "the peer removal is partly applied",
                     },

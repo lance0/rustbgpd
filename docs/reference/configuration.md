@@ -1470,8 +1470,10 @@ unique bare address plus `interface`; startup resolves that interface to the
 BFD transmit scope and rejects an unresolvable name before preparing sockets.
 Receive-side `IPV6_PKTINFO` must report the same interface for every link-local
 control packet, including zero-discriminator bootstrap packets. The public BFD
-status and metric key remains the bare peer address under the existing unique
-link-local-address rule.
+status key remains the bare peer address under the existing unique
+link-local-address rule. The BFD metrics' `peer` label is the scoped value
+(`fe80::1%eth0`), as for every other per-peer metric; see
+[the `peer` label](operations.md#the-peer-label).
 
 Neighbor and peer-group `bfd` attachments apply on **SIGHUP**, including BFD
 on a newly added neighbor or the first BFD session in the process. Removing a

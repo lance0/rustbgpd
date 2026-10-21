@@ -1787,7 +1787,10 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
         let recreated = peers[0];
         let lifecycle_task = tokio::spawn(async move {
             later_tx
-                .send(RibUpdate::PeerDeleted { peer: recreated })
+                .send(RibUpdate::PeerDeleted {
+                    peer: recreated,
+                    label: None,
+                })
                 .await
                 .unwrap();
             let (outbound_tx, _outbound_rx) = mpsc::channel(1);
@@ -1832,7 +1835,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
                     refresh_markers += 1;
                     reply.send(0).unwrap();
                 }
-                RibUpdate::PeerDeleted { peer } => {
+                RibUpdate::PeerDeleted { peer, .. } => {
                     // LOAD-BEARING: removing reverse-order pre-registration
                     // lets this later delete overtake an unregistered restore.
                     assert_eq!(peer, peers[0]);

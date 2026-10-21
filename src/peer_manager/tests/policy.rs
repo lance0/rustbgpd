@@ -2536,6 +2536,7 @@ async fn conditional_install_shares_one_deadline_across_send_and_reply() {
     rib_tx
         .send(RibUpdate::PeerDeleted {
             peer: Ipv4Addr::new(192, 0, 2, 1).into(),
+            label: None,
         })
         .await
         .unwrap();

@@ -72,9 +72,10 @@ Template variables:
   `bgp_peer_admin_enabled`, so configured peers appear even before their first
   FSM transition. Every exported metric family
   identifies a peer the same way, by its bare neighbor address
-  (`192.0.2.1`, `2001:db8::1`), so one selector drives every per-peer panel
+  (`192.0.2.1`, `2001:db8::1`) or, for an IPv6 link-local neighbor, its
+  scoped address (`fe80::1%eth0`), so one selector drives every per-peer panel
   and `by (peer)` joins across families match. Supports multiple values
-  and All. The selector value stays the bare address; the member's ASN,
+  and All. The selector value stays that address; the member's ASN,
   description, and peer group live on the
   `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` identity
   metric, and the **Peer identity** row joins it onto session truth with

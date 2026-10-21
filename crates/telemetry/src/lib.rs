@@ -8,9 +8,9 @@
 //! `"keepalive"`, etc. Reason labels covered by the
 //! [`reason_labels`] contract are typed instead, so the canonical
 //! vocabulary is enforced at compile time. The `peer` label has one
-//! canonical form — the bare neighbor address, built by
-//! [`peer_label`] — so `by (peer)` aggregations and cross-family joins
-//! behave.
+//! value per neighbor — the bare address built by [`peer_label`], or
+//! `addr%if` for an IPv6 link-local neighbor — so `by (peer)`
+//! aggregations and cross-family joins behave.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
