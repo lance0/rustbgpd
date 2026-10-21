@@ -1317,3 +1317,247 @@ fn page_selection_holds_at_most_page_size_plus_one_destinations() {
         }
     }
 }
+
+// --- FlowSpec (`QueryLocalFlowSpecExport`) --------------------------------
+
+/// A local rule as `AddFlowSpec` builds it, with `communities`.
+fn local_rule(communities: &[u32]) -> FlowSpecRoute {
+    let mut rule = crate::test_support::make_flowspec_route(Ipv4Addr::UNSPECIFIED);
+    rule.peer = LOCAL_PEER;
+    rule.origin_type = crate::route::RouteOrigin::Local;
+    rule.peer_router_id = Ipv4Addr::UNSPECIFIED;
+    rule.attributes = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+    ];
+    if !communities.is_empty() {
+        rule.attributes
+            .push(PathAttribute::Communities(communities.to_vec()));
+    }
+    rule
+}
+
+fn inject_rule(manager: &mut RibManager, rule: FlowSpecRoute) {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectFlowSpec { route: rule, reply });
+    rx.try_recv().unwrap().unwrap();
+}
+
+fn query_rule(
+    manager: &mut RibManager,
+    key: &crate::route::FlowSpecKey,
+    named: Option<Vec<ExportDestination>>,
+    resume: Resume,
+    page_size: usize,
+) -> Result<RouteExportPage, RouteExportPageError> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryLocalFlowSpecExport {
+        key: key.clone(),
+        managed: named,
+        resume,
+        page_size,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+/// The `FlowSpec` rule's destination prefix, for a prefix deny.
+fn rule_prefix() -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24))
+}
+
+/// One row per registered peer, each with the reason its own export gate
+/// gives: committed, family not negotiated, export policy, and a
+/// pre-policy community gate.
+#[test]
+fn flowspec_dispositions_name_each_peers_gate() {
+    let (mut manager, _tx) = manager();
+    let committed = v4(1);
+    let unicast_only = v4(2);
+    let denied = v4(3);
+    let _committed_rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(committed),
+        ipv4_flowspec_sendable(),
+        None,
+        0,
+        64,
+    );
+    let _unicast_rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(unicast_only),
+        ipv4_sendable(),
+        None,
+        0,
+        64,
+    );
+    let _denied_rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(denied),
+        ipv4_flowspec_sendable(),
+        Some(deny_prefixes_chain(&[rule_prefix()])),
+        0,
+        64,
+    );
+    let rule = local_rule(&[]);
+    let key = rule.selection_key();
+    inject_rule(&mut manager, rule);
+
+    let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
+    assert_eq!(peers_of(&page), vec![committed, unicast_only, denied]);
+    assert!(page.next.is_none());
+    let export = row(&page, PeerId::from_addr(committed));
+    assert_eq!(export.disposition, RouteExportDisposition::Committed);
+    assert_eq!(export.reason, "");
+    let export = row(&page, PeerId::from_addr(unicast_only));
+    assert_eq!(export.disposition, RouteExportDisposition::Withheld);
+    assert_eq!(export.reason, "family_not_negotiated");
+    assert_eq!(export.explain_code, "family_not_sendable");
+    let export = row(&page, PeerId::from_addr(denied));
+    assert_eq!(export.disposition, RouteExportDisposition::Withheld);
+    assert_eq!(export.reason, "export_policy");
+    assert_eq!(export.explain_code, "policy_denied");
+    assert_eq!(export.deny_validation, Vec::<String>::new());
+
+    // NO_ADVERTISE stops the rule before policy, for every peer.
+    inject_rule(
+        &mut manager,
+        local_rule(&[rustbgpd_wire::COMMUNITY_NO_ADVERTISE]),
+    );
+    let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
+    for peer in [committed, denied] {
+        let export = row(&page, PeerId::from_addr(peer));
+        assert_eq!(export.disposition, RouteExportDisposition::Withheld);
+        assert_eq!(export.reason, "export_rule");
+        assert_eq!(export.explain_code, "no_advertise_suppressed");
+    }
+}
+
+/// A received rule with the same key that out-selects the local one is
+/// never this rule's export, although the peer's Adj-RIB-Out holds the key.
+/// Red proof: dropping the source check reports it committed.
+#[test]
+fn received_flowspec_rule_out_selecting_the_local_one_is_not_selected() {
+    let (mut manager, _tx) = manager();
+    let target = v4(2);
+    let source = Ipv4Addr::new(10, 0, 0, 9);
+    let _target_rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(target),
+        ipv4_flowspec_sendable(),
+        None,
+        0,
+        64,
+    );
+    let _source_rx = peer_up(
+        &mut manager,
+        peer_v4(source),
+        ipv4_flowspec_sendable(),
+        None,
+        0,
+        64,
+    );
+    let rule = local_rule(&[]);
+    let key = rule.selection_key();
+    inject_rule(&mut manager, rule);
+    let mut received = crate::test_support::make_flowspec_route(source);
+    received.origin_type = crate::route::RouteOrigin::Ibgp;
+    received.attributes.push(PathAttribute::LocalPref(200));
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(source),
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![received],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        manager.loc_rib.get_flowspec(&key).unwrap().peer,
+        peer_v4(source)
+    );
+    assert!(
+        manager
+            .adj_ribs_out
+            .get(&PeerId::from_addr(target))
+            .and_then(|out| out.get_flowspec(&key))
+            .is_some()
+    );
+
+    let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
+    let export = row(&page, PeerId::from_addr(target));
+    assert_eq!(export.disposition, RouteExportDisposition::Withheld);
+    assert_eq!(export.reason, "not_selected");
+}
+
+/// A dirty outbound peer is pending, not committed or withheld; a key with
+/// no local rule is listed as not found, with no rows.
+#[test]
+fn flowspec_pending_resync_and_missing_rule() {
+    let (mut manager, _tx) = manager();
+    let peer = v4(1);
+    let _rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(peer),
+        ipv4_flowspec_sendable(),
+        None,
+        0,
+        64,
+    );
+    let rule = local_rule(&[]);
+    let key = rule.selection_key();
+
+    let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
+    assert_eq!(page.routes, not_found(0));
+
+    inject_rule(&mut manager, rule);
+    manager.dirty_peers.insert(PeerId::from_addr(peer));
+    let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
+    let export = row(&page, PeerId::from_addr(peer));
+    assert_eq!(export.disposition, RouteExportDisposition::Pending);
+    assert_eq!(export.reason, "outbound_resync");
+}
+
+/// The `FlowSpec` walk pages, lists named managed peers without a session as
+/// not Established, and is fenced like the unicast walk: replacing the rule
+/// between pages invalidates the resumed walk.
+#[test]
+fn flowspec_walk_pages_and_aborts_on_a_replaced_rule() {
+    let (mut manager, _tx) = manager();
+    let _receivers: Vec<_> = [2, 3]
+        .into_iter()
+        .map(|octet| {
+            peer_up(
+                &mut manager,
+                PeerId::from_addr(v4(octet)),
+                ipv4_flowspec_sendable(),
+                None,
+                0,
+                64,
+            )
+        })
+        .collect();
+    let rule = local_rule(&[]);
+    let key = rule.selection_key();
+    inject_rule(&mut manager, rule);
+    let named = Some(vec![(v4(1), None), (v4(2), None)]);
+
+    let first = query_rule(&mut manager, &key, named.clone(), None, 2).unwrap();
+    assert_eq!(peers_of(&first), vec![v4(1), v4(2)]);
+    assert_eq!(
+        row(&first, PeerId::from_addr(v4(1))).disposition,
+        RouteExportDisposition::NotEstablished
+    );
+    let last = query_rule(&mut manager, &key, named.clone(), resume_of(&first), 2).unwrap();
+    assert_eq!(peers_of(&last), vec![v4(3)]);
+    assert!(last.next.is_none());
+
+    inject_rule(&mut manager, local_rule(&[65_000 << 16 | 1]));
+    assert_eq!(
+        query_rule(&mut manager, &key, named, resume_of(&first), 2),
+        Err(RouteExportPageError::Invalidated)
+    );
+}

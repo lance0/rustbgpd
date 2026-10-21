@@ -106,14 +106,46 @@ impl InjectionService {
         page_token: &str,
     ) -> Result<(RouteExportPage, String), Status> {
         let binding = export_walk_binding(&keys, include_configured);
+        let key_count = keys.len();
+        self.export_walk_page_for(
+            kind,
+            (binding, key_count),
+            include_configured,
+            page_size,
+            page_token,
+            |managed, resume, page_size, reply| RibUpdate::QueryLocalRouteExport {
+                keys,
+                managed,
+                resume,
+                page_size,
+                reply,
+            },
+        )
+        .await
+    }
+
+    /// [`Self::export_walk_page`] for any walk the RIB answers with a
+    /// [`RouteExportPage`]: `walk` is the token binding and key count, and
+    /// `query` builds the RIB request.
+    async fn export_walk_page_for(
+        &self,
+        kind: &str,
+        (binding, key_count): (u64, usize),
+        include_configured: bool,
+        page_size: u32,
+        page_token: &str,
+        query: impl FnOnce(
+            Option<Vec<ExportDestination>>,
+            Option<(RouteExportCursor, RouteExportVersion)>,
+            usize,
+            oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
+        ) -> RibUpdate,
+    ) -> Result<(RouteExportPage, String), Status> {
         let resume = if page_token.is_empty() {
             None
         } else {
             Some(decode_export_page_token(
-                page_token,
-                kind,
-                binding,
-                keys.len(),
+                page_token, kind, binding, key_count,
             )?)
         };
         let page_size = match page_size {
@@ -127,12 +159,8 @@ impl InjectionService {
         } else {
             None
         };
-        let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryLocalRouteExport {
-            keys,
-            managed,
-            resume,
-            page_size,
-            reply,
+        let page = rib_manager_read(&self.rib_tx, |reply| {
+            query(managed, resume, page_size, reply)
         })
         .await?
         .map_err(|RouteExportPageError::Invalidated| {
@@ -398,6 +426,8 @@ const EXPORT_PAGE_TOKEN_MAX_LEN: usize = 512;
 const SINGLE_EXPORT_WALK: &str = "pe2";
 /// Token kind of a `BatchListPathExportDispositions` walk.
 const BATCH_EXPORT_WALK: &str = "pb1";
+/// Token kind of a `ListFlowSpecExportDispositions` walk.
+const FLOWSPEC_EXPORT_WALK: &str = "pf1";
 
 /// What a walk's token is bound to besides its kind: the key list, in
 /// order, and whether managed peers are listed.
@@ -1286,6 +1316,60 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 next_page_token,
             },
         ))
+    }
+
+    async fn list_flow_spec_export_dispositions(
+        &self,
+        request: Request<proto::ListFlowSpecExportDispositionsRequest>,
+    ) -> Result<Response<proto::ListPathExportDispositionsResponse>, Status> {
+        let req = request.into_inner();
+        let afi = parse_flowspec_afi(req.afi_safi)?;
+        let rule = FlowSpecRule {
+            components: parse_flowspec_components(&req.components, afi)?,
+        };
+        rule.validate()
+            .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
+        validate_flowspec_rule_encoded_len(&rule, afi)?;
+        let key = rustbgpd_rib::FlowSpecKey { afi, rule };
+        let binding = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (&key, req.include_configured).hash(&mut hasher);
+            hasher.finish()
+        };
+        let rule_text = key.rule.to_string();
+        let (page, next_page_token) = self
+            .export_walk_page_for(
+                FLOWSPEC_EXPORT_WALK,
+                (binding, 1),
+                req.include_configured,
+                req.page_size,
+                &req.page_token,
+                |managed, resume, page_size, reply| RibUpdate::QueryLocalFlowSpecExport {
+                    key,
+                    managed,
+                    resume,
+                    page_size,
+                    reply,
+                },
+            )
+            .await?;
+        // As for ListPathExportDispositions: a resumed walk whose rule is
+        // gone was refused above.
+        if page.routes.iter().any(|route| !route.found) {
+            return Err(Status::not_found(format!(
+                "no local FlowSpec rule {rule_text}"
+            )));
+        }
+        Ok(Response::new(proto::ListPathExportDispositionsResponse {
+            peers: page
+                .routes
+                .into_iter()
+                .flat_map(|route| route.peers)
+                .map(export_disposition_to_proto)
+                .collect(),
+            next_page_token,
+        }))
     }
 
     async fn list_leased_keys(
@@ -2679,6 +2763,217 @@ mod tests {
             })
             .collect();
         publisher.publish(peers, Arc::new([]));
+    }
+
+    /// An exact export encoder that accepts every announcement.
+    struct AcceptAllEncoder;
+
+    impl rustbgpd_rib::update::ExactExportEncoder for AcceptAllEncoder {
+        fn owner_id(&self) -> u64 {
+            1
+        }
+        fn snapshot(&self) -> Arc<dyn rustbgpd_rib::update::ExactExportSnapshot> {
+            Arc::new(Self)
+        }
+    }
+
+    impl rustbgpd_rib::update::ExactExportSnapshot for AcceptAllEncoder {
+        fn owner_id(&self) -> u64 {
+            1
+        }
+        fn generation(&self) -> u64 {
+            1
+        }
+        fn probe_announcement(
+            &self,
+            _candidate: rustbgpd_rib::update::ExactExportCandidate<'_>,
+        ) -> Result<rustbgpd_rib::update::ExactExportResult, rustbgpd_rib::update::ExactExportError>
+        {
+            Ok(rustbgpd_rib::update::ExactExportResult {
+                encoded_len: 0,
+                max_len: usize::MAX,
+                generation: 1,
+            })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// The `FlowSpec` walk against a real RIB and a published roster: a key
+    /// is validated before the RIB, a missing rule is `NOT_FOUND`, each peer
+    /// gets its own disposition across pages, a unicast walk's token is
+    /// refused, and deleting the rule between pages is `ABORTED`.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one RIB and roster drive validation, the walk and the mid-walk delete"
+    )]
+    async fn flowspec_export_dispositions_against_a_real_rib() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let mut roster = crate::import_roster::ImportRosterPublisher::new();
+        publish_managed(&mut roster, 3);
+        let svc = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::new(InjectionLeases::new()),
+        )
+        .with_peer_roster(roster.reader());
+        let mut outbound = Vec::new();
+        for (octet, safi) in [
+            (1, rustbgpd_wire::Safi::FlowSpec),
+            (2, rustbgpd_wire::Safi::Unicast),
+        ] {
+            let (outbound_tx, outbound_rx) = mpsc::channel(64);
+            outbound.push(outbound_rx);
+            // A session stages its encoder before PeerUp; without one,
+            // announcements fail closed and the peer stays resynchronizing.
+            rib_tx
+                .send(RibUpdate::SetPeerExportEncoder {
+                    peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))),
+                    session_id: 0,
+                    encoder: Arc::new(AcceptAllEncoder),
+                })
+                .await
+                .unwrap();
+            rib_tx
+                .send(RibUpdate::PeerUp {
+                    peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))),
+                    session_id: 0,
+                    peer_asn: 65_010,
+                    peer_router_id: Ipv4Addr::UNSPECIFIED,
+                    outbound_tx,
+                    export_policy: None,
+                    sendable_families: vec![(Afi::Ipv4, safi)],
+                    is_ebgp: true,
+                    route_reflector_client: false,
+                    orr_vantage: None,
+                    per_client_best: false,
+                    interpret_rfc1997: true,
+                    add_path_send_families: vec![],
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: vec![],
+                    negotiated_llgr_families: vec![],
+                })
+                .await
+                .unwrap();
+        }
+        let components = vec![proto::FlowSpecComponent {
+            r#type: 1,
+            prefix: "192.0.2.0/24".into(),
+            ..Default::default()
+        }];
+        let list = |afi_safi: proto::AddressFamily,
+                    components: Vec<proto::FlowSpecComponent>,
+                    page_size,
+                    token: &str| {
+            svc.list_flow_spec_export_dispositions(Request::new(
+                proto::ListFlowSpecExportDispositionsRequest {
+                    afi_safi: afi_safi as i32,
+                    components,
+                    page_size,
+                    page_token: token.into(),
+                    include_configured: true,
+                },
+            ))
+        };
+        let ipv4 = proto::AddressFamily::Ipv4Flowspec;
+
+        // Malformed keys never reach the RIB.
+        for (afi_safi, components) in [
+            (proto::AddressFamily::Ipv4Unicast, components.clone()),
+            (ipv4, vec![]),
+        ] {
+            let err = list(afi_safi, components, 0, "").await.unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        }
+        let missing = list(ipv4, components.clone(), 0, "").await.unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+
+        svc.add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+            afi_safi: ipv4 as i32,
+            components: components.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        let first = list(ipv4, components.clone(), 2, "")
+            .await
+            .unwrap()
+            .into_inner();
+        let second = list(ipv4, components.clone(), 2, &first.next_page_token)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(second.next_page_token, "");
+        let rows: Vec<_> = first
+            .peers
+            .iter()
+            .chain(&second.peers)
+            .map(|row| {
+                (
+                    row.peer_address.as_str(),
+                    row.disposition,
+                    row.reason.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "10.0.0.1",
+                    proto::PathExportDisposition::Committed as i32,
+                    ""
+                ),
+                (
+                    "10.0.0.2",
+                    proto::PathExportDisposition::Withheld as i32,
+                    "family_not_negotiated"
+                ),
+                (
+                    "10.0.0.3",
+                    proto::PathExportDisposition::NotEstablished as i32,
+                    "not_established"
+                ),
+            ]
+        );
+
+        // A unicast walk's token does not resume a FlowSpec walk.
+        let unicast_token = encode_export_page_token(
+            SINGLE_EXPORT_WALK,
+            0,
+            &RouteExportCursor::default(),
+            RouteExportVersion::default(),
+        );
+        let foreign = list(ipv4, components.clone(), 2, &unicast_token)
+            .await
+            .unwrap_err();
+        assert_eq!(foreign.code(), tonic::Code::InvalidArgument);
+
+        svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+            afi_safi: ipv4 as i32,
+            components: components.clone(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        let deleted = list(ipv4, components, 2, &first.next_page_token)
+            .await
+            .unwrap_err();
+        assert_eq!(deleted.code(), tonic::Code::Aborted);
+
+        drop(svc);
+        drop(rib_tx);
+        manager_task.await.unwrap();
     }
 
     /// The batch walk and `include_configured` against a real RIB and a

@@ -296,7 +296,6 @@ impl RibManager {
     /// for initial table dump and ROUTE-REFRESH responses.
     #[expect(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         reason = "FlowSpec staging keeps the family-local export ladder together"
     )]
     pub(in crate::manager) fn stage_flowspec_rules_with_checkpoint(
@@ -324,162 +323,195 @@ impl RibManager {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         for key in keys {
             checkpoint();
-            if let Some(best) = loc_rib.get_flowspec(key) {
-                let fs_family = (best.afi, Safi::FlowSpec);
-                if !sendable.is_some_and(|f| f.contains(&fs_family)) {
-                    if rib_out.get_flowspec(key).is_some() {
-                        fs_withdraw.push(key.clone());
-                    }
-                    continue;
-                }
-
-                // RFC 1997: NO_ADVERTISE is a pre-policy export restriction.
-                // A permit policy cannot remove it to make the rule eligible.
-                if super::no_advertise_export_suppressed(best.communities()) {
-                    if rib_out.get_flowspec(key).is_some() {
-                        fs_withdraw.push(key.clone());
-                    }
-                    continue;
-                }
-
-                // RFC 1997: source-route NO_EXPORT / NO_EXPORT_SUBCONFED is
-                // an eBGP export restriction when this neighbor honors the
-                // well-known communities. Evaluate before policy so a
-                // removal cannot bypass it; policy-added communities remain
-                // deliverable.
-                if super::no_export_export_suppressed(
-                    best.communities(),
-                    target_is_ebgp,
-                    interpret_rfc1997,
-                ) {
-                    if rib_out.get_flowspec(key).is_some() {
-                        fs_withdraw.push(key.clone());
-                    }
-                    continue;
-                }
-
-                // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
-                // suppressed. See `llgr_stale_export_suppressed`.
-                if super::llgr_stale_export_suppressed(
-                    best.is_llgr_stale,
-                    best.communities(),
-                    fs_family,
-                    target_is_ebgp,
-                    llgr,
-                ) {
-                    if rib_out.get_flowspec(key).is_some() {
-                        fs_withdraw.push(key.clone());
-                    }
-                    continue;
-                }
-
-                // Reuse the existing iBGP split-horizon / RR check. Only
-                // origin_type/peer/peer_router_id are relevant here.
-                if should_suppress_ibgp_inner(
-                    &crate::route::Route {
-                        prefix: Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                            Ipv4Addr::UNSPECIFIED,
-                            0,
-                        )),
-                        next_hop: best.peer.addr(),
-                        link_local_next_hop: None,
-                        next_hop_scope: None,
-                        peer: best.peer,
-                        attributes: AttrSet::new(vec![]),
-                        received_at: crate::route::ReceivedAt::from_instant(best.received_at),
-                        origin_type: best.origin_type,
-                        peer_router_id: best.peer_router_id,
-                        is_stale: false,
-                        is_llgr_stale: false,
-                        path_id: 0,
-                        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                        received_as_path: None,
-                        aspa_context: crate::route::AspaContextId::DEFAULT,
-                    },
-                    target_is_ebgp,
-                    target_is_rr_client,
-                    cluster_id,
-                    peer_is_rr_client,
-                ) {
-                    if rib_out.get_flowspec(key).is_some() {
-                        fs_withdraw.push(key.clone());
-                    }
-                    continue;
-                }
-
-                // A rule without a destination-prefix component stays
-                // `None` — fabricating `0.0.0.0/0` would spuriously match
-                // prefix-based policy terms (same class as the BGP-LS fix).
-                let dest_prefix = best.rule.destination_prefix();
-                let aspath_str = if needs_as_path_string {
-                    best.as_path()
-                        .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
-                } else {
-                    String::new()
-                };
-                let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
-                let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
-                let ctx = RouteContext {
-                    prefix: dest_prefix,
-                    next_hop: None,
-                    extended_communities: best.extended_communities(),
-                    communities: best.communities(),
-                    large_communities: best.large_communities(),
-                    as_path_str: &aspath_str,
-                    as_path: best.as_path(),
-                    as_path_len: aspath_len,
-                    origin_asn,
-                    validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                    aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                    peer_address: Some(target_peer.addr()),
-                    peer_asn: target_peer_asn,
-                    peer_group: target_peer_group,
-                    route_type: Some(route_type(best.origin_type)),
-                    family: Some(flowspec_route_family(best.afi)),
-                    evpn_route_type: None,
-                    local_pref: best.local_pref_attr(),
-                    med: best.med_attr(),
-                };
-                checkpoint();
-                let (result, evaluation) =
-                    rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
-                checkpoint();
-                record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
-                if result.action == rustbgpd_policy::PolicyAction::Permit {
-                    let mut modified = best.clone();
-                    if !result.modifications.is_empty() {
-                        let mut modifications = result.modifications.clone();
-                        // RFC 8955/8956 FlowSpec MP_REACH carries NH-Len 0.
-                        // The shared helper's IPv4 next-hop support would
-                        // otherwise insert a legacy NEXT_HOP path attribute.
-                        modifications.set_next_hop = None;
-                        if !modifications.is_empty() {
-                            checkpoint();
-                            let next_hop = rustbgpd_policy::apply_modifications(
-                                &mut modified.attributes,
-                                &modifications,
-                            );
-                            checkpoint();
-                            debug_assert!(next_hop.is_none());
-                        }
-                    }
-                    if super::no_advertise_export_suppressed(modified.communities()) {
-                        if rib_out.get_flowspec(key).is_some() {
-                            fs_withdraw.push(key.clone());
-                        }
-                        continue;
-                    }
-                    checkpoint();
-                    fs_announce.push(modified);
-                    checkpoint();
-                } else if rib_out.get_flowspec(key).is_some() {
+            let Some(best) = loc_rib.get_flowspec(key) else {
+                if rib_out.get_flowspec(key).is_some() {
                     fs_withdraw.push(key.clone());
                 }
+                continue;
+            };
+            if Self::flowspec_pre_policy_stop(
+                best,
+                peer_is_rr_client,
+                target_is_ebgp,
+                interpret_rfc1997,
+                target_is_rr_client,
+                cluster_id,
+                sendable,
+                llgr,
+            )
+            .is_some()
+            {
+                if rib_out.get_flowspec(key).is_some() {
+                    fs_withdraw.push(key.clone());
+                }
+                continue;
+            }
+            let aspath_str = flowspec_as_path_string(best, needs_as_path_string);
+            let ctx = flowspec_export_context(
+                best,
+                &aspath_str,
+                target_peer,
+                target_peer_asn,
+                target_peer_group,
+            );
+            checkpoint();
+            let (result, evaluation) =
+                rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+            checkpoint();
+            record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
+            if result.action == rustbgpd_policy::PolicyAction::Permit {
+                let modified = flowspec_export_modified(best, &result, checkpoint);
+                if super::no_advertise_export_suppressed(modified.communities()) {
+                    if rib_out.get_flowspec(key).is_some() {
+                        fs_withdraw.push(key.clone());
+                    }
+                    continue;
+                }
+                checkpoint();
+                fs_announce.push(modified);
+                checkpoint();
             } else if rib_out.get_flowspec(key).is_some() {
                 fs_withdraw.push(key.clone());
             }
         }
+    }
+
+    /// The live export ladder for the Loc-RIB rule `best` toward the
+    /// registered `peer`, without counting policy metrics: the rule as
+    /// export would announce it, or the gate that stops it.
+    pub(in crate::manager) fn explain_flowspec_export(
+        &self,
+        peer: PeerId,
+        best: &crate::route::FlowSpecRoute,
+    ) -> Result<crate::route::FlowSpecRoute, FlowSpecExportStop> {
+        let stop = |code, detail: String| FlowSpecExportStop {
+            code,
+            detail,
+            deny_validation: Vec::new(),
+        };
+        if let Some(code) = Self::flowspec_pre_policy_stop(
+            best,
+            &self.peer_is_rr_client,
+            self.peer_is_ebgp.get(&peer).copied().unwrap_or(true),
+            self.peer_interpret_rfc1997.contains(&peer),
+            self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
+            self.cluster_id,
+            self.peer_sendable_families.get(&peer),
+            self.peer_advertised_llgr_families.get(&peer),
+        ) {
+            return Err(stop(code, format!("export gate {code} stops this rule")));
+        }
+        let export_pol = self.export_policy_for(peer);
+        let aspath_str = flowspec_as_path_string(
+            best,
+            export_pol.is_some_and(PolicyChain::requires_as_path_string),
+        );
+        let ctx = flowspec_export_context(
+            best,
+            &aspath_str,
+            peer,
+            self.peer_asn.get(&peer).copied(),
+            self.peer_group.get(&peer).map(String::as_str),
+        );
+        let (result, evaluation, policy_label, deny_validation) =
+            super::explain_export_evaluation(export_pol, &ctx);
+        if result.action != rustbgpd_policy::PolicyAction::Permit {
+            let (code, detail) = super::unicast::export_deny_attribution(
+                evaluation.matched_policy.as_deref(),
+                &policy_label,
+            );
+            return Err(FlowSpecExportStop {
+                deny_validation: if code == "policy_denied" {
+                    deny_validation
+                } else {
+                    Vec::new()
+                },
+                ..stop(code, detail)
+            });
+        }
+        let modified = flowspec_export_modified(best, &result, &mut || {});
+        if super::no_advertise_export_suppressed(modified.communities()) {
+            return Err(stop(
+                "no_advertise_policy_suppressed",
+                "export policy added NO_ADVERTISE".to_string(),
+            ));
+        }
+        Ok(modified)
+    }
+
+    /// The pre-policy export gate that stops the Loc-RIB rule `best` toward
+    /// a peer, as its `ExplainAdvertisedRoute` stop code; `None` when the
+    /// rule reaches export policy. Live staging and the export-disposition
+    /// query both read this ladder.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the FlowSpec export ladder reads the target peer's session facts directly"
+    )]
+    pub(in crate::manager) fn flowspec_pre_policy_stop(
+        best: &crate::route::FlowSpecRoute,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
+        target_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+    ) -> Option<&'static str> {
+        let fs_family = (best.afi, Safi::FlowSpec);
+        if !sendable.is_some_and(|f| f.contains(&fs_family)) {
+            return Some("family_not_sendable");
+        }
+        // RFC 1997: NO_ADVERTISE is a pre-policy export restriction.
+        // A permit policy cannot remove it to make the rule eligible.
+        if super::no_advertise_export_suppressed(best.communities()) {
+            return Some("no_advertise_suppressed");
+        }
+        // RFC 1997: source-route NO_EXPORT / NO_EXPORT_SUBCONFED is an eBGP
+        // export restriction when this neighbor honors the well-known
+        // communities. Evaluate before policy so a removal cannot bypass
+        // it; policy-added communities remain deliverable.
+        if super::no_export_export_suppressed(best.communities(), target_is_ebgp, interpret_rfc1997)
+        {
+            return Some("no_export_suppressed");
+        }
+        // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
+        // suppressed. See `llgr_stale_export_suppressed`.
+        if super::llgr_stale_export_suppressed(
+            best.is_llgr_stale,
+            best.communities(),
+            fs_family,
+            target_is_ebgp,
+            llgr,
+        ) {
+            return Some("llgr_stale_suppressed");
+        }
+        // Reuse the existing iBGP split-horizon / RR check. Only
+        // origin_type/peer/peer_router_id are relevant here.
+        should_suppress_ibgp_inner(
+            &crate::route::Route {
+                prefix: Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+                next_hop: best.peer.addr(),
+                link_local_next_hop: None,
+                next_hop_scope: None,
+                peer: best.peer,
+                attributes: AttrSet::new(vec![]),
+                received_at: crate::route::ReceivedAt::from_instant(best.received_at),
+                origin_type: best.origin_type,
+                peer_router_id: best.peer_router_id,
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                received_as_path: None,
+                aspa_context: crate::route::AspaContextId::DEFAULT,
+            },
+            target_is_ebgp,
+            target_is_rr_client,
+            cluster_id,
+            peer_is_rr_client,
+        )
+        .then_some("ibgp_split_horizon")
     }
 
     /// Recompute `FlowSpec` Loc-RIB best routes for affected rules and
@@ -644,4 +676,87 @@ impl RibManager {
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
         super::super::retire_hash_set(&mut affected, &mut checkpoint);
     }
+}
+
+/// `best`'s `AS_PATH` as a policy regex subject, or empty when the chain
+/// never reads one.
+pub(in crate::manager) fn flowspec_as_path_string(
+    best: &crate::route::FlowSpecRoute,
+    needed: bool,
+) -> String {
+    if needed {
+        best.as_path()
+            .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string)
+    } else {
+        String::new()
+    }
+}
+
+/// The export-policy context of the Loc-RIB rule `best` toward
+/// `target_peer`. A rule without a destination-prefix component has no
+/// prefix: fabricating `0.0.0.0/0` would spuriously match prefix-based
+/// policy terms (same class as the BGP-LS fix).
+pub(in crate::manager) fn flowspec_export_context<'a>(
+    best: &'a crate::route::FlowSpecRoute,
+    as_path_str: &'a str,
+    target_peer: PeerId,
+    target_peer_asn: Option<u32>,
+    target_peer_group: Option<&'a str>,
+) -> RouteContext<'a> {
+    RouteContext {
+        prefix: best.rule.destination_prefix(),
+        next_hop: None,
+        extended_communities: best.extended_communities(),
+        communities: best.communities(),
+        large_communities: best.large_communities(),
+        as_path_str,
+        as_path: best.as_path(),
+        as_path_len: best.as_path().map_or(0, rustbgpd_wire::AsPath::len),
+        origin_asn: best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn),
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: Some(target_peer.addr()),
+        peer_asn: target_peer_asn,
+        peer_group: target_peer_group,
+        route_type: Some(route_type(best.origin_type)),
+        family: Some(flowspec_route_family(best.afi)),
+        evpn_route_type: None,
+        local_pref: best.local_pref_attr(),
+        med: best.med_attr(),
+    }
+}
+
+/// `best` as export policy's permit `result` modifies it for one peer.
+pub(in crate::manager) fn flowspec_export_modified(
+    best: &crate::route::FlowSpecRoute,
+    result: &rustbgpd_policy::PolicyResult,
+    checkpoint: &mut impl FnMut(),
+) -> crate::route::FlowSpecRoute {
+    let mut modified = best.clone();
+    if !result.modifications.is_empty() {
+        let mut modifications = result.modifications.clone();
+        // RFC 8955/8956 FlowSpec MP_REACH carries NH-Len 0. The shared
+        // helper's IPv4 next-hop support would otherwise insert a legacy
+        // NEXT_HOP path attribute.
+        modifications.set_next_hop = None;
+        if !modifications.is_empty() {
+            checkpoint();
+            let next_hop =
+                rustbgpd_policy::apply_modifications(&mut modified.attributes, &modifications);
+            checkpoint();
+            debug_assert!(next_hop.is_none());
+        }
+    }
+    modified
+}
+
+/// The export gate that stops a `FlowSpec` rule toward one peer.
+#[derive(Debug)]
+pub(in crate::manager) struct FlowSpecExportStop {
+    /// Stop code in the `ExplainAdvertisedRoute` gate vocabulary.
+    pub(in crate::manager) code: &'static str,
+    /// Human-readable detail.
+    pub(in crate::manager) detail: String,
+    /// The deciding statement's validation codes for a `policy_denied` stop.
+    pub(in crate::manager) deny_validation: Vec<String>,
 }

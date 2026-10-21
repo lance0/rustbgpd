@@ -24,7 +24,7 @@ use crate::update::InjectOutcome;
 /// at the ladder is not sent looking for a policy they never wrote. Config
 /// validation refuses the reserved names to operator policies, so the deciding
 /// member's name is proof rather than a heuristic.
-fn export_deny_attribution(
+pub(super) fn export_deny_attribution(
     matched_policy: Option<&str>,
     policy_label: &str,
 ) -> (&'static str, String) {
