@@ -3374,6 +3374,10 @@ when any of these changed since the walk's first page:
   without resetting the session, or the contents of a dataset that policy
   reads.
 
+Any page, including the first, also returns `ABORTED` when a dataset that
+policy reads is refreshed while the page's rows are being evaluated, so no
+page mixes dataset contents.
+
 On `ABORTED`, discard the rows already collected and restart the walk with an
 empty `page_token`. A restarted walk for a removed route returns `NOT_FOUND`,
 so `NOT_FOUND` on a first page always means no local route has the key.

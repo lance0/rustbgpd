@@ -479,6 +479,14 @@ where
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook run once between a disposition page's version check and its
+    /// row evaluation, to land a dataset refresh in that window.
+    pub(in crate::manager) static BEFORE_EXPORT_ROWS: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
 impl RibManager {
     /// Visit cancellation at bounded intervals even when every row is filtered
     /// out. Only matching committed rows are cloned; no export re-evaluation.
@@ -1926,9 +1934,11 @@ impl RibManager {
     /// its route content, the outbound peer roster and the peers' export
     /// policy match its first page, so a route removed mid-walk is not
     /// reported as never having existed and a peer that joins or leaves is
-    /// neither skipped nor counted twice. Removing the route and restoring
-    /// identical content between pages leaves the walk valid: every
-    /// disposition is a function of that content.
+    /// neither skipped nor counted twice. Any page, including the first, is
+    /// refused when the policy version moves while its rows are evaluated.
+    /// Removing the route and restoring identical content between pages
+    /// leaves the walk valid: every disposition is a function of that
+    /// content.
     fn local_route_export_page(
         &mut self,
         prefix: Prefix,
@@ -1967,10 +1977,22 @@ impl RibManager {
         );
         let more = peers.len() > n;
         peers.truncate(n);
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_EXPORT_ROWS.take() {
+            hook();
+        }
         let peers = peers
             .into_iter()
             .map(|peer| self.local_route_export(peer, &route))
             .collect();
+        // A dataset refresh is not a RIB message: it can land while the rows
+        // above evaluate, each pinning datasets on its own. Recheck so no page,
+        // first or last, mixes generations or carries a version its rows
+        // were not read under. Route and roster are actor-owned and cannot
+        // move inside this call.
+        if self.export_policy_version() != version.policy {
+            return Err(RouteExportPageError::Invalidated);
+        }
         Ok(RouteExportPage {
             peers,
             more,

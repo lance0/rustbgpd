@@ -695,26 +695,31 @@ fn export_policy_replaced_mid_walk_invalidates_the_resumed_walk() {
     );
 }
 
-/// A dataset swap is visible to the next explain before any RIB message
-/// arrives, so a swap of a dataset a listed peer's export chain reads
-/// invalidates the walk with no RIB update in between. Red proof: leaving
-/// the dataset generations out of the policy version fails this test.
-#[test]
-fn export_dataset_swapped_mid_walk_invalidates_the_resumed_walk() {
-    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
-    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry, SetStore};
-
-    let data = |listed: bool| {
-        DatasetData::Prefix(PrefixSet::new(listed.then_some(PrefixSetEntry {
+fn allowed_dataset(listed: bool) -> rustbgpd_policy::datasets::DatasetData {
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
+    rustbgpd_policy::datasets::DatasetData::Prefix(PrefixSet::new(listed.then_some(
+        PrefixSetEntry {
             prefix: v4_prefix(),
             ge: None,
             le: None,
-        })))
-    };
+        },
+    )))
+}
+
+/// Peers 10.0.0.2..=4 whose export chain accepts the local route only while
+/// it is listed in the returned dataset, and the route itself.
+fn dataset_walk_setup() -> (
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    Arc<rustbgpd_policy::datasets::DatasetHandle>,
+) {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::sets::SetStore;
+
     let handle = Arc::new(DatasetHandle::new(
         "allowed",
         DatasetKind::Prefix,
-        data(true),
+        allowed_dataset(true),
     ));
     let mut bindings = DatasetBindings::new();
     bindings.insert(Arc::clone(&handle));
@@ -731,7 +736,7 @@ fn export_dataset_swapped_mid_walk_invalidates_the_resumed_walk() {
     )]);
 
     let (mut manager, _tx) = manager();
-    let _receivers: Vec<_> = [2, 3, 4]
+    let receivers = [2, 3, 4]
         .into_iter()
         .map(|octet| {
             peer_up(
@@ -745,12 +750,56 @@ fn export_dataset_swapped_mid_walk_invalidates_the_resumed_walk() {
         })
         .collect();
     inject(&mut manager, local_route(v4_prefix(), 0));
+    (manager, receivers, handle)
+}
+
+/// A dataset swap is visible to the next explain before any RIB message
+/// arrives, so a swap of a dataset a listed peer's export chain reads
+/// invalidates the walk with no RIB update in between. Red proof: leaving
+/// the dataset generations out of the policy version fails this test.
+#[test]
+fn export_dataset_swapped_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, handle) = dataset_walk_setup();
     let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
     assert!(first.more);
 
-    handle.refresh(data(false));
+    handle.refresh(allowed_dataset(false));
     assert_eq!(
         resume(&mut manager, &first),
         Err(RouteExportPageError::Invalidated)
     );
+}
+
+/// A dataset refresh runs outside the RIB actor, so it can land after a
+/// page's version check while its rows evaluate. The final page has no
+/// continuation token, so the page itself is refused; a first page is
+/// refused too rather than issuing a token its rows were not read under.
+/// The hook lands the refresh in exactly that window. Red proof: removing
+/// the post-collection recheck returns both pages.
+#[test]
+fn export_dataset_swapped_while_a_page_evaluates_invalidates_the_page() {
+    use crate::manager::queries::BEFORE_EXPORT_ROWS;
+
+    let (mut manager, _receivers, handle) = dataset_walk_setup();
+    let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
+    assert!(first.more);
+    let refresh = Arc::clone(&handle);
+    BEFORE_EXPORT_ROWS.set(Some(Box::new(move || {
+        refresh.refresh(allowed_dataset(false));
+    })));
+    assert_eq!(
+        resume(&mut manager, &first),
+        Err(RouteExportPageError::Invalidated)
+    );
+
+    let refresh = Arc::clone(&handle);
+    BEFORE_EXPORT_ROWS.set(Some(Box::new(move || {
+        refresh.refresh(allowed_dataset(true));
+    })));
+    assert_eq!(
+        query(&mut manager, v4_prefix(), 0, None, 2),
+        Err(RouteExportPageError::Invalidated)
+    );
+    // Without a refresh in the window, a restarted walk is served.
+    assert!(query(&mut manager, v4_prefix(), 0, None, 2).is_ok());
 }

@@ -1526,7 +1526,8 @@ pub enum RouteExportPageError {
     NoRoute,
     /// A resumed walk's route content changed (or the route is gone), the
     /// outbound peer roster changed, or the peers' export policy changed
-    /// since its first page.
+    /// since its first page; or, on any page, a dataset the policy reads
+    /// was refreshed while the page's rows were evaluated.
     Invalidated,
 }
 

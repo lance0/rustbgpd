@@ -5,6 +5,8 @@
   is removed, a peer joins, leaves or flaps out of the Established set, or an
   Established peer's export policy or a dataset it reads changes between
   pages, the next page returns `ABORTED` and the client restarts the walk.
+  A dataset refresh that lands while any page is being evaluated also returns
+  `ABORTED` for that page, so no page mixes dataset contents.
   Previously a route deleted mid-walk returned the same `NOT_FOUND` as a key
   that never existed, and a session change could skip or repeat a peer.
   Removing the route and restoring identical content between pages leaves the
