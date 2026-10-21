@@ -1798,3 +1798,49 @@ async fn bfd_registration_preserves_disabled_delete_and_readd() {
     mgr.handle_bfd_state_change(up_ack(peer)).await;
     assert!(!mgr.bfd_withholding(&peer));
 }
+
+/// A recreated interface (same name, new index) moves the link-local BFD
+/// session to the new scope under a fresh revision, on the link-state change
+/// and independently of any TCP dial; a missing name changes nothing.
+#[tokio::test]
+async fn link_local_bfd_follows_a_recreated_interface() {
+    let peer: IpAddr = "fe80::2".parse().unwrap();
+    for (interface, moves) in [("eth1", true), ("rbgp-ll-missing0", false)] {
+        let counters = Arc::new(BfdCouplingCounters::default());
+        let mut mgr = test_peer_manager();
+        let (_key, _tx) = super::link_failover::insert_recreated_link_local_peer(
+            &mut mgr,
+            interface,
+            fake_bfd_peer_handle(counters),
+        );
+        let mut params = bfd_params(IpAddr::V4("192.0.2.9".parse().unwrap()), false);
+        params.peer = peer;
+        params.scope_id = Some(4);
+        params.destination = crate::bfd_runtime::bfd_destination(peer, Some(4), false).unwrap();
+        params.revision = 3;
+        let configured = std::collections::HashMap::from([(peer, params)]);
+        let (desired_tx, mut desired_rx) =
+            watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+        let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+        let mut mgr = mgr.with_bfd_coupling(desired_tx, state_rx, configured);
+        desired_rx.mark_unchanged();
+
+        mgr.handle_links_changed();
+
+        let published = desired_rx.has_changed().unwrap();
+        assert_eq!(published, moves, "{interface}");
+        let session = &mgr.bfd_coupling.as_ref().unwrap().configured[&peer];
+        if moves {
+            assert_eq!(session.scope_id, Some(9));
+            assert_eq!(
+                session.destination,
+                crate::bfd_runtime::bfd_destination(peer, Some(9), false).unwrap()
+            );
+            assert_ne!(session.revision, 3, "a fresh revision replaces the session");
+            assert_eq!(desired_rx.borrow().sessions[0].scope_id, Some(9));
+        } else {
+            assert_eq!(session.scope_id, Some(4));
+            assert_eq!(session.revision, 3);
+        }
+    }
+}

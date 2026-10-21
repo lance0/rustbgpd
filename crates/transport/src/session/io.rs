@@ -463,6 +463,38 @@ impl PeerSession {
         if self.read_half.is_some() || self.connect_task.is_some() {
             return;
         }
+        // A scoped link-local peer dials its interface's *current* index, so
+        // an interface deleted and recreated under the same name is followed.
+        // No interface by that name now means "cannot dial yet": the attempt
+        // fails like an unreachable connect and the retry timer tries again.
+        match self.config.refresh_link_local_scope() {
+            Ok(false) => {}
+            Ok(true) => {
+                if let (Some(scope), Some(ifindex)) = (
+                    self.link_local_next_hop_scope.as_mut(),
+                    self.config.peer_scope_id,
+                ) {
+                    scope.ifindex = ifindex;
+                }
+                info!(
+                    peer = %self.peer_label,
+                    addr = %self.config.remote_addr,
+                    "link-local peer interface has a new index; dialing it"
+                );
+            }
+            Err(interface) => {
+                let addr = self.config.remote_addr;
+                self.connect_task = Some(tokio::spawn(async move {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "interface {interface:?} for link-local peer {addr} is not present"
+                        ),
+                    ))
+                }));
+                return;
+            }
+        }
 
         let config = self.config.clone();
         let peer_label = self.peer_label.clone();

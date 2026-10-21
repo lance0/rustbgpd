@@ -23,6 +23,17 @@ use socket2::Socket;
 #[cfg(target_os = "linux")]
 use zeroize::{Zeroize, Zeroizing};
 
+/// The kernel's current index for an interface name (`if_nametoindex`), or
+/// `None` when no interface has that name now (or the name is not a valid C
+/// string).
+pub(crate) fn interface_index(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    // SAFETY: `name` is a valid NUL-terminated C string that outlives the
+    // call; `if_nametoindex` only reads it and returns 0 on failure.
+    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+    (index != 0).then_some(index)
+}
+
 #[cfg(target_os = "linux")]
 const TCP_MD5SIG_MAXKEYLEN: usize = 80;
 

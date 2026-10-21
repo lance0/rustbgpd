@@ -17,9 +17,9 @@
 //!   sessions down in well under the hold time, with no GR-retained routes;
 //! - the opt-out session on eth2, pulled at the same moment, stays Established;
 //! - the eth3 session is unaffected throughout;
-//! - the eth1 sessions recover when the link returns and after A's own admin
-//!   down/up; the numbered one also after the veth pair is deleted and
-//!   recreated;
+//! - the eth1 sessions recover when the link returns, after A's own admin
+//!   down/up, and after the veth pair is deleted and recreated (the
+//!   link-local neighbor follows the recreated interface's new index);
 //! - removing A's eth4 address takes that session down at once;
 //! - control: an ordinary transport loss (B killed) still retains routes under
 //!   GR, so the purge above is the failover's doing.
@@ -422,13 +422,12 @@ fn fast_external_failover_end_to_end() {
     );
     assert_failed_over(&mut a, ETH1_V4, "");
     ns.link(1);
-    // Only the numbered session can come back: a static link-local neighbor
-    // resolves its interface index once, at configuration time, so it keeps
-    // dialing the deleted interface's index. That is independent of failover.
+    // Both come back: the link-local neighbor re-resolves its interface by
+    // name and dials the recreated interface's new index.
     a.wait(
-        "the numbered eth1 session recovers on the recreated interface",
+        "eth1 sessions recover on the recreated interface",
         RECOVERY_BOUND,
-        |a| a.established(ETH1_V4),
+        |a| a.established(ETH1_V4) && a.established(ETH1_LL),
     );
     assert!(a.established(UNTOUCHED));
 

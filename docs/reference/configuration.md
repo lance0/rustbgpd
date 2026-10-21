@@ -1142,6 +1142,17 @@ surfaces keep the two together:
 - Prometheus labels it with the same scoped value, `peer="fe80::5054:ff:fe00:1%eth1"`;
   see [the `peer` label](operations.md#the-peer-label).
 
+The interface is followed by name, not by the index it had when the
+configuration was loaded. Every outbound connection attempt and every inbound
+match resolves `interface` to its current index, from the link monitor's
+snapshot when it has a complete one and from the kernel otherwise. An
+interface that is deleted and recreated under the same name is therefore
+dialed and accepted at its new index without a reload, and a configured BFD
+session moves to the new index when the link monitor sees the change. While no
+interface has that name, connection attempts fail as unreachable and are
+retried on the normal timer, and inbound connections for the neighbor are not
+matched.
+
 RFC 4007 §11.6 permits a default zone for an unscoped link-local address;
 rustbgpd does not assume one, so a selector keeps its meaning when another
 neighbor is added on the same address. That is a product contract rather than

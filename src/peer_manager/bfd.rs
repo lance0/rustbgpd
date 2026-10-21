@@ -702,6 +702,62 @@ impl PeerManager {
         }
     }
 
+    /// Follow a recreated interface: re-resolve each scoped link-local BFD
+    /// session's interface by name and, when its index changed, publish the
+    /// new destination under a fresh revision so the actor replaces the
+    /// session. Driven by link-state changes, independently of TCP dialing,
+    /// because strict BFD can hold a peer before any connect attempt. A name
+    /// that resolves to nothing leaves the session as it is until it does.
+    pub(super) fn refresh_bfd_link_local_scopes(&mut self) {
+        let Some(coupling) = self.bfd_coupling.as_ref() else {
+            return;
+        };
+        if coupling.reloading {
+            return;
+        }
+        let updates: Vec<(IpAddr, u32)> = coupling
+            .configured
+            .values()
+            .filter_map(|params| {
+                let scope = params.scope_id?;
+                let key = self.unique_peer_key_for_address(params.peer)?;
+                let interface = key.interface.as_deref()?;
+                let current = self
+                    .peers
+                    .get(&key)?
+                    .transport_config
+                    .link_state
+                    .resolve_interface(interface)?;
+                (current != scope).then_some((params.peer, current))
+            })
+            .collect();
+        if updates.is_empty() {
+            return;
+        }
+        let coupling = self.bfd_coupling.as_mut().expect("checked above");
+        for (peer, ifindex) in updates {
+            let Some(params) = coupling.configured.get_mut(&peer) else {
+                continue;
+            };
+            let Ok(destination) =
+                crate::bfd_runtime::bfd_destination(peer, Some(ifindex), params.multihop)
+            else {
+                continue;
+            };
+            info!(
+                %peer,
+                old_scope = ?params.scope_id,
+                new_scope = ifindex,
+                "BFD link-local interface has a new index; replacing the session"
+            );
+            params.scope_id = Some(ifindex);
+            params.destination = destination;
+            params.revision = coupling.next_revision;
+            coupling.next_revision = coupling.next_revision.saturating_add(1);
+        }
+        self.republish_bfd_desired();
+    }
+
     /// Take the BFD state-change receiver into a `run`-local (so the `select!`
     /// arm captures the local rather than `self`, mirroring the BMP interval).
     pub(super) fn take_bfd_state_change_rx(&mut self) -> Option<BfdStateChangeReceiver> {
