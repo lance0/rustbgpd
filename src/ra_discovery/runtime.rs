@@ -291,6 +291,18 @@ struct Actor {
     local_addresses: HashMap<String, (Instant, Vec<Ipv6Addr>)>,
     opener: Opener,
     open_retries: HashMap<String, OpenRetry>,
+    /// A link-up RS whose interface had no socket yet, keyed by interface
+    /// name with the (ifindex, generation) it belongs to. Sent when that
+    /// socket opens; dropped on stop or a generation change.
+    pending_rs: HashMap<String, (u32, u64)>,
+    #[cfg(test)]
+    sent: Vec<Transmit>,
+}
+
+enum Input {
+    Command(Command),
+    Packet(Received),
+    Wake,
 }
 
 /// A failed open for one (ifindex, generation) and when to try again.
@@ -328,6 +340,9 @@ impl Actor {
             local_addresses: HashMap::new(),
             opener,
             open_retries: HashMap::new(),
+            pending_rs: HashMap::new(),
+            #[cfg(test)]
+            sent: Vec::new(),
         };
         (actor, event_rx, received_rx)
     }
@@ -354,36 +369,61 @@ impl Actor {
                     None => std::future::pending().await,
                 }
             };
-            tokio::select! {
+            let input = tokio::select! {
                 command = commands.recv() => {
                     let Some(command) = command else {
                         self.engine.stop_all();
                         self.flush();
                         return;
                     };
-                    self.command(command);
+                    Input::Command(command)
                 }
-                Some(packet) = received.recv() => self.received(&packet),
-                () = sleep => self.engine.poll(Instant::now()),
+                Some(packet) = received.recv() => Input::Packet(packet),
+                () = sleep => Input::Wake,
+            };
+            self.handle(input, Instant::now());
+        }
+    }
+
+    /// Apply one input. Socket reconciliation runs only for control inputs
+    /// and timer wakes, which are the only inputs that change which sockets
+    /// are wanted or retry a failed open; a received packet never does, so
+    /// a flood on one port does not re-inventory every other port.
+    fn handle(&mut self, input: Input, now: Instant) {
+        let reconcile = match input {
+            Input::Packet(packet) => {
+                self.received(&packet, now);
+                false
             }
-            self.open_sockets(Instant::now());
-            self.flush();
+            Input::Command(command) => {
+                self.command(command, now);
+                true
+            }
+            Input::Wake => {
+                self.engine.poll(now);
+                true
+            }
+        };
+        if reconcile {
+            self.open_sockets(now);
+        }
+        self.flush();
+        if reconcile {
             self.close_stale_sockets();
         }
     }
 
-    fn command(&mut self, command: Command) {
+    fn command(&mut self, command: Command, now: Instant) {
         match command {
             Command::Start(name) => self.engine.start(&name),
             Command::Stop(name) => self.engine.stop(&name),
-            Command::Link(event) => self.engine.on_link(&event, Instant::now()),
+            Command::Link(event) => self.engine.on_link(&event, now),
             Command::SessionEstablished(name) => self.engine.session_established(&name),
-            Command::SessionFailed(name) => self.engine.session_failed(&name, Instant::now()),
+            Command::SessionFailed(name) => self.engine.session_failed(&name, now),
         }
     }
 
-    fn received(&mut self, packet: &Received) {
-        let now = Instant::now();
+    fn received(&mut self, packet: &Received, now: Instant) {
         let local = &mut self.local_addresses;
         let result = match packet::parse(&packet.payload, packet.source, packet.hop_limit) {
             Ok(NdMessage::RouterAdvertisement {
@@ -448,16 +488,21 @@ impl Actor {
                         self.received_tx.clone(),
                     )));
                     debug!(interface = %name, ifindex, "RA socket open");
+                    let pending_rs = self.pending_rs.get(&name) == Some(&(ifindex, generation));
                     self.sockets.insert(
                         name.clone(),
                         InterfaceSocket {
-                            name,
+                            name: name.clone(),
                             ifindex,
                             generation,
                             socket,
                             _reader: reader,
                         },
                     );
+                    if pending_rs {
+                        self.pending_rs.remove(&name);
+                        self.transmit(Transmit::RouterSolicitation { ifindex });
+                    }
                 }
                 Err(error) => {
                     let failures = failures + 1;
@@ -490,6 +535,8 @@ impl Actor {
             .retain(|name, s| live.get(name.as_str()) == Some(&(s.ifindex, s.generation)));
         self.open_retries
             .retain(|name, r| live.get(name.as_str()) == Some(&(r.ifindex, r.generation)));
+        self.pending_rs
+            .retain(|name, link| live.get(name.as_str()) == Some(link));
     }
 
     fn flush(&mut self) {
@@ -498,26 +545,47 @@ impl Actor {
             let _ = self.events.send(event);
         }
         for transmit in std::mem::take(&mut self.engine.transmits) {
-            let (ifindex, destination) = match transmit {
-                Transmit::RouterAdvertisement { ifindex, .. } => (ifindex, ALL_NODES),
-                Transmit::RouterSolicitation { ifindex } => (ifindex, ALL_ROUTERS),
-            };
-            let Some(socket) = self.sockets.values().find(|s| s.ifindex == ifindex) else {
+            if self.transmit(transmit) {
                 continue;
-            };
-            let lladdr = link_layer_address(&socket.name);
-            let bytes = match transmit {
-                Transmit::RouterAdvertisement {
-                    router_lifetime_secs,
-                    ..
-                } => packet::encode_router_advertisement(router_lifetime_secs, lladdr),
-                Transmit::RouterSolicitation { .. } => packet::encode_router_solicitation(lladdr),
-            };
-            let to = SocketAddrV6::new(destination, 0, 0, ifindex);
-            if let Err(error) = socket.socket.get_ref().send_to(&bytes, &to.into()) {
-                debug!(interface = %socket.name, %error, "router discovery send failed");
+            }
+            // No socket yet. A missed RA is covered by the next scheduled
+            // one; the link-up RS is not, so keep it for the socket.
+            if let Transmit::RouterSolicitation { ifindex } = transmit
+                && let Some((name, _, generation)) = self
+                    .engine
+                    .bound_interfaces()
+                    .find(|(_, i, _)| *i == ifindex)
+            {
+                self.pending_rs
+                    .insert(name.to_owned(), (ifindex, generation));
             }
         }
+    }
+
+    /// Send on the interface's socket. False when it has no socket.
+    fn transmit(&mut self, transmit: Transmit) -> bool {
+        let (ifindex, destination) = match transmit {
+            Transmit::RouterAdvertisement { ifindex, .. } => (ifindex, ALL_NODES),
+            Transmit::RouterSolicitation { ifindex } => (ifindex, ALL_ROUTERS),
+        };
+        let Some(socket) = self.sockets.values().find(|s| s.ifindex == ifindex) else {
+            return false;
+        };
+        let lladdr = link_layer_address(&socket.name);
+        let bytes = match transmit {
+            Transmit::RouterAdvertisement {
+                router_lifetime_secs,
+                ..
+            } => packet::encode_router_advertisement(router_lifetime_secs, lladdr),
+            Transmit::RouterSolicitation { .. } => packet::encode_router_solicitation(lladdr),
+        };
+        let to = SocketAddrV6::new(destination, 0, 0, ifindex);
+        if let Err(error) = socket.socket.get_ref().send_to(&bytes, &to.into()) {
+            debug!(interface = %socket.name, %error, "router discovery send failed");
+        }
+        #[cfg(test)]
+        self.sent.push(transmit);
+        true
     }
 }
 
@@ -568,8 +636,100 @@ mod tests {
 
     use socket2::{Domain, Socket, Type};
 
-    use super::{Actor, open_backoff};
+    use super::{Actor, Command, Input, Received, open_backoff};
+    use crate::ra_discovery::engine::Transmit;
     use crate::ra_discovery::{DiscoveryConfig, LinkEvent, LinkState};
+
+    /// An actor whose socket opener fails `failures` times, then succeeds
+    /// with an ordinary socket standing in for the raw one.
+    fn flaky_actor(failures: u32, send: bool) -> (Actor, Arc<AtomicU32>) {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&attempts);
+        let opener = move |_: &str, _: u32| {
+            if counter.fetch_add(1, Ordering::Relaxed) < failures {
+                Err(std::io::Error::other("transient"))
+            } else {
+                Socket::new(Domain::IPV6, Type::DGRAM, None)
+            }
+        };
+        let config = DiscoveryConfig {
+            send,
+            ..DiscoveryConfig::default()
+        };
+        let (actor, _, _) = Actor::new(config, 1, Box::new(opener));
+        (actor, attempts)
+    }
+
+    fn link(state: LinkState) -> Input {
+        Input::Command(Command::Link(LinkEvent {
+            ifindex: 9,
+            name: "x".into(),
+            state,
+        }))
+    }
+
+    #[tokio::test]
+    async fn received_packets_do_not_reconcile_sockets() {
+        let (mut actor, attempts) = flaky_actor(u32::MAX, false);
+        let t0 = Instant::now();
+        actor.handle(Input::Command(Command::Start("x".into())), t0);
+        actor.handle(link(LinkState::Unknown), t0);
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        // The retry is overdue at t0+5s, but a packet must not run it.
+        let t5 = t0 + Duration::from_secs(5);
+        for _ in 0..100 {
+            let packet = Received {
+                ifindex: 9,
+                generation: 1,
+                source: "fe80::1".parse().unwrap(),
+                hop_limit: Some(255),
+                payload: Vec::new(),
+            };
+            actor.handle(Input::Packet(packet), t5);
+        }
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        // A timer wake does.
+        actor.handle(Input::Wake, t5);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn link_up_rs_waits_for_the_socket() {
+        let (mut actor, attempts) = flaky_actor(2, true);
+        let t0 = Instant::now();
+        actor.handle(Input::Command(Command::Start("x".into())), t0);
+        actor.handle(link(LinkState::Up), t0);
+        actor.handle(Input::Wake, t0 + Duration::from_secs(1));
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(actor.sent, vec![], "no socket yet");
+        actor.handle(Input::Wake, t0 + Duration::from_secs(3));
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            actor.sent,
+            vec![Transmit::RouterSolicitation { ifindex: 9 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_link_up_rs_is_dropped_on_stop_and_new_generation() {
+        // Stop: the interface is gone, nothing is sent later.
+        let (mut actor, _) = flaky_actor(1, true);
+        let t0 = Instant::now();
+        actor.handle(Input::Command(Command::Start("x".into())), t0);
+        actor.handle(link(LinkState::Up), t0);
+        assert_eq!(actor.pending_rs.len(), 1);
+        actor.handle(Input::Command(Command::Stop("x".into())), t0);
+        assert!(actor.pending_rs.is_empty());
+        // Down drops the old generation's RS; the next Up queues its own.
+        let (mut actor, _) = flaky_actor(u32::MAX, true);
+        actor.handle(Input::Command(Command::Start("x".into())), t0);
+        actor.handle(link(LinkState::Up), t0);
+        let first = actor.pending_rs["x"];
+        actor.handle(link(LinkState::Down), t0);
+        assert!(actor.pending_rs.is_empty());
+        actor.handle(link(LinkState::Up), t0);
+        assert_ne!(actor.pending_rs["x"], first);
+    }
 
     #[test]
     fn open_backoff_doubles_to_a_one_minute_cap() {
