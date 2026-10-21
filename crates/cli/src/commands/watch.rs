@@ -61,6 +61,14 @@ fn scope_bgp_event(event: &mut BgpEvent) {
             scope_address(&mut event.peer_address, &policy.peer_interface);
             scope_address(&mut policy.peer_address, &policy.peer_interface);
         }
+        Some(Payload::DataplaneRoute(route)) => {
+            scope_address(&mut event.peer_address, &route.peer_interface);
+            scope_address(&mut route.peer_address, &route.peer_interface);
+        }
+        Some(Payload::Bfd(session)) => {
+            scope_address(&mut event.peer_address, &session.peer_interface);
+            scope_address(&mut session.peer_address, &session.peer_interface);
+        }
         _ => {}
     }
 }
@@ -2414,6 +2422,53 @@ mod tests {
     }
 
     #[test]
+    fn bfd_and_dataplane_route_events_render_the_scoped_neighbor() {
+        use crate::proto::bgp_event::Payload;
+        let mut bfd = BgpEvent {
+            peer_address: "fe80::1".to_string(),
+            payload: Some(Payload::Bfd(crate::proto::BfdSessionEvent {
+                peer_address: "fe80::1".to_string(),
+                peer_interface: "eth0".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        scope_bgp_event(&mut bfd);
+        assert_eq!(bfd.peer_address, "fe80::1%eth0");
+        let Some(Payload::Bfd(payload)) = &bfd.payload else {
+            panic!("expected BFD payload");
+        };
+        assert_eq!(payload.peer_address, "fe80::1%eth0");
+
+        let mut route = BgpEvent {
+            peer_address: "fe80::1".to_string(),
+            payload: Some(Payload::DataplaneRoute(crate::proto::DataplaneRouteEvent {
+                peer_address: "fe80::1".to_string(),
+                peer_interface: "eth0".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        scope_bgp_event(&mut route);
+        assert_eq!(route.peer_address, "fe80::1%eth0");
+        let Some(Payload::DataplaneRoute(payload)) = &route.payload else {
+            panic!("expected dataplane route payload");
+        };
+        assert_eq!(payload.peer_address, "fe80::1%eth0");
+
+        let mut numbered = BgpEvent {
+            peer_address: "192.0.2.1".to_string(),
+            payload: Some(Payload::Bfd(crate::proto::BfdSessionEvent {
+                peer_address: "192.0.2.1".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        scope_bgp_event(&mut numbered);
+        assert_eq!(numbered.peer_address, "192.0.2.1");
+    }
+
+    #[test]
     fn json_bgp_event_session_uses_null_family() {
         let event = BgpEvent {
             timestamp: "1".to_string(),
@@ -2667,6 +2722,7 @@ mod tests {
                     prefix_length: 24,
                     next_hop: "192.0.2.1".to_string(),
                     peer_address: "10.0.0.1".to_string(),
+                    peer_interface: String::new(),
                     timestamp: "1".to_string(),
                     reason: "install_failed:permission denied".to_string(),
                 },

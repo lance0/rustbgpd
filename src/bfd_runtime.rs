@@ -471,6 +471,8 @@ fn resolve_bfd<'a>(
 pub struct BfdStatus {
     /// Peer IP address.
     pub peer: IpAddr,
+    /// Interface of a scoped (IPv6 link-local) peer; empty for a numbered one.
+    pub peer_interface: String,
     /// Current session state.
     pub state: rustbgpd_bfd::SessionState,
     /// Local diagnostic for the last state change.
@@ -494,6 +496,8 @@ pub struct BfdStatus {
 pub struct BfdRuntimeEvent {
     /// Peer IP address.
     pub peer: IpAddr,
+    /// Interface of a scoped (IPv6 link-local) peer; empty for a numbered one.
+    pub peer_interface: String,
     /// State before the transition.
     pub old_state: rustbgpd_bfd::SessionState,
     /// State after the transition.
@@ -1380,6 +1384,10 @@ mod linux {
                             // subscribers — expected and ignorable.
                             let _ = self.event_tx.send(BfdRuntimeEvent {
                                 peer,
+                                peer_interface: rustbgpd_api::peer_types::PeerKey::label_interface(
+                                    Some(&peer_label),
+                                )
+                                .to_string(),
                                 old_state: old,
                                 new_state: new,
                                 diagnostic,
@@ -1480,6 +1488,10 @@ mod linux {
                 .values()
                 .map(|e| BfdStatus {
                     peer: e.peer,
+                    peer_interface: rustbgpd_api::peer_types::PeerKey::label_interface(Some(
+                        &e.peer_label,
+                    ))
+                    .to_string(),
                     state: e.session.state(),
                     diagnostic: e.last_diagnostic,
                     strict: e.strict,
@@ -1995,8 +2007,8 @@ mod linux {
         async fn bfd_interface_move_retires_old_value_without_touching_replacement() {
             use super::*;
             let metrics = BgpMetrics::new();
-            let (status_tx, _) = watch::channel(Vec::new());
-            let (event_tx, _) = broadcast::channel(8);
+            let (status_tx, status_rx) = watch::channel(Vec::new());
+            let (event_tx, mut event_rx) = broadcast::channel(8);
             let (state_change_tx, _state_rx) = super::super::state_change_channel();
             let mut actor = Actor {
                 configured_peers: HashSet::new(),
@@ -2026,6 +2038,14 @@ mod linux {
                     &status_tx,
                 )
                 .await;
+            // Status rows keep a bare address beside the session's interface.
+            let published = |rx: &watch::Receiver<Vec<BfdStatus>>| {
+                rx.borrow()
+                    .iter()
+                    .map(|status| (status.peer, status.peer_interface.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(published(&status_rx), [(peer, "eth0".to_string())]);
             let local = actor.sessions[&peer].local_discriminator;
             let actions =
                 actor
@@ -2051,6 +2071,11 @@ mod linux {
                     }));
             actor.apply(peer, actions, &metrics).await;
             assert_eq!(actor.sessions[&peer].session.state(), SessionState::Up);
+            let up = event_rx.try_recv().expect("the Up transition is broadcast");
+            assert_eq!(
+                (up.peer, up.peer_interface.as_str(), up.new_state),
+                (peer, "eth0", SessionState::Up)
+            );
 
             // The peer manager deletes eth0 (reaping its value) and adds eth1
             // before the BFD reload commits.
@@ -2069,6 +2094,7 @@ mod linux {
                     &status_tx,
                 )
                 .await;
+            assert_eq!(published(&status_rx), [(peer, "eth1".to_string())]);
 
             let bfd_series: Vec<(String, String, f64)> = metrics
                 .registry()

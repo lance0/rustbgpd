@@ -494,6 +494,7 @@ pub(crate) fn dataplane_route_event(
                 prefix_length,
                 next_hop: "192.0.2.1".to_string(),
                 peer_address: peer_address.to_string(),
+                peer_interface: String::new(),
                 timestamp: "123".to_string(),
                 reason: action.to_string(),
             },
@@ -506,6 +507,7 @@ pub(crate) fn blackhole_status(state: proto::BlackholeDiscardState) -> proto::Bl
         prefix: "198.51.100.1".to_string(),
         prefix_length: 32,
         peer_address: "10.0.0.2".to_string(),
+        peer_interface: String::new(),
         state: state as i32,
         reason: "test".to_string(),
     }

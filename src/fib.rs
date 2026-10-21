@@ -14,8 +14,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv6Addr};
+use std::sync::Arc;
 
-use rustbgpd_rib::{FibInstallCandidate, FibInstallNextHop, RouteOrigin};
+use rustbgpd_rib::{FibInstallCandidate, FibInstallNextHop, Route, RouteOrigin};
 use rustbgpd_wire::Prefix;
 
 use crate::config::FibTableConfig;
@@ -94,6 +95,9 @@ pub(crate) struct FibRoute {
     pub target: FibRouteTarget,
     /// Peer that supplied the Loc-RIB best route.
     pub peer: IpAddr,
+    /// Interface of `peer` when it is a scoped (IPv6 link-local) neighbor,
+    /// as recorded with the best route; `None` for a numbered peer.
+    pub peer_interface: Option<Arc<str>>,
     /// How the Loc-RIB best route was learned.
     pub origin_type: RouteOrigin,
     /// Add-Path path identifier from the selected best route.
@@ -389,6 +393,8 @@ pub(crate) enum FibDrop {
         prefix: Prefix,
         /// Peer that supplied the route.
         peer: IpAddr,
+        /// Interface of a scoped `peer`.
+        peer_interface: Option<Arc<str>>,
     },
     /// A table exceeded its configured hard route-count limit.
     RouteLimitExceeded {
@@ -400,6 +406,8 @@ pub(crate) enum FibDrop {
         next_hop: IpAddr,
         /// Peer that supplied the route.
         peer: IpAddr,
+        /// Interface of a scoped `peer`.
+        peer_interface: Option<Arc<str>>,
         /// Configured maximum route count.
         limit: u32,
         /// Number of sampled `route_limit_exceeded` rows surfaced for
@@ -700,6 +708,7 @@ impl FibIntentBuilder {
                         table_name: table.name.to_string(),
                         prefix: route.prefix,
                         peer: route.peer,
+                        peer_interface: source_interface(route),
                     });
                     continue;
                 }
@@ -766,6 +775,7 @@ impl FibIntentBuilder {
                             key,
                             route.next_hop,
                             route.peer,
+                            source_interface(route),
                             limit,
                             &mut state.route_limit_drops,
                         );
@@ -780,6 +790,7 @@ impl FibIntentBuilder {
                     // consistent with the row's best-route metadata.
                     target: FibRouteTarget::from_set_with_best_hop(best_next_hop, eligible),
                     peer: route.peer,
+                    peer_interface: source_interface(route),
                     origin_type: route.origin_type,
                     path_id: route.path_id,
                 };
@@ -851,9 +862,19 @@ fn push_route_limit_drop(
         route.key,
         route.target.primary(),
         route.peer,
+        route.peer_interface.clone(),
         limit,
         counters,
     );
+}
+
+/// Interface of the best route's scoped (IPv6 link-local) source neighbor,
+/// from the provenance its receiving session recorded. Only link-local
+/// neighbors are scoped, so numbered peers skip the context-table read.
+pub(crate) fn source_interface(route: &Route) -> Option<Arc<str>> {
+    matches!(route.peer, IpAddr::V6(peer) if peer.is_unicast_link_local())
+        .then(|| route.peer_interface())
+        .flatten()
 }
 
 #[derive(Default)]
@@ -862,12 +883,17 @@ struct RouteLimitDropCounters {
     total: usize,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sampled drop row records each field of the rejected route"
+)]
 fn push_route_limit_drop_for_route(
     intent: &mut FibIntent,
     table_name: &str,
     key: FibRouteKey,
     next_hop: IpAddr,
     peer: IpAddr,
+    peer_interface: Option<Arc<str>>,
     limit: u32,
     counters: &mut RouteLimitDropCounters,
 ) {
@@ -880,6 +906,7 @@ fn push_route_limit_drop_for_route(
         key,
         next_hop,
         peer,
+        peer_interface,
         limit,
         sampled_rows: 0,
         suppressed_rows: 0,
@@ -1195,6 +1222,7 @@ mod tests {
             key,
             target: FibRouteTarget::single(ip(next_hop)),
             peer: ip("198.51.100.1"),
+            peer_interface: None,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         }
@@ -1389,6 +1417,51 @@ mod tests {
             intent.drops.as_slice(),
             [FibDrop::LinkLocalNextHopScopeMissing { table_name, next_hop, .. }]
                 if table_name == "edge" && *next_hop == ip("fe80::1")
+        ));
+    }
+
+    /// A route learned from a link-local neighbor projects with the
+    /// interface its session recorded, on installed rows and on drops;
+    /// numbered rows carry none.
+    #[test]
+    fn projected_rows_carry_a_scoped_source_interface() {
+        let scoped = |prefix| {
+            let mut route = route_from_peer(
+                prefix,
+                ip("203.0.113.1"),
+                RouteOrigin::Ebgp,
+                0,
+                ip("fe80::1"),
+            );
+            route.aspa_context = rustbgpd_rib::route::AspaContextId::intern_scoped(
+                rustbgpd_wire::AspaValidationContext::default(),
+                Some("eth0"),
+            );
+            route
+        };
+        let routes = vec![
+            scoped(v4_prefix(2, 24)),
+            route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
+        ];
+        let open = table("edge", 1000, 200, &["ipv4_unicast"]);
+        let intent = project_fib_intent(std::slice::from_ref(&open), &candidates(routes.clone()));
+        let rows: Vec<_> = intent
+            .routes
+            .values()
+            .map(|route| (route.peer, route.peer_interface.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [(ip("fe80::1"), Some("eth0")), (ip("198.51.100.1"), None)]
+        );
+
+        let mut numbered_only = open;
+        numbered_only.allowed_neighbors = vec!["198.51.100.1".to_string()];
+        let intent = project_fib_intent(&[numbered_only], &candidates(routes));
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::PeerNotAllowed { peer, peer_interface: Some(interface), .. }]
+                if *peer == ip("fe80::1") && &**interface == "eth0"
         ));
     }
 
@@ -2478,6 +2551,7 @@ mod tests {
             key,
             target: target_from_addrs(["203.0.113.1", "203.0.113.2"]),
             peer: ip("198.51.100.1"),
+            peer_interface: None,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
