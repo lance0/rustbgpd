@@ -45,6 +45,7 @@ class ReceiptTest(unittest.TestCase):
                 "foreign_state_l2",
                 "foreign_state_l2_dst",
                 "foreign_state_nhid",
+                "ra_discovery",
             ),
         )
         self.assertEqual(
