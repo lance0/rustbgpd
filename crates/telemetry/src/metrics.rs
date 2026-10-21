@@ -535,9 +535,10 @@ struct BgpMetricsInner {
     // Exact last-published labels, owned with the family across peer replacements.
     // Always lock this map before modifying peer_info; no family scans under the lock.
     peer_info_labels: Mutex<BTreeMap<(String, String), [String; 3]>>,
-    /// Bare link-local address → scoped `peer` value, for emitters (RIB,
-    /// BFD, transport) that know only the bare address.
-    scoped_peers: RwLock<HashMap<String, String>>,
+    /// Bare link-local address → (current scoped `peer` value, values it
+    /// superseded and not yet reaped), for emitters (RIB, BFD, transport)
+    /// that know only the bare address.
+    scoped_peers: RwLock<HashMap<String, (String, Vec<String>)>>,
     session_down: IntCounterVec,
     stale_timer_events: IntCounterVec,
     session_notification_outstanding_value: Arc<AtomicI64>,
@@ -3917,7 +3918,11 @@ impl BgpMetrics {
     /// `address`, so every later emission, read and reap that passes the
     /// bare address uses `label` instead. A later registration for the same
     /// address replaces the earlier one (an interface change re-adds the
-    /// neighbor). A `label` equal to the bare address registers nothing.
+    /// neighbor); the replaced value is kept until the next
+    /// [`Self::reap_peer_series`] of the bare address removes its series,
+    /// because the old neighbor's late teardown writes may land on it after
+    /// the delete reap. A `label` equal to the bare address registers
+    /// nothing.
     ///
     /// Call before the neighbor's first emission, and never unregister: an
     /// emitter's teardown writes and the RIB's final reap after a delete
@@ -3930,11 +3935,21 @@ impl BgpMetrics {
         if label == bare {
             return;
         }
-        self.0
+        let mut scoped = self
+            .0
             .scoped_peers
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(bare, label.to_owned());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (current, superseded) = scoped
+            .entry(bare)
+            .or_insert_with(|| (label.to_owned(), Vec::new()));
+        if current != label {
+            let previous = std::mem::replace(current, label.to_owned());
+            superseded.retain(|value| value != label);
+            if !superseded.contains(&previous) {
+                superseded.push(previous);
+            }
+        }
     }
 
     /// The `peer` value series use for `peer`: the registered scoped value
@@ -3949,7 +3964,19 @@ impl BgpMetrics {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(peer)
-            .map_or(Cow::Borrowed(peer), |label| Cow::Owned(label.clone()))
+            .map_or(Cow::Borrowed(peer), |(label, _)| Cow::Owned(label.clone()))
+    }
+
+    /// Forget and return the scoped values registrations for bare address
+    /// `peer` replaced, so their series can be reaped once.
+    fn take_superseded_peers(&self, peer: &str) -> Vec<String> {
+        self.0
+            .scoped_peers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(peer)
+            .map(|(_, superseded)| std::mem::take(superseded))
+            .unwrap_or_default()
     }
 
     /// Remove every series whose `peer` label equals `peer`, across all
@@ -3971,6 +3998,10 @@ impl BgpMetrics {
     /// REAP LIST — keep in sync with the `peer`-labeled Vec fields on
     /// [`BgpMetrics`] (see the struct doc comment).
     pub fn reap_peer_series(&self, peer: &str) {
+        // A bare address also reaps the values an interface move replaced.
+        for value in self.take_superseded_peers(peer) {
+            self.reap_peer_series(&value);
+        }
         let peer = &*self.scoped_peer(peer);
         Self::reap_peer_series_from_vec(&self.0.state_transitions, peer);
         Self::reap_peer_series_from_vec(&self.0.session_flaps, peer);
@@ -10793,6 +10824,36 @@ mod tests {
             BTreeSet::from(
                 ["192.0.2.1", "2001:db8::1", "fe80::1%eth1", "fe80::2"].map(str::to_owned)
             )
+        );
+    }
+
+    #[test]
+    fn interface_move_reaps_late_writes_to_the_superseded_scoped_value() {
+        let m = BgpMetrics::with_registry(Registry::new());
+        let address: IpAddr = "fe80::1".parse().unwrap();
+        m.register_scoped_peer(address, "fe80::1%eth0");
+        m.set_rib_prefixes("fe80::1", "ipv4_unicast", 5);
+        // The manager deletes the eth0 neighbor and queues the RIB's reap.
+        m.reap_peer_series("fe80::1%eth0");
+        // The RIB's late teardown write lands on the old scoped value...
+        m.set_rib_prefixes("fe80::1", "ipv4_unicast", 3);
+        // ...before the re-add on eth1 replaces the registration.
+        m.register_scoped_peer(address, "fe80::1%eth1");
+        m.record_message_sent("fe80::1", "open");
+        // The RIB's final reap names the bare address.
+        m.reap_peer_series("fe80::1");
+        assert!(
+            peer_label_values(&m).is_empty(),
+            "superseded fe80::1%eth0 series must not outlive the final reap"
+        );
+
+        // The superseded value is forgotten once reaped: a later reap of
+        // the bare address leaves a series written under that value alone.
+        m.record_message_sent("fe80::1%eth0", "open");
+        m.reap_peer_series("fe80::1");
+        assert_eq!(
+            peer_label_values(&m),
+            BTreeSet::from(["fe80::1%eth0".to_owned()])
         );
     }
 
