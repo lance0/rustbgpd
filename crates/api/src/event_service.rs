@@ -2166,11 +2166,31 @@ mod tests {
         assert!(lag.missed_count > 0);
     }
 
-    /// Cross-stream correlation: notification and policy events must render
-    /// the same scoped `address%interface` peer label lifecycle events use.
+    /// Cross-stream correlation: session, notification and policy events
+    /// report a scoped neighbor as route events do, a bare `peer_address`
+    /// plus `peer_interface`, on both the envelope and the payload.
+    /// Red proof: copying the label into `peer_address` fails every row.
     #[test]
-    fn notification_and_policy_events_render_scoped_peer_label() {
+    fn session_and_policy_events_report_address_plus_interface() {
         let peer: IpAddr = "fe80::1".parse().unwrap();
+        let mut lifecycle = crate::test_support::lifecycle_event(
+            peer,
+            crate::peer_types::SessionLifecycleEventType::Established,
+        );
+        lifecycle.peer_label = Some("fe80::1%eth0".to_string());
+        let event = session_event_to_bgp_event(SessionEvent::Lifecycle(lifecycle));
+        assert_eq!(event.peer_address, "fe80::1");
+        let Some(proto::bgp_event::Payload::Session(payload)) = event.payload else {
+            panic!("expected session payload");
+        };
+        assert_eq!(
+            (
+                payload.peer_address.as_str(),
+                payload.peer_interface.as_str()
+            ),
+            ("fe80::1", "eth0")
+        );
+
         let SessionEvent::Notification(mut notification) =
             notification_event(peer, SessionNotificationEventType::Sent)
         else {
@@ -2178,20 +2198,45 @@ mod tests {
         };
         notification.peer_label = Some("fe80::1%eth0".to_string());
         let event = session_event_to_bgp_event(SessionEvent::Notification(notification));
-        assert_eq!(event.peer_address, "fe80::1%eth0");
+        assert_eq!(event.peer_address, "fe80::1");
         let Some(proto::bgp_event::Payload::Notification(payload)) = event.payload else {
             panic!("expected notification payload");
         };
-        assert_eq!(payload.peer_address, "fe80::1%eth0");
+        assert_eq!(
+            (
+                payload.peer_address.as_str(),
+                payload.peer_interface.as_str()
+            ),
+            ("fe80::1", "eth0")
+        );
 
         let mut policy = policy_event(Some(peer));
         policy.peer_label = Some("fe80::1%eth0".to_string());
         let event = policy_event_to_bgp_event(policy);
-        assert_eq!(event.peer_address, "fe80::1%eth0");
+        assert_eq!(event.peer_address, "fe80::1");
         let Some(proto::bgp_event::Payload::Policy(payload)) = event.payload else {
             panic!("expected policy payload");
         };
-        assert_eq!(payload.peer_address, "fe80::1%eth0");
+        assert_eq!(
+            (
+                payload.peer_address.as_str(),
+                payload.peer_interface.as_str()
+            ),
+            ("fe80::1", "eth0")
+        );
+
+        // A numbered neighbor's label carries no interface.
+        let event = policy_event_to_bgp_event(policy_event(Some("192.0.2.1".parse().unwrap())));
+        let Some(proto::bgp_event::Payload::Policy(payload)) = event.payload else {
+            panic!("expected policy payload");
+        };
+        assert_eq!(
+            (
+                payload.peer_address.as_str(),
+                payload.peer_interface.as_str()
+            ),
+            ("192.0.2.1", "")
+        );
     }
 
     #[tokio::test]

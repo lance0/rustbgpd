@@ -3443,6 +3443,10 @@ message SessionEvent {
   string session_role = 6;
   // Stable operator-facing reason/summary string for this event.
   string reason = 7;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 8;
 }
 
 message StreamLagEvent {
@@ -3474,6 +3478,10 @@ message NotificationEvent {
   string shutdown_reason = 9;
   // Stable operator-facing reason/summary string for this event.
   string reason = 10;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 11;
 }
 
 message PolicyEvent {
@@ -3494,6 +3502,10 @@ message PolicyEvent {
   string timestamp = 7;
   // Stable operator-facing reason/summary string for this event.
   string reason = 8;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 9;
 }
 
 message DataplaneEvent {
@@ -3584,10 +3596,10 @@ message BgpEvent {
   // Outbound peer affected by target-scoped route events such as
   // export-policy filtering. Empty for ordinary source-peer route events.
   string target_peer_address = 19;
-  // A route-category event's interface scopes are in its RouteEvent
-  // payload (peer_interface, previous_peer_interface,
-  // target_peer_interface); they are not duplicated here, which would
-  // grow every broadcast ring slot.
+  // peer_address is a bare IP literal for every category. A scoped
+  // neighbor's interface is in the payload (RouteEvent, SessionEvent,
+  // NotificationEvent or PolicyEvent peer_interface fields); it is not
+  // duplicated here, which would grow every broadcast ring slot.
 
   // 21 was the durable event_id and 22 the OTC route-blocked payload, both
   // produced only by the removed durable event history.

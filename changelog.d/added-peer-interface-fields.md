@@ -4,7 +4,8 @@
   its bare `peer_address`: `peer_interface` on `Route`, `RouteSourceIdentity`,
   `PathExportDispositionEntry`, `OrrExplainCandidate`,
   `ExplainBestPathResponse`, `ExplainImportPolicyResponse`,
-  `ImportExplainMatch` and `ListRejectedRoutesResponse`; `peer_interface`,
+  `ImportExplainMatch`, `ListRejectedRoutesResponse`, `SessionEvent`,
+  `NotificationEvent` and `PolicyEvent`; `peer_interface`,
   `previous_peer_interface` and `target_peer_interface` on `RouteEvent`; and
   `peer_interface` plus `route_peer_interface` on
   `ExplainAdvertisedRouteResponse`. The address and interface together

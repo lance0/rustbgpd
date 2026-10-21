@@ -351,17 +351,19 @@ neighbor; the interface is empty for a numbered neighbor:
 | `ExplainBestPathResponse` | `peer_interface` |
 | `PathExportDispositionEntry` | `peer_interface` |
 | `ExplainImportPolicyResponse`, `ImportExplainMatch`, `ListRejectedRoutesResponse` | `peer_interface` |
+| `SessionEvent`, `NotificationEvent`, `PolicyEvent` | `peer_interface` |
 
 Route rows and route events report the interface recorded when the route was
 learned or the event was recorded, not the current neighbor inventory.
 Routes retained across a Graceful Restart and the history of a deleted
-neighbor keep the interface they had. A `WatchEvents` route event carries its
-interfaces in the `RouteEvent` payload; the envelope's `peer_address`,
-`previous_peer_address` and `target_peer_address` are not repeated with a
-scope.
+neighbor keep the interface they had. A `BgpEvent` envelope's
+`peer_address`, `previous_peer_address` and `target_peer_address` are bare IP
+literals in every category; the interfaces are in its payload (`RouteEvent`,
+`SessionEvent`, `NotificationEvent` or `PolicyEvent`) and are not repeated on
+the envelope. Session, notification and policy events report the interface
+of the neighbor they name.
 
-Session, notification and policy events already render a scoped neighbor's
-`peer_address` as `address%interface`; that is unchanged. EVPN, VPN, labeled,
+EVPN, VPN, labeled,
 RTC, BGP-LS and FlowSpec route entries, EVPN route events, FIB and blackhole
 status rows, BFD sessions and policy statistics rows still report a bare
 address with no interface. Each link-local address can belong to only one
@@ -3038,8 +3040,8 @@ Unified event types:
 | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED` | BGP FSM state changed; payload carries old/new state and session role |
 | `BGP_EVENT_TYPE_SESSION_ESTABLISHED` | FSM reached `Established` |
 | `BGP_EVENT_TYPE_SESSION_LOST` | FSM left `Established`; severity is `WARNING` |
-| `BGP_EVENT_TYPE_PEER_ADDED` | Peer entered the authoritative managed set; payload carries new state `idle` and the exact scoped peer label |
-| `BGP_EVENT_TYPE_PEER_REMOVED` | Peer left the authoritative managed set after session retirement; payload carries no FSM state or role and preserves the exact scoped peer label |
+| `BGP_EVENT_TYPE_PEER_ADDED` | Peer entered the authoritative managed set; payload carries new state `idle` and the neighbor's exact address and interface |
+| `BGP_EVENT_TYPE_PEER_REMOVED` | Peer left the authoritative managed set after session retirement; payload carries no FSM state or role and preserves the neighbor's exact address and interface |
 | `BGP_EVENT_TYPE_PEER_ENABLED` | Operator enabled a configured peer |
 | `BGP_EVENT_TYPE_PEER_DISABLED` | Operator disabled a configured peer |
 | `BGP_EVENT_TYPE_NOTIFICATION_SENT` | rustbgpd sent a BGP NOTIFICATION; payload carries direction, code, subcode, description, session role, and optional RFC 9003 shutdown reason |

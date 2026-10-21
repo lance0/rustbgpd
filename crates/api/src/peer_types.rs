@@ -53,6 +53,15 @@ impl PeerKey {
         }
     }
 
+    /// The interface in an operator label rendered by [`Self::label`]
+    /// (`address%interface`); empty for a numbered neighbor's label.
+    #[must_use]
+    pub fn label_interface(label: Option<&str>) -> &str {
+        label
+            .and_then(|label| label.split_once('%'))
+            .map_or("", |(_, interface)| interface)
+    }
+
     /// Whether an event recorded for `address` with operator label `label`
     /// (`address%interface` for a scoped neighbor) belongs to this neighbor.
     /// A scoped key matches only the label it would render.

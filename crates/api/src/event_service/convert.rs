@@ -1,5 +1,5 @@
 use crate::peer_types::{
-    PolicyEvent, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
+    PeerKey, PolicyEvent, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
     SessionNotificationEvent, SessionNotificationEventType,
 };
 use crate::proto;
@@ -187,10 +187,9 @@ pub fn session_event_to_bgp_event(event: SessionEvent) -> proto::BgpEvent {
 
 fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::BgpEvent {
     let event_type = session_lifecycle_event_type_to_bgp_event_type(event.event_type);
-    let peer_address = event
-        .peer_label
-        .clone()
-        .unwrap_or_else(|| event.peer.to_string());
+    // Bare address plus interface, the identity shape of route events.
+    let peer_address = event.peer.to_string();
+    let peer_interface = PeerKey::label_interface(event.peer_label.as_deref()).to_string();
     let old_state = event
         .old_state
         .map_or_else(String::new, |state| state.as_str().to_string());
@@ -206,6 +205,7 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
         new_state,
         session_role,
         reason: event.reason.clone(),
+        peer_interface,
     };
 
     let severity = match event.event_type {
@@ -239,10 +239,9 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
 
 fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> proto::BgpEvent {
     let event_type = session_notification_event_type_to_bgp_event_type(event.event_type);
-    let peer_address = event
-        .peer_label
-        .clone()
-        .unwrap_or_else(|| event.peer.to_string());
+    // Bare address plus interface, the identity shape of route events.
+    let peer_address = event.peer.to_string();
+    let peer_interface = PeerKey::label_interface(event.peer_label.as_deref()).to_string();
     let direction = match event.event_type {
         SessionNotificationEventType::Sent => "sent",
         SessionNotificationEventType::Received => "received",
@@ -258,6 +257,7 @@ fn session_notification_event_to_bgp_event(event: SessionNotificationEvent) -> p
         session_role: event.session_role.unwrap_or_default(),
         shutdown_reason: event.shutdown_reason.unwrap_or_default(),
         reason: event.reason.clone(),
+        peer_interface,
     };
 
     proto::BgpEvent {
@@ -290,8 +290,9 @@ pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
         reason,
     } = event;
     let timestamp = rustbgpd_rib::event::unix_seconds_string(timestamp_unix_ms);
-    let peer_address =
-        peer_label.unwrap_or_else(|| peer.map_or_else(String::new, |peer| peer.to_string()));
+    // Bare address plus interface, the identity shape of route events.
+    let peer_address = peer.map_or_else(String::new, |peer| peer.to_string());
+    let peer_interface = PeerKey::label_interface(peer_label.as_deref()).to_string();
     let policy = proto::PolicyEvent {
         event_type: proto::BgpEventType::PolicyChanged as i32,
         operation: operation.to_string(),
@@ -301,6 +302,7 @@ pub fn policy_event_to_bgp_event(event: PolicyEvent) -> proto::BgpEvent {
         affected_peer_count: u32::try_from(affected_peer_count).unwrap_or(u32::MAX),
         timestamp: timestamp.clone(),
         reason: reason.clone(),
+        peer_interface,
     };
 
     proto::BgpEvent {

@@ -34,18 +34,34 @@ fn scope_route_event(event: &mut RouteEvent) {
     scope_address(&mut event.target_peer_address, &event.target_peer_interface);
 }
 
-/// [`scope_route_event`] for a route-category stream event: its payload
-/// carries the interfaces, which also scope the envelope's addresses.
+/// Render a stream event's neighbors in scoped form: the payload carries
+/// the interfaces, which also scope the envelope's addresses.
 fn scope_bgp_event(event: &mut BgpEvent) {
     use crate::commands::neighbor::scope_address;
-    if let Some(crate::proto::bgp_event::Payload::Route(route)) = &mut event.payload {
-        scope_address(&mut event.peer_address, &route.peer_interface);
-        scope_address(
-            &mut event.previous_peer_address,
-            &route.previous_peer_interface,
-        );
-        scope_address(&mut event.target_peer_address, &route.target_peer_interface);
-        scope_route_event(route);
+    use crate::proto::bgp_event::Payload;
+    match &mut event.payload {
+        Some(Payload::Route(route)) => {
+            scope_address(&mut event.peer_address, &route.peer_interface);
+            scope_address(
+                &mut event.previous_peer_address,
+                &route.previous_peer_interface,
+            );
+            scope_address(&mut event.target_peer_address, &route.target_peer_interface);
+            scope_route_event(route);
+        }
+        Some(Payload::Session(session)) => {
+            scope_address(&mut event.peer_address, &session.peer_interface);
+            scope_address(&mut session.peer_address, &session.peer_interface);
+        }
+        Some(Payload::Notification(notification)) => {
+            scope_address(&mut event.peer_address, &notification.peer_interface);
+            scope_address(&mut notification.peer_address, &notification.peer_interface);
+        }
+        Some(Payload::Policy(policy)) => {
+            scope_address(&mut event.peer_address, &policy.peer_interface);
+            scope_address(&mut policy.peer_address, &policy.peer_interface);
+        }
+        _ => {}
     }
 }
 
@@ -1194,7 +1210,8 @@ pub async fn session_history(
         print_empty_history(json, "session")?;
         return Ok(());
     }
-    for event in response.events {
+    for mut event in response.events {
+        scope_bgp_event(&mut event);
         print_bgp_event(&event, json)?;
     }
     Ok(())
@@ -1229,7 +1246,8 @@ pub async fn policy_history(
         print_empty_history(json, "policy")?;
         return Ok(());
     }
-    for event in response.events {
+    for mut event in response.events {
+        scope_bgp_event(&mut event);
         print_bgp_event(&event, json)?;
     }
     Ok(())
@@ -2361,6 +2379,40 @@ mod tests {
         assert_eq!(value["summary"], "route best changed 203.0.113.0/24");
     }
 
+    /// The daemon reports a scoped neighbor as a bare address plus its
+    /// interface; rbgp keeps printing `address%interface` for session and
+    /// policy events, envelope and payload alike.
+    #[test]
+    fn session_and_policy_events_render_the_scoped_neighbor() {
+        use crate::proto::bgp_event::Payload;
+        let mut session = BgpEvent {
+            peer_address: "fe80::1".to_string(),
+            payload: Some(Payload::Session(crate::proto::SessionEvent {
+                peer_address: "fe80::1".to_string(),
+                peer_interface: "eth0".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        scope_bgp_event(&mut session);
+        assert_eq!(session.peer_address, "fe80::1%eth0");
+        let Some(Payload::Session(payload)) = &session.payload else {
+            panic!("expected session payload");
+        };
+        assert_eq!(payload.peer_address, "fe80::1%eth0");
+
+        let mut policy = BgpEvent {
+            peer_address: "192.0.2.1".to_string(),
+            payload: Some(Payload::Policy(crate::proto::PolicyEvent {
+                peer_address: "192.0.2.1".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        scope_bgp_event(&mut policy);
+        assert_eq!(policy.peer_address, "192.0.2.1");
+    }
+
     #[test]
     fn json_bgp_event_session_uses_null_family() {
         let event = BgpEvent {
@@ -2380,6 +2432,7 @@ mod tests {
                     new_state: "Established".to_string(),
                     session_role: "primary".to_string(),
                     reason: "session established".to_string(),
+                    peer_interface: String::new(),
                 },
             )),
             ..Default::default()
@@ -2468,6 +2521,7 @@ mod tests {
                     session_role: "primary".to_string(),
                     shutdown_reason: String::new(),
                     reason: "BGP NOTIFICATION sent for peer 10.0.0.1: 6/7 (Connection Collision Resolution)".to_string(),
+                    peer_interface: String::new(),
                 },
             )),
             ..Default::default()
