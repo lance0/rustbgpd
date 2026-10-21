@@ -118,6 +118,23 @@ impl KnownPeerQueries {
     }
 }
 
+impl KnownPeerQueries {
+    /// [`Self::require_known`] for a parsed selector, naming its scoped
+    /// form (`fe80::1%eth0`) in the `NOT_FOUND` message.
+    pub(crate) async fn require_known_key(
+        &self,
+        key: &crate::peer_types::PeerKey,
+    ) -> Result<(), Status> {
+        self.require_known(key.address).await.map_err(|status| {
+            if status.code() == tonic::Code::NotFound {
+                Status::not_found(format!("neighbor {key} not found"))
+            } else {
+                status
+            }
+        })
+    }
+}
+
 /// Send one read-only request to the RIB manager and await its reply.
 ///
 /// Unlike [`peer_manager_read`], this is deliberately unbounded here: RIB
