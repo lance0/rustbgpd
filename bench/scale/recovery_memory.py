@@ -271,14 +271,49 @@ HARNESS_MEMBER_FULL_PASS = "                    .with_member_full_pass()\n"
 MEMBER_FULL_PASS_BUILDER = "pub fn with_member_full_pass("
 
 
+PEER_ID_EXPORT = "pub use peer_id::PeerId;"
+PEER_ID_IMPORT = re.compile(r"^[ \t]*use rustbgpd_rib::PeerId;\n", re.M)
+PEER_ID_FROM_ADDR = "PeerId::from_addr("
+PEER_ID_ADDR = "peer.addr()"
+
+
+def unwrap_peer_ids(text: str) -> str:
+    """Rewrite one harness source for a control whose RIB keys peers by address.
+
+    Before `PeerId`, the RIB took and returned the bare address, so
+    `PeerId::from_addr(x)` is `x` and `peer.addr()` is `peer`. Anything else
+    naming `PeerId` or calling `.addr()` has no one-to-one mapping and refuses.
+    """
+    text = PEER_ID_IMPORT.sub("", text)
+    out = []
+    rest = text
+    while (start := rest.find(PEER_ID_FROM_ADDR)) >= 0:
+        out.append(rest[:start])
+        depth = 1
+        index = start + len(PEER_ID_FROM_ADDR)
+        while depth:
+            require(index < len(rest), "unbalanced PeerId::from_addr in the harness")
+            depth += {"(": 1, ")": -1}.get(rest[index], 0)
+            index += 1
+        out.append(rest[start + len(PEER_ID_FROM_ADDR):index - 1])
+        rest = rest[index:]
+    text = "".join(out) + rest
+    text = text.replace(PEER_ID_ADDR, "peer")
+    require("PeerId" not in text, "a historical control cannot map this PeerId use")
+    require(".addr()" not in text, "a historical control cannot map this PeerId::addr use")
+    return text
+
+
 def derive_control_api(tree: Path) -> None:
     """Fit the shared harness to a control's RIB request API.
 
     A control whose RibUpdate predates dataset swaps drops `swaps: None`:
     `None` selects full re-evaluation, which is all such a control can do. A
     control without the per-member full-pass hook drops the hook: the
-    per-member resync is the only full pass it has. Every role therefore
-    still runs the same operation.
+    per-member resync is the only full pass it has. A control whose RIB
+    predates `PeerId` keys peers by address, so the harness's
+    `PeerId::from_addr`/`addr` conversions become identities there. Every role
+    therefore still runs the same operation.
     """
     update = (tree / "crates/rib/src/update.rs").read_text(encoding="utf-8")
     require(update.count(REEVALUATE_VARIANT) == 1, "unexpected export re-evaluation request")
@@ -295,7 +330,19 @@ def derive_control_api(tree: Path) -> None:
         require(text.count("swaps:") == text.count(HARNESS_SWAPS),
                 "a historical control cannot drop non-default dataset swaps")
         text = text.replace(HARNESS_SWAPS, "")
-    harness.write_text(text, encoding="utf-8")
+    changes = [(harness, text)]
+    lib = (tree / "crates/rib/src/lib.rs").read_text(encoding="utf-8")
+    if PEER_ID_EXPORT not in lib:
+        require("PeerId" not in lib, "unexpected PeerId export in the control")
+        entrypoint = tree / "bench/scale/rrharness/src/main.rs"
+        changes = [
+            (path, unwrap_peer_ids(source))
+            for path, source in ((harness, text),
+                                 (entrypoint, entrypoint.read_text(encoding="utf-8")))
+        ]
+    # Validate every file before changing any.
+    for path, source in changes:
+        path.write_text(source, encoding="utf-8")
 
 
 def key_values(text: str, name: str) -> dict[str, int]:
