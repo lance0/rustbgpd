@@ -808,6 +808,9 @@ struct FibRouteFilters {
     reason: Option<String>,
     prefix: Option<(String, u32)>,
     peer_address: Option<String>,
+    /// Page-token binding of a scoped peer selector; `None` keeps the plain
+    /// decimal offset token.
+    peer_scope: Option<String>,
 }
 
 impl FibRouteFilters {
@@ -822,8 +825,12 @@ impl FibRouteFilters {
                 let (addr, len) = prefix_parts(prefix);
                 (addr, len)
             });
-        let peer_address = parse_optional_peer_filter("peer_address", &req.peer_address, roster)?
-            .map(|key| key.address.to_string());
+        let key = parse_optional_peer_filter("peer_address", &req.peer_address, roster)?;
+        let peer_address = key.as_ref().map(|key| key.address.to_string());
+        let peer_scope = key
+            .as_ref()
+            .filter(|key| key.interface.is_some())
+            .map(|key| crate::peer_selector::scoped_identity("fib".to_string(), Some(key)));
         let state = match proto::FibRouteState::try_from(req.state) {
             Ok(proto::FibRouteState::Unspecified) => None,
             Ok(state) => Some(state),
@@ -841,6 +848,7 @@ impl FibRouteFilters {
             reason,
             prefix,
             peer_address,
+            peer_scope,
         })
     }
 
@@ -879,8 +887,12 @@ struct FibRoutePageParams {
     page_size: usize,
 }
 
+/// A FIB page token is the decimal offset, followed by `:` and the scope
+/// binding when the request selects a scoped peer; a token is refused for a
+/// request with a different scope.
 fn parse_fib_page_params(
     req: &proto::ListFibRoutesRequest,
+    peer_scope: Option<&str>,
 ) -> Result<Option<FibRoutePageParams>, &'static str> {
     if req.page_size == 0 {
         if req.page_token.is_empty() {
@@ -892,7 +904,14 @@ fn parse_fib_page_params(
     let offset: usize = if req.page_token.is_empty() {
         0
     } else {
-        req.page_token.parse().map_err(|_| "invalid page_token")?
+        let (offset, scope) = match req.page_token.split_once(':') {
+            Some((offset, scope)) => (offset, Some(scope)),
+            None => (req.page_token.as_str(), None),
+        };
+        if scope != peer_scope {
+            return Err("page_token belongs to a different peer scope");
+        }
+        offset.parse().map_err(|_| "invalid page_token")?
     };
 
     Ok(Some(FibRoutePageParams {
@@ -919,6 +938,7 @@ fn sort_fib_routes(routes: &mut [proto::FibRouteStatus]) {
 fn build_fib_response(
     routes: Vec<proto::FibRouteStatus>,
     page: Option<FibRoutePageParams>,
+    peer_scope: Option<&str>,
 ) -> proto::ListFibRoutesResponse {
     let total_count = u64::try_from(routes.len()).unwrap_or(u64::MAX);
     let Some(page) = page else {
@@ -939,10 +959,10 @@ fn build_fib_response(
         .offset
         .checked_add(page_routes.len())
         .unwrap_or(routes_len);
-    let next_page_token = if next_offset < routes_len {
-        next_offset.to_string()
-    } else {
-        String::new()
+    let next_page_token = match (next_offset < routes_len, peer_scope) {
+        (false, _) => String::new(),
+        (true, None) => next_offset.to_string(),
+        (true, Some(scope)) => format!("{next_offset}:{scope}"),
     };
 
     proto::ListFibRoutesResponse {
@@ -2854,7 +2874,8 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ListFibRoutesResponse>, Status> {
         let req = request.into_inner();
         let filters = FibRouteFilters::from_request(&req, self.roster())?;
-        let page = parse_fib_page_params(&req).map_err(Status::invalid_argument)?;
+        let page = parse_fib_page_params(&req, filters.peer_scope.as_deref())
+            .map_err(Status::invalid_argument)?;
         let mut routes: Vec<proto::FibRouteStatus> = (self.fib_route_snapshot)()
             .into_iter()
             .filter(|route| filters.matches(route))
@@ -2867,7 +2888,11 @@ impl proto::rib_service_server::RibService for RibService {
         {
             return Err(Status::invalid_argument("page_token is out of range"));
         }
-        Ok(Response::new(build_fib_response(routes, page)))
+        Ok(Response::new(build_fib_response(
+            routes,
+            page,
+            filters.peer_scope.as_deref(),
+        )))
     }
 
     async fn list_route_events(
@@ -8833,6 +8858,68 @@ mod tests {
         assert_eq!(row.peer_address, "198.51.100.1");
         assert_eq!(row.state, proto::FibRouteState::Installed as i32);
         assert_eq!(row.reason, "owned");
+    }
+
+    /// A FIB page token for a scoped peer binds the scope: it continues the
+    /// same scoped query and is refused for another interface or a numbered
+    /// query, while a numbered query keeps the plain decimal offset.
+    /// Red proof: dropping the scope comparison accepts the eth1 request.
+    #[tokio::test]
+    async fn fib_page_tokens_bind_the_peer_scope() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            Arc::new(|| {
+                ["203.0.113.0", "203.0.113.64", "198.51.100.0"]
+                    .into_iter()
+                    .zip(["fe80::1", "fe80::1", "192.0.2.1"])
+                    .map(|(prefix, peer)| proto::FibRouteStatus {
+                        table_name: "edge".to_string(),
+                        prefix: prefix.to_string(),
+                        prefix_length: 26,
+                        peer_address: peer.to_string(),
+                        ..Default::default()
+                    })
+                    .collect()
+            }),
+        );
+        let list = |peer: &str, page_token: String| {
+            svc.list_fib_routes(Request::new(proto::ListFibRoutesRequest {
+                peer_address: peer.to_string(),
+                page_size: 1,
+                page_token,
+                ..Default::default()
+            }))
+        };
+
+        let first = list("fe80::1%eth0", String::new())
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(first.total_count, 2);
+        let token = first.next_page_token;
+        assert!(token.starts_with("1:"), "{token}");
+        let second = list("fe80::1%eth0", token.clone())
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(second.routes[0].prefix, "203.0.113.64");
+        for other in ["fe80::1%eth1", "192.0.2.1", ""] {
+            let error = list(other, token.clone()).await.unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "{other}: {error}"
+            );
+        }
+
+        let numbered = list("", String::new()).await.unwrap().into_inner();
+        assert_eq!(numbered.next_page_token, "1");
+        let error = list("fe80::1%eth0", numbered.next_page_token)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
     }
 
     #[tokio::test]

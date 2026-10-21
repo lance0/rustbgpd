@@ -3005,7 +3005,8 @@ message ListFibRoutesRequest {
   // Optional page size. 0 preserves legacy behavior and returns the full
   // filtered snapshot.
   uint32 page_size = 7;
-  // Decimal offset returned by next_page_token. Requires page_size > 0.
+  // Opaque offset returned by next_page_token (bound to a scoped
+  // peer_address selector). Requires page_size > 0.
   string page_token = 8;
 }
 
