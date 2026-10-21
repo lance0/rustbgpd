@@ -1678,6 +1678,20 @@ impl Config {
             });
         }
 
+        let mut replay_owners = HashSet::new();
+        for owner in &self.global.gr_eor_replay_owners {
+            rustbgpd_rib::injection_lease::validate_owner(owner).map_err(|reason| {
+                ConfigError::InvalidGrConfig {
+                    reason: format!("gr_eor_replay_owners entry {owner:?}: {reason}"),
+                }
+            })?;
+            if !replay_owners.insert(owner.as_str()) {
+                return Err(ConfigError::InvalidGrConfig {
+                    reason: format!("gr_eor_replay_owners lists {owner:?} twice"),
+                });
+            }
+        }
+
         // Validate EVPN instances by resolving them — this runs the
         // full per-entry parse plus the table-level uniqueness checks
         // (duplicate VNI, duplicate RD) in one pass. The resolved

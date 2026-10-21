@@ -20,7 +20,8 @@ use rustbgpd_rib::injection_lease::{
 use rustbgpd_rib::manager::ROUTE_QUERY_MAX_PAGE_SIZE;
 use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition};
 use rustbgpd_rib::{
-    EvpnRibRoute, FlowSpecRoute, InjectOutcome, RibCommandError, RibUpdate, Route, RouteOrigin,
+    EvpnRibRoute, FlowSpecRoute, InjectOutcome, ReplayComplete, RibCommandError, RibUpdate, Route,
+    RouteOrigin,
 };
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, BitmaskMatch, EthernetSegmentIdentifier, EthernetTagId, EvpnImet,
@@ -1100,6 +1101,53 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             })
             .collect();
         Ok(Response::new(proto::ListInjectionLeasesResponse { leases }))
+    }
+
+    async fn mark_replay_complete(
+        &self,
+        request: Request<proto::MarkReplayCompleteRequest>,
+    ) -> Result<Response<proto::MarkReplayCompleteResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.get_ref();
+        validate_owner(&req.owner).map_err(Status::invalid_argument)?;
+        set_request_summary(
+            &request,
+            GrpcRequestSummary::new(format!(
+                "owner={} incarnation={}",
+                safe_summary_value(&req.owner),
+                req.incarnation
+            )),
+        );
+        let req = request.into_inner();
+        // The primary channel, not the query lane: the signal must follow
+        // the controller's earlier injections through the RIB queue.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::MarkReplayComplete {
+                owner: req.owner,
+                incarnation: req.incarnation,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
+        let result = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|error| map_rib_command_error("replay-complete signal failed", error))?;
+        let (outcome, awaiting) = match result {
+            ReplayComplete::Released => (proto::ReplayCompleteOutcome::Released, vec![]),
+            ReplayComplete::Recorded { awaiting } => {
+                (proto::ReplayCompleteOutcome::Recorded, awaiting)
+            }
+            ReplayComplete::NotExpected => (proto::ReplayCompleteOutcome::NotExpected, vec![]),
+            ReplayComplete::NotHolding => (proto::ReplayCompleteOutcome::NotHolding, vec![]),
+        };
+        Ok(Response::new(proto::MarkReplayCompleteResponse {
+            outcome: outcome as i32,
+            awaiting,
+        }))
     }
 
     async fn add_evpn_route(
@@ -4761,6 +4809,106 @@ mod tests {
         let info = ErrorInfo::decode(any.value.as_slice()).expect("google.rpc.ErrorInfo");
         assert_eq!(info.domain, "rustbgpd");
         info.reason
+    }
+
+    /// `MarkReplayComplete` through a running RIB holding one grace window
+    /// for two listed controllers: each outcome maps to its enum value, the
+    /// partial signal lists who is still awaited, and a stale incarnation is
+    /// `FAILED_PRECONDITION` with reason `INCARNATION_MISMATCH`.
+    #[tokio::test]
+    async fn mark_replay_complete_maps_every_outcome() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        )
+        .with_eor_grace(rustbgpd_rib::EorGraceConfig {
+            peers: vec![rustbgpd_rib::EorGracePeerConfig {
+                peer: "192.0.2.2".parse().unwrap(),
+                deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(600),
+                families: vec![(Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
+            }],
+            replay_owners: vec!["ctl-a".into(), "ctl-b".into()],
+        });
+        let leases = manager.injection_leases();
+        let incarnation = leases.incarnation();
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, leases);
+        let mark = |owner: &str, incarnation: u64| {
+            Request::new(proto::MarkReplayCompleteRequest {
+                owner: owner.into(),
+                incarnation,
+            })
+        };
+        let outcome =
+            |response: proto::MarkReplayCompleteResponse| (response.outcome(), response.awaiting);
+
+        let response = svc
+            .mark_replay_complete(mark("ctl-a", incarnation))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            outcome(response),
+            (
+                proto::ReplayCompleteOutcome::Recorded,
+                vec!["ctl-b".to_string()]
+            )
+        );
+        let stale = svc
+            .mark_replay_complete(mark("ctl-b", incarnation ^ 1))
+            .await
+            .unwrap_err();
+        assert_eq!(lease_conflict_reason(&stale), "INCARNATION_MISMATCH");
+        let response = svc
+            .mark_replay_complete(mark("unlisted", incarnation))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            outcome(response),
+            (proto::ReplayCompleteOutcome::NotExpected, vec![])
+        );
+        let invalid = svc
+            .mark_replay_complete(mark("bad owner", incarnation))
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        let response = svc
+            .mark_replay_complete(mark("ctl-b", incarnation))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            outcome(response),
+            (proto::ReplayCompleteOutcome::Released, vec![])
+        );
+        let response = svc
+            .mark_replay_complete(mark("ctl-a", incarnation))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            outcome(response),
+            (proto::ReplayCompleteOutcome::NotHolding, vec![])
+        );
+
+        let read_only = InjectionService::new(
+            rib_tx.clone(),
+            AccessMode::ReadOnly,
+            Arc::new(InjectionLeases::new()),
+        );
+        assert!(
+            read_only
+                .mark_replay_complete(mark("ctl-a", incarnation))
+                .await
+                .is_err()
+        );
+        drop((svc, read_only, rib_tx));
+        manager_task.await.unwrap();
     }
 
     /// Every lease-ownership refusal carries its `ErrorInfo` reason through

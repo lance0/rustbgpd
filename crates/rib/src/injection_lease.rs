@@ -196,6 +196,9 @@ pub enum LeaseConflict {
     KeyUnowned,
     /// The renewed generation is unknown, superseded or expired.
     GenerationNotLive,
+    /// A replay-complete signal named another daemon incarnation than this
+    /// process's: the controller replayed into a previous process.
+    IncarnationMismatch,
 }
 
 impl LeaseConflict {
@@ -206,6 +209,7 @@ impl LeaseConflict {
             Self::OwnerMismatch => "OWNER_MISMATCH",
             Self::KeyUnowned => "KEY_UNOWNED",
             Self::GenerationNotLive => "GENERATION_NOT_LIVE",
+            Self::IncarnationMismatch => "INCARNATION_MISMATCH",
         }
     }
 }

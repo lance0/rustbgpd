@@ -2992,6 +2992,19 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Option<crate::injection_lease::LeasedKeysPage>>,
     },
+    /// A controller finished replaying its desired state into incarnation
+    /// `incarnation` (the planned-restart End-of-RIB grace window). Sent on
+    /// the primary channel, so it is applied after the controller's earlier
+    /// injections.
+    MarkReplayComplete {
+        /// Controller (lease owner syntax).
+        owner: String,
+        /// The daemon incarnation the controller replayed into.
+        incarnation: u64,
+        /// Response channel; a stale incarnation is
+        /// [`RibCommandError::FailedPrecondition`].
+        reply: oneshot::Sender<Result<crate::manager::ReplayComplete, RibCommandError>>,
+    },
     /// Subscribe to route change events via broadcast channel.
     SubscribeRouteEvents {
         /// Response channel carrying the broadcast receiver.

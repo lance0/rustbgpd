@@ -198,6 +198,7 @@ Required. Defines the local BGP speaker identity.
 | `max_as_path_length` | u16 | no       | `750`                | Maximum number of AS numbers accepted in a received `AS_PATH`, counted across every segment with prepends and `AS_SET` members included. A longer path carrying reachable NLRI is handled as RFC 7606 treat-as-withdraw (subcode 11): its routes are withdrawn, the session stays Established, and `bgp_update_malformed_total{disposition="treat_as_withdraw"}` increments. Without reachable NLRI, RFC 7606 section 5.2 requires a session reset. `0` disables the ceiling. Distinct from the `as_path_length` policy match, which filters without withdrawing. **Restart-required.** |
 | `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. The `prometheus_addr` HTTP listener runs on its own thread outside this runtime and is not counted. **Restart-required** (runtime built once at startup). |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB and BLACKHOLE ownership receipts, and gRPC socket) |
+| `gr_eor_replay_owners` | array of strings | no | `[]` | Injection controllers whose replay-complete signal releases the [planned-restart End-of-RIB grace window](#planned-restart-end-of-rib-grace-window) early. Release needs every listed controller; the deadline still wins. Names use the lease owner rule (1-64 bytes of `[A-Za-z0-9._-]`), each listed once. Empty keeps the timer-only window. **Restart-required.** |
 | `warm_cache_checkpoint_on_shutdown` | bool | no | `false`             | Publish a bounded daemon-private routing checkpoint during coordinated shutdown. **Restart-required.** Publication only; startup does not restore routes. |
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
 | `honor_graceful_shutdown` | bool | no  | `false`              | Enable RFC 8326 §4 receiver behavior on EBGP imports — see below |
@@ -2012,9 +2013,35 @@ gr_eor_grace_time = 25   # off by default
   `bgp_gr_eor_grace_released_total{peer,reason="deadline"}` increments. The
   release is timer-driven: rustbgpd does not know whether replay finished, and
   a route not re-injected by then is removed by the helper at that End-of-RIB.
-- **Scope of the guarantee.** The window closes the observed gap when replay
-  completes before release. A timer does not prove that replay completed, so
-  this is a bounded mitigation, not a gap-free restart.
+  When listed controllers have not signalled (below), the release is a WARN
+  log whose `awaiting` field names them.
+- **Replay-complete signal.** List the controllers in `[global]
+  gr_eor_replay_owners`. Each one reads the daemon incarnation
+  (`CheckLiveness`) before it replays, re-adds its full desired state, then
+  calls [`InjectionService.MarkReplayComplete`](api.md#replay-complete-signal)
+  with its name and that incarnation. Once every listed controller has
+  signalled, every held End-of-RIB is released at once (a neighbor that
+  establishes later gets End-of-RIB right after its initial table) and
+  `bgp_gr_eor_grace_released_total{peer,reason="replay_complete"}`
+  increments. The signal travels through the RIB queue behind the
+  controller's earlier injections, so the replayed routes reach the helper
+  first. A signal for an older incarnation is refused, so a replay into a
+  previous process never counts. `rustbgpd-gobgp-bridge` signals as
+  `gobgp-bridge` after its post-restart reconcile pass finishes without a
+  failure.
+- **Scope of the guarantee.** The window closes the gap when every listed
+  controller signals before the deadline: release then follows the
+  controllers' replay, not a timer. The signal proves that each controller
+  replayed its own desired state, nothing more; behind the GoBGP bridge
+  that is the bans the bridge tracks, not the detector's view. With no
+  listed controller, or when one stays silent, release falls back to the
+  deadline, which closes the observed gap only when replay completes before
+  it.
+
+```toml
+[global]
+gr_eor_replay_owners = ["gobgp-bridge"]
+```
 
 **Choosing the value.** Set the window a few seconds beyond the controller's
 measured replay time after a restart. End-of-RIB is per address family, so the
@@ -2040,8 +2067,9 @@ heuristic only; it cannot see the upstream's real limit. The local
 `gr_stale_routes_time` is the opposite direction (how long rustbgpd keeps a
 restarting peer's routes) and does not bound this window.
 
-A reload stores a new value for the next planned restart; it does not change a
-window already running.
+A reload stores a new `gr_eor_grace_time` for the next planned restart; it
+does not change a window already running. `gr_eor_replay_owners` is read once
+at startup; a change waits for the next restart.
 
 ### Long-Lived Graceful Restart (RFC 9494)
 

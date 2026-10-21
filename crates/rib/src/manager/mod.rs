@@ -132,7 +132,7 @@ pub use conditional_advertisement::{
     ConditionEntryStatus, ConditionalAdvertiseIf, ConditionalAdvertisement,
     ConditionalAdvertisementCapture, ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
 };
-pub use eor_grace::{EorGraceConfig, EorGracePeerConfig};
+pub use eor_grace::{EorGraceConfig, EorGracePeerConfig, ReplayComplete};
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 
@@ -911,6 +911,9 @@ pub struct RibManager {
     /// Each grace window's absolute deadline, with a cached minimum so the
     /// run loop's per-turn timer probe does not scan the peers.
     eor_grace_deadlines: graceful_restart::DeadlineMap<IpAddr>,
+    /// Controllers whose replay-complete signals release the grace windows
+    /// early, and the ones that have signalled.
+    eor_replay: eor_grace::ReplayWait,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
     /// Route identities touched while their family's Loc-RIB was frozen.
@@ -2434,6 +2437,7 @@ impl RibManager {
             rtc_eor_hold_ready: HashSet::new(),
             eor_grace: HashMap::new(),
             eor_grace_deadlines: graceful_restart::DeadlineMap::default(),
+            eor_replay: eor_grace::ReplayWait::default(),
             selection_deferral: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
             selection_deferred_refresh: HashMap::new(),
@@ -4333,6 +4337,16 @@ impl RibManager {
                 let page = self.leased_keys_page(&owner, resume.as_ref(), page_size);
                 if reply.send(page).is_err() {
                     warn!("query caller dropped before receiving response");
+                }
+            }
+            RibUpdate::MarkReplayComplete {
+                owner,
+                incarnation,
+                reply,
+            } => {
+                let result = self.mark_replay_complete(&owner, incarnation);
+                if reply.send(result).is_err() {
+                    warn!("replay-complete caller dropped before receiving response");
                 }
             }
             RibUpdate::QueryLocalRouteExport {

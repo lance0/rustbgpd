@@ -174,10 +174,50 @@ FRR as the helper:
   End-of-RIB on the new session. If End-of-RIB wins, FRR drops the stale bans
   and learns them again when the replay lands, so the upstream briefly has no
   blackhole. The liveness probe keeps that window short; the receipt records
-  the measured value.
+  the measured value. The daemon's End-of-RIB grace window with the
+  replay-complete signal (below) closes it.
 - An unban that fails while rustbgpd is stopped leaves the stale blackhole at
   the peer until rustbgpd returns and sends End-of-RIB, or until the peer's
   restart timer expires.
+
+### Replay-complete signal
+
+When the post-restart pass that a liveness probe started finishes with no
+failed call, the bridge calls the daemon's
+`InjectionService.MarkReplayComplete` as owner **`gobgp-bridge`**, with the
+incarnation that probe reported before the pass began. A daemon that holds
+End-of-RIB after a planned restart
+([`gr_eor_grace_time`](../../docs/reference/configuration.md#planned-restart-end-of-rib-grace-window))
+and lists the bridge releases it then, after the replayed bans, instead of
+waiting for the window's deadline:
+
+```toml
+[global]
+gr_eor_replay_owners = ["gobgp-bridge"]
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 64512
+gr_eor_grace_time = 120   # an upper bound; the signal normally releases it
+```
+
+- The bridge needs no option for this; the owner name is fixed. Two bridges
+  in front of one daemon would signal under the same name, so the first one
+  to finish would release End-of-RIB for both.
+- If the daemon restarted again during the pass, it refuses the stale
+  incarnation (`FAILED_PRECONDITION`); the bridge then replays and signals
+  again on the next probe, as it does for a signal that is not answered
+  within the bridge's 10-second RPC deadline or fails in any other way
+  another pass could change. A daemon that predates the signal answers
+  `UNIMPLEMENTED`, which the bridge logs and ignores, as it does a refused
+  credential.
+- A daemon that does not list the bridge answers `NOT_EXPECTED`, and a cold
+  boot `NOT_HOLDING`; neither changes anything.
+- The periodic pass and the first probe after the bridge starts never signal:
+  only a pass that follows a daemon restart does.
+- The signal covers the bans this bridge process tracks. A bridge restarted
+  together with the daemon tracks nothing, so the detector must re-send its
+  bans before the window's deadline.
 
 A detector deadline can expire while the daemon is still applying a change.
 The daemon finishes a change it has accepted, so check the RIB before

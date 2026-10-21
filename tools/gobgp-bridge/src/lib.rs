@@ -8,7 +8,9 @@
 //!
 //! The bridge keeps the announced bans in memory and re-adds them on each
 //! reconcile pass, so a restarted daemon gets them back. A liveness probe
-//! starts a pass as soon as the daemon answers again after a restart. A request succeeds
+//! starts a pass as soon as the daemon answers again after a restart; when
+//! that pass finishes, the bridge signals `MarkReplayComplete` as
+//! [`REPLAY_OWNER`] for the incarnation it observed. A request succeeds
 //! only after rustbgpd has acknowledged the mutation, and daemon errors are
 //! returned as they arrive.
 
@@ -30,7 +32,7 @@ use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint, Uri};
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::rustbgpd as rbgp;
@@ -127,6 +129,10 @@ type Injection =
     rbgp::injection_service_client::InjectionServiceClient<InterceptedService<Channel, Bearer>>;
 type Control =
     rbgp::control_service_client::ControlServiceClient<InterceptedService<Channel, Bearer>>;
+
+/// The controller name the bridge signals replay completion under; list it
+/// in the daemon's `[global] gr_eor_replay_owners`.
+pub const REPLAY_OWNER: &str = "gobgp-bridge";
 
 /// Default interval between daemon liveness probes.
 pub const DEFAULT_LIVENESS_POLL: Duration = Duration::from_millis(500);
@@ -332,6 +338,44 @@ impl Bridge {
         true
     }
 
+    /// Tell the daemon that this bridge finished replaying into
+    /// `incarnation`, the value its probe saw before the pass started.
+    /// Returns false when the signal should be retried after another pass:
+    /// the daemon restarted again (`FAILED_PRECONDITION`), did not answer
+    /// (including a local deadline, which tonic reports as `CANCELLED`), or
+    /// failed in any other way another pass could change.
+    async fn mark_replay_complete(&self, incarnation: u64) -> bool {
+        let request = rbgp::MarkReplayCompleteRequest {
+            owner: REPLAY_OWNER.to_string(),
+            incarnation,
+        };
+        match self.injection.clone().mark_replay_complete(request).await {
+            Ok(response) => {
+                let response = response.into_inner();
+                info!(incarnation, outcome = ?response.outcome(), awaiting = ?response.awaiting, "signalled replay complete");
+                true
+            }
+            Err(status)
+                if matches!(
+                    status.code(),
+                    Code::Unimplemented
+                        | Code::PermissionDenied
+                        | Code::Unauthenticated
+                        | Code::InvalidArgument
+                ) =>
+            {
+                // A daemon that predates the signal, or a refusal another
+                // pass would not change.
+                warn!(code = ?status.code(), error = status.message(), "replay-complete signal failed");
+                true
+            }
+            Err(status) => {
+                warn!(code = ?status.code(), error = status.message(), "replay-complete signal not accepted; replaying again");
+                false
+            }
+        }
+    }
+
     /// Run `reconcile` every `interval` for the life of the process.
     pub fn spawn_reconcile(&self, interval: Duration) {
         let bridge = self.clone();
@@ -347,7 +391,9 @@ impl Bridge {
 
     /// Probe the daemon with `CheckLiveness` every `poll` for the life of the
     /// process, and run `reconcile` at once when the daemon answers after a
-    /// failed probe or with a new incarnation. `CheckLiveness` is the
+    /// failed probe or with a new incarnation. After that pass finishes with
+    /// no failure, it signals replay complete for the incarnation the probe
+    /// saw, so the daemon can release a held End-of-RIB. `CheckLiveness` is the
     /// daemon's cheapest call and is audited at DEBUG. Against a daemon that
     /// predates the incarnation, a restart quicker than one probe goes unseen
     /// here; the periodic pass is the backstop.
@@ -370,8 +416,11 @@ impl Bridge {
                     None => Probe::Down,
                     Some(incarnation) if came_back(last, answer) => {
                         info!(incarnation, "rustbgpd answered again; reconciling now");
-                        // An unfinished pass is retried on the next answer.
-                        if bridge.reconcile().await {
+                        // An unfinished pass, or a signal to retry, is
+                        // retried on the next answer.
+                        if bridge.reconcile().await
+                            && bridge.mark_replay_complete(incarnation).await
+                        {
                             Probe::Up(incarnation)
                         } else {
                             Probe::Down

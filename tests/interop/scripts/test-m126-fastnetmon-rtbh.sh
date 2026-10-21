@@ -22,6 +22,13 @@
 #   6. an unban while rustbgpd is stopped: the stale blackholes stay at FRR
 #      until the window releases End-of-RIB, then FRR removes them.
 #
+# Phase 7 lists the bridge in gr_eor_replay_owners and uses a long window:
+#
+#   7. a rustbgpd restart while banned: the bridge signals replay complete
+#      after its post-restart pass, and FRR's millisecond log shows both
+#      replayed bans before End-of-RIB, which arrives long before the
+#      window's deadline, released by the signal.
+#
 # Exit status 0 means every check passed. Control plane only.
 #
 # Environment:
@@ -60,6 +67,11 @@ RECONCILE_SECS=30
 # interval plus margin, stays below the 120 s Restart Time rustbgpd
 # advertises, and far below FRR's 360 s stale-path time.
 GRACE_SECS=40
+# Phase 7: a window long enough that only the replay-complete signal can
+# release End-of-RIB inside SIGNAL_EOR_MAX_SECS. The deadline is also clamped
+# to the restart marker's window (the 120 s Restart Time from shutdown).
+SIGNAL_GRACE_SECS=100
+SIGNAL_EOR_MAX_SECS=20
 # Phase 5: the latest the bridge's replay may refresh both bans after the
 # daemon starts. The restart watch reconciles on the first probe that sees a
 # new incarnation; FRR is polled once a second.
@@ -69,6 +81,12 @@ V6="2001:db8:66::7/128"
 V4_NH="10.0.0.1"
 V6_NH="2001:db8:126::1"
 BLACKHOLE="blackhole" # FRR's name for 65535:666
+# FRR's per-prefix line for a received announcement. FRR prints the
+# "rcvd UPDATE w/ attr" line only when the attributes differ from the last
+# ones it printed for the peer, so a replay that repeats them has only this
+# line. The export policy lets only BLACKHOLE-tagged host routes out.
+UPD4="rcvd $V4 IPv4 unicast"
+UPD6="rcvd $V6 IPv6 unicast"
 
 cd "$REPO_ROOT"
 WORK="$(mktemp -d)"
@@ -132,6 +150,15 @@ GRACE_CONF=/etc/rustbgpd-grace.toml
 { cat "$LAB_DIR/rustbgpd.toml"; echo "gr_eor_grace_time = $GRACE_SECS"; } >"$WORK/grace.toml"
 docker cp -q "$WORK/grace.toml" "$DET:$GRACE_CONF"
 docker exec "$DET" rustbgpd --check "$GRACE_CONF" >/dev/null
+# Phase 7: the long window, with the bridge as the listed replay controller.
+SIGNAL_CONF=/etc/rustbgpd-signal.toml
+{
+    sed 's/^listen_port = 179$/&\ngr_eor_replay_owners = ["gobgp-bridge"]/' "$LAB_DIR/rustbgpd.toml"
+    echo "gr_eor_grace_time = $SIGNAL_GRACE_SECS"
+} >"$WORK/signal.toml"
+grep -q '^gr_eor_replay_owners' "$WORK/signal.toml"
+docker cp -q "$WORK/signal.toml" "$DET:$SIGNAL_CONF"
+docker exec "$DET" rustbgpd --check "$SIGNAL_CONF" >/dev/null
 
 # Exact PIDs of a process name (/proc comm, 15 characters) in the detector.
 pids_of() {
@@ -268,9 +295,13 @@ expect_unbanned() { # label limit
 
 # Fail if either prefix appears at FRR during the next N seconds.
 # Milliseconds from FRR's End-of-RIB to the first blackhole UPDATE after line
-# MARK of its log, or 0 when the UPDATE came first (FRR never dropped the ban).
-frr_gap_ms() { # mark eor-pattern update-pattern
-    docker exec "$FRR" tail -n +"$(($1 + 1))" /tmp/bgpd.log | awk -v e="$2" -v u="$3" '
+# MARK of its log, or 0 when the UPDATE came first in log order (FRR never
+# dropped the ban). An UPDATE logged after End-of-RIB in the same millisecond
+# prints "<1", never 0.
+# With a fourth argument "lead", print End-of-RIB minus UPDATE instead:
+# positive when the UPDATE came first.
+frr_gap_ms() { # mark eor-pattern update-pattern [lead]
+    docker exec "$FRR" tail -n +"$(($1 + 1))" /tmp/bgpd.log | awk -v e="$2" -v u="$3" -v lead="${4:-}" '
         # Milliseconds since 1970 of a "YYYY/MM/DD HH:MM:SS.mmm" log line,
         # by days-from-civil, so a gap across midnight stays correct.
         function ms(  d, t, y, m, era, yoe, doy, doe) {
@@ -283,7 +314,13 @@ frr_gap_ms() { # mark eor-pattern update-pattern
         }
         index($0, e) && !ne { ne = NR; te = ms() }
         index($0, u) && !nu { nu = NR; tu = ms() }
-        END { if (!ne || !nu) print "unknown"; else if (nu < ne) print 0; else print tu - te }'
+        END {
+            if (!ne || !nu) print "unknown"
+            else if (lead != "") print te - tu
+            else if (nu < ne) print 0
+            else if (tu == te) print "<1"
+            else print tu - te
+        }'
 }
 
 expect_stays_absent() { # label seconds
@@ -334,6 +371,23 @@ frr_withdrawals() { # prefix
 
 grace_release_logs() {
     docker exec "$DET" sh -c 'grep -c "End-of-RIB grace window ended at its deadline" /var/log/rustbgpd.log || true'
+}
+
+signal_release_logs() {
+    docker exec "$DET" sh -c 'grep -c "every listed controller signalled replay complete" /var/log/rustbgpd.log || true'
+}
+
+bridge_signal_logs() {
+    docker exec "$DET" sh -c 'grep -c "signalled replay complete" /var/log/bridge.log || true'
+}
+
+# bgp_gr_eor_grace_released_total for FRR with this reason, from the running
+# rustbgpd (0 when absent).
+released_metric() { # reason
+    docker exec "$DET" rbgp metrics 2>/dev/null | awk -v r="$1" '
+        index($0, "bgp_gr_eor_grace_released_total{") == 1 &&
+            index($0, "peer=\"10.0.0.2\"") && index($0, "reason=\"" r "\"") { v = $2 }
+        END { print (v == "" ? 0 : v) }'
 }
 
 # ---------------------------------------------------------------------------
@@ -422,8 +476,8 @@ fi
 record "phase2_first_absent_after_start_s=${gap_from:-never}"
 record "phase2_withdrawals_before_first_absence=${gap_withdrawals:-n/a}"
 record "phase2_bans_back_after_start_s=${back:-never}"
-record "phase2_v4_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "attr: nexthop $V4_NH, origin ?, community blackhole")"
-record "phase2_v6_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "mp_nexthop $V6_NH, community blackhole")"
+record "phase2_v4_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "$UPD4")"
+record "phase2_v6_gap_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "$UPD6")"
 stop_replay
 expect_unbanned "phase 2 unban after restart" 90
 
@@ -542,8 +596,8 @@ else
 fi
 # From FRR's log order: each family's first blackhole UPDATE after the
 # restart came before its End-of-RIB, so the helper never dropped the ban.
-gap4=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "attr: nexthop $V4_NH, origin ?, community blackhole")
-gap6=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "mp_nexthop $V6_NH, community blackhole")
+gap4=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "$UPD4")
+gap6=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "$UPD6")
 if [ "$gap4" = 0 ] && [ "$gap6" = 0 ]; then
     ok "phase 5 FRR's log has both replayed bans before End-of-RIB"
 else
@@ -617,6 +671,68 @@ fi
 record "phase6_stale_until_s=${held:-never}"
 record "phase6_removed_after_start_s=${gone:-never}"
 expect_stays_absent "phase 6 after release (one reconcile interval)" $((RECONCILE_SECS + 5))
+
+# ---------------------------------------------------------------------------
+# Phase 7: rustbgpd restart while banned, replay-complete signal releases
+# End-of-RIB
+# ---------------------------------------------------------------------------
+
+log "Phase 7: ban, restart rustbgpd with a ${SIGNAL_GRACE_SECS}s window and gr_eor_replay_owners = [gobgp-bridge]"
+start_replay
+expect_banned "phase 7 ban" 60
+stop_one rustbgpd
+expect_stale "phase 7 daemon stopped, FRR keeps stale bans" 10
+deadline_releases_before=$(grace_release_logs)
+signal_releases_before=$(signal_release_logs)
+bridge_signals_before=$(bridge_signal_logs)
+mark=$(docker exec "$FRR" sh -c 'wc -l < /tmp/bgpd.log')
+start_rustbgpd "$SIGNAL_CONF"
+t0=$(date +%s)
+wait_session "phase 7 restart" 120 || true
+EXPECTED_EST=$((EXPECTED_EST + 1))
+# Wait for both End-of-RIB markers; give up at the window's deadline.
+eor4=""
+eor6=""
+while [ $(($(date +%s) - t0)) -lt $((SIGNAL_GRACE_SECS + 10)) ]; do
+    # grep finds nothing until End-of-RIB arrives; that is not an error.
+    eor4=$(frr_eor_after IPv4 "$mark" || true)
+    eor6=$(frr_eor_after IPv6 "$mark" || true)
+    [ -n "$eor4" ] && [ -n "$eor6" ] && break
+    sleep 1
+done
+# Both replayed bans must be in FRR's log before their order is judged.
+expect_banned "phase 7 bans fresh after the release" 10
+# Judged on FRR's millisecond log order, not on polls: each family's first
+# replayed blackhole UPDATE after the restart precedes its End-of-RIB.
+gap4=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "$UPD4")
+gap6=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "$UPD6")
+if [ "$gap4" = 0 ] && [ "$gap6" = 0 ]; then
+    ok "phase 7 FRR's log has both replayed bans before End-of-RIB"
+else
+    bad "phase 7 End-of-RIB before the replayed ban: IPv4 gap ${gap4} ms, IPv6 gap ${gap6} ms"
+fi
+if [ -n "$eor4" ] && [ -n "$eor6" ] && [ $((eor4 - t0)) -le "$SIGNAL_EOR_MAX_SECS" ] &&
+    [ $((eor6 - t0)) -le "$SIGNAL_EOR_MAX_SECS" ]; then
+    ok "phase 7 FRR received End-of-RIB $((eor4 - t0))s / $((eor6 - t0))s after start, long before the ${SIGNAL_GRACE_SECS}s deadline"
+else
+    bad "phase 7 End-of-RIB timing: IPv4 ${eor4:-none}, IPv6 ${eor6:-none}, start $t0, expected <= ${SIGNAL_EOR_MAX_SECS}s"
+fi
+if [ "$(bridge_signal_logs)" -gt "$bridge_signals_before" ] &&
+    [ "$(signal_release_logs)" -gt "$signal_releases_before" ] &&
+    [ "$(grace_release_logs)" -eq "$deadline_releases_before" ] &&
+    [ "$(released_metric replay_complete)" = 1 ] && [ "$(released_metric deadline)" = 0 ]; then
+    ok "phase 7 the bridge signalled and rustbgpd released End-of-RIB on the signal, not the deadline"
+else
+    bad "phase 7 release: bridge signals $(bridge_signal_logs), signal releases $(signal_release_logs), deadline releases $(grace_release_logs), metric replay_complete=$(released_metric replay_complete) deadline=$(released_metric deadline)"
+fi
+record "phase7_v4_gap_ms=$gap4"
+record "phase7_v6_gap_ms=$gap6"
+record "phase7_v4_update_before_eor_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv4 Unicast" "$UPD4" lead)"
+record "phase7_v6_update_before_eor_ms=$(frr_gap_ms "$mark" "End-of-RIB for IPv6 Unicast" "$UPD6" lead)"
+record "phase7_eor_after_start_s=$((${eor4:-t0} - t0))/$((${eor6:-t0} - t0))"
+record "phase7_window_s=$SIGNAL_GRACE_SECS"
+stop_replay
+expect_unbanned "phase 7 unban after restart" 90
 
 # ---------------------------------------------------------------------------
 

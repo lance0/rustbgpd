@@ -229,7 +229,7 @@ shape itself does not raise the tier.
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
 | `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
 
-### InjectionService (12 RPCs)
+### InjectionService (13 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -243,6 +243,7 @@ shape itself does not raise the tier.
 | `RenewLease` | `operator_only` | Keeps an owner's injected routes and rules alive. Delaying a dead controller's withdrawal has the blast radius of the injection itself, so it shares the adds' tier; a successful renewal is audited at INFO instead of WARN (ADR-0141). |
 | `ListInjectionLeases` | `sensitive_read` | Lease owners, generations and remaining time; discloses controller identities. |
 | `ListLeasedKeys` | `sensitive_read` | The injected keys one owner holds, with each key's generation and remaining lease, paged. Same disclosure as `ListInjectionLeases` plus the owner's route and rule keys. |
+| `MarkReplayComplete` | `operator_only` | A controller's replay-complete signal after a planned restart. The last listed controller's signal releases the held End-of-RIB, and helpers then remove every stale route the controllers did not re-add, so an early or forged signal has the blast radius of deleting those routes. Rare; audited at WARN like the adds. |
 | `AddEvpnRoute` | `operator_only` | Originates EVPN Type 2/3/5; can blackhole an L2 segment by hijacking a MAC, or steer Type 5 traffic. |
 | `DeleteEvpnRoute` | `operator_only` | Same risk class. |
 
@@ -286,10 +287,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.8% |
-| `sensitive_read` | 81 | 61.8% |
-| `mutating` | 22 | 16.8% |
-| `operator_only` | 27 | 20.6% |
-| **Total** | **131** | **100%** |
+| `sensitive_read` | 81 | 61.4% |
+| `mutating` | 22 | 16.7% |
+| `operator_only` | 28 | 21.2% |
+| **Total** | **132** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`

@@ -96,7 +96,7 @@ and RPCs in it stay alpha; the
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases |
+| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases and a controller replay-complete signal |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
@@ -271,7 +271,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `BfdService` | `GetBfdSessions` | None |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
-| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
@@ -3030,6 +3030,7 @@ export policy).
 | `RenewLease` | Renew an owner's lease generation |
 | `ListInjectionLeases` | List the injection lease table |
 | `ListLeasedKeys` | List the keys one lease owner holds; see [reconcile an owner's keys](#reconcile-an-owners-keys) |
+| `MarkReplayComplete` | Signal that a controller finished replaying after a planned restart; see [replay-complete signal](#replay-complete-signal) |
 | `AddEvpnRoute` | Inject an EVPN Type 2 (MAC/IP), Type 3 (IMET), or Type 5 (IP Prefix) route; Type 5 may be interface-less or carry an overlay-index gateway |
 | `DeleteEvpnRoute` | Withdraw a previously injected EVPN route by its EVPN route key |
 
@@ -3524,6 +3525,48 @@ context.AddMetadata("authorization", "Bearer " + token);
 
 Do not expose the listener beyond loopback to reach a remote controller;
 see [security](security.md) for the remote mTLS posture.
+
+### Replay-complete signal
+
+After a planned restart, the
+[End-of-RIB grace window](configuration.md#planned-restart-end-of-rib-grace-window)
+holds End-of-RIB toward configured Graceful Restart helpers. A controller
+listed in `[global] gr_eor_replay_owners` releases it early, once its replay
+is done:
+
+1. Read the daemon incarnation `I` from `ControlService.CheckLiveness`
+   (or `LeaseGeneration.incarnation` from a leased add) before replaying.
+2. Re-add the full desired state.
+3. Call `MarkReplayComplete(owner, I)`.
+
+The signal is sent through the RIB queue after the controller's earlier
+injections, and each add commits before its RPC returns, so every route
+added before the call reaches the helpers ahead of the released End-of-RIB.
+Release needs every listed controller (AND); the window's deadline still
+releases End-of-RIB if one stays silent. Windows belong to the configured
+neighbors from daemon start, so the release also covers a neighbor whose
+session is not up yet: when it establishes, its initial table ends in
+End-of-RIB at once.
+
+| Result | Meaning |
+|--------|---------|
+| OK `RELEASED` | This owner was the last one awaited; the held End-of-RIB was released |
+| OK `RECORDED` | Recorded; `awaiting` lists the listed owners that have not signalled |
+| OK `NOT_EXPECTED` | The owner is not in `gr_eor_replay_owners`; nothing changed (logged at WARN) |
+| OK `NOT_HOLDING` | No End-of-RIB is held: a cold boot, no window configured, or the window already ended. Nothing is released; the signal is still recorded for this incarnation |
+| `FAILED_PRECONDITION`, `ErrorInfo` reason `INCARNATION_MISMATCH` | `I` is not the current incarnation: the daemon restarted. Nothing changed; read `I` again and replay again |
+
+A repeated signal for the same owner changes nothing. The RPC is
+`operator_only` and outside the v1 stable surface. Like the lease owner, the
+owner name is a label, not an authenticated identity: any operator credential
+can signal for any owner. The signal proves only that the controller replayed
+its own desired state.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"owner": "gobgp-bridge", "incarnation": "<from CheckLiveness>"}' \
+  localhost:50051 rustbgpd.v1.InjectionService/MarkReplayComplete
+```
 
 ### Inject a FlowSpec rule
 

@@ -2196,7 +2196,7 @@ impl BgpMetrics {
         let gr_eor_grace_released = IntCounterVec::new(
             Opts::new(
                 "bgp_gr_eor_grace_released_total",
-                "End-of-RIB grace windows that ended after a planned restart and released any held End-of-RIB toward the peer, by bounded reason (deadline).",
+                "End-of-RIB grace windows that ended after a planned restart and released any held End-of-RIB toward the peer, by bounded reason (deadline, replay_complete).",
             ),
             &["peer", "reason"],
         )

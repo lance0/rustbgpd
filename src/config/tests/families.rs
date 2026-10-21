@@ -923,6 +923,40 @@ fn ipv6_next_hop_advisory_survives_a_missing_link_local_interface() {
 }
 
 #[test]
+fn eor_replay_owners_use_the_lease_owner_rule() {
+    let with_owners = |owners: &str| {
+        gr_toml("gr_eor_grace_time = 60").replace(
+            "listen_port = 179\n",
+            &format!("listen_port = 179\ngr_eor_replay_owners = {owners}\n"),
+        )
+    };
+    let accepted = parse(&with_owners(r#"["gobgp-bridge", "ctl.2_b"]"#)).unwrap();
+    assert_eq!(
+        accepted.global.gr_eor_replay_owners,
+        ["gobgp-bridge", "ctl.2_b"]
+    );
+    assert_eq!(
+        parse(&gr_toml("gr_eor_grace_time = 60"))
+            .unwrap()
+            .global
+            .gr_eor_replay_owners,
+        Vec::<String>::new()
+    );
+    assert_gr_reason(
+        &with_owners(r#"["gobgp bridge"]"#),
+        "gr_eor_replay_owners entry \"gobgp bridge\": owner may contain only A-Z, a-z, 0-9, '.', '_' and '-'",
+    );
+    assert_gr_reason(
+        &with_owners(r#"[""]"#),
+        "gr_eor_replay_owners entry \"\": owner must be 1..=64 bytes; got 0",
+    );
+    assert_gr_reason(
+        &with_owners(r#"["a", "a"]"#),
+        "gr_eor_replay_owners lists \"a\" twice",
+    );
+}
+
+#[test]
 fn eor_grace_time_is_bounded_by_the_advertised_restart_time() {
     // The default Restart Time (120 s) bounds an unset gr_restart_time.
     assert_gr_reason(
