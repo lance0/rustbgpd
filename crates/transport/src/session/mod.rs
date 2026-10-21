@@ -2770,6 +2770,7 @@ impl PeerSession {
             if let Some(command) = self.deferred_command.take()
                 && self.handle_command(command).await == ControlFlow::Break(())
             {
+                self.join_closed_writer().await;
                 return Ok(());
             }
             // Gate the TCP read arm closed while the FSM is still in `Idle`.
@@ -2846,6 +2847,7 @@ impl PeerSession {
                     match cmd {
                         Some(cmd) => {
                             if self.handle_command(cmd).await == ControlFlow::Break(()) {
+                                self.join_closed_writer().await;
                                 return Ok(());
                             }
                         }
