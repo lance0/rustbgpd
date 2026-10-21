@@ -40,6 +40,7 @@ class ReceiptTest(unittest.TestCase):
                 "auto_lacp_daemon",
                 "core_isolation",
                 "core_isolation_daemon",
+                "fast_external_failover",
                 "ac_gate",
                 "nexthop_raw",
                 "foreign_state_l2",

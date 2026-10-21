@@ -57,6 +57,9 @@
 #       (ADR-0140 core-isolation hold controller against real bonds/veths)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh core_isolation_daemon
 #       (daemon binary: startup hold, crash + release helper, clean shutdown)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fast_external_failover
+#       (two daemons: carrier loss / admin down / interface delete / address
+#        removal tear down directly connected eBGP before the hold timer)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate
 #       (single-active AC-gate IFLA_BRPORT_STATE round-trip +
 #        flood-flag non-clobber proof)
@@ -157,6 +160,7 @@ case "${1:-all}" in
     auto_lacp_daemon)   FILTER=""; RUSTBGPD_TEST_BIN="evpn_auto_lacp_binary" ;;
     core_isolation)     FILTER=""; RUSTBGPD_TEST_FILTER="evpn_core_isolation::tests::netns::" ;;
     core_isolation_daemon) FILTER=""; RUSTBGPD_TEST_BIN="evpn_core_isolation_binary" ;;
+    fast_external_failover) FILTER=""; RUSTBGPD_TEST_BIN="fast_external_failover_binary" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
     nexthop_raw)        TEST_BIN="netns_nexthop_raw"; FILTER="" ;;
     foreign_state_l2)   TEST_BIN="netns_foreign_state"; FILTER="l2_foreign_"; EXACT_FILTER=0 ;;
@@ -183,7 +187,7 @@ case "${1:-all}" in
     l3_single_path_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_installs_and_withdraws_l3_triple" ;;
     l3_foreign_route_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_foreign_route_survives_l3_cycle" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, bond_lacp, auto_lacp_daemon, core_isolation, core_isolation_daemon, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_l2_dst, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, peer_sync_local_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, flood_list, svd_flood_list, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, bond_lacp, auto_lacp_daemon, core_isolation, core_isolation_daemon, fast_external_failover, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_l2_dst, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, peer_sync_local_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, flood_list, svd_flood_list, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
         exit 2
         ;;
 esac

@@ -982,6 +982,9 @@ jobs:
       - name: ADR-0140 core-isolation daemon and release helper netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh core_isolation_daemon
 
+      - name: Fast external failover two-daemon netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh fast_external_failover
+
       - name: Single-active AC-gate netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh ac_gate
 
