@@ -869,7 +869,7 @@ async fn reconcile_once<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
-                peer_interface: crate::fib::source_interface(&candidate.route),
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: candidate.reason.to_string(),
             });
@@ -880,7 +880,7 @@ async fn reconcile_once<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
-                peer_interface: crate::fib::source_interface(&candidate.route),
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Failed,
                 reason: "ownership_state_unavailable".to_string(),
             });
@@ -898,7 +898,7 @@ async fn reconcile_once<F>(
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
                         peer: candidate.route.peer,
-                        peer_interface: crate::fib::source_interface(&candidate.route),
+                        peer_interface: candidate.route.peer_interface(),
                         state: BlackholeState::Installed,
                         reason: "owned".to_string(),
                     });
@@ -930,7 +930,7 @@ async fn reconcile_once<F>(
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
                         peer: candidate.route.peer,
-                        peer_interface: crate::fib::source_interface(&candidate.route),
+                        peer_interface: candidate.route.peer_interface(),
                         state: BlackholeState::Failed,
                         reason: "foreign_route_exists".to_string(),
                     });
@@ -945,7 +945,7 @@ async fn reconcile_once<F>(
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
                         peer: candidate.route.peer,
-                        peer_interface: crate::fib::source_interface(&candidate.route),
+                        peer_interface: candidate.route.peer_interface(),
                         state: BlackholeState::Failed,
                         reason: "foreign_route_exists".to_string(),
                     });
@@ -957,7 +957,7 @@ async fn reconcile_once<F>(
                     candidate.prefix,
                     OwnedBlackhole {
                         peer: candidate.route.peer,
-                        peer_interface: crate::fib::source_interface(&candidate.route),
+                        peer_interface: candidate.route.peer_interface(),
                     },
                 );
                 info!(
@@ -968,7 +968,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
-                    peer_interface: crate::fib::source_interface(&candidate.route),
+                    peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Installed,
                     reason: "adopted".to_string(),
                 });
@@ -978,7 +978,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
-                    peer_interface: crate::fib::source_interface(&candidate.route),
+                    peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Failed,
                     reason: "foreign_route_exists".to_string(),
                 });
@@ -999,7 +999,7 @@ async fn reconcile_once<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
-                peer_interface: crate::fib::source_interface(&candidate.route),
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: "route_churn_deferred".to_string(),
             });
@@ -1021,7 +1021,7 @@ async fn reconcile_once<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
-                peer_interface: crate::fib::source_interface(&candidate.route),
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: reason.to_string(),
             });
@@ -1040,7 +1040,7 @@ async fn reconcile_once<F>(
                     candidate.prefix,
                     OwnedBlackhole {
                         peer: candidate.route.peer,
-                        peer_interface: crate::fib::source_interface(&candidate.route),
+                        peer_interface: candidate.route.peer_interface(),
                     },
                 );
                 metrics.record_blackhole_discard_installed();
@@ -1052,7 +1052,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
-                    peer_interface: crate::fib::source_interface(&candidate.route),
+                    peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Installed,
                     reason: "installed".to_string(),
                 });
@@ -1068,7 +1068,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
-                    peer_interface: crate::fib::source_interface(&candidate.route),
+                    peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Failed,
                     reason: e,
                 });
@@ -1098,7 +1098,7 @@ fn ownership_unavailable_status(candidate: &Candidate) -> BlackholeStatus {
     BlackholeStatus {
         prefix: candidate.prefix,
         peer: candidate.route.peer,
-        peer_interface: crate::fib::source_interface(&candidate.route),
+        peer_interface: candidate.route.peer_interface(),
         state: BlackholeState::Failed,
         reason: "ownership_state_unavailable".to_string(),
     }
@@ -1296,7 +1296,7 @@ async fn degraded_pass_without_dump<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
-                peer_interface: crate::fib::source_interface(&candidate.route),
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Failed,
                 reason: if state.ownership.available {
                     "dump_failed"
@@ -1317,7 +1317,7 @@ async fn degraded_pass_without_dump<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
-                peer_interface: crate::fib::source_interface(&candidate.route),
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: candidate.reason.to_string(),
             });

@@ -18,6 +18,7 @@ use std::time::Duration;
 use rustbgpd_evpn_linux::worker_progress::{WorkerProgress, WorkerProgressState};
 #[cfg(test)]
 use rustbgpd_rib::FibInstallCandidate;
+use rustbgpd_rib::route::AspaContextId;
 use rustbgpd_rib::{RibUpdate, RouteOrigin};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
@@ -131,8 +132,9 @@ pub struct FibRuntimeStatus {
     /// next-hop.
     pub next_hops: Vec<IpAddr>,
     pub peer: Option<IpAddr>,
-    /// Interface of a scoped (IPv6 link-local) `peer`, recorded with its route.
-    pub peer_interface: Option<Arc<str>>,
+    /// Interned interface of a scoped (IPv6 link-local) `peer`, recorded with
+    /// its route (see [`crate::fib::source_scope`]).
+    pub peer_scope: AspaContextId,
     pub state: FibRuntimeState,
     pub reason: String,
     pub sampling: Option<FibRuntimeSampling>,
@@ -167,8 +169,9 @@ pub struct FibRuntimeEvent {
     pub prefix: Prefix,
     pub next_hop: Option<IpAddr>,
     pub peer: Option<IpAddr>,
-    /// Interface of a scoped (IPv6 link-local) `peer`, recorded with its route.
-    pub peer_interface: Option<Arc<str>>,
+    /// Interned interface of a scoped (IPv6 link-local) `peer`, recorded with
+    /// its route (see [`crate::fib::source_scope`]).
+    pub peer_scope: AspaContextId,
     /// Event time in Unix epoch milliseconds.
     pub timestamp_unix_ms: i64,
     pub reason: String,
@@ -1757,7 +1760,7 @@ fn emit_fib_event(
         prefix: route.key.prefix,
         next_hop: Some(route.target.primary()),
         peer: Some(route.peer),
-        peer_interface: route.peer_interface.clone(),
+        peer_scope: route.peer_scope,
         timestamp_unix_ms: rustbgpd_rib::event::unix_time_ms_now(),
         reason: reason.into(),
     });
@@ -1917,7 +1920,10 @@ impl From<&FibRoute> for PersistedFibRoute {
                 })
                 .collect(),
             peer: route.peer,
-            peer_interface: route.peer_interface.as_deref().map(str::to_string),
+            peer_interface: route
+                .peer_scope
+                .peer_interface()
+                .map(|interface| interface.to_string()),
             origin_type: route.origin_type.into(),
             path_id: route.path_id,
         }
@@ -2042,7 +2048,10 @@ impl PersistedFibRoute {
             key,
             target: FibRouteTarget::from_set_with_best_hop(best, next_hops),
             peer: self.peer,
-            peer_interface: self.peer_interface.map(Arc::from),
+            peer_scope: self
+                .peer_interface
+                .as_deref()
+                .map_or(AspaContextId::DEFAULT, crate::fib::interface_scope),
             origin_type: self.origin_type.into(),
             path_id: self.path_id,
         })
@@ -2558,7 +2567,7 @@ fn status_for_drop(
                     next_hop: None,
                     next_hops: Vec::new(),
                     peer: None,
-                    peer_interface: None,
+                    peer_scope: AspaContextId::DEFAULT,
                     state: FibRuntimeState::Rejected,
                     reason: "foreign_route_exists".to_string(),
                     sampling: None,
@@ -2573,7 +2582,7 @@ fn status_for_drop(
             table_name,
             prefix,
             peer,
-            peer_interface,
+            peer_scope,
         } => {
             let table = config.tables.iter().find(|table| table.name == *table_name);
             FibRuntimeStatus {
@@ -2584,7 +2593,7 @@ fn status_for_drop(
                 next_hop: None,
                 next_hops: Vec::new(),
                 peer: Some(*peer),
-                peer_interface: peer_interface.clone(),
+                peer_scope: *peer_scope,
                 state: FibRuntimeState::Rejected,
                 reason: "peer_not_allowed".to_string(),
                 sampling: None,
@@ -2595,7 +2604,7 @@ fn status_for_drop(
             key,
             next_hop,
             peer,
-            peer_interface,
+            peer_scope,
             ..
         } => FibRuntimeStatus {
             table_name: table_name.clone(),
@@ -2605,7 +2614,7 @@ fn status_for_drop(
             next_hop: Some(*next_hop),
             next_hops: vec![*next_hop],
             peer: Some(*peer),
-            peer_interface: peer_interface.clone(),
+            peer_scope: *peer_scope,
             state: FibRuntimeState::Rejected,
             reason: "route_limit_exceeded".to_string(),
             sampling: route_limit_sampling(drop),
@@ -2629,7 +2638,7 @@ fn status_for_next_hop_drop(
         next_hop: Some(next_hop),
         next_hops: vec![next_hop],
         peer: None,
-        peer_interface: None,
+        peer_scope: AspaContextId::DEFAULT,
         state: FibRuntimeState::Rejected,
         reason: reason.to_string(),
         sampling: None,
@@ -2709,7 +2718,7 @@ fn status_for_route(route: &FibRoute, state: FibRuntimeState, reason: String) ->
         next_hop: Some(route.target.primary()),
         next_hops: route.target.next_hops.iter().map(|nh| nh.addr).collect(),
         peer: Some(route.peer),
-        peer_interface: route.peer_interface.clone(),
+        peer_scope: route.peer_scope,
         state,
         reason,
         sampling: None,
@@ -3597,7 +3606,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(next_hop),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         }
@@ -3621,7 +3630,7 @@ mod tests {
             },
             target: FibRouteTarget::single(next_hop),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         }
@@ -4581,39 +4590,79 @@ mod tests {
         assert_eq!(load_owned_state(&config), owned);
     }
 
-    /// A scoped source neighbor's interface survives a restart, so the
-    /// restored row reports it and equals the re-projected route (no
-    /// metadata refresh). Numbered rows write no `peer_interface` key.
+    /// A scoped source neighbor's interface survives a restart: owned state
+    /// records the name, restore re-interns it, and the restored row equals
+    /// the re-projection of the same best route (whose session context also
+    /// carries its negotiated ASN), so the first pass after the restart
+    /// plans no metadata refresh. Numbered rows write no `peer_interface`.
     #[test]
-    fn owned_state_persistence_keeps_the_scoped_source_interface() {
+    fn restored_scoped_row_matches_its_reprojection_without_a_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fib-owned.json");
         let mut config = config();
         config.owned_state_path = Some(path.clone());
-        let numbered = fib_route(v4(24), ip("192.0.2.1"));
-        let scoped = FibRoute {
-            peer: ip("fe80::1"),
-            peer_interface: Some(Arc::from("eth0")),
-            ..fib_route(v4(25), ip("192.0.2.2"))
+        let mut scoped =
+            route_from_peer(v4(25), ip("192.0.2.2"), RouteOrigin::Ebgp, 0, ip("fe80::1"));
+        scoped.aspa_context = AspaContextId::intern_scoped(
+            rustbgpd_wire::AspaValidationContext {
+                neighbor_asn: Some(64_512),
+                ..rustbgpd_wire::AspaValidationContext::default()
+            },
+            Some("eth0"),
+        );
+        let candidates: Vec<FibInstallCandidate> = [scoped, route(v4(24), ip("192.0.2.1"))]
+            .into_iter()
+            .map(|best| FibInstallCandidate {
+                next_hops: vec![FibInstallNextHop {
+                    next_hop: best.next_hop,
+                    link_local_next_hop: None,
+                    next_hop_scope: None,
+                    peer: best.peer,
+                    path_id: 0,
+                    weight: 1,
+                }],
+                best,
+            })
+            .collect();
+        let intent = crate::fib::project_fib_intent(&config.tables, &candidates);
+        let owned = FibOwnedState {
+            routes: intent.routes.clone(),
+            ..FibOwnedState::default()
         };
-        let mut owned = FibOwnedState::default();
-        owned.routes.insert(numbered.key, numbered.clone());
-        owned.routes.insert(scoped.key, scoped.clone());
 
         write_owned_state(&path, &config.tables, &owned).unwrap();
-        assert_eq!(load_owned_state(&config), owned);
+        let persisted = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
-            std::fs::read_to_string(&path)
-                .unwrap()
-                .matches("peer_interface")
-                .count(),
+            persisted.matches("peer_interface").count(),
             1,
-            "only the scoped row records an interface"
+            "only the scoped row records its interface"
         );
-        let status = status_for_route(&scoped, FibRuntimeState::Installed, "owned".to_string());
-        assert_eq!(status.peer_interface.as_deref(), Some("eth0"));
-        let status = status_for_route(&numbered, FibRuntimeState::Installed, "owned".to_string());
-        assert_eq!(status.peer_interface, None);
+        assert!(persisted.contains("\"eth0\""));
+        let restored = load_owned_state(&config);
+        let kernel = FibKernelSnapshot {
+            routes: owned
+                .routes
+                .values()
+                .map(|route| {
+                    (
+                        route.key,
+                        FibKernelRoute {
+                            target: route.target.clone(),
+                            protocol: FibKernelProtocol::Bgp,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let plan = compute_fib_diff(&intent, &restored, &kernel);
+        assert_eq!(plan.ops, Vec::new(), "no metadata refresh after restart");
+        assert_eq!(restored, owned);
+
+        let scoped_row = &restored.routes[&key(v4(25))];
+        let status = status_for_route(scoped_row, FibRuntimeState::Installed, String::new());
+        assert_eq!(status.peer_scope.peer_interface().as_deref(), Some("eth0"));
+        let numbered_row = &restored.routes[&key(v4(24))];
+        assert_eq!(numbered_row.peer_scope, AspaContextId::DEFAULT);
     }
 
     /// ADR-0079: reordering `[[fib_tables]]` stanzas is not a config
@@ -4784,7 +4833,7 @@ mod tests {
             },
             target: FibRouteTarget::single(ip("192.0.2.3")),
             peer: ip("192.0.2.3"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         })
@@ -8099,7 +8148,7 @@ mod tests {
             key: key(v4(24)),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8135,7 +8184,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8171,7 +8220,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8205,7 +8254,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8237,7 +8286,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8271,7 +8320,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8305,7 +8354,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8330,7 +8379,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8354,7 +8403,7 @@ mod tests {
             next_hop: Some(ip("192.0.2.1")),
             next_hops: vec![ip("192.0.2.1")],
             peer: Some(ip("198.51.100.1")),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             state: FibRuntimeState::Installed,
             reason: "owned".to_string(),
             sampling: None,
@@ -8377,7 +8426,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8408,7 +8457,7 @@ mod tests {
             key: key(prefix),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8432,7 +8481,7 @@ mod tests {
             next_hop: Some(ip("192.0.2.1")),
             next_hops: vec![ip("192.0.2.1")],
             peer: Some(ip("198.51.100.1")),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             state: FibRuntimeState::Installed,
             reason: "owned".to_string(),
             sampling: None,
@@ -8545,7 +8594,7 @@ mod tests {
             key: key(v4(24)),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8739,7 +8788,7 @@ mod tests {
             key: key(v6(64)),
             target: FibRouteTarget::single(ip("2001:db8:ffff::1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8773,7 +8822,7 @@ mod tests {
             key: key(v4(32)),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8811,7 +8860,7 @@ mod tests {
             key: key(v4(24)),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8840,7 +8889,7 @@ mod tests {
             key: key(v4(24)),
             target: FibRouteTarget::from_next_hops([FibNextHop::scoped(ip("fe80::2"), 7)]),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8878,7 +8927,7 @@ mod tests {
                 weight: 1,
             }]),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8904,7 +8953,7 @@ mod tests {
                 [ip("192.0.2.1"), ip("192.0.2.2")].map(FibNextHop::equal),
             ),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -8958,7 +9007,7 @@ mod tests {
                 },
             ]),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -9004,7 +9053,7 @@ mod tests {
                 },
             ]),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -9050,7 +9099,7 @@ mod tests {
                 [ip("192.0.2.2"), ip("192.0.2.1")].map(FibNextHop::equal),
             ),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -9068,7 +9117,7 @@ mod tests {
             key: key(v4(24)),
             target: FibRouteTarget::from_next_hops([FibNextHop::scoped(ip("fe80::2"), 7)]),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -9101,7 +9150,7 @@ mod tests {
                 },
             ]),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
@@ -9138,7 +9187,7 @@ mod tests {
             key: key(v4(24)),
             target: FibRouteTarget::single(ip("192.0.2.1")),
             peer: ip("198.51.100.1"),
-            peer_interface: None,
+            peer_scope: AspaContextId::DEFAULT,
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };

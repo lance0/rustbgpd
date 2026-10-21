@@ -883,7 +883,8 @@ fn fib_runtime_event_to_bgp_event(
         timestamp: rustbgpd_rib::event::unix_seconds_string(event.timestamp_unix_ms),
         reason: event.reason.clone(),
         peer_interface: event
-            .peer_interface
+            .peer_scope
+            .peer_interface()
             .as_deref()
             .unwrap_or_default()
             .to_string(),
@@ -2321,7 +2322,8 @@ fn fib_status_to_proto(
         next_hops: status.next_hops.iter().map(ToString::to_string).collect(),
         peer_address: status.peer.map_or_else(String::new, |ip| ip.to_string()),
         peer_interface: status
-            .peer_interface
+            .peer_scope
+            .peer_interface()
             .as_deref()
             .unwrap_or_default()
             .to_string(),
@@ -9035,6 +9037,7 @@ mod tests {
             rustbgpd_wire::Ipv4Prefix::new("192.0.2.0".parse().unwrap(), 24),
         );
         let scoped = Some(Arc::<str>::from("eth0"));
+        let scope = fib::interface_scope("eth0");
         let link_local: std::net::IpAddr = "fe80::1".parse().unwrap();
         let mut fib = fib_runtime::FibRuntimeStatus {
             table_name: "edge".to_string(),
@@ -9044,7 +9047,7 @@ mod tests {
             next_hop: None,
             next_hops: Vec::new(),
             peer: Some(link_local),
-            peer_interface: scoped.clone(),
+            peer_scope: scope,
             state: fib_runtime::FibRuntimeState::Installed,
             reason: "owned".to_string(),
             sampling: None,
@@ -9055,13 +9058,13 @@ mod tests {
             ("fe80::1", "eth0")
         );
         fib.peer = Some("192.0.2.9".parse().unwrap());
-        fib.peer_interface = None;
+        fib.peer_scope = rustbgpd_rib::route::AspaContextId::DEFAULT;
         assert_eq!(fib_status_to_proto(&fib).peer_interface, "");
 
         let row = blackhole_status_to_proto(&blackhole::BlackholeStatus {
             prefix,
             peer: link_local,
-            peer_interface: scoped.clone(),
+            peer_interface: scoped,
             state: blackhole::BlackholeState::Installed,
             reason: "owned".to_string(),
         });
@@ -9078,7 +9081,7 @@ mod tests {
             prefix,
             next_hop: None,
             peer: Some(link_local),
-            peer_interface: scoped,
+            peer_scope: scope,
             timestamp_unix_ms: 0,
             reason: String::new(),
         });
