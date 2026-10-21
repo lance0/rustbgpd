@@ -3156,6 +3156,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         };
         let export_chain = server_proto::PolicyChainStats {
             peer_address: peer_address.clone(),
+            peer_interface: String::new(),
             direction: "export".to_string(),
             routes_evaluated: 7,
             policy_generation: 41,
@@ -3180,6 +3181,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         };
         let import_chain = server_proto::PolicyChainStats {
             peer_address,
+            peer_interface: String::new(),
             direction: "import".to_string(),
             routes_evaluated: 11,
             policy_generation: 3,
@@ -3241,6 +3243,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                 prefix: "10.10.1.0".to_string(),
                 prefix_length: 24,
                 peer: "10.0.0.9".to_string(),
+                peer_interface: String::new(),
                 changes: vec!["local_pref unset -> 200".to_string()],
             }],
             ..Default::default()

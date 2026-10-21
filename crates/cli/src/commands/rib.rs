@@ -2150,12 +2150,15 @@ pub async fn count_best(
 
 pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = read_rpc(
+    let mut resp = read_rpc(
         "ListBlackholeDiscards",
         client.list_blackhole_discards(ListBlackholeDiscardsRequest {}),
     )
     .await?
     .into_inner();
+    for discard in &mut resp.discards {
+        scope_address(&mut discard.peer_address, &discard.peer_interface);
+    }
     print_blackhole_discards(&resp.discards, json)
 }
 
@@ -2172,6 +2175,7 @@ pub async fn fib(
     .await?
     .into_inner();
     for route in &mut resp.routes {
+        scope_address(&mut route.peer_address, &route.peer_interface);
         restore_matching_scoped_address(filters.peer.as_deref(), &mut route.peer_address);
     }
     print_fib_routes(&resp, json, include_fib_page_meta(&filters))
@@ -4548,6 +4552,7 @@ mod tests {
             prefix: "203.0.113.66".to_string(),
             prefix_length: 32,
             peer_address: "192.0.2.1".to_string(),
+            peer_interface: String::new(),
             state: crate::proto::BlackholeDiscardState::Rejected as i32,
             reason: "not_ebgp".to_string(),
         };
@@ -4642,6 +4647,7 @@ mod tests {
             next_hop: "192.0.2.1".to_string(),
             next_hops: vec!["192.0.2.1".to_string()],
             peer_address: "198.51.100.1".to_string(),
+            peer_interface: String::new(),
             state: crate::proto::FibRouteState::Rejected as i32,
             reason: "route_limit_exceeded".to_string(),
             sampling_sampled_rows: 128,

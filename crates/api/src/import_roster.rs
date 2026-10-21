@@ -202,14 +202,20 @@ pub async fn capture_import(
 ) -> Result<Vec<(IpAddr, ImportPolicyTermHits)>, ImportPolicyStatsError> {
     capture_import_allow_partial(peers, deadline, progress, false)
         .await
-        .map(|capture| capture.rows)
+        .map(|capture| {
+            capture
+                .rows
+                .into_iter()
+                .map(|(key, snapshot)| (key.address, snapshot))
+                .collect()
+        })
 }
 
 /// Captured rows and the selected session addresses that exited during capture.
 #[derive(Debug)]
 pub(crate) struct ImportCapture {
     /// Live installed counters, in roster order; chainless sessions add no row.
-    pub rows: Vec<(IpAddr, ImportPolicyTermHits)>,
+    pub rows: Vec<(PeerKey, ImportPolicyTermHits)>,
     /// Sorted unique addresses whose selected publication closed.
     pub incomplete_peer_addresses: Vec<IpAddr>,
 }
@@ -247,7 +253,7 @@ pub(crate) async fn capture_import_allow_partial(
                 let snapshot = result?;
                 progress.read += 1;
                 if let Some(snapshot) = snapshot {
-                    capture.rows.push((peer.key.address, snapshot));
+                    capture.rows.push((peer.key.clone(), snapshot));
                 }
             }
         }

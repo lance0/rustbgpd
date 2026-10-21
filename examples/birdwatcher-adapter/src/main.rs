@@ -750,6 +750,28 @@ async fn list_neighbors(state: &AppState) -> Result<Vec<proto::NeighborState>, H
         .neighbors)
 }
 
+/// The daemon's selector for `peer`. An IPv6 link-local neighbor must be
+/// named with its interface (`fe80::1%eth0`); a bare link-local selector is
+/// `INVALID_ARGUMENT`. Numbered peers skip the neighbor lookup.
+async fn peer_selector(state: &AppState, peer: IpAddr) -> Result<String, HttpError> {
+    if !matches!(peer, IpAddr::V6(address) if address.is_unicast_link_local()) {
+        return Ok(peer.to_string());
+    }
+    Ok(scoped_selector(&list_neighbors(state).await?, peer))
+}
+
+/// `peer` scoped by its configured interface, when the neighbor has one.
+fn scoped_selector(neighbors: &[proto::NeighborState], peer: IpAddr) -> String {
+    neighbors
+        .iter()
+        .filter_map(|neighbor| neighbor.config.as_ref())
+        .find(|config| !config.interface.is_empty() && config.address.parse::<IpAddr>() == Ok(peer))
+        .map_or_else(
+            || peer.to_string(),
+            |config| format!("{peer}%{}", config.interface),
+        )
+}
+
 fn parse_upstream_peer_address(address: &str) -> Result<IpAddr, HttpError> {
     address.parse().map_err(|_| {
         error!("upstream daemon returned an invalid neighbor address");
@@ -1068,6 +1090,7 @@ async fn serve_routes_for_peer(
     peer: IpAddr,
     wildcard: Option<(u64, u64)>,
 ) -> Result<Json<Value>, HttpError> {
+    let selector = peer_selector(state, peer).await?;
     for _ in 0..CAPTURE_ATTEMPTS {
         let (best, best_version) = match capture_best_route_keys(state, None).await {
             Ok(capture) => capture,
@@ -1081,7 +1104,7 @@ async fn serve_routes_for_peer(
         loop {
             let resp = match client
                 .list_received_routes(proto::ListRoutesRequest {
-                    neighbor_address: peer.to_string(),
+                    neighbor_address: selector.clone(),
                     // UNSPECIFIED = all unicast families, matching the
                     // in-daemon server's unfiltered per-peer query.
                     afi_safi: proto::AddressFamily::Unspecified as i32,
@@ -1352,7 +1375,7 @@ async fn routes_export(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpError> {
-    let peer = state.identities.resolve(&id)?;
+    let peer = peer_selector(&state, state.identities.resolve(&id)?).await?;
     let best = best_route_keys(&state, None).await?;
     let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
     let mut routes = Vec::new();
@@ -1360,7 +1383,7 @@ async fn routes_export(
     loop {
         let resp = client
             .list_advertised_routes(proto::ListRoutesRequest {
-                neighbor_address: peer.to_string(),
+                neighbor_address: peer.clone(),
                 afi_safi: proto::AddressFamily::Unspecified as i32,
                 page_size: 1000,
                 page_token: page_token.clone(),
@@ -1504,7 +1527,7 @@ fn longest_match(routes: &[proto::Route], query: ExactPrefix) -> Option<ExactPre
     reason = "separate arms keep each exact IXP consumer journey mutation-testable"
 )]
 fn exact_route_request(
-    peer: IpAddr,
+    peer: &str,
     prefix: ExactPrefix,
     page_token: String,
     source: ExactRouteSource,
@@ -1526,7 +1549,7 @@ fn exact_route_request(
 }
 
 fn view_route_request(
-    peer: IpAddr,
+    peer: &str,
     prefix: ExactPrefix,
     page_token: String,
     remaining: u64,
@@ -1595,7 +1618,7 @@ async fn route_export(
 /// Backs the longest-match fallback of the exact-route lookups.
 async fn view_routes(
     client: &mut proto::rib_service_client::RibServiceClient<Upstream>,
-    peer: IpAddr,
+    peer: &str,
     prefix: ExactPrefix,
     source: ExactRouteSource,
     max_scan_routes: u64,
@@ -1642,6 +1665,7 @@ async fn serve_exact_route(
     let Some(prefix) = prefix else {
         return Ok(Json(empty_routes_body(state.max_routes)));
     };
+    let peer = &peer_selector(state, peer).await?;
     if source == ExactRouteSource::Received {
         return serve_exact_received_route(state, peer, prefix).await;
     }
@@ -1722,7 +1746,7 @@ async fn received_routes_page(
 
 async fn serve_exact_received_route(
     state: &AppState,
-    peer: IpAddr,
+    peer: &str,
     prefix: ExactPrefix,
 ) -> Result<Json<Value>, HttpError> {
     for _ in 0..CAPTURE_ATTEMPTS {
@@ -1913,7 +1937,7 @@ async fn routes_filtered(
     let mut client = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let resp = match client
         .list_rejected_routes(proto::ListRejectedRoutesRequest {
-            peer_address: peer_addr.to_string(),
+            peer_address: peer_selector(&state, peer_addr).await?,
         })
         .await
     {
@@ -1984,7 +2008,7 @@ async fn routes_table_filtered(
         for (peer, ..) in &inventory {
             let response = match policy
                 .list_rejected_routes(proto::ListRejectedRoutesRequest {
-                    peer_address: peer.to_string(),
+                    peer_address: scoped_selector(&neighbors, *peer),
                 })
                 .await
             {
@@ -2106,7 +2130,7 @@ async fn routes_protocol_large_community_wild_xy(
     let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
     let response = match policy
         .list_rejected_routes(proto::ListRejectedRoutesRequest {
-            peer_address: peer.to_string(),
+            peer_address: peer_selector(&state, peer).await?,
         })
         .await
     {
@@ -2473,6 +2497,7 @@ async fn routes_noexport(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpError> {
     let peer_addr = state.identities.resolve(&id)?;
+    let selector = peer_selector(&state, peer_addr).await?;
 
     let mut rib = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
 
@@ -2484,7 +2509,7 @@ async fn routes_noexport(
     loop {
         let resp = rib
             .list_advertised_routes(proto::ListRoutesRequest {
-                neighbor_address: peer_addr.to_string(),
+                neighbor_address: selector.clone(),
                 afi_safi: proto::AddressFamily::Unspecified as i32,
                 page_size: 1000,
                 page_token,
@@ -2544,7 +2569,7 @@ async fn routes_noexport(
     for route in &candidates {
         let explain = match rib
             .explain_advertised_route(proto::ExplainAdvertisedRouteRequest {
-                peer_address: peer_addr.to_string(),
+                peer_address: selector.clone(),
                 prefix: route.prefix.clone(),
                 prefix_length: route.prefix_length,
                 ..Default::default()
@@ -4624,7 +4649,8 @@ mod tests {
                 (ExactRouteSource::Advertised, ""),
                 (ExactRouteSource::Advertised, "opaque-page-2"),
             ] {
-                let request = exact_route_request(peer, prefix, token.to_string(), source);
+                let request =
+                    exact_route_request(&peer.to_string(), prefix, token.to_string(), source);
                 assert_eq!(request.neighbor_address, peer.to_string(), "{source:?}");
                 assert_eq!(request.prefix_filter, address, "{source:?}");
                 assert_eq!(request.prefix_filter_length, length, "{source:?}");
@@ -4639,6 +4665,25 @@ mod tests {
         assert_eq!(body, serde_json::json!({"message":"Protocol not found"}));
     }
 
+    /// A link-local neighbor is selected with its configured interface;
+    /// numbered and unknown peers stay bare.
+    #[test]
+    fn scoped_selector_names_a_link_local_neighbor_interface() {
+        let neighbor = |address: &str, interface: &str| proto::NeighborState {
+            config: Some(proto::NeighborConfig {
+                address: address.to_string(),
+                interface: interface.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let neighbors = [neighbor("192.0.2.1", ""), neighbor("fe80::1", "eth0")];
+        let selector = |peer: &str| scoped_selector(&neighbors, peer.parse().unwrap());
+        assert_eq!(selector("fe80::1"), "fe80::1%eth0");
+        assert_eq!(selector("192.0.2.1"), "192.0.2.1");
+        assert_eq!(selector("fe80::2"), "fe80::2");
+    }
+
     #[test]
     fn fallback_pages_pin_family_token_shrinking_budget_and_complete_view() {
         let peer: IpAddr = "192.0.2.1".parse().unwrap();
@@ -4648,7 +4693,8 @@ mod tests {
         ] {
             let prefix = ExactPrefix::parse(value).unwrap().unwrap();
             for (token, remaining, page_size) in [("", 10_000, 1000), ("opaque-page-2", 999, 999)] {
-                let request = view_route_request(peer, prefix, token.to_string(), remaining);
+                let request =
+                    view_route_request(&peer.to_string(), prefix, token.to_string(), remaining);
                 assert_eq!(request.neighbor_address, peer.to_string());
                 assert_eq!(request.afi_safi, family as i32);
                 assert_eq!(request.page_token, token);

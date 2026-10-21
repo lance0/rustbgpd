@@ -7653,6 +7653,7 @@ paths = ["x"]
         ];
         *server.state.bfd_sessions.lock().await = vec![rustbgpd_api::proto::BfdSession {
             peer_address: "10.0.0.2".to_string(),
+            peer_interface: String::new(),
             state: rustbgpd_api::proto::BfdSessionState::Down as i32,
             diagnostic: "none".to_string(),
             strict: true,

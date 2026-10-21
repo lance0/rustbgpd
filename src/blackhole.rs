@@ -135,6 +135,8 @@ impl BlackholeConfig {
 pub struct BlackholeStatus {
     pub prefix: Prefix,
     pub peer: IpAddr,
+    /// Interface of a scoped (IPv6 link-local) `peer`, recorded with its route.
+    pub peer_interface: Option<Arc<str>>,
     pub state: BlackholeState,
     pub reason: String,
 }
@@ -147,9 +149,10 @@ pub enum BlackholeState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnedBlackhole {
     peer: IpAddr,
+    peer_interface: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -844,6 +847,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix,
                     peer: installed.peer,
+                    peer_interface: installed.peer_interface.clone(),
                     state: BlackholeState::Failed,
                     reason: "remove_failed".to_string(),
                 });
@@ -865,6 +869,7 @@ async fn reconcile_once<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: candidate.reason.to_string(),
             });
@@ -875,6 +880,7 @@ async fn reconcile_once<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Failed,
                 reason: "ownership_state_unavailable".to_string(),
             });
@@ -889,12 +895,23 @@ async fn reconcile_once<F>(
         if state.owned.contains_key(&candidate.prefix) {
             match presence {
                 KernelRoutePresence::Marker => {
+                    // The best route can move to another source while the
+                    // discard stays installed; keep the retained source
+                    // current so a later failed removal names it.
+                    let source = OwnedBlackhole {
+                        peer: candidate.route.peer,
+                        peer_interface: candidate.route.peer_interface(),
+                    };
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
-                        peer: candidate.route.peer,
+                        peer: source.peer,
+                        peer_interface: source.peer_interface.clone(),
                         state: BlackholeState::Installed,
                         reason: "owned".to_string(),
                     });
+                    if let Some(retained) = state.owned.get_mut(&candidate.prefix) {
+                        *retained = source;
+                    }
                     continue;
                 }
                 KernelRoutePresence::Absent => {
@@ -923,6 +940,7 @@ async fn reconcile_once<F>(
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
                         peer: candidate.route.peer,
+                        peer_interface: candidate.route.peer_interface(),
                         state: BlackholeState::Failed,
                         reason: "foreign_route_exists".to_string(),
                     });
@@ -937,6 +955,7 @@ async fn reconcile_once<F>(
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
                         peer: candidate.route.peer,
+                        peer_interface: candidate.route.peer_interface(),
                         state: BlackholeState::Failed,
                         reason: "foreign_route_exists".to_string(),
                     });
@@ -948,6 +967,7 @@ async fn reconcile_once<F>(
                     candidate.prefix,
                     OwnedBlackhole {
                         peer: candidate.route.peer,
+                        peer_interface: candidate.route.peer_interface(),
                     },
                 );
                 info!(
@@ -958,6 +978,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
+                    peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Installed,
                     reason: "adopted".to_string(),
                 });
@@ -967,6 +988,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
+                    peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Failed,
                     reason: "foreign_route_exists".to_string(),
                 });
@@ -987,6 +1009,7 @@ async fn reconcile_once<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: "route_churn_deferred".to_string(),
             });
@@ -1008,6 +1031,7 @@ async fn reconcile_once<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: reason.to_string(),
             });
@@ -1026,6 +1050,7 @@ async fn reconcile_once<F>(
                     candidate.prefix,
                     OwnedBlackhole {
                         peer: candidate.route.peer,
+                        peer_interface: candidate.route.peer_interface(),
                     },
                 );
                 metrics.record_blackhole_discard_installed();
@@ -1037,6 +1062,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
+                    peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Installed,
                     reason: "installed".to_string(),
                 });
@@ -1052,6 +1078,7 @@ async fn reconcile_once<F>(
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
                     peer: candidate.route.peer,
+                    peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Failed,
                     reason: e,
                 });
@@ -1081,6 +1108,7 @@ fn ownership_unavailable_status(candidate: &Candidate) -> BlackholeStatus {
     BlackholeStatus {
         prefix: candidate.prefix,
         peer: candidate.route.peer,
+        peer_interface: candidate.route.peer_interface(),
         state: BlackholeState::Failed,
         reason: "ownership_state_unavailable".to_string(),
     }
@@ -1177,6 +1205,7 @@ async fn reap_or_report_adopted<F>(
                 BlackholeStatus {
                     prefix,
                     peer: unspecified_peer(prefix),
+                    peer_interface: None,
                     state: BlackholeState::Installed,
                     reason: "adopted_pending_reap".to_string(),
                 },
@@ -1198,6 +1227,7 @@ async fn reap_or_report_adopted<F>(
                     BlackholeStatus {
                         prefix,
                         peer: unspecified_peer(prefix),
+                        peer_interface: None,
                         state: BlackholeState::Failed,
                         reason: "reap_failed".to_string(),
                     },
@@ -1262,6 +1292,7 @@ async fn degraded_pass_without_dump<F>(
                 statuses.push(BlackholeStatus {
                     prefix,
                     peer: installed.peer,
+                    peer_interface: installed.peer_interface.clone(),
                     state: BlackholeState::Failed,
                     reason: "remove_failed".to_string(),
                 });
@@ -1275,6 +1306,7 @@ async fn degraded_pass_without_dump<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Failed,
                 reason: if state.ownership.available {
                     "dump_failed"
@@ -1295,6 +1327,7 @@ async fn degraded_pass_without_dump<F>(
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
                 peer: candidate.route.peer,
+                peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: candidate.reason.to_string(),
             });
@@ -1789,7 +1822,7 @@ pub(super) mod tests {
             tokio::time::Instant::now() + Duration::from_hours(1),
             OwnershipState::ephemeral([prefix]),
         );
-        state.owned.insert(prefix, OwnedBlackhole { peer });
+        state.owned.insert(prefix, owned_blackhole(peer));
 
         reconcile_once(
             config,
@@ -1804,7 +1837,7 @@ pub(super) mod tests {
         assert_eq!(fib.dump_calls, 0);
         assert!(fib.install_calls.is_empty() && fib.remove_calls.is_empty());
         assert!(fib.installed.contains(&prefix));
-        assert_eq!(state.owned.get(&prefix), Some(&OwnedBlackhole { peer }));
+        assert_eq!(state.owned.get(&prefix), Some(&owned_blackhole(peer)));
     }
 
     #[tokio::test]
@@ -1870,8 +1903,8 @@ pub(super) mod tests {
             tokio::time::Instant::now() + Duration::from_hours(1),
             OwnershipState::ephemeral([prefix, withdrawn, adopted]),
         );
-        state.owned.insert(prefix, OwnedBlackhole { peer });
-        state.owned.insert(withdrawn, OwnedBlackhole { peer });
+        state.owned.insert(prefix, owned_blackhole(peer));
+        state.owned.insert(withdrawn, owned_blackhole(peer));
         state.adoption.pending.insert(adopted);
         state.adoption.swept = true;
 
@@ -1975,7 +2008,7 @@ pub(super) mod tests {
             tokio::time::Instant::now() + Duration::from_hours(1),
             OwnershipState::ephemeral([protected]),
         );
-        state.owned.insert(protected, OwnedBlackhole { peer });
+        state.owned.insert(protected, owned_blackhole(peer));
         state.adoption.swept = true;
 
         reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
@@ -2038,7 +2071,7 @@ pub(super) mod tests {
             tokio::time::Instant::now() + Duration::from_hours(1),
             OwnershipState::ephemeral([prefix]),
         );
-        state.owned.insert(prefix, OwnedBlackhole { peer });
+        state.owned.insert(prefix, owned_blackhole(peer));
         state.adoption.swept = true;
 
         reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
@@ -2141,6 +2174,7 @@ pub(super) mod tests {
             let sentinel = vec![BlackholeStatus {
                 prefix,
                 peer,
+                peer_interface: None,
                 state: BlackholeState::Installed,
                 reason: "last_good".to_string(),
             }];
@@ -2153,7 +2187,7 @@ pub(super) mod tests {
                 tokio::time::Instant::now() + Duration::from_hours(1),
                 OwnershipState::ephemeral([prefix]),
             );
-            state.owned.insert(prefix, OwnedBlackhole { peer });
+            state.owned.insert(prefix, owned_blackhole(peer));
             state.adoption.swept = true;
             let owned_before = state.owned.clone();
             let receipt_before = state.ownership.prefixes.clone();
@@ -2207,6 +2241,7 @@ pub(super) mod tests {
         let sentinel = vec![BlackholeStatus {
             prefix,
             peer,
+            peer_interface: None,
             state: BlackholeState::Installed,
             reason: "last_good".to_string(),
         }];
@@ -2941,11 +2976,19 @@ pub(super) mod tests {
         }
     }
 
+    fn owned_blackhole(peer: IpAddr) -> OwnedBlackhole {
+        OwnedBlackhole {
+            peer,
+            peer_interface: None,
+        }
+    }
+
     fn owned_with(prefix: Prefix) -> HashMap<Prefix, OwnedBlackhole> {
         HashMap::from([(
             prefix,
             OwnedBlackhole {
                 peer: "198.51.100.1".parse().unwrap(),
+                peer_interface: None,
             },
         )])
     }
@@ -3155,6 +3198,56 @@ pub(super) mod tests {
         assert_eq!(statuses[0].reason, "installed");
     }
 
+    /// A BLACKHOLE route from a link-local neighbor reports the interface
+    /// its session recorded, and the owned row keeps it after the route
+    /// is withdrawn and the kernel remove fails.
+    #[tokio::test]
+    async fn reconcile_rows_carry_the_scoped_source_interface() {
+        let prefix = v4(32);
+        let mut scoped = route(
+            prefix,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        );
+        scoped.peer = "fe80::1".parse().unwrap();
+        scoped.aspa_context = rustbgpd_rib::route::AspaContextId::intern_scoped(
+            rustbgpd_wire::AspaValidationContext::default(),
+            Some("eth0"),
+        );
+        let mut fib = FakeFib::default();
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let mut owned = HashMap::new();
+        let mut rejected = HashSet::new();
+
+        let statuses = reconcile_for_test(
+            vec![scoped.clone()],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+        )
+        .await;
+        assert_eq!(statuses[0].state, BlackholeState::Installed);
+        assert_eq!(statuses[0].peer_interface.as_deref(), Some("eth0"));
+
+        // The installed discard's best route moves to the eth1 neighbor.
+        let mut moved = scoped;
+        moved.aspa_context = rustbgpd_rib::route::AspaContextId::intern_scoped(
+            rustbgpd_wire::AspaValidationContext::default(),
+            Some("eth1"),
+        );
+        let statuses =
+            reconcile_for_test(vec![moved], &mut fib, &mut owned, &mut rejected, &metrics).await;
+        assert_eq!(statuses[0].reason, "owned");
+        assert_eq!(statuses[0].peer_interface.as_deref(), Some("eth1"));
+
+        fib.fail_remove.insert(prefix, "busy".to_string());
+        let statuses =
+            reconcile_for_test(Vec::new(), &mut fib, &mut owned, &mut rejected, &metrics).await;
+        assert_eq!(statuses[0].reason, "remove_failed");
+        assert_eq!(statuses[0].peer_interface.as_deref(), Some("eth1"));
+    }
+
     #[tokio::test]
     async fn reconcile_failed_remove_stays_visible() {
         let prefix = v4(32);
@@ -3166,6 +3259,7 @@ pub(super) mod tests {
             prefix,
             OwnedBlackhole {
                 peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+                peer_interface: None,
             },
         )]);
         let mut rejected = HashSet::new();
@@ -3261,6 +3355,7 @@ pub(super) mod tests {
         let next = v4_host(66);
         let peer = OwnedBlackhole {
             peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            peer_interface: None,
         };
         let mut fib = FakeFib::default();
         fib.installed.insert(old);
@@ -3349,6 +3444,7 @@ pub(super) mod tests {
         )];
         let peer = OwnedBlackhole {
             peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            peer_interface: None,
         };
         let metrics = BgpMetrics::with_registry(Registry::new());
         let mut fib = FakeFib::default();
@@ -3474,6 +3570,7 @@ pub(super) mod tests {
             prefix,
             OwnedBlackhole {
                 peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+                peer_interface: None,
             },
         )]);
         let mut rejected = HashSet::new();
@@ -3506,6 +3603,7 @@ pub(super) mod tests {
             prefix,
             OwnedBlackhole {
                 peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+                peer_interface: None,
             },
         )]);
         let mut rejected = HashSet::new();
@@ -3973,7 +4071,7 @@ pub(super) mod tests {
             ..Default::default()
         };
         fib.installed.insert(old);
-        let mut owned = HashMap::from([(old, OwnedBlackhole { peer })]);
+        let mut owned = HashMap::from([(old, owned_blackhole(peer))]);
         let mut rejected = HashSet::new();
         let statuses = reconcile_for_test(
             vec![announced(later)],
@@ -4001,7 +4099,7 @@ pub(super) mod tests {
             ..Default::default()
         };
         fib.installed.extend([retained, pending]);
-        let mut owned = HashMap::from([(retained, OwnedBlackhole { peer })]);
+        let mut owned = HashMap::from([(retained, owned_blackhole(peer))]);
         let mut adoption = reapable_adoption();
         adoption.pending.insert(pending);
         let statuses = reconcile_for_test_with_adoption(
@@ -4036,8 +4134,8 @@ pub(super) mod tests {
         let metrics = BgpMetrics::with_registry(Registry::new());
         let peer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
         let mut owned = HashMap::from([
-            (desired, OwnedBlackhole { peer }),
-            (stale, OwnedBlackhole { peer }),
+            (desired, owned_blackhole(peer)),
+            (stale, owned_blackhole(peer)),
         ]);
         let mut rejected = HashSet::new();
         let mut adoption = deferred_adoption();
