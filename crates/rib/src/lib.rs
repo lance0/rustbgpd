@@ -82,7 +82,8 @@ pub use manager::{
     bench_recovery_capture_scan,
 };
 pub use manager::{
-    EorGraceConfig, EorGracePeerConfig, SelectionDeferralConfig, SelectionDeferralWaiterConfig,
+    EorGraceConfig, EorGracePeerConfig, ReplayComplete, SelectionDeferralConfig,
+    SelectionDeferralWaiterConfig,
 };
 pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,

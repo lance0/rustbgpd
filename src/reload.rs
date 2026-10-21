@@ -1990,6 +1990,10 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
     new_config.global.max_as_path_length = current.global.max_as_path_length;
     new_config
         .global
+        .gr_eor_replay_owners
+        .clone_from(&current.global.gr_eor_replay_owners);
+    new_config
+        .global
         .runtime_state_dir
         .clone_from(&current.global.runtime_state_dir);
     new_config
@@ -10852,6 +10856,10 @@ tcp_ao = [
     /// runtime-added-neighbor assertion exercises the later consumer that made
     /// an unpinned ASN/router ID a live split-brain rather than mere metadata.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one desired config and one assertion per pinned daemon-wide field"
+    )]
     async fn reload_pins_daemon_wide_inventory_but_hot_applies_honor_knobs() {
         let desired = r#"
 [global]
@@ -10867,6 +10875,7 @@ multipath_relax = true
 link_bandwidth_weighted = true
 warm_cache_checkpoint_on_shutdown = true
 max_as_path_length = 901
+gr_eor_replay_owners = ["gobgp-bridge"]
 runtime_state_dir = "/tmp/rustbgpd-reload-edited"
 
 [global.telemetry]
@@ -10925,6 +10934,10 @@ hold_time = 90
                 startup.global.warm_cache_checkpoint_on_shutdown
             );
             assert_eq!(runtime.global.max_as_path_length, 750);
+            assert_eq!(
+                runtime.global.gr_eor_replay_owners,
+                startup.global.gr_eor_replay_owners
+            );
             assert_eq!(
                 runtime.global.runtime_state_dir,
                 startup.global.runtime_state_dir

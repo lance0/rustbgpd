@@ -443,6 +443,7 @@ that are stood up once at startup. Three fields are not restart-required:
 | `max_as_path_length` | restart-required | Threaded into each session's transport config when the peer is built; running sessions keep the ceiling they started with. |
 | `dynamic_neighbor_limit` | reload-applied | Admission cap compared live against the dynamic-peer counter (inbound admission and LRU eviction bound); nothing is pre-allocated. SIGHUP updates the admission ceiling immediately; existing dynamic sessions are preserved even if the new limit is below current occupancy, and headroom metrics update on the snapshot swap. |
 | `worker_threads` | restart-required | Tokio runtime worker-thread count; the runtime is built once at startup. Unset caps to `min(CPU parallelism, 8)`; `RUSTBGPD_WORKER_THREADS` overrides. |
+| `gr_eor_replay_owners` | restart-required | The RIB takes the listed replay controllers once at startup, alongside the planned-restart End-of-RIB grace windows; SIGHUP pins the running list. |
 | `warm_cache_checkpoint_on_shutdown` | restart-required | The shutdown checkpoint writer and its pinned runtime-state directory are selected at startup. |
 | `runtime_state_dir` | restart-required | File-system paths (`gr-restart.toml`, `fib-owned.json`, `grpc.sock`) are bound at startup. |
 

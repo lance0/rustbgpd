@@ -799,6 +799,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.InjectionService",
+        "MarkReplayComplete",
+        "/rustbgpd.v1.InjectionService/MarkReplayComplete",
+        AuthTier::OperatorOnly,
+    ),
+    method(
+        "rustbgpd.v1.InjectionService",
         "AddEvpnRoute",
         "/rustbgpd.v1.InjectionService/AddEvpnRoute",
         AuthTier::OperatorOnly,
@@ -939,7 +945,7 @@ mod tests {
     const INVENTORY_JSON: &str = include_str!("../../../docs/reference/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/reference/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 1 | 0.8% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 81 | 61.8% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 81 | 61.4% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1179,7 +1185,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 131);
+        assert_eq!(METHODS.len(), 132);
     }
 
     #[test]
@@ -1222,7 +1228,7 @@ mod tests {
         assert_eq!(method_count_by_tier(AuthTier::Read), 1);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 81);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 22);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 27);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 28);
     }
 
     /// ADR-0141 §8: renewal shares the adds' tier, so an `automation`

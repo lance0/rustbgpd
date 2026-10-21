@@ -63,6 +63,7 @@ fn grace(peers: &[IpAddr]) -> EorGraceConfig {
                 families: vec![V4, V6],
             })
             .collect(),
+        replay_owners: vec![],
     }
 }
 
@@ -242,6 +243,10 @@ impl Helper {
 }
 
 fn eor_count(metrics: &BgpMetrics, peer: IpAddr) -> f64 {
+    released_count(metrics, peer, "deadline")
+}
+
+fn released_count(metrics: &BgpMetrics, peer: IpAddr, reason: &str) -> f64 {
     metrics
         .registry()
         .gather()
@@ -258,7 +263,7 @@ fn eor_count(metrics: &BgpMetrics, peer: IpAddr) -> f64 {
                         .any(|label| label.name() == "peer" && label.value() == peer.to_string())
                         && labels
                             .iter()
-                            .any(|label| label.name() == "reason" && label.value() == "deadline")
+                            .any(|label| label.name() == "reason" && label.value() == reason)
                 })
                 .map(|metric| metric.get_counter().get_value())
         })
@@ -786,4 +791,360 @@ async fn deadline_counts_from_daemon_start_not_install() {
 fn manager_from(config: EorGraceConfig, metrics: &BgpMetrics) -> RibManager {
     let (_tx, rx) = mpsc::channel(8);
     RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()).with_eor_grace(config)
+}
+
+// Replay-complete signal: every listed controller's signal for the current
+// incarnation releases the held End-of-RIB before the deadline.
+
+/// A long window, so a release inside these tests cannot come from the timer.
+const LONG_WINDOW: Duration = Duration::from_secs(120);
+/// A second re-injected ban: a release after the first injection would drop
+/// it at the helper.
+const KEPT2: u8 = 10;
+const BRIDGE: &str = "gobgp-bridge";
+const OTHER: &str = "other-controller";
+
+fn replay_config(peers: &[IpAddr], owners: &[&str]) -> EorGraceConfig {
+    let start = tokio::time::Instant::now();
+    EorGraceConfig {
+        peers: peers
+            .iter()
+            .map(|&peer| EorGracePeerConfig {
+                peer,
+                deadline: start + LONG_WINDOW,
+                families: vec![V4, V6],
+            })
+            .collect(),
+        replay_owners: owners.iter().map(ToString::to_string).collect(),
+    }
+}
+
+fn replay_manager(peers: &[IpAddr], owners: &[&str], metrics: &BgpMetrics) -> RibManager {
+    manager_from(replay_config(peers, owners), metrics)
+}
+
+fn signal(
+    manager: &mut RibManager,
+    owner: &str,
+    incarnation: u64,
+) -> Result<crate::ReplayComplete, RibCommandError> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::MarkReplayComplete {
+        owner: owner.to_string(),
+        incarnation,
+        reply,
+    });
+    rx.try_recv().unwrap()
+}
+
+fn incarnation_mismatch(result: &Result<crate::ReplayComplete, RibCommandError>) -> bool {
+    matches!(
+        result,
+        Err(RibCommandError::FailedPrecondition(
+            crate::injection_lease::LeaseConflict::IncarnationMismatch,
+            _
+        ))
+    )
+}
+
+struct SignalRun {
+    /// A re-injected ban was absent at the upstream after some message.
+    gap: bool,
+    /// When End-of-RIB reached the upstream, relative to process start.
+    eor_at: Option<Duration>,
+    log: Vec<String>,
+    /// What the signal returned.
+    outcome: Option<Result<crate::ReplayComplete, RibCommandError>>,
+}
+
+/// One planned restart through the running actor with a 120 s window and
+/// the bridge listed. The controller replays two bans at 4 s and 5 s and
+/// signals at `signal_at`; the upstream is observed after every message.
+async fn signalled_replay(signal_at: Duration) -> SignalRun {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(deferral(&[UPSTREAM]))
+        .with_eor_grace(replay_config(&[UPSTREAM], &[BRIDGE]));
+    let incarnation = manager.injection_leases.incarnation();
+    let start = tokio::time::Instant::now();
+    let mut helper = Helper::retaining(&[KEPT, KEPT2, UNBANNED]);
+    let mut gap = false;
+    let mut eor_at = None;
+    let mut observe = |helper: &mut Helper, rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        while let Ok(update) = rx.try_recv() {
+            helper.apply(&update);
+            gap |= !(helper.has(KEPT) && helper.has(KEPT2));
+            if eor_at.is_none() && !helper.eor.is_empty() {
+                eor_at = Some(start.elapsed());
+            }
+        }
+    };
+    let handle = tokio::spawn(manager.run());
+    let (messages, mut out_rx) = session_messages(UPSTREAM, 1, HELPER, vec![V4], 64);
+    for message in messages {
+        tx.send(message).await.unwrap();
+    }
+    sync(&tx).await;
+    observe(&mut helper, &mut out_rx);
+
+    let send_signal = |tx: mpsc::Sender<RibUpdate>| async move {
+        let (reply, outcome) = oneshot::channel();
+        tx.send(RibUpdate::MarkReplayComplete {
+            owner: BRIDGE.to_string(),
+            incarnation,
+            reply,
+        })
+        .await
+        .unwrap();
+        outcome.await.unwrap()
+    };
+    let mut events: Vec<(Duration, Option<u8>)> = vec![
+        (Duration::from_secs(4), Some(KEPT)),
+        (Duration::from_secs(5), Some(KEPT2)),
+        (signal_at, None),
+    ];
+    events.sort_by_key(|(at, _)| *at);
+    let mut signal_outcome = None;
+    for (at, event) in events {
+        tokio::time::advance(at.saturating_sub(start.elapsed())).await;
+        match event {
+            Some(octet) => {
+                let (reply, injected) = oneshot::channel();
+                tx.send(RibUpdate::InjectRoute {
+                    route: local_route(octet),
+                    reply,
+                })
+                .await
+                .unwrap();
+                let outcome: Result<InjectOutcome, RibCommandError> = injected.await.unwrap();
+                outcome.unwrap();
+            }
+            None => signal_outcome = Some(send_signal(tx.clone()).await),
+        }
+        sync(&tx).await;
+        observe(&mut helper, &mut out_rx);
+    }
+    // Well short of the deadline: only the signal can have released it.
+    tokio::time::advance(Duration::from_secs(10)).await;
+    sync(&tx).await;
+    observe(&mut helper, &mut out_rx);
+    assert!(start.elapsed() < LONG_WINDOW);
+    assert!((released_count(&metrics, UPSTREAM, "replay_complete") - 1.0).abs() < f64::EPSILON);
+    assert!(
+        eor_count(&metrics, UPSTREAM) < 0.5,
+        "the deadline released it"
+    );
+    assert!(helper.has(KEPT) && helper.has(KEPT2));
+    assert!(
+        !helper.has(UNBANNED),
+        "the unbanned route outlived End-of-RIB"
+    );
+    drop(tx);
+    handle.await.unwrap();
+    SignalRun {
+        gap,
+        eor_at,
+        log: helper.log,
+        outcome: signal_outcome,
+    }
+}
+
+/// The controller replays two bans after a delay, then signals. End-of-RIB
+/// follows the signal at once, long before the 120 s deadline, after both
+/// replayed announcements, and the upstream never loses either ban.
+#[tokio::test(start_paused = true)]
+async fn signal_after_replay_releases_end_of_rib_with_no_gap() {
+    let run = signalled_replay(Duration::from_secs(6)).await;
+    assert!(
+        !run.gap,
+        "a re-injected ban was absent at the upstream: {:?}",
+        run.log
+    );
+    assert_eq!(run.eor_at, Some(Duration::from_secs(6)));
+    assert!(matches!(
+        run.outcome,
+        Some(Ok(crate::ReplayComplete::Released))
+    ));
+    let eor = run.log.iter().position(|e| e == "eor").unwrap();
+    for octet in [KEPT, KEPT2] {
+        let announce = run
+            .log
+            .iter()
+            .position(|e| e == &format!("announce {}", host(octet)))
+            .unwrap();
+        assert!(announce < eor, "{:?}", run.log);
+    }
+}
+
+/// Control: a controller that signals before it replays. The release is the
+/// same mechanism, but the helper drops the bans until replay re-adds them,
+/// so the observer must see the gap.
+#[tokio::test(start_paused = true)]
+async fn control_signal_before_replay_shows_the_gap() {
+    let run = signalled_replay(Duration::from_secs(1)).await;
+    assert!(run.gap, "the control must observe the gap: {:?}", run.log);
+    assert_eq!(run.eor_at, Some(Duration::from_secs(1)));
+    assert!(matches!(
+        run.outcome,
+        Some(Ok(crate::ReplayComplete::Released))
+    ));
+}
+
+/// Two listed controllers: the first signal keeps End-of-RIB held, a stale
+/// incarnation is refused without changing anything, an unlisted owner is
+/// ignored, a repeated signal is idempotent, and the last signal releases.
+#[tokio::test(start_paused = true)]
+async fn release_needs_every_listed_controller_for_this_incarnation() {
+    let metrics = BgpMetrics::new();
+    let mut manager = replay_manager(&[UPSTREAM], &[BRIDGE, OTHER], &metrics);
+    let incarnation = manager.injection_leases.incarnation();
+    let mut rx = connect(&mut manager, UPSTREAM, HELPER);
+    assert_no_eor(&mut rx, "the held session");
+
+    assert_eq!(
+        signal(&mut manager, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::Recorded {
+            awaiting: vec![OTHER.to_string()]
+        }
+    );
+    assert_eq!(
+        signal(&mut manager, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::Recorded {
+            awaiting: vec![OTHER.to_string()]
+        }
+    );
+    assert!(incarnation_mismatch(&signal(
+        &mut manager,
+        OTHER,
+        incarnation ^ 1
+    )));
+    assert_eq!(
+        signal(&mut manager, "unlisted", incarnation).unwrap(),
+        crate::ReplayComplete::NotExpected
+    );
+    assert_no_eor(&mut rx, "a partial, stale or unlisted signal");
+
+    assert_eq!(
+        signal(&mut manager, OTHER, incarnation).unwrap(),
+        crate::ReplayComplete::Released
+    );
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, vec![V4]);
+    assert!((released_count(&metrics, UPSTREAM, "replay_complete") - 1.0).abs() < f64::EPSILON);
+    // Released: a later signal changes nothing, and the deadline has no
+    // window left to release.
+    assert_eq!(
+        signal(&mut manager, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::NotHolding
+    );
+    assert_eq!(manager.next_eor_hold_deadline(), None);
+    tokio::time::advance(LONG_WINDOW).await;
+    manager.expire_eor_holds(tokio::time::Instant::now());
+    assert!(eor_count(&metrics, UPSTREAM) < 0.5);
+}
+
+/// A cold boot holds nothing: a listed controller's signal is `NotHolding`
+/// and an unlisted one `NotExpected`, and End-of-RIB leaves at once. With no
+/// listed controller (the timer-only window) every signal is `NotExpected`
+/// and the window stays held.
+#[tokio::test(start_paused = true)]
+async fn cold_boot_and_unlisted_signals_change_nothing() {
+    let metrics = BgpMetrics::new();
+    let mut cold = replay_manager(&[], &[BRIDGE], &metrics);
+    let incarnation = cold.injection_leases.incarnation();
+    let mut rx = connect(&mut cold, UPSTREAM, HELPER);
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, vec![V4]);
+    assert_eq!(
+        signal(&mut cold, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::NotHolding
+    );
+    assert_eq!(
+        signal(&mut cold, OTHER, incarnation).unwrap(),
+        crate::ReplayComplete::NotExpected
+    );
+    assert!(incarnation_mismatch(&signal(
+        &mut cold,
+        BRIDGE,
+        incarnation.wrapping_add(1)
+    )));
+
+    let mut timer_only = replay_manager(&[UPSTREAM], &[], &metrics);
+    let incarnation = timer_only.injection_leases.incarnation();
+    let mut rx = connect(&mut timer_only, UPSTREAM, HELPER);
+    assert_eq!(
+        signal(&mut timer_only, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::NotExpected
+    );
+    assert_no_eor(&mut rx, "the timer-only window after a signal");
+}
+
+/// A listed controller that never signals: the deadline still releases
+/// End-of-RIB, counted as `deadline`, and the log names the controller.
+#[tokio::test(start_paused = true)]
+async fn deadline_release_names_the_controllers_that_never_signalled() {
+    use std::sync::Mutex;
+
+    let metrics = BgpMetrics::new();
+    let mut manager = replay_manager(&[UPSTREAM], &[BRIDGE, OTHER], &metrics);
+    let incarnation = manager.injection_leases.incarnation();
+    let mut rx = connect(&mut manager, UPSTREAM, HELPER);
+    assert!(signal(&mut manager, BRIDGE, incarnation).is_ok());
+    tokio::time::advance(LONG_WINDOW).await;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = CaptureSubscriber {
+        level: tracing::Level::WARN,
+        events: Arc::clone(&captured),
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        manager.expire_eor_holds(tokio::time::Instant::now());
+    });
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, vec![V4]);
+    assert!((eor_count(&metrics, UPSTREAM) - 1.0).abs() < f64::EPSILON);
+    assert!(released_count(&metrics, UPSTREAM, "replay_complete") < 0.5);
+    let events = captured.lock().unwrap();
+    let release = events
+        .iter()
+        .find(|event| {
+            event
+                .0
+                .get("message")
+                .is_some_and(|message| message.contains("before every listed controller"))
+        })
+        .unwrap_or_else(|| panic!("no deadline release warning: {events:?}"));
+    assert_eq!(release.0.get("awaiting").map(String::as_str), Some(OTHER));
+    assert_eq!(
+        release.0.get("peer").map(String::as_str),
+        Some(UPSTREAM.to_string().as_str())
+    );
+}
+
+/// A peer whose outbound queue is dirty when the last signal arrives keeps
+/// its End-of-RIB for the resync, which sends it after the routes.
+#[tokio::test(start_paused = true)]
+async fn signal_release_while_dirty_waits_for_the_resync() {
+    let metrics = BgpMetrics::new();
+    let mut manager = replay_manager(&[UPSTREAM], &[BRIDGE], &metrics);
+    let incarnation = manager.injection_leases.incarnation();
+    let (messages, mut rx) = session_messages(UPSTREAM, 1, HELPER, vec![V4], 1);
+    for message in messages {
+        manager.handle_update(message);
+    }
+    let mut helper = Helper::retaining(&[KEPT]);
+    let kept = |helper: &Helper| helper.has(KEPT);
+    // A full one-slot queue makes the second announcement mark the peer dirty.
+    inject(&mut manager, 9);
+    inject(&mut manager, KEPT);
+    assert!(manager.dirty_peers.contains(&UPSTREAM));
+    assert_eq!(
+        signal(&mut manager, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::Released
+    );
+    assert!(helper.observe(&mut rx, kept));
+    assert!(helper.eor.is_empty(), "release flushed past a dirty resync");
+    let _ = manager.resync_dirty_peers_bounded();
+    assert!(helper.observe(&mut rx, kept));
+    assert_eq!(helper.eor, vec![V4]);
+    assert_eq!(helper.log.last().map(String::as_str), Some("eor"));
 }

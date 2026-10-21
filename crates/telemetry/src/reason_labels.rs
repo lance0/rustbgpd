@@ -442,18 +442,22 @@ pub enum GrEorGraceReleaseReason {
     /// The window's absolute deadline passed. Replay completion is not
     /// verified.
     Deadline,
+    /// Every controller listed in `gr_eor_replay_owners` signalled replay
+    /// complete for this daemon incarnation.
+    ReplayComplete,
 }
 
 impl GrEorGraceReleaseReason {
     /// Every canonical release reason, for vocabulary walks in tests and
     /// docs.
-    pub const ALL: [Self; 1] = [Self::Deadline];
+    pub const ALL: [Self; 2] = [Self::Deadline, Self::ReplayComplete];
 
     /// The canonical reason token used as the metric label value.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Deadline => "deadline",
+            Self::ReplayComplete => "replay_complete",
         }
     }
 }
@@ -828,6 +832,10 @@ mod tests {
             assert!(seen.insert(reason.as_str()), "duplicate label");
         }
         assert_eq!(GrEorGraceReleaseReason::Deadline.as_str(), "deadline");
+        assert_eq!(
+            GrEorGraceReleaseReason::ReplayComplete.as_str(),
+            "replay_complete"
+        );
     }
 
     #[test]

@@ -702,6 +702,7 @@ impl PeerManager {
                     ebgp_requires_policy: None,
                     warm_cache_checkpoint_on_shutdown: false,
                     max_as_path_length: rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH,
+                    gr_eor_replay_owners: Vec::new(),
                 },
                 // PeerManager::new constructs an in-memory baseline
                 // Config before the operator's TOML is applied. The

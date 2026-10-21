@@ -1039,9 +1039,11 @@ fn eor_grace_config(
     peer_configs: &[config::ResolvedNeighbor],
     start_time: tokio::time::Instant,
     restart_deadline: StdInstant,
+    replay_owners: &[String],
 ) -> rustbgpd_rib::EorGraceConfig {
     let restart_deadline = tokio::time::Instant::from_std(restart_deadline);
     rustbgpd_rib::EorGraceConfig {
+        replay_owners: replay_owners.to_vec(),
         peers: peer_configs
             .iter()
             .map(|neighbor| &neighbor.transport_config)
@@ -4619,8 +4621,20 @@ async fn run<T>(
             timeout: deadline.saturating_duration_since(StdInstant::now()),
             waiters,
         });
-        rib_manager =
-            rib_manager.with_eor_grace(eor_grace_config(&peer_configs, start_time, deadline));
+        rib_manager = rib_manager.with_eor_grace(eor_grace_config(
+            &peer_configs,
+            start_time,
+            deadline,
+            &config.global.gr_eor_replay_owners,
+        ));
+    } else {
+        // A cold boot holds nothing, but knowing the listed controllers lets
+        // a replay-complete signal answer NOT_HOLDING rather than
+        // NOT_EXPECTED.
+        rib_manager = rib_manager.with_eor_grace(rustbgpd_rib::EorGraceConfig {
+            peers: Vec::new(),
+            replay_owners: config.global.gr_eor_replay_owners.clone(),
+        });
     }
     // ADR-0137: seed conditional advertisements before any session can
     // register, after selection deferral so deferral holds them pending.
@@ -10800,6 +10814,7 @@ peer_group = "plain"
                 ebgp_requires_policy: None,
                 warm_cache_checkpoint_on_shutdown: false,
                 max_as_path_length: rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH,
+                gr_eor_replay_owners: Vec::new(),
             },
             security: crate::config::SecurityConfig::default(),
             neighbors: vec![
@@ -11094,7 +11109,12 @@ peer_group = "plain"
             .checked_sub(Duration::from_secs(30))
             .unwrap();
         let restart_deadline = now + Duration::from_secs(20);
-        let config = eor_grace_config(&[long, short, unset, no_gr], start_time, restart_deadline);
+        let config = eor_grace_config(
+            &[long, short, unset, no_gr],
+            start_time,
+            restart_deadline,
+            &[],
+        );
         let deadlines: Vec<_> = config
             .peers
             .iter()

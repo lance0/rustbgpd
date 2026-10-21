@@ -1200,8 +1200,12 @@ complete. With the opt-in
 rustbgpd counts routes that injection controllers replay after the restart as
 part of that update and holds End-of-RIB toward a helper until one deadline
 fixed at process start. Routes keep flowing during the hold. The deadline is
-not a replay-complete signal, so the window closes the observed gap only when
-replay completes before release.
+not a replay-complete signal, so on its own the window closes the observed
+gap only when replay completes before release. Controllers listed in
+`gr_eor_replay_owners` signal `MarkReplayComplete` for the current
+incarnation after replaying; End-of-RIB is then released once every listed
+controller has signalled, so the window closes the gap when every listed
+controller signals before the deadline.
 
 When `warm_cache_checkpoint_on_shutdown = true`, a successful bounded
 checkpoint publication binds its generation into the restart marker

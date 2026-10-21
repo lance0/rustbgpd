@@ -1609,6 +1609,13 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         Err(Status::unimplemented("not mocked"))
     }
 
+    async fn mark_replay_complete(
+        &self,
+        _request: Request<server_proto::MarkReplayCompleteRequest>,
+    ) -> Result<Response<server_proto::MarkReplayCompleteResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
     async fn list_injection_leases(
         &self,
         _request: Request<server_proto::ListInjectionLeasesRequest>,

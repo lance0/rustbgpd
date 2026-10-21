@@ -3700,6 +3700,29 @@ service InjectionService {
   // accepted, and a token is valid only for the owner it was issued for
   // (another owner's token is INVALID_ARGUMENT).
   rpc ListLeasedKeys(ListLeasedKeysRequest) returns (ListLeasedKeysResponse);
+  // A controller's replay-complete signal for the planned-restart
+  // End-of-RIB grace window (gr_eor_grace_time). The daemon releases the
+  // held End-of-RIB once every owner listed in [global]
+  // gr_eor_replay_owners has signalled for the current incarnation, or at
+  // the window's deadline, whichever comes first. An empty list keeps the
+  // timer-only window.
+  //
+  // Protocol: read incarnation I (CheckLivenessResponse.incarnation or
+  // LeaseGeneration.incarnation) before replaying, replay the full desired
+  // state, then call MarkReplayComplete(owner, I). Ordering: the signal
+  // travels through the RIB queue behind the controller's earlier
+  // injections, and each AddPath, AddFlowSpec or leased add commits before
+  // its RPC returns, so every route the controller added before calling is
+  // distributed ahead of the released End-of-RIB.
+  //
+  // The incarnation must be the daemon's current one; otherwise the call
+  // returns FAILED_PRECONDITION with google.rpc.ErrorInfo reason
+  // INCARNATION_MISMATCH and changes nothing: the daemon restarted, so read
+  // the incarnation again and replay again. Every other outcome is OK (see
+  // ReplayCompleteOutcome). A repeated signal for the same owner changes
+  // nothing. The signal proves only that the controller replayed its own
+  // desired state. A malformed owner is INVALID_ARGUMENT.
+  rpc MarkReplayComplete(MarkReplayCompleteRequest) returns (MarkReplayCompleteResponse);
   // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
   // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
   // reflects them to iBGP peers negotiating L2VPN/EVPN.
@@ -4110,6 +4133,33 @@ message ListLeasedKeysResponse {
   // The owner's live generation this walk is bound to; absent when the
   // owner has no live lease.
   LeaseGeneration generation = 3;
+}
+
+message MarkReplayCompleteRequest {
+  // 1-64 bytes of [A-Za-z0-9._-], the lease owner syntax.
+  string owner = 1;
+  // The daemon incarnation the controller read before it replayed.
+  fixed64 incarnation = 2;
+}
+
+message MarkReplayCompleteResponse {
+  ReplayCompleteOutcome outcome = 1;
+  // Listed owners that have not signalled yet, sorted. Empty unless the
+  // outcome is RECORDED.
+  repeated string awaiting = 2;
+}
+
+enum ReplayCompleteOutcome {
+  REPLAY_COMPLETE_OUTCOME_UNSPECIFIED = 0;
+  // This owner was the last one awaited: the held End-of-RIB was released.
+  REPLAY_COMPLETE_OUTCOME_RELEASED = 1;
+  // Recorded; other listed owners have not signalled yet.
+  REPLAY_COMPLETE_OUTCOME_RECORDED = 2;
+  // The owner is not in gr_eor_replay_owners. Nothing changed.
+  REPLAY_COMPLETE_OUTCOME_NOT_EXPECTED = 3;
+  // No End-of-RIB is held: a cold boot, no grace window configured, or the
+  // window already ended (released or past its deadline). Nothing changed.
+  REPLAY_COMPLETE_OUTCOME_NOT_HOLDING = 4;
 }
 
 message DeleteFlowSpecResponse {

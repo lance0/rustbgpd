@@ -894,6 +894,16 @@ pub struct Global {
     /// requires a session reset. `0` disables the ceiling.
     #[serde(default = "default_max_as_path_length")]
     pub max_as_path_length: u16,
+    /// Injection controllers whose replay-complete signal
+    /// (`InjectionService.MarkReplayComplete`) releases the planned-restart
+    /// End-of-RIB grace window (`gr_eor_grace_time`) early. The held
+    /// End-of-RIB is released once every listed controller has signalled
+    /// for the current daemon incarnation, or at the window's deadline,
+    /// whichever comes first. Names use the lease owner syntax: 1-64 bytes
+    /// of `[A-Za-z0-9._-]`. Empty (the default) keeps the timer-only window.
+    /// **Restart-required:** read once at startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gr_eor_replay_owners: Vec<String>,
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,
