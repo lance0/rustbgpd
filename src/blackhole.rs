@@ -895,13 +895,23 @@ async fn reconcile_once<F>(
         if state.owned.contains_key(&candidate.prefix) {
             match presence {
                 KernelRoutePresence::Marker => {
-                    statuses.push(BlackholeStatus {
-                        prefix: candidate.prefix,
+                    // The best route can move to another source while the
+                    // discard stays installed; keep the retained source
+                    // current so a later failed removal names it.
+                    let source = OwnedBlackhole {
                         peer: candidate.route.peer,
                         peer_interface: candidate.route.peer_interface(),
+                    };
+                    statuses.push(BlackholeStatus {
+                        prefix: candidate.prefix,
+                        peer: source.peer,
+                        peer_interface: source.peer_interface.clone(),
                         state: BlackholeState::Installed,
                         reason: "owned".to_string(),
                     });
+                    if let Some(retained) = state.owned.get_mut(&candidate.prefix) {
+                        *retained = source;
+                    }
                     continue;
                 }
                 KernelRoutePresence::Absent => {
@@ -3209,16 +3219,33 @@ pub(super) mod tests {
         let mut owned = HashMap::new();
         let mut rejected = HashSet::new();
 
-        let statuses =
-            reconcile_for_test(vec![scoped], &mut fib, &mut owned, &mut rejected, &metrics).await;
+        let statuses = reconcile_for_test(
+            vec![scoped.clone()],
+            &mut fib,
+            &mut owned,
+            &mut rejected,
+            &metrics,
+        )
+        .await;
         assert_eq!(statuses[0].state, BlackholeState::Installed);
         assert_eq!(statuses[0].peer_interface.as_deref(), Some("eth0"));
+
+        // The installed discard's best route moves to the eth1 neighbor.
+        let mut moved = scoped;
+        moved.aspa_context = rustbgpd_rib::route::AspaContextId::intern_scoped(
+            rustbgpd_wire::AspaValidationContext::default(),
+            Some("eth1"),
+        );
+        let statuses =
+            reconcile_for_test(vec![moved], &mut fib, &mut owned, &mut rejected, &metrics).await;
+        assert_eq!(statuses[0].reason, "owned");
+        assert_eq!(statuses[0].peer_interface.as_deref(), Some("eth1"));
 
         fib.fail_remove.insert(prefix, "busy".to_string());
         let statuses =
             reconcile_for_test(Vec::new(), &mut fib, &mut owned, &mut rejected, &metrics).await;
         assert_eq!(statuses[0].reason, "remove_failed");
-        assert_eq!(statuses[0].peer_interface.as_deref(), Some("eth0"));
+        assert_eq!(statuses[0].peer_interface.as_deref(), Some("eth1"));
     }
 
     #[tokio::test]
