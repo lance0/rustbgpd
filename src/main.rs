@@ -47,6 +47,7 @@ mod kernel_route_notify;
 mod metrics_server;
 mod peer_manager;
 mod policy_admin;
+mod ra_discovery;
 mod reload;
 mod runtime_probe;
 mod sd_notify;
