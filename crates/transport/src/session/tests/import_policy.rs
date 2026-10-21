@@ -168,8 +168,20 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-    assert_eq!(session.import_policy_routes_permitted, 1);
-    assert_eq!(session.import_policy_routes_denied, 1);
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_permitted(),
+        1
+    );
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_denied(),
+        1
+    );
     // Drain any messages — there may be zero or one RoutesReceived
     let mut all_announced = vec![];
     let mut all_withdrawn = vec![];
@@ -336,11 +348,19 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
     session.process_update(v6_update).await;
 
     assert_eq!(
-        session.import_policy_routes_permitted, 3,
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_permitted(),
+        3,
         "destination-less and offset-shifted rules must pass through to the default Permit"
     );
     assert_eq!(
-        session.import_policy_routes_denied, 1,
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_denied(),
+        1,
         "the rule with a real destination prefix must match the deny term"
     );
 
@@ -516,8 +536,20 @@ async fn import_decision_cache_records_deny_and_permit_for_explain() {
         }
         other => panic!("expected Hit(Permit) for permitted prefix, got {other:?}"),
     }
-    assert_eq!(session.import_policy_routes_permitted, 1);
-    assert_eq!(session.import_policy_routes_denied, 1);
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_permitted(),
+        1
+    );
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_denied(),
+        1
+    );
     let samples = counter_samples(&metric_view, "bgp_policy_routes_total");
     let sample = |policy: &str, action: &str| {
         samples.iter().find(|(labels, _)| {
@@ -669,8 +701,14 @@ async fn explain_import_policy_command_does_not_touch_counters() {
         Ipv4UnicastMode::Body,
     );
     session.process_update(update).await;
-    let permitted_before = session.import_policy_routes_permitted;
-    let denied_before = session.import_policy_routes_denied;
+    let permitted_before = session
+        .config
+        .neighbor_counters
+        .import_policy_routes_permitted();
+    let denied_before = session
+        .config
+        .neighbor_counters
+        .import_policy_routes_denied();
     // Issue the explain command through the real dispatch path.
     let (reply_tx, reply_rx) = oneshot::channel();
     let flow = session
@@ -699,8 +737,20 @@ async fn explain_import_policy_command_does_not_touch_counters() {
         reply.matches
     );
     // The read must not have moved either counter.
-    assert_eq!(session.import_policy_routes_permitted, permitted_before);
-    assert_eq!(session.import_policy_routes_denied, denied_before);
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_permitted(),
+        permitted_before
+    );
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_denied(),
+        denied_before
+    );
 }
 
 /// The import-side stats read surface (LAN-248): the query command
@@ -1211,7 +1261,13 @@ async fn explain_disabled_stores_no_decisions() {
     );
     session.process_update(update).await;
     // The route was permitted (counter moved) but nothing was cached.
-    assert_eq!(session.import_policy_routes_permitted, 1);
+    assert_eq!(
+        session
+            .config
+            .neighbor_counters
+            .import_policy_routes_permitted(),
+        1
+    );
     let key = ImportDecisionKey {
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
@@ -1330,7 +1386,7 @@ async fn explain_trace_renders_as_path_from_the_cached_typed_value() {
     session.process_update(update).await;
     // The live evaluation permitted it: the regex matched the string the
     // inbound extractor rendered.
-    assert_eq!(session.import_policy_routes_permitted, 1);
+    assert_eq!(import_policy_counts(&session).0, 1);
 
     let (reply_tx, reply_rx) = oneshot::channel();
     let _ = session

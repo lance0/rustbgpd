@@ -1260,17 +1260,10 @@ impl PeerSession {
                     self.notification_teardown = false;
                     self.received_hard_reset = false;
                     self.sent_hard_reset = false;
-                    // Import-side policy aggregates are per-session — reset
-                    // alongside the other per-session state. A reconnecting
-                    // PeerSession isn't reconstructed, so without this the
-                    // counters would carry forward across flaps and lie about
-                    // "permits / denies on the current session." Matches the
-                    // export-side reset in RibManager::handle_peer_down /
-                    // ::handle_peer_graceful_restart.
-                    self.import_policy_routes_permitted = 0;
-                    self.import_policy_routes_denied = 0;
-                    // The per-session import-decision cache (ADR-0073) is the
-                    // same kind of per-session state: a decision recorded on
+                    // The import-side policy totals are not reset here: they
+                    // live in the neighbor's counter block for the daemon's
+                    // lifetime. The per-session import-decision cache
+                    // (ADR-0073) is per-session state: a decision recorded on
                     // the dying session must not answer an explain query on the
                     // reconnected one. Flush it so explain honours the
                     // "resets on peer session reset" contract rather than

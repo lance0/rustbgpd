@@ -641,7 +641,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
         aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let routes: Vec<Route> = (0..count).map(route).collect();
-    let sent_before = session.updates_sent;
+    let sent_before = session.config.neighbor_counters.updates_sent();
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -691,7 +691,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
         "every prefix in the oversized group must be advertised"
     );
     assert_eq!(
-        session.updates_sent - sent_before,
+        session.config.neighbor_counters.updates_sent() - sent_before,
         updates as u64,
         "updates_sent must count exactly the emitted wire UPDATEs"
     );

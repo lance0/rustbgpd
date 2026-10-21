@@ -556,9 +556,11 @@ impl ForwardingStateSource {
 /// shared by every session the peer manager runs for it: the initial
 /// session, inbound replacements and promoted collision candidates.
 ///
-/// Sessions add to it where they add to the Prometheus counters, so the
-/// operator-facing `flap_count` and `notifications_*` survive a replacement
-/// session. The peer manager drops the block when the neighbor is deleted.
+/// Sessions add to it where they add to the Prometheus counters, so every
+/// operator-facing `NeighborState` counter (`flap_count`, `notifications_*`,
+/// `updates_*`, `otc_routes_blocked`, `import_policy_routes_*`) survives a
+/// session reset and a replacement session. The peer manager drops the block
+/// when the neighbor is deleted.
 /// It is runtime state, not configuration: two configs compare equal on it.
 #[derive(Clone, Debug, Default)]
 pub struct NeighborCounters(Arc<NeighborCounterBlock>);
@@ -568,6 +570,11 @@ struct NeighborCounterBlock {
     flaps: AtomicU64,
     notifications_received: AtomicU64,
     notifications_sent: AtomicU64,
+    updates_received: AtomicU64,
+    updates_sent: AtomicU64,
+    otc_routes_blocked: AtomicU64,
+    import_policy_routes_permitted: AtomicU64,
+    import_policy_routes_denied: AtomicU64,
 }
 
 impl NeighborCounters {
@@ -604,6 +611,65 @@ impl NeighborCounters {
     /// Count one NOTIFICATION sent.
     pub fn record_notification_sent(&self) {
         self.0.notifications_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// UPDATE messages received, End-of-RIB included.
+    #[must_use]
+    pub fn updates_received(&self) -> u64 {
+        self.0.updates_received.load(Ordering::Relaxed)
+    }
+
+    /// UPDATE messages sent, End-of-RIB included.
+    #[must_use]
+    pub fn updates_sent(&self) -> u64 {
+        self.0.updates_sent.load(Ordering::Relaxed)
+    }
+
+    /// Unicast announcements blocked by RFC 9234 OTC rules.
+    #[must_use]
+    pub fn otc_routes_blocked(&self) -> u64 {
+        self.0.otc_routes_blocked.load(Ordering::Relaxed)
+    }
+
+    /// Import policy evaluations that permitted a route.
+    #[must_use]
+    pub fn import_policy_routes_permitted(&self) -> u64 {
+        self.0
+            .import_policy_routes_permitted
+            .load(Ordering::Relaxed)
+    }
+
+    /// Import policy evaluations that denied a route.
+    #[must_use]
+    pub fn import_policy_routes_denied(&self) -> u64 {
+        self.0.import_policy_routes_denied.load(Ordering::Relaxed)
+    }
+
+    /// Count one UPDATE received.
+    pub fn record_update_received(&self) {
+        self.0.updates_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one UPDATE sent.
+    pub fn record_update_sent(&self) {
+        self.0.updates_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count `count` announcements blocked by OTC rules.
+    pub fn record_otc_routes_blocked(&self, count: u64) {
+        self.0
+            .otc_routes_blocked
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Count one UPDATE's import policy evaluations.
+    pub fn record_import_policy_routes(&self, permitted: u64, denied: u64) {
+        self.0
+            .import_policy_routes_permitted
+            .fetch_add(permitted, Ordering::Relaxed);
+        self.0
+            .import_policy_routes_denied
+            .fetch_add(denied, Ordering::Relaxed);
     }
 
     /// Whether both handles share one block.

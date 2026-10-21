@@ -854,7 +854,7 @@ impl PeerSession {
                             Event::NotificationReceived(notif)
                         }
                         Message::Update(update) => {
-                            self.updates_received += 1;
+                            self.config.neighbor_counters.record_update_received();
                             self.metrics
                                 .record_message_received(&self.peer_label, "update");
                             // Emit BMP RouteMonitoring with raw UPDATE PDU
