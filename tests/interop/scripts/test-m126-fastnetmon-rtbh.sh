@@ -295,7 +295,9 @@ expect_unbanned() { # label limit
 
 # Fail if either prefix appears at FRR during the next N seconds.
 # Milliseconds from FRR's End-of-RIB to the first blackhole UPDATE after line
-# MARK of its log, or 0 when the UPDATE came first (FRR never dropped the ban).
+# MARK of its log, or 0 when the UPDATE came first in log order (FRR never
+# dropped the ban). An UPDATE logged after End-of-RIB in the same millisecond
+# prints "<1", never 0.
 # With a fourth argument "lead", print End-of-RIB minus UPDATE instead:
 # positive when the UPDATE came first.
 frr_gap_ms() { # mark eor-pattern update-pattern [lead]
@@ -316,6 +318,7 @@ frr_gap_ms() { # mark eor-pattern update-pattern [lead]
             if (!ne || !nu) print "unknown"
             else if (lead != "") print te - tu
             else if (nu < ne) print 0
+            else if (tu == te) print "<1"
             else print tu - te
         }'
 }
