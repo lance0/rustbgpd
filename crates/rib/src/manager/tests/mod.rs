@@ -1326,6 +1326,7 @@ async fn query_route_event_history(
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryRouteEventHistory {
         peer,
+        peer_interface: None,
         afi,
         prefix,
         limit,

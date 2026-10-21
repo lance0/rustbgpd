@@ -3,8 +3,9 @@ use std::net::IpAddr;
 
 use tonic::Status;
 
+use crate::import_roster::ImportRosterReader;
 use crate::peer_types::{
-    PolicyEvent, SessionEvent, SessionLifecycleEventType, SessionNotificationEventType,
+    PeerKey, PolicyEvent, SessionEvent, SessionLifecycleEventType, SessionNotificationEventType,
 };
 use crate::proto;
 use crate::rib_service::{parse_route_event_prefix_filter, route_event_afi_filter};
@@ -15,7 +16,7 @@ use rustbgpd_wire::{Afi, Prefix, RouteDistinguisher};
 pub(super) struct WatchEventsFilter {
     categories: BTreeSet<i32>,
     event_types: BTreeSet<i32>,
-    peer: Option<IpAddr>,
+    peer: Option<PeerKey>,
     afi: Option<Afi>,
     prefix: Option<Prefix>,
 }
@@ -38,13 +39,10 @@ impl WatchEventsFilter {
             }
         }
 
-        if let Some(peer) = self.peer {
-            let matches_current = event.peer == Some(peer);
-            let matches_previous = event.previous_peer == Some(peer);
-            let matches_target = event.target_peer == Some(peer);
-            if !matches_current && !matches_previous && !matches_target {
-                return false;
-            }
+        if let Some(peer) = &self.peer
+            && !event.involves(peer.address, peer.interface.as_deref())
+        {
+            return false;
         }
 
         if let Some(prefix) = self.prefix
@@ -117,8 +115,10 @@ impl WatchEventsFilter {
             return false;
         }
 
-        if let Some(peer) = self.peer
-            && event.peer_address.parse::<IpAddr>().ok() != Some(peer)
+        // Dataplane and BFD rows carry a bare address; the scoped selector
+        // was resolved against the configured neighbors when parsed.
+        if let Some(peer) = &self.peer
+            && event.peer_address.parse::<IpAddr>().ok() != Some(peer.address)
         {
             return false;
         }
@@ -178,8 +178,10 @@ impl WatchEventsFilter {
         if !self.event_types.is_empty() && !self.event_types.contains(&event.event_type) {
             return false;
         }
-        if let Some(peer) = self.peer
-            && event.peer_address.parse::<IpAddr>().ok() != Some(peer)
+        // Dataplane and BFD rows carry a bare address; the scoped selector
+        // was resolved against the configured neighbors when parsed.
+        if let Some(peer) = &self.peer
+            && event.peer_address.parse::<IpAddr>().ok() != Some(peer.address)
         {
             return false;
         }
@@ -191,22 +193,24 @@ impl WatchEventsFilter {
             return false;
         }
 
-        let (event_type, event_peer) = match event {
+        let (event_type, event_peer, event_label) = match event {
             SessionEvent::Lifecycle(event) => (
                 session_lifecycle_event_type_to_bgp_event_type(event.event_type),
                 event.peer,
+                event.peer_label.as_deref(),
             ),
             SessionEvent::Notification(event) => (
                 session_notification_event_type_to_bgp_event_type(event.event_type),
                 event.peer,
+                event.peer_label.as_deref(),
             ),
         };
         if !self.event_types.is_empty() && !self.event_types.contains(&(event_type as i32)) {
             return false;
         }
 
-        if let Some(peer) = self.peer
-            && event_peer != peer
+        if let Some(peer) = &self.peer
+            && !peer.names_event(event_peer, event_label)
         {
             return false;
         }
@@ -227,8 +231,10 @@ impl WatchEventsFilter {
             return false;
         }
 
-        if let Some(peer) = self.peer
-            && event.peer != Some(peer)
+        if let Some(peer) = &self.peer
+            && !event
+                .peer
+                .is_some_and(|address| peer.names_event(address, event.peer_label.as_deref()))
         {
             return false;
         }
@@ -246,9 +252,10 @@ impl WatchEventsFilter {
             return false;
         }
 
-        if let Some(peer) = self.peer {
-            let matches_current = event.peer == Some(peer);
-            let matches_previous = event.previous_peer == Some(peer);
+        // EVPN events carry bare addresses; see the dataplane note above.
+        if let Some(peer) = &self.peer {
+            let matches_current = event.peer == Some(peer.address);
+            let matches_previous = event.previous_peer == Some(peer.address);
             if !matches_current && !matches_previous {
                 return false;
             }
@@ -361,13 +368,13 @@ fn dataplane_bgp_event_type_has_route(event_type: proto::BgpEventType) -> bool {
 }
 
 pub(super) struct SessionEventHistoryFilter {
-    pub(super) peer: Option<IpAddr>,
+    pub(super) peer: Option<PeerKey>,
     pub(super) event_types: BTreeSet<SessionLifecycleEventType>,
     pub(super) limit: usize,
 }
 
 pub(super) struct PolicyEventHistoryFilter {
-    pub(super) peer: Option<IpAddr>,
+    pub(super) peer: Option<PeerKey>,
     pub(super) limit: usize,
 }
 
@@ -663,21 +670,19 @@ pub(super) fn session_notification_event_type_to_bgp_event_type(
 
 pub(super) fn parse_watch_events_filter(
     req: &proto::WatchEventsRequest,
+    roster: Option<&ImportRosterReader>,
 ) -> Result<WatchEventsFilter, Status> {
     let categories = parse_category_filter(&req.categories)?;
     let event_types = parse_event_type_filter(&req.event_types)?;
     validate_live_category_event_types(&categories, &event_types)?;
     let afi = route_event_afi_filter(req.afi_safi)?;
     let prefix = parse_route_event_prefix_filter(&req.prefix, req.prefix_length, afi)?;
-    let peer = if req.neighbor_address.is_empty() {
-        None
-    } else {
-        Some(
-            req.neighbor_address
-                .parse::<IpAddr>()
-                .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
-        )
-    };
+    let peer = crate::peer_selector::parse_neighbor(
+        "neighbor_address",
+        &req.neighbor_address,
+        "",
+        roster,
+    )?;
 
     Ok(WatchEventsFilter {
         categories,
@@ -757,17 +762,15 @@ fn live_event_type_mask(event_type: proto::BgpEventType) -> u8 {
 
 pub(super) fn parse_list_session_events_filter(
     req: &proto::ListSessionEventsRequest,
+    roster: Option<&ImportRosterReader>,
 ) -> Result<SessionEventHistoryFilter, Status> {
     let event_types = parse_session_event_type_filter(&req.event_types)?;
-    let peer = if req.neighbor_address.is_empty() {
-        None
-    } else {
-        Some(
-            req.neighbor_address
-                .parse::<IpAddr>()
-                .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
-        )
-    };
+    let peer = crate::peer_selector::parse_neighbor(
+        "neighbor_address",
+        &req.neighbor_address,
+        "",
+        roster,
+    )?;
 
     Ok(SessionEventHistoryFilter {
         peer,
@@ -778,17 +781,15 @@ pub(super) fn parse_list_session_events_filter(
 
 pub(super) fn parse_list_policy_events_filter(
     req: &proto::ListPolicyEventsRequest,
+    roster: Option<&ImportRosterReader>,
 ) -> Result<PolicyEventHistoryFilter, Status> {
     parse_policy_event_type_filter(&req.event_types)?;
-    let peer = if req.neighbor_address.is_empty() {
-        None
-    } else {
-        Some(
-            req.neighbor_address
-                .parse::<IpAddr>()
-                .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
-        )
-    };
+    let peer = crate::peer_selector::parse_neighbor(
+        "neighbor_address",
+        &req.neighbor_address,
+        "",
+        roster,
+    )?;
 
     Ok(PolicyEventHistoryFilter {
         peer,
@@ -798,20 +799,18 @@ pub(super) fn parse_list_policy_events_filter(
 
 pub(super) fn parse_list_evpn_events_filter(
     req: &proto::ListEvpnEventsRequest,
+    roster: Option<&ImportRosterReader>,
 ) -> Result<EvpnEventHistoryFilter, Status> {
     let event_types = parse_evpn_event_type_filter(&req.event_types)?;
-    let peer = if req.neighbor_address.is_empty() {
-        None
-    } else {
-        Some(
-            req.neighbor_address
-                .parse::<IpAddr>()
-                .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
-        )
-    };
+    let peer = crate::peer_selector::parse_neighbor(
+        "neighbor_address",
+        &req.neighbor_address,
+        "",
+        roster,
+    )?;
 
     Ok(EvpnEventHistoryFilter {
-        peer,
+        peer: peer.map(|peer| peer.address),
         event_types,
         route_type: parse_evpn_route_type_filter(req.route_type_filter)?,
         rd: crate::route_distinguisher::parse_family_rd(&req.rd_filter)?,
@@ -823,22 +822,70 @@ pub(super) fn parse_list_evpn_events_filter(
 mod compatibility_tests {
     use super::*;
 
+    /// A scoped selector matches route events by the interface they
+    /// recorded and session events by their scoped label; a bare
+    /// link-local selector is refused.
+    #[test]
+    fn scoped_neighbor_filter_matches_only_its_interface() {
+        let peer: IpAddr = "fe80::1".parse().unwrap();
+        let request = |neighbor: &str| proto::WatchEventsRequest {
+            neighbor_address: neighbor.to_string(),
+            ..Default::default()
+        };
+        let Err(error) = parse_watch_events_filter(&request("fe80::1"), None) else {
+            panic!("a bare link-local selector must be refused");
+        };
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        let filter = parse_watch_events_filter(&request("fe80::1%eth0"), None).unwrap();
+
+        let prefix = Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(203, 0, 113, 0),
+            24,
+        ));
+        let mut route = crate::test_support::route_event(prefix, peer);
+        let scope = |interface| {
+            rustbgpd_rib::route::AspaContextId::intern_scoped(
+                rustbgpd_wire::AspaValidationContext::default(),
+                Some(interface),
+            )
+        };
+        route.peer_scope = scope("eth0");
+        assert!(filter.matches_route_event(&route));
+        route.peer_scope = scope("eth1");
+        assert!(!filter.matches_route_event(&route));
+        route.peer_scope = rustbgpd_rib::route::AspaContextId::DEFAULT;
+        assert!(!filter.matches_route_event(&route));
+
+        let mut session =
+            crate::test_support::lifecycle_event(peer, SessionLifecycleEventType::Established);
+        session.peer_label = Some("fe80::1%eth0".to_string());
+        assert!(filter.matches_session_event(&SessionEvent::Lifecycle(session.clone())));
+        session.peer_label = Some("fe80::1%eth1".to_string());
+        assert!(!filter.matches_session_event(&SessionEvent::Lifecycle(session)));
+    }
+
     #[test]
     fn smet_event_filter_accepts_type_six_and_rejects_unmodeled_types() {
-        let filter = parse_list_evpn_events_filter(&proto::ListEvpnEventsRequest {
-            route_type_filter: 6,
-            rd_filter: "65000:100".into(),
-            ..Default::default()
-        })
+        let filter = parse_list_evpn_events_filter(
+            &proto::ListEvpnEventsRequest {
+                route_type_filter: 6,
+                rd_filter: "65000:100".into(),
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
         assert_eq!(filter.route_type, Some(6));
         assert_eq!(filter.rd, Some("65000:100".parse().unwrap()));
         for route_type_filter in 7..=11 {
             assert!(
-                parse_list_evpn_events_filter(&proto::ListEvpnEventsRequest {
-                    route_type_filter,
-                    ..Default::default()
-                })
+                parse_list_evpn_events_filter(
+                    &proto::ListEvpnEventsRequest {
+                        route_type_filter,
+                        ..Default::default()
+                    },
+                    None
+                )
                 .is_err()
             );
         }

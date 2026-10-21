@@ -61,9 +61,15 @@ impl proto::bfd_service_server::BfdService for BfdService {
             // textual representations (notably IPv6) match — mirrors the
             // address-filter handling in NeighborService / RibService. Snapshot
             // peer addresses are already `IpAddr::to_string()` (canonical).
-            let peer = filter
-                .parse::<std::net::IpAddr>()
-                .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
+            let peer = crate::peer_selector::require_neighbor(
+                "peer_address",
+                &filter,
+                "",
+                self.known_peers
+                    .as_ref()
+                    .and_then(|known| known.roster.as_ref()),
+            )?
+            .address;
             let wanted = peer.to_string();
             sessions.retain(|s| s.peer_address == wanted);
             if sessions.is_empty()

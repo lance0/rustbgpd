@@ -22,6 +22,33 @@ pub struct EventsWatchOptions {
     pub json: bool,
 }
 
+/// Render route-event peers in the scoped `fe80::1%eth0` form from the
+/// interfaces the daemon recorded with the event.
+fn scope_route_event(event: &mut RouteEvent) {
+    use crate::commands::neighbor::scope_address;
+    scope_address(&mut event.peer_address, &event.peer_interface);
+    scope_address(
+        &mut event.previous_peer_address,
+        &event.previous_peer_interface,
+    );
+    scope_address(&mut event.target_peer_address, &event.target_peer_interface);
+}
+
+/// [`scope_route_event`] for a route-category stream event: its payload
+/// carries the interfaces, which also scope the envelope's addresses.
+fn scope_bgp_event(event: &mut BgpEvent) {
+    use crate::commands::neighbor::scope_address;
+    if let Some(crate::proto::bgp_event::Payload::Route(route)) = &mut event.payload {
+        scope_address(&mut event.peer_address, &route.peer_interface);
+        scope_address(
+            &mut event.previous_peer_address,
+            &route.previous_peer_interface,
+        );
+        scope_address(&mut event.target_peer_address, &route.target_peer_interface);
+        scope_route_event(route);
+    }
+}
+
 fn format_event_type(t: i32) -> &'static str {
     match RouteEventType::try_from(t) {
         Ok(RouteEventType::Added) => "added",
@@ -983,7 +1010,8 @@ pub async fn run(
         .await?
         .into_inner();
 
-    while let Some(event) = stream.message().await? {
+    while let Some(mut event) = stream.message().await? {
+        scope_bgp_event(&mut event);
         print_route_watch_event(&event, json)?;
     }
     Ok(())
@@ -1066,17 +1094,19 @@ pub async fn events_watch(
         }
         for event in events {
             last_backfilled_route_event_id = last_backfilled_route_event_id.max(event.event_id);
-            let event = route_event_to_bgp_event(event);
+            let mut event = route_event_to_bgp_event(event);
+            scope_bgp_event(&mut event);
             print_bgp_event(&event, json)?;
         }
     }
 
-    while let Some(event) = stream.message().await? {
+    while let Some(mut event) = stream.message().await? {
         if last_backfilled_route_event_id > 0
             && route_event_id(&event).is_some_and(|id| id <= last_backfilled_route_event_id)
         {
             continue;
         }
+        scope_bgp_event(&mut event);
         print_bgp_event(&event, json)?;
     }
     Ok(())
@@ -1128,7 +1158,8 @@ pub async fn history(
         print_empty_history(json, "route")?;
         return Ok(());
     }
-    for event in response.events {
+    for mut event in response.events {
+        scope_route_event(&mut event);
         print_event(&event, json)?;
     }
     Ok(())
@@ -1841,6 +1872,9 @@ mod tests {
     #[test]
     fn json_route_event_includes_event_id() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: 1,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1879,6 +1913,9 @@ mod tests {
     #[test]
     fn route_history_event_type_filter_matches_route_aliases() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: 3,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1906,6 +1943,9 @@ mod tests {
     #[test]
     fn route_history_event_converts_to_bgp_event_shape() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: 1,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1931,6 +1971,9 @@ mod tests {
     #[test]
     fn policy_filtered_route_event_json_includes_target_peer_and_reason() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: RouteEventType::PolicyFiltered as i32,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1979,6 +2022,9 @@ mod tests {
     #[test]
     fn bgp_event_text_route_events_include_event_id() {
         let event = route_event_to_bgp_event(RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: RouteEventType::Added as i32,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -2233,6 +2279,9 @@ mod tests {
     #[test]
     fn json_route_event_omits_empty_optional_fields() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_id: 0,
             event_type: crate::proto::RouteEventType::Added as i32,
             prefix: "203.0.113.0".to_string(),
@@ -2261,6 +2310,9 @@ mod tests {
     #[test]
     fn json_route_event_includes_previous_peer_and_path_id() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_id: 0,
             event_type: crate::proto::RouteEventType::BestChanged as i32,
             prefix: "2001:db8::".to_string(),
@@ -2689,6 +2741,9 @@ mod tests {
     #[test]
     fn json_route_event_shape_is_stable() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: crate::proto::RouteEventType::BestChanged as i32,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -2766,6 +2821,9 @@ mod tests {
         assert_eq!(json["timestamp_unix_seconds"], 1_790_132_714_u64);
 
         let route = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: RouteEventType::Added as i32,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,

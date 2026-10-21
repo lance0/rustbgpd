@@ -343,6 +343,15 @@ fn canonical_ip_or_original(address: &str) -> String {
         .map_or_else(|_| address.to_string(), |address| address.to_string())
 }
 
+/// The daemon's echo of a neighbor selector: a bare canonical address plus
+/// the interface of a scoped `fe80::1%eth0` selector.
+fn daemon_peer(selector: &str) -> (String, String) {
+    match selector.split_once('%') {
+        Some((address, interface)) => (canonical_ip_or_original(address), interface.to_string()),
+        None => (canonical_ip_or_original(selector), String::new()),
+    }
+}
+
 pub(crate) struct MockServerHandle {
     pub(crate) addr: String,
     pub(crate) state: Arc<MockState>,
@@ -2073,7 +2082,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         if let Some(response) = self.state.explain_best_path_response.lock().await.clone() {
             return Ok(Response::new(response));
         }
-        let response_peer = canonical_ip_or_original(&req.peer_address);
+        let (response_peer, response_interface) = daemon_peer(&req.peer_address);
         Ok(Response::new(server_proto::ExplainBestPathResponse {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -2099,6 +2108,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 multipath: "none".to_string(),
             }],
             peer_address: response_peer,
+            peer_interface: response_interface,
             add_path_send_max: 0,
             orr_vantage: String::new(),
             best_reason: "higher_local_pref".to_string(),
@@ -2148,6 +2158,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                     multipath: "none".to_string(),
                 }],
                 peer_address: String::new(),
+                peer_interface: String::new(),
                 add_path_send_max: 0,
                 orr_vantage: String::new(),
                 best_reason: "higher_local_pref".to_string(),
@@ -2168,17 +2179,22 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         }
         let req = request.into_inner();
         *self.state.last_explain_advertised.lock().await = Some(req.clone());
-        let response_peer = canonical_ip_or_original(&req.peer_address);
-        let response_source = req
-            .source
-            .as_ref()
-            .map(|source| server_proto::RouteSourceIdentity {
-                peer_address: canonical_ip_or_original(&source.peer_address),
+        let (response_peer, response_interface) = daemon_peer(&req.peer_address);
+        let response_source = req.source.as_ref().map(|source| {
+            let (peer_address, scope) = daemon_peer(&source.peer_address);
+            server_proto::RouteSourceIdentity {
+                peer_address,
                 path_id: source.path_id,
-            });
-        let route_peer_address = response_source.as_ref().map_or_else(
-            || "198.51.100.2".to_string(),
-            |source| source.peer_address.clone(),
+                peer_interface: if scope.is_empty() {
+                    source.peer_interface.clone()
+                } else {
+                    scope
+                },
+            }
+        });
+        let (route_peer_address, route_peer_interface) = response_source.as_ref().map_or_else(
+            || ("198.51.100.2".to_string(), String::new()),
+            |source| (source.peer_address.clone(), source.peer_interface.clone()),
         );
         let response = Response::new(server_proto::ExplainAdvertisedRouteResponse {
             decision: server_proto::ExplainDecision::Advertise as i32,
@@ -2236,6 +2252,8 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             already_advertised: true,
             rd: String::new(),
             source: response_source,
+            peer_interface: response_interface,
+            route_peer_interface,
         });
         active.complete();
         Ok(response)
@@ -2987,8 +3005,10 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             .fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
         *self.state.last_list_rejected.lock().await = Some(req.clone());
+        let (peer_address, peer_interface) = daemon_peer(&req.peer_address);
         Ok(Response::new(server_proto::ListRejectedRoutesResponse {
-            peer_address: canonical_ip_or_original(&req.peer_address),
+            peer_address,
+            peer_interface,
             retention_enabled: true,
             capacity: 1024,
             routes: Vec::new(),
@@ -3002,10 +3022,12 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
     ) -> Result<Response<server_proto::ExplainImportPolicyResponse>, Status> {
         let req = request.into_inner();
         *self.state.last_explain_import.lock().await = Some(req.clone());
+        let (peer_address, peer_interface) = daemon_peer(&req.peer_address);
 
         if let Some(outcome) = *self.state.explain_import_synthetic_outcome.lock().await {
             return Ok(Response::new(server_proto::ExplainImportPolicyResponse {
-                peer_address: req.peer_address.clone(),
+                peer_address: peer_address.clone(),
+                peer_interface: peer_interface.clone(),
                 prefix: req.prefix.clone(),
                 prefix_length: req.prefix_length,
                 afi_safi: req.afi_safi,
@@ -3014,7 +3036,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                 evictions_since_reset: None,
                 matches: vec![server_proto::ImportExplainMatch {
                     outcome: outcome as i32,
-                    peer_address: req.peer_address,
+                    peer_address,
+                    peer_interface,
                     prefix: req.prefix,
                     prefix_length: req.prefix_length,
                     path_id: req.path_id.unwrap_or(0),
@@ -3039,7 +3062,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
         });
         let permit = |path_id: u32| server_proto::ImportExplainMatch {
             outcome: server_proto::ImportExplainOutcome::Permit as i32,
-            peer_address: req.peer_address.clone(),
+            peer_address: peer_address.clone(),
+            peer_interface: peer_interface.clone(),
             prefix: req.prefix.clone(),
             prefix_length: req.prefix_length,
             path_id,
@@ -3071,7 +3095,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                 permit(1),
                 server_proto::ImportExplainMatch {
                     outcome: server_proto::ImportExplainOutcome::Deny as i32,
-                    peer_address: req.peer_address.clone(),
+                    peer_address: peer_address.clone(),
+                    peer_interface: peer_interface.clone(),
                     prefix: req.prefix.clone(),
                     prefix_length: req.prefix_length,
                     path_id: 2,
@@ -3097,7 +3122,8 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             ],
         };
         Ok(Response::new(server_proto::ExplainImportPolicyResponse {
-            peer_address: req.peer_address,
+            peer_address,
+            peer_interface,
             prefix: req.prefix,
             prefix_length: req.prefix_length,
             afi_safi: req.afi_safi,

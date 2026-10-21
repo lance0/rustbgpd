@@ -329,6 +329,69 @@ including synchronous response construction, transport and client scheduling.
 The separate measured end-to-end [soak acceptance gates](../soaks/soak-acceptance-gates.md)
 remain unchanged.
 
+### Scoped neighbor identity
+
+An IPv6 link-local neighbor (`fe80::/10`) is identified by its address and its
+interface, because one link-local address can exist on several links
+(RFC 4007). Numbered neighbors are identified by address alone, exactly as
+before.
+
+**Responses.** A `peer_address` that names the source or target neighbor of a
+route, route event, export disposition or explanation stays a bare IP literal.
+A sibling interface field carries the scope, and the pair identifies the
+neighbor; the interface is empty for a numbered neighbor:
+
+| Message | Interface fields |
+|---------|------------------|
+| `Route` (received, best, advertised and explain rows) | `peer_interface` |
+| `RouteEvent` | `peer_interface`, `previous_peer_interface`, `target_peer_interface` |
+| `RouteSourceIdentity` | `peer_interface` |
+| `ExplainAdvertisedRouteResponse` | `peer_interface` (target), `route_peer_interface` (selected route's source) |
+| `OrrExplainCandidate` | `peer_interface` |
+| `ExplainBestPathResponse` | `peer_interface` |
+| `PathExportDispositionEntry` | `peer_interface` |
+| `ExplainImportPolicyResponse`, `ImportExplainMatch`, `ListRejectedRoutesResponse` | `peer_interface` |
+
+Route rows and route events report the interface recorded when the route was
+learned or the event was recorded, not the current neighbor inventory.
+Routes retained across a Graceful Restart and the history of a deleted
+neighbor keep the interface they had. A `WatchEvents` route event carries its
+interfaces in the `RouteEvent` payload; the envelope's `peer_address`,
+`previous_peer_address` and `target_peer_address` are not repeated with a
+scope.
+
+Session, notification and policy events already render a scoped neighbor's
+`peer_address` as `address%interface`; that is unchanged. EVPN, VPN, labeled,
+RTC, BGP-LS and FlowSpec route entries, EVPN route events, FIB and blackhole
+status rows, BFD sessions and policy statistics rows still report a bare
+address with no interface. Each link-local address can belong to only one
+configured neighbor in this release (see the
+[configuration reference](configuration.md#scoped-neighbor-identity)), so that
+bare address names one neighbor.
+
+**Selectors.** Every request field that selects a neighbor by address requires
+the scope of a link-local address: `fe80::1%eth0` in the address field, or the
+bare address plus the request's structured interface field where it has one
+(the `NeighborService` requests and `RouteSourceIdentity.peer_interface`).
+
+| Selector | Result |
+|----------|--------|
+| `192.0.2.1`, `2001:db8::1` | Unchanged |
+| `fe80::1%eth0`, or `fe80::1` with interface `eth0` | Selects the neighbor on `eth0` |
+| `fe80::1` with no interface | `INVALID_ARGUMENT`; the message names the scoped neighbors configured on that address |
+| `192.0.2.1%eth0`, `2001:db8::1%eth0`, or a numbered address with an interface | `INVALID_ARGUMENT`: a scope is valid only on a link-local address |
+| `fe80::1%`, a name that is not a Linux interface name, or `fe80::1%eth0` with interface `eth1` | `INVALID_ARGUMENT` |
+| `fe80::1%eth1` when the configured neighbor on `fe80::1` uses `eth0` | `NOT_FOUND`, naming the configured scope |
+
+A bare link-local selector is refused however many neighbors use the address,
+so adding a second neighbor never changes what an existing selector means.
+RFC 4007 §11.6 lets an implementation assume a default zone for an address
+written without one; rustbgpd deliberately does not. Requiring the scope is
+this API's contract, not a standards requirement.
+
+The scope is part of a page token's identity. A token issued for
+`fe80::1%eth0` is refused for `fe80::1%eth1` or for a numbered selector.
+
 ---
 
 ## gnmi.gNMI
@@ -1159,7 +1222,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 For an IPv6 link-local / unnumbered peer, include `interface` in
 `NeighborConfig`. Follow-up operations that address a scoped peer use the same
-`address` + `interface` pair.
+`address` + `interface` pair, or the scoped `fe80::5054:ff:fe00:1%eth1` form in `address`;
+a bare link-local address is refused (see
+[scoped neighbor identity](#scoped-neighbor-identity)).
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

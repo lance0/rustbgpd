@@ -62,6 +62,8 @@ pub struct EventService {
     dataplane_route_events: DataplaneRouteEventBroadcaster,
     bfd_events: BfdEventBroadcaster,
     metrics: BgpMetrics,
+    /// Published managed-peer roster for scoped neighbor selectors.
+    roster: Option<crate::import_roster::ImportRosterReader>,
 }
 
 impl EventService {
@@ -151,7 +153,18 @@ impl EventService {
             dataplane_route_events,
             bfd_events,
             metrics,
+            roster: None,
         }
+    }
+
+    /// Resolve scoped neighbor selectors against the managed-peer roster.
+    #[must_use]
+    pub(crate) fn with_peer_roster(
+        mut self,
+        roster: crate::import_roster::ImportRosterReader,
+    ) -> Self {
+        self.roster = Some(roster);
+        self
     }
 
     fn subscribe_dataplane_events(&self) -> broadcast::Receiver<proto::BgpEvent> {
@@ -191,7 +204,7 @@ impl proto::event_service_server::EventService for EventService {
         request: Request<proto::WatchEventsRequest>,
     ) -> Result<Response<Self::WatchEventsStream>, Status> {
         let req = request.into_inner();
-        let filter = parse_watch_events_filter(&req)?;
+        let filter = parse_watch_events_filter(&req, self.roster.as_ref())?;
 
         let route_stream: Pin<Box<dyn Stream<Item = Result<proto::BgpEvent, Status>> + Send>> =
             if filter.wants_route_events() {
@@ -488,7 +501,7 @@ impl proto::event_service_server::EventService for EventService {
         &self,
         request: Request<proto::ListEvpnEventsRequest>,
     ) -> Result<Response<proto::ListEvpnEventsResponse>, Status> {
-        let filter = parse_list_evpn_events_filter(&request.into_inner())?;
+        let filter = parse_list_evpn_events_filter(&request.into_inner(), self.roster.as_ref())?;
         let events = rib_manager_read(&self.rib_tx, |reply| {
             RibUpdate::QueryEvpnRouteEventHistory {
                 peer: filter.peer,
@@ -509,7 +522,7 @@ impl proto::event_service_server::EventService for EventService {
         &self,
         request: Request<proto::ListSessionEventsRequest>,
     ) -> Result<Response<proto::ListSessionEventsResponse>, Status> {
-        let filter = parse_list_session_events_filter(&request.into_inner())?;
+        let filter = parse_list_session_events_filter(&request.into_inner(), self.roster.as_ref())?;
         let events = peer_manager_read(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::QuerySessionEventHistory {
                 peer: filter.peer,
@@ -531,7 +544,7 @@ impl proto::event_service_server::EventService for EventService {
         &self,
         request: Request<proto::ListPolicyEventsRequest>,
     ) -> Result<Response<proto::ListPolicyEventsResponse>, Status> {
-        let filter = parse_list_policy_events_filter(&request.into_inner())?;
+        let filter = parse_list_policy_events_filter(&request.into_inner(), self.roster.as_ref())?;
         let events = peer_manager_read(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::QueryPolicyEventHistory {
                 peer: filter.peer,
@@ -940,6 +953,9 @@ mod tests {
             peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             previous_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             target_peer: None,
+            peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
+            previous_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
+            target_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
             timestamp_unix_ms: 123_000,
             path_id: 42,
             reason: String::new(),
@@ -978,6 +994,9 @@ mod tests {
             peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             previous_peer: None,
             target_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
+            previous_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
+            target_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
             timestamp_unix_ms: 123_000,
             path_id: 9,
             reason: "policy_denied".to_string(),
@@ -2328,12 +2347,15 @@ mod tests {
 
     #[test]
     fn v6_prefix_filter_matches_only_v6() {
-        let filter = parse_watch_events_filter(&proto::WatchEventsRequest {
-            afi_safi: proto::AddressFamily::Ipv6Unicast as i32,
-            prefix: "2001:db8::".to_string(),
-            prefix_length: 64,
-            ..Default::default()
-        })
+        let filter = parse_watch_events_filter(
+            &proto::WatchEventsRequest {
+                afi_safi: proto::AddressFamily::Ipv6Unicast as i32,
+                prefix: "2001:db8::".to_string(),
+                prefix_length: 64,
+                ..Default::default()
+            },
+            None,
+        )
         .unwrap();
         let event = route_event(
             Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128)),

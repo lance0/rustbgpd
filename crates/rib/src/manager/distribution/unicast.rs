@@ -446,6 +446,7 @@ impl RibManager {
             path_id: 0,
             route_peer: None,
             route_path_id: None,
+            route_peer_interface: None,
             route_type: None,
             reasons: Vec::new(),
             modifications: rustbgpd_policy::RouteModifications::default(),
@@ -615,6 +616,7 @@ impl RibManager {
                 .enumerate()
                 .map(|(i, route)| crate::update::OrrExplainCandidate {
                     peer: route.peer,
+                    peer_interface: route.peer_interface(),
                     path_id: route.path_id,
                     next_hop: route.next_hop,
                     cost: spf.cost_to(topology, route.next_hop),
@@ -954,6 +956,7 @@ impl RibManager {
 
         explain.route_peer = Some(best.peer);
         explain.route_path_id = Some(best.path_id);
+        explain.route_peer_interface = best.peer_interface();
         explain.route_type = Some(route_type(best.origin_type));
 
         // The two suppression checks below are no-ops for an ORR winner

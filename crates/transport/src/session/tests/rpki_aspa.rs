@@ -119,6 +119,11 @@ async fn inbound_routes_carry_the_current_session_aspa_context_id() {
     let expected = AspaContextId::intern(session.aspa_validation_context());
     assert_eq!(first, expected);
     assert_ne!(first, AspaContextId::DEFAULT);
+    assert_eq!(
+        first.peer_interface(),
+        None,
+        "a numbered session has no scope"
+    );
     assert_eq!(announced_context(&mut session, 2, 65002).await, first);
 
     // Reconnect to a different negotiated ASN: the id must follow.
@@ -128,6 +133,35 @@ async fn inbound_routes_carry_the_current_session_aspa_context_id() {
     assert_eq!(context.neighbor_asn, Some(65077));
     assert_eq!(second, AspaContextId::intern(context));
     assert_ne!(second, first);
+}
+
+/// A scoped (link-local) session's routes record its interface as their
+/// source provenance, so retained routes report the interface they were
+/// learned on. Red proof: interning without the session's interface leaves
+/// `peer_interface` empty.
+#[tokio::test]
+async fn inbound_routes_from_a_scoped_session_record_its_interface() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer_interface = Some("eth0".to_string());
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    while rib_rx.try_recv().is_ok() {}
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 9), 32);
+    session
+        .process_update(aspa_first_as_update(prefix, 65002, true))
+        .await;
+    let Ok(RibUpdate::RoutesReceived { announced, .. }) = rib_rx.try_recv() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].peer_interface().as_deref(), Some("eth0"));
+    assert_eq!(
+        AspaContextId::snapshot().get(announced[0].aspa_context),
+        Some(session.aspa_validation_context()),
+        "the scoped id still resolves the session's ASPA context"
+    );
 }
 
 /// Load-bearing scope controls: removing either the eBGP or unicast-family

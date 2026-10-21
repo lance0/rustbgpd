@@ -514,6 +514,26 @@ fn probe_exact_export_announcements(
     )
 }
 
+/// Source of a Loc-RIB best route, as a best-change event reports it: the
+/// peer and Add-Path id plus the receiving session's interned context, which
+/// records a scoped neighbor's interface.
+#[derive(Clone, Copy)]
+struct BestSource {
+    peer: IpAddr,
+    path_id: u32,
+    context: crate::route::AspaContextId,
+}
+
+impl BestSource {
+    fn of(route: &crate::route::Route) -> Self {
+        Self {
+            peer: route.peer,
+            path_id: route.path_id,
+            context: route.aspa_context,
+        }
+    }
+}
+
 impl RibManager {
     fn clean_group_delta_was_admitted(
         &self,
@@ -1641,6 +1661,9 @@ impl ExportGateTrace {
             path_id: self.staged_path_id,
             route_peer: self.best_peer,
             route_path_id: self.best_path_id,
+            // The dry run records the source address only; the unicast
+            // explain answer fills this from the route's provenance.
+            route_peer_interface: None,
             route_type: self.best_route_type,
             reasons,
             modifications: self.modifications,
@@ -6926,7 +6949,7 @@ impl RibManager {
                     needs_full.insert(*prefix);
                 }
                 Some(true) => {
-                    let previous_best = self.loc_rib.get(prefix).map(|r| (r.peer, r.path_id));
+                    let previous_best = self.loc_rib.get(prefix).map(BestSource::of);
                     // Re-resolve the winner (the classification borrows
                     // ended above): the announcing peer's best candidate.
                     let Some(winner) = self.ribs.get(&peer).and_then(|rib| {
@@ -6992,7 +7015,7 @@ impl RibManager {
             if self.selection_deferred(prefix_family(prefix)) {
                 continue;
             }
-            let previous_best = self.loc_rib.get(prefix).map(|r| (r.peer, r.path_id));
+            let previous_best = self.loc_rib.get(prefix).map(BestSource::of);
             // Inner scope: `candidates` borrows the Adj-RIB-Ins and must be
             // dropped before the `&mut self` event publication below.
             let did_change = {
@@ -7080,48 +7103,57 @@ impl RibManager {
     /// (added / withdrawn / replaced), diffing `previous_best` against the
     /// freshly installed state. Shared by the full rescan and the announce
     /// fast path's direct install.
-    fn publish_best_change_events(&mut self, prefix: Prefix, previous_best: Option<(IpAddr, u32)>) {
-        let current_best = self.loc_rib.get(&prefix).map(|r| (r.peer, r.path_id));
+    fn publish_best_change_events(&mut self, prefix: Prefix, previous_best: Option<BestSource>) {
+        let current_best = self.loc_rib.get(&prefix).map(BestSource::of);
         match (previous_best, current_best) {
-            (None, Some((peer, path_id))) => {
-                debug!(%prefix, %peer, "best path added");
+            (None, Some(current)) => {
+                debug!(%prefix, peer = %current.peer, "best path added");
                 self.publish_route_event(RouteEvent {
                     event_id: 0,
                     event_type: RouteEventType::Added,
                     prefix,
-                    peer: Some(peer),
+                    peer: Some(current.peer),
                     previous_peer: None,
                     target_peer: None,
+                    peer_scope: current.context,
+                    previous_peer_scope: crate::route::AspaContextId::DEFAULT,
+                    target_peer_scope: crate::route::AspaContextId::DEFAULT,
                     timestamp_unix_ms: crate::event::unix_time_ms_now(),
-                    path_id,
+                    path_id: current.path_id,
                     reason: String::new(),
                 });
             }
-            (Some((old_peer, old_path_id)), None) => {
+            (Some(previous), None) => {
                 debug!(%prefix, "best path removed");
                 self.publish_route_event(RouteEvent {
                     event_id: 0,
                     event_type: RouteEventType::Withdrawn,
                     prefix,
                     peer: None,
-                    previous_peer: Some(old_peer),
+                    previous_peer: Some(previous.peer),
                     target_peer: None,
+                    peer_scope: crate::route::AspaContextId::DEFAULT,
+                    previous_peer_scope: previous.context,
+                    target_peer_scope: crate::route::AspaContextId::DEFAULT,
                     timestamp_unix_ms: crate::event::unix_time_ms_now(),
-                    path_id: old_path_id,
+                    path_id: previous.path_id,
                     reason: String::new(),
                 });
             }
-            (Some((old_peer, _old_path_id)), Some((peer, path_id))) => {
-                debug!(%prefix, %peer, "best path changed");
+            (Some(previous), Some(current)) => {
+                debug!(%prefix, peer = %current.peer, "best path changed");
                 self.publish_route_event(RouteEvent {
                     event_id: 0,
                     event_type: RouteEventType::BestChanged,
                     prefix,
-                    peer: Some(peer),
-                    previous_peer: Some(old_peer),
+                    peer: Some(current.peer),
+                    previous_peer: Some(previous.peer),
                     target_peer: None,
+                    peer_scope: current.context,
+                    previous_peer_scope: previous.context,
+                    target_peer_scope: crate::route::AspaContextId::DEFAULT,
                     timestamp_unix_ms: crate::event::unix_time_ms_now(),
-                    path_id,
+                    path_id: current.path_id,
                     reason: String::new(),
                 });
             }

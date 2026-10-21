@@ -1754,7 +1754,7 @@ impl PeerManager {
                 let _ = reply.send(self.policy_events_tx.subscribe());
             }
             PeerManagerCommand::QueryPolicyEventHistory { peer, limit, reply } => {
-                self.handle_query_policy_event_history(peer, limit, reply);
+                self.handle_query_policy_event_history(peer.as_ref(), limit, reply);
             }
             PeerManagerCommand::QuerySessionEventHistory {
                 peer,
@@ -1762,7 +1762,7 @@ impl PeerManager {
                 limit,
                 reply,
             } => {
-                self.handle_query_session_event_history(peer, &event_types, limit, reply);
+                self.handle_query_session_event_history(peer.as_ref(), &event_types, limit, reply);
             }
             PeerManagerCommand::DiffRuntimeConfig {
                 candidate_toml,

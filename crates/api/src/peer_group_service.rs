@@ -302,6 +302,8 @@ pub struct PeerGroupService {
     config_mutation_gate: Option<ConfigMutationGateFn>,
     settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
     owned_actor_timeout: Duration,
+    /// Published managed-peer roster for scoped neighbor selectors.
+    roster: Option<crate::import_roster::ImportRosterReader>,
 }
 
 impl PeerGroupService {
@@ -341,7 +343,18 @@ impl PeerGroupService {
             config_mutation_gate,
             settlement: None,
             owned_actor_timeout: OWNED_PEER_GROUP_ACTOR_TIMEOUT,
+            roster: None,
         }
+    }
+
+    /// Resolve scoped neighbor selectors against the managed-peer roster.
+    #[must_use]
+    pub(crate) fn with_peer_roster(
+        mut self,
+        roster: crate::import_roster::ImportRosterReader,
+    ) -> Self {
+        self.roster = Some(roster);
+        self
     }
 
     /// Arm peer-group CRUD with the process-wide fail-stop settlement owner.
@@ -759,10 +772,13 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let address = crate::peer_selector::require_neighbor(
+            "address",
+            &req.address,
+            "",
+            self.roster.as_ref(),
+        )?
+        .address;
         if req.peer_group.trim().is_empty() {
             return Err(Status::invalid_argument("peer_group is required"));
         }
@@ -790,10 +806,13 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let address = crate::peer_selector::require_neighbor(
+            "address",
+            &req.address,
+            "",
+            self.roster.as_ref(),
+        )?
+        .address;
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         self.execute_owned_peer_group_mutation(

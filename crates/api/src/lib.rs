@@ -37,6 +37,7 @@ pub mod metrics_render;
 mod neighbor_service;
 pub mod owner_publication;
 mod peer_group_service;
+mod peer_selector;
 pub mod peer_types;
 mod policy_helpers;
 mod policy_service;

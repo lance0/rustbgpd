@@ -430,6 +430,7 @@ mod tests {
                         rd_filter,
                         ..Default::default()
                     },
+                    None,
                 )
                 .unwrap();
                 assert_eq!(filter.rd, Some(rd));

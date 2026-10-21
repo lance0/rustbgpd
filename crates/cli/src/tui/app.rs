@@ -2034,6 +2034,7 @@ mod tests {
         app.on_rib_result(RibQueryResult {
             identity,
             result: Ok(RibQueryResponse::Rejected(ListRejectedRoutesResponse {
+                peer_interface: Default::default(),
                 peer_address: "198.51.100.1".into(),
                 retention_enabled: true,
                 capacity: 8,
@@ -2077,6 +2078,7 @@ mod tests {
         app.on_rib_result(RibQueryResult {
             identity,
             result: Ok(RibQueryResponse::Rejected(ListRejectedRoutesResponse {
+                peer_interface: Default::default(),
                 peer_address: "198.51.100.1".into(),
                 retention_enabled: true,
                 capacity: 8,

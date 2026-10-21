@@ -35,7 +35,8 @@ pub(crate) fn parse_peer_address(value: &str) -> Result<String, String> {
     bare_ip_rpc_address(value)
         .parse::<std::net::IpAddr>()
         .map_err(|_| {
-            "expected a peer IP address (optionally scoped link-local IPv6)".to_string()
+            "expected a peer IP address; an IPv6 link-local address needs its interface, as fe80::1%eth0"
+                .to_string()
         })?;
     Ok(value.to_string())
 }
@@ -56,6 +57,15 @@ pub(super) fn restore_matching_scoped_address(requested: Option<&str>, response:
         (Ok(requested_ip), Ok(response_ip)) if requested_ip == response_ip
     ) {
         address.clone_into(response);
+    }
+}
+
+/// Render a bare `address` in the scoped `fe80::1%eth0` form when the daemon
+/// reported its interface scope beside it; numbered peers are unchanged.
+pub(crate) fn scope_address(address: &mut String, interface: &str) {
+    if !interface.is_empty() && !address.is_empty() && !address.contains('%') {
+        address.push('%');
+        address.push_str(interface);
     }
 }
 

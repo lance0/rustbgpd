@@ -52,6 +52,15 @@ impl PeerKey {
             None => self.address.to_string(),
         }
     }
+
+    /// Whether an event recorded for `address` with operator label `label`
+    /// (`address%interface` for a scoped neighbor) belongs to this neighbor.
+    /// A scoped key matches only the label it would render.
+    #[must_use]
+    pub fn names_event(&self, address: IpAddr, label: Option<&str>) -> bool {
+        self.address == address
+            && (self.interface.is_none() || label == Some(self.label().as_str()))
+    }
 }
 
 impl std::fmt::Display for PeerKey {
@@ -855,8 +864,9 @@ pub enum PeerManagerCommand {
     },
     /// Query recent policy mutation events from the bounded in-memory history.
     QueryPolicyEventHistory {
-        /// Optional peer filter. Matches only peer-scoped policy events.
-        peer: Option<IpAddr>,
+        /// Optional peer filter. Matches only peer-scoped policy events; a
+        /// scoped neighbor matches only on its recorded label.
+        peer: Option<PeerKey>,
         /// Maximum events to return. 0 uses [`POLICY_EVENT_HISTORY_CAPACITY`].
         limit: usize,
         /// Reply channel returning matching events.
@@ -864,8 +874,9 @@ pub enum PeerManagerCommand {
     },
     /// Query recent session lifecycle events from the bounded in-memory history.
     QuerySessionEventHistory {
-        /// Optional peer filter.
-        peer: Option<IpAddr>,
+        /// Optional peer filter; a scoped neighbor matches only on its
+        /// recorded label.
+        peer: Option<PeerKey>,
         /// Optional event-type filter.
         event_types: BTreeSet<SessionLifecycleEventType>,
         /// Maximum events to return. 0 uses [`SESSION_EVENT_HISTORY_CAPACITY`].

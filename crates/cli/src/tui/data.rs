@@ -876,6 +876,7 @@ mod tests {
             .map(|_| rustbgpd_api::proto::ListRoutesResponse {
                 routes: vec![rustbgpd_api::proto::Route {
                     peer_address: "fe80::1".into(),
+                    peer_interface: "eth0".into(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -904,12 +905,8 @@ mod tests {
             let RibQueryResponse::Page(page) = result.result.unwrap() else {
                 panic!("expected route page")
             };
-            let expected_peer = if view.peer_scoped() {
-                "fe80::1%eth0"
-            } else {
-                "fe80::1"
-            };
-            assert_eq!(page.routes[0].peer_address, expected_peer);
+            // Rows render the scope the daemon recorded, in every view.
+            assert_eq!(page.routes[0].peer_address, "fe80::1%eth0");
             assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
         let expected = |neighbor: &str| rustbgpd_api::proto::ListRoutesRequest {
@@ -925,12 +922,16 @@ mod tests {
         let requests = server.state.list_route_requests.lock().await;
         assert_eq!(
             *requests,
-            vec![expected("fe80::1"), expected("fe80::1"), expected("")]
+            vec![
+                expected("fe80::1%eth0"),
+                expected("fe80::1%eth0"),
+                expected("")
+            ]
         );
     }
 
     #[tokio::test]
-    async fn rib_query_lane_rejected_carries_bare_peer_and_restores_scope() {
+    async fn rib_query_lane_rejected_carries_scoped_peer_and_renders_scope() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         let (lane, mut results) = spawn_rib_query_lane(connection);
@@ -952,7 +953,7 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(request.peer_address, "fe80::1");
+        assert_eq!(request.peer_address, "fe80::1%eth0");
         assert_eq!(
             server
                 .state
@@ -1033,7 +1034,7 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(request.peer_address, "fe80::1");
+        assert_eq!(request.peer_address, "fe80::1%eth0");
         assert_eq!(request.prefix, "203.0.113.0");
         assert_eq!(request.prefix_length, 24);
         assert_eq!(request.rd, "");

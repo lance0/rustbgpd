@@ -107,6 +107,9 @@ pub(crate) fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         peer: Some(peer),
         previous_peer: None,
         target_peer: None,
+        peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
+        previous_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
+        target_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
         timestamp_unix_ms: 123_000,
         path_id: 7,
         reason: String::new(),
@@ -321,9 +324,10 @@ pub(crate) fn spawn_fake_peer_manager_with_history(
                     let mut events: Vec<_> = history
                         .iter()
                         .rev()
-                        .filter(|event| match peer {
-                            Some(peer) => event.peer == peer,
-                            None => true,
+                        .filter(|event| {
+                            peer.as_ref().is_none_or(|peer| {
+                                peer.names_event(event.peer, event.peer_label.as_deref())
+                            })
                         })
                         .filter(|event| {
                             event_types.is_empty() || event_types.contains(&event.event_type)
@@ -362,9 +366,12 @@ pub(crate) fn spawn_fake_peer_manager_with_policy_history(
                     let mut events: Vec<_> = history
                         .iter()
                         .rev()
-                        .filter(|event| match peer {
-                            Some(peer) => event.peer == Some(peer),
-                            None => true,
+                        .filter(|event| {
+                            peer.as_ref().is_none_or(|peer| {
+                                event.peer.is_some_and(|address| {
+                                    peer.names_event(address, event.peer_label.as_deref())
+                                })
+                            })
                         })
                         .take(limit)
                         .cloned()

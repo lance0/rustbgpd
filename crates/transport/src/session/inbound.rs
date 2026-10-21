@@ -1205,13 +1205,23 @@ impl PeerSession {
             self.config.peer.local_role,
         )
     }
-    /// The interned id of [`Self::aspa_validation_context`]. Its inputs are
-    /// fixed for an established session but change across reconnects, so the
-    /// id is re-interned only when the context differs from the cached one.
+    /// The interned id of [`Self::aspa_validation_context`] plus the
+    /// configured interface of a scoped neighbor, which the id records as
+    /// the routes' source provenance. Its inputs are fixed for an
+    /// established session but change across reconnects, so the id is
+    /// re-interned only when the context differs from the cached one; the
+    /// interface is fixed for the session's lifetime, and the cache starts
+    /// interned with it.
     pub(super) fn aspa_context_id(&mut self) -> rustbgpd_rib::route::AspaContextId {
         let context = self.aspa_validation_context();
         if self.aspa_context_id.0 != context {
-            self.aspa_context_id = (context, rustbgpd_rib::route::AspaContextId::intern(context));
+            self.aspa_context_id = (
+                context,
+                rustbgpd_rib::route::AspaContextId::intern_scoped(
+                    context,
+                    self.config.peer_interface.as_deref(),
+                ),
+            );
         }
         self.aspa_context_id.1
     }

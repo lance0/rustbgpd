@@ -1205,11 +1205,7 @@ pub async fn test(
         rpol_source,
         policy: opts.policy.to_string(),
         direction: opts.direction.to_string(),
-        peer: opts
-            .peer
-            .map(bare_ip_rpc_address)
-            .unwrap_or_default()
-            .to_string(),
+        peer: opts.peer.unwrap_or_default().to_string(),
         afi_safi: afi_safi as i32,
         limit: opts.limit,
         show_changes: opts.show_changes,
@@ -1390,7 +1386,7 @@ pub async fn compare(
         rpol_source,
         policies: opts.policies.to_vec(),
         replace_member: opts.replace.unwrap_or_default().to_string(),
-        peer: bare_ip_rpc_address(opts.peer).to_string(),
+        peer: opts.peer.to_string(),
         afi_safi: dry_run_family(opts.family)? as i32,
         limit: opts.limit,
         max_samples: opts.max_samples,
@@ -1613,10 +1609,7 @@ pub async fn stats(
         "GetPolicyStats",
         client.get_policy_stats(GetPolicyStatsRequest {
             allow_partial,
-            peer_address: peer
-                .map(bare_ip_rpc_address)
-                .unwrap_or_default()
-                .to_string(),
+            peer_address: peer.unwrap_or_default().to_string(),
             direction: direction.to_string(),
         }),
     )
@@ -2036,7 +2029,7 @@ pub async fn explain_import(
     let resp = read_rpc(
         "ExplainImportPolicy",
         client.explain_import_policy(ExplainImportPolicyRequest {
-            peer_address: bare_ip_rpc_address(neighbor).to_string(),
+            peer_address: neighbor.to_string(),
             afi_safi: afi_safi as i32,
             prefix: addr,
             prefix_length,
@@ -2348,7 +2341,7 @@ pub async fn chain_show(
             let resp = read_rpc(
                 "GetNeighborPolicyChains",
                 client.get_neighbor_policy_chains(GetNeighborPolicyChainsRequest {
-                    address: bare_ip_rpc_address(addr).to_string(),
+                    address: addr.to_string(),
                 }),
             )
             .await?
@@ -2438,7 +2431,7 @@ pub async fn chain_set(
                 SETTLED_MUTATION_RPC_TIMEOUT,
                 &format!("`rbgp policy chain show --neighbor {addr}`"),
                 client.set_neighbor_import_chain(SetNeighborImportChainRequest {
-                    address: bare_ip_rpc_address(addr).to_string(),
+                    address: addr.to_string(),
                     policy_names: policy_names.clone(),
                 }),
             )
@@ -2454,7 +2447,7 @@ pub async fn chain_set(
                 SETTLED_MUTATION_RPC_TIMEOUT,
                 &format!("`rbgp policy chain show --neighbor {addr}`"),
                 client.set_neighbor_export_chain(SetNeighborExportChainRequest {
-                    address: bare_ip_rpc_address(addr).to_string(),
+                    address: addr.to_string(),
                     policy_names: policy_names.clone(),
                 }),
             )
@@ -2518,7 +2511,7 @@ pub async fn chain_clear(
                 SETTLED_MUTATION_RPC_TIMEOUT,
                 &format!("`rbgp policy chain show --neighbor {addr}`"),
                 client.clear_neighbor_import_chain(ClearNeighborImportChainRequest {
-                    address: bare_ip_rpc_address(addr).to_string(),
+                    address: addr.to_string(),
                 }),
             )
             .await?;
@@ -2533,7 +2526,7 @@ pub async fn chain_clear(
                 SETTLED_MUTATION_RPC_TIMEOUT,
                 &format!("`rbgp policy chain show --neighbor {addr}`"),
                 client.clear_neighbor_export_chain(ClearNeighborExportChainRequest {
-                    address: bare_ip_rpc_address(addr).to_string(),
+                    address: addr.to_string(),
                 }),
             )
             .await?;
@@ -2844,6 +2837,7 @@ mod tests {
     #[test]
     fn import_explain_json_covers_proto_fields() {
         let mut response = proto::ExplainImportPolicyResponse {
+            peer_interface: Default::default(),
             peer_address: "fe80::9".into(),
             prefix: "2001:db8::".into(),
             prefix_length: 48,
@@ -2852,6 +2846,7 @@ mod tests {
             cache_size: Some(u64::MAX),
             evictions_since_reset: Some(u64::MAX),
             matches: vec![proto::ImportExplainMatch {
+                peer_interface: Default::default(),
                 outcome: proto::ImportExplainOutcome::Permit as i32,
                 // Per-match identity repeats the response envelope in normal RPC
                 // replies and is deliberately omitted by this curated projection.
@@ -3097,7 +3092,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scoped_link_local_sends_bare_peer_and_renders() {
+    async fn test_scoped_link_local_sends_scoped_peer_and_renders() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         let file = write_rpol("policy p { term t { reject } }");
@@ -3122,7 +3117,7 @@ mod tests {
         assert_eq!(captured.rpol_source, "policy p { term t { reject } }");
         assert_eq!(captured.policy, "customer-in(200)");
         assert_eq!(captured.direction, "import");
-        assert_eq!(captured.peer, "fe80::9");
+        assert_eq!(captured.peer, "fe80::9%eth0");
         assert_eq!(
             captured.afi_safi,
             crate::proto::AddressFamily::Ipv4Unicast as i32
@@ -3192,7 +3187,7 @@ mod tests {
         );
         assert_eq!(captured.policies, ["client-x"]);
         assert_eq!(captured.replace_member, "client-x");
-        assert_eq!(captured.peer, "fe80::9");
+        assert_eq!(captured.peer, "fe80::9%eth0");
         assert_eq!(
             captured.afi_safi,
             crate::proto::AddressFamily::Ipv6Unicast as i32
@@ -3768,7 +3763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explain_scoped_link_local_sends_bare_peer_and_infers_afi() {
+    async fn explain_scoped_link_local_sends_scoped_peer_and_infers_afi() {
         // Pin: the CLI infers AFI from the prefix (no --afi flag) and
         // sends a well-formed request with the parsed address + length.
         let server = spawn_mock_server(None).await;
@@ -3783,7 +3778,7 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.peer_address, "fe80::1");
+        assert_eq!(captured.peer_address, "fe80::1%eth0");
         assert_eq!(captured.prefix, "2001:db8::");
         assert_eq!(captured.prefix_length, 32);
         assert_eq!(captured.path_id, Some(7));
@@ -3853,7 +3848,7 @@ mod tests {
                 .await
                 .take()
                 .expect("export explain reached ExplainAdvertisedRoute");
-            assert_eq!(req.peer_address, "fe80::1");
+            assert_eq!(req.peer_address, "fe80::1%eth0");
             assert_eq!(req.prefix, "203.0.113.0");
             assert_eq!(req.prefix_length, 24);
             assert_eq!(req.rd, "");
@@ -4211,7 +4206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stats_scoped_link_local_sends_bare_peer_and_renders() {
+    async fn stats_scoped_link_local_sends_scoped_peer_and_renders() {
         let server = spawn_mock_server(None).await;
         let json_conn = connect(&server.addr, None).await.unwrap();
         stats(
@@ -4230,7 +4225,7 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.peer_address, "fe80:0:0:0:0:0:0:2");
+        assert_eq!(captured.peer_address, "fe80:0:0:0:0:0:0:2%eth0");
         assert_eq!(captured.direction, "export");
         let text_conn = connect(&server.addr, None).await.unwrap();
         stats(text_conn, None, "export", false, false)
@@ -4392,7 +4387,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chain_show_scoped_link_local_sends_bare_neighbor() {
+    async fn chain_show_scoped_link_local_sends_scoped_neighbor() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         chain_show(connection, Some("fe80::2%eth0"), true)
@@ -4405,7 +4400,7 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "fe80::2");
+        assert_eq!(captured.address, "fe80::2%eth0");
     }
 
     #[tokio::test]
@@ -4435,7 +4430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chain_set_neighbor_import_sends_bare_scoped_address() {
+    async fn chain_set_neighbor_import_sends_scoped_address() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         chain_set(
@@ -4454,12 +4449,12 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "fe80::2");
+        assert_eq!(captured.address, "fe80::2%eth0");
         assert_eq!(captured.policy_names, vec!["x".to_string()]);
     }
 
     #[tokio::test]
-    async fn chain_set_neighbor_export_sends_bare_scoped_address() {
+    async fn chain_set_neighbor_export_sends_scoped_address() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         chain_set(
@@ -4478,12 +4473,12 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "fe80::2");
+        assert_eq!(captured.address, "fe80::2%eth0");
         assert_eq!(captured.policy_names, vec!["x".to_string()]);
     }
 
     #[tokio::test]
-    async fn chain_clear_neighbor_import_sends_bare_scoped_address() {
+    async fn chain_clear_neighbor_import_sends_scoped_address() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         chain_clear(
@@ -4501,11 +4496,11 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "fe80::2");
+        assert_eq!(captured.address, "fe80::2%eth0");
     }
 
     #[tokio::test]
-    async fn chain_clear_neighbor_export_sends_bare_scoped_address() {
+    async fn chain_clear_neighbor_export_sends_scoped_address() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         chain_clear(
@@ -4523,7 +4518,7 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "fe80::2");
+        assert_eq!(captured.address, "fe80::2%eth0");
     }
 
     /// LAN-323: `fmt` rewrites in place (atomically), a second run is

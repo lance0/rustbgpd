@@ -1406,6 +1406,10 @@ pub struct ExplainAdvertisedRoute {
     /// its source identity together with `route_peer`. `None` before the
     /// ladder selects a route, and for other families.
     pub route_path_id: Option<u32>,
+    /// Interface of `route_peer` when it is a scoped (IPv6 link-local)
+    /// neighbor, from the selected unicast route's recorded source
+    /// provenance. `None` for numbered peers and other families.
+    pub route_peer_interface: Option<Arc<str>>,
     /// Selected best route type.
     pub route_type: Option<rustbgpd_policy::RouteType>,
     /// Explanation reasons, in order. Most entries are decisive; stable
@@ -1468,6 +1472,9 @@ pub enum RouteExportDisposition {
 pub struct PeerRouteExport {
     /// Destination peer.
     pub peer: IpAddr,
+    /// Interface of `peer` when it is a scoped (IPv6 link-local) neighbor,
+    /// from its registered session's accepted source context.
+    pub peer_interface: Option<Arc<str>>,
     /// The one disposition this peer has.
     pub disposition: RouteExportDisposition,
     /// Bounded reason: empty for `Committed`, otherwise a fixed code such as
@@ -1612,6 +1619,9 @@ pub struct ExportGateStep {
 pub struct OrrExplainCandidate {
     /// Adj-RIB-In source peer of this candidate path.
     pub peer: IpAddr,
+    /// Interface of `peer` when it is a scoped (IPv6 link-local) neighbor,
+    /// from the candidate route's recorded source provenance.
+    pub peer_interface: Option<Arc<str>>,
     /// Add-Path identifier of the candidate in its Adj-RIB-In.
     pub path_id: u32,
     /// Candidate's `NEXT_HOP` — the input to the vantage cost lookup.
@@ -3026,6 +3036,9 @@ pub enum RibUpdate {
         /// best-path peer so peer-scoped queries include withdraws and
         /// best-path moves away from the peer.
         peer: Option<IpAddr>,
+        /// Interface of a scoped `peer`, matched against the interface each
+        /// event recorded. `None` selects a numbered peer.
+        peer_interface: Option<Arc<str>>,
         /// Optional address-family filter. `None` = all unicast families.
         afi: Option<Afi>,
         /// Optional exact prefix filter. `None` = all unicast prefixes.

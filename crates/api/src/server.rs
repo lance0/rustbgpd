@@ -2148,6 +2148,7 @@ async fn run_tcp_listener(
         operator_lane: Some(peer_mgr_operator_tx.clone()),
         rib: rib_query_tx.clone(),
         daemon_gate: daemon_gate.clone(),
+        roster: Some(import_roster.clone()),
     };
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
@@ -2171,7 +2172,8 @@ async fn run_tcp_listener(
             dataplane_route_events,
             bfd_events,
             metrics.clone(),
-        ),
+        )
+        .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(BfdServiceServer::with_interceptor(
@@ -2198,7 +2200,8 @@ async fn run_tcp_listener(
         )
         .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_summary_queries(rib_summary_tx.clone())
-        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone())
+        .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
@@ -2209,7 +2212,8 @@ async fn run_tcp_listener(
             config_mutation_gate.clone(),
             runtime_config_lock.clone(),
         )
-        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone())
+        .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(
@@ -2433,6 +2437,7 @@ async fn run_uds_listener(
         operator_lane: Some(peer_mgr_operator_tx.clone()),
         rib: rib_query_tx.clone(),
         daemon_gate: daemon_gate.clone(),
+        roster: Some(import_roster.clone()),
     };
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
@@ -2456,7 +2461,8 @@ async fn run_uds_listener(
             dataplane_route_events,
             bfd_events,
             metrics.clone(),
-        ),
+        )
+        .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(BfdServiceServer::with_interceptor(
@@ -2483,7 +2489,8 @@ async fn run_uds_listener(
         )
         .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_summary_queries(rib_summary_tx.clone())
-        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone())
+        .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(PeerGroupServiceServer::with_interceptor(
@@ -2494,7 +2501,8 @@ async fn run_uds_listener(
             config_mutation_gate.clone(),
             runtime_config_lock.clone(),
         )
-        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
+        .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone())
+        .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(PolicyServiceServer::with_interceptor(

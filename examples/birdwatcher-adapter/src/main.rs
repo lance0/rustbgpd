@@ -3760,6 +3760,7 @@ mod tests {
         for enabled in [false, true] {
             let resp = proto::ListRejectedRoutesResponse {
                 peer_address: peer.to_string(),
+                peer_interface: String::new(),
                 retention_enabled: enabled,
                 capacity: 1024,
                 routes: if enabled {

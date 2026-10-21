@@ -101,6 +101,9 @@ pub struct NeighborService {
     config_mutation_gate: Option<ConfigMutationGateFn>,
     settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
     owned_actor_timeout: Duration,
+    /// Published managed-peer roster, for the scoped candidates a bare
+    /// link-local selector's error names.
+    roster: Option<crate::import_roster::ImportRosterReader>,
 }
 
 impl NeighborService {
@@ -150,7 +153,18 @@ impl NeighborService {
             config_mutation_gate,
             settlement: None,
             owned_actor_timeout: OWNED_NEIGHBOR_ACTOR_TIMEOUT,
+            roster: None,
         }
+    }
+
+    /// Name configured scoped candidates in selector errors.
+    #[must_use]
+    pub(crate) fn with_peer_roster(
+        mut self,
+        roster: crate::import_roster::ImportRosterReader,
+    ) -> Self {
+        self.roster = Some(roster);
+        self
     }
 
     /// Attach the operator query lane served at explicit actor admission points.
@@ -1271,25 +1285,14 @@ fn selection_deferral_to_proto(
         .collect()
 }
 
-fn peer_key(address: &str, interface: &str) -> Result<PeerKey, Status> {
-    let address: IpAddr = address
-        .parse()
-        .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
-    let interface = (!interface.trim().is_empty()).then(|| interface.to_string());
-    match (is_ipv6_link_local(address), interface.as_ref()) {
-        (true, None) => {
-            return Err(Status::invalid_argument(
-                "interface is required for IPv6 link-local neighbors",
-            ));
-        }
-        (false, Some(_)) => {
-            return Err(Status::invalid_argument(
-                "interface is only valid for IPv6 link-local neighbors",
-            ));
-        }
-        _ => {}
-    }
-    Ok(PeerKey::new(address, interface))
+/// A neighbor selector: `address` plus the structured `interface`, or a
+/// scoped `fe80::1%eth0` address (see [`crate::peer_selector`]).
+fn peer_key(
+    address: &str,
+    interface: &str,
+    roster: Option<&crate::import_roster::ImportRosterReader>,
+) -> Result<PeerKey, Status> {
+    crate::peer_selector::require_neighbor("address", address, interface, roster)
 }
 
 #[tonic::async_trait]
@@ -1319,7 +1322,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface)?;
+        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
 
         // Reserve config persistence capacity before mutating runtime state.
         // This makes DeleteNeighbor fail-fast when persistence is unavailable.
@@ -1408,7 +1411,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         request: Request<proto::GetNeighborStateRequest>,
     ) -> Result<Response<proto::NeighborState>, Status> {
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface)?;
+        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
         if req.compare_address.is_empty() && !req.compare_interface.trim().is_empty() {
             return Err(Status::invalid_argument(
                 "compare_interface requires compare_address",
@@ -1417,7 +1420,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let compare_peer = if req.compare_address.is_empty() {
             None
         } else {
-            let compare_peer = peer_key(&req.compare_address, &req.compare_interface)?;
+            let compare_peer = peer_key(
+                &req.compare_address,
+                &req.compare_interface,
+                self.roster.as_ref(),
+            )?;
             validate_update_group_comparison_scope(peer.address, compare_peer.address)?;
             Some(compare_peer)
         };
@@ -1517,7 +1524,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface)?;
+        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
 
         crate::dampening_control::enable_peer_owned(
             self.peer_mgr_tx.clone(),
@@ -1540,7 +1547,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface)?;
+        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
 
         // Empty means "all configured families" — pass empty vec through.
         // Transport filters to negotiated families before sending.
@@ -1569,7 +1576,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface)?;
+        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
 
         peer_manager_request(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::RefreshOutbound { peer, reply }
@@ -1590,7 +1597,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface)?;
+        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
 
         peer_manager_request(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::ReplayOutbound { peer, reply }
@@ -1611,7 +1618,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface)?;
+        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
         let reason = shutdown_communication(&req.reason);
 
         peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::DisablePeer {
@@ -1633,7 +1640,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface)?;
+        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
         let reason = shutdown_communication(&req.reason);
 
         peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::ResetPeer {
@@ -1772,7 +1779,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let peer = if req.address.is_empty() {
             None
         } else {
-            Some(peer_key(&req.address, &req.interface)?)
+            Some(peer_key(
+                &req.address,
+                &req.interface,
+                self.roster.as_ref(),
+            )?)
         };
 
         peer_manager_request(&self.peer_mgr_tx, |reply| {
@@ -2841,21 +2852,24 @@ mod tests {
 
     #[test]
     fn peer_key_rejects_link_local_without_interface() {
-        let err = peer_key("fe80::1", "").unwrap_err();
+        let err = peer_key("fe80::1", "", None).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("interface"));
     }
 
     #[test]
     fn peer_key_accepts_scoped_link_local() {
-        let key = peer_key("fe80::1", "eth0").unwrap();
-        assert_eq!(key.address, "fe80::1".parse::<IpAddr>().unwrap());
-        assert_eq!(key.interface.as_deref(), Some("eth0"));
+        // Structured and in-address scope select the same neighbor.
+        for (address, interface) in [("fe80::1", "eth0"), ("fe80::1%eth0", "")] {
+            let key = peer_key(address, interface, None).unwrap();
+            assert_eq!(key.address, "fe80::1".parse::<IpAddr>().unwrap());
+            assert_eq!(key.interface.as_deref(), Some("eth0"));
+        }
     }
 
     #[test]
     fn peer_key_rejects_numbered_with_interface() {
-        let err = peer_key("192.0.2.1", "eth0").unwrap_err();
+        let err = peer_key("192.0.2.1", "eth0", None).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("only valid"));
     }

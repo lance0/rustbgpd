@@ -22,7 +22,7 @@ use rustbgpd_rib::export_roster::{ExportCaptureError, ExportRosterReader, captur
 
 use crate::peer_types::{
     ConfigEvent, EnqueuedOperatorQuery, NamedPolicyDefinition, OwnedCatalogMutation,
-    OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerOperatorQuery,
+    OwnedCatalogMutationOutcome, PeerKey, PeerManagerCommand, PeerManagerOperatorQuery,
     PolicyStatementDefinition, ValidationPolicyDimensionSnapshot, ValidationPolicyDisposition,
     ValidationPolicyScopeSnapshot,
 };
@@ -253,6 +253,7 @@ fn statement_step_to_proto(
 /// session (current-generation PERMIT / DENY hits only).
 fn resolved_match_to_proto(
     peer_address: &str,
+    peer: &PeerKey,
     prefix: &str,
     prefix_length: u32,
     afi_safi: i32,
@@ -261,6 +262,7 @@ fn resolved_match_to_proto(
     let mut m = proto::ImportExplainMatch {
         outcome: proto::ImportExplainOutcome::Unspecified as i32,
         peer_address: peer_address.to_string(),
+        peer_interface: crate::peer_selector::interface_of(Some(peer)),
         prefix: prefix.to_string(),
         prefix_length,
         path_id: resolved.path_id,
@@ -1022,10 +1024,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         request: Request<proto::GetNeighborPolicyChainsRequest>,
     ) -> Result<Response<proto::NeighborPolicyChains>, Status> {
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let address = crate::peer_selector::require_neighbor(
+            "address",
+            &req.address,
+            "",
+            self.import_roster.as_ref(),
+        )?
+        .address;
         // Capture before the peer-manager read; registration may finish while it waits.
         let initial_roster_pending = self
             .settlement
@@ -1057,10 +1062,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let address = crate::peer_selector::require_neighbor(
+            "address",
+            &req.address,
+            "",
+            self.import_roster.as_ref(),
+        )?
+        .address;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let policy_names = req.policy_names;
         self.execute_owned_policy_mutation(
@@ -1090,10 +1098,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let address = crate::peer_selector::require_neighbor(
+            "address",
+            &req.address,
+            "",
+            self.import_roster.as_ref(),
+        )?
+        .address;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let policy_names = req.policy_names;
         self.execute_owned_policy_mutation(
@@ -1123,10 +1134,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let address = crate::peer_selector::require_neighbor(
+            "address",
+            &req.address,
+            "",
+            self.import_roster.as_ref(),
+        )?
+        .address;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         self.execute_owned_policy_mutation(
             RuntimeConfigOperationKind::NeighborImportChainClear,
@@ -1148,10 +1162,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address: IpAddr = req
-            .address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let address = crate::peer_selector::require_neighbor(
+            "address",
+            &req.address,
+            "",
+            self.import_roster.as_ref(),
+        )?
+        .address;
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         self.execute_owned_policy_mutation(
             RuntimeConfigOperationKind::NeighborExportChainClear,
@@ -1170,10 +1187,14 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         request: Request<proto::ExplainImportPolicyRequest>,
     ) -> Result<Response<proto::ExplainImportPolicyResponse>, Status> {
         let req = request.into_inner();
-        let address: IpAddr = req
-            .peer_address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
+        let peer = crate::peer_selector::require_neighbor(
+            "peer_address",
+            &req.peer_address,
+            "",
+            self.import_roster.as_ref(),
+        )?;
+        let address = peer.address;
+        let echo = crate::peer_selector::address_echo(&req.peer_address, &peer);
         let (afi, safi) = explain_afi_safi(req.afi_safi)?;
         let prefix = explain_prefix(afi, &req.prefix, req.prefix_length)?;
 
@@ -1224,7 +1245,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     .into_iter()
                     .map(|resolved| {
                         resolved_match_to_proto(
-                            &req.peer_address,
+                            &echo,
+                            &peer,
                             &req.prefix,
                             req.prefix_length,
                             req.afi_safi,
@@ -1247,7 +1269,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             // Same synthetic empty-field shape as NOT_SEEN, differing
             // only in the outcome value.
             let mut synthetic = resolved_match_to_proto(
-                &req.peer_address,
+                &echo,
+                &peer,
                 &req.prefix,
                 req.prefix_length,
                 req.afi_safi,
@@ -1262,7 +1285,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
 
         Ok(Response::new(proto::ExplainImportPolicyResponse {
-            peer_address: req.peer_address,
+            peer_address: echo,
+            peer_interface: crate::peer_selector::interface_of(Some(&peer)),
             prefix: req.prefix,
             prefix_length: req.prefix_length,
             afi_safi: req.afi_safi,
@@ -1278,10 +1302,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         request: Request<proto::ListRejectedRoutesRequest>,
     ) -> Result<Response<proto::ListRejectedRoutesResponse>, Status> {
         let req = request.into_inner();
-        let address: IpAddr = req
-            .peer_address
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
+        let peer = crate::peer_selector::require_neighbor(
+            "peer_address",
+            &req.peer_address,
+            "",
+            self.import_roster.as_ref(),
+        )?;
+        let address = peer.address;
 
         let reply = peer_manager_read(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::ListRejectedRoutes { address, reply }
@@ -1349,7 +1376,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .collect();
 
         Ok(Response::new(proto::ListRejectedRoutesResponse {
-            peer_address: req.peer_address,
+            peer_address: crate::peer_selector::address_echo(&req.peer_address, &peer),
+            peer_interface: crate::peer_selector::interface_of(Some(&peer)),
             retention_enabled: reply.enabled,
             capacity: u32::try_from(reply.capacity).unwrap_or(u32::MAX),
             routes,
@@ -1403,15 +1431,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 ));
             }
         };
-        let peer_filter: Option<IpAddr> = if req.peer.is_empty() {
-            None
-        } else {
-            Some(
-                req.peer
-                    .parse()
-                    .map_err(|e| Status::invalid_argument(format!("invalid peer: {e}")))?,
-            )
-        };
+        let peer_filter = crate::peer_selector::parse_neighbor_address(
+            "peer",
+            &req.peer,
+            self.import_roster.as_ref(),
+        )?;
 
         // Compile the candidate source server-side. Diagnostics are a
         // successful RPC with compiled=false — the dry run's answer.
@@ -1538,10 +1562,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 ));
             }
         };
-        let target: IpAddr = req
-            .peer
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid peer: {e}")))?;
+        let target = crate::peer_selector::require_neighbor(
+            "peer",
+            &req.peer,
+            "",
+            self.import_roster.as_ref(),
+        )?
+        .address;
 
         let file = match RpolFile::parse(&req.rpol_source) {
             Ok(file) => file,
@@ -1742,13 +1769,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 "allow_partial requires an unfiltered import or both query",
             ));
         }
-        let peer: Option<IpAddr> = if req.peer_address.is_empty() {
-            None
-        } else {
-            Some(req.peer_address.parse().map_err(|_| {
-                Status::invalid_argument(format!("invalid peer address {:?}", req.peer_address))
-            })?)
-        };
+        let peer = crate::peer_selector::parse_neighbor_address(
+            "peer_address",
+            &req.peer_address,
+            self.import_roster.as_ref(),
+        )?;
         let unavailable =
             || Status::failed_precondition("policy stats runtime unavailable on this listener");
         let roster_cell = self.import_roster.as_ref().ok_or_else(unavailable)?;
@@ -2972,6 +2997,7 @@ mod tests {
         };
         let m = resolved_match_to_proto(
             "10.0.0.2",
+            &PeerKey::new("10.0.0.2".parse().unwrap(), None),
             "192.0.2.0",
             24,
             proto::AddressFamily::Ipv4Unicast as i32,

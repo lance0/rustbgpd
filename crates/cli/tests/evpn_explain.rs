@@ -98,8 +98,9 @@ async fn exact_selectors_forward_typed_keys_without_fallback() {
         assert_eq!(value["key"], expected);
         assert_eq!(value["received_from"], "fe80::2%eth0");
         let request = server.state.last_explain_evpn.lock().await.clone().unwrap();
-        assert_eq!(request.received_from, "fe80::2");
-        assert_eq!(request.advertised_to, "fe80::3");
+        // The daemon requires link-local scope, so selectors keep it.
+        assert_eq!(request.received_from, "fe80::2%eth0");
+        assert_eq!(request.advertised_to, "fe80::3%eth1");
         assert!(request.srv6_argument_companion.is_none());
         assert_eq!(request.key.unwrap().rd, "65000:100");
     }
