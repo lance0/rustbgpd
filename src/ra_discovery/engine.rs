@@ -245,6 +245,7 @@ impl Engine {
         let Some(iface) = self.interfaces.get_mut(&event.name) else {
             return;
         };
+        expire(&event.name, iface, now, &mut self.events);
         let recreated = iface.ifindex.is_some_and(|i| i != event.ifindex);
         match event.state {
             // Unknown never clears anything. An Unknown report naming a
@@ -308,6 +309,9 @@ impl Engine {
         else {
             return Ok(());
         };
+        // Apply overdue expiry first, so a late refresh cannot revive an
+        // expired candidate or keep its binding ahead of the timer.
+        expire(name, iface, now, &mut self.events);
         if iface.confirmed_down || iface.generation != generation {
             return Err(DropReason::StaleLink);
         }
@@ -357,13 +361,14 @@ impl Engine {
     /// to 500 ms, no sooner than 3 s after the previous RA (RFC 4861 §6.2.6).
     pub(crate) fn on_router_solicitation(&mut self, ifindex: u32, generation: u64, now: Instant) {
         let delay = self.random_up_to(MAX_RA_DELAY_TIME);
-        let Some(iface) = self
+        let Some((name, iface)) = self
             .interfaces
-            .values_mut()
-            .find(|i| i.ifindex == Some(ifindex) && i.generation == generation)
+            .iter_mut()
+            .find(|(_, i)| i.ifindex == Some(ifindex) && i.generation == generation)
         else {
             return;
         };
+        expire(name, iface, now, &mut self.events);
         let Some(next) = iface.next_ra else {
             return; // not advertising here
         };
@@ -383,9 +388,10 @@ impl Engine {
 
     /// The neighbor's session failed (hold timer, BFD, NOTIFICATION, TCP
     /// close). Only now may an expired binding move or be released.
-    pub(crate) fn session_failed(&mut self, name: &str) {
+    pub(crate) fn session_failed(&mut self, name: &str, now: Instant) {
         if let Some(iface) = self.interfaces.get_mut(name) {
             iface.established = false;
+            expire(name, iface, now, &mut self.events);
             reselect(name, iface, &mut self.events);
         }
     }
@@ -398,20 +404,7 @@ impl Engine {
             let mut delay = timing.min_interval()
                 + self.random_up_to(timing.max_interval().saturating_sub(timing.min_interval()));
             let iface = self.interfaces.get_mut(&name).expect("key just listed");
-            let before = iface.candidates.len();
-            iface.candidates.retain(|address, expiry| {
-                let live = *expiry > now;
-                if !live {
-                    self.events.push(DiscoveryEvent::CandidateExpired {
-                        interface: name.clone(),
-                        address: *address,
-                    });
-                }
-                live
-            });
-            if iface.candidates.len() != before {
-                reselect(&name, iface, &mut self.events);
-            }
+            expire(&name, iface, now, &mut self.events);
             if let (Some(due), Some(ifindex)) = (iface.next_ra, iface.ifindex)
                 && due <= now
             {
@@ -443,6 +436,26 @@ impl Engine {
         self.rng ^= self.rng << 17;
         let span = u64::try_from(max.as_millis()).unwrap_or(u64::MAX);
         Duration::from_millis(self.rng % span.saturating_add(1))
+    }
+}
+
+/// Drop candidates whose lifetime has run out by `now` and reselect. Every
+/// input applies this first, so the outcome never depends on whether the
+/// expiry timer or the input was processed first.
+fn expire(name: &str, iface: &mut Interface, now: Instant, events: &mut Vec<DiscoveryEvent>) {
+    let before = iface.candidates.len();
+    iface.candidates.retain(|address, expiry| {
+        let live = *expiry > now;
+        if !live {
+            events.push(DiscoveryEvent::CandidateExpired {
+                interface: name.to_owned(),
+                address: *address,
+            });
+        }
+        live
+    });
+    if iface.candidates.len() != before {
+        reselect(name, iface, events);
     }
 }
 

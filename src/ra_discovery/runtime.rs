@@ -378,7 +378,7 @@ impl Actor {
             Command::Stop(name) => self.engine.stop(&name),
             Command::Link(event) => self.engine.on_link(&event, Instant::now()),
             Command::SessionEstablished(name) => self.engine.session_established(&name),
-            Command::SessionFailed(name) => self.engine.session_failed(&name),
+            Command::SessionFailed(name) => self.engine.session_failed(&name, Instant::now()),
         }
     }
 

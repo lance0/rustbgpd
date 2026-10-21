@@ -199,6 +199,54 @@ fn forced_rebind_picks_lowest_live_whatever_the_arrival_order() {
 }
 
 #[test]
+fn late_refresh_cannot_revive_an_expired_binding() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    ra(&mut e, 5, 10, t0).unwrap();
+    ra(&mut e, 1, 60, t0).unwrap();
+    e.events.clear();
+    // fe80::5 expired at t0+10; its RA is processed at t0+11 before any
+    // poll. Expiry applies first, so the binding moves to fe80::1 and the
+    // RA relearns fe80::5 as a mere candidate.
+    ra(&mut e, 5, 10, t0 + Duration::from_secs(11)).unwrap();
+    assert_eq!(
+        e.events,
+        vec![
+            DiscoveryEvent::CandidateExpired {
+                interface: IF.into(),
+                address: ll(5)
+            },
+            DiscoveryEvent::BindingChanged {
+                interface: IF.into(),
+                previous: Some(ep(5)),
+                current: Some(ep(1))
+            },
+            DiscoveryEvent::CandidateLearned {
+                interface: IF.into(),
+                address: ll(5)
+            },
+            DiscoveryEvent::Conflict {
+                interface: IF.into(),
+                bound: ll(1),
+                other: ll(5)
+            },
+        ]
+    );
+}
+
+#[test]
+fn session_failure_after_unpolled_expiry_still_rebinds() {
+    let t0 = Instant::now();
+    let mut e = engine(false, t0);
+    ra(&mut e, 5, 10, t0).unwrap();
+    ra(&mut e, 1, 60, t0).unwrap();
+    e.session_established(IF);
+    e.events.clear();
+    e.session_failed(IF, t0 + Duration::from_secs(11));
+    assert_eq!(bindings(&mut e), vec![(Some(ep(5)), Some(ep(1)))]);
+}
+
+#[test]
 fn candidate_expires_at_router_lifetime_and_refresh_extends_it() {
     let t0 = Instant::now();
     let mut e = engine(false, t0);
@@ -271,7 +319,7 @@ fn discovery_never_moves_an_established_binding() {
         "{events:?}"
     );
     // Only the explicit session-failed input releases it.
-    e.session_failed(IF);
+    e.session_failed(IF, t0 + Duration::from_secs(10));
     assert_eq!(bindings(&mut e), vec![(Some(ep(5)), Some(ep(1)))]);
 }
 
@@ -292,7 +340,7 @@ fn established_binding_with_no_replacement_unbinds_only_after_failure() {
             .any(|ev| matches!(ev, DiscoveryEvent::Conflict { .. }))
     );
     e.poll(t0 + Duration::from_secs(21));
-    e.session_failed(IF);
+    e.session_failed(IF, t0 + Duration::from_secs(21));
     assert_eq!(bindings(&mut e), vec![(Some(ep(5)), None)]);
 }
 
@@ -303,7 +351,7 @@ fn session_failure_keeps_a_live_binding() {
     ra(&mut e, 5, 30, t0).unwrap();
     ra(&mut e, 1, 30, t0).unwrap();
     e.session_established(IF);
-    e.session_failed(IF);
+    e.session_failed(IF, t0);
     assert_eq!(
         bindings(&mut e),
         vec![(None, Some(ep(5)))],
@@ -325,7 +373,7 @@ fn unknown_link_state_clears_nothing() {
     // Still bound on the original ifindex and still Established.
     e.poll(t0 + Duration::from_secs(30));
     assert_eq!(bindings(&mut e), vec![]);
-    e.session_failed(IF);
+    e.session_failed(IF, t0 + Duration::from_secs(30));
     assert_eq!(bindings(&mut e), vec![(Some(ep(1)), None)]);
 }
 
