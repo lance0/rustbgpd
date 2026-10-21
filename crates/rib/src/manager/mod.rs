@@ -4315,6 +4315,7 @@ impl RibManager {
                         chain: self
                             .export_policy_for(peer)
                             .map(PolicyChain::compiled_shared),
+                        peer_interface: self.session_peer_scope(peer).peer_interface(),
                     }
                 });
                 if reply.send(installed).is_err() {
