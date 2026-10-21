@@ -357,8 +357,9 @@ impl Engine {
         Ok(())
     }
 
-    /// A valid RS on `ifindex`: answer with an RA after a random delay of up
-    /// to 500 ms, no sooner than 3 s after the previous RA (RFC 4861 §6.2.6).
+    /// A valid RS on `ifindex`: answer with an RA at the earliest time 3 s
+    /// after the previous RA allows, plus a random delay of up to 500 ms
+    /// (RFC 4861 §6.2.6).
     pub(crate) fn on_router_solicitation(&mut self, ifindex: u32, generation: u64, now: Instant) {
         let delay = self.random_up_to(MAX_RA_DELAY_TIME);
         let Some((name, iface)) = self
@@ -372,11 +373,12 @@ impl Engine {
         let Some(next) = iface.next_ra else {
             return; // not advertising here
         };
-        let mut at = now + delay;
-        if let Some(last) = iface.last_ra {
-            at = at.max(last + MIN_DELAY_BETWEEN_RAS);
-        }
-        iface.next_ra = Some(next.min(at));
+        // §6.2.6: the earliest permitted time, then the random delay on top,
+        // so rate-limited replies are still jittered.
+        let earliest = iface
+            .last_ra
+            .map_or(now, |last| now.max(last + MIN_DELAY_BETWEEN_RAS));
+        iface.next_ra = Some(next.min(earliest + delay));
     }
 
     /// The neighbor's session reached Established: freeze the binding.

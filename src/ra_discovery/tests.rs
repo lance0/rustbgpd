@@ -603,6 +603,36 @@ fn router_solicitation_is_answered_within_half_a_second_but_rate_limited() {
 }
 
 #[test]
+fn rate_limited_router_solicitation_reply_is_still_jittered() {
+    let mut replies = Vec::new();
+    for seed in 1..=32 {
+        let t0 = Instant::now();
+        let mut e = Engine::new(
+            DiscoveryConfig {
+                send: true,
+                timing: RaTiming::new(MAX_RA_INTERVAL_SECS).unwrap(),
+            },
+            seed,
+        );
+        e.start(IF);
+        e.on_link(&link(LinkState::Up, IDX), t0);
+        e.transmits.clear(); // the link-up RS
+        assert_eq!(run_until(&mut e, t0).len(), 1, "the link-up RA at t0");
+        // An RS 1 s later is inside MIN_DELAY_BETWEEN_RAS.
+        let g = generation(&e);
+        e.on_router_solicitation(IDX, g, t0 + Duration::from_secs(1));
+        let reply = e.next_deadline().unwrap() - t0;
+        assert!(reply >= Duration::from_secs(3), "{reply:?}");
+        assert!(reply <= Duration::from_millis(3500), "{reply:?}");
+        replies.push(reply);
+    }
+    assert!(
+        replies.iter().any(|r| *r != Duration::from_secs(3)),
+        "every reply landed exactly on last + 3 s: {replies:?}"
+    );
+}
+
+#[test]
 fn stop_sends_a_final_lifetime_zero_ra() {
     let t0 = Instant::now();
     let mut e = engine(true, t0);
