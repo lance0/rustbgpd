@@ -1441,43 +1441,53 @@ fn policy_label_with_term(
     action: PolicyAction,
     matched_policy: Option<&str>,
 ) -> String {
-    policy_deny_attribution(chain, ctx, action, matched_policy).0
+    let term_suffix = if action == PolicyAction::Deny {
+        matched_policy.and_then(|matched_policy| {
+            rustbgpd_policy::explain_chain_statements(chain, ctx)
+                .steps
+                .last()
+                .filter(|step| step.policy_name.as_deref() == Some(matched_policy))
+                .and_then(|step| step.term_name.as_deref())
+                .map(|term| format!(":{term}"))
+        })
+    } else {
+        None
+    }
+    .unwrap_or_default();
+    format!("{}{term_suffix}", matched_policy.unwrap_or("inline"))
 }
 
-/// [`policy_label_with_term`] plus the validation codes of a Deny: one
-/// `rpki_<state>` / `aspa_<state>` entry, carrying the route's state in
-/// `ctx`, for each validation state the deciding statement's match tests
-/// (see `StatementAttribution::tests_rpki`). Empty for a Permit.
-fn policy_deny_attribution(
-    chain: Option<&PolicyChain>,
+/// Export-policy evaluation for an explain, plus the deny-validation codes
+/// of its deciding term from the same walk: one `rpki_<state>` /
+/// `aspa_<state>` code, with the route's state in `ctx`, for each
+/// validation state the term's guard tests
+/// (`CompiledChain::evaluate_with_deny_validation`).
+fn explain_export_evaluation(
+    export_pol: Option<&PolicyChain>,
     ctx: &RouteContext<'_>,
-    action: PolicyAction,
-    matched_policy: Option<&str>,
-) -> (String, Vec<String>) {
-    let label = matched_policy.unwrap_or("inline");
-    if action != PolicyAction::Deny {
-        return (label.to_string(), Vec::new());
-    }
-    let trace = rustbgpd_policy::explain_chain_statements(chain, ctx);
-    let Some(step) = trace
-        .steps
-        .last()
-        .filter(|step| step.policy_name.as_deref() == matched_policy)
-    else {
-        return (label.to_string(), Vec::new());
+) -> (rustbgpd_policy::PolicyResult, PolicyEvaluation, Vec<String>) {
+    let Some(chain) = export_pol else {
+        return (
+            rustbgpd_policy::PolicyResult::permit(),
+            PolicyEvaluation {
+                action: PolicyAction::Permit,
+                matched_policy: None,
+                eval_error: None,
+            },
+            Vec::new(),
+        );
     };
-    let mut validation = Vec::new();
-    if step.tests_rpki {
-        validation.push(format!("rpki_{}", ctx.validation_state));
-    }
-    if step.tests_aspa {
-        validation.push(format!("aspa_{}", ctx.aspa_state));
-    }
-    let label = match (matched_policy, step.term_name.as_deref()) {
-        (Some(policy), Some(term)) => format!("{policy}:{term}"),
-        _ => label.to_string(),
-    };
-    (label, validation)
+    let (result, evaluation, tested) = chain.compiled().evaluate_with_deny_validation(ctx);
+    let codes = tested
+        .into_iter()
+        .map(|dimension| match dimension {
+            rustbgpd_policy::ir::ValidationDimension::Rpki => {
+                format!("rpki_{}", ctx.validation_state)
+            }
+            rustbgpd_policy::ir::ValidationDimension::Aspa => format!("aspa_{}", ctx.aspa_state),
+        })
+        .collect();
+    (result, evaluation, codes)
 }
 
 /// The consumer identity for the shared single-best export tail
@@ -1542,7 +1552,8 @@ pub(in crate::manager) struct ExportGateTrace {
     /// chain, or `"<policy>"` / `"<policy>:<term>"` for Deny. `None` means
     /// the chain is absent or genuinely empty.
     pub policy_label: Option<String>,
-    /// Validation codes of an export-policy deny (`policy_deny_attribution`).
+    /// Deny-validation codes of the export-policy evaluation
+    /// (`explain_export_evaluation`).
     pub deny_validation: Vec<String>,
     /// Post-modification next hop the route would be staged with.
     pub staged_next_hop: Option<IpAddr>,
@@ -1635,7 +1646,12 @@ impl ExportGateTrace {
             modifications: self.modifications,
             orr_vantage: None,
             orr_candidates: Vec::new(),
-            deny_validation: self.deny_validation,
+            // Only a policy_denied stop keeps the codes of its deciding term.
+            deny_validation: if self.gates.iter().any(|step| step.code == "policy_denied") {
+                self.deny_validation
+            } else {
+                Vec::new()
+            },
             gates: self.gates,
             update_group_id,
             already_advertised: self.suppressed_identical,
@@ -1712,7 +1728,7 @@ impl<'a> ExportTarget<'a> {
     /// a one-shot operator query cannot skew `rbgp policy stats` — the
     /// two are pinned to agree by the policy crate's parity tests.
     fn evaluate_export_chain(
-        &self,
+        &mut self,
         export_pol: Option<&PolicyChain>,
         ctx: &RouteContext<'_>,
     ) -> (rustbgpd_policy::PolicyResult, PolicyEvaluation) {
@@ -1720,17 +1736,11 @@ impl<'a> ExportTarget<'a> {
             Self::Peer { .. } | Self::Group { .. } => {
                 evaluate_chain_with_attribution(export_pol, ctx)
             }
-            Self::Explain { .. } => match export_pol {
-                Some(chain) => chain.compiled().evaluate_with_attribution(ctx),
-                None => (
-                    rustbgpd_policy::PolicyResult::permit(),
-                    PolicyEvaluation {
-                        action: PolicyAction::Permit,
-                        matched_policy: None,
-                        eval_error: None,
-                    },
-                ),
-            },
+            Self::Explain { trace, .. } => {
+                let (result, evaluation, codes) = explain_export_evaluation(export_pol, ctx);
+                trace.deny_validation = codes;
+                (result, evaluation)
+            }
         }
     }
 

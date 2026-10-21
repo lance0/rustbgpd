@@ -96,18 +96,6 @@ pub struct StatementAttribution {
     /// members. Guards render in `.rpol` surface syntax (sets by their
     /// source name); human-oriented, not a machine-parsable grammar.
     pub term_traces: Vec<String>,
-    /// The deciding statement's match tests RPKI origin-validation state:
-    /// a TOML statement with `match_rpki_validation`, or an `.rpol` term
-    /// whose own `accept`/`reject` decided and whose guard compares
-    /// `route.rpki` anywhere. Statement conditions AND together, so other
-    /// conditions may also have matched; inside an `.rpol` `||` or `!`
-    /// the RPKI comparison need not be the operand that held. `false` on a
-    /// default-action fallthrough, and for a term decided by a loop, a
-    /// fail-closed error or a fail-closed bound.
-    pub tests_rpki: bool,
-    /// The same as [`Self::tests_rpki`] for ASPA path-validation state
-    /// (`match_aspa_validation` / `route.aspa`).
-    pub tests_aspa: bool,
 }
 
 /// A full statement-level trace of one chain evaluation.
@@ -205,10 +193,6 @@ pub fn explain_chain_statements(
             modifications,
             term_name: None,
             term_traces: Vec::new(),
-            tests_rpki: matched
-                .is_some_and(|index| named.policy.entries[index].match_rpki_validation.is_some()),
-            tests_aspa: matched
-                .is_some_and(|index| named.policy.entries[index].match_aspa_validation.is_some()),
         });
         if action == PolicyAction::Deny {
             // Chain semantics: a Deny terminates evaluation. Later
@@ -483,9 +467,6 @@ fn trace_rpol_policy(
     // rail), and the trace must agree (pinned by the agreement matrix
     // in `statement_trace.rs`).
     let mut eval_failed = false;
-    // Set when the deciding term's own `accept` / `reject` decided, the
-    // only case in which its guard is the deciding match.
-    let mut own_verdict = false;
     // LAN-305: pin dataset generations once for the whole trace walk,
     // exactly like the live evaluator — the trace's probes and its
     // generation annotations come from the same snapshots.
@@ -675,12 +656,10 @@ fn trace_rpol_policy(
                 merged.merge_applicable(mods.clone(), ctx);
                 deciding_permit = Some(merged);
                 decided = Some((index, term));
-                own_verdict = true;
                 break;
             }
             TermActionView::Deny => {
                 decided = Some((index, term));
-                own_verdict = true;
                 break;
             }
             TermActionView::Continue(mods) => {
@@ -736,14 +715,6 @@ fn trace_rpol_policy(
             modifications,
             term_name: term.name.clone(),
             term_traces,
-            tests_rpki: own_verdict
-                && term
-                    .guard
-                    .any_node(&|expr| matches!(expr, MatchExpr::RpkiIs(_))),
-            tests_aspa: own_verdict
-                && term
-                    .guard
-                    .any_node(&|expr| matches!(expr, MatchExpr::AspaIs(_))),
         }
     } else {
         // Fallthrough to the policy default; a permitting default
@@ -766,8 +737,6 @@ fn trace_rpol_policy(
             modifications,
             term_name: None,
             term_traces,
-            tests_rpki: false,
-            tests_aspa: false,
         }
     }
 }
