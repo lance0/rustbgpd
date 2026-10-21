@@ -197,24 +197,31 @@ case "$(cat "$root/activation-mode")" in
   no-effect-*|partial|down|repoint-*)
     # The last comparison before the command is the known-good prior runtime.
     cp "$root/last-diff" "$root/runtime-toml"
-    count() {{ sed "s/outcome=\"$1\"}} 0/outcome=\"$1\"}} 1/" "$root/metrics" > "$root/metrics.new" && mv "$root/metrics.new" "$root/metrics"; }}
+    # Stage the whole ledger change and install it with one rename, as the
+    # daemon records a reload's outcome at once. The tool kills this command
+    # at the settle deadline, which a stalled host can reach between two
+    # separately installed edits and leave a ledger no daemon publishes.
+    cp "$root/metrics" "$root/metrics.next"
+    edit() {{ sed "$1" "$root/metrics.next" > "$root/metrics.new" && mv "$root/metrics.new" "$root/metrics.next"; }}
+    count() {{ edit "s/outcome=\"$1\"}} 0/outcome=\"$1\"}} 1/"; }}
     case "$(cat "$root/activation-mode")" in
       no-effect-rejected|repoint-*) count rejected_no_effect ;;
       no-effect-ignored) count rejected_no_effect; count ignored_in_flight ;;
       no-effect-restarted)
         count rejected_no_effect
-        sed 's/^process_start_time_seconds .*/process_start_time_seconds 1700000100/' "$root/metrics" > "$root/metrics.new" && mv "$root/metrics.new" "$root/metrics" ;;
+        edit 's/^process_start_time_seconds .*/process_start_time_seconds 1700000100/' ;;
       no-effect-settling)
         count rejected_no_effect
-        printf '%s\n' '{SETTLING}' >> "$root/metrics" ;;
-      no-effect-no-metrics) rm "$root/metrics" ;;
+        printf '%s\n' '{SETTLING}' >> "$root/metrics.next" ;;
+      no-effect-no-metrics) rm "$root/metrics.next" "$root/metrics" ;;
       partial) count known_partial; printf 'partial\n' > "$root/runtime-toml" ;;
-      down) rm "$root/metrics" "$root/runtime" ;;
+      down) rm "$root/metrics.next" "$root/metrics" "$root/runtime" ;;
     esac
     case "$(cat "$root/activation-mode")" in
-      repoint-settling) cp "$root/metrics" "$root/metrics-then"; printf '%s\n' '{SETTLING}' >> "$root/metrics-then" ;;
+      repoint-settling) cp "$root/metrics.next" "$root/metrics-then"; printf '%s\n' '{SETTLING}' >> "$root/metrics-then" ;;
       repoint-down) rm "$root/runtime" ;;
-    esac ;;
+    esac
+    [ ! -f "$root/metrics.next" ] || mv "$root/metrics.next" "$root/metrics" ;;
 esac
 printf '{SECRET}\n' >&2
 [ ! -f "$root/activation-fails" ] || exit 9
