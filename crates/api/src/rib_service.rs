@@ -2811,6 +2811,11 @@ impl proto::rib_service_server::RibService for RibService {
         }
         let mut response = explain_to_proto(explain);
         response.peer_interface = crate::peer_selector::interface_of(Some(&target));
+        // The source echo is the validated selector, also when the ladder
+        // stopped before selecting a route (e.g. at an ORF gate).
+        if let (Some(source), Some(key)) = (response.source.as_mut(), source_key.as_ref()) {
+            source.peer_interface = crate::peer_selector::interface_of(Some(key));
+        }
         Ok(Response::new(response))
     }
 
@@ -9238,15 +9243,17 @@ mod tests {
                 else {
                     continue;
                 };
+                // Path ID 9 stops before selection, as an ORF gate does.
+                let selected = source.filter(|source| source.path_id != 9);
                 let _ = reply.send(Ok(ExplainAdvertisedRoute {
                     decision: ExplainDecision::Advertise,
                     peer,
                     prefix,
                     next_hop: None,
                     path_id: 1,
-                    route_peer: source.map(|source| source.peer),
-                    route_path_id: source.map(|source| source.path_id),
-                    route_peer_interface: Some("eth0".into()),
+                    route_peer: selected.map(|source| source.peer),
+                    route_path_id: selected.map(|source| source.path_id),
+                    route_peer_interface: selected.map(|_| "eth0".into()),
                     route_type: None,
                     reasons: Vec::new(),
                     modifications: rustbgpd_policy::RouteModifications::default(),
@@ -9262,19 +9269,20 @@ mod tests {
             }
         });
         let svc = RibService::new(tx);
-        let request = |source: &str| {
+        let request_path = |source: &str, path_id: u32| {
             Request::new(proto::ExplainAdvertisedRouteRequest {
                 peer_address: "192.0.2.1".to_string(),
                 prefix: "203.0.113.0".to_string(),
                 prefix_length: 24,
                 source: Some(proto::RouteSourceIdentity {
                     peer_address: source.to_string(),
-                    path_id: 7,
+                    path_id,
                     peer_interface: String::new(),
                 }),
                 ..Default::default()
             })
         };
+        let request = |source: &str| request_path(source, 7);
 
         let response = svc
             .explain_advertised_route(request("fe80::1%eth0"))
@@ -9298,6 +9306,15 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+
+        // A ladder that stops before selection still echoes the source scope.
+        let stopped = svc
+            .explain_advertised_route(request_path("fe80::1%eth0", 9))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(stopped.route_peer_interface, "");
+        assert_eq!(stopped.source.unwrap().peer_interface, "eth0");
     }
 
     #[tokio::test]
