@@ -242,7 +242,7 @@ async fn refresh_brackets_updates_on_tcp_and_only_non_err_sends_eor() {
 async fn gr_orf_first_refresh_sends_initial_eor_before_any_borr_on_tcp() {
     let (mut session, mut server, _session_rib_rx, _bmp_rx) = refresh_session(true, false).await;
     let family = (Afi::Ipv4, Safi::Unicast);
-    let peer = session.peer_ip;
+    let peer = PeerId::from_addr(session.peer_ip);
     let (tx, rx) = mpsc::channel(64);
     let (_query_tx, query_rx) = mpsc::channel(8);
     let manager = tokio::spawn(

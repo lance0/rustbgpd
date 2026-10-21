@@ -10,6 +10,7 @@
 //! post-setup resident bytes so persistent indices carry explicit write-side
 //! and memory gates.
 
+use rustbgpd_rib::PeerId;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr};
@@ -199,7 +200,7 @@ fn make_routes(count: usize) -> Vec<Route> {
             let peer = if index % GROUP_SPLIT_HORIZON_STRIDE == 0 {
                 grouped_member
             } else {
-                IpAddr::V4(external_peer)
+                PeerId::from_addr(IpAddr::V4(external_peer))
             };
             let own_grouped_route = peer == grouped_member;
             Route {

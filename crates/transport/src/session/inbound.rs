@@ -1545,7 +1545,7 @@ impl PeerSession {
             if self
                 .deliver_wire_routes_to_rib(
                     RibUpdate::RoutesReceived {
-                        peer: self.peer_ip,
+                        peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                         announced: vec![],
                         withdrawn: loop_withdrawn,
@@ -1571,7 +1571,7 @@ impl PeerSession {
             let refresh_delta = self.capture_bgpls_refresh_delta(&[], &loop_bgpls_withdrawn);
             if self
                 .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     announced: vec![],
                     withdrawn: loop_bgpls_withdrawn,
@@ -1589,7 +1589,7 @@ impl PeerSession {
             let refresh_delta = self.capture_vpn_refresh_delta(&[], &loop_l3vpn_withdrawn);
             if self
                 .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     announced: vec![],
                     withdrawn: loop_l3vpn_withdrawn,
@@ -1607,7 +1607,7 @@ impl PeerSession {
             let refresh_delta = self.capture_labeled_refresh_delta(&[], &loop_labeled_withdrawn);
             if self
                 .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     announced: vec![],
                     withdrawn: loop_labeled_withdrawn,
@@ -1625,7 +1625,7 @@ impl PeerSession {
             let refresh_delta = self.capture_rtc_refresh_delta(&[], &loop_rtc_withdrawn);
             if self
                 .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     announced: vec![],
                     withdrawn: loop_rtc_withdrawn,
@@ -2093,7 +2093,7 @@ impl PeerSession {
                 let _ = self
                     .rib_tx
                     .send(RibUpdate::EndOfRib {
-                        peer: self.peer_ip,
+                        peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                         afi: Afi::Ipv4,
                         safi: Safi::Unicast,
@@ -2145,7 +2145,7 @@ impl PeerSession {
                 let _ = self
                     .rib_tx
                     .send(RibUpdate::EndOfRib {
-                        peer: self.peer_ip,
+                        peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                         afi: mp.afi,
                         safi: mp.safi,
@@ -2637,7 +2637,7 @@ impl PeerSession {
                         next_hop,
                         link_local_next_hop: None,
                         next_hop_scope: self.link_local_next_hop_scope(next_hop, None),
-                        peer: self.peer_ip,
+                        peer: self.rib_peer(),
                         received_as_path: import_attr_memo.received_path_override(
                             parsed_as_path,
                             &attrs,
@@ -2779,7 +2779,7 @@ impl PeerSession {
                                 flowspec_announced.push(FlowSpecRoute {
                                     rule: rule.clone(),
                                     afi: mp.afi,
-                                    peer: self.peer_ip,
+                                    peer: self.rib_peer(),
                                     attributes: attrs,
                                     received_at: now,
                                     origin_type: route_origin,
@@ -2853,7 +2853,7 @@ impl PeerSession {
                                     route: route.clone(),
                                     next_hop: mp.next_hop,
                                     link_local_next_hop: mp.link_local_next_hop,
-                                    peer: self.peer_ip,
+                                    peer: self.rib_peer(),
                                     attributes: attrs,
                                     received_at: now,
                                     origin_type: route_origin,
@@ -2917,7 +2917,7 @@ impl PeerSession {
                                     family: bgpls_family,
                                     nlri: nlri.clone(),
                                     next_hop: mp.next_hop,
-                                    peer: self.peer_ip,
+                                    peer: self.rib_peer(),
                                     attributes: attrs,
                                     received_at: now,
                                     origin_type: route_origin,
@@ -2992,7 +2992,7 @@ impl PeerSession {
                                         mp.next_hop,
                                         mp.link_local_next_hop,
                                     ),
-                                    peer: self.peer_ip,
+                                    peer: self.rib_peer(),
                                     attributes: attrs,
                                     received_at: now,
                                     origin_type: route_origin,
@@ -3067,7 +3067,7 @@ impl PeerSession {
                                         mp.next_hop,
                                         mp.link_local_next_hop,
                                     ),
-                                    peer: self.peer_ip,
+                                    peer: self.rib_peer(),
                                     attributes: attrs,
                                     received_at: now,
                                     origin_type: route_origin,
@@ -3133,7 +3133,7 @@ impl PeerSession {
                                 rtc_announced.push(RtcRibRoute {
                                     nlri: *nlri,
                                     next_hop: mp.next_hop,
-                                    peer: self.peer_ip,
+                                    peer: self.rib_peer(),
                                     attributes: attrs,
                                     received_at: now,
                                     origin_type: route_origin,
@@ -3263,7 +3263,7 @@ impl PeerSession {
                                 link_local_next_hop,
                                 next_hop_scope: self
                                     .link_local_next_hop_scope(next_hop, link_local_next_hop),
-                                peer: self.peer_ip,
+                                peer: self.rib_peer(),
                                 received_as_path: import_attr_memo.received_path_override(
                                     parsed_as_path,
                                     &attrs,
@@ -3708,7 +3708,7 @@ impl PeerSession {
             if self
                 .deliver_wire_routes_to_rib(
                     RibUpdate::RoutesReceived {
-                        peer: self.peer_ip,
+                        peer: self.rib_peer(),
                         session_id: self.session_identity.id,
                         announced,
                         withdrawn,
@@ -3735,7 +3735,7 @@ impl PeerSession {
                 self.capture_bgpls_refresh_delta(&bgpls_announced, &bgpls_withdrawn);
             if self
                 .deliver_routes_to_rib(RibUpdate::BgpLsRoutesReceived {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     announced: bgpls_announced,
                     withdrawn: bgpls_withdrawn,
@@ -3753,7 +3753,7 @@ impl PeerSession {
             let refresh_delta = self.capture_vpn_refresh_delta(&vpn_announced, &vpn_withdrawn);
             if self
                 .deliver_routes_to_rib(RibUpdate::VpnRoutesReceived {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     announced: vpn_announced,
                     withdrawn: vpn_withdrawn,
@@ -3772,7 +3772,7 @@ impl PeerSession {
                 self.capture_labeled_refresh_delta(&labeled_announced, &labeled_withdrawn);
             if self
                 .deliver_routes_to_rib(RibUpdate::LabeledRoutesReceived {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     announced: labeled_announced,
                     withdrawn: labeled_withdrawn,
@@ -3790,7 +3790,7 @@ impl PeerSession {
             let refresh_delta = self.capture_rtc_refresh_delta(&rtc_announced, &rtc_withdrawn);
             if self
                 .deliver_routes_to_rib(RibUpdate::RtcRoutesReceived {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     announced: rtc_announced,
                     withdrawn: rtc_withdrawn,

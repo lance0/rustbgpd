@@ -45,8 +45,8 @@
 //! - RFC 8365 §5.1.3 — VXLAN encap convention (label field = raw
 //!   24-bit VNI; the §5 MPLS-style high-20-bits shift does not apply)
 
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::IpAddr;
 use std::time::Instant;
 
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId};
@@ -364,7 +364,7 @@ fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
         route: EvpnRoute::Imet(imet),
         next_hop: instance.local_vtep_ip,
         link_local_next_hop: None,
-        peer: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        peer: PeerId::LOCAL,
         attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::route::RouteOrigin::Local,
@@ -377,6 +377,7 @@ fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
     use std::sync::Arc;
 
     use rustbgpd_rib::{RibCommandError, route::RouteOrigin};

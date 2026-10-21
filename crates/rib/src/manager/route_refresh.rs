@@ -1,5 +1,5 @@
+use crate::PeerId;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
 use std::time::Instant;
 
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi};
@@ -38,8 +38,8 @@ pub(super) enum FamilyReplayOutcome {
 /// `clean_policy_transition_peer_ready` check the key, so for these maps a
 /// present key must mean a non-empty set.
 fn remove_family_drop_empty(
-    map: &mut HashMap<IpAddr, HashSet<(Afi, Safi)>>,
-    peer: IpAddr,
+    map: &mut HashMap<PeerId, HashSet<(Afi, Safi)>>,
+    peer: PeerId,
     family: (Afi, Safi),
 ) {
     if let Some(families) = map.get_mut(&peer) {
@@ -51,7 +51,7 @@ fn remove_family_drop_empty(
 }
 
 impl RibManager {
-    pub(super) fn update_peer_refresh_metrics(&self, peer: IpAddr) {
+    pub(super) fn update_peer_refresh_metrics(&self, peer: PeerId) {
         if let Some(families) = self.refresh_in_progress.get(&peer) {
             for &(afi, safi) in families {
                 self.update_refresh_metrics(peer, afi, safi);
@@ -59,7 +59,7 @@ impl RibManager {
         }
     }
 
-    pub(super) fn clear_peer_refresh_metrics(&self, peer: IpAddr) {
+    pub(super) fn clear_peer_refresh_metrics(&self, peer: PeerId) {
         if let Some(families) = self.refresh_in_progress.get(&peer) {
             let peer_label = peer.to_string();
             for &(afi, safi) in families {
@@ -72,7 +72,7 @@ impl RibManager {
         }
     }
 
-    fn update_refresh_metrics(&self, peer: IpAddr, afi: Afi, safi: Safi) {
+    fn update_refresh_metrics(&self, peer: PeerId, afi: Afi, safi: Safi) {
         let active = self
             .refresh_in_progress
             .get(&peer)
@@ -98,7 +98,7 @@ impl RibManager {
 
     pub(super) fn set_refresh_stale_count(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         afi: Afi,
         safi: Safi,
         count: usize,
@@ -112,7 +112,7 @@ impl RibManager {
 
     pub(super) fn decrement_refresh_stale_count(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         afi: Afi,
         safi: Safi,
         count: usize,
@@ -148,7 +148,7 @@ impl RibManager {
         }
     }
 
-    pub(super) fn handle_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+    pub(super) fn handle_end_of_rib(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "received End-of-RIB");
         self.remove_unrefreshed_stale_family(peer, afi, safi);
     }
@@ -161,7 +161,7 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "End-of-RIB handler covers GR and LLGR branches across the per-family stale lifecycles (unicast, FlowSpec, EVPN, VPN, BGP-LS, RTC)"
     )]
-    pub(super) fn remove_unrefreshed_stale_family(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+    pub(super) fn remove_unrefreshed_stale_family(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         let is_gr_peer = self.gr_peers.contains_key(&peer);
         let is_llgr_peer = self.llgr_peers.contains_key(&peer);
         if !is_gr_peer && !is_llgr_peer {
@@ -550,11 +550,11 @@ impl RibManager {
     /// check the key rather than the set (`clean_policy_transition_peer_ready`),
     /// so an empty entry would keep reporting the peer as gated for the
     /// rest of the session.
-    pub(super) fn lift_orf_gate(&mut self, peer: IpAddr, family: (Afi, Safi)) {
+    pub(super) fn lift_orf_gate(&mut self, peer: PeerId, family: (Afi, Safi)) {
         remove_family_drop_empty(&mut self.peer_orf_pending, peer, family);
     }
 
-    pub(super) fn handle_route_refresh_request(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+    pub(super) fn handle_route_refresh_request(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "handling route refresh request");
         // The leader's dispatch has already released its queued flag and
         // checked its session. One readiness owner covers admission, the
@@ -586,9 +586,9 @@ impl RibManager {
     /// replay, even if the leader's released flag lets them enqueue now.
     fn take_refresh_cohort(
         &mut self,
-        leader: IpAddr,
+        leader: PeerId,
         family: (Afi, Safi),
-    ) -> Option<(usize, Vec<IpAddr>)> {
+    ) -> Option<(usize, Vec<PeerId>)> {
         let queued = self.primary_backlog().min(MAX_JOIN_COHORT - 1);
         if queued == 0
             || !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
@@ -673,7 +673,7 @@ impl RibManager {
         (peers.len() > 1).then_some((gid, peers))
     }
 
-    pub(super) fn handle_begin_route_refresh(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+    pub(super) fn handle_begin_route_refresh(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "beginning enhanced route refresh");
         self.refresh_in_progress
             .entry(peer)
@@ -787,14 +787,14 @@ impl RibManager {
             .observe_rib_route_refresh_begin_actor_duration(started_at.elapsed());
     }
 
-    pub(super) fn handle_end_route_refresh(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+    pub(super) fn handle_end_route_refresh(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         self.finish_route_refresh(peer, afi, safi, false);
     }
 
     /// Schedule a complete explicit unicast replay without changing protocol gates.
     pub(super) fn handle_replay_peer_outbound(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         families: Vec<(Afi, Safi)>,
         replay: &std::sync::Arc<rustbgpd_bmp::BmpReplay>,
@@ -854,7 +854,7 @@ impl RibManager {
 
     /// Re-advertise the Loc-RIB for a given family to a peer, followed by `EoR`.
     /// Called when a peer sends ROUTE-REFRESH (RFC 2918).
-    pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+    pub(super) fn send_route_refresh_response(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         let _ = self.send_route_refresh_response_inner(
             peer,
             afi,
@@ -879,7 +879,7 @@ impl RibManager {
     /// queued; a nested call keeps the enclosing owner's context and age.
     pub(super) fn send_route_refresh_response_inner(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         afi: Afi,
         safi: Safi,
         replay_kind: FamilyReplayKind,
@@ -903,7 +903,7 @@ impl RibManager {
     )]
     fn send_route_refresh_response_with_readiness(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         afi: Afi,
         safi: Safi,
         replay_kind: FamilyReplayKind,
@@ -2051,7 +2051,7 @@ impl RibManager {
     ///
     /// Called after a successful dirty-peer resync. If the send fails again,
     /// the peer is re-marked dirty for another attempt.
-    pub(super) fn flush_pending_eor(&mut self, peer: IpAddr) {
+    pub(super) fn flush_pending_eor(&mut self, peer: PeerId) {
         let Some(families) = self.pending_eor.remove(&peer) else {
             return;
         };
@@ -2091,7 +2091,7 @@ impl RibManager {
     }
 
     /// Retry any deferred enhanced route refresh responses for a peer.
-    pub(super) fn retry_pending_refresh(&mut self, peer: IpAddr) {
+    pub(super) fn retry_pending_refresh(&mut self, peer: PeerId) {
         self.replacement_checkpoint(true);
         let Some(families) = self.pending_refresh.remove(&peer) else {
             return;
@@ -2113,7 +2113,7 @@ impl RibManager {
     )]
     pub(super) fn finish_route_refresh(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         afi: Afi,
         safi: Safi,
         timed_out: bool,

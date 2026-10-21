@@ -1,5 +1,6 @@
 //! Manager-owned source-capacity disable and explicit recovery.
 
+use rustbgpd_rib::PeerId;
 use std::sync::Arc;
 
 use rustbgpd_api::peer_types::{
@@ -63,7 +64,10 @@ impl PeerManager {
         let (reply, response) = oneshot::channel();
         let commands = retired_sessions
             .iter()
-            .map(|&session_id| RibUpdate::PeerDown { peer, session_id })
+            .map(|&session_id| RibUpdate::PeerDown {
+                peer: PeerId::from_addr(peer),
+                session_id,
+            })
             .chain([RibUpdate::QueryLocRibCount { reply }])
             .collect();
         self.rib_control(commands, response, "RIB source-retirement barrier")
@@ -81,7 +85,7 @@ impl PeerManager {
         let Some(original) = &context.dampening_admission else {
             return Outcome::Applied;
         };
-        let peer = PeerKey::new(notice.source.peer, context.peer_interface.clone());
+        let peer = PeerKey::new(notice.source.peer.addr(), context.peer_interface.clone());
         let Some(managed) = self.peers.get(&peer) else {
             return Outcome::Applied;
         };
@@ -114,7 +118,7 @@ impl PeerManager {
             if self
                 .send_rib_update(
                     RibUpdate::PeerDown {
-                        peer: peer.address,
+                        peer: PeerId::from_addr(peer.address),
                         session_id,
                     },
                     OperatorReadAdmission::Fenced {
@@ -179,7 +183,7 @@ impl PeerManager {
             ));
         }
         let source = ReceivedRouteSource {
-            peer: peer.address,
+            peer: PeerId::from_addr(peer.address),
             session_id: managed.session_id(),
             peer_asn: Some(asn),
             context: Some(Arc::new(PeerSourceContext {

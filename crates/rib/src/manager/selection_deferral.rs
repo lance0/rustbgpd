@@ -5,10 +5,10 @@
 //! GR-capable for the family and does not carry Restart State, or proves that
 //! it must be excluded.  `EoR` completion is bound to that classified session.
 
+use crate::PeerId;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::mem::size_of;
-use std::net::IpAddr;
 use std::time::Duration;
 
 use rustbgpd_telemetry::BgpMetrics;
@@ -238,7 +238,7 @@ use super::helpers::{afi_safi_label, gauge_val};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectionDeferralWaiterConfig {
     /// Static peer address.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Configured families for which this peer may become an `EoR` waiter.
     pub families: Vec<(Afi, Safi)>,
 }
@@ -318,14 +318,14 @@ impl WaiterState {
 
 #[derive(Debug)]
 struct FamilyGate {
-    waiters: HashMap<IpAddr, WaiterState>,
+    waiters: HashMap<PeerId, WaiterState>,
     selection_staged: bool,
 }
 
 #[derive(Debug)]
 struct ReleasedFamily {
     reason: SelectionDeferralReleaseReason,
-    waiters: HashMap<IpAddr, WaiterState>,
+    waiters: HashMap<PeerId, WaiterState>,
 }
 
 /// Actor-owned selection-deferral state. Released families are retained in
@@ -340,7 +340,7 @@ pub(super) struct SelectionDeferral {
     /// Address-only RIB identity cannot disambiguate scoped duplicate peers.
     /// Keep such peers blocked until the timer rather than let one `EoR` satisfy
     /// both configured sessions.
-    ambiguous_peers: HashSet<IpAddr>,
+    ambiguous_peers: HashSet<PeerId>,
 }
 
 impl SelectionDeferral {
@@ -471,12 +471,12 @@ impl SelectionDeferral {
 
     pub(super) fn peer_snapshot(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Vec<crate::update::SelectionDeferralPeerFamilyState> {
         self.peer_snapshot_for(Some(peer))
     }
 
-    pub(super) fn snapshot_peers(&self) -> impl Iterator<Item = IpAddr> + '_ {
+    pub(super) fn snapshot_peers(&self) -> impl Iterator<Item = PeerId> + '_ {
         self.active
             .values()
             .flat_map(|gate| gate.waiters.keys().copied())
@@ -495,7 +495,7 @@ impl SelectionDeferral {
 
     fn peer_snapshot_for(
         &self,
-        peer: Option<IpAddr>,
+        peer: Option<PeerId>,
     ) -> Vec<crate::update::SelectionDeferralPeerFamilyState> {
         let now = tokio::time::Instant::now();
         let remaining_millis =
@@ -542,7 +542,7 @@ impl SelectionDeferral {
     /// remove it when OPEN proves that RFC 4724 says not to wait for it.
     pub(super) fn classify_session(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         peer_restart_state: bool,
         peer_gr_families: &HashSet<(Afi, Safi)>,
@@ -604,7 +604,7 @@ impl SelectionDeferral {
     /// `None` leaves every waiter unchanged.
     pub(super) fn await_collision_failback_refresh(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         peer_restart_state: bool,
         peer_gr_families: &HashSet<(Afi, Safi)>,
@@ -665,7 +665,7 @@ impl SelectionDeferral {
 
     /// Revert a current-session waiter to the not-yet-established state.  A
     /// flap cannot shrink the frozen cohort and accidentally release a family.
-    pub(super) fn session_down(&mut self, peer: IpAddr, session_id: u64, metrics: &BgpMetrics) {
+    pub(super) fn session_down(&mut self, peer: PeerId, session_id: u64, metrics: &BgpMetrics) {
         for (&family, gate) in &mut self.active {
             if matches!(
                 gate.waiters.get(&peer),
@@ -697,7 +697,7 @@ impl SelectionDeferral {
     /// cannot tell which of the duplicate configured peers was deleted.
     pub(super) fn peer_deleted(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         metrics: &BgpMetrics,
     ) -> Vec<SelectionDeferralTransition> {
         if self.ambiguous_peers.contains(&peer) {
@@ -731,7 +731,7 @@ impl SelectionDeferral {
 
     pub(super) fn end_of_rib(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         family: (Afi, Safi),
         metrics: &BgpMetrics,
@@ -754,7 +754,7 @@ impl SelectionDeferral {
 
     pub(super) fn begin_route_refresh(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         family: (Afi, Safi),
     ) -> Option<SelectionDeferralTransition> {
@@ -779,7 +779,7 @@ impl SelectionDeferral {
 
     pub(super) fn end_route_refresh(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         family: (Afi, Safi),
         metrics: &BgpMetrics,
@@ -1142,7 +1142,7 @@ impl RibManager {
     /// family against the complete Adj-RIB-In cohort.
     pub(super) fn selection_deferral_end_of_rib(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         family: (Afi, Safi),
     ) -> Option<SelectionDeferralTransition> {
@@ -1153,7 +1153,7 @@ impl RibManager {
 
     pub(super) fn selection_deferral_begin_route_refresh(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         family: (Afi, Safi),
     ) -> Option<SelectionDeferralTransition> {
@@ -1164,7 +1164,7 @@ impl RibManager {
 
     pub(super) fn selection_deferral_end_route_refresh(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         session_id: u64,
         family: (Afi, Safi),
     ) -> Option<SelectionDeferralTransition> {

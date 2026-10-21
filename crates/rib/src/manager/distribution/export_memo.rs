@@ -141,6 +141,7 @@ impl ExportMemo {
 
 #[cfg(test)]
 mod tests {
+    use crate::PeerId;
     use std::net::{IpAddr, Ipv4Addr};
 
     use rustbgpd_wire::{
@@ -170,7 +171,7 @@ mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
             attributes,
             received_at: crate::route::ReceivedAt::now(),
             origin_type: RouteOrigin::Ebgp,

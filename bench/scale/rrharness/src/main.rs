@@ -15,6 +15,7 @@
 //!   rrharness churn <n_clients> <n_cand> <n_prefixes> <secs> <out_prefix>
 //!   rrharness late-join <n_clients> <n_prefixes>
 
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
@@ -60,7 +61,7 @@ fn route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32) -> Route {
         next_hop: IpAddr::V4(src),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(src),
+        peer: PeerId::from_addr(IpAddr::V4(src)),
         attributes: AttrSet::new(attributes),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ibgp,
@@ -229,7 +230,7 @@ fn thread_cpu_secs(tid: i32, ticks_per_second: u64) -> io::Result<f64> {
 
 fn empty_routes_received(peer: IpAddr, announced: Vec<Route>) -> RibUpdate {
     RibUpdate::RoutesReceived {
-        peer,
+        peer: PeerId::from_addr(peer),
         session_id: 0,
         announced,
         withdrawn: Vec::new(),
@@ -291,8 +292,8 @@ impl Harness {
     async fn add_clients(&mut self, n_clients: u32) {
         let first = u32::try_from(self.clients.len()).expect("client count exceeds u32");
         for i in first..first.checked_add(n_clients).expect("client count overflow") {
-            let peer = client_addr(i);
-            self.clients.push(peer);
+            let peer = PeerId::from_addr(client_addr(i));
+            self.clients.push(peer.addr());
             let (otx, mut orx) = mpsc::channel::<OutboundRouteUpdate>(CHANNEL_CAP);
             let drained = Arc::clone(&self.drained);
             tokio::spawn(async move {
@@ -347,7 +348,10 @@ impl Harness {
     async fn peer_update_group(&self, peer: IpAddr) -> String {
         let (reply, rx) = oneshot::channel();
         self.qtx
-            .send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+            .send(RibUpdate::QueryPeerUpdateGroup {
+                peer: PeerId::from_addr(peer),
+                reply,
+            })
             .await
             .unwrap();
         rx.await.unwrap()
@@ -406,7 +410,7 @@ impl Harness {
                     .iter()
                     .find(|((afi, safi), _)| *afi == Afi::Ipv4 && *safi == Safi::Unicast)
                     .map_or(0, |(_, c)| *c);
-                (peer, v4)
+                (peer.addr(), v4)
             })
             .collect()
     }

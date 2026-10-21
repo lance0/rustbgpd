@@ -1,4 +1,5 @@
 use rustbgpd_api::peer_types::PeerKey;
+use rustbgpd_rib::PeerId;
 use rustbgpd_transport::{
     PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification,
 };
@@ -69,7 +70,7 @@ impl PeerManager {
         if self
             .send_rib_update(
                 rustbgpd_rib::RibUpdate::PeerDown {
-                    peer: peer_key.address,
+                    peer: PeerId::from_addr(peer_key.address),
                     session_id: old_session_id,
                 },
                 super::OperatorReadAdmission::Fenced {

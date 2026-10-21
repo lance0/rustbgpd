@@ -19,6 +19,7 @@
 //!
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench outbound_encode
 
+use rustbgpd_rib::PeerId;
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -57,7 +58,7 @@ fn routes(count: u32, shape: &str) -> Arc<Vec<Route>> {
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             attributes: match shape {
                 "shared_arc" => Arc::clone(&shared),
                 "equal_values" => AttrSet::new(attrs(None)),
@@ -114,7 +115,7 @@ fn failover_announce() -> Arc<Vec<Route>> {
                 let i = u32::from(s - 1) * 40 + j;
                 Route {
                     prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | (i << 8)), 24)),
-                    peer: IpAddr::V4(source),
+                    peer: PeerId::from_addr(IpAddr::V4(source)),
                     next_hop: IpAddr::V4(source),
                     attributes: Arc::clone(&shared),
                     ..template.clone()

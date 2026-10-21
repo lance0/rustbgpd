@@ -7,6 +7,8 @@
 //! outbound message, so a transient gap is seen even when the final table
 //! looks right.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::HashSet;
 
 use rustbgpd_bmp::BmpReplay;
@@ -22,8 +24,8 @@ use crate::{
 const V4: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
 const WINDOW: Duration = Duration::from_secs(10);
-const UPSTREAM: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-const CLIENT: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+const UPSTREAM: PeerId = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+const CLIENT: PeerId = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
 /// Banned before the restart and re-injected by the controller after it.
 const KEPT: u8 = 7;
 /// Banned before the restart and unbanned while the daemon was down: the
@@ -52,7 +54,7 @@ fn local_route(octet: u8) -> Route {
     route
 }
 
-fn grace(peers: &[IpAddr]) -> EorGraceConfig {
+fn grace(peers: &[PeerId]) -> EorGraceConfig {
     let start = tokio::time::Instant::now();
     EorGraceConfig {
         peers: peers
@@ -70,7 +72,7 @@ fn grace(peers: &[IpAddr]) -> EorGraceConfig {
 /// The daemon builds the selection-deferral roster from the same static GR
 /// peers. A helper-only upstream (FRR's default) is excluded from it, so the
 /// gate releases at once and only the grace window can hold End-of-RIB.
-fn deferral(peers: &[IpAddr]) -> SelectionDeferralConfig {
+fn deferral(peers: &[PeerId]) -> SelectionDeferralConfig {
     SelectionDeferralConfig {
         timeout: Duration::from_mins(2),
         waiters: peers
@@ -85,7 +87,7 @@ fn deferral(peers: &[IpAddr]) -> SelectionDeferralConfig {
 
 /// `None` is a cold boot; `Some(peers)` a planned restart with a grace
 /// window for `peers` (possibly none).
-fn manager(grace_peers: Option<&[IpAddr]>, metrics: &BgpMetrics) -> RibManager {
+fn manager(grace_peers: Option<&[PeerId]>, metrics: &BgpMetrics) -> RibManager {
     let (_tx, rx) = mpsc::channel(8);
     with_grace(
         RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()),
@@ -93,7 +95,7 @@ fn manager(grace_peers: Option<&[IpAddr]>, metrics: &BgpMetrics) -> RibManager {
     )
 }
 
-fn with_grace(manager: RibManager, grace_peers: Option<&[IpAddr]>) -> RibManager {
+fn with_grace(manager: RibManager, grace_peers: Option<&[PeerId]>) -> RibManager {
     match grace_peers {
         Some(peers) => manager
             .with_selection_deferral(deferral(&[UPSTREAM]))
@@ -114,7 +116,7 @@ const HELPER: Session = Session {
 };
 
 fn session_messages(
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     session: Session,
     families: Vec<(Afi, Safi)>,
@@ -159,7 +161,7 @@ fn session_messages(
 
 fn connect(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     session: Session,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (messages, rx) = session_messages(peer, 1, session, vec![V4], 64);
@@ -242,11 +244,11 @@ impl Helper {
     }
 }
 
-fn eor_count(metrics: &BgpMetrics, peer: IpAddr) -> f64 {
+fn eor_count(metrics: &BgpMetrics, peer: PeerId) -> f64 {
     released_count(metrics, peer, "deadline")
 }
 
-fn released_count(metrics: &BgpMetrics, peer: IpAddr, reason: &str) -> f64 {
+fn released_count(metrics: &BgpMetrics, peer: PeerId, reason: &str) -> f64 {
     metrics
         .registry()
         .gather()
@@ -319,7 +321,7 @@ async fn sync(tx: &mpsc::Sender<RibUpdate>) {
 async fn delayed_replay(grace_on: bool, replay_after: Duration) -> ReplayRun {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
-    let grace_peers: &[IpAddr] = if grace_on { &[UPSTREAM] } else { &[] };
+    let grace_peers: &[PeerId] = if grace_on { &[UPSTREAM] } else { &[] };
     let manager = with_grace(
         RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone()),
         Some(grace_peers),
@@ -807,7 +809,7 @@ const KEPT2: u8 = 10;
 const BRIDGE: &str = "gobgp-bridge";
 const OTHER: &str = "other-controller";
 
-fn replay_config(peers: &[IpAddr], owners: &[&str]) -> EorGraceConfig {
+fn replay_config(peers: &[PeerId], owners: &[&str]) -> EorGraceConfig {
     let start = tokio::time::Instant::now();
     EorGraceConfig {
         peers: peers
@@ -822,7 +824,7 @@ fn replay_config(peers: &[IpAddr], owners: &[&str]) -> EorGraceConfig {
     }
 }
 
-fn replay_manager(peers: &[IpAddr], owners: &[&str], metrics: &BgpMetrics) -> RibManager {
+fn replay_manager(peers: &[PeerId], owners: &[&str], metrics: &BgpMetrics) -> RibManager {
     manager_from(replay_config(peers, owners), metrics)
 }
 

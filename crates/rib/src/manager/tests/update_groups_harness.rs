@@ -1,4 +1,5 @@
 use super::*;
+use crate::PeerId;
 
 pub(super) struct RunningManager {
     pub(super) tx: mpsc::Sender<RibUpdate>,
@@ -28,7 +29,7 @@ pub(super) fn spawn_running_manager_with_roster(
 /// `select!` before its due-timer check and then yield on its wall-clock
 /// flush budget, so whether a quiesce lands ahead of the resync tick depends
 /// on host speed. At most two probes precede the tick.
-pub(super) async fn await_dirty_resync(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) {
+pub(super) async fn await_dirty_resync(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) {
     for _ in 0..4 {
         let (reply, dirty) = oneshot::channel();
         tx.send(RibUpdate::TestQueryPeerOutboundDirty { peer, reply })

@@ -1,4 +1,5 @@
 use super::*;
+use crate::PeerId;
 use rustbgpd_policy::{NamedPolicy, Policy, PolicyAction};
 
 fn chain(action: PolicyAction) -> PolicyChain {
@@ -30,8 +31,8 @@ fn register(manager: &mut RibManager, id: u64) {
     });
 }
 
-fn peer() -> IpAddr {
-    Ipv4Addr::new(10, 0, 0, 2).into()
+fn peer() -> PeerId {
+    PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 2).into())
 }
 
 fn record(manager: &mut RibManager, id: u64, policy: Option<PolicyChain>) {
@@ -133,7 +134,7 @@ async fn replaced_session_policy_releases_compiled_body_after_last_owner() {
 
 /// Register `peer` ungrouped: Add-Path send keeps the chain per peer, so the
 /// RIB installs the session's own (uncounted) chain rather than a group handle.
-fn register_ungrouped(manager: &mut RibManager, peer: IpAddr, export_policy: Option<PolicyChain>) {
+fn register_ungrouped(manager: &mut RibManager, peer: PeerId, export_policy: Option<PolicyChain>) {
     let (outbound_tx, _rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
         peer,
@@ -155,7 +156,7 @@ fn register_ungrouped(manager: &mut RibManager, peer: IpAddr, export_policy: Opt
     });
 }
 
-fn installed_counter_id(manager: &RibManager, peer: IpAddr) -> Option<u64> {
+fn installed_counter_id(manager: &RibManager, peer: PeerId) -> Option<u64> {
     manager.export_chains[&peer]
         .as_ref()
         .expect("peer has an installed chain")
@@ -235,8 +236,8 @@ async fn export_counters_are_created_at_every_install_path() {
 /// a disabled peer reports no row and an unaffected peer the global fallback.
 #[tokio::test]
 async fn export_roster_entries_always_hold_the_evaluated_instance() {
-    let uncounted: IpAddr = Ipv4Addr::new(10, 0, 0, 7).into();
-    let disabled: IpAddr = Ipv4Addr::new(10, 0, 0, 8).into();
+    let uncounted = PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 7).into());
+    let disabled = PeerId::from_addr(Ipv4Addr::new(10, 0, 0, 8).into());
     let (_tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(
         rx,

@@ -1034,7 +1034,7 @@ fn route_uses_add_path(
             Prefix::V6(_) => Afi::Ipv6,
         };
         profiles.contains(&MrtAddPathReceiveProfile {
-            peer: route.peer,
+            peer: route.peer.addr(),
             afi,
             safi: Safi::Unicast,
         })
@@ -1083,7 +1083,7 @@ fn encode_route_entries_profile<const FIX_ORIGINATED_TIME: bool>(
                 continue;
             }
             let peer_index = peer_index
-                .get(&route.peer)
+                .get(&route.peer.addr())
                 .copied()
                 .expect("effective peer inventory includes every route origin");
             let age = route.received_at.elapsed().as_secs();
@@ -1302,7 +1302,7 @@ fn encode_warm_snapshot_inner(
             || is_ipv6_link_local(route.next_hop)
         {
             return Err(EncodeError::UnsupportedWarmRouteProfile {
-                peer: route.peer,
+                peer: route.peer.addr(),
                 reason: "scoped or link-local next-hop identity",
             });
         }
@@ -1313,7 +1313,7 @@ fn encode_warm_snapshot_inner(
         }
         if route.link_local_next_hop.is_some() || is_ipv6_link_local(route.next_hop) {
             return Err(EncodeError::UnsupportedWarmRouteProfile {
-                peer: route.peer,
+                peer: route.peer.addr(),
                 reason: "link-local next-hop identity",
             });
         }
@@ -1436,7 +1436,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     seen_peers.extend(effective_peers.iter().map(|peer| peer.peer_addr));
     for route in routes {
         output.check()?;
-        if !seen_peers.contains(&route.peer) {
+        if !seen_peers.contains(&route.peer.addr()) {
             if effective_peers.len() == usize::from(u16::MAX) {
                 return Err(EncodeError::FieldTooLarge {
                     field: "PEER_INDEX_TABLE.peer_count",
@@ -1459,9 +1459,9 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                         .saturating_add(1)
                         .saturating_mul(std::mem::size_of::<MrtPeerEntry>()),
                 })?;
-            seen_peers.insert(route.peer);
+            seen_peers.insert(route.peer.addr());
             effective_peers.push(MrtPeerEntry {
-                peer_addr: route.peer,
+                peer_addr: route.peer.addr(),
                 peer_bgp_id: Ipv4Addr::UNSPECIFIED,
                 peer_asn: 0,
             });
@@ -1469,7 +1469,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     }
     for route in evpn_routes {
         output.check()?;
-        if !seen_peers.contains(&route.peer) {
+        if !seen_peers.contains(&route.peer.addr()) {
             if effective_peers.len() == usize::from(u16::MAX) {
                 return Err(EncodeError::FieldTooLarge {
                     field: "PEER_INDEX_TABLE.peer_count",
@@ -1492,9 +1492,9 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                         .saturating_add(1)
                         .saturating_mul(std::mem::size_of::<MrtPeerEntry>()),
                 })?;
-            seen_peers.insert(route.peer);
+            seen_peers.insert(route.peer.addr());
             effective_peers.push(MrtPeerEntry {
-                peer_addr: route.peer,
+                peer_addr: route.peer.addr(),
                 peer_bgp_id: Ipv4Addr::UNSPECIFIED,
                 peer_asn: 0,
             });
@@ -1538,8 +1538,8 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     // output after their profile counts have been preflighted.
     let mut ordered_routes = collect_cancellable(routes.iter(), budget)?;
     sort_cancellable_by(&mut ordered_routes, budget, |a, b| {
-        let a_index = peer_index.get(&a.peer).copied().unwrap_or(u16::MAX);
-        let b_index = peer_index.get(&b.peer).copied().unwrap_or(u16::MAX);
+        let a_index = peer_index.get(&a.peer.addr()).copied().unwrap_or(u16::MAX);
+        let b_index = peer_index.get(&b.peer.addr()).copied().unwrap_or(u16::MAX);
         a.prefix
             .cmp(&b.prefix)
             .then(a_index.cmp(&b_index))
@@ -1597,7 +1597,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
             let uses_add_path = route_uses_add_path(route, add_path_receive);
             if !uses_add_path && route.path_id != 0 {
                 return Err(EncodeError::AddPathProfileMismatch {
-                    peer: route.peer,
+                    peer: route.peer.addr(),
                     path_id: route.path_id,
                 });
             }
@@ -1660,15 +1660,15 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     // route-type/field order. Do not retain one encoded NLRI Vec per route.
     let mut sorted_evpn = collect_cancellable(evpn_routes.iter(), budget)?;
     sort_cancellable_by(&mut sorted_evpn, budget, |a, b| {
-        let a_idx = peer_index.get(&a.peer).copied().unwrap_or(u16::MAX);
-        let b_idx = peer_index.get(&b.peer).copied().unwrap_or(u16::MAX);
+        let a_idx = peer_index.get(&a.peer.addr()).copied().unwrap_or(u16::MAX);
+        let b_idx = peer_index.get(&b.peer.addr()).copied().unwrap_or(u16::MAX);
         a_idx
             .cmp(&b_idx)
             .then_with(|| a.route.key().cmp(&b.route.key()))
     })?;
     for route in sorted_evpn {
         output.check()?;
-        let Some(&idx) = peer_index.get(&route.peer) else {
+        let Some(&idx) = peer_index.get(&route.peer.addr()) else {
             continue;
         };
         let age = route.received_at.elapsed().as_secs();
@@ -1689,6 +1689,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
 mod tests {
     use super::*;
     use rustbgpd_rib::AttrSet;
+    use rustbgpd_rib::PeerId;
     use rustbgpd_rib::route::{Route, RouteOrigin};
     use rustbgpd_wire::{
         Aggregator, AsPath, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Origin,
@@ -1964,7 +1965,7 @@ mod tests {
             next_hop,
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer,
+            peer: PeerId::from_addr(peer),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
@@ -2672,7 +2673,7 @@ mod tests {
             route,
             next_hop,
             link_local_next_hop: None,
-            peer,
+            peer: PeerId::from_addr(peer),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
@@ -2709,7 +2710,7 @@ mod tests {
             route,
             next_hop,
             link_local_next_hop: None,
-            peer,
+            peer: PeerId::from_addr(peer),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {

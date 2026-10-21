@@ -287,7 +287,7 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
         return (cmp, BestPathReason::ShorterClusterList);
     }
 
-    let cmp = a.peer.cmp(&b.peer);
+    let cmp = a.peer.addr().cmp(&b.peer.addr());
     if cmp != Ordering::Equal {
         return (cmp, BestPathReason::LowerPeerAddress);
     }
@@ -678,7 +678,10 @@ fn cmp_chain(
     // 6. Lowest peer address, then inbound Add-Path identifier. The
     // identifier has no preference semantics (RFC 7911 §2); this last
     // comparison only makes distinct same-peer routes a total order.
-    a.peer.cmp(&b.peer).then_with(|| a.path_id.cmp(&b.path_id))
+    a.peer
+        .addr()
+        .cmp(&b.peer.addr())
+        .then_with(|| a.path_id.cmp(&b.path_id))
 }
 
 /// Whether `other` is co-installable with the best route `best` as an
@@ -785,6 +788,7 @@ fn same_multipath_class(a: &Route, b: &Route) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::PeerId;
     use std::net::{IpAddr, Ipv4Addr};
 
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
@@ -799,7 +803,7 @@ mod tests {
             next_hop: IpAddr::V4(peer),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(peer),
+            peer: PeerId::from_addr(IpAddr::V4(peer)),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
@@ -1130,6 +1134,40 @@ mod tests {
         r
     }
 
+    /// Pins today's tie-break for two neighbors that share one IPv6
+    /// link-local address on different interfaces (config validation still
+    /// rejects the pair). Equal on every attribute, without Add-Path, the
+    /// comparators fall through to the peer address and cannot order them
+    /// even though each route records its own interface. The scoped
+    /// tie-break must turn this red.
+    #[test]
+    fn same_link_local_address_on_two_interfaces_compares_equal() {
+        let context = rustbgpd_wire::AspaValidationContext {
+            neighbor_asn: Some(65001),
+            local_role: None,
+            first_as_check_exempt: false,
+        };
+        let on = |interface: &str| {
+            let mut route = base_route(Ipv4Addr::new(1, 0, 0, 1));
+            route.peer = PeerId::from_addr("fe80::1".parse().unwrap());
+            route.aspa_context =
+                crate::route::AspaContextId::intern_scoped(context, Some(interface));
+            route
+        };
+        let (eth0, eth1) = (on("eth0"), on("eth1"));
+        assert_eq!(eth0.peer_interface().as_deref(), Some("eth0"));
+        assert_eq!(eth1.peer_interface().as_deref(), Some("eth1"));
+
+        for (a, b) in [(&eth0, &eth1), (&eth1, &eth0)] {
+            assert_eq!(best_path_cmp(a, b), Ordering::Equal);
+            assert_eq!(best_path_cmp_orr(a, b, Some(10), Some(10)), Ordering::Equal);
+            assert_eq!(
+                best_path_cmp_with_reason(a, b),
+                (Ordering::Equal, BestPathReason::LowerPathId)
+            );
+        }
+    }
+
     /// RFC 4456 §9 orders the identifier comparison before `CLUSTER_LIST`
     /// length: the lower `ORIGINATOR_ID` wins despite a longer list.
     #[test]
@@ -1299,7 +1337,7 @@ mod tests {
         let c = ibgp(3, 1);
 
         // The winner's peer for each of the six iteration orders.
-        let winners: Vec<IpAddr> = [
+        let winners: Vec<PeerId> = [
             [&a, &b, &c],
             [&a, &c, &b],
             [&b, &a, &c],
@@ -1434,7 +1472,7 @@ mod tests {
             std::net::Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 0),
             48,
         ));
-        r.peer = IpAddr::V6(peer);
+        r.peer = PeerId::from_addr(IpAddr::V6(peer));
         r.next_hop = IpAddr::V6(peer);
         r
     }
@@ -2164,6 +2202,7 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    use crate::PeerId;
     use std::net::{IpAddr, Ipv4Addr};
 
     use proptest::prelude::*;
@@ -2274,7 +2313,7 @@ mod proptests {
                         next_hop: IpAddr::V4(peer),
                         link_local_next_hop: None,
                         next_hop_scope: None,
-                        peer: IpAddr::V4(peer),
+                        peer: PeerId::from_addr(IpAddr::V4(peer)),
                         attributes: AttrSet::new(attributes),
                         received_at: crate::route::ReceivedAt::now(),
                         origin_type,
@@ -2346,7 +2385,7 @@ mod proptests {
     /// export).
     fn production_local(mut route: Route) -> Route {
         route.origin_type = RouteOrigin::Local;
-        route.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        route.peer = PeerId::LOCAL;
         route.peer_router_id = Ipv4Addr::UNSPECIFIED;
         AttrSet::edit(&mut route.attributes, |attrs| {
             attrs.retain(|attr| {

@@ -286,7 +286,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             next_hop: IpAddr::V6(v6_nh),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
@@ -654,7 +654,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             next_hop: IpAddr::V6(v6_nh),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
@@ -2841,7 +2841,7 @@ async fn exported_mpls_v6_next_hop_field(
             ifindex,
         })
     });
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
     let attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3094,7 +3094,7 @@ fn labeled_route_with(prefix: Prefix, next_hop: IpAddr) -> rustbgpd_rib::Labeled
     let mut route = make_labeled_rib_route(100);
     route.nlri.prefix = prefix;
     route.next_hop = next_hop;
-    route.peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    route.peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
     route
 }
 
@@ -3102,7 +3102,7 @@ fn vpn_route_with(prefix: VpnPrefix, next_hop: IpAddr) -> rustbgpd_rib::VpnRibRo
     let mut route = make_vpn_rib_route(100);
     route.nlri.prefix = prefix;
     route.next_hop = next_hop;
-    route.peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    route.peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
     route
 }
 
@@ -3145,7 +3145,7 @@ async fn export_set_next_hop_keeps_labeled_and_vpn_next_hops_on_the_wire() {
     session
         .rib_tx
         .send(RibUpdate::SetPeerExportEncoder {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id: 7,
             encoder: session.export_encoder.clone(),
         })
@@ -3154,7 +3154,7 @@ async fn export_set_next_hop_keeps_labeled_and_vpn_next_hops_on_the_wire() {
     session
         .rib_tx
         .send(RibUpdate::PeerUp {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id: 7,
             peer_asn: 65002,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -3174,7 +3174,7 @@ async fn export_set_next_hop_keeps_labeled_and_vpn_next_hops_on_the_wire() {
         .await
         .unwrap();
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+    let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
     let v6_next_hop: IpAddr = RECEIVED_IPV6_NEXT_HOP.parse().unwrap();
     let labeled_v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24));
     let labeled_v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48));
@@ -3277,7 +3277,7 @@ async fn export_set_next_hop_keeps_labeled_and_vpn_next_hops_on_the_wire() {
         session
             .rib_tx
             .send(RibUpdate::ExplainAdvertisedRoute {
-                peer: session.peer_ip,
+                peer: PeerId::from_addr(session.peer_ip),
                 prefix,
                 rd: rd.map(|()| RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1])),
                 labeled,
@@ -3482,7 +3482,7 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
         session
             .rib_tx
             .send(RibUpdate::SetPeerExportEncoder {
-                peer: session.peer_ip,
+                peer: PeerId::from_addr(session.peer_ip),
                 session_id: 7,
                 encoder: session.export_encoder.clone(),
             })
@@ -3491,7 +3491,7 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
         session
             .rib_tx
             .send(RibUpdate::PeerUp {
-                peer: session.peer_ip,
+                peer: PeerId::from_addr(session.peer_ip),
                 session_id: 7,
                 peer_asn: 65002,
                 peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -3513,7 +3513,7 @@ async fn labeled_ipv4_ipv6_next_hop_export_requires_extended_nexthop_on_the_wire
         session
             .rib_tx
             .send(RibUpdate::LabeledRoutesReceived {
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))),
                 session_id: 0,
                 announced: vec![
                     labeled_route_with(received_prefix, received_v6),
@@ -3656,7 +3656,7 @@ async fn check_mpls_set_next_hop_keeps_link_local(safi: Safi, add_path: bool) {
         session
             .rib_tx
             .send(RibUpdate::SetPeerExportEncoder {
-                peer: session.peer_ip,
+                peer: PeerId::from_addr(session.peer_ip),
                 session_id: 7,
                 encoder: session.export_encoder.clone(),
             })
@@ -3665,7 +3665,7 @@ async fn check_mpls_set_next_hop_keeps_link_local(safi: Safi, add_path: bool) {
         session
             .rib_tx
             .send(RibUpdate::PeerUp {
-                peer: session.peer_ip,
+                peer: PeerId::from_addr(session.peer_ip),
                 session_id: 7,
                 peer_asn: 65002,
                 peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -3686,7 +3686,7 @@ async fn check_mpls_set_next_hop_keeps_link_local(safi: Safi, add_path: bool) {
             })
             .await
             .unwrap();
-        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        let source = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
         let prefix = "2001:db8:100::".parse().unwrap();
         let received = if safi == Safi::LabeledUnicast {
             let mut route = labeled_route_with(Prefix::V6(Ipv6Prefix::new(prefix, 48)), primary);
@@ -4070,7 +4070,7 @@ async fn action_only_replacement_frames(
         session
             .rib_tx
             .send(RibUpdate::SetPeerExportEncoder {
-                peer,
+                peer: PeerId::from_addr(peer),
                 session_id: 0,
                 encoder,
             })
@@ -4080,7 +4080,7 @@ async fn action_only_replacement_frames(
         session
             .rib_tx
             .send(RibUpdate::PeerUp {
-                peer,
+                peer: PeerId::from_addr(peer),
                 session_id: 0,
                 peer_asn: 65002,
                 peer_router_id: match peer {
@@ -4106,7 +4106,7 @@ async fn action_only_replacement_frames(
             session
                 .rib_tx
                 .send(RibUpdate::PeerSlowState {
-                    peer,
+                    peer: PeerId::from_addr(peer),
                     session_id: 0,
                     slow: true,
                 })
@@ -4119,7 +4119,10 @@ async fn action_only_replacement_frames(
         let (reply, response) = tokio::sync::oneshot::channel();
         session
             .rib_tx
-            .send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+            .send(RibUpdate::QueryPeerUpdateGroup {
+                peer: PeerId::from_addr(peer),
+                reply,
+            })
             .await
             .unwrap();
         assert_eq!(response.await.unwrap().starts_with("group:"), !private);
@@ -4133,8 +4136,8 @@ async fn action_only_replacement_frames(
         }
     }
     let mut route = make_route(100);
-    route.peer = "192.0.2.9".parse().unwrap();
-    route.next_hop = route.peer;
+    route.peer = PeerId::from_addr("192.0.2.9".parse().unwrap());
+    route.next_hop = route.peer.addr();
     route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -4175,7 +4178,7 @@ async fn action_only_replacement_frames(
         peers
             .into_iter()
             .map(|peer| PeerExportPolicyReplacement {
-                peer,
+                peer: PeerId::from_addr(peer),
                 export_policy: Some(policy(!initially_self)),
             })
             .collect()
@@ -4267,7 +4270,7 @@ async fn action_only_replacement_frames(
     session
         .rib_tx
         .send(RibUpdate::RefreshPeerOutbound {
-            peer: peers[0],
+            peer: PeerId::from_addr(peers[0]),
             reply,
         })
         .await
@@ -4363,7 +4366,7 @@ async fn injected_unspecified_next_hop_resolves_to_self_per_session() {
 
     let mut v4 = make_route(100);
     v4.origin_type = rustbgpd_rib::RouteOrigin::Local;
-    v4.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    v4.peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     v4.next_hop = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
     AttrSet::edit(&mut v4.attributes, |attrs| {
         for attr in attrs.iter_mut() {
@@ -4374,7 +4377,7 @@ async fn injected_unspecified_next_hop_resolves_to_self_per_session() {
     });
     let mut v6 = make_v6_unicast_route(Ipv6Addr::UNSPECIFIED);
     v6.origin_type = rustbgpd_rib::RouteOrigin::Local;
-    v6.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    v6.peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     let specific = Ipv4Addr::new(192, 0, 2, 99);
     let local_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
 
@@ -4473,7 +4476,7 @@ async fn injected_self_route_never_exports_the_unspecified_sentinel() {
 
     let mut stored = make_route(100);
     stored.origin_type = rustbgpd_rib::RouteOrigin::Local;
-    stored.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    stored.peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     stored.next_hop = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
     AttrSet::edit(&mut stored.attributes, |attrs| {
         for attr in attrs.iter_mut() {
@@ -4626,8 +4629,8 @@ async fn learned_unspecified_next_hop_is_never_rewritten_to_self() {
         });
         let mut v6 = make_v6_unicast_route(Ipv6Addr::UNSPECIFIED);
         v6.origin_type = origin_type;
-        assert_ne!(v4.peer, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        assert_ne!(v6.peer, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_ne!(v4.peer.addr(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_ne!(v6.peer.addr(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
         for (remote_asn, route_server_client) in [(65001, false), (65002, true)] {
             let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);

@@ -23,6 +23,7 @@
 //! either.
 
 use super::*;
+use rustbgpd_rib::PeerId;
 
 use std::collections::BTreeMap;
 
@@ -1093,7 +1094,7 @@ fn spawn_rib(
                         .and_then(mpsc::WeakSender::upgrade)
                         .expect("the row supplies a filler sender")
                         .try_send(RibUpdate::QueryPeerRetainedStale {
-                            peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
                             reply,
                         })
                         .expect("the matched command freed the only slot");
@@ -1578,7 +1579,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::ConditionalInstall => {
             let set = rustbgpd_rib::ConditionalAdvertisementSet {
                 definitions: Vec::new(),
-                attachments: BTreeMap::from([(peers[0], vec![Arc::from("backup")])]),
+                attachments: BTreeMap::from([(PeerId::from_addr(peers[0]), vec![Arc::from("backup")])]),
             };
             let prior = manager
                 .install_conditional_advertisements(set.clone(), &[])
@@ -1606,7 +1607,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             let (asn, reason) = admission.capacity_failure().unwrap();
             let notice = rustbgpd_rib::dampening::DampeningCapacityNotice {
                 source: ReceivedRouteSource {
-                    peer: peers[0],
+                    peer: PeerId::from_addr(peers[0]),
                     session_id: 1,
                     peer_asn: Some(asn),
                     context: Some(Arc::new(PeerSourceContext {
@@ -1751,7 +1752,10 @@ async fn run(row: &WaitSite) {
     if matches!(row.rib, RibHold::Capacity) {
         let (reply, _response) = oneshot::channel();
         rib_tx
-            .try_send(RibUpdate::QueryPeerRetainedStale { peer: first, reply })
+            .try_send(RibUpdate::QueryPeerRetainedStale {
+                peer: PeerId::from_addr(first),
+                reply,
+            })
             .unwrap();
         assert_eq!(rib_tx.capacity(), 0);
     }
@@ -2537,7 +2541,7 @@ async fn legacy_dataset_refresh_bounds_capacity_and_reports_every_export_failure
             let (reply, _response) = oneshot::channel();
             rib_tx
                 .try_send(RibUpdate::QueryPeerRetainedStale {
-                    peer: peers[0],
+                    peer: PeerId::from_addr(peers[0]),
                     reply,
                 })
                 .unwrap();
@@ -2645,7 +2649,7 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
             failed_restore: false,
         },
     ] {
-        let peer = "10.39.3.1".parse::<IpAddr>().unwrap();
+        let peer = PeerId::from_addr("10.39.3.1".parse::<IpAddr>().unwrap());
         let gate = Gate::new();
         let (mut manager, _) = rfc8212_status_manager();
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
@@ -2656,16 +2660,16 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
         manager.rib_tx = rib_tx;
         let (operator_tx, operator_rx) = mpsc::channel(4);
         manager = manager.with_operator_queries(operator_rx);
-        let (handle, _) = spawn_session(peer, true, gate.clone(), stall_state, false);
-        insert_test_managed_peer(&mut manager, peer, handle, false);
+        let (handle, _) = spawn_session(peer.addr(), true, gate.clone(), stall_state, false);
+        insert_test_managed_peer(&mut manager, peer.addr(), handle, false);
         let transaction = tokio::spawn(async move {
-            let result = drive(&mut manager, drive_kind, [peer, peer]).await;
+            let result = drive(&mut manager, drive_kind, [peer.addr(), peer.addr()]).await;
             (manager, result)
         });
         for _ in 0..4 {
             tokio::task::yield_now().await;
         }
-        let infos = admit_snapshot_across_deadline(&operator_tx, peer).await;
+        let infos = admit_snapshot_across_deadline(&operator_tx, peer.addr()).await;
         assert!(
             !transaction.is_finished(),
             "owner expiry must not abandon an admitted read"

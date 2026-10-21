@@ -48,7 +48,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
@@ -617,7 +617,7 @@ fn ibgp_default_local_pref_when_missing() {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -654,7 +654,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,
@@ -699,7 +699,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),

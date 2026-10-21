@@ -1,9 +1,10 @@
 use super::*;
 use rustbgpd_api::peer_types::{PeerManagerOperatorQuery, PeerManagerReadinessQuery};
+use rustbgpd_rib::PeerId;
 
 #[tokio::test(start_paused = true)]
 async fn refresh_outbound_bounds_full_rib_queue_admission() {
-    let address = "192.0.2.1".parse().unwrap();
+    let address = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let (commands, command_rx) = mpsc::channel(4);
     let (operator, operator_rx) = mpsc::channel(4);
     let (rib_tx, mut rib_rx) = mpsc::channel(1);
@@ -25,12 +26,17 @@ async fn refresh_outbound_bounds_full_rib_queue_admission() {
         None,
     )
     .with_operator_queries(operator_rx);
-    insert_test_managed_peer(&mut manager, address, stalled_policy_query_handle(), false);
+    insert_test_managed_peer(
+        &mut manager,
+        address.addr(),
+        stalled_policy_query_handle(),
+        false,
+    );
     let manager_task = tokio::spawn(manager.run());
     let (reply, mut response) = oneshot::channel();
     commands
         .send(PeerManagerCommand::RefreshOutbound {
-            peer: key(address),
+            peer: key(address.addr()),
             reply,
         })
         .await
@@ -45,7 +51,13 @@ async fn refresh_outbound_bounds_full_rib_queue_admission() {
     drop(response);
     let (reply, read) = oneshot::channel();
     operator
-        .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply }.into())
+        .send(
+            PeerManagerOperatorQuery::HasPeerAddress {
+                address: address.addr(),
+                reply,
+            }
+            .into(),
+        )
         .await
         .unwrap();
     let read_after_cancellation = matches!(
@@ -199,7 +211,7 @@ async fn replay_scheduling_keeps_readiness_and_operator_reads_responsive() {
 #[tokio::test(start_paused = true)]
 async fn admitted_reads_survive_owner_expiry_and_replay_cancellation() {
     for (replay, cancel) in [(false, false), (true, false), (true, true)] {
-        let address = "192.0.2.1".parse().unwrap();
+        let address = PeerId::from_addr("192.0.2.1".parse().unwrap());
         let (session_commands, mut session_rx) = mpsc::channel(4);
         let (replays, mut replay_rx) = mpsc::channel(1);
         let (states, mut state_rx) = mpsc::channel(1);
@@ -239,7 +251,7 @@ async fn admitted_reads_survive_owner_expiry_and_replay_cancellation() {
         .with_operator_queries(operator_rx);
         insert_test_managed_peer(
             &mut manager,
-            address,
+            address.addr(),
             PeerHandle::from_parts(session_commands, session),
             false,
         );
@@ -248,12 +260,12 @@ async fn admitted_reads_survive_owner_expiry_and_replay_cancellation() {
         commands
             .send(if replay {
                 PeerManagerCommand::ReplayOutbound {
-                    peer: key(address),
+                    peer: key(address.addr()),
                     reply,
                 }
             } else {
                 PeerManagerCommand::RefreshOutbound {
-                    peer: key(address),
+                    peer: key(address.addr()),
                     reply,
                 }
             })
@@ -282,7 +294,7 @@ async fn admitted_reads_survive_owner_expiry_and_replay_cancellation() {
         operator
             .send(
                 PeerManagerOperatorQuery::GetPeerState {
-                    peer: key(address),
+                    peer: key(address.addr()),
                     reply,
                 }
                 .into(),
@@ -296,7 +308,7 @@ async fn admitted_reads_survive_owner_expiry_and_replay_cancellation() {
         let (reply, mut mutation) = oneshot::channel();
         commands
             .send(PeerManagerCommand::DisablePeer {
-                peer: key(address),
+                peer: key(address.addr()),
                 reason: None,
                 reply,
             })
@@ -319,7 +331,10 @@ async fn admitted_reads_survive_owner_expiry_and_replay_cancellation() {
             Err(oneshot::error::TryRecvError::Empty)
         );
         let read_delivered = state_reply
-            .send(policy_test_peer_state(address, SessionState::Established))
+            .send(policy_test_peer_state(
+                address.addr(),
+                SessionState::Established,
+            ))
             .is_ok();
         let read_survived = matches!(
             tokio::time::timeout(Duration::from_secs(1), read).await,
@@ -360,7 +375,7 @@ async fn admitted_reads_survive_owner_expiry_and_replay_cancellation() {
 
 #[tokio::test(start_paused = true)]
 async fn refresh_admission_and_reply_share_one_budget() {
-    let address = "192.0.2.1".parse().unwrap();
+    let address = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let (rib_tx, mut rib_rx) = mpsc::channel(1);
     rib_tx
         .send(RibUpdate::PeerDown {
@@ -371,10 +386,15 @@ async fn refresh_admission_and_reply_share_one_budget() {
         .unwrap();
     let mut manager = test_peer_manager();
     manager.rib_tx = rib_tx;
-    insert_test_managed_peer(&mut manager, address, stalled_policy_query_handle(), false);
+    insert_test_managed_peer(
+        &mut manager,
+        address.addr(),
+        stalled_policy_query_handle(),
+        false,
+    );
     let started = tokio::time::Instant::now();
     let operation = tokio::spawn(async move {
-        let result = manager.refresh_outbound(key(address)).await;
+        let result = manager.refresh_outbound(key(address.addr())).await;
         (manager, result)
     });
     tokio::task::yield_now().await;

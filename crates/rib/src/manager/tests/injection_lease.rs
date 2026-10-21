@@ -2,13 +2,15 @@
 //! clock.
 
 use super::*;
+use crate::PeerId;
 use crate::injection_lease::{
     ExpiryExit, InjectedKey, InjectionLeases, LeaseConflict, LeaseGeneration, LeasedKeysPage,
     LeasedKeysResume, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
+use crate::test_support::peer_v4;
 use crate::update::{InjectOutcome, RibCommandError, RoutePage};
 
-const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 70));
+const TARGET: PeerId = peer_v4(Ipv4Addr::new(192, 0, 2, 70));
 
 struct Harness {
     tx: mpsc::Sender<RibUpdate>,
@@ -1173,7 +1175,7 @@ async fn expiry_hands_the_prefix_to_a_learned_route() {
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
-        peer: IpAddr::V4(SOURCE),
+        peer: peer_v4(SOURCE),
         peer_asn: 65200,
         peer_router_id: SOURCE,
         outbound_tx: source_tx,
@@ -1202,7 +1204,7 @@ async fn expiry_hands_the_prefix_to_a_learned_route() {
     ]);
     h.tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(SOURCE),
+        peer: peer_v4(SOURCE),
         announced: vec![learned],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -1226,18 +1228,15 @@ async fn expiry_hands_the_prefix_to_a_learned_route() {
 
     tokio::time::advance(Duration::from_secs(10)).await;
     h.settle().await;
-    assert_eq!(
-        best(query_best_routes(&h.tx).await),
-        vec![IpAddr::V4(SOURCE)]
-    );
-    let advertised: Vec<IpAddr> = h
+    assert_eq!(best(query_best_routes(&h.tx).await), vec![peer_v4(SOURCE)]);
+    let advertised: Vec<PeerId> = h
         .drain()
         .iter()
         .flat_map(|update| update.announce.iter())
         .filter(|route| route.prefix == host(1))
         .map(|route| route.peer)
         .collect();
-    assert_eq!(advertised, vec![IpAddr::V4(SOURCE)]);
+    assert_eq!(advertised, vec![peer_v4(SOURCE)]);
     h.stop().await;
 }
 
@@ -1619,7 +1618,7 @@ async fn peer_down_turn() {
         .unwrap_or(1);
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer_up = |peer: IpAddr, asn: u32, outbound_tx| RibUpdate::PeerUp {
+    let peer_up = |peer: PeerId, asn: u32, outbound_tx| RibUpdate::PeerUp {
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
@@ -1640,7 +1639,7 @@ async fn peer_down_turn() {
     let (out_tx, mut out_rx) = mpsc::channel(1 << 16);
     manager.handle_update(peer_up(TARGET, 65100, out_tx));
     let (source_tx, _source_rx) = mpsc::channel(1 << 16);
-    manager.handle_update(peer_up(IpAddr::V4(SOURCE), 65200, source_tx));
+    manager.handle_update(peer_up(peer_v4(SOURCE), 65200, source_tx));
     let total = owners * MAX_KEYS_PER_OWNER;
     let mut index = 0u32;
     while (index as usize) < total {
@@ -1663,7 +1662,7 @@ async fn peer_down_turn() {
             .collect();
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(SOURCE),
+            peer: peer_v4(SOURCE),
             announced,
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -1677,7 +1676,7 @@ async fn peer_down_turn() {
     }
     let started = std::time::Instant::now();
     manager.handle_update(RibUpdate::PeerDown {
-        peer: IpAddr::V4(SOURCE),
+        peer: peer_v4(SOURCE),
         session_id: 0,
     });
     while manager.process_next_route_chunk() {}

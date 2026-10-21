@@ -2568,6 +2568,7 @@ fn format_esi(esi: EthernetSegmentIdentifier) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rustbgpd_rib::PeerId;
     use std::fmt::Write as _;
 
     use super::*;
@@ -2641,7 +2642,7 @@ mod tests {
             }),
             next_hop: ipa(originator_ip),
             link_local_next_hop: None,
-            peer: ipa(originator_ip),
+            peer: PeerId::from_addr(ipa(originator_ip)),
             attributes: AttrSet::new(attrs),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ibgp,
@@ -4583,7 +4584,7 @@ mod tests {
                 },
                 best: Some(remote_type4),
                 previous_best: None,
-                peer: Some(ipa("10.0.0.2")),
+                peer: Some(PeerId::from_addr(ipa("10.0.0.2"))),
                 previous_peer: None,
                 timestamp_unix_ms: rustbgpd_rib::event::unix_time_ms_now(),
             }))

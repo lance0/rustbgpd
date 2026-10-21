@@ -11,6 +11,8 @@
 //! must match message for message; the grouped side must also prove the
 //! cohort really formed (one turn, one shared payload and encode cell).
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -85,7 +87,7 @@ fn peer_up(
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: SESSION,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         peer_asn,
         peer_router_id: peer,
         outbound_tx,
@@ -105,7 +107,7 @@ fn announce(peer: Ipv4Addr, announced: Vec<Route>) -> RibUpdate {
     RibUpdate::RoutesReceived {
         // The table source is an unregistered legacy producer.
         session_id: if peer == SOURCE { 0 } else { SESSION },
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -141,7 +143,7 @@ fn encoder(
     reuses: &Arc<AtomicUsize>,
 ) -> RibUpdate {
     RibUpdate::SetPeerExportEncoder {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: SESSION,
         encoder: Arc::new(CohortExactEncoder {
             owner,
@@ -157,8 +159,8 @@ fn encoder(
 
 struct Run {
     manager: RibManager,
-    streams: BTreeMap<IpAddr, Vec<NormMsg>>,
-    raw: BTreeMap<IpAddr, Vec<OutboundRouteUpdate>>,
+    streams: BTreeMap<PeerId, Vec<NormMsg>>,
+    raw: BTreeMap<PeerId, Vec<OutboundRouteUpdate>>,
     /// Joiners whose registration the FIRST advance completed.
     first_turn: Vec<Ipv4Addr>,
     /// Group-table control-tag scans the first advance ran.
@@ -195,7 +197,7 @@ async fn run(
     let (out_tx, out_rx) = mpsc::channel(1_024);
     manager.handle_update(encoder(SURVIVOR, 1, 4_096, &probes, &reuses));
     manager.handle_update(peer_up(SURVIVOR, 65_001, ipv4_sendable(), None, out_tx));
-    receivers.insert(IpAddr::V4(SURVIVOR), out_rx);
+    receivers.insert(peer_v4(SURVIVOR), out_rx);
 
     let mut table = vec![
         route(1, SOURCE, vec![]),
@@ -209,7 +211,7 @@ async fn run(
     // Queued actor work makes every joiner's registration defer.
     tx.try_send(announce(SOURCE, vec![])).unwrap();
     for (index, joiner) in joiners.iter().enumerate() {
-        let peer = IpAddr::V4(joiner.addr);
+        let peer = peer_v4(joiner.addr);
         if joiner.role.is_some() {
             manager.handle_update(RibUpdate::SetPeerExportContext {
                 peer,
@@ -262,7 +264,7 @@ async fn run(
 
     let dead_rx = dead.map(|peer| {
         Arc::new(Mutex::new(Some(
-            receivers.remove(&IpAddr::V4(peer)).expect("dead joiner"),
+            receivers.remove(&peer_v4(peer)).expect("dead joiner"),
         )))
     });
     if let Some(dead_rx) = &dead_rx {
@@ -283,11 +285,7 @@ async fn run(
     let first_turn = joiners
         .iter()
         .map(|joiner| joiner.addr)
-        .filter(|addr| {
-            manager
-                .outbound_session_ids
-                .contains_key(&IpAddr::V4(*addr))
-        })
+        .filter(|addr| manager.outbound_session_ids.contains_key(&peer_v4(*addr)))
         .collect();
     while !manager.pending_initial_registrations.is_empty() {
         manager.advance_pending_initial_registration();
@@ -325,7 +323,7 @@ fn assert_table_then_families<'a>(
     peer: Ipv4Addr,
     families: &[(Afi, Safi)],
 ) -> &'a OutboundRouteUpdate {
-    let updates = &run.raw[&IpAddr::V4(peer)];
+    let updates = &run.raw[&peer_v4(peer)];
     assert_eq!(updates.len(), 2, "{peer}: one table envelope and one EoR");
     assert!(!updates[0].announce.is_empty() && updates[0].end_of_rib.is_empty());
     assert!(updates[1].announce.is_empty());
@@ -366,7 +364,7 @@ async fn deferred_same_group_joiners_share_one_replay_like_ungrouped_oracle() {
         .map(|peer| assert_table_then_eor(&grouped, *peer))
         .collect();
     for (table, peer) in tables.iter().zip(cohort) {
-        assert_eq!(table.announce_source_exclusion, Some(IpAddr::V4(peer)));
+        assert_eq!(table.announce_source_exclusion, Some(peer_v4(peer)));
         assert!(Arc::ptr_eq(&table.announce, &tables[0].announce));
         assert!(Arc::ptr_eq(
             table.shared_group_encode.as_ref().expect("shared encode"),
@@ -449,7 +447,7 @@ async fn dead_cohort_member_does_not_stall_or_corrupt_the_others() {
     for run in [&grouped, &oracle] {
         // The closed channel fails the dead member's commit; its dirty
         // state is dropped rather than re-marked (its PeerDown cleans up).
-        let dead = IpAddr::V4(dead);
+        let dead = peer_v4(dead);
         assert!(run.manager.outbound_channel_gone(dead));
         assert!(run.manager.dirty_peers.is_empty());
         assert!(run.manager.pending_initial_registrations.is_empty());
@@ -640,7 +638,7 @@ async fn exact_export_rejection_stays_with_its_cohort_member() {
         grouped
             .manager
             .peer_unexportable
-            .contains_key(&IpAddr::V4(joiners[1].addr))
+            .contains_key(&peer_v4(joiners[1].addr))
     );
     for peer in [joiners[0].addr, joiners[2].addr] {
         let table = assert_table_then_eor(&grouped, peer);

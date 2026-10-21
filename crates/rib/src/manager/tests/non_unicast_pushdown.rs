@@ -6,10 +6,12 @@
 //! updates, withdrawals, or best-path ran for the duration of that copy.
 
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use crate::update::RibRowFilter;
 
 /// Two peers' rows in every non-unicast family, in the Loc-RIB.
-fn manager_with_two_peers_per_family() -> (RibManager, IpAddr, IpAddr) {
+fn manager_with_two_peers_per_family() -> (RibManager, PeerId, PeerId) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let kept = Ipv4Addr::new(10, 0, 0, 1);
@@ -52,10 +54,10 @@ fn manager_with_two_peers_per_family() -> (RibManager, IpAddr, IpAddr) {
         .loc_rib
         .recompute_flowspec(v6.selection_key(), std::iter::once(&v6));
 
-    (manager, IpAddr::V4(kept), IpAddr::V4(dropped))
+    (manager, peer_v4(kept), peer_v4(dropped))
 }
 
-fn by_peer<T: 'static>(peer: IpAddr, of: fn(&T) -> IpAddr) -> RibRowFilter<T> {
+fn by_peer<T: 'static>(peer: PeerId, of: fn(&T) -> PeerId) -> RibRowFilter<T> {
     Box::new(move |row: &T| of(row) == peer)
 }
 

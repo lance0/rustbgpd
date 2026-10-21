@@ -1,3 +1,5 @@
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 
@@ -12,7 +14,7 @@ fn prefix(octet: u8) -> Ipv4Prefix {
 }
 
 pub(super) fn peer_up(
-    peer: IpAddr,
+    peer: PeerId,
     tx: mpsc::Sender<OutboundRouteUpdate>,
     policy: Option<PolicyChain>,
 ) -> RibUpdate {
@@ -39,7 +41,7 @@ pub(super) fn peer_up(
 fn source_update(manager: &mut RibManager, announce: &[u8], withdraw: &[u8]) {
     let source = Ipv4Addr::new(192, 0, 2, 1);
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: announce
             .iter()
@@ -63,7 +65,7 @@ fn non_full_encoder_refusal_retains_the_owed_withdrawal_for_recovery() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1], &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 1).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 1).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
     let initial = receiver.try_recv().unwrap();
@@ -94,7 +96,7 @@ fn missing_completed_proof_resync_counts_fallback_and_keeps_the_owed_withdrawal(
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1], &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 6).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 6).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     let mut registration = peer_up(member, outbound, None);
     if let RibUpdate::PeerUp {
@@ -125,7 +127,7 @@ fn missing_completed_proof_resync_counts_fallback_and_keeps_the_owed_withdrawal(
     );
 
     // Stage the real withdrawal without emitting; then lose only its proof.
-    let source: IpAddr = Ipv4Addr::new(192, 0, 2, 1).into();
+    let source = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 1).into());
     assert!(
         manager
             .ribs
@@ -168,7 +170,7 @@ fn missing_completed_proof_resync_counts_fallback_and_keeps_the_owed_withdrawal(
 
 /// Point the newest live record away from the outbound registration, so a
 /// refusal could not be read back as a fallback and resync copies the prior.
-pub(super) fn detach_fallback_record(manager: &mut RibManager, peer: IpAddr) {
+pub(super) fn detach_fallback_record(manager: &mut RibManager, peer: PeerId) {
     let (detached, _) = mpsc::channel(1);
     manager
         .live_sessions
@@ -187,7 +189,7 @@ fn reserve_refusal_without_a_durable_fallback_keeps_the_owed_withdrawal() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1], &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 7).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 7).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     let mut registration = peer_up(member, outbound, None);
     if let RibUpdate::PeerUp {
@@ -214,7 +216,7 @@ fn reserve_refusal_without_a_durable_fallback_keeps_the_owed_withdrawal() {
 
     // Stage the withdrawal of the admitted key and one new key without
     // emitting, so the pre-send reservation must grow the proof.
-    let source: IpAddr = Ipv4Addr::new(192, 0, 2, 1).into();
+    let source = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 1).into());
     let added = (Prefix::V4(prefix(2)), 0);
     let rib = manager.ribs.get_mut(&source).unwrap();
     assert!(rib.withdraw(&owed.0, owed.1));
@@ -319,7 +321,7 @@ fn common_recovery_charge_is_truthful_at_startup_capture_and_release() {
         header
     );
     source_update(&mut manager, &[1, 2], &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 2).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 2).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
     while receiver.try_recv().is_ok() {}
@@ -350,7 +352,7 @@ fn proof_refused_initial_dump_settles_without_a_second_replay() {
             (1..=128).collect()
         };
         source_update(&mut manager, &prefixes, &[]);
-        let member: IpAddr = Ipv4Addr::new(10, 220, 4, 10).into();
+        let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 10).into());
         manager.pending_group_admitted = AdmittedRecovery::with_test_limits(
             if refuse_seed { 0 } else { 1024 },
             512 * 1024 * 1024,
@@ -398,7 +400,7 @@ fn proof_refused_refresh_settles_only_its_own_recovery_state() {
         let (_tx, rx) = mpsc::channel(1);
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
         source_update(&mut manager, &[1, 2], &[]);
-        let member: IpAddr = Ipv4Addr::new(10, 220, 4, 11).into();
+        let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 11).into());
         let (outbound, mut receiver) = mpsc::channel(16);
         let mut registration = peer_up(member, outbound, None);
         if let RibUpdate::PeerUp {
@@ -475,7 +477,7 @@ fn proof_refused_initial_dump_still_retries_a_failed_eor() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1, 2], &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 12).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 12).into());
     manager.pending_group_admitted = AdmittedRecovery::with_test_limits(0, 512 * 1024 * 1024);
     let (outbound, mut receiver) = mpsc::channel(1);
     manager.handle_update(peer_up(member, outbound, None));
@@ -503,7 +505,7 @@ fn common_recovery_cap_refusal_keeps_owed_withdrawals_without_reset() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1, 2], &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 3).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 3).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
     while receiver.try_recv().is_ok() {}
@@ -532,7 +534,7 @@ fn common_recovery_fallback_does_not_invent_private_flowspec_delivery() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1], &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 5).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 5).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     let mut registration = peer_up(member, outbound, None);
     if let RibUpdate::PeerUp {
@@ -625,7 +627,7 @@ fn a_failed_initial_dump_has_no_admitted_withdrawal_duties() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1], &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 2, 1).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 2, 1).into());
     let (outbound, mut receiver) = mpsc::channel(1);
     outbound.try_send(OutboundRouteUpdate::default()).unwrap();
     manager.handle_update(peer_up(member, outbound, None));
@@ -655,7 +657,7 @@ fn a_failed_initial_dump_has_no_admitted_withdrawal_duties() {
 fn a_clean_regroup_never_seeds_a_prefix_blocked_by_the_member_limit() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let member: IpAddr = Ipv4Addr::new(10, 220, 2, 1).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 2, 1).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
     receiver.try_recv().unwrap();
@@ -692,7 +694,7 @@ fn a_batched_refusal_retains_source_keys_for_targeted_recovery() {
     for probe_refusal in [false, true] {
         let (_tx, rx) = mpsc::channel(1);
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-        let member: IpAddr = Ipv4Addr::new(10, 220, 2, 1).into();
+        let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 2, 1).into());
         let (outbound, mut receiver) = mpsc::channel(if probe_refusal { 16 } else { 1 });
         manager.handle_update(peer_up(member, outbound, Some(policy(3, 1))));
         receiver.try_recv().unwrap();
@@ -767,7 +769,7 @@ fn a_batched_refusal_retains_source_keys_for_targeted_recovery() {
 fn budget_refused_batched_narrowing_keeps_current_withdrawal_duties() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let member: IpAddr = Ipv4Addr::new(10, 220, 4, 4).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 4, 4).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, Some(policy(3, 1))));
     while receiver.try_recv().is_ok() {}
@@ -817,7 +819,7 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
     let source_a = Ipv4Addr::new(10, 220, 2, 1);
     let source_b = Ipv4Addr::new(10, 220, 2, 2);
     let source_c = Ipv4Addr::new(10, 220, 2, 3);
-    let member: IpAddr = source_a.into();
+    let member = peer_v4(source_a);
     let (outbound, mut receiver) = mpsc::channel(16);
     let mut registration = peer_up(member, outbound, None);
     if let RibUpdate::PeerUp {
@@ -835,7 +837,7 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
     manager.peer_export_encoders.insert(member, encoder.clone());
     let inject = |manager: &mut RibManager, source, preference| {
         manager.handle_update(RibUpdate::RoutesReceived {
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             session_id: 0,
             announced: vec![make_route_with_lp(prefix(1), source, preference)],
             withdrawn: vec![],
@@ -850,7 +852,7 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
     inject(&mut manager, source_b, 100);
     let first = receiver.try_recv().unwrap();
     assert_eq!(first.announce.len(), 1);
-    assert_eq!(first.announce[0].peer, IpAddr::V4(source_b));
+    assert_eq!(first.announce[0].peer, peer_v4(source_b));
     inject(&mut manager, source_a, 300);
     while let Ok(update) = receiver.try_recv() {
         assert_eq!(update.withdraw, Vec::<(Prefix, u32)>::new());
@@ -859,7 +861,7 @@ fn rejected_prior_slot_is_withdrawn(lane_only: bool) {
                 .announce
                 .iter()
                 .all(|route| update.announce_source_exclusion == Some(route.peer)
-                    || route.peer == IpAddr::V4(source_b))
+                    || route.peer == peer_v4(source_b))
         );
     }
     assert!(manager.grouped_member_of(member).is_some());
@@ -900,7 +902,7 @@ fn clean_pcb_lane_only_rejection_withdraws_the_old_lane_slot() {
 fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let member: IpAddr = Ipv4Addr::new(10, 220, 2, 1).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 2, 1).into());
     manager.handle_update(RibUpdate::SetPeerExportContext {
         peer: member,
         session_id: 0,
@@ -925,7 +927,7 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
         attrs.push(PathAttribute::OnlyToCustomer(64_496));
     });
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![route],
         withdrawn: vec![],
@@ -960,7 +962,7 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
 fn a_same_session_table_replay_rejection_withdraws_the_actual_prior() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let member: IpAddr = Ipv4Addr::new(10, 220, 2, 1).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 2, 1).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
     receiver.try_recv().unwrap();
@@ -992,7 +994,7 @@ fn grouped_capture_orders_real_old_values_and_recovers_exact_withdrawals() {
     let mut receivers = Vec::new();
     for peer in peers {
         let (outbound, mut receiver) = mpsc::channel(128);
-        manager.handle_update(peer_up(peer, outbound, None));
+        manager.handle_update(peer_up(PeerId::from_addr(peer), outbound, None));
         let mut admitted = HashSet::new();
         while let Ok(update) = receiver.try_recv() {
             admitted.extend(update.announce.iter().map(|route| route.prefix));
@@ -1001,8 +1003,11 @@ fn grouped_capture_orders_real_old_values_and_recovers_exact_withdrawals() {
             admitted,
             keys.iter().map(|n| Prefix::V4(prefix(*n))).collect()
         );
-        assert!(manager.mark_outbound_dirty(peer));
-        let proof = manager.pending_group_admitted.get(&peer).unwrap();
+        assert!(manager.mark_outbound_dirty(PeerId::from_addr(peer)));
+        let proof = manager
+            .pending_group_admitted
+            .get(&PeerId::from_addr(peer))
+            .unwrap();
         assert_eq!(proof.len(), 64);
         for n in &keys {
             assert!(proof.contains(&ExactExportKey::Unicast(Prefix::V4(prefix(*n)), 0)));
@@ -1025,8 +1030,12 @@ fn grouped_capture_orders_real_old_values_and_recovers_exact_withdrawals() {
                 .map(|n| (Prefix::V4(prefix(*n)), 0))
                 .collect()
         );
-        assert!(!manager.dirty_peers.contains(&peer));
-        assert!(!manager.pending_group_admitted.contains_record(peer));
+        assert!(!manager.dirty_peers.contains(&PeerId::from_addr(peer)));
+        assert!(
+            !manager
+                .pending_group_admitted
+                .contains_record(PeerId::from_addr(peer))
+        );
     }
 }
 
@@ -1043,7 +1052,7 @@ fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
         Some(Ipv4Addr::new(192, 0, 2, 254)),
         BgpMetrics::new(),
     );
-    let member: IpAddr = Ipv4Addr::new(10, 222, 4, 1).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 222, 4, 1).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);
     let (outbound, mut receiver) = mpsc::channel(16);
     let mut registration = peer_up(member, outbound, None);
@@ -1069,7 +1078,7 @@ fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
             .map(|r| ExactExportKey::Vpn(r.key()))
             .collect();
         manager.handle_update(RibUpdate::VpnRoutesReceived {
-            peer: source.into(),
+            peer: peer_v4(source),
             session_id: 0,
             announced: routes,
             withdrawn: vec![],
@@ -1120,7 +1129,7 @@ fn full_old_capture_keeps_actual_proof(vpn: bool, vpn_capable: bool) {
     let withdrawn = if vpn {
         let key = make_vpn_rib_route(source, 1, 100, 100).key();
         manager.handle_update(RibUpdate::VpnRoutesReceived {
-            peer: source.into(),
+            peer: peer_v4(source),
             session_id: 0,
             announced: vec![],
             withdrawn: vec![key.clone()],
@@ -1169,7 +1178,7 @@ fn initial_dump_creates_an_indexed_pool_before_eor_deferral() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &(1..=128).collect::<Vec<_>>(), &[]);
-    let member: IpAddr = Ipv4Addr::new(10, 222, 4, 2).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 222, 4, 2).into());
     let (outbound, mut receiver) = mpsc::channel(1);
     manager.handle_update(peer_up(member, outbound, None));
     let delivered = receiver.try_recv().unwrap();
@@ -1209,13 +1218,13 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let member = Ipv4Addr::new(10, 222, 4, 3);
     let (outbound, mut receiver) = mpsc::channel(16);
-    manager.handle_update(peer_up(member.into(), outbound, None));
+    manager.handle_update(peer_up(peer_v4(member), outbound, None));
     while receiver.try_recv().is_ok() {}
     source_update(&mut manager, &(1..=128).collect::<Vec<_>>(), &[]);
     assert_eq!(receiver.try_recv().unwrap().announce.len(), 128);
     // These staged own-source rows must never enter the actual admitted OLD set.
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: member.into(),
+        peer: peer_v4(member),
         session_id: 0,
         announced: (0..2_000)
             .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::from(n), 32), member))
@@ -1231,17 +1240,17 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
     while let Ok(update) = receiver.try_recv() {
         assert!(update.announce.is_empty());
     }
-    let gid = manager.grouped_member_of(member.into()).unwrap();
+    let gid = manager.grouped_member_of(peer_v4(member)).unwrap();
     assert!(manager.group_ribs[&gid].table.len() >= 2_000);
     let mut ledger = AdmittedRecovery::with_test_limits(8 * 1024, 512 * 1024 * 1024);
-    let keeper: IpAddr = Ipv4Addr::new(10, 222, 4, 240).into();
-    let spare: IpAddr = Ipv4Addr::new(10, 222, 4, 241).into();
+    let keeper = PeerId::from_addr(Ipv4Addr::new(10, 222, 4, 240).into());
+    let spare = PeerId::from_addr(Ipv4Addr::new(10, 222, 4, 241).into());
     ledger.insert_empty(keeper).unwrap();
     ledger.insert_empty(spare).unwrap();
     ledger.remove(&spare); // Retain the second record slot, so capture registration cannot consume the fault.
     ledger.fail_next_allocation_for_test();
     manager.pending_group_admitted = ledger;
-    assert!(manager.mark_outbound_dirty(member.into()));
+    assert!(manager.mark_outbound_dirty(peer_v4(member)));
     assert_eq!(
         manager
             .pending_group_admitted
@@ -1257,11 +1266,16 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
     // The oversized optional pool refuses by cap; the fitting flat proof reaches
     // the injected allocator fault. Propagating the first refusal gives the wrong cause.
     assert_eq!(
-        manager.group_recovery_fallback(member.into()),
+        manager.group_recovery_fallback(peer_v4(member)),
         Some(RecoveryFallbackCause::AllocationFailure)
     );
     assert_eq!(fallback_count(&manager, "allocation_failure"), 1.0);
-    assert!(manager.pending_group_admitted.get(&member.into()).is_none());
+    assert!(
+        manager
+            .pending_group_admitted
+            .get(&peer_v4(member))
+            .is_none()
+    );
     source_update(&mut manager, &[], &[1]);
     while manager.resync_dirty_peers_bounded() {}
     let mut withdrawals = Vec::new();
@@ -1276,8 +1290,8 @@ fn optional_index_share_and_flat_refusal_count_once_and_keep_the_owed_withdrawal
         1
     );
     assert_eq!(fallback_count(&manager, "allocation_failure"), 1.0);
-    assert!(!manager.dirty_peers.contains(&member.into()));
-    assert_eq!(manager.group_recovery_fallback(member.into()), None);
+    assert!(!manager.dirty_peers.contains(&peer_v4(member)));
+    assert_eq!(manager.group_recovery_fallback(peer_v4(member)), None);
 }
 
 #[test]
@@ -1291,8 +1305,8 @@ fn actual_full_old_slot_churn_stops_searching_but_keeps_every_admitted_key() {
     const COUNT: u32 = 5_000;
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let first: IpAddr = Ipv4Addr::new(10, 222, 4, 4).into();
-    let second: IpAddr = Ipv4Addr::new(10, 222, 4, 5).into();
+    let first = PeerId::from_addr(Ipv4Addr::new(10, 222, 4, 4).into());
+    let second = PeerId::from_addr(Ipv4Addr::new(10, 222, 4, 5).into());
     let source = Ipv4Addr::new(192, 0, 2, 1);
     let (first_tx, mut first_rx) = mpsc::channel(64);
     let (second_tx, mut second_rx) = mpsc::channel(1024);
@@ -1304,7 +1318,7 @@ fn actual_full_old_slot_churn_stops_searching_but_keeps_every_admitted_key() {
                   announce: std::ops::Range<u32>,
                   withdraw: std::ops::Range<u32>| {
         manager.handle_update(RibUpdate::RoutesReceived {
-            peer: source.into(),
+            peer: peer_v4(source),
             session_id: 0,
             announced: announce
                 .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::from(n), 32), source))

@@ -1,4 +1,6 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
 #[tokio::test]
 async fn send_initial_table_includes_flowspec_routes() {
@@ -6,7 +8,7 @@ async fn send_initial_table_includes_flowspec_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let fs_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
     let fs_rule = fs_route.rule.clone();
 
@@ -24,7 +26,7 @@ async fn send_initial_table_includes_flowspec_routes() {
     .await
     .unwrap();
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -67,7 +69,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let fs_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
     let fs_rule = fs_route.rule.clone();
 
@@ -85,7 +87,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     .await
     .unwrap();
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -142,7 +144,7 @@ async fn dirty_resync_retries_flowspec_updates() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -167,7 +169,7 @@ async fn dirty_resync_retries_flowspec_updates() {
 
     // The initial EoR occupies the single slot, so the next FlowSpec
     // update will fail to enqueue and mark the peer dirty.
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let fs_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
     let fs_rule = fs_route.rule.clone();
     tx.send(RibUpdate::RoutesReceived {
@@ -219,7 +221,7 @@ async fn dirty_resync_retries_flowspec_updates() {
     clippy::float_cmp,
     reason = "the exported gauge contains exact integer route counts"
 )]
-fn assert_flowspec_gauge(manager: &RibManager, peer: IpAddr, expected: u32) {
+fn assert_flowspec_gauge(manager: &RibManager, peer: PeerId, expected: u32) {
     let metrics = manager.metrics.registry().gather();
     let gauge = metrics
         .iter()
@@ -253,7 +255,7 @@ async fn flowspec_gauge_tracks_gr_llgr_expiry_and_end_of_rib() {
     for llgr in [false, true] {
         for end_of_rib in [false, true] {
             let source = Ipv4Addr::new(10, 0, 0, 1);
-            let peer = IpAddr::V4(source);
+            let peer = peer_v4(source);
             let (_tx, rx) = mpsc::channel(64);
             let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
             let mut routes = Vec::new();
@@ -372,9 +374,9 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                     Afi::Ipv4
                 };
                 let source_v4 = Ipv4Addr::new(10, 0, 0, 1);
-                let source = IpAddr::V4(source_v4);
+                let source = peer_v4(source_v4);
                 let alternate_v4 = Ipv4Addr::new(10, 0, 0, 2);
-                let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
+                let target = peer_v4(Ipv4Addr::new(10, 0, 0, 100));
                 let (_tx, rx) = mpsc::channel(64);
                 let mut manager =
                     RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -413,7 +415,7 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                     let mut route = make_destless_flowspec_route(omitted_afi, alternate_v4, 6);
                     route.path_id = 31;
                     route.attributes.push(PathAttribute::LocalPref(100));
-                    let alternate = IpAddr::V4(alternate_v4);
+                    let alternate = peer_v4(alternate_v4);
                     manager.handle_update(RibUpdate::RoutesReceived {
                         session_id: 0,
                         peer: alternate,
@@ -512,7 +514,7 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                 }
                 if fallback {
                     let best = manager.loc_rib.get_flowspec(&key).unwrap();
-                    assert_eq!(best.peer, IpAddr::V4(alternate_v4));
+                    assert_eq!(best.peer, peer_v4(alternate_v4));
                     assert!(!best.is_stale);
                     assert_eq!(
                         manager.adj_ribs_out[&target]
@@ -553,7 +555,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 100));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -577,8 +579,8 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let source_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source_a = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let source_b = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     let mut route_a = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
     route_a.attributes.push(PathAttribute::LocalPref(200));
@@ -704,7 +706,7 @@ async fn destinationless_v4_v6_rules_coexist_and_withdraw_independently() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target: IpAddr = "192.0.2.2".parse().unwrap();
+    let target = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -728,7 +730,7 @@ async fn destinationless_v4_v6_rules_coexist_and_withdraw_independently() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source: IpAddr = "198.51.100.1".parse().unwrap();
+    let source = PeerId::from_addr("198.51.100.1".parse().unwrap());
     let v4 = make_destless_flowspec_route(Afi::Ipv4, "198.51.100.1".parse().unwrap(), 6);
     let v6 = make_destless_flowspec_route(Afi::Ipv6, "198.51.100.1".parse().unwrap(), 6);
     assert_eq!(v4.rule, v6.rule, "fixture must differ only by AFI");
@@ -790,7 +792,7 @@ async fn flowspec_export_prefix_term_does_not_match_destination_less_rules() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -817,7 +819,7 @@ async fn flowspec_export_prefix_term_does_not_match_destination_less_rules() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let v4_route = make_destless_flowspec_route(Afi::Ipv4, Ipv4Addr::new(10, 0, 0, 1), 6);
     let v6_route = make_destless_flowspec_route(Afi::Ipv6, Ipv4Addr::new(10, 0, 0, 1), 17);
     tx.send(RibUpdate::RoutesReceived {
@@ -860,7 +862,7 @@ async fn flowspec_export_prefix_term_still_matches_real_destination_prefix() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -888,7 +890,7 @@ async fn flowspec_export_prefix_term_still_matches_real_destination_prefix() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     // Destination 192.0.2.0/24 — must be denied by the export term.
     let denied = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
     // Destination-less — must pass through to the default Permit.
@@ -939,7 +941,7 @@ async fn flowspec_gr_consecutive_restart_deletes_stale_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -988,7 +990,7 @@ async fn flowspec_gr_eor_sweeps_non_readvertised() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let kept = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
     let dropped = make_flowspec_route_alt(Ipv4Addr::new(10, 0, 0, 1));
     let kept_rule = kept.rule.clone();
@@ -1069,7 +1071,7 @@ async fn flowspec_llgr_eor_sweeps_non_readvertised() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let kept = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
     let dropped = make_flowspec_route_alt(Ipv4Addr::new(10, 0, 0, 1));
     let kept_rule = kept.rule.clone();
@@ -1189,7 +1191,7 @@ pub(super) fn flowspec_policy_statement(
 
 async fn replace_flowspec_routes(
     tx: &mpsc::Sender<RibUpdate>,
-    source: IpAddr,
+    source: PeerId,
     routes: Vec<FlowSpecRoute>,
 ) {
     tx.send(RibUpdate::RoutesReceived {
@@ -1210,7 +1212,7 @@ async fn replace_flowspec_routes(
 
 async fn flowspec_export_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     is_ebgp: bool,
     interpret_rfc1997: bool,
     export_policy: Option<rustbgpd_policy::PolicyChain>,
@@ -1264,8 +1266,8 @@ async fn flowspec_source_no_advertise_precedes_removal_policy() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
     let source_addr = Ipv4Addr::new(198, 51, 100, 41);
-    let source = IpAddr::V4(source_addr);
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 41));
+    let source = peer_v4(source_addr);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 41));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1384,10 +1386,10 @@ async fn flowspec_no_export_honors_neighbor_mode_and_source_precedence() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let honor: IpAddr = "192.0.2.120".parse().unwrap();
-    let transparent: IpAddr = "192.0.2.121".parse().unwrap();
-    let internal: IpAddr = "192.0.2.122".parse().unwrap();
-    let policy_adder: IpAddr = "192.0.2.123".parse().unwrap();
+    let honor = PeerId::from_addr("192.0.2.120".parse().unwrap());
+    let transparent = PeerId::from_addr("192.0.2.121".parse().unwrap());
+    let internal = PeerId::from_addr("192.0.2.122".parse().unwrap());
+    let policy_adder = PeerId::from_addr("192.0.2.123".parse().unwrap());
     let mut honor_rx = flowspec_export_peer_up(&tx, honor, true, true, Some(removal_policy)).await;
     let mut transparent_rx = flowspec_export_peer_up(&tx, transparent, true, false, None).await;
     let mut internal_rx = flowspec_export_peer_up(&tx, internal, false, true, None).await;
@@ -1395,7 +1397,7 @@ async fn flowspec_no_export_honors_neighbor_mode_and_source_precedence() {
         flowspec_export_peer_up(&tx, policy_adder, true, true, Some(add_policy)).await;
 
     let source_addr = Ipv4Addr::new(198, 51, 100, 120);
-    let source = IpAddr::V4(source_addr);
+    let source = peer_v4(source_addr);
     let policy_added_route = with_flowspec_communities(
         make_destless_flowspec_route(Afi::Ipv4, source_addr, 47),
         vec![marker],
@@ -1507,8 +1509,8 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
     let source_addr = Ipv4Addr::new(198, 51, 100, 42);
-    let source = IpAddr::V4(source_addr);
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
+    let source = peer_v4(source_addr);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 42));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1650,7 +1652,7 @@ async fn local_flowspec_gauge_tracks_injected_intent() {
     let source = Ipv4Addr::new(198, 51, 100, 51);
     let mut received = make_flowspec_route(source);
     received.attributes.push(PathAttribute::LocalPref(200));
-    let peer = IpAddr::V4(source);
+    let peer = peer_v4(source);
     manager
         .ribs
         .entry(peer)
@@ -1707,7 +1709,7 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 51));
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 51));
     let mut out_rx = flowspec_export_peer_up(&tx, target, true, true, None).await;
 
     let first = local_flowspec_route(vec![(65000 << 16) | 1]);
@@ -1744,10 +1746,10 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
     let source = Ipv4Addr::new(198, 51, 100, 51);
     let mut received = make_flowspec_route(source);
     received.attributes.push(PathAttribute::LocalPref(200));
-    replace_flowspec_routes(&tx, IpAddr::V4(source), vec![received]).await;
+    replace_flowspec_routes(&tx, peer_v4(source), vec![received]).await;
     let update = out_rx.try_recv().expect("received rule takes over");
     assert_eq!(update.flowspec_announce.len(), 1);
-    assert_eq!(update.flowspec_announce[0].peer, IpAddr::V4(source));
+    assert_eq!(update.flowspec_announce[0].peer, peer_v4(source));
 
     let masked = local_flowspec_route(vec![(65000 << 16) | 3]);
     assert_eq!(
@@ -1765,7 +1767,7 @@ async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
     assert!(out_rx.try_recv().is_err());
     let best = query_flowspec_routes(&tx).await;
     assert_eq!(best.len(), 1);
-    assert_eq!(best[0].peer, IpAddr::V4(source));
+    assert_eq!(best[0].peer, peer_v4(source));
 
     drop(tx);
     handle.await.unwrap();

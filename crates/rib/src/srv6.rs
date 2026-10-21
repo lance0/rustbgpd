@@ -493,6 +493,7 @@ fn restore_component(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::PeerId;
     use std::net::Ipv6Addr;
 
     use rustbgpd_wire::{
@@ -1000,7 +1001,7 @@ pub(crate) mod tests {
             }),
             next_hop: sid.into(),
             link_local_next_hop: None,
-            peer: peer.into(),
+            peer: PeerId::from_addr(peer.into()),
             attributes: AttrSet::new(vec![
                 service_attribute(6, sid, 24, Some([32, 16, 16, 0, 16, 48])),
                 PathAttribute::PmsiTunnel(PmsiTunnel {
@@ -1155,7 +1156,7 @@ pub(crate) mod tests {
             }),
             next_hop: sid.into(),
             link_local_next_hop: None,
-            peer: peer.into(),
+            peer: PeerId::from_addr(peer.into()),
             attributes: AttrSet::new(vec![
                 service_attribute(6, sid, 124, Some([40, 24, 16, 16, 0, 0])),
                 PathAttribute::PmsiTunnel(PmsiTunnel {

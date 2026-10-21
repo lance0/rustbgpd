@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 /// Number of metric series in the registry whose `peer` label equals
 /// `peer` (exact match), across all families.
@@ -366,7 +367,7 @@ async fn link_local_neighbor_series_share_one_scoped_peer_value() {
     else {
         panic!("PeerDeleted with the scoped label expected");
     };
-    assert_eq!((peer, &*label), (addr, "fe80::1%eth0"));
+    assert_eq!((peer.addr(), &*label), (addr, "fe80::1%eth0"));
     metrics.set_rib_prefixes("fe80::1", "ipv4_unicast", 0);
     assert_eq!(
         peer_label_values(&metrics),
@@ -427,20 +428,25 @@ async fn delete_peer_reaps_metric_series() {
         rib_tx,
         None,
     );
-    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer_addr = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     let counters = Arc::new(FakePeerCounters::default());
     insert_test_managed_peer_with_asn(
         &mut mgr,
-        peer_addr,
+        peer_addr.addr(),
         65002,
-        fake_peer_handle(peer_addr, SessionState::Established, None, counters.clone()),
+        fake_peer_handle(
+            peer_addr.addr(),
+            SessionState::Established,
+            None,
+            counters.clone(),
+        ),
         false,
     );
     seed_peer_metric_series(&metrics_view, "10.0.0.2");
     metrics_view.record_fib_route_installed(); // process-global counter
     assert!(peer_metric_series_count(&metrics_view, "10.0.0.2") > 0);
 
-    mgr.delete_peer(key(peer_addr), false).await.unwrap();
+    mgr.delete_peer(key(peer_addr.addr()), false).await.unwrap();
 
     // One reap clears every emitter; process-global counters are untouched.
     assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), 0);
@@ -472,22 +478,22 @@ async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
         rib_tx,
         None,
     );
-    let addr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+    let addr = PeerId::from_addr(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)));
     let interface = "rustbgpd-test-missing0";
-    let mut original = make_config(addr, 65002);
+    let mut original = make_config(addr.addr(), 65002);
     original.interface = Some(interface.to_string());
     original.scope_id = Some(42);
     mgr.add_peer(original, false).await.unwrap();
 
     // Bare-address emitters land on the neighbor's scoped value.
     let peer_label = "fe80::1%rustbgpd-test-missing0";
-    seed_peer_metric_series(&metrics_view, &rustbgpd_telemetry::peer_label(addr));
+    seed_peer_metric_series(&metrics_view, &rustbgpd_telemetry::peer_label(addr.addr()));
     assert!(peer_metric_series_count(&metrics_view, peer_label) > 0);
 
     // Reconcile with replacement missing scope_id on nonexistent interface,
     // so delete_peer_for_reconfigure succeeds, but add_peer_with_admin_state
     // fails on nix::net::if_::if_nametoindex.
-    let mut replacement = make_config(addr, 65002);
+    let mut replacement = make_config(addr.addr(), 65002);
     replacement.interface = Some(interface.to_string());
     replacement.scope_id = None;
     replacement.hold_time = Some(30);
@@ -505,7 +511,8 @@ async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
         result.effects,
         vec![
             rustbgpd_api::peer_types::PeerReconcileEffect::RemovedForFailedReplacement(scoped_key(
-                addr, interface
+                addr.addr(),
+                interface
             ))
         ]
     );
@@ -684,11 +691,11 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
         rib_tx,
         None,
     );
-    let address = "fe80::1".parse().unwrap();
-    let first = scoped_key(address, "eth0");
-    let last = scoped_key(address, "eth1");
+    let address = PeerId::from_addr("fe80::1".parse().unwrap());
+    let first = scoped_key(address.addr(), "eth0");
+    let last = scoped_key(address.addr(), "eth1");
     for (interface, scope_id) in [("eth0", 1), ("eth1", 2)] {
-        let mut config = make_config(address, 65002);
+        let mut config = make_config(address.addr(), 65002);
         config.interface = Some(interface.to_string());
         config.scope_id = Some(scope_id);
         mgr.add_peer_with_admin_state(config, false, false)
@@ -753,7 +760,7 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
     ));
     let removed = query_session_event_history(
         &mgr,
-        Some(address),
+        Some(address.addr()),
         [SessionLifecycleEventType::PeerRemoved]
             .into_iter()
             .collect(),
@@ -1056,16 +1063,19 @@ async fn dynamic_peer_auto_removal_reaps_metric_series() {
         rib_tx,
         None,
     );
-    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer_addr = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     let counters = Arc::new(FakePeerCounters::default());
     insert_test_managed_peer_with_asn(
         &mut mgr,
-        peer_addr,
+        peer_addr.addr(),
         65002,
-        fake_peer_handle(peer_addr, SessionState::Idle, None, counters.clone()),
+        fake_peer_handle(peer_addr.addr(), SessionState::Idle, None, counters.clone()),
         false,
     );
-    mgr.peers.get_mut(&key(peer_addr)).unwrap().is_dynamic = true;
+    mgr.peers
+        .get_mut(&key(peer_addr.addr()))
+        .unwrap()
+        .is_dynamic = true;
     mgr.dynamic_peer_count = 1;
     seed_peer_metric_series(&metrics_view, "10.0.0.2");
 
@@ -1073,7 +1083,7 @@ async fn dynamic_peer_auto_removal_reaps_metric_series() {
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id: 1,
         role: rustbgpd_transport::SessionRole::Primary,
-        peer_addr,
+        peer_addr: peer_addr.addr(),
     })
     .await;
 
@@ -1144,7 +1154,7 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
             if let RibUpdate::QueryBmpPeerStats { reply } = update {
                 let mut counts = std::collections::HashMap::new();
                 counts.insert(
-                    addr,
+                    PeerId::from_addr(addr),
                     vec![
                         ((Afi::Ipv4, Safi::Unicast), 12_u64),
                         ((Afi::Ipv4, Safi::MplsVpn), 3_u64),
@@ -1152,7 +1162,7 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
                 );
                 let mut rpki_counts = std::collections::HashMap::new();
                 rpki_counts.insert(
-                    addr,
+                    PeerId::from_addr(addr),
                     vec![(
                         (Afi::Ipv4, Safi::Unicast),
                         rustbgpd_rib::RpkiValidationCounts {
@@ -1358,7 +1368,7 @@ fn rfc9972_rpki_counts_remain_exact_under_add_path_and_project_zero_rows() {
 
     let mut rpki = std::collections::HashMap::new();
     rpki.insert(
-        addr,
+        PeerId::from_addr(addr),
         vec![(
             (Afi::Ipv4, Safi::Unicast),
             rustbgpd_rib::RpkiValidationCounts {

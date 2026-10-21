@@ -1,6 +1,7 @@
 //! Neighbor-snapshot projection of outbound resync and update-group recovery
 //! fallback state.
 
+use crate::PeerId;
 use std::time::Duration;
 
 use super::update_groups_recovery::peer_up;
@@ -14,7 +15,7 @@ fn prefix(octet: u8) -> Ipv4Prefix {
 fn source_update(manager: &mut RibManager, announce: &[u8]) {
     let source = Ipv4Addr::new(192, 0, 2, 1);
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: source.into(),
+        peer: peer_v4(source),
         session_id: 0,
         announced: announce
             .iter()
@@ -39,7 +40,7 @@ async fn dirty_grouped_member_reports_pending_resync_and_fallback_cause() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 9, 1).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 9, 1).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
     while receiver.try_recv().is_ok() {}
@@ -84,7 +85,7 @@ async fn dirty_seconds_restart_with_each_episode() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     source_update(&mut manager, &[1]);
-    let member: IpAddr = Ipv4Addr::new(10, 220, 9, 2).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(10, 220, 9, 2).into());
     let (outbound, mut receiver) = mpsc::channel(16);
     manager.handle_update(peer_up(member, outbound, None));
     while receiver.try_recv().is_ok() {}

@@ -1,7 +1,7 @@
 //! Shared staged payloads and per-member delta emission for update groups.
 
+use crate::PeerId;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyEvaluation};
@@ -24,7 +24,7 @@ pub(in crate::manager) struct GroupDelta {
     pub(in crate::manager) new: Option<(Route, Option<NextHopAction>)>,
     /// Source peer of the group-table entry this delta replaces, read
     /// BEFORE commit. `None` = the key was not previously staged.
-    pub(in crate::manager) old_source: Option<IpAddr>,
+    pub(in crate::manager) old_source: Option<PeerId>,
     /// Plain groups retain only SOURCE control attributes for prior eligibility;
     /// full route/lane snapshots are confined to per-client-best groups.
     pub(in crate::manager) prior_source_attrs: Option<Arc<AttrSet>>,
@@ -90,7 +90,7 @@ impl PriorGroupSlots {
         Some(prior)
     }
 
-    pub(in crate::manager) fn adv_entry(&self, member: IpAddr) -> Option<AdvEntry<'_>> {
+    pub(in crate::manager) fn adv_entry(&self, member: PeerId) -> Option<AdvEntry<'_>> {
         if self.route.peer != member {
             return Some(AdvEntry {
                 route: &self.route,
@@ -149,7 +149,7 @@ pub(in crate::manager) struct RunnerUp {
     /// [`LaneDelta::old_source`] carries the old RUNNER-UP's source —
     /// without this field no emit, count, or replay seam could know
     /// which member the substitution targets.
-    pub(in crate::manager) winner_source: IpAddr,
+    pub(in crate::manager) winner_source: PeerId,
 }
 
 /// One slot of a member's derived advertised view — what
@@ -188,7 +188,7 @@ pub(in crate::manager) struct LaneDelta {
     pub(in crate::manager) new: Option<RunnerUp>,
     /// The replaced lane slot, before this pass commits its desired view.
     pub(in crate::manager) prior: Option<RunnerUp>,
-    pub(in crate::manager) old_source: Option<IpAddr>,
+    pub(in crate::manager) old_source: Option<PeerId>,
     /// The ONE member this transition emits toward, resolved at
     /// staging time (every Decision 5 lane arm is member-scoped
     /// "toward `source(w)`"): the new entry's [`RunnerUp::winner_source`]
@@ -203,7 +203,7 @@ pub(in crate::manager) struct LaneDelta {
     /// rewrite; the lane arm owns exactly the slots they skip
     /// (`source(w)` under an unchanged winner source, and the old
     /// `source(w)` on all-candidates-gone).
-    pub(in crate::manager) emit_target: Option<IpAddr>,
+    pub(in crate::manager) emit_target: Option<PeerId>,
     /// Captured source attributes of the REPLACED lane entry — the
     /// was-side input for rs-control verdict flips across the
     /// transition, mirroring [`RsTagTransition::prior_source_attrs`].
@@ -299,7 +299,7 @@ pub(in crate::manager) struct CleanPolicyTransitionInventory {
     pub(in crate::manager) permit_totals: HashMap<Option<String>, u64>,
     /// The subset of each aggregate sourced by one peer. Split-horizon
     /// excludes these verdicts from that peer's counter replay.
-    pub(in crate::manager) permit_by_source: HashMap<IpAddr, HashMap<Option<String>, u64>>,
+    pub(in crate::manager) permit_by_source: HashMap<PeerId, HashMap<Option<String>, u64>>,
 }
 
 impl CleanPolicyTransitionInventory {
@@ -319,7 +319,7 @@ impl CleanPolicyTransitionInventory {
 
 fn retire_clean_policy_counts(
     permit_totals: &mut HashMap<Option<String>, u64>,
-    permit_by_source: &mut HashMap<IpAddr, HashMap<Option<String>, u64>>,
+    permit_by_source: &mut HashMap<PeerId, HashMap<Option<String>, u64>>,
     checkpoint: &mut impl FnMut(bool),
 ) {
     for row in permit_totals.drain() {
@@ -348,7 +348,7 @@ pub(in crate::manager) struct CleanPolicyTransitionInventoryBuilder {
     pub(super) announce: Vec<Route>,
     pub(super) next_hop_override: Vec<Option<NextHopAction>>,
     pub(super) permit_totals: HashMap<Option<String>, u64>,
-    pub(super) permit_by_source: HashMap<IpAddr, HashMap<Option<String>, u64>>,
+    pub(super) permit_by_source: HashMap<PeerId, HashMap<Option<String>, u64>>,
 }
 
 impl CleanPolicyTransitionInventoryBuilder {
@@ -440,21 +440,21 @@ pub(in crate::manager) struct GroupStageOutput {
     /// the old source of a withdraw delta (withdraw → skip/lane
     /// withdraw), or a consumed lane transition's `emit_target`
     /// (member-scoped emission the shared payload does not carry).
-    pub(super) exceptions: HashSet<IpAddr>,
+    pub(super) exceptions: HashSet<PeerId>,
     /// Exception members that cannot be expressed as the shared announce
     /// payload plus own-source exclusion and therefore still need the full
     /// per-member matrix walk.
-    source_exclusion_unsafe: HashSet<IpAddr>,
+    source_exclusion_unsafe: HashSet<PeerId>,
     /// Number of shared announcements sourced by each member. This makes the
     /// all-own-source no-op test O(1): emitting an otherwise empty envelope
     /// changes marker ordering even though transport would encode no UPDATE.
-    shared_source_counts: HashMap<IpAddr, usize>,
+    shared_source_counts: HashMap<PeerId, usize>,
 }
 
 impl GroupStageOutput {
     pub(in crate::manager) fn prior_slots(
         &self,
-        member: IpAddr,
+        member: PeerId,
     ) -> impl Iterator<Item = ((Prefix, u32), AdvEntry<'_>)> {
         self.deltas
             .iter()
@@ -512,7 +512,7 @@ impl GroupStageOutput {
 
     /// Whether the pre-built shared emission is exactly this member's
     /// source-flip matrix output.
-    pub(in crate::manager) fn shared_applies_to(&self, member: IpAddr) -> bool {
+    pub(in crate::manager) fn shared_applies_to(&self, member: PeerId) -> bool {
         !self.exceptions.contains(&member)
     }
 
@@ -521,7 +521,7 @@ impl GroupStageOutput {
     /// cold-table announce whose only exception is the newly staged route's
     /// source: the member must see nothing for that slot, and no displaced
     /// advertisement or exception lane is owed.
-    pub(in crate::manager) fn shared_applies_with_source_exclusion(&self, member: IpAddr) -> bool {
+    pub(in crate::manager) fn shared_applies_with_source_exclusion(&self, member: PeerId) -> bool {
         !self.source_exclusion_unsafe.contains(&member)
     }
 
@@ -530,7 +530,7 @@ impl GroupStageOutput {
     /// per-member matrix correctly emits no envelope for this member.
     pub(in crate::manager) fn shared_has_payload_after_source_exclusion(
         &self,
-        member: IpAddr,
+        member: PeerId,
     ) -> bool {
         !self.shared_withdraw.is_empty()
             || self.shared_source_counts.get(&member).copied().unwrap_or(0)
@@ -621,7 +621,7 @@ impl GroupStageOutput {
     /// dirty resync re-derives them from `adv(m)`.
     pub(in crate::manager) fn member_scoped_withdraws<'a>(
         &'a self,
-        member: IpAddr,
+        member: PeerId,
         checkpoint: impl Fn() + Copy + 'a,
     ) -> impl Iterator<Item = (Prefix, u32)> + 'a {
         self.deltas
@@ -761,7 +761,7 @@ pub(in crate::manager) struct BatchedTransitionInventory {
     /// Member-scoped corrections the shared exclusion cannot express:
     /// the ADR-0126 lane substitution toward each winner's source
     /// (announce) and the displaced/retired own-sourced slot (withdraw).
-    pub(in crate::manager) supplements: AddrMap<IpAddr, BatchedMemberSupplement>,
+    pub(in crate::manager) supplements: AddrMap<PeerId, BatchedMemberSupplement>,
     pub(super) counters: BatchedTransitionCounters,
 }
 
@@ -804,10 +804,10 @@ pub(in crate::manager) struct BatchedMemberSupplement {
 #[derive(Default)]
 pub(super) struct BatchedTransitionCounters {
     pub(super) permit_totals: FastMap<Option<PolicyLabel>, u64>,
-    pub(super) permit_by_source: AddrMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
-    pub(super) lane_by_winner_source: AddrMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
+    pub(super) permit_by_source: AddrMap<PeerId, FastMap<Option<PolicyLabel>, u64>>,
+    pub(super) lane_by_winner_source: AddrMap<PeerId, FastMap<Option<PolicyLabel>, u64>>,
     pub(super) deny_totals: FastMap<Option<PolicyLabel>, u64>,
-    pub(super) deny_by_source: AddrMap<IpAddr, FastMap<Option<PolicyLabel>, u64>>,
+    pub(super) deny_by_source: AddrMap<PeerId, FastMap<Option<PolicyLabel>, u64>>,
 }
 
 impl BatchedTransitionCounters {
@@ -839,7 +839,7 @@ impl BatchedTransitionCounters {
         }
     }
 
-    pub(super) fn record_permit(&mut self, source: IpAddr, label: Option<PolicyLabel>) {
+    pub(super) fn record_permit(&mut self, source: PeerId, label: Option<PolicyLabel>) {
         *self
             .permit_by_source
             .entry(source)
@@ -849,7 +849,7 @@ impl BatchedTransitionCounters {
         *self.permit_totals.entry(label).or_default() += 1;
     }
 
-    pub(super) fn record_lane(&mut self, winner_source: IpAddr, label: Option<PolicyLabel>) {
+    pub(super) fn record_lane(&mut self, winner_source: PeerId, label: Option<PolicyLabel>) {
         *self
             .lane_by_winner_source
             .entry(winner_source)
@@ -858,7 +858,7 @@ impl BatchedTransitionCounters {
             .or_default() += 1;
     }
 
-    pub(super) fn record_deny(&mut self, source: IpAddr, label: Option<PolicyLabel>) {
+    pub(super) fn record_deny(&mut self, source: PeerId, label: Option<PolicyLabel>) {
         *self
             .deny_by_source
             .entry(source)
@@ -875,7 +875,7 @@ impl BatchedTransitionCounters {
     /// a full table walk.
     pub(super) fn rows_for(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<(Option<String>, PolicyAction, u64)> {
         let mut rows = Vec::new();
@@ -941,11 +941,11 @@ impl BatchedTransitionCounters {
 #[derive(Default)]
 pub(in crate::manager) struct GroupEvalAccumulator {
     pub(super) totals: Vec<(Option<PolicyLabel>, PolicyAction, u64)>,
-    pub(super) per_source: AddrMap<IpAddr, Vec<(Option<PolicyLabel>, PolicyAction, u64)>>,
+    pub(super) per_source: AddrMap<PeerId, Vec<(Option<PolicyLabel>, PolicyAction, u64)>>,
     /// Verdict (and source peer) of the most recent evaluation, consumed
     /// per key by the staging loops to label the staged entry / denial
     /// residue (single-best stages at most one eval per key).
-    pub(super) last: Option<(Option<PolicyLabel>, PolicyAction, IpAddr)>,
+    pub(super) last: Option<(Option<PolicyLabel>, PolicyAction, PeerId)>,
 }
 
 pub(super) fn bump_eval_row(
@@ -1003,7 +1003,7 @@ impl GroupEvalAccumulator {
     }
 
     /// Record one chain evaluation for the route sourced by `source`.
-    pub(in crate::manager) fn record(&mut self, evaluation: &PolicyEvaluation, source: IpAddr) {
+    pub(in crate::manager) fn record(&mut self, evaluation: &PolicyEvaluation, source: PeerId) {
         bump_eval_row(
             &mut self.totals,
             evaluation.matched_policy.as_ref(),
@@ -1021,7 +1021,7 @@ impl GroupEvalAccumulator {
     /// per-key label / denial-residue hook.
     pub(in crate::manager) fn take_last(
         &mut self,
-    ) -> Option<(Option<PolicyLabel>, PolicyAction, IpAddr)> {
+    ) -> Option<(Option<PolicyLabel>, PolicyAction, PeerId)> {
         self.last.take()
     }
 }
@@ -1063,7 +1063,7 @@ impl GroupEvalAccumulator {
 #[cfg(test)]
 pub(in crate::manager) fn emit_group_deltas_for_member(
     deltas: &[GroupDelta],
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
     withdraw: &mut Vec<(Prefix, u32)>,
@@ -1082,7 +1082,7 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
 
 pub(in crate::manager) fn emit_group_deltas_for_member_with_checkpoint(
     deltas: &[GroupDelta],
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
     withdraw: &mut Vec<(Prefix, u32)>,
@@ -1194,7 +1194,7 @@ pub(in crate::manager) fn emit_group_deltas_for_member_with_checkpoint(
 fn emit_pcb_source_flip(
     delta: &GroupDelta,
     prior: &PriorGroupSlots,
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
     withdraw: &mut Vec<(Prefix, u32)>,
@@ -1280,7 +1280,7 @@ fn prepare_pcb_slot(
 #[cfg(test)]
 pub(in crate::manager) fn emit_lane_deltas_for_member(
     lane_deltas: &[LaneDelta],
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
     withdraw: &mut Vec<(Prefix, u32)>,
@@ -1299,7 +1299,7 @@ pub(in crate::manager) fn emit_lane_deltas_for_member(
 
 pub(in crate::manager) fn emit_lane_deltas_for_member_with_checkpoint(
     lane_deltas: &[LaneDelta],
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
     withdraw: &mut Vec<(Prefix, u32)>,
@@ -1378,7 +1378,7 @@ pub(in crate::manager) fn emit_lane_deltas_for_member_with_checkpoint(
 #[cfg(test)]
 pub(in crate::manager) fn emit_rs_tag_transitions(
     transitions: &[RsTagTransition],
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
     withdraw: &mut Vec<(Prefix, u32)>,
@@ -1397,7 +1397,7 @@ pub(in crate::manager) fn emit_rs_tag_transitions(
 
 pub(in crate::manager) fn emit_rs_tag_transitions_with_checkpoint(
     transitions: &[RsTagTransition],
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
     announce: &mut Vec<Route>,
     withdraw: &mut Vec<(Prefix, u32)>,
@@ -1439,7 +1439,7 @@ pub(in crate::manager) fn emit_rs_tag_transitions_with_checkpoint(
 /// A persistent group-verdict VPN denial: (source peer, denying policy
 /// label, the denied route's extended communities — the Φ gate input
 /// for an RTC member's join-time counter replay).
-pub(super) type VpnDenialRecord = (IpAddr, Option<PolicyLabel>, Vec<ExtendedCommunity>);
+pub(super) type VpnDenialRecord = (PeerId, Option<PolicyLabel>, Vec<ExtendedCommunity>);
 
 /// One entry of a shared group VPN staging pass. Unlike the unicast
 /// [`GroupDelta`] this carries the full displaced route (`old`), not just
@@ -1490,7 +1490,7 @@ impl VpnGroupStageOutput {
     /// its emission is lost to a full channel.
     pub(in crate::manager) fn member_scoped_withdraws<'a>(
         &'a self,
-        member: IpAddr,
+        member: PeerId,
         filter: Option<&'a RtcMembership>,
         mut checkpoint: impl FnMut() + 'a,
     ) -> impl Iterator<Item = VpnRouteKey> + 'a {
@@ -1536,7 +1536,7 @@ pub(in crate::manager) fn rt_passes(filter: Option<&RtcMembership>, route: &VpnR
 #[cfg(test)]
 pub(in crate::manager) fn emit_vpn_group_deltas_for_member(
     deltas: &[VpnGroupDelta],
-    member: IpAddr,
+    member: PeerId,
     filter: Option<&RtcMembership>,
     vpn_announce: &mut Vec<VpnRibRoute>,
     vpn_withdraw: &mut Vec<VpnRibRouteKey>,
@@ -1553,7 +1553,7 @@ pub(in crate::manager) fn emit_vpn_group_deltas_for_member(
 
 pub(in crate::manager) fn emit_vpn_group_deltas_for_member_with_checkpoint(
     deltas: &[VpnGroupDelta],
-    member: IpAddr,
+    member: PeerId,
     filter: Option<&RtcMembership>,
     vpn_announce: &mut Vec<VpnRibRoute>,
     vpn_withdraw: &mut Vec<VpnRibRouteKey>,
@@ -1604,7 +1604,7 @@ impl EvpnGroupInput {
     pub(in crate::manager) fn eligible(
         &self,
         route: &crate::route::EvpnRibRoute,
-        member: IpAddr,
+        member: PeerId,
         group: &super::GroupRibOut,
         cluster_id: Option<std::net::Ipv4Addr>,
         membership: Option<&super::RtcMembership>,
@@ -1658,7 +1658,7 @@ impl EvpnGroupStageOutput {
 pub(in crate::manager) fn emit_evpn_group_deltas_for_member(
     group: &super::GroupRibOut,
     deltas: &[EvpnGroupDelta],
-    member: IpAddr,
+    member: PeerId,
     cluster_id: Option<std::net::Ipv4Addr>,
     membership: Option<&super::RtcMembership>,
     rejected: Option<&HashSet<crate::update::ExactExportKey>>,
@@ -1685,7 +1685,7 @@ pub(in crate::manager) fn emit_evpn_group_deltas_for_member(
 pub(in crate::manager) fn emit_evpn_group_deltas_for_member_with_checkpoint(
     group: &super::GroupRibOut,
     deltas: &[EvpnGroupDelta],
-    member: IpAddr,
+    member: PeerId,
     cluster_id: Option<std::net::Ipv4Addr>,
     membership: Option<&super::RtcMembership>,
     rejected: Option<&HashSet<crate::update::ExactExportKey>>,

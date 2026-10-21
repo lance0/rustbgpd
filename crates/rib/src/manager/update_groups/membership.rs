@@ -1,7 +1,8 @@
 use super::{
-    AdjRibOut, ExactExportKey, FastMap, GroupMembership, GroupRibOut, HashSet, IpAddr, PolicyChain,
+    AdjRibOut, ExactExportKey, FastMap, GroupMembership, GroupRibOut, HashSet, PolicyChain,
     RegroupBaseline, RibManager, VpnRibRouteKey,
 };
+use crate::PeerId;
 
 impl RibManager {
     /// Compute (or recompute) a registered peer's update-group
@@ -21,7 +22,7 @@ impl RibManager {
     )]
     pub(in crate::manager) fn recompute_update_group(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Option<super::super::evpn_recovery::EvpnCompleteFeed> {
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
@@ -507,7 +508,7 @@ impl RibManager {
     /// group-uniform staging inputs from the joining peer (all members
     /// are key-equal) and builds the shared table with one staging pass
     /// — the policy work every subsequent join replays for free.
-    pub(super) fn join_group(&mut self, gid: usize, peer: IpAddr) {
+    pub(super) fn join_group(&mut self, gid: usize, peer: PeerId) {
         // Every membership seam funnels through here (registration,
         // recompute, per-peer policy install): a join landing on the gid
         // of a mid-walk destination prestage must discard the prestage
@@ -524,7 +525,7 @@ impl RibManager {
     /// join-time build pass (one shared staging walk, deltas discarded:
     /// correct only while the group is memberless). `peer` is the
     /// exemplar whose group-uniform staging inputs seed the profile.
-    pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: IpAddr) {
+    pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: PeerId) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
         if !self.group_ribs.contains_key(&gid) {
@@ -636,7 +637,7 @@ impl RibManager {
     /// recompute/fallback, rollback to a prior group, and the optimized clean
     /// transition commit. Ungrouped peers never pass through it and retain
     /// their independently installed chain.
-    pub(super) fn install_group_member(&mut self, gid: usize, peer: IpAddr) {
+    pub(super) fn install_group_member(&mut self, gid: usize, peer: PeerId) {
         // Grouped unicast state belongs to GroupRibOut. Install the private
         // multi-family table with no unicast reservation before any family
         // can become its first creator; non-unicast state still lives here,

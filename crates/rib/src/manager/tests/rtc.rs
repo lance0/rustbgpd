@@ -1,5 +1,7 @@
 use super::*;
+use crate::PeerId;
 use crate::attr_set::AttrSet;
+use crate::test_support::peer_v4;
 
 fn with_rtc_no_advertise(mut route: crate::route::RtcRibRoute) -> crate::route::RtcRibRoute {
     AttrSet::edit(&mut route.attributes, |attrs| {
@@ -57,7 +59,7 @@ async fn rtc_routes_received_stored_and_queryable() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
@@ -85,7 +87,7 @@ async fn rtc_withdraw_removes_route() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let key = route.key();
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -120,7 +122,7 @@ async fn rtc_default_nlri_stored() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let mut route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 0, 100);
     route.nlri = rustbgpd_wire::RtcNlri::DEFAULT;
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -152,8 +154,8 @@ async fn rtc_route_reflects_between_ibgp_clients_with_originator_and_cluster_lis
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let client_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let client_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let client_a = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let client_b = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut a_rx = rtc_peer_up(&tx, client_a, false, true).await;
     drain_rtc_initial_dump(&mut a_rx).await;
     let mut b_rx = rtc_peer_up(&tx, client_b, false, true).await;
@@ -210,8 +212,8 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
     let source = Ipv4Addr::new(198, 51, 100, 10);
-    let source_ip = IpAddr::V4(source);
-    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
+    let source_ip = peer_v4(source);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -221,7 +223,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
         peer_asn: 65100,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
-        export_policy: Some(rtc_no_advertise_policy(source_ip, false)),
+        export_policy: Some(rtc_no_advertise_policy(source_ip.addr(), false)),
         sendable_families: rtc_sendable(),
         is_ebgp: true,
         route_reflector_client: false,
@@ -283,7 +285,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
         peer: target,
-        export_policy: Some(rtc_no_advertise_policy(source_ip, true)),
+        export_policy: Some(rtc_no_advertise_policy(source_ip.addr(), true)),
         reply,
     })
     .await
@@ -299,7 +301,7 @@ async fn rtc_no_advertise_withdraws_exact_prior_and_recovers() {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::ReplacePeerExportPolicy {
         peer: target,
-        export_policy: Some(rtc_no_advertise_policy(source_ip, false)),
+        export_policy: Some(rtc_no_advertise_policy(source_ip.addr(), false)),
         reply,
     })
     .await
@@ -325,7 +327,7 @@ async fn rtc_route_not_reflected_to_source_peer() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let mut source_rx = rtc_peer_up(&tx, source, false, true).await;
     drain_rtc_initial_dump(&mut source_rx).await;
 
@@ -358,8 +360,8 @@ async fn rtc_route_suppressed_nonclient_to_nonclient() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let non_client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let non_client = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut source_rx = rtc_peer_up(&tx, source, false, false).await;
     drain_rtc_initial_dump(&mut source_rx).await;
     let mut non_client_rx = rtc_peer_up(&tx, non_client, false, false).await;
@@ -395,7 +397,7 @@ async fn send_initial_table_includes_rtc_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let key = route.key();
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -407,7 +409,7 @@ async fn send_initial_table_includes_rtc_routes() {
     .await
     .unwrap();
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
 
     let update = out_rx.recv().await.unwrap();
@@ -438,7 +440,7 @@ async fn peer_up_with_rtc_family_originates_default_rtc_to_peer() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
 
     let update = out_rx.recv().await.unwrap();
@@ -479,7 +481,7 @@ async fn default_rtc_not_originated_to_non_rtc_peer() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -520,7 +522,7 @@ async fn default_rtc_origination_idempotent_across_peer_ups() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
 
@@ -534,7 +536,7 @@ async fn default_rtc_origination_idempotent_across_peer_ups() {
     // Same peer returns; a second RTC peer joins too.
     let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
-    let second = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let second = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut second_rx = rtc_peer_up(&tx, second, true, false).await;
     drain_rtc_initial_dump(&mut second_rx).await;
 
@@ -561,7 +563,7 @@ async fn default_rtc_retained_after_last_rtc_peer_drops_and_readvertised_on_retu
     let handle = tokio::spawn(manager.run());
 
     // The only RTC peer comes up: default is originated and advertised.
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, peer, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
 
@@ -601,11 +603,11 @@ async fn peer_down_withdraws_rtc_routes_from_other_peers() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let key = route.key();
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -648,11 +650,11 @@ async fn rtc_gr_family_not_in_capability_is_withdrawn() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let key = route.key();
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -709,11 +711,11 @@ async fn rtc_gr_marks_stale_and_demotes_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let key = route.key();
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -771,11 +773,11 @@ async fn rtc_gr_eor_clears_stale() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let kept = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let dropped = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 200, 100);
     let kept_key = kept.key();
@@ -847,7 +849,7 @@ async fn rtc_gr_timer_sweeps_stale_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let key = route.key();
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -896,11 +898,11 @@ async fn rtc_gr_consecutive_restart_deletes_stale_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let key = route.key();
     tx.send(RibUpdate::RtcRoutesReceived {
@@ -961,7 +963,7 @@ async fn route_refresh_rtc_re_advertises_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, true, false).await;
     drain_rtc_initial_dump(&mut out_rx).await;
 
@@ -1021,7 +1023,7 @@ async fn vpn_not_advertised_to_rtc_peer_with_empty_membership() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1035,7 +1037,7 @@ async fn vpn_not_advertised_to_rtc_peer_with_empty_membership() {
     .await
     .unwrap();
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = vpn_rtc_peer_up(&tx, target).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
@@ -1054,7 +1056,7 @@ async fn vpn_not_advertised_to_rtc_peer_with_empty_membership() {
 fn rtc_export_filter_strict_empty_and_argument_driven() {
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let sendable_rtc = vec![crate::route::RtcRibRouteKey::afi_safi()];
     let sendable_no_rtc = vec![(Afi::Ipv4, Safi::Unicast)];
 
@@ -1094,7 +1096,7 @@ async fn vpn_advertised_after_matching_rtc_nlri_arrives_without_reset() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let route_b = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(200)]);
     let key_a = route_a.key();
@@ -1109,7 +1111,7 @@ async fn vpn_advertised_after_matching_rtc_nlri_arrives_without_reset() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
@@ -1137,7 +1139,7 @@ async fn vpn_withdrawn_when_rtc_nlri_withdrawn() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 62, vec![rt(100)]);
     let vpn_key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -1150,7 +1152,7 @@ async fn vpn_withdrawn_when_rtc_nlri_withdrawn() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     // The receiving leaf originates interest in another leaf's RT:
@@ -1162,7 +1164,7 @@ async fn vpn_withdrawn_when_rtc_nlri_withdrawn() {
     let interest_key = interest.key();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![interest],
         withdrawn: vec![],
     })
@@ -1173,7 +1175,7 @@ async fn vpn_withdrawn_when_rtc_nlri_withdrawn() {
 
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![],
         withdrawn: vec![interest_key],
     })
@@ -1195,7 +1197,7 @@ async fn default_rtc_nlri_matches_all_vpn_routes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1210,12 +1212,12 @@ async fn default_rtc_nlri_matches_all_vpn_routes() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![make_rtc_rib_route_with_nlri(
             target,
             rustbgpd_wire::RtcNlri::DEFAULT,
@@ -1245,7 +1247,7 @@ async fn rtc_prefix_match_gates_by_masked_bits() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let covered_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let covered_b = make_vpn_rib_route_with_rts(
         Ipv4Addr::new(10, 0, 0, 1),
@@ -1270,14 +1272,14 @@ async fn rtc_prefix_match_gates_by_masked_bits() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     // /48 = origin AS 65000 (32 bits) + RT type 0x00 / subtype 0x02 (16 bits).
     let nlri = rustbgpd_wire::RtcNlri::new(65000, 0x0002_0000_0000_0000, 48).unwrap();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![make_rtc_rib_route_with_nlri(target, nlri)],
         withdrawn: vec![],
     })
@@ -1305,7 +1307,7 @@ async fn rtc_filter_applies_to_both_vpnv4_and_vpnv6() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let v4_covered = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let v6_covered = make_vpn6_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 1, vec![rt(100)]);
     let v4_other = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(200)]);
@@ -1321,7 +1323,7 @@ async fn rtc_filter_applies_to_both_vpnv4_and_vpnv6() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
@@ -1348,7 +1350,7 @@ async fn non_rtc_peer_reflection_unchanged() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -1360,7 +1362,7 @@ async fn non_rtc_peer_reflection_unchanged() {
     .await
     .unwrap();
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1399,7 +1401,7 @@ async fn route_with_any_matching_rt_passes() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(555), rt(100)]);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -1412,7 +1414,7 @@ async fn route_with_any_matching_rt_passes() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
@@ -1433,7 +1435,7 @@ async fn membership_rebuilt_from_all_adjribin_paths_not_locrib_best() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -1447,16 +1449,16 @@ async fn membership_rebuilt_from_all_adjribin_paths_not_locrib_best() {
 
     let winner = Ipv4Addr::new(10, 0, 0, 2);
     let loser = Ipv4Addr::new(10, 0, 0, 3);
-    let mut winner_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(winner)).await;
+    let mut winner_rx = vpn_rtc_peer_up(&tx, peer_v4(winner)).await;
     drain_strict_vpn_rtc_initial_dump(&mut winner_rx).await;
-    let mut loser_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(loser)).await;
+    let mut loser_rx = vpn_rtc_peer_up(&tx, peer_v4(loser)).await;
     drain_strict_vpn_rtc_initial_dump(&mut loser_rx).await;
 
     // Winner's copy of the NLRI takes the Loc-RIB tiebreak (higher LOCAL_PREF)
     // and gets reflected to the loser.
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(winner),
+        peer: peer_v4(winner),
         announced: vec![make_rtc_rib_route(winner, 100, 200)],
         withdrawn: vec![],
     })
@@ -1472,7 +1474,7 @@ async fn membership_rebuilt_from_all_adjribin_paths_not_locrib_best() {
     // open — the filter reads the peer's Adj-RIB-In, not the Loc-RIB.
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(loser),
+        peer: peer_v4(loser),
         announced: vec![make_rtc_rib_route(loser, 100, 100)],
         withdrawn: vec![],
     })
@@ -1498,7 +1500,7 @@ async fn rtc_refresh_eorr_sweep_restages_vpn() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let route_b = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(200)]);
     let key_b = route_b.key();
@@ -1512,7 +1514,7 @@ async fn rtc_refresh_eorr_sweep_restages_vpn() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100, 200]).await;
@@ -1520,7 +1522,7 @@ async fn rtc_refresh_eorr_sweep_restages_vpn() {
     assert_eq!(announced.vpn_announce.len(), 2);
 
     tx.send(RibUpdate::BeginRouteRefresh {
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         session_id: 0,
         afi: Afi::Ipv4,
         safi: Safi::RtConstrain,
@@ -1531,7 +1533,7 @@ async fn rtc_refresh_eorr_sweep_restages_vpn() {
     // stays marked stale.
     send_rtc_interest(&tx, target, &[100]).await;
     tx.send(RibUpdate::EndRouteRefresh {
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         session_id: 0,
         afi: Afi::Ipv4,
         safi: Safi::RtConstrain,
@@ -1560,7 +1562,7 @@ async fn gr_reestablish_without_rtc_in_capability_starts_strict() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -1573,7 +1575,7 @@ async fn gr_reestablish_without_rtc_in_capability_starts_strict() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
     send_rtc_interest(&tx, target, &[100]).await;
     let announced = out_rx.recv().await.unwrap();
@@ -1583,7 +1585,7 @@ async fn gr_reestablish_without_rtc_in_capability_starts_strict() {
     // retained (RFC 4724: only families in the capability are preserved).
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
@@ -1596,7 +1598,7 @@ async fn gr_reestablish_without_rtc_in_capability_starts_strict() {
 
     // Re-establish: the strict initial dump proves the membership did not
     // survive the restart — no VPN routes until the interest re-arrives.
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
@@ -1619,7 +1621,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route_a = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let route_b = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 61, vec![rt(200)]);
     let key_a = route_a.key();
@@ -1634,7 +1636,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
     send_rtc_interest(&tx, target, &[100, 200]).await;
     let announced = out_rx.recv().await.unwrap();
@@ -1644,7 +1646,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
     // preserved as stale.
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv4, Safi::RtConstrain)],
@@ -1657,7 +1659,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
 
     // Re-establish: VPN routes flow in the INITIAL dump, filtered by the
     // stale membership — before any RTC re-advertisement arrives.
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     let dump = out_rx.recv().await.unwrap();
     let dumped: Vec<_> = dump.vpn_announce.iter().map(VpnRibRoute::key).collect();
     assert!(
@@ -1675,7 +1677,7 @@ async fn rtc_gr_preserves_vpn_membership_through_restart_window() {
     // membership shrinks and the uncovered VPN route is withdrawn.
     tx.send(RibUpdate::EndOfRib {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         afi: Afi::Ipv4,
         safi: Safi::RtConstrain,
     })
@@ -1708,7 +1710,7 @@ async fn initial_dump_to_rtc_peer_stages_no_vpn_then_flows_on_interest() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -1721,7 +1723,7 @@ async fn initial_dump_to_rtc_peer_stages_no_vpn_then_flows_on_interest() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
@@ -1741,7 +1743,7 @@ async fn rtc_membership_unchanged_skips_restage() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1756,7 +1758,7 @@ async fn rtc_membership_unchanged_skips_restage() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     send_rtc_interest(&tx, target, &[100]).await;
@@ -1816,7 +1818,7 @@ fn es_import_interest(peer: Ipv4Addr) -> crate::route::RtcRibRoute {
 /// undrained.
 async fn families_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     sendable_families: Vec<(Afi, Safi)>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
@@ -1879,7 +1881,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     let (key_a, key_b, key_es, key_no_rt) = (tenant_a.key(), tenant_b.key(), es.key(), no_rt.key());
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(src),
+        peer: peer_v4(src),
         announced: vec![],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -1892,7 +1894,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     .unwrap();
 
     // Not RTC-negotiated: unfiltered initial dump.
-    let plain = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let plain = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut plain_rx = families_peer_up(&tx, plain, evpn_sendable()).await;
     let dump = next_update(&mut plain_rx).await;
     assert_eq!(
@@ -1909,7 +1911,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     let target = Ipv4Addr::new(10, 0, 0, 2);
     let mut sendable = evpn_sendable();
     sendable.push((Afi::Ipv4, Safi::RtConstrain));
-    let mut out_rx = families_peer_up(&tx, IpAddr::V4(target), sendable).await;
+    let mut out_rx = families_peer_up(&tx, peer_v4(target), sendable).await;
     let dump = next_update(&mut out_rx).await;
     assert!(dump.rtc_announce.iter().any(|r| r.nlri.is_default()));
     assert!(
@@ -1929,7 +1931,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     let interest_key = interest.key();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![interest],
         withdrawn: vec![],
     })
@@ -1946,7 +1948,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
 
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![],
         withdrawn: vec![interest_key],
     })
@@ -1959,7 +1961,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     // RFC 7432 §7.6: the ES-Import RT is subject to RT-Constrain.
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![es_import_interest(target)],
         withdrawn: vec![],
     })
@@ -1971,7 +1973,7 @@ async fn evpn_rtc_membership_filters_tenants_and_route_types() {
     // Default membership admits everything, including a route with no RT.
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![make_rtc_rib_route_with_nlri(
             target,
             rustbgpd_wire::RtcNlri::DEFAULT,
@@ -2006,13 +2008,13 @@ async fn evpn_rtc_membership_change_restages_evpn_for_vpn_grouped_peer() {
     let target = Ipv4Addr::new(10, 0, 0, 2);
     let mut sendable = vpn_rtc_sendable();
     sendable.push((Afi::L2Vpn, Safi::Evpn));
-    let mut out_rx = families_peer_up(&tx, IpAddr::V4(target), sendable).await;
+    let mut out_rx = families_peer_up(&tx, peer_v4(target), sendable).await;
     let dump = next_update(&mut out_rx).await;
     assert!(dump.evpn_announce.is_empty());
     let _eor = next_update(&mut out_rx).await;
     let (reply, group) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerUpdateGroup {
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         reply,
     })
     .await
@@ -2028,7 +2030,7 @@ async fn evpn_rtc_membership_change_restages_evpn_for_vpn_grouped_peer() {
 
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![],
         withdrawn: vec![make_rtc_rib_route(target, 100, 100).key()],
     })
@@ -2048,7 +2050,7 @@ async fn evpn_routes_received_from(
 ) {
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced: vec![],
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -2097,7 +2099,7 @@ fn es_import_rt_matches_membership_on_rt_bits() {
 #[tokio::test(start_paused = true)]
 async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release() {
     let evpn = (Afi::L2Vpn, Safi::Evpn);
-    let waiter = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
+    let waiter = peer_v4(Ipv4Addr::new(10, 0, 0, 99));
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_selection_deferral(crate::SelectionDeferralConfig {
@@ -2111,7 +2113,7 @@ async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release
     let sync = async |tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr| {
         let (reply, group) = oneshot::channel();
         tx.send(RibUpdate::QueryPeerUpdateGroup {
-            peer: IpAddr::V4(peer),
+            peer: peer_v4(peer),
             reply,
         })
         .await
@@ -2133,8 +2135,8 @@ async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release
     let mut per_peer_sendable = evpn_sendable();
     per_peer_sendable.push((Afi::Ipv4, Safi::RtConstrain));
     let mut rxs = vec![
-        families_peer_up(&tx, IpAddr::V4(grouped), grouped_sendable).await,
-        families_peer_up(&tx, IpAddr::V4(per_peer), per_peer_sendable).await,
+        families_peer_up(&tx, peer_v4(grouped), grouped_sendable).await,
+        families_peer_up(&tx, peer_v4(per_peer), per_peer_sendable).await,
     ];
     assert!(sync(&tx, grouped).await.starts_with("group:"));
 
@@ -2143,7 +2145,7 @@ async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release
         send_rtc_interest(&tx, peer, &[200]).await;
         tx.send(RibUpdate::RtcRoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(peer),
+            peer: peer_v4(peer),
             announced: vec![],
             withdrawn: vec![make_rtc_rib_route(peer, 100, 100).key()],
         })
@@ -2207,7 +2209,7 @@ fn eor_set(update: &OutboundRouteUpdate) -> HashSet<(Afi, Safi)> {
 async fn send_rtc_eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr) {
     tx.send(RibUpdate::EndOfRib {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         afi: Afi::Ipv4,
         safi: Safi::RtConstrain,
     })
@@ -2222,7 +2224,7 @@ async fn send_rtc_eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr) {
 async fn rtc_peer_down_without_retained_rtc(
     tx: &mpsc::Sender<RibUpdate>,
 ) -> (Ipv4Addr, crate::route::VpnRibRouteKey) {
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let route = make_vpn_rib_route_with_rts(Ipv4Addr::new(10, 0, 0, 1), 60, vec![rt(100)]);
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
@@ -2235,7 +2237,7 @@ async fn rtc_peer_down_without_retained_rtc(
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
     send_rtc_interest(tx, target, &[100]).await;
     send_rtc_eor(tx, target).await;
@@ -2249,7 +2251,7 @@ async fn rtc_peer_down_without_retained_rtc(
 
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
@@ -2266,7 +2268,7 @@ async fn rtc_peer_down_without_retained_rtc(
 /// State bit, and a GR capability that again omits SAFI 132.
 async fn stage_vpn_gr_context(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, restarting: bool) {
     tx.send(RibUpdate::SetPeerGracefulRestartContext {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         peer_restart_state: restarting,
         peer_gr_helper: true,
@@ -2293,7 +2295,7 @@ async fn gr_helper_peer_without_retained_rtc_holds_vpn_eor_until_rtc_eor() {
     let (target, key) = rtc_peer_down_without_retained_rtc(&tx).await;
 
     stage_vpn_gr_context(&tx, target, false).await;
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     let dump = out_rx.recv().await.unwrap();
     assert!(dump.vpn_announce.is_empty());
     let eor = out_rx.recv().await.unwrap();
@@ -2343,7 +2345,7 @@ async fn restarting_peer_without_retained_rtc_gets_vpn_eor_immediately() {
     let (target, key) = rtc_peer_down_without_retained_rtc(&tx).await;
 
     stage_vpn_gr_context(&tx, target, true).await;
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     rib_barrier(&tx).await;
     let dump = out_rx.try_recv().expect("initial dump");
     assert!(dump.vpn_announce.is_empty());
@@ -2379,7 +2381,7 @@ async fn rtc_eor_hold_releases_vpn_and_evpn_at_cap() {
     let mut sendable = vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)];
     sendable.extend(VPN_FAMILIES);
     sendable.push((Afi::Ipv4, Safi::RtConstrain));
-    let mut out_rx = families_peer_up(&tx, IpAddr::V4(target), sendable).await;
+    let mut out_rx = families_peer_up(&tx, peer_v4(target), sendable).await;
     let dump = out_rx.recv().await.unwrap();
     assert!(dump.rtc_announce.iter().any(|r| r.nlri.is_default()));
     let eor = out_rx.recv().await.unwrap();
@@ -2415,12 +2417,12 @@ async fn rtc_eor_hold_restarts_with_replacement_session() {
     let handle = tokio::spawn(manager.run());
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     tokio::time::advance(Duration::from_secs(30)).await;
     tx.send(RibUpdate::PeerDown {
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         session_id: 0,
     })
     .await
@@ -2430,7 +2432,7 @@ async fn rtc_eor_hold_restarts_with_replacement_session() {
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 1,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
@@ -2476,7 +2478,7 @@ async fn rtc_eor_hold_cap_is_bounded_under_sustained_ingress() {
     let handle = tokio::spawn(manager.run());
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     let released = held_eor_under_sustained_ingress(&tx, &mut out_rx).await;
@@ -2502,7 +2504,7 @@ async fn rtc_eor_hold_cap_is_bounded_while_gr_timer_is_due() {
     let source = Ipv4Addr::new(10, 0, 0, 1);
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![make_vpn_rib_route_with_rts(source, 60, vec![rt(100)])],
         withdrawn: vec![],
     })
@@ -2510,7 +2512,7 @@ async fn rtc_eor_hold_cap_is_bounded_while_gr_timer_is_due() {
     .unwrap();
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         restart_time: 2,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::MplsVpn)],
@@ -2522,7 +2524,7 @@ async fn rtc_eor_hold_cap_is_bounded_while_gr_timer_is_due() {
     .unwrap();
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
 
     let released = held_eor_under_sustained_ingress(&tx, &mut out_rx).await;
@@ -2586,12 +2588,12 @@ async fn stray_rtc_eorr_keeps_hold_and_window_eorr_releases_it() {
     let handle = tokio::spawn(manager.run());
 
     let target = Ipv4Addr::new(10, 0, 0, 2);
-    let mut out_rx = vpn_rtc_peer_up(&tx, IpAddr::V4(target)).await;
+    let mut out_rx = vpn_rtc_peer_up(&tx, peer_v4(target)).await;
     drain_strict_vpn_rtc_initial_dump(&mut out_rx).await;
     let rtc = (Afi::Ipv4, Safi::RtConstrain);
 
     tx.send(RibUpdate::EndRouteRefresh {
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         session_id: 0,
         afi: rtc.0,
         safi: rtc.1,
@@ -2602,7 +2604,7 @@ async fn stray_rtc_eorr_keeps_hold_and_window_eorr_releases_it() {
     assert_no_outbound(&mut out_rx, "a stray RT-Constrain EoRR released the hold");
 
     tx.send(RibUpdate::BeginRouteRefresh {
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         session_id: 0,
         afi: rtc.0,
         safi: rtc.1,
@@ -2610,7 +2612,7 @@ async fn stray_rtc_eorr_keeps_hold_and_window_eorr_releases_it() {
     .await
     .unwrap();
     tx.send(RibUpdate::EndRouteRefresh {
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         session_id: 0,
         afi: rtc.0,
         safi: rtc.1,
@@ -2656,7 +2658,7 @@ async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_hours(1),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: IpAddr::V4(target),
+                peer: peer_v4(target),
                 families: vec![rtc],
             }],
         });
@@ -2667,7 +2669,7 @@ async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
     let key = route.key();
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: vec![route],
         withdrawn: vec![],
     })
@@ -2675,7 +2677,7 @@ async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
     .unwrap();
 
     tx.send(RibUpdate::SetPeerGracefulRestartContext {
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         session_id: SESSION,
         peer_restart_state: false,
         peer_gr_helper: true,
@@ -2691,7 +2693,7 @@ async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: SESSION,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
@@ -2709,7 +2711,7 @@ async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
     .unwrap();
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: SESSION,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         announced: vec![make_rtc_rib_route(target, 100, 100)],
         withdrawn: vec![],
     })
@@ -2725,7 +2727,7 @@ async fn rtc_eor_completing_selection_deferral_sends_vpn_routes_before_eor() {
 
     tx.send(RibUpdate::EndOfRib {
         session_id: SESSION,
-        peer: IpAddr::V4(target),
+        peer: peer_v4(target),
         afi: rtc.0,
         safi: rtc.1,
     })
@@ -2763,7 +2765,7 @@ async fn rtc_eor_cap_waits_for_pre_cap_route_batch() {
     let target = Ipv4Addr::new(10, 0, 0, 2);
     let mut sendable = evpn_sendable();
     sendable.push((Afi::Ipv4, Safi::RtConstrain));
-    let mut out_rx = families_peer_up(&tx, IpAddr::V4(target), sendable).await;
+    let mut out_rx = families_peer_up(&tx, peer_v4(target), sendable).await;
     send_rtc_interest(&tx, target, &[100]).await;
     drain_outbound(&tx, &mut out_rx).await;
 
@@ -2771,7 +2773,7 @@ async fn rtc_eor_cap_waits_for_pre_cap_route_batch() {
     let src = Ipv4Addr::new(10, 0, 0, 1);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(src),
+        peer: peer_v4(src),
         announced: vec![],
         withdrawn: vec![],
         flowspec_announced: vec![],

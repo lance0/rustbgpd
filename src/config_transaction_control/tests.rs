@@ -9,6 +9,7 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_api::rib_service::FibTableControlError;
 use rustbgpd_policy::PolicyAction;
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[cfg(debug_assertions)]
 use std::path::{Path, PathBuf};
@@ -6000,7 +6001,7 @@ fn flap_window_peer_up(
     use rustbgpd_wire::{Afi, Safi};
 
     rustbgpd_rib::RibUpdate::PeerUp {
-        peer,
+        peer: PeerId::from_addr(peer),
         session_id: 1,
         peer_asn: 65002,
         peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
@@ -6097,7 +6098,7 @@ async fn real_token_confirm_window_after_session_drop(
 
     rib_tx
         .send(rustbgpd_rib::RibUpdate::PeerDown {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 1,
         })
         .await
@@ -9562,7 +9563,7 @@ fn candidate_state_for_peer(
     let mut states = impact
         .entries
         .iter()
-        .filter(|row| row.peer == peer)
+        .filter(|row| row.peer == PeerId::from_addr(peer))
         .map(|row| &row.candidate);
     let first = states
         .next()
@@ -9582,7 +9583,7 @@ fn planned_families(
     impact
         .entries
         .iter()
-        .filter(|row| row.peer == peer)
+        .filter(|row| row.peer == PeerId::from_addr(peer))
         .map(|row| (row.afi, row.safi))
         .collect()
 }
@@ -9637,7 +9638,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
     let mut session_acks = BTreeMap::new();
     let mut outbound_receivers = Vec::new();
     for (index, neighbor) in resolved.into_iter().enumerate() {
-        let peer = neighbor.transport_config.remote_addr.ip();
+        let peer = PeerId::from_addr(neighbor.transport_config.remote_addr.ip());
         let session_id = u64::try_from(index + 1).unwrap();
         session_acks.insert(
             peer,
@@ -9736,7 +9737,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
             .update_group_impact
             .entries
             .iter()
-            .filter(|row| row.peer == peer)
+            .filter(|row| row.peer == PeerId::from_addr(peer))
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.transition == expected));
@@ -9820,7 +9821,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
     assert_eq!(live.len(), 5);
 
     for &peer in &peers {
-        let row = live[&peer];
+        let row = live[&PeerId::from_addr(peer)];
         assert_eq!(
             row.input
                 .sendable_families
@@ -9834,19 +9835,26 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
 
     for &peer in &[peers[0], peers[2], peers[3], peers[4]] {
         assert!(matches!(
-            live[&peer].classification,
+            live[&PeerId::from_addr(peer)].classification,
             UpdateGroupClassification::Groupable(_)
         ));
-        assert!(live[&peer].runtime_membership.starts_with("group:"));
+        assert!(
+            live[&PeerId::from_addr(peer)]
+                .runtime_membership
+                .starts_with("group:")
+        );
     }
     assert_eq!(
-        live[&peers[1]].classification.reason(),
+        live[&PeerId::from_addr(peers[1])].classification.reason(),
         Some("policy_peer_context")
     );
-    assert_eq!(live[&peers[1]].runtime_membership, "policy_peer_context");
+    assert_eq!(
+        live[&PeerId::from_addr(peers[1])].runtime_membership,
+        "policy_peer_context"
+    );
     assert_eq!(
         planned_private_fingerprint,
-        format!("{:?}", live[&peers[1]].input),
+        format!("{:?}", live[&PeerId::from_addr(peers[1])].input),
         "planned private fingerprint must equal the real post-apply classifier input"
     );
 
@@ -9864,7 +9872,8 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
             {
                 assert_eq!(
                     left_id == right_id,
-                    live[&peers[left]].runtime_membership == live[&peers[right]].runtime_membership,
+                    live[&PeerId::from_addr(peers[left])].runtime_membership
+                        == live[&PeerId::from_addr(peers[right])].runtime_membership,
                     "plan-local group equality must equal real runtime partition equality"
                 );
             }
@@ -9892,7 +9901,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
     );
 
     for (index, peer) in peers.iter().enumerate() {
-        let acks = &session_acks[peer];
+        let acks = &session_acks[&PeerId::from_addr(*peer)];
         if index < 4 {
             assert_eq!(acks.state_queries(), 1, "changed peer {peer}");
             assert_eq!(acks.export_updates(), 1, "changed peer {peer}");
@@ -10006,7 +10015,7 @@ async fn config_transaction_plan_matches_real_post_apply_heterogeneous_update_gr
     let mut session_acks = BTreeMap::new();
     let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
     for (index, neighbor) in resolved.into_iter().enumerate() {
-        let peer = neighbor.transport_config.remote_addr.ip();
+        let peer = PeerId::from_addr(neighbor.transport_config.remote_addr.ip());
         let session_id = u64::try_from(index + 1).unwrap();
         session_acks.insert(
             peer,
@@ -10069,7 +10078,7 @@ async fn config_transaction_plan_matches_real_post_apply_heterogeneous_update_gr
         let rows = impact
             .entries
             .iter()
-            .filter(|row| row.peer == *peer)
+            .filter(|row| row.peer == PeerId::from_addr(*peer))
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].afi, rows[0].safi), (1, 1));
@@ -10140,23 +10149,27 @@ async fn config_transaction_plan_matches_real_post_apply_heterogeneous_update_gr
         3
     );
     for (peer, reason) in peers[3..].iter().zip(["orr_vantage", "add_path_send"]) {
-        assert_eq!(live[peer].classification.reason(), Some(reason));
+        assert_eq!(
+            live[&PeerId::from_addr(*peer)].classification.reason(),
+            Some(reason)
+        );
         assert_eq!(
             private_fingerprints[peer],
-            format!("{:?}", live[peer].input)
+            format!("{:?}", live[&PeerId::from_addr(*peer)].input)
         );
     }
     for left in 0..peers.len() {
         for right in (left + 1)..peers.len() {
             assert_eq!(
                 candidates[left] == candidates[right],
-                live[&peers[left]].runtime_membership == live[&peers[right]].runtime_membership,
+                live[&PeerId::from_addr(peers[left])].runtime_membership
+                    == live[&PeerId::from_addr(peers[right])].runtime_membership,
                 "planned equality must exactly match live partition equality"
             );
         }
     }
     for (index, peer) in peers.iter().enumerate() {
-        let acks = &session_acks[peer];
+        let acks = &session_acks[&PeerId::from_addr(*peer)];
         assert_eq!(acks.state_queries(), u32::from(index < 3));
         assert_eq!(acks.export_updates(), u32::from(index < 3));
         assert_eq!((acks.import_updates(), acks.route_refreshes()), (0, 0));

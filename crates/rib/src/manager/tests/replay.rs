@@ -1,4 +1,5 @@
 use super::*;
+use crate::PeerId;
 use rustbgpd_bmp::BmpReplay;
 
 fn manager() -> RibManager {
@@ -8,7 +9,7 @@ fn manager() -> RibManager {
 
 fn register_peer(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     families: Vec<(Afi, Safi)>,
     add_path: bool,
     capacity: usize,
@@ -61,7 +62,7 @@ fn drain(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<OutboundRout
 
 fn request(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     families: Vec<(Afi, Safi)>,
     replay: &Arc<BmpReplay>,
@@ -93,8 +94,8 @@ fn explicit_replay_preserves_private_grouped_and_add_path_inventory() {
             &mut manager,
             vec![make_route_with_lp(prefix, Ipv4Addr::new(192, 0, 2, 2), 100)],
         );
-        let peer = "10.0.0.1".parse().unwrap();
-        let sibling = "10.0.0.2".parse().unwrap();
+        let peer = PeerId::from_addr("10.0.0.1".parse().unwrap());
+        let sibling = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let mut outbound = register_peer(&mut manager, peer, ipv4_sendable(), add_path, 16);
         let mut other = register_peer(&mut manager, sibling, ipv4_sendable(), add_path, 16);
         let baseline = drain(&mut outbound);
@@ -153,7 +154,7 @@ fn explicit_replay_preserves_private_grouped_and_add_path_inventory() {
 #[test]
 fn explicit_replay_completes_empty_negotiated_unsendable_ipv6() {
     let mut manager = manager();
-    let peer = "10.0.0.1".parse().unwrap();
+    let peer = PeerId::from_addr("10.0.0.1".parse().unwrap());
     let mut outbound = register_peer(&mut manager, peer, ipv4_sendable(), false, 16);
     drain(&mut outbound);
     let (replay, _enrolled) = BmpReplay::new(Duration::from_secs(5));
@@ -179,7 +180,7 @@ fn explicit_replay_completes_empty_negotiated_unsendable_ipv6() {
 #[test]
 fn explicit_replay_rejects_stale_session_and_orf_gate_without_output() {
     let mut manager = manager();
-    let peer = "10.0.0.1".parse().unwrap();
+    let peer = PeerId::from_addr("10.0.0.1".parse().unwrap());
     let mut outbound = register_peer(&mut manager, peer, ipv4_sendable(), false, 16);
     drain(&mut outbound);
     let (stale, _enrolled) = BmpReplay::new(Duration::from_secs(5));
@@ -202,11 +203,11 @@ fn explicit_replay_rejects_stale_session_and_orf_gate_without_output() {
 
 #[test]
 fn explicit_replay_rejects_selection_deferral_without_releasing_gate() {
-    let peer = "10.0.0.1".parse().unwrap();
+    let peer = PeerId::from_addr("10.0.0.1".parse().unwrap());
     let mut manager = manager().with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
-            peer: "192.0.2.1".parse().unwrap(),
+            peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
             families: ipv4_sendable(),
         }],
     });
@@ -222,7 +223,7 @@ fn explicit_replay_rejects_selection_deferral_without_releasing_gate() {
 #[test]
 fn explicit_replay_full_channel_cancels_without_terminal_or_refresh_retry() {
     let mut manager = manager();
-    let peer = "10.0.0.1".parse().unwrap();
+    let peer = PeerId::from_addr("10.0.0.1".parse().unwrap());
     let mut outbound = register_peer(&mut manager, peer, ipv4_sendable(), false, 1);
     // Keep the initial EoR queued to fill the sole channel slot.
     let (replay, _enrolled) = BmpReplay::new(Duration::from_secs(5));
@@ -237,7 +238,7 @@ fn explicit_replay_full_channel_cancels_without_terminal_or_refresh_retry() {
 #[test]
 fn explicit_replay_terminal_admission_failure_invalidates_admitted_routes() {
     let mut manager = manager();
-    let peer = "10.0.0.1".parse().unwrap();
+    let peer = PeerId::from_addr("10.0.0.1".parse().unwrap());
     let mut outbound = register_peer(&mut manager, peer, ipv4_sendable(), false, 1);
     drain(&mut outbound);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);

@@ -6,7 +6,9 @@
 //! class: spurious 2nd-best withdrawals / re-advertisements), the
 //! single-best presentation shape, and the refresh/GShut replays.
 
+use crate::PeerId;
 use crate::attr_set::AttrSet;
+use crate::test_support::peer_v4;
 use rustbgpd_policy::{
     CommunityMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
 };
@@ -63,7 +65,7 @@ fn ebgp_route(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>, communities: V
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         attributes: AttrSet::new(attributes),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
@@ -82,7 +84,7 @@ fn ebgp_route(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>, communities: V
 /// chain and per-client-best flag. Does NOT drain the initial dump.
 async fn client_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     export_policy: Option<PolicyChain>,
     per_client_best: bool,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -115,7 +117,7 @@ async fn client_peer_up(
 async fn announce_from(tx: &mpsc::Sender<RibUpdate>, source: Ipv4Addr, routes: Vec<Route>) {
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         announced: routes,
         withdrawn: vec![],
         flowspec_announced: vec![],
@@ -173,19 +175,19 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     // Best-path sanity: A's shorter AS path wins the Loc-RIB.
     let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
-    assert_eq!(best[0].peer, IpAddr::V4(SOURCE_A));
+    assert_eq!(best[0].peer, peer_v4(SOURCE_A));
 
     // Single-best client: the denied best hides the prefix entirely.
-    let hidden = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let hidden = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut hidden_rx = client_peer_up(&tx, hidden, Some(deny_tagged_chain()), false).await;
     drain_eor(&mut hidden_rx).await; // initial dump: EoR only, no routes
 
     // Per-client-best client: same chain, receives the runner-up.
-    let mitigated = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mitigated = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut mitigated_rx = client_peer_up(&tx, mitigated, Some(deny_tagged_chain()), true).await;
     let dump = mitigated_rx.recv().await.unwrap();
     assert_eq!(dump.announce.len(), 1, "exactly the filtered best");
-    assert_eq!(dump.announce[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(dump.announce[0].path_id, 0, "single-best shape");
     assert_eq!(dump.withdraw.len(), 0);
     drain_eor(&mut mitigated_rx).await;
@@ -193,7 +195,7 @@ async fn best_denied_single_best_hides_per_client_best_sends_runner_up() {
     // Adj-RIB-Out / ListAdvertisedRoutes present the same shape.
     let advertised = collect_advertised_routes(&tx, mitigated).await;
     assert_eq!(advertised.len(), 1);
-    assert_eq!(advertised[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(advertised[0].peer, peer_v4(SOURCE_B));
     assert_eq!(advertised[0].path_id, 0);
 
     assert!(
@@ -220,7 +222,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
     sync(&tx).await;
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 40));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 40));
     let mut out_rx = client_peer_up(
         &tx,
         target,
@@ -230,7 +232,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
     .await;
     let initial = out_rx.recv().await.unwrap();
     assert_eq!(initial.announce.len(), 1);
-    assert_eq!(initial.announce[0].peer, IpAddr::V4(SOURCE_A));
+    assert_eq!(initial.announce[0].peer, peer_v4(SOURCE_A));
     assert_eq!(initial.announce[0].path_id, 0);
     drain_eor(&mut out_rx).await;
 
@@ -251,7 +253,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
         .try_recv()
         .expect("runner-up replacement emitted after query synchronization");
     assert_eq!(replacement.announce.len(), 1);
-    assert_eq!(replacement.announce[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(replacement.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(replacement.announce[0].path_id, 0);
     assert!(
         replacement.withdraw.is_empty(),
@@ -261,7 +263,7 @@ async fn no_advertise_winner_is_replaced_by_per_client_runner_up_before_policy()
 
     let advertised = collect_advertised_routes(&tx, target).await;
     assert_eq!(advertised.len(), 1);
-    assert_eq!(advertised[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(advertised[0].peer, peer_v4(SOURCE_B));
     assert_eq!(advertised[0].path_id, 0);
 
     let (reply, response) = oneshot::channel();
@@ -316,7 +318,7 @@ async fn source_member_of_best_gets_runner_up() {
     let handle = tokio::spawn(manager.run());
 
     // A is an outbound per-client-best client AND the source of the best.
-    let a = IpAddr::V4(SOURCE_A);
+    let a = peer_v4(SOURCE_A);
     let mut a_rx = client_peer_up(&tx, a, None, true).await;
     drain_eor(&mut a_rx).await;
 
@@ -329,7 +331,7 @@ async fn source_member_of_best_gets_runner_up() {
     sync(&tx).await;
     let update = a_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
-    assert_eq!(update.announce[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(update.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(update.announce[0].path_id, 0);
     assert_eq!(update.withdraw.len(), 0);
 
@@ -350,8 +352,8 @@ async fn grouped_source_member_explain_names_runner_up_substitution() {
 
     // Two shareable-chain unicast-only per-client-best members: since
     // the classifier flip they share one mitigated group.
-    let a = IpAddr::V4(SOURCE_A);
-    let e = IpAddr::V4(SOURCE_E);
+    let a = peer_v4(SOURCE_A);
+    let e = peer_v4(SOURCE_E);
     let mut a_rx = client_peer_up(&tx, a, None, true).await;
     drain_eor(&mut a_rx).await;
     let mut e_rx = client_peer_up(&tx, e, None, true).await;
@@ -384,13 +386,13 @@ async fn grouped_source_member_explain_names_runner_up_substitution() {
     sync(&tx).await;
     let update = a_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
-    assert_eq!(update.announce[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(update.announce[0].peer, peer_v4(SOURCE_B));
 
     let explain = query_explain_advertised_route(&tx, a, Prefix::V4(prefix())).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
     assert_eq!(
         explain.route_peer,
-        Some(IpAddr::V4(SOURCE_B)),
+        Some(peer_v4(SOURCE_B)),
         "explain for source(w) names the runner-up substitution"
     );
     assert!(
@@ -404,9 +406,9 @@ async fn grouped_source_member_explain_names_runner_up_substitution() {
 
     // The non-source member's explain names the winner, also in sync.
     let e_update = e_rx.recv().await.unwrap();
-    assert_eq!(e_update.announce[0].peer, IpAddr::V4(SOURCE_A));
+    assert_eq!(e_update.announce[0].peer, peer_v4(SOURCE_A));
     let explain = query_explain_advertised_route(&tx, e, Prefix::V4(prefix())).await;
-    assert_eq!(explain.route_peer, Some(IpAddr::V4(SOURCE_A)));
+    assert_eq!(explain.route_peer, Some(peer_v4(SOURCE_A)));
     assert!(explain.already_advertised);
 
     drop(tx);
@@ -432,11 +434,11 @@ async fn candidate_churn_produces_minimal_deltas() {
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
 
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut client_rx = client_peer_up(&tx, client, Some(deny_tagged_chain()), true).await;
     let dump = client_rx.recv().await.unwrap();
     assert_eq!(dump.announce.len(), 1);
-    assert_eq!(dump.announce[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
     drain_eor(&mut client_rx).await;
 
     // (a) new WORSE candidate: filtered best stays B — no wire traffic.
@@ -463,7 +465,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     // candidate — announce E, withdraw NOTHING (same path_id 0).
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(SOURCE_B),
+        peer: peer_v4(SOURCE_B),
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix()), 0)],
         flowspec_announced: vec![],
@@ -477,7 +479,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     sync(&tx).await;
     let update = client_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
-    assert_eq!(update.announce[0].peer, IpAddr::V4(SOURCE_E));
+    assert_eq!(update.announce[0].peer, peer_v4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
     assert!(
         update.withdraw.is_empty(),
@@ -514,7 +516,7 @@ async fn candidate_churn_produces_minimal_deltas() {
     reply_rx.await.unwrap().unwrap();
     let update = client_rx.recv().await.unwrap();
     assert_eq!(update.announce.len(), 1);
-    assert_eq!(update.announce[0].peer, IpAddr::V4(SOURCE_E));
+    assert_eq!(update.announce[0].peer, peer_v4(SOURCE_E));
     assert_eq!(update.announce[0].path_id, 0);
     assert_eq!(update.withdraw.len(), 0);
 
@@ -533,7 +535,7 @@ async fn route_refresh_replays_filtered_best() {
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
 
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut client_rx = client_peer_up(&tx, client, Some(deny_tagged_chain()), true).await;
     let dump = client_rx.recv().await.unwrap();
     assert_eq!(dump.announce.len(), 1);
@@ -554,7 +556,7 @@ async fn route_refresh_replays_filtered_best() {
         1,
         "refresh replays the filtered best"
     );
-    assert_eq!(replay.announce[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(replay.announce[0].peer, peer_v4(SOURCE_B));
     assert_eq!(replay.announce[0].path_id, 0);
     assert_eq!(replay.withdraw.len(), 0);
 
@@ -598,14 +600,14 @@ async fn explain_names_runner_up_selection_with_term_labels() {
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
 
-    let mitigated = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let mitigated = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut mitigated_rx =
         client_peer_up(&tx, mitigated, Some(rpol_deny_tagged_chain()), true).await;
     let dump = mitigated_rx.recv().await.unwrap();
     assert_eq!(dump.announce.len(), 1, "live sends the runner-up");
-    assert_eq!(dump.announce[0].peer, IpAddr::V4(SOURCE_B));
+    assert_eq!(dump.announce[0].peer, peer_v4(SOURCE_B));
 
-    let hidden = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let hidden = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let mut hidden_rx = client_peer_up(&tx, hidden, Some(rpol_deny_tagged_chain()), false).await;
     drain_eor(&mut hidden_rx).await;
 
@@ -613,7 +615,7 @@ async fn explain_names_runner_up_selection_with_term_labels() {
     // advertised, with the denied best named per candidate.
     let explain = query_explain_advertised_route(&tx, mitigated, Prefix::V4(prefix())).await;
     assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
-    assert_eq!(explain.route_peer, Some(IpAddr::V4(SOURCE_B)));
+    assert_eq!(explain.route_peer, Some(peer_v4(SOURCE_B)));
     assert_eq!(explain.next_hop, Some(IpAddr::V4(SOURCE_B)));
     assert!(
         explain.already_advertised,
@@ -699,7 +701,7 @@ policy deny-all {
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
 
-    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 4));
     let mut client_rx = client_peer_up(&tx, client, Some(chain), true).await;
     drain_eor(&mut client_rx).await; // nothing staged: EoR only
 
@@ -743,12 +745,12 @@ async fn agrees_with_single_best_when_policy_permits_the_best() {
     announce_from(&tx, SOURCE_A, vec![best_route()]).await;
     announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
 
-    let plain = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
+    let plain = peer_v4(Ipv4Addr::new(10, 0, 0, 6));
     let mut plain_rx = client_peer_up(&tx, plain, None, false).await;
     let plain_dump = plain_rx.recv().await.unwrap();
     drain_eor(&mut plain_rx).await;
 
-    let pcb = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+    let pcb = peer_v4(Ipv4Addr::new(10, 0, 0, 7));
     let mut pcb_rx = client_peer_up(&tx, pcb, None, true).await;
     let pcb_dump = pcb_rx.recv().await.unwrap();
     drain_eor(&mut pcb_rx).await;

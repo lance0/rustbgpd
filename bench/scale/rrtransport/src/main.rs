@@ -1,3 +1,4 @@
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -113,7 +114,7 @@ fn route(prefix: Ipv4Prefix, source: Ipv4Addr) -> Route {
         next_hop: IpAddr::V4(source),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(source),
+        peer: PeerId::from_addr(IpAddr::V4(source)),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -281,7 +282,10 @@ async fn wait_established(session: &PeerHandle) -> Result<()> {
 async fn peer_group(rib_query: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Result<String> {
     let (reply, receive) = oneshot::channel();
     rib_query
-        .send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+        .send(RibUpdate::QueryPeerUpdateGroup {
+            peer: PeerId::from_addr(peer),
+            reply,
+        })
         .await?;
     Ok(tokio::time::timeout(DEADLINE, receive).await??)
 }
@@ -321,7 +325,7 @@ async fn staged_counts(rib_query: &mpsc::Sender<RibUpdate>) -> Result<HashMap<Ip
                 .into_iter()
                 .find(|((afi, safi), _)| *afi == Afi::Ipv4 && *safi == Safi::Unicast)
                 .map_or(0, |(_, count)| count);
-            (peer, count)
+            (peer.addr(), count)
         })
         .collect())
 }
@@ -384,7 +388,7 @@ async fn smoke() -> Result<()> {
             .collect();
         rib_tx
             .send(RibUpdate::RoutesReceived {
-                peer: IpAddr::V4(source),
+                peer: PeerId::from_addr(IpAddr::V4(source)),
                 session_id: 0,
                 announced,
                 withdrawn: Vec::new(),

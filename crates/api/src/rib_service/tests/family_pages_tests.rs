@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 #[tokio::test]
 #[expect(
@@ -142,7 +143,7 @@ async fn family_and_evpn_page_sizes_default_and_clamp_before_actor_dispatch() {
 
 #[test]
 fn family_page_tokens_bind_family_scope_filters_and_version() {
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let scope = RouteQueryScope::Received { peer: Some(peer) };
     let version = RoutePageVersion {
         epoch: 2,
@@ -313,8 +314,8 @@ async fn family_rpc_typed_families_and_prefix_boundaries_reject_before_dispatch(
     reason = "one real actor fixture checks exact and longer-prefix continuations for both typed family requests"
 )]
 async fn typed_family_prefix_pages_match_exact_and_longer_routes_in_the_real_rib() {
-    let source: IpAddr = "192.0.2.1".parse().unwrap();
-    let (_, _, vpn, labeled, _) = non_unicast_routes(source);
+    let source = PeerId::from_addr("192.0.2.1".parse().unwrap());
+    let (_, _, vpn, labeled, _) = non_unicast_routes(source.addr());
     let mut vpn_longer = vpn.clone();
     vpn_longer.nlri.prefix =
         rustbgpd_wire::VpnPrefix::v6("2001:db8:100:0:1::".parse().unwrap(), 80).unwrap();
@@ -529,8 +530,8 @@ async fn evpn_peer_filter_acknowledgement_preserves_unfiltered_calls() {
 
 #[tokio::test]
 async fn evpn_peer_raw_rd_filter_changes_reject_foreign_continuation() {
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
-    let (route, ..) = non_unicast_routes(peer);
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
+    let (route, ..) = non_unicast_routes(peer.addr());
     let raw_type0 = "0x0000fde800000064";
     let raw_type2 = "0x00020000fde80064";
     let type0 = parse_family_rd(raw_type0).unwrap().unwrap();
@@ -613,9 +614,9 @@ async fn evpn_peer_pages_apply_mac_esi_vni_filters_and_preserve_source() {
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, ExtendedCommunity, MacAddress,
         MplsLabel,
     };
-    let source: IpAddr = "192.0.2.1".parse().unwrap();
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
-    let (mut route, ..) = non_unicast_routes(source);
+    let source = PeerId::from_addr("192.0.2.1".parse().unwrap());
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
+    let (mut route, ..) = non_unicast_routes(source.addr());
     let mac = MacAddress([0, 1, 2, 3, 4, 5]);
     let esi = EthernetSegmentIdentifier([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     route.route = EvpnRoute::MacIp(EvpnMacIp {
@@ -730,8 +731,8 @@ async fn evpn_peer_pages_apply_mac_esi_vni_filters_and_preserve_source() {
 
 #[tokio::test]
 async fn vpn_pages_preserve_raw_rd_identity_across_continuation_and_filtering() {
-    let peer = "192.0.2.1".parse().unwrap();
-    let (_, _, mut first, _, _) = non_unicast_routes(peer);
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
+    let (_, _, mut first, _, _) = non_unicast_routes(peer.addr());
     first.nlri.route_distinguisher =
         rustbgpd_wire::RouteDistinguisher([0, 2, 0, 0, 0xfd, 0xe8, 0, 100]);
     let mut second = first.clone();
@@ -972,7 +973,7 @@ async fn evpn_loc_filters_and_page_scope_are_applied_before_materialization() {
         "MPLS label cannot satisfy a VNI filter"
     );
     let mut wrong = route.clone();
-    wrong.peer = "192.0.2.2".parse().unwrap();
+    wrong.peer = PeerId::from_addr("192.0.2.2".parse().unwrap());
     assert!(!filter.as_ref().unwrap()(&wrong));
     for changed in [
         proto::ListBestEvpnRoutesRequest {
@@ -1075,7 +1076,7 @@ async fn evpn_loc_filters_and_page_scope_are_applied_before_materialization() {
 )]
 async fn vpn_family_page_response_filters_and_invalidation() {
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (_, _, route, _, _) = non_unicast_routes(peer);
     let (tx, mut rx) = mpsc::channel(1);
     let svc = RibService::new(tx);
@@ -1196,7 +1197,7 @@ async fn vpn_family_page_response_filters_and_invalidation() {
 )]
 async fn labeled_family_page_response_filters_and_invalidation() {
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (_, _, _, route, _) = non_unicast_routes(peer);
     let (tx, mut rx) = mpsc::channel(1);
     let svc = RibService::new(tx);
@@ -1316,7 +1317,7 @@ async fn labeled_family_page_response_filters_and_invalidation() {
 )]
 async fn rtc_family_page_response_filters_and_invalidation() {
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (_, _, _, _, route) = non_unicast_routes(peer);
     let (tx, mut rx) = mpsc::channel(1);
     let svc = RibService::new(tx);
@@ -1486,7 +1487,7 @@ async fn bgpls_pages_walk_every_route_once_through_the_real_rib() {
     let actor = tokio::spawn(manager.run());
     for (peer, announced) in [(first, routes), (second, vec![foreign])] {
         tx.send(RibUpdate::BgpLsRoutesReceived {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 0,
             announced,
             withdrawn: vec![],
@@ -1730,12 +1731,12 @@ fn topology_link_route(peer: IpAddr, local: u8, remote: u8, link_id: Option<u8>)
 /// differ only in their Link NLRI.
 #[tokio::test]
 async fn orr_topology_pages_walk_every_element_once_through_the_real_rib() {
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let mut routes: Vec<_> = (1..=5)
-        .map(|node| topology_link_route(peer, node, node % 5 + 1, None))
+        .map(|node| topology_link_route(peer.addr(), node, node % 5 + 1, None))
         .collect();
-    routes.push(topology_link_route(peer, 1, 3, Some(1)));
-    routes.push(topology_link_route(peer, 1, 3, Some(2)));
+    routes.push(topology_link_route(peer.addr(), 1, 3, Some(1)));
+    routes.push(topology_link_route(peer.addr(), 1, 3, Some(2)));
     let (tx, rx) = mpsc::channel(8);
     let (_query_tx, query_rx) = mpsc::channel(1);
     let manager = rustbgpd_rib::RibManager::new(

@@ -8,8 +8,8 @@
 //! transition, so the published roster is always the projection of a
 //! completed operation.
 
+use crate::PeerId;
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
@@ -18,7 +18,7 @@ use crate::export_roster::{ExportRosterPeer, ExportRosterPublisher, ExportRoster
 
 pub(super) struct ExportChains {
     global: Option<PolicyChain>,
-    peers: HashMap<IpAddr, Option<PolicyChain>>,
+    peers: HashMap<PeerId, Option<PolicyChain>>,
     /// Advanced by every mutation.
     version: u64,
     /// The version the published roster projects.
@@ -48,13 +48,13 @@ impl ExportChains {
 
     /// `peer`'s own entry: `Some(None)` when explicitly disabled, `None`
     /// when the peer falls back to the global chain.
-    pub(super) fn get(&self, peer: &IpAddr) -> Option<&Option<PolicyChain>> {
+    pub(super) fn get(&self, peer: &PeerId) -> Option<&Option<PolicyChain>> {
         self.peers.get(peer)
     }
 
     /// The chain that evaluates `peer`'s exports: per-peer if set, else
     /// global.
-    pub(super) fn for_peer(&self, peer: IpAddr) -> Option<&PolicyChain> {
+    pub(super) fn for_peer(&self, peer: PeerId) -> Option<&PolicyChain> {
         match self.peers.get(&peer) {
             Some(chain) => chain.as_ref(),
             None => self.global.as_ref(),
@@ -62,18 +62,18 @@ impl ExportChains {
     }
 
     #[cfg(test)]
-    pub(super) fn contains_key(&self, peer: &IpAddr) -> bool {
+    pub(super) fn contains_key(&self, peer: &PeerId) -> bool {
         self.peers.contains_key(peer)
     }
 
     /// Install `peer`'s entry (`None` disables export policy for it).
-    pub(super) fn insert(&mut self, peer: IpAddr, chain: Option<PolicyChain>) {
+    pub(super) fn insert(&mut self, peer: PeerId, chain: Option<PolicyChain>) {
         self.version += 1;
         self.peers.insert(peer, chain);
     }
 
     /// Remove `peer`'s entry, so it falls back to the global chain.
-    pub(super) fn remove(&mut self, peer: &IpAddr) {
+    pub(super) fn remove(&mut self, peer: &PeerId) {
         if self.peers.remove(peer).is_some() {
             self.version += 1;
         }
@@ -141,7 +141,7 @@ impl ExportChains {
         let published = self.publisher.published();
         let (mut peers, global) = self.projection();
         peers.sort_unstable_by_key(|(peer, _)| *peer);
-        let ids = |peers: &[ExportRosterPeer]| -> Vec<(IpAddr, Option<u64>)> {
+        let ids = |peers: &[ExportRosterPeer]| -> Vec<(PeerId, Option<u64>)> {
             peers
                 .iter()
                 .map(|(peer, counters)| (*peer, counters.as_ref().map(|c| c.id())))
@@ -161,10 +161,10 @@ impl ExportChains {
 }
 
 #[cfg(test)]
-impl std::ops::Index<&IpAddr> for ExportChains {
+impl std::ops::Index<&PeerId> for ExportChains {
     type Output = Option<PolicyChain>;
 
-    fn index(&self, peer: &IpAddr) -> &Self::Output {
+    fn index(&self, peer: &PeerId) -> &Self::Output {
         &self.peers[peer]
     }
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use rustbgpd::bench_internals::{FibTableConfig, project_fib_intent_counts};
-use rustbgpd_rib::AttrSet;
+use rustbgpd_rib::{AttrSet, PeerId};
 use rustbgpd_rib::{FibInstallCandidate, FibInstallNextHop, Route, RouteOrigin};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
@@ -17,7 +17,7 @@ use rustbgpd_wire::{
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-fn table(name: &str, table_id: u32, metric: u32, allowed_neighbors: &[IpAddr]) -> FibTableConfig {
+fn table(name: &str, table_id: u32, metric: u32, allowed_neighbors: &[PeerId]) -> FibTableConfig {
     FibTableConfig {
         name: name.to_string(),
         table_id,
@@ -35,8 +35,13 @@ fn table(name: &str, table_id: u32, metric: u32, allowed_neighbors: &[IpAddr]) -
     }
 }
 
-fn peer(idx: usize) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(198, 51, 100, (idx % 250 + 1) as u8))
+fn peer(idx: usize) -> PeerId {
+    PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+        198,
+        51,
+        100,
+        (idx % 250 + 1) as u8,
+    )))
 }
 
 fn prefix(idx: usize) -> Prefix {

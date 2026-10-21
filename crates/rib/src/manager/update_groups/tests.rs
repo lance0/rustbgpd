@@ -1,3 +1,5 @@
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rustbgpd_policy::{Policy, PolicyStatement, RouteModifications};
@@ -16,7 +18,7 @@ fn canceled_update_group_snapshot_does_not_invoke_builder() {
     send_update_group_snapshot(reply, |_| panic!("canceled query materialized"));
 }
 
-fn test_snapshot_row(peer: IpAddr) -> UpdateGroupPeerSnapshot {
+fn test_snapshot_row(peer: PeerId) -> UpdateGroupPeerSnapshot {
     let input = UpdateGroupClassifierInput {
         policy_fingerprint: None,
         policy_provenance: None,
@@ -41,8 +43,8 @@ fn test_snapshot_row(peer: IpAddr) -> UpdateGroupPeerSnapshot {
     }
 }
 
-fn unsorted_mixed_snapshot_peers() -> Vec<IpAddr> {
-    vec![
+fn unsorted_mixed_snapshot_peers() -> Vec<PeerId> {
+    [
         IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
         IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -50,6 +52,9 @@ fn unsorted_mixed_snapshot_peers() -> Vec<IpAddr> {
         IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
     ]
+    .into_iter()
+    .map(PeerId::from_addr)
+    .collect()
 }
 
 #[test]
@@ -58,9 +63,10 @@ fn snapshot_peer_order_key_is_fixed_stack_storage() {
         value
     }
 
-    let v4: [u8; 17] = snapshot_peer_order_key(&IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)));
-    let v6: [u8; 17] =
-        snapshot_peer_order_key(&IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6)));
+    let v4: [u8; 17] = snapshot_peer_order_key(&peer_v4(Ipv4Addr::new(192, 0, 2, 7)));
+    let v6: [u8; 17] = snapshot_peer_order_key(&PeerId::from_addr(IpAddr::V6(Ipv6Addr::new(
+        0x2001, 0xdb8, 1, 2, 3, 4, 5, 6,
+    ))));
     assert_eq!(v4, [0, 192, 0, 2, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(
         v6,
@@ -78,10 +84,10 @@ fn snapshot_materializer_uses_stack_key_for_fixed_mixed_roster() {
     let (reply, _receiver) = tokio::sync::oneshot::channel::<UpdateGroupSnapshot>();
     let mut peers = Vec::with_capacity(1_000);
     for index in (0..500_u32).rev() {
-        peers.push(IpAddr::V6(Ipv6Addr::from(
+        peers.push(PeerId::from_addr(IpAddr::V6(Ipv6Addr::from(
             0x2001_0db8_0000_0000_0000_0000_0000_0000_u128 + u128::from(index),
-        )));
-        peers.push(IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + index)));
+        ))));
+        peers.push(peer_v4(Ipv4Addr::from(0x0a00_0000 + index)));
     }
     let expected = (0..500_u32)
         .map(|index| IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + index)))
@@ -110,7 +116,7 @@ fn snapshot_materializer_uses_stack_key_for_fixed_mixed_roster() {
         snapshot
             .peers
             .into_iter()
-            .map(|row| row.peer)
+            .map(|row| row.peer.addr())
             .collect::<Vec<_>>(),
         expected,
         "snapshot order is independently derived from the legacy family/address contract"
@@ -136,9 +142,9 @@ fn canceled_update_group_snapshot_stops_between_sorted_rows() {
     assert_eq!(
         observed,
         vec![
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            peer_v4(Ipv4Addr::new(10, 0, 0, 1)),
+            peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer_v4(Ipv4Addr::new(192, 0, 2, 2)),
         ],
         "cancellation after K=3 row builds must stop before row K+1"
     );
@@ -200,7 +206,7 @@ fn update_group_snapshot_preserves_legacy_mixed_address_order() {
         snapshot
             .peers
             .iter()
-            .map(|row| row.peer)
+            .map(|row| row.peer.addr())
             .collect::<Vec<_>>(),
         vec![
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -276,7 +282,7 @@ fn empty_policy(default_action: PolicyAction) -> PolicyChain {
 
 fn register_growth_peer(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
 ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(16);
@@ -305,7 +311,7 @@ fn register_growth_peer(
     outbound_rx
 }
 
-fn replace_growth_policy(manager: &mut RibManager, peer: IpAddr, policy: Option<PolicyChain>) {
+fn replace_growth_policy(manager: &mut RibManager, peer: PeerId, policy: Option<PolicyChain>) {
     assert_eq!(
         manager.replace_peer_export_policy_synchronously(peer, policy),
         Ok(())
@@ -328,7 +334,7 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
         None,
         rustbgpd_telemetry::BgpMetrics::new(),
     );
-    let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 45));
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 45));
     let permit = empty_policy(PolicyAction::Permit);
     let deny = empty_policy(PolicyAction::Deny);
 
@@ -412,7 +418,7 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
     }
 }
 
-fn compare(manager: &mut RibManager, left: IpAddr, right: IpAddr) -> UpdateGroupPeerComparison {
+fn compare(manager: &mut RibManager, left: PeerId, right: PeerId) -> UpdateGroupPeerComparison {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     manager.handle_update(crate::RibUpdate::QueryUpdateGroupComparison {
         primary: left,
@@ -495,7 +501,7 @@ fn comparison_verdicts_use_runtime_identity_and_preserve_sides() {
         compare(&mut manager, OTHER2, MEMBER).verdict,
         UpdateGroupComparisonVerdict::Unknown
     );
-    let absent: IpAddr = "192.0.2.254".parse().unwrap();
+    let absent = PeerId::from_addr("192.0.2.254".parse().unwrap());
     assert_eq!(
         compare(&mut manager, OTHER2, absent).verdict,
         UpdateGroupComparisonVerdict::Unknown
@@ -588,17 +594,17 @@ fn uncommitted_policy_transition_cleanup_refuses_owned_groups() {
     assert!(manager.group_ribs.contains_key(&8));
 }
 
-const MEMBER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1));
-const OTHER1: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 2));
-const OTHER2: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 3));
+const MEMBER: PeerId = peer_v4(Ipv4Addr::new(10, 9, 0, 1));
+const OTHER1: PeerId = peer_v4(Ipv4Addr::new(10, 9, 0, 2));
+const OTHER2: PeerId = peer_v4(Ipv4Addr::new(10, 9, 0, 3));
 
 fn prefix(n: u8) -> Prefix {
     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 100, n, 0), 24))
 }
 
-fn route(p: Prefix, src: IpAddr) -> Route {
+fn route(p: Prefix, src: PeerId) -> Route {
     let Prefix::V4(v4) = p else { unreachable!() };
-    let IpAddr::V4(src4) = src else {
+    let IpAddr::V4(src4) = src.addr() else {
         unreachable!()
     };
     let mut route = make_route(v4, src4);
@@ -643,7 +649,7 @@ fn named_permit_chain(label: &str) -> PolicyChain {
     chain
 }
 
-fn announce_delta(p: Prefix, src: IpAddr, old: Option<IpAddr>) -> GroupDelta {
+fn announce_delta(p: Prefix, src: PeerId, old: Option<PeerId>) -> GroupDelta {
     let new = route(p, src);
     let source_attrs = capture_source_attrs(&new);
     GroupDelta {
@@ -659,7 +665,7 @@ fn announce_delta(p: Prefix, src: IpAddr, old: Option<IpAddr>) -> GroupDelta {
     }
 }
 
-fn withdraw_delta(p: Prefix, old: Option<IpAddr>) -> GroupDelta {
+fn withdraw_delta(p: Prefix, old: Option<PeerId>) -> GroupDelta {
     GroupDelta {
         prefix: p,
         path_id: 0,
@@ -698,7 +704,7 @@ fn source_flip_matrix_exhaustive() {
             let p = prefix(1);
             let delta = match new {
                 Some(src) => announce_delta(p, src, old),
-                None => withdraw_delta(p, old),
+                None => withdraw_delta(p, old.map(PeerId::addr).map(PeerId::from_addr)),
             };
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
@@ -762,9 +768,9 @@ fn staging_manager() -> RibManager {
 /// A candidate with a controlled best-path rank (higher `lp` ranks
 /// first) whose next hop IS its source peer, so a
 /// [`deny_next_hop_statement`] discriminates candidates per source.
-fn cand(p: Prefix, src: IpAddr, lp: u32) -> Route {
+fn cand(p: Prefix, src: PeerId, lp: u32) -> Route {
     let Prefix::V4(v4) = p else { unreachable!() };
-    let IpAddr::V4(src4) = src else {
+    let IpAddr::V4(src4) = src.addr() else {
         unreachable!()
     };
     make_route_with_lp(v4, src4, lp)
@@ -781,7 +787,7 @@ fn seed(manager: &mut RibManager, route: Route) {
         .insert(route);
 }
 
-fn unseed(manager: &mut RibManager, peer: IpAddr, p: Prefix) {
+fn unseed(manager: &mut RibManager, peer: PeerId, p: Prefix) {
     if let Some(rib) = manager.ribs.get_mut(&peer) {
         rib.withdraw(&p, 0);
     }
@@ -900,7 +906,7 @@ fn eval_totals(evals: &GroupEvalAccumulator) -> (u64, u64) {
 
 /// Source peers with at least one recorded per-source row — the
 /// candidates the walk actually evaluated.
-fn eval_sources(evals: &GroupEvalAccumulator) -> HashSet<IpAddr> {
+fn eval_sources(evals: &GroupEvalAccumulator) -> HashSet<PeerId> {
     evals.per_source.keys().copied().collect()
 }
 
@@ -912,12 +918,13 @@ fn lane_source(manager: &RibManager, p: Prefix) -> Option<IpAddr> {
         .runner_up
         .get(&p)
         .map(|entry| entry.route.peer)
+        .map(PeerId::addr)
 }
 
 /// Sorted `(winner_source, [v4, v6])` rows of the group's
 /// `lane_counts`.
-fn lane_count_rows(manager: &RibManager) -> Vec<(IpAddr, [usize; 2])> {
-    let mut rows: Vec<(IpAddr, [usize; 2])> = manager
+fn lane_count_rows(manager: &RibManager) -> Vec<(PeerId, [usize; 2])> {
+    let mut rows: Vec<(PeerId, [usize; 2])> = manager
         .group_ribs
         .get(&PCB_GID)
         .unwrap()
@@ -931,7 +938,7 @@ fn lane_count_rows(manager: &RibManager) -> Vec<(IpAddr, [usize; 2])> {
 
 /// [`cand`] plus one standard community — a source-attribute
 /// difference a [`strip_communities_chain`] erases post-policy.
-fn cand_with_comm(p: Prefix, src: IpAddr, lp: u32, comm: u32) -> Route {
+fn cand_with_comm(p: Prefix, src: PeerId, lp: u32, comm: u32) -> Route {
     let mut route = cand(p, src, lp);
     let mut attrs = route.attributes.to_vec();
     attrs.push(PathAttribute::Communities(vec![comm]));
@@ -951,7 +958,7 @@ fn strip_communities_chain(comms: Vec<u32>) -> PolicyChain {
                 communities_remove: comms,
                 ..RouteModifications::default()
             },
-            ..deny_next_hop_statement(OTHER1)
+            ..deny_next_hop_statement(OTHER1.addr())
         }],
         default_action: PolicyAction::Permit,
     }])
@@ -984,7 +991,7 @@ fn pcb_winner_and_lane_from_permitted_candidates() {
 
     let group = m.group_ribs.get(&PCB_GID).unwrap();
     assert_eq!(group.table.get(&p, 0).map(|r| r.peer), Some(OTHER1));
-    assert_eq!(lane_source(&m, p), Some(OTHER2));
+    assert_eq!(lane_source(&m, p), Some(OTHER2.addr()));
     // Early exit: the third candidate is never evaluated.
     assert_eq!(eval_totals(&out.evals), (2, 0));
     assert_eq!(eval_sources(&out.evals), HashSet::from([OTHER1, OTHER2]));
@@ -1002,7 +1009,7 @@ fn pcb_denied_best_walks_to_first_permitted() {
     seed(&mut m, cand(p, MEMBER, 100));
     m.group_ribs.insert(
         PCB_GID,
-        per_client_best_group(Some(deny_sources_chain(&[OTHER1]))),
+        per_client_best_group(Some(deny_sources_chain(&[OTHER1.addr()]))),
     );
 
     let out = stage_pcb(&mut m, &[p]);
@@ -1010,7 +1017,7 @@ fn pcb_denied_best_walks_to_first_permitted() {
     assert_eq!(out.deltas.len(), 1);
     let (winner, _) = out.deltas[0].new.as_ref().expect("winner announce");
     assert_eq!(winner.peer, OTHER2);
-    assert_eq!(lane_source(&m, p), Some(MEMBER));
+    assert_eq!(lane_source(&m, p), Some(MEMBER.addr()));
     assert_eq!(eval_totals(&out.evals), (2, 1));
     assert_eq!(
         eval_sources(&out.evals),
@@ -1148,7 +1155,7 @@ fn pcb_winner_label_is_captured_at_its_permit_point() {
     seed(&mut m, cand(p, OTHER2, 200));
     let mut chain = PolicyChain::new(vec![
         Policy {
-            entries: vec![deny_next_hop_statement(OTHER2)],
+            entries: vec![deny_next_hop_statement(OTHER2.addr())],
             default_action: PolicyAction::Permit,
         },
         Policy {
@@ -1205,9 +1212,9 @@ fn pcb_winner_label_is_captured_at_its_permit_point() {
     reason = "the exhaustive lane/source-flip matrix enumerates every cell inline"
 )]
 fn pcb_lane_transition_matrix_exhaustive() {
-    const A: IpAddr = OTHER1;
-    const B: IpAddr = OTHER2;
-    const C: IpAddr = MEMBER;
+    const A: IpAddr = OTHER1.addr();
+    const B: IpAddr = OTHER2.addr();
+    const C: IpAddr = MEMBER.addr();
     struct Case {
         name: &'static str,
         initial: &'static [(IpAddr, u32)],
@@ -1366,14 +1373,14 @@ fn pcb_lane_transition_matrix_exhaustive() {
         let p = prefix(7);
         m.group_ribs.insert(PCB_GID, per_client_best_group(None));
         for &(src, lp) in case.initial {
-            seed(&mut m, cand(p, src, lp));
+            seed(&mut m, cand(p, PeerId::from_addr(src), lp));
         }
         let _ = stage_pcb(&mut m, &[p]);
         for &src in case.remove {
-            unseed(&mut m, src, p);
+            unseed(&mut m, PeerId::from_addr(src), p);
         }
         for &(src, lp) in case.add {
-            seed(&mut m, cand(p, src, lp));
+            seed(&mut m, cand(p, PeerId::from_addr(src), lp));
         }
 
         let out = stage_pcb(&mut m, &[p]);
@@ -1384,8 +1391,18 @@ fn pcb_lane_transition_matrix_exhaustive() {
                 assert_eq!(announces.len(), 1, "{}: winner delta count", case.name);
                 let delta = announces[0];
                 let (winner, _) = delta.new.as_ref().unwrap();
-                assert_eq!(winner.peer, src, "{}: winner source", case.name);
-                assert_eq!(delta.old_source, old, "{}: winner old_source", case.name);
+                assert_eq!(
+                    winner.peer,
+                    PeerId::from_addr(src),
+                    "{}: winner source",
+                    case.name
+                );
+                assert_eq!(
+                    delta.old_source,
+                    old.map(PeerId::from_addr),
+                    "{}: winner old_source",
+                    case.name
+                );
             }
             None => {
                 assert!(
@@ -1407,11 +1424,16 @@ fn pcb_lane_transition_matrix_exhaustive() {
                 assert_eq!(lane.prefix, p, "{}: lane prefix", case.name);
                 assert_eq!(
                     lane.new.as_ref().map(|entry| entry.route.peer),
-                    new,
+                    new.map(PeerId::from_addr),
                     "{}: lane new source",
                     case.name
                 );
-                assert_eq!(lane.old_source, old, "{}: lane old_source", case.name);
+                assert_eq!(
+                    lane.old_source,
+                    old.map(PeerId::from_addr),
+                    "{}: lane old_source",
+                    case.name
+                );
             }
             None => {
                 assert!(
@@ -1460,7 +1482,7 @@ fn pcb_runner_up_records_winner_source() {
     seed(&mut m, cand(p, MEMBER, 100));
     m.group_ribs.insert(
         PCB_GID,
-        per_client_best_group(Some(deny_sources_chain(&[OTHER1]))),
+        per_client_best_group(Some(deny_sources_chain(&[OTHER1.addr()]))),
     );
     let out = stage_pcb(&mut m, &[p]);
     let lane = out.lane_deltas[0].new.as_ref().expect("lane announce");
@@ -1524,7 +1546,7 @@ fn pcb_lane_count_moves_on_winner_flip_without_lane_delta() {
         out.lane_deltas.is_empty(),
         "unchanged lane route is suppressed across the winner flip"
     );
-    assert_eq!(lane_source(&m, p), Some(MEMBER));
+    assert_eq!(lane_source(&m, p), Some(MEMBER.addr()));
     assert_eq!(lane_count_rows(&m), vec![(OTHER2, [1, 0])]);
 }
 
@@ -1648,7 +1670,7 @@ fn pcb_emit_consumers_ignore_lane_fields() {
             &mut withdraw,
             &mut nh_flags,
         );
-        let keys: Vec<(Prefix, IpAddr)> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
+        let keys: Vec<(Prefix, PeerId)> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
         (keys, withdraw, nh_flags.len())
     };
     let with_lane = (
@@ -1658,7 +1680,7 @@ fn pcb_emit_consumers_ignore_lane_fields() {
             .collect::<Vec<_>>(),
     );
     out.build_shared_emit(&mut |_| {});
-    let shared_with_lane: Vec<(Prefix, IpAddr)> = out
+    let shared_with_lane: Vec<(Prefix, PeerId)> = out
         .shared_announce
         .iter()
         .map(|r| (r.prefix, r.peer))
@@ -1673,7 +1695,7 @@ fn pcb_emit_consumers_ignore_lane_fields() {
             .collect::<Vec<_>>(),
     );
     out.build_shared_emit(&mut |_| {});
-    let shared_without_lane: Vec<(Prefix, IpAddr)> = out
+    let shared_without_lane: Vec<(Prefix, PeerId)> = out
         .shared_announce
         .iter()
         .map(|r| (r.prefix, r.peer))
@@ -1710,7 +1732,7 @@ fn pcb_table_build_pass_populates_lane() {
     // O(overlapped prefixes): only the prefix with a distinct-
     // source runner-up occupies the lane.
     assert_eq!(group.runner_up.len(), 1);
-    assert_eq!(lane_source(&m, overlapped), Some(OTHER2));
+    assert_eq!(lane_source(&m, overlapped), Some(OTHER2.addr()));
 }
 
 // --- ADR-0126 Phase 2 (read-only seams): the adv(m) derivation
@@ -1719,7 +1741,7 @@ fn pcb_table_build_pass_populates_lane() {
 
 /// A lane entry with a full payload, for driving `adv_entry`
 /// directly.
-fn lane_entry(route: Route, winner_source: IpAddr, label: &str, comm: Option<u32>) -> RunnerUp {
+fn lane_entry(route: Route, winner_source: PeerId, label: &str, comm: Option<u32>) -> RunnerUp {
     RunnerUp {
         route,
         nh: Some(NextHopAction::Self_),
@@ -1955,7 +1977,7 @@ fn pcb_advertised_iterators_substitute_lane_entry() {
 
     // MEMBER sources p1's winner: its view substitutes the lane
     // route (OTHER1's candidate) there and nowhere else.
-    let mut rows: Vec<(Prefix, IpAddr, u32)> = m
+    let mut rows: Vec<(Prefix, PeerId, u32)> = m
         .grouped_advertised_routes_iter(MEMBER)
         .unwrap()
         .map(|r| (r.prefix, r.peer, r.path_id))
@@ -1967,7 +1989,7 @@ fn pcb_advertised_iterators_substitute_lane_entry() {
     );
     // OTHER2 sources no winner: the staged table, split horizon
     // moot, no substitution anywhere.
-    let mut rows: Vec<(Prefix, IpAddr)> = m
+    let mut rows: Vec<(Prefix, PeerId)> = m
         .grouped_advertised_routes_iter(OTHER2)
         .unwrap()
         .map(|r| (r.prefix, r.peer))
@@ -1977,7 +1999,7 @@ fn pcb_advertised_iterators_substitute_lane_entry() {
 
     // Ordered variant: the substitution keeps the winner's prefix
     // position, so the prefix-index order is unchanged.
-    let ordered: Vec<(Prefix, IpAddr)> = m
+    let ordered: Vec<(Prefix, PeerId)> = m
         .grouped_advertised_routes_ordered_iter(MEMBER, None)
         .unwrap()
         .map(|r| (r.prefix, r.peer))
@@ -2009,7 +2031,7 @@ fn pcb_ordered_iterator_resumes_past_substituted_row() {
         .members
         .insert(OTHER2, GroupMembership::Grouped(PCB_GID));
 
-    let full: Vec<(Prefix, IpAddr)> = m
+    let full: Vec<(Prefix, PeerId)> = m
         .grouped_advertised_routes_ordered_iter(OTHER2, None)
         .unwrap()
         .map(|r| (r.prefix, r.peer))
@@ -2022,8 +2044,8 @@ fn pcb_ordered_iterator_resumes_past_substituted_row() {
         .next()
         .map(crate::update::route_query_key)
         .unwrap();
-    assert_eq!(cursor, (p1, MEMBER, 0));
-    let resumed: Vec<(Prefix, IpAddr)> = m
+    assert_eq!(cursor, (p1, MEMBER.addr(), 0));
+    let resumed: Vec<(Prefix, PeerId)> = m
         .grouped_advertised_routes_ordered_iter(OTHER2, Some(cursor))
         .unwrap()
         .map(|r| (r.prefix, r.peer))
@@ -2128,11 +2150,11 @@ fn pcb_join_counters_replay_lane_permit() {
 
     let stats = |peer: IpAddr| {
         m.export_policy_counters
-            .get(&peer)
+            .get(&PeerId::from_addr(peer))
             .map_or(0, |stats| stats.snapshot().export_policy_routes_permitted)
     };
-    assert_eq!(stats(MEMBER), 2);
-    assert_eq!(stats(OTHER1), 1);
+    assert_eq!(stats(MEMBER.addr()), 2);
+    assert_eq!(stats(OTHER1.addr()), 1);
 
     // Label attribution is uniform across staged and lane permits.
     let gathered = m.metrics.registry().gather();
@@ -2140,7 +2162,7 @@ fn pcb_join_counters_replay_lane_permit() {
         .iter()
         .find(|family| family.name() == "bgp_policy_routes_total")
         .expect("policy routes counter family registered");
-    let permits = |peer: IpAddr, policy: &str| {
+    let permits = |peer: PeerId, policy: &str| {
         let peer_label = peer.to_string();
         family
             .get_metric()
@@ -2172,14 +2194,14 @@ fn pcb_join_counters_replay_lane_permit() {
 // --- ADR-0126 Phase 2 (steady-state emit): the Decision 5 matrix
 // --- arms + member-scoped lane emission, proven against adv(m).
 
-const FOURTH: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 4));
+const FOURTH: PeerId = peer_v4(Ipv4Addr::new(10, 9, 0, 4));
 const RS_ASN: u32 = 65000;
 const TARGET_ASN: u32 = 64512;
 
 /// Fixed per-source LP so every (winner, lane) state in the
 /// steady-state matrix is a pure seed-set choice: OTHER1 = 300
 /// outranks OTHER2 = 200 outranks MEMBER = 100.
-fn matrix_lp(src: IpAddr) -> u32 {
+fn matrix_lp(src: PeerId) -> u32 {
     if src == OTHER1 {
         300
     } else if src == OTHER2 {
@@ -2194,7 +2216,7 @@ fn matrix_lp(src: IpAddr) -> u32 {
 /// exact call order.
 fn emit_walk(
     out: &GroupStageOutput,
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
 ) -> (Vec<Route>, Vec<(Prefix, u32)>) {
     let mut announce = Vec::new();
@@ -2237,7 +2259,7 @@ fn emit_walk(
 /// (`shared_applies_to`), the walk must produce exactly the shared
 /// emission — the exception-routing invariant (a member NOT in
 /// `exceptions` is exactly served by the shared payload).
-fn member_emission(out: &GroupStageOutput, member: IpAddr) -> (Vec<Route>, Vec<(Prefix, u32)>) {
+fn member_emission(out: &GroupStageOutput, member: PeerId) -> (Vec<Route>, Vec<(Prefix, u32)>) {
     let (announce, withdraw) = emit_walk(out, member, None);
     if out.shared_applies_to(member) {
         assert_eq!(
@@ -2301,10 +2323,10 @@ fn member_emission(out: &GroupStageOutput, member: IpAddr) -> (Vec<Route>, Vec<(
     reason = "the exhaustive steady-state matrix folds every transition inline"
 )]
 fn pcb_steady_state_emission_matrix_matches_adv() {
-    type State = (Option<IpAddr>, Option<IpAddr>);
-    const A: IpAddr = OTHER1;
-    const B: IpAddr = OTHER2;
-    const C: IpAddr = MEMBER;
+    type State = (Option<PeerId>, Option<PeerId>);
+    const A: PeerId = OTHER1;
+    const B: PeerId = OTHER2;
+    const C: PeerId = MEMBER;
     let members = [A, B, C, FOURTH];
     let states: [State; 6] = [
         (None, None),
@@ -2319,7 +2341,7 @@ fn pcb_steady_state_emission_matrix_matches_adv() {
             let p = prefix(9);
             let mut m = staging_manager();
             m.group_ribs.insert(PCB_GID, per_client_best_group(None));
-            let mut wires: HashMap<IpAddr, HashMap<(Prefix, u32), Route>> =
+            let mut wires: HashMap<PeerId, HashMap<(Prefix, u32), Route>> =
                 members.iter().map(|&peer| (peer, HashMap::new())).collect();
             for (pass, state) in [(1u8, old_state), (2, new_state)] {
                 if pass == 2 {
@@ -2333,7 +2355,7 @@ fn pcb_steady_state_emission_matrix_matches_adv() {
                 let mut out = stage_pcb(&mut m, &[p]);
                 out.build_shared_emit(&mut |_| {});
                 let group = m.group_ribs.get(&PCB_GID).unwrap();
-                let mut emitted: HashMap<IpAddr, usize> = HashMap::new();
+                let mut emitted: HashMap<PeerId, usize> = HashMap::new();
                 for &member in &members {
                     let case =
                         format!("{old_state:?} -> {new_state:?}, pass {pass}, member {member}");
@@ -2434,7 +2456,7 @@ fn pcb_promotion_compares_the_former_winners_advertised_slot() {
                 attrs.push(PathAttribute::Med(99));
                 promoted.attributes = AttrSet::new(attrs);
             }
-            "next-hop" => promoted.next_hop = FOURTH,
+            "next-hop" => promoted.next_hop = FOURTH.addr(),
             _ => assert!(!Arc::ptr_eq(
                 &old_runner_up.attributes,
                 &promoted.attributes
@@ -2473,7 +2495,7 @@ fn pcb_overtaking_compares_the_new_winners_advertised_slot() {
     assert!(announce.is_empty() && withdraw.is_empty());
     assert_eq!(member_emission(&out, OTHER1).0.len(), 1);
     assert_eq!(lane_count_rows(&m), vec![(OTHER2, [1, 0])]);
-    assert_eq!(lane_source(&m, p), Some(OTHER1));
+    assert_eq!(lane_source(&m, p), Some(OTHER1.addr()));
 }
 
 #[test]
@@ -2821,7 +2843,7 @@ fn pcb_empty_lane_emits_like_plain_group() {
 
     assert!(pcb.lane_deltas.is_empty());
     let shape = |out: &GroupStageOutput| {
-        let mut rows: Vec<(Prefix, u32, Option<IpAddr>)> = out
+        let mut rows: Vec<(Prefix, u32, Option<PeerId>)> = out
             .deltas
             .iter()
             .map(|d| (d.prefix, d.path_id, d.new.as_ref().map(|(r, _)| r.peer)))
@@ -2837,7 +2859,7 @@ fn pcb_empty_lane_emits_like_plain_group() {
             "exception routing diverged for {member}"
         );
         let keys = |routes: &[Route]| {
-            let mut keys: Vec<(Prefix, u32, IpAddr)> = routes
+            let mut keys: Vec<(Prefix, u32, PeerId)> = routes
                 .iter()
                 .map(|r| (r.prefix, r.path_id, r.peer))
                 .collect();
@@ -3022,7 +3044,7 @@ fn peer_update_group_gauge_tracks_membership() {
 
 fn gathered_peer_update_group(
     metrics: &rustbgpd_telemetry::BgpMetrics,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> Option<f64> {
     let peer = peer.to_string();
     metrics
@@ -3166,7 +3188,7 @@ type ResyncEmission = (Vec<Route>, Vec<(Prefix, u32)>, Vec<Option<NextHopAction>
 /// `(announce, withdraw, nh_flags)`.
 fn resync(
     group: &GroupRibOut,
-    member: IpAddr,
+    member: PeerId,
     rs_control: Option<(u32, u32)>,
     is_dirty: bool,
     is_force: bool,
@@ -3201,7 +3223,7 @@ fn resync(
 /// Assert a folded wire equals the member's `adv_entry`-derived
 /// view — the ADR-0126 Decision 4 invariant every resync must
 /// converge to.
-fn assert_wire_is_adv(group: &GroupRibOut, member: IpAddr, wire: &HashMap<(Prefix, u32), Route>) {
+fn assert_wire_is_adv(group: &GroupRibOut, member: PeerId, wire: &HashMap<(Prefix, u32), Route>) {
     let adv: HashMap<(Prefix, u32), &Route> = group
         .table
         .iter()
@@ -3260,7 +3282,7 @@ fn pcb_dirty_resync_substitutes_lane_for_winner_source() {
     group.tombstones.insert((k4, 0)); // gone from the table entirely
 
     let (announce, withdraw, nh_flags) = resync(&group, MEMBER, None, true, false, None);
-    let announced: HashMap<Prefix, IpAddr> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
+    let announced: HashMap<Prefix, PeerId> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
     assert_eq!(
         announced,
         HashMap::from([(k1, OTHER1), (k2, OTHER2)]),
@@ -3285,7 +3307,7 @@ fn pcb_dirty_resync_substitutes_lane_for_winner_source() {
     // A dirty member that does NOT source the winner is untouched
     // by the lane: it receives the staged winners.
     let (announce, withdraw, _) = resync(&group, OTHER1, None, true, false, None);
-    let announced: HashMap<Prefix, IpAddr> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
+    let announced: HashMap<Prefix, PeerId> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
     assert_eq!(announced, HashMap::from([(k2, MEMBER), (k3, MEMBER)]));
     let withdrawn: HashSet<(Prefix, u32)> = withdraw.into_iter().collect();
     assert_eq!(
@@ -3309,7 +3331,7 @@ fn pcb_force_resync_reannounces_substitution() {
     );
 
     let (announce, withdraw, _) = resync(&group, MEMBER, None, false, true, None);
-    let announced: HashMap<Prefix, IpAddr> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
+    let announced: HashMap<Prefix, PeerId> = announce.iter().map(|r| (r.prefix, r.peer)).collect();
     assert_eq!(announced, HashMap::from([(k1, OTHER1), (k2, OTHER2)]));
     assert!(withdraw.is_empty(), "force-only withdraws nothing");
 }
@@ -3437,7 +3459,7 @@ fn pcb_empty_lane_resync_matches_plain_group() {
         let (plain_announce, mut plain_withdraw, _) =
             resync(&plain, MEMBER, None, is_dirty, is_force, Some(&extras));
         let keys = |routes: &[Route]| {
-            let mut keys: Vec<(Prefix, u32, IpAddr)> = routes
+            let mut keys: Vec<(Prefix, u32, PeerId)> = routes
                 .iter()
                 .map(|r| (r.prefix, r.path_id, r.peer))
                 .collect();
@@ -3533,24 +3555,32 @@ fn pcb_channel_full_lost_emission_converges_to_adv() {
     let p = prefix(1);
     // Mimic the fanout driver's channel-full arm for `victim`,
     // then run its dirty resync and fold onto `wire`.
-    let lose_and_resync = |m: &mut RibManager,
-                           victim: IpAddr,
-                           wire: &mut HashMap<(Prefix, u32), Route>| {
-        let out = stage_pcb(m, &[p]);
-        let group = m.group_ribs.get_mut(&PCB_GID).unwrap();
-        group.tombstones.extend(out.withdrawn_keys(|| {}));
-        let extras: HashSet<(Prefix, u32)> = out.member_scoped_withdraws(victim, || {}).collect();
-        let group = m.group_ribs.get(&PCB_GID).unwrap();
-        let (announce, withdraw, _) = resync(group, victim, None, true, false, Some(&extras));
-        let announce_keys: HashSet<(Prefix, u32)> =
-            announce.iter().map(|r| (r.prefix, r.path_id)).collect();
-        assert!(
-            announce_keys.is_disjoint(&withdraw.iter().copied().collect()),
-            "announce+withdraw of one key escaped for {victim}"
-        );
-        fold_wire(wire, announce, &withdraw);
-        assert_wire_is_adv(group, victim, wire);
-    };
+    let lose_and_resync =
+        |m: &mut RibManager, victim: IpAddr, wire: &mut HashMap<(Prefix, u32), Route>| {
+            let out = stage_pcb(m, &[p]);
+            let group = m.group_ribs.get_mut(&PCB_GID).unwrap();
+            group.tombstones.extend(out.withdrawn_keys(|| {}));
+            let extras: HashSet<(Prefix, u32)> = out
+                .member_scoped_withdraws(PeerId::from_addr(victim), || {})
+                .collect();
+            let group = m.group_ribs.get(&PCB_GID).unwrap();
+            let (announce, withdraw, _) = resync(
+                group,
+                PeerId::from_addr(victim),
+                None,
+                true,
+                false,
+                Some(&extras),
+            );
+            let announce_keys: HashSet<(Prefix, u32)> =
+                announce.iter().map(|r| (r.prefix, r.path_id)).collect();
+            assert!(
+                announce_keys.is_disjoint(&withdraw.iter().copied().collect()),
+                "announce+withdraw of one key escaped for {victim}"
+            );
+            fold_wire(wire, announce, &withdraw);
+            assert_wire_is_adv(group, PeerId::from_addr(victim), wire);
+        };
 
     // (a) Lane retire lost: OTHER1 sources the winner, its wire
     // holds the substitution, the runner-up disappears.
@@ -3564,7 +3594,7 @@ fn pcb_channel_full_lost_emission_converges_to_adv() {
     fold_wire(&mut wire, announce, &withdraw);
     assert_eq!(wire[&(p, 0)].peer, OTHER2, "wire holds the substitution");
     unseed(&mut m, OTHER2, p);
-    lose_and_resync(&mut m, OTHER1, &mut wire);
+    lose_and_resync(&mut m, OTHER1.addr(), &mut wire);
     assert!(wire.is_empty(), "the retire withdraw must be delivered");
 
     // (b) Substituted announce lost: the lane fills under an
@@ -3578,7 +3608,7 @@ fn pcb_channel_full_lost_emission_converges_to_adv() {
     fold_wire(&mut wire, announce, &withdraw);
     assert!(wire.is_empty(), "winner's own source starts empty");
     seed(&mut m, cand(p, OTHER2, 200));
-    lose_and_resync(&mut m, OTHER1, &mut wire);
+    lose_and_resync(&mut m, OTHER1.addr(), &mut wire);
     assert_eq!(
         wire[&(p, 0)].peer,
         OTHER2,
@@ -3598,7 +3628,7 @@ fn pcb_channel_full_lost_emission_converges_to_adv() {
     fold_wire(&mut wire, announce, &withdraw);
     assert_eq!(wire[&(p, 0)].peer, OTHER1, "wire holds the staged winner");
     seed(&mut m, cand(p, MEMBER, 400));
-    lose_and_resync(&mut m, MEMBER, &mut wire);
+    lose_and_resync(&mut m, MEMBER.addr(), &mut wire);
     assert_eq!(
         wire[&(p, 0)].peer,
         OTHER1,
@@ -3639,7 +3669,7 @@ fn replay_group(lane_comm: Option<u32>) -> GroupRibOut {
 /// observes only what it triggers.
 fn register_pcb_member(
     m: &mut RibManager,
-    member: IpAddr,
+    member: PeerId,
     mut group: GroupRibOut,
 ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
@@ -3679,7 +3709,7 @@ fn register_pcb_member(
 fn folded_outbound(
     rx: &mut tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate>,
 ) -> (
-    HashMap<Prefix, (IpAddr, Option<NextHopAction>)>,
+    HashMap<Prefix, (PeerId, Option<NextHopAction>)>,
     Vec<(Prefix, u32)>,
 ) {
     let mut announced = HashMap::new();
@@ -3995,7 +4025,7 @@ fn vpn_key(n: u8) -> VpnRouteKey {
     }
 }
 
-fn vpn_route(n: u8, src: IpAddr) -> VpnRibRoute {
+fn vpn_route(n: u8, src: PeerId) -> VpnRibRoute {
     let key = vpn_key(n);
     VpnRibRoute {
         nlri: VpnNlri {
@@ -4003,21 +4033,21 @@ fn vpn_route(n: u8, src: IpAddr) -> VpnRibRoute {
             route_distinguisher: key.route_distinguisher,
             prefix: key.prefix,
         },
-        next_hop: src,
+        next_hop: src.addr(),
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: src,
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: std::time::Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
-        peer_router_id: crate::test_support::session_router_id(src),
+        peer_router_id: crate::test_support::session_router_id(src.addr()),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
     }
 }
 
-fn vpn_announce_delta(n: u8, src: IpAddr, old: Option<IpAddr>) -> VpnGroupDelta {
+fn vpn_announce_delta(n: u8, src: PeerId, old: Option<PeerId>) -> VpnGroupDelta {
     VpnGroupDelta {
         key: vpn_key(n),
         new: Some(vpn_route(n, src)),
@@ -4026,7 +4056,7 @@ fn vpn_announce_delta(n: u8, src: IpAddr, old: Option<IpAddr>) -> VpnGroupDelta 
     }
 }
 
-fn vpn_withdraw_delta(n: u8, old: Option<IpAddr>) -> VpnGroupDelta {
+fn vpn_withdraw_delta(n: u8, old: Option<PeerId>) -> VpnGroupDelta {
     VpnGroupDelta {
         key: vpn_key(n),
         new: None,
@@ -4142,7 +4172,7 @@ fn capacity_one_vpn_member() -> (
 
 fn receive_vpn(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     announced: Vec<VpnRibRoute>,
     withdrawn: Vec<VpnRibRouteKey>,
 ) {
@@ -4291,7 +4321,7 @@ fn vpn_source_flip_matrix_exhaustive() {
             }
             let delta = match new {
                 Some(src) => vpn_announce_delta(1, src, old),
-                None => vpn_withdraw_delta(1, old),
+                None => vpn_withdraw_delta(1, old.map(PeerId::addr).map(PeerId::from_addr)),
             };
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
@@ -4620,7 +4650,7 @@ const fn rt(n: u64) -> u64 {
     0x0002_FDE8_0000_0000 | n
 }
 
-fn vpn_route_with_rts(n: u8, src: IpAddr, rts: &[u64]) -> VpnRibRoute {
+fn vpn_route_with_rts(n: u8, src: PeerId, rts: &[u64]) -> VpnRibRoute {
     let mut route = vpn_route(n, src);
     route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
@@ -4913,7 +4943,7 @@ fn source_control_modifying_mode_preserves_historical_residue_and_transition() {
 // --- the widened all-affected set, plain groups from
 // --- `best_changed` exactly.
 
-const OTHER3: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 4));
+const OTHER3: PeerId = peer_v4(Ipv4Addr::new(10, 9, 0, 4));
 
 /// Plain sibling of [`per_client_best_group`] with a caller-chosen
 /// export chain — the staging-trigger control group.
@@ -4945,7 +4975,7 @@ fn pcb_group_restages_from_all_affected_without_best_change() {
     let mut rx = register_pcb_member(
         &mut m,
         MEMBER,
-        per_client_best_group(Some(deny_sources_chain(&[OTHER1]))),
+        per_client_best_group(Some(deny_sources_chain(&[OTHER1.addr()]))),
     );
     seed(&mut m, cand(p, OTHER1, 300)); // Loc-RIB best, chain-denied
     seed(&mut m, cand(p, OTHER2, 200)); // advertised winner
@@ -4992,7 +5022,7 @@ fn plain_group_denied_best_does_not_restage_on_candidate_withdrawal() {
     let mut rx = register_pcb_member(
         &mut m,
         MEMBER,
-        plain_group_with_chain(Some(deny_sources_chain(&[OTHER1]))),
+        plain_group_with_chain(Some(deny_sources_chain(&[OTHER1.addr()]))),
     );
     seed(&mut m, cand(p, OTHER1, 300));
     seed(&mut m, cand(p, OTHER2, 200));
@@ -5063,7 +5093,7 @@ fn pcb_lane_retires_when_runner_up_withdrawn_without_best_change() {
         announced[&p].0, OTHER2,
         "precondition: source(w) holds the lane substitution"
     );
-    assert_eq!(lane_source(&m, p), Some(OTHER2));
+    assert_eq!(lane_source(&m, p), Some(OTHER2.addr()));
 
     unseed(&mut m, OTHER2, p);
     let changed = m.recompute_best(&HashSet::from([p]));
@@ -5111,7 +5141,7 @@ fn pcb_widened_pass_with_unchanged_winner_and_lane_is_noop() {
         out.lane_deltas.is_empty(),
         "unchanged lane stays suppressed"
     );
-    assert_eq!(lane_source(&m, p), Some(OTHER2));
+    assert_eq!(lane_source(&m, p), Some(OTHER2.addr()));
 }
 
 /// Plain groups keep the exact `best_changed` staging input: an
@@ -5175,7 +5205,7 @@ fn per_client_best_customer_group() -> GroupRibOut {
 /// an export gate) keeps this fixture on the per-peer path.
 fn register_ungrouped_pcb_peer(
     m: &mut RibManager,
-    member: IpAddr,
+    member: PeerId,
 ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
     m.slow_isolated_peers.insert(member);
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel(8);
@@ -5202,7 +5232,7 @@ fn register_ungrouped_pcb_peer(
 }
 
 /// Feed inbound routes through the REAL chunked distribution pass.
-fn receive_routes(m: &mut RibManager, source: IpAddr, announced: Vec<Route>) {
+fn receive_routes(m: &mut RibManager, source: PeerId, announced: Vec<Route>) {
     m.handle_update(crate::update::RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -5220,9 +5250,9 @@ fn receive_routes(m: &mut RibManager, source: IpAddr, announced: Vec<Route>) {
 /// Every queued envelope folded to the wire-relevant fields.
 #[derive(Debug, PartialEq, Default)]
 struct DrainedWire {
-    announced: Vec<(Prefix, IpAddr)>,
+    announced: Vec<(Prefix, PeerId)>,
     withdrawn: Vec<(Prefix, u32)>,
-    otc_blocked: Vec<(Prefix, IpAddr)>,
+    otc_blocked: Vec<(Prefix, PeerId)>,
 }
 
 fn drain_wire(
@@ -5275,7 +5305,7 @@ fn pcb_otc_blocked_winner_stays_staged_and_residue_recorded() {
         }),
         "the staged form keeps the OTC attribute"
     );
-    assert_eq!(lane_source(&m, p), Some(OTHER2));
+    assert_eq!(lane_source(&m, p), Some(OTHER2.addr()));
     assert_eq!(out.otc_blocked.len(), 1);
     assert_eq!(out.otc_blocked[0].peer, OTHER1);
     let blocked = group.otc_blocked_for_member(MEMBER, None);
@@ -5387,7 +5417,7 @@ fn pcb_otc_blocked_scoped_query_matches_unscoped_across_scope_shapes() {
     assert_eq!(group.runner_up.len(), 3);
 
     let view = |routes: Vec<Route>| {
-        let mut view: Vec<(Prefix, IpAddr)> = routes
+        let mut view: Vec<(Prefix, PeerId)> = routes
             .iter()
             .map(|route| (route.prefix, route.peer))
             .collect();
@@ -5404,7 +5434,7 @@ fn pcb_otc_blocked_scoped_query_matches_unscoped_across_scope_shapes() {
             HashSet::from([prefix(9)]),
             HashSet::from([prefix(2), prefix(9)]),
         ] {
-            let expected: Vec<(Prefix, IpAddr)> = unscoped
+            let expected: Vec<(Prefix, PeerId)> = unscoped
                 .iter()
                 .copied()
                 .filter(|(p, _)| scope.contains(p))
@@ -5439,7 +5469,7 @@ fn pcb_policy_filtered_scoped_query_matches_full_residue() {
     }
     m.group_ribs.insert(
         PCB_GID,
-        per_client_best_group(Some(deny_sources_chain(&[OTHER1]))),
+        per_client_best_group(Some(deny_sources_chain(&[OTHER1.addr()]))),
     );
     stage_pcb(&mut m, &staged);
     let group = m.group_ribs.get(&PCB_GID).unwrap();
@@ -5579,7 +5609,7 @@ fn pcb_otc_budget_refused_dirty_recovery_keeps_the_owed_withdrawal() {
     let _ = drain_wire(&mut receiver);
     while manager.resync_dirty_peers_bounded() {}
     let recovered = drain_wire(&mut receiver);
-    assert_eq!(recovered.announced, [] as [(Prefix, IpAddr); 0]);
+    assert_eq!(recovered.announced, [] as [(Prefix, PeerId); 0]);
     assert_eq!(recovered.withdrawn, vec![(p, 0)]);
     assert!(!manager.dirty_peers.contains(&MEMBER));
     assert_eq!(manager.group_recovery_fallback(MEMBER), None);
@@ -5791,8 +5821,8 @@ fn pcb_advertised_iterators_skip_backstop_stripped_slots() {
             .insert(peer, GroupMembership::Grouped(PCB_GID));
     }
 
-    let rows = |peer: IpAddr| -> Vec<(Prefix, IpAddr)> {
-        let mut rows: Vec<(Prefix, IpAddr)> = m
+    let rows = |peer: PeerId| -> Vec<(Prefix, PeerId)> {
+        let mut rows: Vec<(Prefix, PeerId)> = m
             .grouped_advertised_routes_iter(peer)
             .unwrap()
             .map(|r| (r.prefix, r.peer))
@@ -5808,7 +5838,7 @@ fn pcb_advertised_iterators_skip_backstop_stripped_slots() {
     );
     assert_eq!(rows(OTHER2), vec![(p2, MEMBER), (p3, OTHER1)]);
 
-    let ordered: Vec<(Prefix, IpAddr)> = m
+    let ordered: Vec<(Prefix, PeerId)> = m
         .grouped_advertised_routes_ordered_iter(MEMBER, None)
         .unwrap()
         .map(|r| (r.prefix, r.peer))
@@ -5893,7 +5923,7 @@ fn pcb_otc_subtraction_is_role_gated() {
     );
     assert_eq!(group.advertised_count_for(MEMBER), 2);
     assert_eq!(m.grouped_advertised_count(MEMBER), Some(2));
-    let mut rows: Vec<(Prefix, IpAddr)> = m
+    let mut rows: Vec<(Prefix, PeerId)> = m
         .grouped_advertised_routes_iter(MEMBER)
         .unwrap()
         .map(|r| (r.prefix, r.peer))
@@ -5990,11 +6020,11 @@ fn pcb_otc_query_surfaces_match_ungrouped_post_backstop() {
     // The ungrouped Adj-RIB-Out is the oracle: post-backstop,
     // blocked routes were never committed.
     let oracle_rib = ungrouped.adj_ribs_out.get(&MEMBER).unwrap();
-    let mut oracle: Vec<(Prefix, IpAddr)> = oracle_rib.iter().map(|r| (r.prefix, r.peer)).collect();
+    let mut oracle: Vec<(Prefix, PeerId)> = oracle_rib.iter().map(|r| (r.prefix, r.peer)).collect();
     oracle.sort();
     assert_eq!(oracle, vec![(p3, OTHER1)]);
 
-    let mut rows: Vec<(Prefix, IpAddr)> = grouped
+    let mut rows: Vec<(Prefix, PeerId)> = grouped
         .grouped_advertised_routes(MEMBER)
         .unwrap()
         .iter()
@@ -6130,7 +6160,7 @@ fn per_client_best_groups_are_excluded_from_clean_transition_inventory() {
 /// [`route`] plus one standard community — the smallest wire-form
 /// difference between a source and a destination staged entry, and,
 /// with a control-space value, an RFC 7947 tag for [`RS_ASN`].
-fn route_with_comm(p: Prefix, src: IpAddr, comm: u32) -> Route {
+fn route_with_comm(p: Prefix, src: PeerId, comm: u32) -> Route {
     let mut route = route(p, src);
     let mut attrs = route.attributes.to_vec();
     attrs.push(PathAttribute::Communities(vec![comm]));
@@ -6436,7 +6466,7 @@ fn clean_transition_inventory_degrades_on_table_drift() {
 
 fn snapshot_capture_channel(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     gid: Option<usize>,
 ) -> tokio::sync::mpsc::Receiver<crate::update::OutboundRouteUpdate> {
     let (outbound, receiver) = tokio::sync::mpsc::channel(1);
@@ -6468,7 +6498,7 @@ fn shared_full_capture_preserves_unsynchronized_uc_vpn_old_views() {
     }
     group.apply_vpn_delta(&vpn_announce_delta(1, OTHER1, None));
     manager.group_ribs.insert(GID, group);
-    let peers = [MEMBER, OTHER2, IpAddr::V4(Ipv4Addr::new(10, 9, 0, 4))];
+    let peers = [MEMBER, OTHER2, peer_v4(Ipv4Addr::new(10, 9, 0, 4))];
     let _receivers: Vec<_> = peers
         .iter()
         .map(|peer| snapshot_capture_channel(&mut manager, *peer, Some(GID)))
@@ -6844,8 +6874,8 @@ fn full_table_vpn_members_share_one_recovery_pool_within_production_caps() {
     manager.group_ribs.insert(GID, group);
     // Thirteen exact flat 1.23M-key proofs fill the 512 MiB daemon cap; the
     // fourteenth member would fall back to conservative withdrawal.
-    let members: Vec<IpAddr> = (1..=14)
-        .map(|n| IpAddr::V4(Ipv4Addr::new(10, 22, 58, n)))
+    let members: Vec<PeerId> = (1..=14)
+        .map(|n| peer_v4(Ipv4Addr::new(10, 22, 58, n)))
         .collect();
     let _receivers: Vec<_> = members
         .iter()

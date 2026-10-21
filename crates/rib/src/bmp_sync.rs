@@ -391,6 +391,7 @@ pub fn loc_rib_open_pdu(local_asn: u32, router_id: Ipv4Addr) -> Bytes {
 
 #[cfg(test)]
 mod tests {
+    use crate::PeerId;
     use std::net::Ipv6Addr;
     use std::time::Instant;
 
@@ -418,7 +419,7 @@ mod tests {
             next_hop,
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: next_hop,
+            peer: PeerId::from_addr(next_hop),
             attributes: AttrSet::new(base_attrs()),
             received_at: crate::route::ReceivedAt::now(),
             origin_type: RouteOrigin::Ebgp,
@@ -454,7 +455,7 @@ mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,

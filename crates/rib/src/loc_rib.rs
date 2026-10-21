@@ -1049,7 +1049,7 @@ pub(crate) fn evpn_cmp_with_reason(
         other => return (other, R::ShorterClusterList),
     }
     // 8. Final tiebreak: lower peer address wins (deterministic).
-    (a.peer.cmp(&b.peer), R::LowerPeerAddress)
+    (a.peer.addr().cmp(&b.peer.addr()), R::LowerPeerAddress)
 }
 
 /// Values for the decisive EVPN comparator step, in winner / comparison order.
@@ -1194,7 +1194,7 @@ fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
     //    zero today: FlowSpec does not negotiate Add-Path). The identifier
     //    has no preference semantics (RFC 7911 §2); it only makes distinct
     //    same-peer routes a total order.
-    cmp_ipaddr(&a.peer, &b.peer).then_with(|| a.path_id.cmp(&b.path_id))
+    cmp_ipaddr(&a.peer.addr(), &b.peer.addr()).then_with(|| a.path_id.cmp(&b.path_id))
 }
 
 fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
@@ -1245,7 +1245,7 @@ fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
         return cmp;
     }
 
-    cmp_ipaddr(&a.peer, &b.peer)
+    cmp_ipaddr(&a.peer.addr(), &b.peer.addr())
 }
 
 fn bgpls_stale_rank(route: &BgpLsRibRoute) -> u8 {
@@ -1379,7 +1379,7 @@ fn vpn_cmp_chain(
     // negotiates Add-Path, so one peer can hold several otherwise-tied
     // routes. The identifier has no preference semantics (RFC 7911 §2);
     // it only makes the order total, independent of candidate order.
-    cmp_ipaddr(&a.peer, &b.peer).then_with(|| a.path_id.cmp(&b.path_id))
+    cmp_ipaddr(&a.peer.addr(), &b.peer.addr()).then_with(|| a.path_id.cmp(&b.path_id))
 }
 
 pub(crate) fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
@@ -1514,7 +1514,7 @@ fn labeled_cmp_chain(
     // negotiates Add-Path, so one peer can hold several otherwise-tied
     // routes. The identifier has no preference semantics (RFC 7911 §2);
     // it only makes the order total, independent of candidate order.
-    cmp_ipaddr(&a.peer, &b.peer).then_with(|| a.path_id.cmp(&b.path_id))
+    cmp_ipaddr(&a.peer.addr(), &b.peer.addr()).then_with(|| a.path_id.cmp(&b.path_id))
 }
 
 fn labeled_stale_rank(route: &LabeledRibRoute) -> u8 {
@@ -1600,7 +1600,7 @@ fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
         return cmp;
     }
 
-    cmp_ipaddr(&a.peer, &b.peer)
+    cmp_ipaddr(&a.peer.addr(), &b.peer.addr())
 }
 
 fn rtc_stale_rank(route: &RtcRibRoute) -> u8 {
@@ -1656,6 +1656,7 @@ impl Default for LocRib {
 
 #[cfg(test)]
 mod tests {
+    use crate::PeerId;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::time::Instant;
@@ -1846,11 +1847,11 @@ mod tests {
         nlri: rustbgpd_wire::bgpls::BgpLsNlri,
         peer_oct: u8,
     ) -> BgpLsRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         BgpLsRibRoute {
             family,
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             peer,
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
@@ -1871,10 +1872,10 @@ mod tests {
     }
 
     fn make_vpn_route(nlri: VpnNlri, peer_oct: u8, local_pref: u32) -> VpnRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         VpnRibRoute {
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer,
@@ -1903,7 +1904,7 @@ mod tests {
         assert_eq!(loc.vpn_len(), 1);
         assert_eq!(
             loc.get_vpn(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             "higher LOCAL_PREF candidate must win"
         );
     }
@@ -1920,7 +1921,7 @@ mod tests {
         loc.recompute_vpn(key, [&r_stale, &r_fresh].into_iter());
         assert_eq!(
             loc.get_vpn(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             "fresh route wins over a stale route with higher LOCAL_PREF"
         );
     }
@@ -2115,10 +2116,10 @@ mod tests {
     }
 
     fn make_labeled_route(nlri: LabeledNlri, peer_oct: u8, local_pref: u32) -> LabeledRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         LabeledRibRoute {
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer,
@@ -2147,7 +2148,7 @@ mod tests {
         assert_eq!(loc.labeled_len(), 1);
         assert_eq!(
             loc.get_labeled(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
         );
     }
 
@@ -2163,7 +2164,7 @@ mod tests {
         loc.recompute_labeled(key, [&r_stale, &r_fresh].into_iter());
         assert_eq!(
             loc.get_labeled(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             "fresh route must beat GR-stale despite lower LOCAL_PREF"
         );
     }
@@ -2597,10 +2598,10 @@ mod tests {
     }
 
     fn make_rtc_route(nlri: RtcNlri, peer_oct: u8, local_pref: u32) -> RtcRibRoute {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct));
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)));
         RtcRibRoute {
             nlri,
-            next_hop: peer,
+            next_hop: peer.addr(),
             peer,
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -2627,7 +2628,7 @@ mod tests {
         assert_eq!(loc.rtc_len(), 1);
         assert_eq!(
             loc.get_rtc(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             "higher LOCAL_PREF candidate must win"
         );
     }
@@ -2644,7 +2645,7 @@ mod tests {
         loc.recompute_rtc(key.clone(), [&r_stale, &r_fresh].into_iter());
         assert_eq!(
             loc.get_rtc(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
             "fresh route wins over a stale route with higher LOCAL_PREF"
         );
     }
@@ -2765,7 +2766,7 @@ mod tests {
         assert_eq!(loc.len(), 1);
         assert_eq!(
             loc.get(&prefix).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
         );
     }
 
@@ -2781,7 +2782,7 @@ mod tests {
         assert!(loc.recompute(prefix, [&route_a, &route_b].into_iter()));
         assert_eq!(
             loc.get(&prefix).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
         );
     }
 
@@ -2897,7 +2898,7 @@ mod tests {
         assert_eq!(loc.bgpls_len(), 1, "same opaque key should replace");
         assert_eq!(
             loc.get_bgpls(&key).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
         );
 
         assert!(loc.remove_bgpls(&key));
@@ -3002,7 +3003,7 @@ mod tests {
         // r2 has highest local_pref (200)
         assert_eq!(
             loc.get(&prefix).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
         );
     }
 
@@ -3037,7 +3038,7 @@ mod tests {
         FlowSpecRoute {
             rule: make_flowspec_rule(),
             afi: Afi::Ipv4,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, peer_oct))),
             attributes: attrs,
             received_at: Instant::now(),
             origin_type,
@@ -3057,7 +3058,10 @@ mod tests {
 
         loc.recompute_flowspec(flowspec_key(&rule), [&r1, &r2].into_iter());
         let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
-        assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            best.peer,
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+        );
     }
 
     #[test]
@@ -3089,7 +3093,10 @@ mod tests {
 
         loc.recompute_flowspec(flowspec_key(&rule), [&r1, &r2].into_iter());
         let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
-        assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            best.peer,
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+        );
     }
 
     #[test]
@@ -3103,7 +3110,10 @@ mod tests {
 
         loc.recompute_flowspec(flowspec_key(&rule), [&internal, &external].into_iter());
         let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
-        assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            best.peer,
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+        );
     }
 
     #[test]
@@ -3119,7 +3129,10 @@ mod tests {
         loc.recompute_flowspec(flowspec_key(&rule), [&r_stale, &r_fresh].into_iter());
         let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         // Fresh route wins despite lower LOCAL_PREF
-        assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            best.peer,
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+        );
     }
 
     /// Regression: GR-stale outranks LLGR-stale (RFC 9494 §4.7), and
@@ -3145,7 +3158,7 @@ mod tests {
         loc.recompute_flowspec(flowspec_key(&rule), [&gr, &llgr].into_iter());
         assert_eq!(
             loc.get_flowspec(&flowspec_key(&rule)).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             "GR-stale must outrank LLGR-stale"
         );
     }
@@ -3163,7 +3176,7 @@ mod tests {
         loc.recompute_flowspec(flowspec_key(&rule), [&fresh, &llgr].into_iter());
         assert_eq!(
             loc.get_flowspec(&flowspec_key(&rule)).unwrap().peer,
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             "fresh must outrank LLGR-stale even with lower LocalPref"
         );
     }
@@ -3187,7 +3200,10 @@ mod tests {
 
         loc.recompute_flowspec(flowspec_key(&rule), [&r1, &r2].into_iter());
         let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
-        assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            best.peer,
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+        );
     }
 
     #[test]
@@ -3201,7 +3217,10 @@ mod tests {
         loc.recompute_flowspec(flowspec_key(&rule), [&r1, &r2].into_iter());
         let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         // Lowest peer IP wins
-        assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(
+            best.peer,
+            PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
     }
 
     // ---- RFC 4271 §9.1.2.2 step (f) on every non-unicast chain ---------
@@ -3283,7 +3302,7 @@ mod tests {
             route: mac_ip,
             next_hop: IpAddr::V4(peer),
             link_local_next_hop: None,
-            peer: IpAddr::V4(peer),
+            peer: PeerId::from_addr(IpAddr::V4(peer)),
             attributes: AttrSet::new(attrs),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
@@ -3983,7 +4002,7 @@ mod tests {
                 route: mac_ip,
                 next_hop: IpAddr::V4(peer),
                 link_local_next_hop: None,
-                peer: IpAddr::V4(peer),
+                peer: PeerId::from_addr(IpAddr::V4(peer)),
                 attributes: AttrSet::new(vec![PathAttribute::LocalPref(100)]),
                 received_at: Instant::now(),
                 origin_type: RouteOrigin::Ibgp,

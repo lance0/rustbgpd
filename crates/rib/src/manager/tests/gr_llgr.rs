@@ -1,4 +1,6 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
 #[path = "gr_llgr_harness.rs"]
 mod harness;
@@ -9,8 +11,8 @@ use harness::{RunningManager, TimeMode, direct_manager, spawn_manager};
 async fn gr_marks_stale_and_demotes_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     let (out_tx, mut out_rx) = mpsc::channel(64);
@@ -80,7 +82,7 @@ async fn gr_marks_stale_and_demotes_routes() {
 async fn gr_eor_clears_stale() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let dropped_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
@@ -169,7 +171,7 @@ async fn gr_eor_clears_stale() {
 async fn gr_consecutive_restart_deletes_stale_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -217,7 +219,7 @@ async fn gr_consecutive_restart_deletes_stale_routes() {
 async fn gr_eor_sweep_scopes_to_family() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
-    let source: IpAddr = "10.0.0.1".parse().unwrap();
+    let source = PeerId::from_addr("10.0.0.1".parse().unwrap());
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
     let mut v6_route = make_v6_route(v6_prefix, "2001:db8::1".parse().unwrap());
@@ -279,7 +281,7 @@ async fn gr_eor_sweep_scopes_to_family() {
 async fn gr_timer_sweeps_stale_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
@@ -333,7 +335,7 @@ async fn gr_timer_sweeps_stale_routes() {
 async fn gr_peer_up_defers_stale_to_eor() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
@@ -439,7 +441,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
 async fn gr_peer_up_timer_expires_sweeps_stale() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
@@ -533,7 +535,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
 async fn gr_peer_down_aborts_gr() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
@@ -594,7 +596,7 @@ async fn gr_withdraws_non_gr_family_routes() {
 
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Realtime);
 
-    let source: IpAddr = "10.0.0.1".parse().unwrap();
+    let source = PeerId::from_addr("10.0.0.1".parse().unwrap());
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
 
@@ -608,7 +610,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         attributes: AttrSet::new(vec![]),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: session_router_id(source),
+        peer_router_id: session_router_id(source.addr()),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -682,7 +684,7 @@ async fn gr_withdraws_non_gr_family_routes() {
 async fn llgr_gr_timer_promotes_to_llgr_stale() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Source sends a route
@@ -742,7 +744,7 @@ async fn llgr_gr_timer_promotes_to_llgr_stale() {
 async fn llgr_timer_sweeps_llgr_stale_routes() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -806,7 +808,7 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
 async fn llgr_eor_clears_llgr_stale() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let kept_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let dropped_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
@@ -927,7 +929,7 @@ async fn llgr_eor_clears_llgr_stale() {
 async fn llgr_peer_down_aborts_llgr() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -995,7 +997,7 @@ async fn llgr_peer_down_aborts_llgr() {
 async fn llgr_without_peer_capability_falls_through_to_sweep() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -1052,7 +1054,7 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
 
 /// `PeerUp` with the boilerplate defaulted; returns the outbound receiver
 /// so the channel stays open for the initial dump + `EoR`.
-fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<OutboundRouteUpdate> {
+fn establish_peer(manager: &mut RibManager, peer: PeerId) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1078,7 +1080,7 @@ fn establish_peer(manager: &mut RibManager, peer: IpAddr) -> mpsc::Receiver<Outb
 #[tokio::test]
 async fn stale_peer_policy_context_from_superseded_session_is_discarded() {
     let (_tx, mut manager) = direct_manager(None);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
 
     let _out_rx = establish_peer(&mut manager, peer);
 
@@ -1117,7 +1119,7 @@ async fn stale_peer_policy_context_from_superseded_session_is_discarded() {
 #[tokio::test]
 async fn llgr_reestablish_uses_captured_stale_routes_time() {
     let (_tx, mut manager) = direct_manager(None);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
 
     // GR with LLGR and a non-default stale_routes_time.
     manager.handle_update(RibUpdate::PeerGracefulRestart {
@@ -1153,7 +1155,7 @@ async fn llgr_reestablish_uses_captured_stale_routes_time() {
 #[tokio::test]
 async fn llgr_expiry_sweep_drops_llgr_peer_config() {
     let (_tx, mut manager) = direct_manager(None);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
 
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,
@@ -1188,7 +1190,7 @@ async fn llgr_expiry_sweep_drops_llgr_peer_config() {
 #[tokio::test]
 async fn gr_expiry_without_reestablish_releases_peer_state() {
     let (_tx, mut manager) = direct_manager(None);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     let _out_rx = establish_peer(&mut manager, peer);
@@ -1248,7 +1250,7 @@ async fn gr_expiry_without_reestablish_releases_peer_state() {
 #[tokio::test]
 async fn llgr_expiry_without_reestablish_releases_peer_state() {
     let (_tx, mut manager) = direct_manager(None);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     let _out_rx = establish_peer(&mut manager, peer);
@@ -1312,7 +1314,7 @@ async fn llgr_expiry_without_reestablish_releases_peer_state() {
 #[tokio::test]
 async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
     let (_tx, mut manager) = direct_manager(None);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     let _out_rx = establish_peer(&mut manager, peer);
@@ -1380,7 +1382,7 @@ async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
 
 fn establish_ibgp_peer(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     route_reflector_client: bool,
     negotiated_llgr_families: Vec<(Afi, Safi)>,
@@ -1434,8 +1436,8 @@ async fn drain_unicast_initial_dump(
 async fn grouped_late_join_reflects_gr_retained_rr_client_route() {
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
     let (_tx, mut manager) = direct_manager(cluster_id);
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
 
     let mut source_rx = establish_ibgp_peer(&mut manager, source, 11, true, Vec::new());
@@ -1489,8 +1491,8 @@ async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
     let (_tx, mut manager) = direct_manager(cluster_id);
     manager.test_force_ungrouped = true;
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let family = (Afi::Ipv4, Safi::Unicast);
 
@@ -1571,7 +1573,7 @@ async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
 async fn rr_client_role_is_overwritten_when_source_reestablishes_as_nonclient() {
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 254));
     let (_tx, mut manager) = direct_manager(cluster_id);
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
 
     let mut first_rx = establish_ibgp_peer(&mut manager, source, 51, true, Vec::new());
     drain_eor(&mut first_rx).await;
@@ -1602,7 +1604,7 @@ async fn rr_client_role_is_overwritten_when_source_reestablishes_as_nonclient() 
 /// given sendable families.
 async fn channel_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     sendable: Vec<(Afi, Safi)>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(64);
@@ -1629,7 +1631,7 @@ async fn channel_peer_up(
     out_rx
 }
 
-async fn send_eor(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, afi: Afi, safi: Safi) {
+async fn send_eor(tx: &mpsc::Sender<RibUpdate>, peer: PeerId, afi: Afi, safi: Safi) {
     tx.send(RibUpdate::EndOfRib {
         peer,
         session_id: 0,
@@ -1648,7 +1650,7 @@ async fn send_eor(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, afi: Afi, safi: Sa
 async fn llgr_mixed_stale_times_sweep_per_family() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1738,7 +1740,7 @@ async fn llgr_mixed_stale_times_sweep_per_family() {
 async fn llgr_reconnect_and_second_down_preserve_original_deadline() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let family = vec![(Afi::Ipv4, Safi::Unicast)];
     tx.send(RibUpdate::RoutesReceived {
@@ -1806,7 +1808,7 @@ async fn llgr_reconnect_and_second_down_preserve_original_deadline() {
 async fn llgr_reestablish_carries_llgr_stale_until_eor() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let family = vec![(Afi::Ipv4, Safi::Unicast)];
     tx.send(RibUpdate::RoutesReceived {
@@ -1897,7 +1899,7 @@ async fn llgr_reestablish_carries_llgr_stale_until_eor() {
 async fn llgr_reconnect_before_expiry_across_families() {
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let src_v4 = Ipv4Addr::new(10, 0, 0, 1);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let families = vec![
@@ -2025,11 +2027,11 @@ async fn evpn_gr_stale_routes_keep_exporting_during_gr_window() {
     // eBGP target: iBGP targets would be split-horizon-suppressed without
     // an RR cluster-id, and GR-stale export is not eBGP-gated (only
     // LLGR-stale toward a non-LLGR eBGP peer is).
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = llgr_gate_peer_up(&tx, target, evpn_sendable(), true, vec![], None).await;
     drain_eor(&mut out_rx).await;
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     let key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
@@ -2079,6 +2081,7 @@ async fn evpn_gr_stale_routes_keep_exporting_during_gr_window() {
 }
 
 mod deadline_map {
+
     use std::time::Duration;
 
     use crate::manager::graceful_restart::DeadlineMap;
@@ -2185,7 +2188,7 @@ async fn deferred_retention_peer(
 ) {
     let (tx, mut manager) = direct_manager(None);
     let source = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(source);
+    let peer = peer_v4(source);
     let _old_rx = establish_peer(&mut manager, peer);
     let mut old_route = make_flowspec_route(source);
     old_route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
@@ -2262,7 +2265,7 @@ async fn deferred_retention_peer(
 async fn retention_expiry_spares_deferred_reestablished_peer() {
     for llgr in [false, true] {
         let (_tx, mut manager, _new_rx) = deferred_retention_peer(llgr).await;
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
         if llgr {
             manager.sweep_llgr_stale(peer, &[(Afi::Ipv4, Safi::FlowSpec)]);
         } else {
@@ -2294,7 +2297,7 @@ async fn retention_expiry_spares_deferred_reestablished_peer() {
 async fn run_loop_retention_expiry_precedes_deferred_registration() {
     for llgr in [false, true] {
         let (tx, manager, mut new_rx) = deferred_retention_peer(llgr).await;
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
         // Start the actual actor with a due timer and a pending registration.
         // Virtual time makes the ordering deterministic without a bulk table.
         tokio::time::advance(std::time::Duration::from_secs(10)).await;
@@ -2319,8 +2322,8 @@ async fn run_loop_retention_expiry_precedes_deferred_registration() {
 const V4_UNICAST: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const V6_UNICAST: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
 
-fn retention_source() -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+fn retention_source() -> PeerId {
+    peer_v4(Ipv4Addr::new(10, 0, 0, 1))
 }
 
 fn retention_v4_prefix() -> Prefix {
@@ -2332,7 +2335,7 @@ fn retention_v6_prefix() -> Prefix {
 }
 
 /// One IPv4 and one IPv6 unicast route from `source` into a direct manager.
-fn announce_dual_stack(manager: &mut RibManager, source: IpAddr) {
+fn announce_dual_stack(manager: &mut RibManager, source: PeerId) {
     let mut v6 = make_v6_route(
         Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32),
         "2001:db8::1".parse().unwrap(),
@@ -2358,7 +2361,7 @@ fn announce_dual_stack(manager: &mut RibManager, source: IpAddr) {
     drain_route_chunks(manager);
 }
 
-fn adj_route(manager: &RibManager, peer: IpAddr, prefix: Prefix) -> Option<Route> {
+fn adj_route(manager: &RibManager, peer: PeerId, prefix: Prefix) -> Option<Route> {
     manager
         .ribs
         .get(&peer)
@@ -2385,7 +2388,7 @@ fn family_set(families: &[(Afi, Safi)]) -> HashSet<(Afi, Safi)> {
 /// the way transport does before `PeerUp`.
 fn reconnect_with_capabilities(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     gr_families: &[(Afi, Safi)],
     llgr_families: &[(Afi, Safi)],
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -2396,7 +2399,7 @@ fn reconnect_with_capabilities(
 /// every family of the new LLGR capability (local `llgr_stale_time` 3600).
 fn reconnect_with_llgr_stale_time(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     gr_families: &[(Afi, Safi)],
     llgr_families: &[(Afi, Safi)],
     stale_time: u32,
@@ -2451,7 +2454,7 @@ async fn llgr_only_peer_retains_routes_as_llgr_stale_until_llst_expiry() {
     let _out_rx = establish_peer(&mut manager, source);
     announce_dual_stack(&mut manager, source);
     // A fresh alternative that loses to the source on router ID alone.
-    let alternative = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let alternative = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: alternative,
@@ -2689,7 +2692,7 @@ async fn duplicate_gr_family_is_retained_not_deleted() {
     assert!(v4.is_stale);
 }
 
-fn gr_gauges(manager: &RibManager, peer: IpAddr) -> (f64, f64) {
+fn gr_gauges(manager: &RibManager, peer: PeerId) -> (f64, f64) {
     let label = peer.to_string();
     let labels = [("peer", label.as_str())];
     (
@@ -2767,7 +2770,7 @@ async fn partial_gr_stale_gauge_counts_both_phases_through_reconnect() {
     }
 }
 
-fn received(source: IpAddr, announced: Vec<Route>, withdrawn: Vec<(Prefix, u32)>) -> RibUpdate {
+fn received(source: PeerId, announced: Vec<Route>, withdrawn: Vec<(Prefix, u32)>) -> RibUpdate {
     RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -2881,10 +2884,10 @@ async fn gr_stale_gauge_falls_as_routes_are_readvertised_before_eor() {
 async fn gr_eor_after_llgr_reconnect_resolves_mixed_paths() {
     let (_tx, mut manager) = direct_manager(None);
     let source_addr = Ipv4Addr::new(10, 0, 0, 1);
-    let source = IpAddr::V4(source_addr);
+    let source = peer_v4(source_addr);
     let other_addr = Ipv4Addr::new(10, 0, 0, 2);
-    let other = IpAddr::V4(other_addr);
-    let receiver = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let other = peer_v4(other_addr);
+    let receiver = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let dual = [V4_UNICAST, V6_UNICAST];
     let mut out_rx = reconnect_with_capabilities(&mut manager, receiver, &dual, &dual);
     let source_rx = establish_peer(&mut manager, source);
@@ -3269,7 +3272,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
             per_client_best,
             interpret_rfc1997: true,
             session_id: 0,
-            peer: IpAddr::V4(Ipv4Addr::new(10, 9, 0, u8::try_from(index).unwrap() + 1)),
+            peer: peer_v4(Ipv4Addr::new(10, 9, 0, u8::try_from(index).unwrap() + 1)),
             peer_asn: 65_200 + u32::try_from(index).unwrap(),
             peer_router_id: Ipv4Addr::new(10, 9, 0, u8::try_from(index).unwrap() + 1),
             outbound_tx: out_tx,
@@ -3309,7 +3312,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
     let announce = |manager: &mut RibManager, source: Ipv4Addr, routes: Vec<Route>| {
         manager.handle_update(RibUpdate::RoutesReceived {
             session_id: 0,
-            peer: IpAddr::V4(source),
+            peer: peer_v4(source),
             announced: routes,
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -3380,7 +3383,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
     // one prefix per family, and one route per unicast family with a new MED.
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,
-        peer: IpAddr::V4(gr),
+        peer: peer_v4(gr),
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![
@@ -3408,7 +3411,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
     ] {
         manager.handle_update(RibUpdate::EndOfRib {
             session_id: 0,
-            peer: IpAddr::V4(gr),
+            peer: peer_v4(gr),
             afi,
             safi,
         });
@@ -3419,18 +3422,15 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
             &format!("GR {afi:?}/{safi:?}"),
         );
     }
-    assert!(
-        !manager.gr_peers.contains_key(&IpAddr::V4(gr)),
-        "GR completed"
-    );
-    assert_eq!(manager.loc_rib.get(&v4(5)).unwrap().peer, IpAddr::V4(other));
-    assert_eq!(manager.loc_rib.get(&v6(3)).unwrap().peer, IpAddr::V4(other));
+    assert!(!manager.gr_peers.contains_key(&peer_v4(gr)), "GR completed");
+    assert_eq!(manager.loc_rib.get(&v4(5)).unwrap().peer, peer_v4(other));
+    assert_eq!(manager.loc_rib.get(&v6(3)).unwrap().peer, peer_v4(other));
 
     // LLGR arm: promote to LLGR-stale (LLGR_STALE community added), then
     // re-advertise one route and resolve the family with End-of-RIB.
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,
-        peer: IpAddr::V4(llgr),
+        peer: peer_v4(llgr),
         restart_time: 2,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
@@ -3443,8 +3443,8 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
         }],
         llgr_stale_time: 3600,
     });
-    manager.sweep_gr_stale(IpAddr::V4(llgr));
-    assert!(manager.llgr_peers.contains_key(&IpAddr::V4(llgr)));
+    manager.sweep_gr_stale(peer_v4(llgr));
+    assert!(manager.llgr_peers.contains_key(&peer_v4(llgr)));
     announce(
         &mut manager,
         llgr,
@@ -3453,14 +3453,14 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
     drain(&mut receivers);
     manager.handle_update(RibUpdate::EndOfRib {
         session_id: 0,
-        peer: IpAddr::V4(llgr),
+        peer: peer_v4(llgr),
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
     });
     drain(&mut receivers);
     assert_nothing_left(&mut manager, &mut receivers, "LLGR Ipv4/Unicast");
     assert!(
-        !manager.llgr_peers.contains_key(&IpAddr::V4(llgr)),
+        !manager.llgr_peers.contains_key(&peer_v4(llgr)),
         "LLGR completed"
     );
     assert!(
@@ -3471,7 +3471,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
 
 async fn gr_retention_rows(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
 ) -> Vec<crate::update::GrRetentionFamilyState> {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryNeighborRibSnapshots {
@@ -3508,7 +3508,7 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
     use crate::update::GrRetentionPhase::{GrAwaitingEor, GrRestart, Llgr};
 
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let family = vec![(Afi::Ipv4, Safi::Unicast)];
     let _out_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
     tx.send(RibUpdate::RoutesReceived {
@@ -3544,7 +3544,7 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
     // included: they come from maintained counters, not a scan.
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryNeighborRibSnapshots {
-        peers: vec![source, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
+        peers: vec![source, peer_v4(Ipv4Addr::new(10, 0, 0, 2))],
         comparison: None,
         reply,
         include_retained: false,
@@ -3588,7 +3588,7 @@ async fn neighbor_snapshot_reports_gr_retention_phase_and_remaining_time() {
 
 async fn retained_query(
     tx: &mpsc::Sender<RibUpdate>,
-    peers: Vec<IpAddr>,
+    peers: Vec<PeerId>,
     include_retained: bool,
 ) -> crate::update::NeighborRibSnapshotResponse {
     let (reply, response) = oneshot::channel();
@@ -3613,8 +3613,8 @@ async fn include_retained_reports_unlisted_peer_until_sweep() {
     use crate::update::GrRetentionPhase::GrRestart;
 
     let RunningManager { tx, handle } = spawn_manager(TimeMode::Paused);
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let listed = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let listed = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let _source_rx = channel_peer_up(&tx, source, ipv4_sendable()).await;
     let _listed_rx = channel_peer_up(&tx, listed, ipv4_sendable()).await;
     tx.send(RibUpdate::RoutesReceived {
@@ -3684,7 +3684,7 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
     let (summary_tx, summary_rx) = mpsc::channel(4);
     let mut manager = manager.with_summary_queries(summary_rx);
     let source = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(source);
+    let peer = peer_v4(source);
     let _out_rx = establish_peer(&mut manager, peer);
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -3746,8 +3746,8 @@ async fn replacement_summary_view_keeps_down_peer_retention_row() {
 #[tokio::test(start_paused = true)]
 async fn retention_row_reports_llgr_deadline_outside_family_maps() {
     let (_tx, mut manager) = direct_manager(None);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let other = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let now = tokio::time::Instant::now();
     manager.llgr_stale_deadlines.insert(
         (peer, Afi::Ipv6, Safi::Unicast),
@@ -3763,7 +3763,7 @@ async fn retention_row_reports_llgr_deadline_outside_family_maps() {
     assert_eq!(rows[0].phase, crate::update::GrRetentionPhase::Llgr);
     assert_eq!(rows[0].remaining_secs, Some(100));
     assert_eq!(
-        manager.gr_retention_snapshot(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
+        manager.gr_retention_snapshot(peer_v4(Ipv4Addr::new(10, 0, 0, 3))),
         Vec::new()
     );
 }
@@ -3836,8 +3836,8 @@ async fn readiness_probe_runs_during_mass_graceful_restart_entry() {
         }
     }));
 
-    let peers: Vec<IpAddr> = (1..=PEERS)
-        .map(|index| IpAddr::V4(Ipv4Addr::new(10, 57, 0, index)))
+    let peers: Vec<PeerId> = (1..=PEERS)
+        .map(|index| peer_v4(Ipv4Addr::new(10, 57, 0, index)))
         .collect();
     let mut outbound = Vec::new();
     for &peer in &peers {

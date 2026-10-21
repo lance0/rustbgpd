@@ -12,6 +12,7 @@ use super::{
     should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal, validate_route_aspa,
     validate_route_rpki,
 };
+use crate::PeerId;
 use crate::injection_lease::{InjectedKey, LeaseGeneration};
 use crate::update::InjectOutcome;
 
@@ -48,10 +49,10 @@ impl RibManager {
         reason = "group per-client-best export keeps group, policy, and table diff state together"
     )]
     pub(in crate::manager) fn distribute_group_per_client_best_prefix(
-        ribs: &HashMap<IpAddr, AdjRibIn>,
+        ribs: &HashMap<PeerId, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
         group_is_ebgp: bool,
         interpret_rfc1997: bool,
@@ -96,7 +97,7 @@ impl RibManager {
     pub(in crate::manager) fn distribute_single_best_prefix(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
@@ -171,11 +172,11 @@ fn revalidation<T>(ours: Option<&Arc<T>>, sessions: Option<&Arc<T>>) -> Revalida
     reason = "candidate collection mirrors the per-target reflection filter inputs"
 )]
 fn orr_candidates<'a>(
-    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    ribs: &'a HashMap<PeerId, AdjRibIn>,
     prefix_peers: &'a UnicastPrefixPeers,
-    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    peer_is_rr_client: &'a HashMap<PeerId, bool>,
     prefix: &'a Prefix,
-    target_peer: Option<IpAddr>,
+    target_peer: Option<PeerId>,
     target_is_ebgp: bool,
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
@@ -207,11 +208,11 @@ fn orr_candidates<'a>(
     reason = "candidate collection mirrors the per-target reflection filter inputs"
 )]
 fn multipath_candidates<'a>(
-    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    ribs: &'a HashMap<PeerId, AdjRibIn>,
     prefix_peers: &'a UnicastPrefixPeers,
-    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    peer_is_rr_client: &'a HashMap<PeerId, bool>,
     prefix: &'a Prefix,
-    target_peer: Option<IpAddr>,
+    target_peer: Option<PeerId>,
     target_is_ebgp: bool,
     interpret_rfc1997: bool,
     rs_control: Option<(u32, u32)>,
@@ -283,11 +284,11 @@ fn multipath_candidates<'a>(
     reason = "candidate collection mirrors the per-target reflection filter inputs"
 )]
 fn orr_candidates_with_checkpoint<'a>(
-    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    ribs: &'a HashMap<PeerId, AdjRibIn>,
     prefix_peers: &'a UnicastPrefixPeers,
-    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    peer_is_rr_client: &'a HashMap<PeerId, bool>,
     prefix: &'a Prefix,
-    target_peer: Option<IpAddr>,
+    target_peer: Option<PeerId>,
     target_is_ebgp: bool,
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
@@ -319,11 +320,11 @@ fn orr_candidates_with_checkpoint<'a>(
     reason = "candidate collection mirrors the per-target reflection filter inputs"
 )]
 fn multipath_candidates_with_checkpoint<'a>(
-    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    ribs: &'a HashMap<PeerId, AdjRibIn>,
     prefix_peers: &'a UnicastPrefixPeers,
-    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    peer_is_rr_client: &'a HashMap<PeerId, bool>,
     prefix: &'a Prefix,
-    target_peer: Option<IpAddr>,
+    target_peer: Option<PeerId>,
     target_is_ebgp: bool,
     interpret_rfc1997: bool,
     rs_control: Option<(u32, u32)>,
@@ -407,12 +408,12 @@ impl RibManager {
     )]
     pub(in crate::manager) fn explain_single_best_prefix(
         loc_rib: &LocRib,
-        ribs: &HashMap<IpAddr, AdjRibIn>,
+        ribs: &HashMap<PeerId, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         rib_out: Option<&AdjRibOut>,
         prefix: Prefix,
-        target_peer: IpAddr,
+        target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
@@ -752,7 +753,7 @@ impl RibManager {
                         .and_then(rustbgpd_wire::AsPath::origin_asn),
                     validation_state: candidate.validation_state,
                     aspa_state: candidate.aspa_state,
-                    peer_address: Some(target_peer),
+                    peer_address: Some(target_peer.addr()),
                     peer_asn: target_peer_asn,
                     peer_group: target_peer_group,
                     route_type: Some(route_type(candidate.origin_type)),
@@ -1146,7 +1147,7 @@ impl RibManager {
             origin_asn,
             validation_state: best.validation_state,
             aspa_state: best.aspa_state,
-            peer_address: Some(target_peer),
+            peer_address: Some(target_peer.addr()),
             peer_asn: target_peer_asn,
             peer_group: target_peer_group,
             route_type: explain.route_type,
@@ -1296,7 +1297,7 @@ impl RibManager {
                         .and_then(rustbgpd_wire::AsPath::origin_asn),
                     validation_state: candidate.validation_state,
                     aspa_state: candidate.aspa_state,
-                    peer_address: Some(target_peer),
+                    peer_address: Some(target_peer.addr()),
                     peer_asn: target_peer_asn,
                     peer_group: target_peer_group,
                     route_type: Some(route_type(candidate.origin_type)),
@@ -1534,7 +1535,7 @@ impl RibManager {
 
     pub(super) fn process_withdraw_chunk(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         withdrawn: Vec<(Prefix, u32)>,
         history: Option<(
             &crate::update::ReceivedRouteSource,
@@ -1623,7 +1624,7 @@ impl RibManager {
 
     pub(in crate::manager) fn process_announce_chunk(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announced: Vec<crate::route::Route>,
         validated_with: Option<&rustbgpd_rpki::ValidationSnapshot>,
     ) {
@@ -1933,12 +1934,12 @@ impl RibManager {
         reason = "multipath export keeps peer, policy, and Adj-RIB-Out diff state together; the bools are independent per-target mode/state flags threaded from the caller's ladder"
     )]
     pub(in crate::manager) fn distribute_multipath_prefix_with_checkpoint(
-        ribs: &HashMap<IpAddr, AdjRibIn>,
+        ribs: &HashMap<PeerId, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
-        target_peer: IpAddr,
+        target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         send_max: u32,
@@ -2069,7 +2070,7 @@ impl RibManager {
                 origin_asn,
                 validation_state: candidate.validation_state,
                 aspa_state: candidate.aspa_state,
-                peer_address: Some(target_peer),
+                peer_address: Some(target_peer.addr()),
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(candidate.origin_type)),
@@ -2227,10 +2228,10 @@ impl RibManager {
         reason = "group per-client-best export keeps group, policy, and table diff state together"
     )]
     pub(in crate::manager) fn distribute_group_per_client_best_prefix_with_checkpoint(
-        ribs: &HashMap<IpAddr, AdjRibIn>,
+        ribs: &HashMap<PeerId, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
         group_is_ebgp: bool,
         interpret_rfc1997: bool,
@@ -2285,7 +2286,7 @@ impl RibManager {
         });
 
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
-        let mut winner_source: Option<IpAddr> = None;
+        let mut winner_source: Option<PeerId> = None;
         for candidate in &candidates {
             checkpoint();
             if winner_source == Some(candidate.peer) {
@@ -2419,7 +2420,7 @@ impl RibManager {
     pub(in crate::manager) fn distribute_single_best_prefix_with_checkpoint(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
@@ -2927,14 +2928,14 @@ impl RibManager {
         reason = "ORR export keeps peer, policy, and Adj-RIB-Out diff state together"
     )]
     pub(in crate::manager) fn distribute_orr_best_prefix_with_checkpoint(
-        ribs: &HashMap<IpAddr, AdjRibIn>,
+        ribs: &HashMap<PeerId, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        peer_is_rr_client: &HashMap<PeerId, bool>,
         orr_topology: &crate::orr::OrrTopology,
         orr_spf: &crate::orr::SpfResult,
         prefix: &Prefix,
-        target_peer: IpAddr,
+        target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
         target_is_ebgp: bool,
@@ -3070,7 +3071,7 @@ impl RibManager {
             origin_asn,
             validation_state: best.validation_state,
             aspa_state: best.aspa_state,
-            peer_address: Some(target_peer),
+            peer_address: Some(target_peer.addr()),
             peer_asn: target_peer_asn,
             peer_group: target_peer_group,
             route_type: Some(route_type(best.origin_type)),

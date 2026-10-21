@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::peer_v4;
 use crate::update::{RibRowsPage, RoutePageError};
 
 fn fixture() -> (RibManager, Ipv4Addr) {
@@ -38,17 +39,19 @@ fn vpn_page(
 fn vpn_family_pages_bound_order_and_keep_add_path_candidates() {
     let (mut manager, peer) = fixture();
     let mut route = make_vpn_rib_route(peer, 1, 100, 100);
-    manager.ribs.insert(peer.into(), AdjRibIn::new(peer.into()));
+    manager
+        .ribs
+        .insert(peer_v4(peer), AdjRibIn::new(peer_v4(peer)));
     for path in (0..1005).rev() {
         route.path_id = path;
         manager
             .ribs
-            .get_mut(&peer.into())
+            .get_mut(&peer_v4(peer))
             .unwrap()
             .insert_vpn(route.clone());
     }
     let scope = RouteQueryScope::Received {
-        peer: Some(peer.into()),
+        peer: Some(peer_v4(peer)),
     };
     let first = vpn_page(&mut manager, scope, None, None, usize::MAX).unwrap();
     assert_eq!(first.routes.len(), 1000);
@@ -61,7 +64,7 @@ fn vpn_family_pages_bound_order_and_keep_add_path_candidates() {
             .all(|pair| pair[0].path_id < pair[1].path_id)
     );
     let route = first.routes.last().unwrap();
-    let after = (route.nlri.key(), route.peer, route.path_id);
+    let after = (route.nlri.key(), route.peer.addr(), route.path_id);
     let next = vpn_page(&mut manager, scope, Some(after), Some(first.version), 10).unwrap();
     assert_eq!(next.routes.len(), 5);
     assert_eq!(next.total, 1005);
@@ -73,7 +76,7 @@ fn vpn_family_pages_bound_order_and_keep_add_path_candidates() {
             .total,
         0
     );
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let mut out = AdjRibOut::new(destination);
     out.insert_vpn(first.routes[0].clone());
     manager.adj_ribs_out.insert(destination, out);
@@ -86,7 +89,7 @@ fn vpn_family_pages_bound_order_and_keep_add_path_candidates() {
     )
     .unwrap();
     assert_eq!(page.total, 1);
-    assert_eq!(page.routes[0].peer, IpAddr::V4(peer));
+    assert_eq!(page.routes[0].peer, peer_v4(peer));
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryVpnRoutesPage {
         scope,
@@ -108,31 +111,31 @@ fn vpn_family_pages_invalidate_on_receive_withdraw_and_stale_sweep() {
     let (mut manager, peer) = fixture();
     let mut route = make_vpn_rib_route(peer, 1, 100, 100);
     let scope = RouteQueryScope::Received {
-        peer: Some(peer.into()),
+        peer: Some(peer_v4(peer)),
     };
-    manager.handle_vpn_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_vpn_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     let first = vpn_page(&mut manager, scope, None, None, 1).unwrap();
-    let after = (route.nlri.key(), route.peer, route.path_id);
+    let after = (route.nlri.key(), route.peer.addr(), route.path_id);
     route.next_hop = "192.0.2.9".parse().unwrap();
-    manager.handle_vpn_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_vpn_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     assert_eq!(
         vpn_page(&mut manager, scope, Some(after), Some(first.version), 1).unwrap_err(),
         RoutePageError::Invalidated
     );
     let fresh = vpn_page(&mut manager, scope, None, None, 1).unwrap();
-    manager.handle_vpn_routes_received(peer.into(), vec![], vec![route.key()]);
+    manager.handle_vpn_routes_received(peer_v4(peer), vec![], vec![route.key()]);
     assert_eq!(
         vpn_page(&mut manager, scope, Some(after), Some(fresh.version), 1).unwrap_err(),
         RoutePageError::Invalidated
     );
-    manager.handle_vpn_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_vpn_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     let fresh = vpn_page(&mut manager, scope, None, None, 1).unwrap();
     manager
         .ribs
-        .get_mut(&peer.into())
+        .get_mut(&peer_v4(peer))
         .unwrap()
         .mark_stale_vpn(route.afi_safi());
-    manager.sweep_gr_stale(peer.into());
+    manager.sweep_gr_stale(peer_v4(peer));
     assert_eq!(
         vpn_page(&mut manager, scope, Some(after), Some(fresh.version), 1).unwrap_err(),
         RoutePageError::Invalidated
@@ -162,17 +165,19 @@ fn labeled_page(
 fn labeled_family_pages_bound_order_and_keep_add_path_candidates() {
     let (mut manager, peer) = fixture();
     let mut route = make_labeled_rib_route(peer, 1, 100, 100);
-    manager.ribs.insert(peer.into(), AdjRibIn::new(peer.into()));
+    manager
+        .ribs
+        .insert(peer_v4(peer), AdjRibIn::new(peer_v4(peer)));
     for path in (0..1005).rev() {
         route.path_id = path;
         manager
             .ribs
-            .get_mut(&peer.into())
+            .get_mut(&peer_v4(peer))
             .unwrap()
             .insert_labeled(route.clone());
     }
     let scope = RouteQueryScope::Received {
-        peer: Some(peer.into()),
+        peer: Some(peer_v4(peer)),
     };
     let first = labeled_page(&mut manager, scope, None, None, usize::MAX).unwrap();
     assert_eq!(first.routes.len(), 1000);
@@ -185,7 +190,7 @@ fn labeled_family_pages_bound_order_and_keep_add_path_candidates() {
             .all(|pair| pair[0].path_id < pair[1].path_id)
     );
     let route = first.routes.last().unwrap();
-    let after = (route.nlri.prefix, route.peer, route.path_id);
+    let after = (route.nlri.prefix, route.peer.addr(), route.path_id);
     let next = labeled_page(&mut manager, scope, Some(after), Some(first.version), 10).unwrap();
     assert_eq!(next.routes.len(), 5);
     assert_eq!(next.total, 1005);
@@ -197,7 +202,7 @@ fn labeled_family_pages_bound_order_and_keep_add_path_candidates() {
             .total,
         0
     );
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let mut out = AdjRibOut::new(destination);
     out.insert_labeled(first.routes[0].clone());
     manager.adj_ribs_out.insert(destination, out);
@@ -210,7 +215,7 @@ fn labeled_family_pages_bound_order_and_keep_add_path_candidates() {
     )
     .unwrap();
     assert_eq!(page.total, 1);
-    assert_eq!(page.routes[0].peer, IpAddr::V4(peer));
+    assert_eq!(page.routes[0].peer, peer_v4(peer));
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryLabeledRoutesPage {
         scope,
@@ -232,31 +237,31 @@ fn labeled_family_pages_invalidate_on_receive_withdraw_and_stale_sweep() {
     let (mut manager, peer) = fixture();
     let mut route = make_labeled_rib_route(peer, 1, 100, 100);
     let scope = RouteQueryScope::Received {
-        peer: Some(peer.into()),
+        peer: Some(peer_v4(peer)),
     };
-    manager.handle_labeled_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_labeled_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     let first = labeled_page(&mut manager, scope, None, None, 1).unwrap();
-    let after = (route.nlri.prefix, route.peer, route.path_id);
+    let after = (route.nlri.prefix, route.peer.addr(), route.path_id);
     route.next_hop = "192.0.2.9".parse().unwrap();
-    manager.handle_labeled_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_labeled_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     assert_eq!(
         labeled_page(&mut manager, scope, Some(after), Some(first.version), 1).unwrap_err(),
         RoutePageError::Invalidated
     );
     let fresh = labeled_page(&mut manager, scope, None, None, 1).unwrap();
-    manager.handle_labeled_routes_received(peer.into(), vec![], vec![route.key()]);
+    manager.handle_labeled_routes_received(peer_v4(peer), vec![], vec![route.key()]);
     assert_eq!(
         labeled_page(&mut manager, scope, Some(after), Some(fresh.version), 1).unwrap_err(),
         RoutePageError::Invalidated
     );
-    manager.handle_labeled_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_labeled_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     let fresh = labeled_page(&mut manager, scope, None, None, 1).unwrap();
     manager
         .ribs
-        .get_mut(&peer.into())
+        .get_mut(&peer_v4(peer))
         .unwrap()
         .mark_stale_labeled(route.afi_safi());
-    manager.sweep_gr_stale(peer.into());
+    manager.sweep_gr_stale(peer_v4(peer));
     assert_eq!(
         labeled_page(&mut manager, scope, Some(after), Some(fresh.version), 1).unwrap_err(),
         RoutePageError::Invalidated
@@ -286,17 +291,19 @@ fn rtc_page(
 fn rtc_family_pages_bound_order_and_keep_add_path_candidates() {
     let (mut manager, peer) = fixture();
     let mut route = make_rtc_rib_route(peer, 1, 100);
-    manager.ribs.insert(peer.into(), AdjRibIn::new(peer.into()));
+    manager
+        .ribs
+        .insert(peer_v4(peer), AdjRibIn::new(peer_v4(peer)));
     for path in (0..1005).rev() {
         route.path_id = path;
         manager
             .ribs
-            .get_mut(&peer.into())
+            .get_mut(&peer_v4(peer))
             .unwrap()
             .insert_rtc(route.clone());
     }
     let scope = RouteQueryScope::Received {
-        peer: Some(peer.into()),
+        peer: Some(peer_v4(peer)),
     };
     let first = rtc_page(&mut manager, scope, None, None, usize::MAX).unwrap();
     assert_eq!(first.routes.len(), 1000);
@@ -309,7 +316,7 @@ fn rtc_family_pages_bound_order_and_keep_add_path_candidates() {
             .all(|pair| pair[0].path_id < pair[1].path_id)
     );
     let route = first.routes.last().unwrap();
-    let after = (route.nlri, route.peer, route.path_id);
+    let after = (route.nlri, route.peer.addr(), route.path_id);
     let next = rtc_page(&mut manager, scope, Some(after), Some(first.version), 10).unwrap();
     assert_eq!(next.routes.len(), 5);
     assert_eq!(next.total, 1005);
@@ -321,7 +328,7 @@ fn rtc_family_pages_bound_order_and_keep_add_path_candidates() {
             .total,
         0
     );
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let mut out = AdjRibOut::new(destination);
     out.insert_rtc(first.routes[0].clone());
     manager.adj_ribs_out.insert(destination, out);
@@ -334,7 +341,7 @@ fn rtc_family_pages_bound_order_and_keep_add_path_candidates() {
     )
     .unwrap();
     assert_eq!(page.total, 1);
-    assert_eq!(page.routes[0].peer, IpAddr::V4(peer));
+    assert_eq!(page.routes[0].peer, peer_v4(peer));
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryRtcRoutesPage {
         scope,
@@ -356,31 +363,31 @@ fn rtc_family_pages_invalidate_on_receive_withdraw_and_stale_sweep() {
     let (mut manager, peer) = fixture();
     let mut route = make_rtc_rib_route(peer, 1, 100);
     let scope = RouteQueryScope::Received {
-        peer: Some(peer.into()),
+        peer: Some(peer_v4(peer)),
     };
-    manager.handle_rtc_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_rtc_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     let first = rtc_page(&mut manager, scope, None, None, 1).unwrap();
-    let after = (route.nlri, route.peer, route.path_id);
+    let after = (route.nlri, route.peer.addr(), route.path_id);
     route.next_hop = "192.0.2.9".parse().unwrap();
-    manager.handle_rtc_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_rtc_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     assert_eq!(
         rtc_page(&mut manager, scope, Some(after), Some(first.version), 1).unwrap_err(),
         RoutePageError::Invalidated
     );
     let fresh = rtc_page(&mut manager, scope, None, None, 1).unwrap();
-    manager.handle_rtc_routes_received(peer.into(), vec![], vec![route.key()]);
+    manager.handle_rtc_routes_received(peer_v4(peer), vec![], vec![route.key()]);
     assert_eq!(
         rtc_page(&mut manager, scope, Some(after), Some(fresh.version), 1).unwrap_err(),
         RoutePageError::Invalidated
     );
-    manager.handle_rtc_routes_received(peer.into(), vec![route.clone()], vec![]);
+    manager.handle_rtc_routes_received(peer_v4(peer), vec![route.clone()], vec![]);
     let fresh = rtc_page(&mut manager, scope, None, None, 1).unwrap();
     manager
         .ribs
-        .get_mut(&peer.into())
+        .get_mut(&peer_v4(peer))
         .unwrap()
         .mark_stale_rtc(route.afi_safi());
-    manager.sweep_gr_stale(peer.into());
+    manager.sweep_gr_stale(peer_v4(peer));
     assert_eq!(
         rtc_page(&mut manager, scope, Some(after), Some(fresh.version), 1).unwrap_err(),
         RoutePageError::Invalidated
@@ -389,8 +396,8 @@ fn rtc_family_pages_invalidate_on_receive_withdraw_and_stale_sweep() {
 #[test]
 fn vpn_grouped_pages_apply_rtc_split_horizon_and_encoder_rejections() {
     let (mut manager, _) = fixture();
-    let first: IpAddr = "192.0.2.10".parse().unwrap();
-    let second: IpAddr = "192.0.2.11".parse().unwrap();
+    let first = PeerId::from_addr("192.0.2.10".parse().unwrap());
+    let second = PeerId::from_addr("192.0.2.11".parse().unwrap());
     let source = Ipv4Addr::new(192, 0, 2, 12);
     let mut receivers = Vec::new();
     for peer in [first, second] {
@@ -433,7 +440,7 @@ fn vpn_grouped_pages_apply_rtc_split_horizon_and_encoder_rejections() {
     let filtered = make_vpn_rib_route_with_rts(source, 2, vec![rt(200)]);
     let own = make_vpn_rib_route_with_rts(first_v4, 3, vec![rt(100)]);
     manager.handle_vpn_routes_received(
-        source.into(),
+        peer_v4(source),
         vec![accepted.clone(), filtered.clone()],
         vec![],
     );
@@ -442,7 +449,7 @@ fn vpn_grouped_pages_apply_rtc_split_horizon_and_encoder_rejections() {
     let page = vpn_page(&mut manager, scope, None, None, 10).unwrap();
     assert_eq!(page.total, 1);
     assert_eq!(page.routes[0].nlri.key(), accepted.nlri.key());
-    assert_eq!(page.routes[0].peer, IpAddr::V4(source));
+    assert_eq!(page.routes[0].peer, peer_v4(source));
     let second_page = vpn_page(
         &mut manager,
         RouteQueryScope::Advertised { peer: second },
@@ -464,7 +471,7 @@ fn vpn_grouped_pages_apply_rtc_split_horizon_and_encoder_rejections() {
     );
     manager.peer_unexportable.get_mut(&first).unwrap().clear();
     let before = vpn_page(&mut manager, scope, None, None, 10).unwrap();
-    let after = (accepted.nlri.key(), accepted.peer, accepted.path_id);
+    let after = (accepted.nlri.key(), accepted.peer.addr(), accepted.path_id);
     manager.mark_outbound_dirty(first);
     manager.handle_rtc_routes_received(
         first,
@@ -492,7 +499,7 @@ fn vpn_grouped_pages_apply_rtc_split_horizon_and_encoder_rejections() {
 fn vpn_grouped_page_refuses_unadmitted_announces_and_undelivered_withdraws() {
     use super::exportability::MockExactExportEncoder;
     let (mut manager, source) = fixture();
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let (outbound_tx, mut receiver) = mpsc::channel(4);
     let padding = outbound_tx.clone();
     manager.handle_update(RibUpdate::PeerUp {
@@ -519,7 +526,7 @@ fn vpn_grouped_page_refuses_unadmitted_announces_and_undelivered_withdraws() {
         .peer_export_encoders
         .insert(destination, encoder.clone());
     let old = make_vpn_rib_route(source, 1, 100, 100);
-    manager.handle_vpn_routes_received(source.into(), vec![old.clone()], vec![]);
+    manager.handle_vpn_routes_received(peer_v4(source), vec![old.clone()], vec![]);
     let accepted = receiver.try_recv().unwrap();
     assert_eq!(accepted.vpn_announce.len(), 1);
     assert_eq!(accepted.vpn_announce[0].nlri.key(), old.nlri.key());
@@ -537,7 +544,11 @@ fn vpn_grouped_page_refuses_unadmitted_announces_and_undelivered_withdraws() {
     for _ in 0..4 {
         padding.try_send(OutboundRouteUpdate::default()).unwrap();
     }
-    manager.handle_vpn_routes_received(source.into(), vec![unexportable.clone()], vec![old.key()]);
+    manager.handle_vpn_routes_received(
+        peer_v4(source),
+        vec![unexportable.clone()],
+        vec![old.key()],
+    );
     let gid = manager.vpn_grouped_member_of(destination).unwrap();
     assert!(
         manager.group_ribs[&gid]
@@ -561,15 +572,9 @@ fn vpn_grouped_page_refuses_unadmitted_announces_and_undelivered_withdraws() {
         vpn_page(&mut manager, scope, None, None, 1).unwrap_err(),
         RoutePageError::ResyncInProgress
     );
+    let old_cursor = Some((old.nlri.key(), old.peer.addr(), old.path_id));
     assert_eq!(
-        vpn_page(
-            &mut manager,
-            scope,
-            Some((old.nlri.key(), old.peer, old.path_id)),
-            Some(first.version),
-            1
-        )
-        .unwrap_err(),
+        vpn_page(&mut manager, scope, old_cursor, Some(first.version), 1).unwrap_err(),
         RoutePageError::Invalidated
     );
     while receiver.try_recv().is_ok() {}
@@ -595,7 +600,7 @@ fn vpn_grouped_page_refuses_unadmitted_announces_and_undelivered_withdraws() {
 #[test]
 fn vpn_grouped_page_rejects_closed_receiver_until_fresh_session() {
     let (mut manager, source) = fixture();
-    let destination: IpAddr = "192.0.2.2".parse().unwrap();
+    let destination = PeerId::from_addr("192.0.2.2".parse().unwrap());
     let register = |manager: &mut RibManager, session_id| {
         let (outbound_tx, receiver) = mpsc::channel(16);
         manager.handle_update(RibUpdate::PeerUp {
@@ -621,7 +626,7 @@ fn vpn_grouped_page_rejects_closed_receiver_until_fresh_session() {
     let mut receiver = register(&mut manager, 0);
     while receiver.try_recv().is_ok() {}
     let old = make_vpn_rib_route(source, 1, 100, 100);
-    manager.handle_vpn_routes_received(source.into(), vec![old.clone()], vec![]);
+    manager.handle_vpn_routes_received(peer_v4(source), vec![old.clone()], vec![]);
     assert_eq!(
         receiver.try_recv().unwrap().vpn_announce[0].key(),
         old.key()
@@ -634,7 +639,7 @@ fn vpn_grouped_page_rejects_closed_receiver_until_fresh_session() {
 
     drop(receiver);
     let new = make_vpn_rib_route(source, 2, 200, 100);
-    manager.handle_vpn_routes_received(source.into(), vec![new.clone()], vec![old.key()]);
+    manager.handle_vpn_routes_received(peer_v4(source), vec![new.clone()], vec![old.key()]);
     let gid = manager.vpn_grouped_member_of(destination).unwrap();
     assert!(manager.group_ribs[&gid].table.get_vpn(&new.key()).is_some());
     assert!(manager.group_ribs[&gid].table.get_vpn(&old.key()).is_none());
@@ -699,7 +704,7 @@ fn bgpls_query_key(route: &BgpLsRibRoute) -> crate::update::BgpLsRouteQueryKey {
         route.nlri.nlri_type.as_u16(),
         route.nlri.route_distinguisher,
         route.nlri.payload.clone(),
-        route.peer,
+        route.peer.addr(),
         route.path_id,
     )
 }
@@ -713,7 +718,7 @@ fn bgpls_family_pages_walk_every_route_once_in_identity_order() {
     for suffix in (0..25).rev() {
         let advertiser = if suffix % 2 == 0 { peer } else { other };
         manager.handle_bgpls_routes_received(
-            advertiser.into(),
+            peer_v4(advertiser),
             vec![make_bgpls_route(advertiser, suffix, 100)],
             vec![],
         );
@@ -721,7 +726,7 @@ fn bgpls_family_pages_walk_every_route_once_in_identity_order() {
     let mut vpn = make_bgpls_route(peer, 0, 100);
     vpn.family = BgpLsFamily::LinkStateVpn;
     vpn.nlri.route_distinguisher = Some([0, 0, 0xfd, 0xe8, 0, 0, 0, 1]);
-    manager.handle_bgpls_routes_received(peer.into(), vec![vpn], vec![]);
+    manager.handle_bgpls_routes_received(peer_v4(peer), vec![vpn], vec![]);
 
     let all = bgpls_page(&mut manager, RouteQueryScope::Best, None, None, usize::MAX).unwrap();
     assert_eq!(all.routes.len(), 26);
@@ -749,7 +754,7 @@ fn bgpls_family_pages_walk_every_route_once_in_identity_order() {
     let received = bgpls_page(
         &mut manager,
         RouteQueryScope::Received {
-            peer: Some(other.into()),
+            peer: Some(peer_v4(other)),
         },
         None,
         None,
@@ -757,14 +762,14 @@ fn bgpls_family_pages_walk_every_route_once_in_identity_order() {
     )
     .unwrap();
     assert_eq!(received.total, 12);
-    assert!(received.routes.iter().all(|r| r.peer == IpAddr::V4(other)));
+    assert!(received.routes.iter().all(|r| r.peer == peer_v4(other)));
 }
 
 /// Receive, withdraw and advertised commits each fence an open BGP-LS walk.
 #[test]
 fn bgpls_family_pages_invalidate_on_receive_withdraw_and_export() {
     let (mut manager, peer) = fixture();
-    let destination = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+    let destination = peer_v4(Ipv4Addr::new(192, 0, 2, 3));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
         per_client_best: false,
@@ -785,20 +790,24 @@ fn bgpls_family_pages_invalidate_on_receive_withdraw_and_export() {
         negotiated_llgr_families: Vec::new(),
     });
     let routes: Vec<_> = (1..=2).map(|s| make_bgpls_route(peer, s, 100)).collect();
-    manager.handle_bgpls_routes_received(peer.into(), routes.clone(), vec![]);
+    manager.handle_bgpls_routes_received(peer_v4(peer), routes.clone(), vec![]);
     while out_rx.try_recv().is_ok() {}
 
     let best = RouteQueryScope::Best;
     let first = bgpls_page(&mut manager, best, None, None, 1).unwrap();
     assert!(first.has_more);
     let after = Some(bgpls_query_key(&first.routes[0]));
-    manager.handle_bgpls_routes_received(peer.into(), vec![make_bgpls_route(peer, 3, 100)], vec![]);
+    manager.handle_bgpls_routes_received(
+        peer_v4(peer),
+        vec![make_bgpls_route(peer, 3, 100)],
+        vec![],
+    );
     assert_eq!(
         bgpls_page(&mut manager, best, after.clone(), Some(first.version), 1).unwrap_err(),
         RoutePageError::Invalidated
     );
     let fresh = bgpls_page(&mut manager, best, None, None, 1).unwrap();
-    manager.handle_bgpls_routes_received(peer.into(), vec![], vec![routes[1].key()]);
+    manager.handle_bgpls_routes_received(peer_v4(peer), vec![], vec![routes[1].key()]);
     assert_eq!(
         bgpls_page(&mut manager, best, after, Some(fresh.version), 1).unwrap_err(),
         RoutePageError::Invalidated
@@ -808,7 +817,11 @@ fn bgpls_family_pages_invalidate_on_receive_withdraw_and_export() {
     let first = bgpls_page(&mut manager, advertised, None, None, 1).unwrap();
     assert_eq!(first.total, 2, "routes 1 and 3 remain exported");
     let after = Some(bgpls_query_key(&first.routes[0]));
-    manager.handle_bgpls_routes_received(peer.into(), vec![make_bgpls_route(peer, 4, 100)], vec![]);
+    manager.handle_bgpls_routes_received(
+        peer_v4(peer),
+        vec![make_bgpls_route(peer, 4, 100)],
+        vec![],
+    );
     assert_eq!(
         bgpls_page(&mut manager, advertised, after, Some(first.version), 1).unwrap_err(),
         RoutePageError::Invalidated
@@ -862,7 +875,7 @@ fn orr_topology_pages_walk_every_element_once_and_fence_on_change() {
     let mut routes = square_topology(peer);
     routes.push(link_route(peer, X, Y, Some(5), &[link_id(1)]));
     routes.push(link_route(peer, X, Y, Some(5), &[link_id(2)]));
-    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    manager.handle_bgpls_routes_received(peer_v4(peer), routes, vec![]);
     let topology =
         crate::orr::OrrTopology::build(manager.ribs.values().flat_map(AdjRibIn::iter_bgpls));
     assert_eq!(topology.links().len(), 6);
@@ -942,7 +955,7 @@ fn orr_topology_pages_walk_every_element_once_and_fence_on_change() {
 
     let first = orr_node_page(&mut manager, None, None, 1).unwrap();
     manager.handle_bgpls_routes_received(
-        peer.into(),
+        peer_v4(peer),
         vec![link_route(peer, Y, X, Some(7), &[])],
         vec![],
     );
@@ -966,7 +979,7 @@ fn orr_topology_pages_walk_every_element_once_and_fence_on_change() {
 fn orr_topology_pages_keep_one_source_across_vantage_changes() {
     use crate::orr::fixtures::{link_route, square_topology};
     let (manager, peer) = fixture();
-    let waiter: IpAddr = "192.0.2.50".parse().unwrap();
+    let waiter = PeerId::from_addr("192.0.2.50".parse().unwrap());
     let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
         timeout: std::time::Duration::from_secs(30),
         waiters: vec![crate::SelectionDeferralWaiterConfig {
@@ -982,7 +995,7 @@ fn orr_topology_pages_keep_one_source_across_vantage_changes() {
         route.nlri.route_distinguisher = Some([0, 0, 0, 1, 0, 0, 0, 1]);
         routes.push(route);
     }
-    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    manager.handle_bgpls_routes_received(peer_v4(peer), routes, vec![]);
     let mut keys: Vec<_> = manager
         .build_orr_topology()
         .node_keys()
@@ -1026,7 +1039,7 @@ fn register_destination(
         per_client_best: false,
         interpret_rfc1997: true,
         session_id: 0,
-        peer: destination,
+        peer: PeerId::from_addr(destination),
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
@@ -1048,10 +1061,10 @@ fn register_destination(
 #[test]
 fn bgpls_advertised_pages_invalidate_when_outbound_state_clears() {
     let (mut manager, peer) = fixture();
-    let destination: IpAddr = "192.0.2.3".parse().unwrap();
-    let _out = register_destination(&mut manager, destination, bgpls_sendable());
+    let destination = PeerId::from_addr("192.0.2.3".parse().unwrap());
+    let _out = register_destination(&mut manager, destination.addr(), bgpls_sendable());
     let routes: Vec<_> = (1..=2).map(|s| make_bgpls_route(peer, s, 100)).collect();
-    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    manager.handle_bgpls_routes_received(peer_v4(peer), routes, vec![]);
     let scope = RouteQueryScope::Advertised { peer: destination };
     let first = bgpls_page(&mut manager, scope, None, None, 1).unwrap();
     assert_eq!(first.total, 2);
@@ -1068,17 +1081,17 @@ fn bgpls_advertised_pages_invalidate_when_outbound_state_clears() {
 #[test]
 fn labeled_advertised_pages_invalidate_when_outbound_state_clears() {
     let (mut manager, peer) = fixture();
-    let destination: IpAddr = "192.0.2.3".parse().unwrap();
-    let _out = register_destination(&mut manager, destination, labeled_sendable());
+    let destination = PeerId::from_addr("192.0.2.3".parse().unwrap());
+    let _out = register_destination(&mut manager, destination.addr(), labeled_sendable());
     let routes: Vec<_> = (1..=2)
         .map(|octet| make_labeled_rib_route(peer, octet, 100, 100))
         .collect();
-    manager.handle_labeled_routes_received(peer.into(), routes, vec![]);
+    manager.handle_labeled_routes_received(peer_v4(peer), routes, vec![]);
     let scope = RouteQueryScope::Advertised { peer: destination };
     let first = labeled_page(&mut manager, scope, None, None, 1).unwrap();
     assert_eq!(first.total, 2);
     let route = &first.routes[0];
-    let after = Some((route.nlri.prefix, route.peer, route.path_id));
+    let after = Some((route.nlri.prefix, route.peer.addr(), route.path_id));
     manager.clear_outbound_peer_state(destination);
     assert_eq!(
         labeled_page(&mut manager, scope, after, Some(first.version), 1).unwrap_err(),
@@ -1099,7 +1112,7 @@ fn orr_topology_page_walks_build_once_per_version() {
     let mut routes = square_topology(peer);
     routes.push(link_route(peer, X, Y, Some(5), &[link_id(1)]));
     routes.push(link_route(peer, X, Y, Some(5), &[link_id(2)]));
-    manager.handle_bgpls_routes_received(peer.into(), routes, vec![]);
+    manager.handle_bgpls_routes_received(peer_v4(peer), routes, vec![]);
 
     let mut keys: Vec<_> = manager
         .build_orr_topology()
@@ -1148,7 +1161,7 @@ fn orr_topology_page_walks_build_once_per_version() {
 
     let first = orr_node_page(&mut manager, None, None, 1).unwrap();
     manager.handle_bgpls_routes_received(
-        peer.into(),
+        peer_v4(peer),
         vec![link_route(peer, Y, X, Some(7), &[])],
         vec![],
     );
@@ -1164,9 +1177,10 @@ fn orr_topology_page_walks_build_once_per_version() {
     assert_eq!(fresh.total, 7);
     assert_eq!(manager.orr_page_topology_builds, 2);
 
-    manager
-        .peer_orr_vantage
-        .insert("192.0.2.9".parse().unwrap(), "10.0.1.3".parse().unwrap());
+    manager.peer_orr_vantage.insert(
+        PeerId::from_addr("192.0.2.9".parse().unwrap()),
+        (PeerId::from_addr("10.0.1.3".parse().unwrap())).addr(),
+    );
     manager.recompute_orr();
     assert!(
         manager.orr_page_topology.is_none(),

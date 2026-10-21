@@ -2,6 +2,8 @@
 //! expiry waits only for the primary backlog queued when it first fell due
 //! (the ADR-0137 admission cutoff), not for the queue to go empty.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Waker};
@@ -10,8 +12,8 @@ use super::*;
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
-fn source() -> IpAddr {
-    IpAddr::V4(SOURCE)
+fn source() -> PeerId {
+    peer_v4(SOURCE)
 }
 
 fn one_route() -> RibUpdate {
@@ -227,7 +229,7 @@ async fn selection_deferral_timer_fires_under_sustained_ingress() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(10),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             }],
         });
@@ -258,7 +260,7 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(10),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });
@@ -276,7 +278,7 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
     let other = Ipv4Addr::new(10, 0, 0, 2);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(other),
+        peer: peer_v4(other),
         announced: vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24),
             other,
@@ -292,7 +294,7 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
     .unwrap();
     tx.send(RibUpdate::PeerGracefulRestart {
         session_id: 0,
-        peer: IpAddr::V4(other),
+        peer: peer_v4(other),
         restart_time: 2,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
@@ -353,7 +355,7 @@ async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(10),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                peer: peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });

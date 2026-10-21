@@ -55,6 +55,7 @@
 //! independent: it is the same bytes whether egress attributes are shared or
 //! distinct. Only the denominator moves between light and heavy.
 
+use rustbgpd_rib::PeerId;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -173,7 +174,7 @@ fn make_route(prefix: Prefix, i: u32, a: &Arc<AttrSet>) -> Route {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, i as u8, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, i as u8, 1)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, i as u8, 1))),
         attributes: a.clone(),
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -197,7 +198,7 @@ fn make_client_route(prefix: Prefix, client: u32, idx: u32) -> Route {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, (client & 0xFF) as u8, 1, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
         attributes: a,
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -233,7 +234,12 @@ fn rr_shape_heap(pfx: &[Prefix], p: usize, heavy_policy: bool) -> (usize, Vec<Ro
     let base = ALLOC.allocated();
     let ribs: Vec<AdjRibIn> = (0..p)
         .map(|i| {
-            let mut r = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, i as u8 + 1, 1)));
+            let mut r = AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                10,
+                0,
+                i as u8 + 1,
+                1,
+            ))));
             let a = AttrSet::new(attrs(i as u32 + 1));
             for x in pfx {
                 r.insert(make_route(*x, i as u32 + 1, &a));
@@ -246,7 +252,14 @@ fn rr_shape_heap(pfx: &[Prefix], p: usize, heavy_policy: bool) -> (usize, Vec<Ro
         loc.recompute(*x, ribs.iter().flat_map(|r| r.iter_prefix(x)));
     }
     let mut outs: Vec<AdjRibOut> = (0..p)
-        .map(|i| AdjRibOut::new(IpAddr::V4(Ipv4Addr::new(10, 0, i as u8 + 1, 1))))
+        .map(|i| {
+            AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                10,
+                0,
+                i as u8 + 1,
+                1,
+            ))))
+        })
         .collect();
     for (client, o) in outs.iter_mut().enumerate() {
         for (idx, x) in pfx.iter().enumerate() {
@@ -307,7 +320,7 @@ fn route_data_sharing_profile() {
             .map(|r| {
                 Arc::new(RouteData {
                     prefix: r.prefix,
-                    peer: r.peer,
+                    peer: r.peer.addr(),
                     received_at: r.received_at,
                     origin_type: r.origin_type,
                     peer_router_id: r.peer_router_id,

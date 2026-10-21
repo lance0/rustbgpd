@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 #[tokio::test(start_paused = true)]
 async fn gshut_toggle_times_out_when_rib_reply_wedges() {
@@ -180,8 +181,8 @@ async fn refresh_outbound_forwards_exact_peer_and_classifies_failures() {
         rib_tx,
         None,
     );
-    let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
-    let peer = key(address);
+    let address = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
+    let peer = key(address.addr());
 
     let unknown = mgr.refresh_outbound(peer.clone()).await.unwrap_err();
     assert!(matches!(
@@ -193,7 +194,7 @@ async fn refresh_outbound_forwards_exact_peer_and_classifies_failures() {
         "an unknown peer must be rejected before the RIB"
     );
 
-    insert_test_managed_peer(&mut mgr, address, closed_peer_handle(), false);
+    insert_test_managed_peer(&mut mgr, address.addr(), closed_peer_handle(), false);
     let success = mgr.refresh_outbound(peer.clone());
     let respond = async {
         let RibUpdate::RefreshPeerOutbound {

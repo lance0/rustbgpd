@@ -3,6 +3,8 @@
 //! withheld with a bounded reason, or pending, one row per registered peer.
 
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use crate::update::{
     ExportDestination, LocalRouteExports, PeerRouteExport, RouteExportCursor,
     RouteExportDisposition, RouteExportPage, RouteExportPageError, RouteExportVersion,
@@ -18,7 +20,7 @@ fn manager() -> (RibManager, mpsc::Sender<RibUpdate>) {
 
 fn peer_up(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sendable_families: Vec<(Afi, Safi)>,
     export_policy: Option<rustbgpd_policy::PolicyChain>,
     add_path_send_max: u32,
@@ -37,7 +39,7 @@ fn peer_up(
 
 fn peer_up_with(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sendable_families: Vec<(Afi, Safi)>,
     export_policy: Option<rustbgpd_policy::PolicyChain>,
     add_path_send_max: u32,
@@ -137,7 +139,7 @@ fn not_found(key: usize) -> Vec<LocalRouteExports> {
     }]
 }
 
-fn row(page: &RouteExportPage, peer: IpAddr) -> &PeerRouteExport {
+fn row(page: &RouteExportPage, peer: PeerId) -> &PeerRouteExport {
     page.routes
         .iter()
         .flat_map(|route| &route.peers)
@@ -159,8 +161,8 @@ fn v4_prefix() -> Prefix {
 #[test]
 fn withheld_family_is_reported_beside_a_committed_peer() {
     let (mut manager, _tx) = manager();
-    let withheld = v4(1);
-    let normal = v4(2);
+    let withheld = PeerId::from_addr(v4(1));
+    let normal = PeerId::from_addr(v4(2));
     manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
         peer: withheld,
         session_id: 0,
@@ -186,7 +188,7 @@ fn withheld_family_is_reported_beside_a_committed_peer() {
     assert_eq!(committed.reason, "");
 
     // A family the session never negotiated is a different reason.
-    let v4_only = v4(3);
+    let v4_only = PeerId::from_addr(v4(3));
     let _v4_rx = peer_up(&mut manager, v4_only, ipv4_sendable(), None, 0, 64);
     let page = query(&mut manager, prefix, 0, None, 10).unwrap();
     assert_eq!(row(&page, v4_only).reason, "family_not_negotiated");
@@ -198,17 +200,10 @@ fn withheld_family_is_reported_beside_a_committed_peer() {
 #[test]
 fn another_source_for_the_same_prefix_is_not_committed() {
     let (mut manager, _tx) = manager();
-    let target = v4(2);
+    let target = PeerId::from_addr(v4(2));
     let source = Ipv4Addr::new(10, 0, 0, 9);
     let _target_rx = peer_up(&mut manager, target, ipv4_sendable(), None, 0, 64);
-    let _source_rx = peer_up(
-        &mut manager,
-        IpAddr::V4(source),
-        ipv4_sendable(),
-        None,
-        0,
-        64,
-    );
+    let _source_rx = peer_up(&mut manager, peer_v4(source), ipv4_sendable(), None, 0, 64);
     let prefix = v4_prefix();
     inject(&mut manager, local_route(prefix, 0));
     let Prefix::V4(v4_prefix) = prefix else {
@@ -218,7 +213,7 @@ fn another_source_for_the_same_prefix_is_not_committed() {
     let mut better = make_route_with_lp(v4_prefix, source, 200);
     better.origin_type = crate::route::RouteOrigin::Ibgp;
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![better],
         withdrawn: vec![],
@@ -229,10 +224,7 @@ fn another_source_for_the_same_prefix_is_not_committed() {
         validated_with: None,
     });
     drain_route_chunks(&mut manager);
-    assert_eq!(
-        manager.loc_rib.get(&prefix).unwrap().peer,
-        IpAddr::V4(source)
-    );
+    assert_eq!(manager.loc_rib.get(&prefix).unwrap().peer, peer_v4(source));
     // The target's advertised state holds the winner, in sync.
     let (reply, mut explained) = oneshot::channel();
     manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
@@ -244,7 +236,7 @@ fn another_source_for_the_same_prefix_is_not_committed() {
         reply,
     });
     let winner = explained.try_recv().unwrap().unwrap();
-    assert_eq!(winner.route_peer, Some(IpAddr::V4(source)));
+    assert_eq!(winner.route_peer, Some(peer_v4(source)));
     assert!(winner.already_advertised);
 
     let page = query(&mut manager, prefix, 0, None, 10).unwrap();
@@ -259,7 +251,7 @@ fn another_source_for_the_same_prefix_is_not_committed() {
 #[test]
 fn another_local_path_id_is_not_committed() {
     let (mut manager, _tx) = manager();
-    let target = v4(2);
+    let target = PeerId::from_addr(v4(2));
     let _target_rx = peer_up(&mut manager, target, ipv4_sendable(), None, 0, 64);
     let prefix = v4_prefix();
     inject(&mut manager, local_route(prefix, 1));
@@ -283,8 +275,8 @@ fn another_local_path_id_is_not_committed() {
 #[test]
 fn add_path_rank_and_export_policy() {
     let (mut manager, _tx) = manager();
-    let add_path = v4(4);
-    let denied = v4(5);
+    let add_path = PeerId::from_addr(v4(4));
+    let denied = PeerId::from_addr(v4(5));
     let prefix = v4_prefix();
     let _add_path_rx = peer_up(&mut manager, add_path, ipv4_sendable(), None, 2, 64);
     let _denied_rx = peer_up(
@@ -336,9 +328,9 @@ fn rpol_chain(source: &str, name: &str) -> PolicyChain {
 fn rpki_invalid_deny_names_the_validation_state() {
     let (mut manager, _tx) = manager();
     let prefix = v4_prefix();
-    let toml = v4(1);
-    let toml_add_path = v4(2);
-    let rpol = v4(3);
+    let toml = PeerId::from_addr(v4(1));
+    let toml_add_path = PeerId::from_addr(v4(2));
+    let rpol = PeerId::from_addr(v4(3));
     let rov = || deny_prefixes_if_rpki(&[prefix], RpkiValidation::Invalid);
     let _toml_rx = peer_up(&mut manager, toml, ipv4_sendable(), Some(rov()), 0, 64);
     let _add_path_rx = peer_up(
@@ -382,7 +374,7 @@ fn rpki_invalid_deny_names_the_validation_state() {
 fn deny_after_an_rpki_permit_names_no_validation_state() {
     let (mut manager, _tx) = manager();
     let prefix = v4_prefix();
-    let target = v4(1);
+    let target = PeerId::from_addr(v4(1));
     let mut permit_valid = deny_prefixes_if_rpki(&[prefix], RpkiValidation::Valid);
     permit_valid.policies[0].policy.entries[0].action = rustbgpd_policy::PolicyAction::Permit;
     let mut policies = permit_valid.policies;
@@ -411,7 +403,7 @@ fn deny_after_an_rpki_permit_names_no_validation_state() {
 #[test]
 fn per_client_best_policy_deny_is_export_policy() {
     let (mut manager, _tx) = manager();
-    let target = v4(6);
+    let target = PeerId::from_addr(v4(6));
     let prefix = v4_prefix();
     let _rx = peer_up_with(
         &mut manager,
@@ -436,7 +428,7 @@ fn per_client_best_policy_deny_is_export_policy() {
 #[test]
 fn unnegotiated_family_is_withheld_not_pending() {
     let (mut manager, _tx) = manager();
-    let v4_only = v4(3);
+    let v4_only = PeerId::from_addr(v4(3));
     let _rx = peer_up(&mut manager, v4_only, ipv4_sendable(), None, 0, 64);
     let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8::7".parse().unwrap(), 128));
     inject(&mut manager, local_route(prefix, 0));
@@ -453,7 +445,7 @@ fn unnegotiated_family_is_withheld_not_pending() {
 #[test]
 fn undelivered_peer_is_pending() {
     let (mut manager, _tx) = manager();
-    let target = v4(2);
+    let target = PeerId::from_addr(v4(2));
     // The initial End-of-RIB fills the one slot, so the route's send fails.
     let _full_rx = peer_up(&mut manager, target, ipv4_sendable(), None, 0, 1);
     let prefix = v4_prefix();
@@ -471,7 +463,16 @@ fn peers_page_in_address_order_within_the_bound() {
     let (mut manager, _tx) = manager();
     let receivers: Vec<_> = [3, 1, 2]
         .into_iter()
-        .map(|octet| peer_up(&mut manager, v4(octet), ipv4_sendable(), None, 0, 64))
+        .map(|octet| {
+            peer_up(
+                &mut manager,
+                PeerId::from_addr(v4(octet)),
+                ipv4_sendable(),
+                None,
+                0,
+                64,
+            )
+        })
         .collect();
     let prefix = v4_prefix();
     inject(&mut manager, local_route(prefix, 0));
@@ -497,7 +498,14 @@ fn peers_page_in_address_order_within_the_bound() {
 #[test]
 fn unknown_local_route_is_not_found() {
     let (mut manager, _tx) = manager();
-    let _rx = peer_up(&mut manager, v4(1), ipv4_sendable(), None, 0, 64);
+    let _rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(v4(1)),
+        ipv4_sendable(),
+        None,
+        0,
+        64,
+    );
     let prefix = v4_prefix();
     assert_eq!(
         query(&mut manager, prefix, 0, None, 10).unwrap().routes,
@@ -516,8 +524,8 @@ fn unknown_local_route_is_not_found() {
 #[test]
 fn rows_report_the_destination_scope() {
     let (mut manager, _tx) = manager();
-    let scoped = v4(1);
-    let numbered = v4(2);
+    let scoped = PeerId::from_addr(v4(1));
+    let numbered = PeerId::from_addr(v4(2));
     manager.handle_update(RibUpdate::SetPeerSourceContext {
         peer: scoped,
         session_id: 0,
@@ -542,7 +550,7 @@ fn peers_of(page: &RouteExportPage) -> Vec<IpAddr> {
     page.routes
         .iter()
         .flat_map(|route| &route.peers)
-        .map(|row| row.peer)
+        .map(|row| row.peer.addr())
         .collect()
 }
 
@@ -555,7 +563,16 @@ fn walk_started() -> (
     let (mut manager, _tx) = manager();
     let receivers = [2, 3, 4]
         .into_iter()
-        .map(|octet| peer_up(&mut manager, v4(octet), ipv4_sendable(), None, 0, 64))
+        .map(|octet| {
+            peer_up(
+                &mut manager,
+                PeerId::from_addr(v4(octet)),
+                ipv4_sendable(),
+                None,
+                0,
+                64,
+            )
+        })
         .collect();
     inject(&mut manager, local_route(v4_prefix(), 0));
     let first = query(&mut manager, v4_prefix(), 0, None, 2).unwrap();
@@ -625,7 +642,14 @@ fn route_replaced_mid_walk_invalidates_the_resumed_walk() {
 #[test]
 fn peer_joining_mid_walk_invalidates_the_resumed_walk() {
     let (mut manager, mut receivers, first) = walk_started();
-    receivers.push(peer_up(&mut manager, v4(1), ipv4_sendable(), None, 0, 64));
+    receivers.push(peer_up(
+        &mut manager,
+        PeerId::from_addr(v4(1)),
+        ipv4_sendable(),
+        None,
+        0,
+        64,
+    ));
     assert_eq!(
         resume(&mut manager, &first),
         Err(RouteExportPageError::Invalidated)
@@ -643,7 +667,7 @@ fn peer_joining_mid_walk_invalidates_the_resumed_walk() {
 fn peer_leaving_or_flapping_mid_walk_invalidates_the_resumed_walk() {
     let (mut manager, _receivers, first) = walk_started();
     manager.handle_update(RibUpdate::PeerDown {
-        peer: v4(2),
+        peer: PeerId::from_addr(v4(2)),
         session_id: 0,
     });
     assert_eq!(
@@ -653,10 +677,17 @@ fn peer_leaving_or_flapping_mid_walk_invalidates_the_resumed_walk() {
 
     let (mut manager, mut receivers, first) = walk_started();
     manager.handle_update(RibUpdate::PeerDown {
-        peer: v4(2),
+        peer: PeerId::from_addr(v4(2)),
         session_id: 0,
     });
-    receivers.push(peer_up(&mut manager, v4(2), ipv4_sendable(), None, 0, 64));
+    receivers.push(peer_up(
+        &mut manager,
+        PeerId::from_addr(v4(2)),
+        ipv4_sendable(),
+        None,
+        0,
+        64,
+    ));
     assert_eq!(
         resume(&mut manager, &first),
         Err(RouteExportPageError::Invalidated)
@@ -674,7 +705,7 @@ fn unrelated_changes_leave_the_walk_resumable() {
     inject(&mut manager, local_route(other, 0));
     withdraw(&mut manager, other, 0);
     manager.handle_update(RibUpdate::PeerDown {
-        peer: v4(9),
+        peer: PeerId::from_addr(v4(9)),
         session_id: 0,
     });
     let rest = resume(&mut manager, &first).unwrap();
@@ -708,7 +739,7 @@ fn export_policy_replaced_mid_walk_invalidates_the_resumed_walk() {
     let (mut manager, _receivers, first) = walk_started();
     let (reply, mut rx) = oneshot::channel();
     manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
-        peer: v4(2),
+        peer: PeerId::from_addr(v4(2)),
         export_policy: Some(deny_prefixes_chain(&[v4_prefix()])),
         reply,
     });
@@ -776,7 +807,7 @@ fn dataset_walk_setup() -> (
         .map(|octet| {
             peer_up(
                 &mut manager,
-                v4(octet),
+                PeerId::from_addr(v4(octet)),
                 ipv4_sendable(),
                 Some(chain.clone()),
                 0,
@@ -857,8 +888,8 @@ fn explain_deny_label_names_the_deciding_term_across_a_dataset_refresh() {
         false,
     );
     let (mut manager, _tx) = manager();
-    let single_best = v4(1);
-    let add_path = v4(2);
+    let single_best = PeerId::from_addr(v4(1));
+    let add_path = PeerId::from_addr(v4(2));
     let _single_rx = peer_up(
         &mut manager,
         single_best,
@@ -918,7 +949,7 @@ fn listed(page: &RouteExportPage) -> Vec<(usize, bool, Vec<IpAddr>)> {
             (
                 route.key,
                 route.found,
-                route.peers.iter().map(|row| row.peer).collect(),
+                route.peers.iter().map(|row| row.peer.addr()).collect(),
             )
         })
         .collect()
@@ -930,7 +961,16 @@ fn batch_setup() -> (RibManager, Vec<mpsc::Receiver<OutboundRouteUpdate>>) {
     let (mut manager, _tx) = manager();
     let receivers = [1, 2, 3]
         .into_iter()
-        .map(|octet| peer_up(&mut manager, v4(octet), ipv4_sendable(), None, 0, 64))
+        .map(|octet| {
+            peer_up(
+                &mut manager,
+                PeerId::from_addr(v4(octet)),
+                ipv4_sendable(),
+                None,
+                0,
+                64,
+            )
+        })
         .collect();
     inject(&mut manager, local_route(prefix_at(1), 0));
     inject(&mut manager, local_route(prefix_at(3), 0));
@@ -954,7 +994,7 @@ fn batch_lists_keys_in_order_with_a_not_found_entry() {
     );
     assert!(page.next.is_none());
     assert_eq!(
-        row(&page, v4(1)).disposition,
+        row(&page, PeerId::from_addr(v4(1))).disposition,
         RouteExportDisposition::Committed
     );
 }
@@ -1047,24 +1087,35 @@ fn numbered(peers: &[IpAddr]) -> Vec<ExportDestination> {
 #[test]
 fn managed_peers_without_a_session_are_listed_only_when_named() {
     let (mut manager, _tx) = manager();
-    let _rx = peer_up(&mut manager, v4(2), ipv4_sendable(), None, 0, 64);
+    let _rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(v4(2)),
+        ipv4_sendable(),
+        None,
+        0,
+        64,
+    );
     inject(&mut manager, local_route(v4_prefix(), 0));
 
     let page = query_keys(
         &mut manager,
         &[(v4_prefix(), 0)],
-        Some(numbered(&[v4(1), v4(2), v4(3)])),
+        Some(numbered(&[
+            (PeerId::from_addr(v4(1))).addr(),
+            (PeerId::from_addr(v4(2))).addr(),
+            (PeerId::from_addr(v4(3))).addr(),
+        ])),
         None,
         10,
     )
     .unwrap();
     assert_eq!(peers_of(&page), vec![v4(1), v4(2), v4(3)]);
     assert_eq!(
-        row(&page, v4(2)).disposition,
+        row(&page, PeerId::from_addr(v4(2))).disposition,
         RouteExportDisposition::Committed
     );
     for peer in [v4(1), v4(3)] {
-        let row = row(&page, peer);
+        let row = row(&page, PeerId::from_addr(peer));
         assert_eq!(row.disposition, RouteExportDisposition::NotEstablished);
         assert_eq!(row.reason, "not_established");
         assert_eq!(row.explain_code, "");
@@ -1083,7 +1134,7 @@ fn managed_peers_without_a_session_are_listed_only_when_named() {
 #[test]
 fn managed_peers_match_registered_sessions_by_scope() {
     let (mut manager, _tx) = manager();
-    let link_local: IpAddr = "fe80::1".parse().unwrap();
+    let link_local = PeerId::from_addr("fe80::1".parse().unwrap());
     manager.handle_update(RibUpdate::SetPeerSourceContext {
         peer: link_local,
         session_id: 0,
@@ -1097,8 +1148,8 @@ fn managed_peers_match_registered_sessions_by_scope() {
     let _rx = peer_up(&mut manager, link_local, ipv4_sendable(), None, 0, 64);
     inject(&mut manager, local_route(v4_prefix(), 0));
     let named = Some(vec![
-        (link_local, Some(Arc::from("eth0"))),
-        (link_local, Some(Arc::from("eth1"))),
+        (link_local.addr(), Some(Arc::from("eth0"))),
+        (link_local.addr(), Some(Arc::from("eth1"))),
     ]);
     let keys = [(v4_prefix(), 0)];
 
@@ -1109,7 +1160,7 @@ fn managed_peers_match_registered_sessions_by_scope() {
     assert_eq!(rows[0].disposition, RouteExportDisposition::Committed);
     assert_eq!(
         first.next.as_ref().and_then(|cursor| cursor.after.clone()),
-        Some((link_local, Some(Arc::from("eth0"))))
+        Some((link_local.addr(), Some(Arc::from("eth0"))))
     );
 
     let rest = query_keys(&mut manager, &keys, named, resume_of(&first), 1).unwrap();
@@ -1128,14 +1179,32 @@ fn managed_peers_match_registered_sessions_by_scope() {
 #[test]
 fn managed_peer_becoming_established_mid_walk_invalidates_the_walk() {
     let (mut manager, _tx) = manager();
-    let _rx = peer_up(&mut manager, v4(2), ipv4_sendable(), None, 0, 64);
+    let _rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(v4(2)),
+        ipv4_sendable(),
+        None,
+        0,
+        64,
+    );
     inject(&mut manager, local_route(v4_prefix(), 0));
-    let named = Some(numbered(&[v4(1), v4(2), v4(3)]));
+    let named = Some(numbered(&[
+        (PeerId::from_addr(v4(1))).addr(),
+        (PeerId::from_addr(v4(2))).addr(),
+        (PeerId::from_addr(v4(3))).addr(),
+    ]));
     let keys = [(v4_prefix(), 0)];
     let first = query_keys(&mut manager, &keys, named.clone(), None, 1).unwrap();
     assert_eq!(peers_of(&first), vec![v4(1)]);
 
-    let _joined = peer_up(&mut manager, v4(3), ipv4_sendable(), None, 0, 64);
+    let _joined = peer_up(
+        &mut manager,
+        PeerId::from_addr(v4(3)),
+        ipv4_sendable(),
+        None,
+        0,
+        64,
+    );
     assert_eq!(
         query_keys(&mut manager, &keys, named, resume_of(&first), 1),
         Err(RouteExportPageError::Invalidated)
@@ -1153,7 +1222,10 @@ fn managed_peer_set_change_mid_walk_invalidates_the_walk() {
     let first = query_keys(
         &mut manager,
         &keys,
-        Some(numbered(&[v4(1), v4(3)])),
+        Some(numbered(&[
+            (PeerId::from_addr(v4(1))).addr(),
+            (PeerId::from_addr(v4(3))).addr(),
+        ])),
         None,
         1,
     )
@@ -1163,7 +1235,11 @@ fn managed_peer_set_change_mid_walk_invalidates_the_walk() {
         query_keys(
             &mut manager,
             &keys,
-            Some(numbered(&[v4(1), v4(2), v4(3)])),
+            Some(numbered(&[
+                (PeerId::from_addr(v4(1))).addr(),
+                (PeerId::from_addr(v4(2))).addr(),
+                (PeerId::from_addr(v4(3))).addr()
+            ])),
             resume_of(&first),
             1
         ),
@@ -1173,7 +1249,10 @@ fn managed_peer_set_change_mid_walk_invalidates_the_walk() {
     let rest = query_keys(
         &mut manager,
         &keys,
-        Some(numbered(&[v4(1), v4(3)])),
+        Some(numbered(&[
+            (PeerId::from_addr(v4(1))).addr(),
+            (PeerId::from_addr(v4(3))).addr(),
+        ])),
         resume_of(&first),
         1,
     )
@@ -1192,7 +1271,16 @@ fn page_selection_holds_at_most_page_size_plus_one_destinations() {
 
     let (mut manager, _tx) = manager();
     let _receivers: Vec<_> = (1..=40)
-        .map(|octet| peer_up(&mut manager, v4(octet), ipv4_sendable(), None, 0, 64))
+        .map(|octet| {
+            peer_up(
+                &mut manager,
+                PeerId::from_addr(v4(octet)),
+                ipv4_sendable(),
+                None,
+                0,
+                64,
+            )
+        })
         .collect();
     inject(&mut manager, local_route(prefix_at(1), 0));
     inject(&mut manager, local_route(prefix_at(3), 0));
@@ -1212,7 +1300,7 @@ fn page_selection_holds_at_most_page_size_plus_one_destinations() {
                 EXPORT_SELECTION_HIGH_WATER.get()
             );
             for route in &page.routes {
-                listed_rows.extend(route.peers.iter().map(|row| (route.key, row.peer)));
+                listed_rows.extend(route.peers.iter().map(|row| (route.key, row.peer.addr())));
             }
             resume = resume_of(&page);
             if resume.is_none() {
@@ -1289,16 +1377,23 @@ fn flowspec_dispositions_name_each_peers_gate() {
     let denied = v4(3);
     let _committed_rx = peer_up(
         &mut manager,
-        committed,
+        PeerId::from_addr(committed),
         ipv4_flowspec_sendable(),
         None,
         0,
         64,
     );
-    let _unicast_rx = peer_up(&mut manager, unicast_only, ipv4_sendable(), None, 0, 64);
+    let _unicast_rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(unicast_only),
+        ipv4_sendable(),
+        None,
+        0,
+        64,
+    );
     let _denied_rx = peer_up(
         &mut manager,
-        denied,
+        PeerId::from_addr(denied),
         ipv4_flowspec_sendable(),
         Some(deny_prefixes_chain(&[rule_prefix()])),
         0,
@@ -1311,14 +1406,14 @@ fn flowspec_dispositions_name_each_peers_gate() {
     let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
     assert_eq!(peers_of(&page), vec![committed, unicast_only, denied]);
     assert!(page.next.is_none());
-    let export = row(&page, committed);
+    let export = row(&page, PeerId::from_addr(committed));
     assert_eq!(export.disposition, RouteExportDisposition::Committed);
     assert_eq!(export.reason, "");
-    let export = row(&page, unicast_only);
+    let export = row(&page, PeerId::from_addr(unicast_only));
     assert_eq!(export.disposition, RouteExportDisposition::Withheld);
     assert_eq!(export.reason, "family_not_negotiated");
     assert_eq!(export.explain_code, "family_not_sendable");
-    let export = row(&page, denied);
+    let export = row(&page, PeerId::from_addr(denied));
     assert_eq!(export.disposition, RouteExportDisposition::Withheld);
     assert_eq!(export.reason, "export_policy");
     assert_eq!(export.explain_code, "policy_denied");
@@ -1331,7 +1426,7 @@ fn flowspec_dispositions_name_each_peers_gate() {
     );
     let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
     for peer in [committed, denied] {
-        let export = row(&page, peer);
+        let export = row(&page, PeerId::from_addr(peer));
         assert_eq!(export.disposition, RouteExportDisposition::Withheld);
         assert_eq!(export.reason, "export_rule");
         assert_eq!(export.explain_code, "no_advertise_suppressed");
@@ -1346,10 +1441,17 @@ fn received_flowspec_rule_out_selecting_the_local_one_is_not_selected() {
     let (mut manager, _tx) = manager();
     let target = v4(2);
     let source = Ipv4Addr::new(10, 0, 0, 9);
-    let _target_rx = peer_up(&mut manager, target, ipv4_flowspec_sendable(), None, 0, 64);
+    let _target_rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(target),
+        ipv4_flowspec_sendable(),
+        None,
+        0,
+        64,
+    );
     let _source_rx = peer_up(
         &mut manager,
-        IpAddr::V4(source),
+        peer_v4(source),
         ipv4_flowspec_sendable(),
         None,
         0,
@@ -1362,7 +1464,7 @@ fn received_flowspec_rule_out_selecting_the_local_one_is_not_selected() {
     received.origin_type = crate::route::RouteOrigin::Ibgp;
     received.attributes.push(PathAttribute::LocalPref(200));
     manager.handle_update(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(source),
+        peer: peer_v4(source),
         session_id: 0,
         announced: vec![],
         withdrawn: vec![],
@@ -1375,18 +1477,18 @@ fn received_flowspec_rule_out_selecting_the_local_one_is_not_selected() {
     drain_route_chunks(&mut manager);
     assert_eq!(
         manager.loc_rib.get_flowspec(&key).unwrap().peer,
-        IpAddr::V4(source)
+        peer_v4(source)
     );
     assert!(
         manager
             .adj_ribs_out
-            .get(&target)
+            .get(&PeerId::from_addr(target))
             .and_then(|out| out.get_flowspec(&key))
             .is_some()
     );
 
     let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
-    let export = row(&page, target);
+    let export = row(&page, PeerId::from_addr(target));
     assert_eq!(export.disposition, RouteExportDisposition::Withheld);
     assert_eq!(export.reason, "not_selected");
 }
@@ -1397,7 +1499,14 @@ fn received_flowspec_rule_out_selecting_the_local_one_is_not_selected() {
 fn flowspec_pending_resync_and_missing_rule() {
     let (mut manager, _tx) = manager();
     let peer = v4(1);
-    let _rx = peer_up(&mut manager, peer, ipv4_flowspec_sendable(), None, 0, 64);
+    let _rx = peer_up(
+        &mut manager,
+        PeerId::from_addr(peer),
+        ipv4_flowspec_sendable(),
+        None,
+        0,
+        64,
+    );
     let rule = local_rule(&[]);
     let key = rule.selection_key();
 
@@ -1405,9 +1514,9 @@ fn flowspec_pending_resync_and_missing_rule() {
     assert_eq!(page.routes, not_found(0));
 
     inject_rule(&mut manager, rule);
-    manager.dirty_peers.insert(peer);
+    manager.dirty_peers.insert(PeerId::from_addr(peer));
     let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
-    let export = row(&page, peer);
+    let export = row(&page, PeerId::from_addr(peer));
     assert_eq!(export.disposition, RouteExportDisposition::Pending);
     assert_eq!(export.reason, "outbound_resync");
 }
@@ -1423,7 +1532,7 @@ fn flowspec_walk_pages_and_aborts_on_a_replaced_rule() {
         .map(|octet| {
             peer_up(
                 &mut manager,
-                v4(octet),
+                PeerId::from_addr(v4(octet)),
                 ipv4_flowspec_sendable(),
                 None,
                 0,
@@ -1439,7 +1548,7 @@ fn flowspec_walk_pages_and_aborts_on_a_replaced_rule() {
     let first = query_rule(&mut manager, &key, named.clone(), None, 2).unwrap();
     assert_eq!(peers_of(&first), vec![v4(1), v4(2)]);
     assert_eq!(
-        row(&first, v4(1)).disposition,
+        row(&first, PeerId::from_addr(v4(1))).disposition,
         RouteExportDisposition::NotEstablished
     );
     let last = query_rule(&mut manager, &key, named.clone(), resume_of(&first), 2).unwrap();

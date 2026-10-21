@@ -2,6 +2,7 @@
 //! output; the correctness-only mode never reads process or cgroup memory.
 
 use super::*;
+use rustbgpd_rib::PeerId;
 
 use std::net::Ipv6Addr;
 
@@ -262,7 +263,7 @@ fn fixture_vpn_route(family: usize, index: usize) -> VpnRibRoute {
         next_hop: fixture_next_hop(family),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: source_addr(0).into(),
+        peer: PeerId::from_addr(source_addr(0).into()),
         attributes: expected_attributes(true, family),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,
@@ -282,7 +283,7 @@ fn fixture_evpn_route(index: usize) -> EvpnRibRoute {
         }),
         next_hop: source_addr(0).into(),
         link_local_next_hop: None,
-        peer: source_addr(0).into(),
+        peer: PeerId::from_addr(source_addr(0).into()),
         attributes: expected_attributes(true, 0),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,
@@ -397,7 +398,11 @@ impl Inventory {
                 IpAddr::V4(source_addr(0)),
                 "wrong EVPN next hop"
             );
-            assert_eq!(value.peer, IpAddr::V4(source_addr(0)), "wrong EVPN source");
+            assert_eq!(
+                value.peer,
+                PeerId::from_addr(IpAddr::V4(source_addr(0))),
+                "wrong EVPN source"
+            );
             assert_eq!(
                 value.attributes, self.expected_attrs[2],
                 "wrong EVPN attributes"
@@ -425,7 +430,11 @@ impl Inventory {
             assert_eq!(value.path_id, 0, "the fixture did not negotiate Add-Path");
             let (family, index) = prefix_index(value.prefix);
             assert_eq!(value.next_hop, fixture_next_hop(family), "wrong next hop");
-            assert_eq!(value.peer, IpAddr::V4(source_addr(0)), "wrong route source");
+            assert_eq!(
+                value.peer,
+                PeerId::from_addr(IpAddr::V4(source_addr(0))),
+                "wrong route source"
+            );
             assert_eq!(
                 value.attributes, self.expected_attrs[family],
                 "wrong expected attributes"
@@ -444,7 +453,11 @@ impl Inventory {
                 "wrong VPN label or NLRI data"
             );
             assert_eq!(value.next_hop, fixture_next_hop(family), "wrong next hop");
-            assert_eq!(value.peer, IpAddr::V4(source_addr(0)), "wrong route source");
+            assert_eq!(
+                value.peer,
+                PeerId::from_addr(IpAddr::V4(source_addr(0))),
+                "wrong route source"
+            );
             assert_eq!(
                 value.attributes,
                 self.expected_attrs[family + 2],
@@ -677,7 +690,7 @@ impl RecoveryHarness {
         tokio::spawn(consume(receiver, commands, limits, evpn_limit));
         self.tx
             .send(RibUpdate::SetPeerExportEncoder {
-                peer,
+                peer: PeerId::from_addr(peer),
                 session_id: 1,
                 encoder: fanout_bench_export_encoder(),
             })
@@ -685,7 +698,7 @@ impl RecoveryHarness {
             .unwrap();
         self.tx
             .send(RibUpdate::PeerUp {
-                peer,
+                peer: PeerId::from_addr(peer),
                 session_id: 1,
                 peer_asn: 64512,
                 peer_router_id: match peer {
@@ -746,7 +759,10 @@ impl RecoveryHarness {
     pub(super) async fn peer_group_label(&self, peer: IpAddr) -> String {
         let (reply, answer) = oneshot::channel();
         self.tx
-            .send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+            .send(RibUpdate::QueryPeerUpdateGroup {
+                peer: PeerId::from_addr(peer),
+                reply,
+            })
             .await
             .unwrap();
         answer.await.unwrap()
@@ -768,7 +784,7 @@ impl RecoveryHarness {
                     .iter()
                     .find(|(family, _)| *family == (Afi::L2Vpn, Safi::Evpn))
                     .map_or(0, |(_, count)| *count);
-                (peer, count)
+                (peer.addr(), count)
             })
             .collect()
     }
@@ -795,7 +811,7 @@ impl RecoveryHarness {
         let mut totals = [0; 2];
         for (index, scope) in [
             RouteQueryScope::Received {
-                peer: Some(self.source),
+                peer: Some(PeerId::from_addr(self.source)),
             },
             RouteQueryScope::Best,
         ]
@@ -839,7 +855,7 @@ impl RecoveryHarness {
                         .find(|(family, _)| *family == wanted)
                         .map_or(0, |(_, count)| *count)
                 });
-                (peer, counts)
+                (peer.addr(), counts)
             })
             .collect()
     }
@@ -941,7 +957,7 @@ impl RecoveryHarness {
             let (reply, result) = oneshot::channel();
             self.tx
                 .send(RibUpdate::QueryPeerUpdateGroup {
-                    peer: receiver.peer,
+                    peer: PeerId::from_addr(receiver.peer),
                     reply,
                 })
                 .await
@@ -1161,7 +1177,7 @@ async fn sample(
 
 fn vpn_receipt(source: IpAddr, announced: Vec<VpnRibRoute>) -> RibUpdate {
     RibUpdate::VpnRoutesReceived {
-        peer: source,
+        peer: PeerId::from_addr(source),
         session_id: 1,
         announced,
         withdrawn: Vec::new(),
@@ -1217,7 +1233,7 @@ pub(super) fn key_update(source: IpAddr, family: usize, announce: bool) -> RibUp
     if family >= 2 {
         let value = fixture_vpn_route(family % 2, 0);
         RibUpdate::VpnRoutesReceived {
-            peer: source,
+            peer: PeerId::from_addr(source),
             session_id: 1,
             announced: if announce {
                 vec![value.clone()]
@@ -1300,7 +1316,7 @@ async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Pa
         harness
             .tx
             .send(RibUpdate::PeerDown {
-                peer: harness.source,
+                peer: PeerId::from_addr(harness.source),
                 session_id: 1,
             })
             .await
@@ -1321,7 +1337,7 @@ async fn run(cell: Cell, clients: u32, spec: Spec, memory: Option<&std::path::Pa
         harness
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
-                peers: vec![harness.receivers[0].peer],
+                peers: vec![PeerId::from_addr(harness.receivers[0].peer)],
                 swaps: None,
                 reply,
             })
@@ -1464,6 +1480,7 @@ pub(super) fn main(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_rib::PeerId;
 
     #[test]
     fn private_evpn_bitmap_tracks_exact_imet_keys_and_empty_control() {
@@ -1768,7 +1785,7 @@ mod tests {
         harness
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
-                peers: vec![harness.receivers[0].peer],
+                peers: vec![PeerId::from_addr(harness.receivers[0].peer)],
                 swaps: None,
                 reply,
             })

@@ -297,7 +297,7 @@ async fn outbound_pacing_releases_deadline_after_filtered_slice() {
         let excluded = Ipv4Addr::new(10, 0, 0, 2);
         let mut routes = pacing_routes(3, true);
         for route in &mut routes[1..] {
-            route.peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+            route.peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
         }
         let update = if shared_fallback {
             let encode =
@@ -314,7 +314,7 @@ async fn outbound_pacing_releases_deadline_after_filtered_slice() {
         } else {
             let mut update = pacing_update(&session, routes);
             update.end_of_rib.clear();
-            update.announce_source_exclusion = Some(IpAddr::V4(excluded));
+            update.announce_source_exclusion = Some(PeerId::from_addr(IpAddr::V4(excluded)));
             update
         };
         session.handle_outbound_route_update(update).await;

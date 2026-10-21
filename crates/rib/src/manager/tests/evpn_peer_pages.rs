@@ -1,5 +1,6 @@
 use super::*;
 use crate::attr_set::AttrSet;
+use crate::test_support::peer_v4;
 use crate::update::{EvpnRoutePage, EvpnRouteQueryKey, RoutePageError, RoutePageVersion};
 
 fn page(
@@ -21,7 +22,7 @@ fn page(
     rx.try_recv().unwrap()
 }
 
-fn fixture() -> (RibManager, IpAddr) {
+fn fixture() -> (RibManager, PeerId) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(
         rx,
@@ -30,7 +31,7 @@ fn fixture() -> (RibManager, IpAddr) {
         Some(Ipv4Addr::new(10, 0, 0, 254)),
         BgpMetrics::new(),
     );
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     manager.ribs.insert(peer, AdjRibIn::new(peer));
     (manager, peer)
 }
@@ -49,7 +50,7 @@ fn smet_pages_continue_by_key_and_peer_and_invalidate_on_flags_change() {
     let first = page(&mut manager, scope, None, None, 1).unwrap();
     assert_eq!(first.total, 2);
     assert!(first.has_more);
-    let after = (first.routes[0].key(), peer);
+    let after = (first.routes[0].key(), peer.addr());
     let second = page(&mut manager, scope, Some(after), Some(first.version), 1).unwrap();
     assert_eq!(second.routes.len(), 1);
     assert!(!second.has_more);
@@ -99,7 +100,7 @@ fn evpn_pages_bound_copy_and_order_without_losing_non_best_rows() {
     let second = page(
         &mut manager,
         scope,
-        Some((last.key(), last.peer)),
+        Some((last.key(), last.peer.addr())),
         Some(first.version),
         10,
     )
@@ -150,7 +151,7 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer)),
+            Some((route.key(), peer.addr())),
             Some(first.version),
             1
         )
@@ -162,7 +163,7 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
     route.route = EvpnRoute::Es(rustbgpd_wire::EvpnEs {
         rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
         esi: EthernetSegmentIdentifier([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
-        originator_ip: peer,
+        originator_ip: peer.addr(),
     });
     manager.process_evpn_announce_chunk(peer, vec![route.clone()]);
     assert_eq!(manager.evpn_dataplane_generation, dataplane_generation);
@@ -170,7 +171,7 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer)),
+            Some((route.key(), peer.addr())),
             Some(before.version),
             1
         )
@@ -183,7 +184,7 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer)),
+            Some((route.key(), peer.addr())),
             Some(before.version),
             1
         )
@@ -195,7 +196,7 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
 #[test]
 fn evpn_advertised_scope_is_destination_and_mutation_version_tracks_commit() {
     let (mut manager, source) = fixture();
-    let destination = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let destination = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(32);
     manager.handle_update(RibUpdate::PeerUp {
         peer: destination,
@@ -249,7 +250,7 @@ fn evpn_advertised_scope_is_destination_and_mutation_version_tracks_commit() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), source)),
+            Some((route.key(), source.addr())),
             Some(first.version),
             1
         )
@@ -267,7 +268,7 @@ fn evpn_advertised_scope_is_destination_and_mutation_version_tracks_commit() {
         page(
             &mut manager,
             received,
-            Some((route.key(), source)),
+            Some((route.key(), source.addr())),
             Some(first.version),
             1
         )
@@ -301,7 +302,7 @@ async fn evpn_pages_invalidate_across_gr_retention_and_eor_sweep() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer)),
+            Some((route.key(), peer.addr())),
             Some(first.version),
             1
         )
@@ -314,7 +315,7 @@ async fn evpn_pages_invalidate_across_gr_retention_and_eor_sweep() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer)),
+            Some((route.key(), peer.addr())),
             Some(retained.version),
             1
         )
@@ -326,7 +327,7 @@ async fn evpn_pages_invalidate_across_gr_retention_and_eor_sweep() {
 #[test]
 fn evpn_non_best_attribute_change_still_invalidates_received_pages() {
     let (mut manager, peer) = fixture();
-    let other: IpAddr = "10.0.0.2".parse().unwrap();
+    let other = PeerId::from_addr("10.0.0.2".parse().unwrap());
     manager.ribs.insert(other, AdjRibIn::new(other));
     let mut best = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
     best.attributes = AttrSet::new(vec![PathAttribute::LocalPref(200)]);
@@ -346,7 +347,7 @@ fn evpn_non_best_attribute_change_still_invalidates_received_pages() {
         page(
             &mut manager,
             scope,
-            Some((best.key(), other)),
+            Some((best.key(), other.addr())),
             Some(before.version),
             1
         )

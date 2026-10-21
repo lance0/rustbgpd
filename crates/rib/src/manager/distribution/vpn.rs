@@ -1,7 +1,8 @@
 use super::{
-    Afi, HashSet, IpAddr, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi,
-    route_type, should_suppress_ibgp_inner, vpn_route_family, vpn_routes_equal, warn,
+    Afi, HashSet, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi, route_type,
+    should_suppress_ibgp_inner, vpn_route_family, vpn_routes_equal, warn,
 };
+use crate::PeerId;
 use crate::attr_set::AttrSet;
 use crate::loc_rib::vpn_tiebreak_orr;
 use crate::route::{VpnRibRoute, VpnRibRouteKey};
@@ -44,7 +45,7 @@ fn vpn_afi_safi(key: &VpnRouteKey) -> (Afi, Safi) {
 impl RibManager {
     /// Whether Add-Path send is negotiated with `peer` for any VPN family
     /// (SAFI 128) with a non-zero configured `send_max`.
-    pub(in crate::manager) fn peer_vpn_add_path_send(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn peer_vpn_add_path_send(&self, peer: PeerId) -> bool {
         self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0) > 0
             && self
                 .peer_add_path_send_families
@@ -883,7 +884,7 @@ impl RibManager {
         &mut self,
         changed_keys: &HashSet<VpnRouteKey>,
         affected_nlri: &HashSet<VpnRouteKey>,
-        targets: Option<&HashSet<IpAddr>>,
+        targets: Option<&HashSet<PeerId>>,
     ) {
         let readiness = self.replacement_readiness.clone();
         #[cfg(test)]
@@ -891,7 +892,7 @@ impl RibManager {
         let mut checkpoint = || {
             super::super::replacement_readiness_checkpoint_at(&readiness, "selection_vpn", false);
         };
-        let targeted = |peer: &IpAddr| targets.is_none_or(|targets| targets.contains(peer));
+        let targeted = |peer: &PeerId| targets.is_none_or(|targets| targets.contains(peer));
         // An RFC 9107 ORR peer selects from the per-target candidate set,
         // not the Loc-RIB best — a candidate change that leaves the
         // Loc-RIB best untouched can still flip a vantage best, so
@@ -938,7 +939,7 @@ impl RibManager {
         }
         let mut vpn_group_stage = self.stage_vpn_update_groups(changed_keys, targets);
 
-        let peers: Vec<IpAddr> = self
+        let peers: Vec<PeerId> = self
             .outbound_peers
             .keys()
             .inspect(|_| checkpoint())

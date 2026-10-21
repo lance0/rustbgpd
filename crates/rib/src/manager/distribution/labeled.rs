@@ -1,7 +1,8 @@
 use super::{
-    Afi, HashSet, IpAddr, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi,
+    Afi, HashSet, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi,
     labeled_route_family, labeled_routes_equal, route_type, should_suppress_ibgp_inner, warn,
 };
+use crate::PeerId;
 use crate::attr_set::AttrSet;
 use crate::loc_rib::labeled_tiebreak_orr;
 use crate::route::{LabeledRibRoute, LabeledRibRouteKey};
@@ -44,7 +45,7 @@ fn labeled_afi_safi(key: &Prefix) -> (Afi, Safi) {
 impl RibManager {
     /// Whether Add-Path send is negotiated with `peer` for any
     /// labeled-unicast family (SAFI 4) with a non-zero configured `send_max`.
-    pub(in crate::manager) fn peer_labeled_add_path_send(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn peer_labeled_add_path_send(&self, peer: PeerId) -> bool {
         self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0) > 0
             && self
                 .peer_add_path_send_families
@@ -789,7 +790,7 @@ impl RibManager {
             );
         }
 
-        let peers: Vec<IpAddr> = self
+        let peers: Vec<PeerId> = self
             .outbound_peers
             .keys()
             .inspect(|_| checkpoint())

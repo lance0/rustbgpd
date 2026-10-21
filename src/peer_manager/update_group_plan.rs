@@ -1,3 +1,4 @@
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
@@ -253,7 +254,7 @@ impl PeerManager {
         for peer in peers {
             let current_cfg = current.get(&peer);
             let candidate_cfg = candidate.get(&peer);
-            let live = live.get(&peer);
+            let live = live.get(&PeerId::from_addr(peer));
             let current_state = if current_cfg.is_none() {
                 PlannedGroupability::Absent
             } else {
@@ -343,7 +344,7 @@ impl PeerManager {
                 other => other.label(),
             };
             entries.push(UpdateGroupFamilyImpact {
-                peer,
+                peer: PeerId::from_addr(peer),
                 afi,
                 safi,
                 current,
@@ -391,6 +392,7 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_rib::PeerId;
 
     fn snapshot_fixture() -> UpdateGroupSnapshot {
         let input = UpdateGroupClassifierInput {
@@ -411,7 +413,7 @@ mod tests {
         };
         UpdateGroupSnapshot {
             peers: vec![UpdateGroupPeerSnapshot {
-                peer: "192.0.2.1".parse().unwrap(),
+                peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
                 classification: classify_update_group(input.clone()),
                 input,
                 runtime_membership: "group:1".to_string(),
@@ -495,7 +497,7 @@ mod tests {
         assert!(!requires_local_resync(&deleted, true));
 
         let entries = [UpdateGroupFamilyImpact {
-            peer: "192.0.2.1".parse().unwrap(),
+            peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
             afi: 1,
             safi: 1,
             current: PlannedGroupability::Group {

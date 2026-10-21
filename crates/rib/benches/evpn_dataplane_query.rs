@@ -1,3 +1,4 @@
+use rustbgpd_rib::PeerId;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
@@ -76,7 +77,7 @@ fn route(index: usize, route_type: u8) -> EvpnRibRoute {
         route,
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
-        peer: IpAddr::V4(peer),
+        peer: PeerId::from_addr(IpAddr::V4(peer)),
         attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,

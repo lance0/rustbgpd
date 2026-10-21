@@ -1,5 +1,7 @@
 //! ADR-0137 slice 2: condition-tracker state machine under a paused clock.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,8 +34,8 @@ fn condition() -> Prefix {
     Prefix::V4(prefix(1))
 }
 
-fn peer(octet: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))
+fn peer(octet: u8) -> PeerId {
+    peer_v4(Ipv4Addr::new(10, 0, 0, octet))
 }
 
 fn manager_with(metrics: &BgpMetrics) -> RibManager {
@@ -98,8 +100,8 @@ fn applied(manager: &RibManager) -> AppliedConditionalState {
     state(manager).1
 }
 
-fn route_with_med(source: IpAddr, p: Ipv4Prefix, med: Option<u32>) -> Route {
-    let IpAddr::V4(source) = source else {
+fn route_with_med(source: PeerId, p: Ipv4Prefix, med: Option<u32>) -> Route {
+    let IpAddr::V4(source) = source.addr() else {
         unreachable!()
     };
     let mut route = make_route(p, source);
@@ -124,11 +126,11 @@ fn withdraw_injected(manager: &mut RibManager, p: Ipv4Prefix) {
     manager.handle_withdraw_injected(Prefix::V4(p), 0, false, "", false, reply);
 }
 
-fn peer_up(manager: &mut RibManager, source: IpAddr, session_id: u64) {
+fn peer_up(manager: &mut RibManager, source: PeerId, session_id: u64) {
     manager.handle_update(peer_up_update(source, session_id, 65001));
 }
 
-fn peer_up_update(source: IpAddr, session_id: u64, peer_asn: u32) -> RibUpdate {
+fn peer_up_update(source: PeerId, session_id: u64, peer_asn: u32) -> RibUpdate {
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     RibUpdate::PeerUp {
         peer: source,
@@ -151,7 +153,7 @@ fn peer_up_update(source: IpAddr, session_id: u64, peer_asn: u32) -> RibUpdate {
 }
 
 fn routes_received(
-    source: IpAddr,
+    source: PeerId,
     session_id: u64,
     announced: Vec<Route>,
     withdrawn: Vec<(Prefix, u32)>,
@@ -188,7 +190,7 @@ async fn barrier(tx: &mpsc::Sender<RibUpdate>) {
 
 fn received(
     manager: &mut RibManager,
-    source: IpAddr,
+    source: PeerId,
     session_id: u64,
     announced: Vec<Route>,
     withdrawn: Vec<(Prefix, u32)>,
@@ -387,7 +389,7 @@ async fn clean_match_beats_error_and_rejection_is_a_miss() {
 /// it. A received candidate carries its source peer's address.
 #[tokio::test(start_paused = true)]
 async fn local_candidates_have_absent_peer_context() {
-    let observe = |policy: PolicyChain, received_from: Option<IpAddr>| {
+    let observe = |policy: PolicyChain, received_from: Option<PeerId>| {
         let mut manager = manager();
         let _ = manager.install_conditional_advertisements(vec![definition(
             ConditionalAdvertiseIf::Present,
@@ -1061,7 +1063,7 @@ async fn settle_expiry_is_served_beside_an_overdue_timer_under_traffic() {
     handle.await.unwrap();
 }
 
-fn unrelated_two_chunk(source: IpAddr, octet: u8) -> RibUpdate {
+fn unrelated_two_chunk(source: PeerId, octet: u8) -> RibUpdate {
     routes_received(
         source,
         1,
@@ -1072,7 +1074,7 @@ fn unrelated_two_chunk(source: IpAddr, octet: u8) -> RibUpdate {
 
 async fn spawn_with_source(
     metrics: &BgpMetrics,
-    source: IpAddr,
+    source: PeerId,
 ) -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
@@ -1526,7 +1528,7 @@ fn v6(addr: &str, len: u8) -> Prefix {
     Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr.parse().unwrap(), len))
 }
 
-fn v6_route(source: IpAddr, prefix: Prefix) -> Route {
+fn v6_route(source: PeerId, prefix: Prefix) -> Route {
     let mut route = route_with_med(source, v4(0, 0, 0, 32), None);
     route.prefix = prefix;
     route

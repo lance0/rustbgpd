@@ -1,14 +1,16 @@
 use super::exportability::MockExactExportEncoder;
 use super::*;
+use crate::PeerId;
 use crate::manager::distribution::OutboundCommitBatch;
 use crate::manager::helpers::evpn_routes_equal;
 use crate::manager::update_groups::{EvpnGroupStageOutput, emit_evpn_group_deltas_for_member};
+use crate::test_support::peer_v4;
 use crate::update::ExactExportKey;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) fn fixture() -> (
     RibManager,
-    IpAddr,
+    PeerId,
     usize,
     mpsc::Receiver<OutboundRouteUpdate>,
 ) {
@@ -19,7 +21,7 @@ pub(super) fn fixture_with_rtc(
     rtc: bool,
 ) -> (
     RibManager,
-    IpAddr,
+    PeerId,
     usize,
     mpsc::Receiver<OutboundRouteUpdate>,
 ) {
@@ -31,7 +33,7 @@ pub(super) fn fixture_with_rtc(
         Some(Ipv4Addr::new(192, 0, 2, 254)),
         BgpMetrics::new(),
     );
-    let member: IpAddr = Ipv4Addr::new(192, 0, 2, 30).into();
+    let member = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 30).into());
     let (sender, mut output) = mpsc::channel(8);
     register_with_rtc(&mut manager, member, sender, rtc);
     while output.try_recv().is_ok() {}
@@ -48,7 +50,7 @@ pub(super) fn fixture_with_rtc(
 
 pub(super) fn register(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sender: mpsc::Sender<OutboundRouteUpdate>,
 ) {
     register_with_rtc(manager, peer, sender, false);
@@ -56,7 +58,7 @@ pub(super) fn register(
 
 fn register_with_rtc(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     sender: mpsc::Sender<OutboundRouteUpdate>,
     rtc: bool,
 ) {
@@ -103,7 +105,7 @@ fn events(
     manager: &RibManager,
     gid: usize,
     output: &EvpnGroupStageOutput,
-    member: IpAddr,
+    member: PeerId,
     membership: Option<&RtcMembership>,
     rejected: Option<&HashSet<ExactExportKey>>,
 ) -> (Vec<EvpnRibRoute>, Vec<rustbgpd_wire::EvpnRouteKey>) {
@@ -130,7 +132,7 @@ fn private_events(
     manager: &RibManager,
     gid: usize,
     key: rustbgpd_wire::EvpnRouteKey,
-    member: IpAddr,
+    member: PeerId,
     private: &crate::adj_rib_out::AdjRibOut,
     membership: Option<&RtcMembership>,
 ) -> (Vec<EvpnRibRoute>, Vec<rustbgpd_wire::EvpnRouteKey>) {
@@ -298,7 +300,7 @@ fn source_flip_uses_direct_source_exclusion_and_private_equality() {
     let old_source = a.peer;
     stage(&mut manager, gid, &a);
     let mut b = a.clone();
-    b.peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20));
+    b.peer = peer_v4(Ipv4Addr::new(192, 0, 2, 20));
     b.peer_router_id = Ipv4Addr::new(192, 0, 2, 20);
     let flip = stage(&mut manager, gid, &b);
     let former = events(&manager, gid, &flip, old_source, None, None);
@@ -503,7 +505,7 @@ fn negotiated_rtc_excludes_shared_ownership_and_keeps_private_missing_membership
     );
 }
 
-fn assert_negotiated_rtc_evpn_stays_private(manager: &mut RibManager, member: IpAddr, gid: usize) {
+fn assert_negotiated_rtc_evpn_stays_private(manager: &mut RibManager, member: PeerId, gid: usize) {
     assert!(manager.group_ribs[&gid].rtc_negotiated());
     assert!(!manager.group_ribs[&gid].owns_evpn_routes());
     assert_eq!(manager.grouped_member_of(member), Some(gid));
@@ -522,7 +524,7 @@ fn negotiated_rtc_exclusion_survives_registration_replay_and_regroup() {
     assert_negotiated_rtc_evpn_stays_private(&mut manager, member, gid);
     // A second real registration retains the original group during replay,
     // so a fresh disabled constructor cannot make the replay check vacuous.
-    let second: IpAddr = Ipv4Addr::new(192, 0, 2, 31).into();
+    let second = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 31).into());
     let (sender, mut second_output) = mpsc::channel(8);
     register_with_rtc(&mut manager, second, sender, true);
     assert_eq!(manager.grouped_member_of(second), Some(gid));
@@ -926,8 +928,8 @@ fn gr_llgr_transitions_refresh_flags_and_link_local_metadata_without_ordinary_ev
 #[test]
 fn shared_capture_caller_reuses_older_universe_and_keeps_each_old_projection_exact() {
     let (mut manager, first, gid, _first_output) = fixture();
-    let second: IpAddr = "192.0.2.31".parse().unwrap();
-    let third: IpAddr = "192.0.2.32".parse().unwrap();
+    let second = PeerId::from_addr("192.0.2.31".parse().unwrap());
+    let third = PeerId::from_addr("192.0.2.32".parse().unwrap());
     let mut outputs = Vec::new();
     for peer in [second, third] {
         let (sender, mut output) = mpsc::channel(8);
@@ -1067,7 +1069,7 @@ fn disjoint_peer_budget() -> usize {
         + 1024
 }
 
-fn assert_owned_test_evpn_bodies(manager: &RibManager, peer: IpAddr, routes: &[EvpnRibRoute]) {
+fn assert_owned_test_evpn_bodies(manager: &RibManager, peer: PeerId, routes: &[EvpnRibRoute]) {
     let gid = manager.evpn_grouped_member_of(peer).unwrap();
     assert!(manager.group_ribs[&gid].evpn_projection_complete());
     assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
@@ -1085,8 +1087,8 @@ fn assert_owned_test_evpn_bodies(manager: &RibManager, peer: IpAddr, routes: &[E
 
 fn older_universe_fixture() -> (
     RibManager,
-    IpAddr,
-    IpAddr,
+    PeerId,
+    PeerId,
     usize,
     mpsc::Receiver<OutboundRouteUpdate>,
     mpsc::Receiver<OutboundRouteUpdate>,
@@ -1098,7 +1100,7 @@ fn older_universe_fixture() -> (
         4 * disjoint_peer_budget(),
     );
     assert!(manager.register_evpn_recovery(first, false));
-    let second = "192.0.2.31".parse().unwrap();
+    let second = PeerId::from_addr("192.0.2.31".parse().unwrap());
     let (sender, mut second_output) = mpsc::channel(8);
     register(&mut manager, second, sender);
     while second_output.try_recv().is_ok() {}
@@ -1170,7 +1172,7 @@ fn assert_disjoint_flat_fits(routes: &[EvpnRibRoute]) {
     );
     let handle = flat
         .register(PeerSession {
-            peer: "192.0.2.31".parse().unwrap(),
+            peer: PeerId::from_addr("192.0.2.31".parse().unwrap()),
             session_id: 7,
         })
         .unwrap();
