@@ -4,8 +4,9 @@
 Reads samples.csv, run.json and rustbgpd.log from the matching runner
 and emits a JSON verdict against the soak-specific gates:
 
-  - RSS slope (steady state, MB/hour) < 1.0
-  - intern table size (bgp_rib_attr_intern_global_size) slope per hour < 1.0
+  - RSS slope (MB/hour) < 1.0, fitted over post-warmup samples only
+  - intern table size (bgp_rib_attr_intern_global_size) slope per hour < 1.0,
+    fitted over the same post-warmup samples
   - peak RSS < 512 MB
   - session established in the final CSV sample (no flap)
   - churn cycles meet 50% of the configured post-warmup cadence (at least one)
@@ -32,7 +33,8 @@ With run.json lease_mode == 1 (ADR-0141 owner leases), also:
   - every 1 Hz /readyz probe returns 200, at least soak_seconds / 2 probes
 
 Stdlib only. Exit code 0 on pass, 1 on any gate failure, 2 on
-harness/input error.
+harness/input error, including fewer than MIN_SLOPE_SAMPLES samples at or
+after warmup_sec (insufficient evidence for a slope).
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ COUNTERS = REQUIRED - {"elapsed_sec", "rss_mb", "bgp_established"}
 LEASE_META = ("lease_owners", "lease_keys_per_owner", "lease_seconds",
               "lease_renew_sec", "lease_flap_interval_sec")
 EXPIRY_SLACK_SEC = 5.0
+MIN_SLOPE_SAMPLES = 2
 
 
 def safe_float(value: str | None) -> Optional[float]:
@@ -80,9 +83,10 @@ def linreg(xs: list[float], ys: list[float]) -> float:
     return num / den
 
 
-def analyze(rows: list[dict[str, str]], minimum_cycles: int) -> dict:
+def analyze(rows: list[dict[str, str]], minimum_cycles: int, warmup_sec: int) -> dict:
     rss_pts: list[tuple[float, float]] = []
     intern_pts: list[tuple[float, float]] = []
+    peak_rss = max(float(row["rss_mb"]) for row in rows)
     established_final: list[str] = []
     max_cycles = 0
     first_flaps = first_uptime = final_flaps = final_uptime = 0
@@ -92,9 +96,10 @@ def analyze(rows: list[dict[str, str]], minimum_cycles: int) -> dict:
         e = safe_float(row.get("elapsed_sec"))
         r = safe_float(row.get("rss_mb"))
         i = safe_float(row.get("intern_size"))
-        if e is not None and r is not None:
+        # The slope gates fit only post-warmup samples; peak RSS spans the run.
+        if e is not None and r is not None and e >= warmup_sec:
             rss_pts.append((e, r))
-        if e is not None and i is not None:
+        if e is not None and i is not None and e >= warmup_sec:
             intern_pts.append((e, i))
         c = safe_float(row.get("churn_cycles"))
         if c is not None:
@@ -108,17 +113,13 @@ def analyze(rows: list[dict[str, str]], minimum_cycles: int) -> dict:
         final_target = int(safe_float(row.get("live_target")))
         final_routes = int(safe_float(row.get("frr_route_count")))
 
-    rss_slope = (
-        linreg([e / 3600 for e, _ in rss_pts], [r for _, r in rss_pts])
-        if rss_pts
-        else float("nan")
-    )
-    intern_slope = (
-        linreg([e / 3600 for e, _ in intern_pts], [i for _, i in intern_pts])
-        if intern_pts
-        else float("nan")
-    )
-    peak_rss = max((r for _, r in rss_pts), default=float("nan"))
+    distinct = len({e for e, _ in rss_pts})
+    if distinct < MIN_SLOPE_SAMPLES:
+        raise ValueError(
+            f"insufficient evidence: {distinct} distinct sample time(s) at or after "
+            f"warmup_sec={warmup_sec}, need {MIN_SLOPE_SAMPLES} for the slope gates")
+    rss_slope = linreg([e / 3600 for e, _ in rss_pts], [r for _, r in rss_pts])
+    intern_slope = linreg([e / 3600 for e, _ in intern_pts], [i for _, i in intern_pts])
 
     final_established = bool(established_final) and established_final[-1] == "1"
 
@@ -166,6 +167,7 @@ def analyze(rows: list[dict[str, str]], minimum_cycles: int) -> dict:
         "rss_slope_per_hour": rss_slope if not math.isnan(rss_slope) else None,
         "peak_rss_mb": peak_rss if not math.isnan(peak_rss) else None,
         "samples": len(rows),
+        "slope_window": {"from_elapsed_sec": warmup_sec, "samples": len(rss_pts)},
         "gates": gates,
     }
 
@@ -398,7 +400,11 @@ def main() -> int:
     denominator = 2 * meta["churn_interval_sec"]
     minimum_cycles = max(1, (active_seconds + denominator - 1) // denominator)
 
-    result = analyze(rows, minimum_cycles)
+    try:
+        result = analyze(rows, minimum_cycles, meta["warmup_sec"])
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     result["gates"]["daemon_log"] = analyze_daemon_log(args.run_dir)
     lease_mode = meta.get("lease_mode", 0)
     if type(lease_mode) is not int or lease_mode not in (0, 1):
