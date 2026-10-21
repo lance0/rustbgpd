@@ -337,7 +337,8 @@ interface, because one link-local address can exist on several links
 before.
 
 **Responses.** A `peer_address` that names the source or target neighbor of a
-route, route event, export disposition or explanation stays a bare IP literal.
+route, route event, export disposition, explanation, dataplane row, BFD session
+or policy statistics row stays a bare IP literal.
 A sibling interface field carries the scope, and the pair identifies the
 neighbor; the interface is empty for a numbered neighbor:
 
@@ -352,6 +353,10 @@ neighbor; the interface is empty for a numbered neighbor:
 | `PathExportDispositionEntry` | `peer_interface` |
 | `ExplainImportPolicyResponse`, `ImportExplainMatch`, `ListRejectedRoutesResponse` | `peer_interface` |
 | `SessionEvent`, `NotificationEvent`, `PolicyEvent` | `peer_interface` |
+| `FibRouteStatus`, `BlackholeDiscard`, `DataplaneRouteEvent` | `peer_interface` |
+| `BfdSession`, `BfdSessionEvent` | `peer_interface` |
+| `PolicyChainStats` | `peer_interface` (empty on the `global` row) |
+| `TestPolicyDiff`, `TestPolicyRejectedRoute` | `peer_interface` (beside `peer`) |
 
 Route rows and route events report the interface recorded when the route was
 learned or the event was recorded, not the current neighbor inventory. The
@@ -364,15 +369,18 @@ Routes retained across a Graceful Restart and the history of a deleted
 neighbor keep the interface they had. A `BgpEvent` envelope's
 `peer_address`, `previous_peer_address` and `target_peer_address` are bare IP
 literals in every category; the interfaces are in its payload (`RouteEvent`,
-`SessionEvent`, `NotificationEvent` or `PolicyEvent`) and are not repeated on
-the envelope. Session, notification and policy events report the interface
-of the neighbor they name.
+`SessionEvent`, `NotificationEvent`, `PolicyEvent`, `BfdSessionEvent` or
+`DataplaneRouteEvent`) and are not repeated on the envelope. Session,
+notification, policy and BFD events and BFD sessions report the interface of
+the neighbor they name. FIB and blackhole rows, FIB route events and
+`TestPolicy` samples take the interface recorded with the route they describe,
+and FIB owned state keeps it across a daemon restart. `PolicyChainStats` rows
+report the interface of the neighbor whose chain they count.
 
-EVPN, VPN, labeled,
-RTC, BGP-LS and FlowSpec route entries, EVPN route events, FIB and blackhole
-status rows, BFD sessions and policy statistics rows still report a bare
-address with no interface. Each link-local address can belong to only one
-configured neighbor in this release (see the
+EVPN, VPN, labeled, RTC, BGP-LS and FlowSpec route entries and EVPN route
+events still report a bare address with no interface: those route types do
+not yet record the receiving session's interface. Each link-local address can
+belong to only one configured neighbor in this release (see the
 [configuration reference](configuration.md#scoped-neighbor-identity)), so that
 bare address names one neighbor.
 
