@@ -1956,11 +1956,73 @@ impl RibManager {
         page_size: usize,
     ) -> Result<RouteExportPage, RouteExportPageError> {
         let (routes, version) = self.local_route_export_version(keys, managed.as_deref());
+        self.local_export_page(
+            &routes,
+            version,
+            managed,
+            resume,
+            page_size,
+            Self::local_route_export,
+        )
+    }
+
+    /// Answer [`crate::update::RibUpdate::QueryLocalFlowSpecExport`].
+    pub(super) fn handle_query_local_flowspec_export(
+        &mut self,
+        key: &crate::route::FlowSpecKey,
+        managed: Option<Vec<ExportDestination>>,
+        resume: Option<(RouteExportCursor, RouteExportVersion)>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
+    ) {
+        let rule = self
+            .ribs
+            .get(&LOCAL_PEER)
+            .and_then(|rib| {
+                rib.get_flowspec(&crate::route::FlowSpecRouteKey {
+                    afi: key.afi,
+                    rule: key.rule.clone(),
+                    path_id: 0,
+                })
+            })
+            .cloned();
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            rule.as_ref().map(|rule| &rule.attributes).hash(&mut hasher);
+            hasher.finish()
+        };
+        let version = self.export_walk_version(fingerprint, managed.as_deref());
+        let page = self.local_export_page(
+            &[rule],
+            version,
+            managed,
+            resume,
+            page_size,
+            |manager, peer, rule| manager.local_flowspec_export(peer, rule),
+        );
+        if reply.send(page).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    /// One page of the export walk over the local entries `routes` read
+    /// under `version`; `export` gives one registered peer's row for one
+    /// entry. See [`Self::local_route_export_page`] for the walk's contract.
+    fn local_export_page<R>(
+        &mut self,
+        routes: &[Option<R>],
+        version: RouteExportVersion,
+        managed: Option<Vec<ExportDestination>>,
+        resume: Option<(RouteExportCursor, RouteExportVersion)>,
+        page_size: usize,
+        mut export: impl FnMut(&mut Self, IpAddr, &R) -> PeerRouteExport,
+    ) -> Result<RouteExportPage, RouteExportPageError> {
         let (cursor, expected) = resume.unzip();
         if expected.is_some_and(|expected| expected != version)
             || cursor
                 .as_ref()
-                .is_some_and(|cursor| cursor.key >= keys.len())
+                .is_some_and(|cursor| cursor.key >= routes.len())
         {
             return Err(RouteExportPageError::Invalidated);
         }
@@ -2024,7 +2086,7 @@ impl RibManager {
                 .iter()
                 .map(|(peer, scope, registered)| {
                     if *registered {
-                        self.local_route_export(*peer, route)
+                        export(self, *peer, route)
                     } else {
                         not_established_export(*peer, scope.clone())
                     }
@@ -2073,9 +2135,20 @@ impl RibManager {
                 })
             })
             .collect();
-        let version = RouteExportVersion {
+        let version = self.export_walk_version(local_routes_fingerprint(&routes), managed);
+        (routes, version)
+    }
+
+    /// The version an export walk reads under, given its entries'
+    /// fingerprint and the named `managed` peers.
+    fn export_walk_version(
+        &self,
+        route: u64,
+        managed: Option<&[ExportDestination]>,
+    ) -> RouteExportVersion {
+        RouteExportVersion {
             roster: self.outbound_roster_generation,
-            route: local_routes_fingerprint(&routes),
+            route,
             policy: self.export_policy_version(),
             managed: managed.map_or(0, |peers| {
                 use std::hash::{Hash, Hasher};
@@ -2083,8 +2156,7 @@ impl RibManager {
                 peers.hash(&mut hasher);
                 hasher.finish() | 1
             }),
-        };
-        (routes, version)
+        }
     }
 
     /// Every destination of an export walk, unordered, with whether it is
@@ -2177,7 +2249,7 @@ impl RibManager {
             && explanation.route_peer.is_some()
             && (explanation.route_peer, explanation.route_path_id)
                 != (Some(LOCAL_PEER), Some(route.path_id));
-        let mut export = if other_source {
+        let export = if other_source {
             row(
                 Withheld,
                 "not_selected",
@@ -2209,13 +2281,23 @@ impl RibManager {
                 ..row(disposition, &reason, code, stop_detail)
             }
         };
-        if export.disposition != Committed
+        self.selection_deferred_export(family, export)
+    }
+
+    /// `export`, reported as pending while graceful-restart selection
+    /// deferral holds `family` and it is not committed.
+    fn selection_deferred_export(
+        &self,
+        family: (Afi, Safi),
+        mut export: PeerRouteExport,
+    ) -> PeerRouteExport {
+        if export.disposition != RouteExportDisposition::Committed
             && self
                 .selection_deferral
                 .as_ref()
                 .is_some_and(|deferral| deferral.is_gated(family))
         {
-            export.disposition = Pending;
+            export.disposition = RouteExportDisposition::Pending;
             export.reason = "selection_deferred".to_string();
             export.detail = format!(
                 "graceful-restart selection deferral holds this family; export would be {}",
@@ -2227,6 +2309,97 @@ impl RibManager {
             );
         }
         export
+    }
+
+    /// The export disposition of the local `FlowSpec` `rule` toward one
+    /// registered peer. Committed means the peer's Adj-RIB-Out holds this
+    /// key from the local source with the attributes export would send now.
+    fn local_flowspec_export(
+        &self,
+        peer: IpAddr,
+        rule: &crate::route::FlowSpecRoute,
+    ) -> PeerRouteExport {
+        use RouteExportDisposition::{Committed, Pending, Withheld};
+        let family = (rule.afi, Safi::FlowSpec);
+        let peer_interface = self.session_peer_scope(peer).peer_interface();
+        let row = |disposition, reason: &str, explain_code, detail: String| PeerRouteExport {
+            peer,
+            peer_interface: peer_interface.clone(),
+            disposition,
+            reason: reason.to_string(),
+            explain_code,
+            detail,
+            advertised_path_id: 0,
+            deny_validation: Vec::new(),
+        };
+        if let Some((reason, detail)) = self.unexported_family(peer, family) {
+            return row(Withheld, &reason, "family_not_sendable", detail);
+        }
+        if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
+            return row(
+                Pending,
+                "outbound_resync",
+                "",
+                "outbound delivery to this peer is resynchronizing".to_string(),
+            );
+        }
+        let key = rule.selection_key();
+        let export = match self.loc_rib.get_flowspec(&key) {
+            None => row(
+                Withheld,
+                "not_selected",
+                "no_best_route",
+                "no rule is selected for this FlowSpec key".to_string(),
+            ),
+            Some(best) if best.peer != LOCAL_PEER => row(
+                Withheld,
+                "not_selected",
+                "",
+                format!("the selected rule for this key is from {}", best.peer),
+            ),
+            Some(best) => match self.explain_flowspec_export(peer, best) {
+                Err(stop) => {
+                    let reason = match stop.code {
+                        "policy_denied" | "rfc8212_missing_export_policy" => "export_policy",
+                        _ => "export_rule",
+                    };
+                    PeerRouteExport {
+                        deny_validation: stop.deny_validation,
+                        ..row(Withheld, reason, stop.code, stop.detail)
+                    }
+                }
+                Ok(announced) => match self
+                    .adj_ribs_out
+                    .get(&peer)
+                    .and_then(|rib_out| rib_out.get_flowspec(&key))
+                {
+                    Some(held)
+                        if held.peer == LOCAL_PEER && held.attributes == announced.attributes =>
+                    {
+                        row(Committed, "", "", "in the peer's Adj-RIB-Out".to_string())
+                    }
+                    _ if self.peer_unexportable.get(&peer).is_some_and(|keys| {
+                        keys.contains(&ExactExportKey::FlowSpec(key.clone()))
+                    }) =>
+                    {
+                        row(
+                            Withheld,
+                            "exact_export_rejected",
+                            "exact_export_rejected",
+                            "the session's encoder cannot carry this rule".to_string(),
+                        )
+                    }
+                    _ => row(
+                        Pending,
+                        "not_yet_committed",
+                        "",
+                        "export is staged but the peer's Adj-RIB-Out does not hold it yet"
+                            .to_string(),
+                    ),
+                },
+            },
+        };
+        self.selection_deferred_export(family, export)
     }
 
     /// Reason and detail when the peer's session does not export `family`

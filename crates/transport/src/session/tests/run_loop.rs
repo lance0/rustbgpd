@@ -492,6 +492,101 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
     );
 }
 
+/// A session task that ends on `Shutdown` must not resolve while its writer
+/// still holds the Cease. The daemon exits right after the peer manager joins
+/// every session task, and a detached writer dies with the runtime, so an
+/// early return lets the socket close with no NOTIFICATION on the wire.
+#[tokio::test]
+async fn shutdown_resolves_only_after_the_writer_flushes_the_cease() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    session.commands = cmd_rx;
+    // Small buffers and a stopped reader wedge the writer in a bulk write,
+    // so the Cease can only reach the wire after the peer drains.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connect = tokio::spawn(async move {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        socket.connect(addr).await.unwrap()
+    });
+    let (server, _) = listener.accept().await.unwrap();
+    socket2::SockRef::from(&server)
+        .set_send_buffer_size(4096)
+        .unwrap();
+    let mut peer = connect.await.unwrap();
+    session.test_install_stream(server);
+    establish_test_session(&mut session, 65002).await;
+    let mut frame = vec![0u8; 4096];
+    frame[..16].fill(0xff);
+    frame[16..18].copy_from_slice(&4096u16.to_be_bytes());
+    frame[18] = 2;
+    let frame = Bytes::from(frame);
+    for _ in 0..256 {
+        session.enqueue_bulk_encoded(frame.clone(), false).unwrap();
+    }
+    let mut senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
+    let session_task = tokio::spawn(async move { session.run().await });
+
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    // `close_tcp` drops the teardown sender after the Cease is queued.
+    assert!(senders_dropped.changed().await.is_err());
+    assert!(
+        !session_task.is_finished(),
+        "the session task resolved while its writer still held the Cease"
+    );
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), session_task)
+        .await
+        .expect("session task must finish once the writer drains")
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
+    let cease = parse_wire_frames(&wire)
+        .into_iter()
+        .find(|(msg_type, _)| *msg_type == 3)
+        .expect("the Cease NOTIFICATION must reach the wire");
+    assert_eq!(
+        &cease.1[19..21],
+        &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN],
+        "NOTIFICATION must be Cease/Administrative Shutdown"
+    );
+}
+
+/// Joining the writer must not slow an ordinary shutdown: with a peer whose
+/// socket accepts the Cease, the writer exits as soon as it has flushed, so
+/// the session task resolves without waiting on any timer. The paused clock
+/// makes this deterministic: a writer that waited on a linger, a keepalive
+/// tick or a sender that is never dropped would let the clock auto-advance
+/// past the ceiling, far below the peer manager's 500 ms per-peer bound.
+#[tokio::test(start_paused = true)]
+async fn shutdown_with_a_draining_peer_resolves_without_waiting_on_a_timer() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    session.commands = cmd_rx;
+    let (client, mut peer) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let session_task = tokio::spawn(async move { session.run().await });
+
+    let started = tokio::time::Instant::now();
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_millis(50), session_task)
+        .await
+        .expect("an ordinary shutdown must not wait on a timer")
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
+    assert_eq!(started.elapsed(), Duration::ZERO);
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    let frames = parse_wire_frames(&wire);
+    let (msg_type, cease) = frames.last().expect("the peer must receive frames");
+    assert_eq!(*msg_type, 3, "the Cease must be the final frame");
+    assert_eq!(&cease[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
+}
+
 /// ADR-0078 rule 1: a full RIB channel parks the session task instead of
 /// dropping the batch — the routes arrive once the channel drains, and
 /// the saturation counter records the blocked send.

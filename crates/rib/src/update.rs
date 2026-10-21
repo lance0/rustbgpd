@@ -3066,6 +3066,22 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
     },
+    /// [`Self::QueryLocalRouteExport`] for the one locally injected
+    /// `FlowSpec` rule `key`, under the same walk, paging and version
+    /// contract.
+    QueryLocalFlowSpecExport {
+        /// The local rule's key.
+        key: crate::route::FlowSpecKey,
+        /// Managed peers, listed as not Established unless registered.
+        managed: Option<Vec<ExportDestination>>,
+        /// Resume here, provided the walk's state still matches the version
+        /// of the page that returned this cursor.
+        resume: Option<(RouteExportCursor, RouteExportVersion)>,
+        /// Entries per page, clamped to `1..=ROUTE_QUERY_MAX_PAGE_SIZE`.
+        page_size: usize,
+        /// Response channel.
+        reply: oneshot::Sender<Result<RouteExportPage, RouteExportPageError>>,
+    },
     /// One page of the injected keys `owner` holds in
     /// [`crate::injection_lease::InjectedKeyCursor`] order, at most
     /// `page_size` of them. The reply is `None` when `resume` was bound to
