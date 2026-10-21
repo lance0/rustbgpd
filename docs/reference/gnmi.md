@@ -368,10 +368,12 @@ Supported neighbor state:
 /network-instances/network-instance[name=DEFAULT]/protocols/protocol[identifier=BGP][name=BGP]/bgp/neighbors/neighbor[neighbor-address=X]/state/messages
 ```
 
-For scoped IPv6 link-local neighbors, the OpenConfig `neighbor-address` key is
-the bare IP address, not `fe80::x%ifname`. rustbgpd v1 rejects configuring the
-same link-local neighbor address on multiple interfaces, so the bare key remains
-unambiguous.
+A scoped IPv6 link-local neighbor is keyed `neighbor-address=fe80::x%ifname`,
+the zone form OpenConfig's `inet:ip-address` type allows, and its
+`state/neighbor-address` leaf renders the same scoped value. A `Get` or
+`Subscribe` path with a bare link-local key is `INVALID_ARGUMENT`, following the
+gRPC API's [neighbor selector rule](api.md#scoped-neighbor-identity); numbered
+neighbors keep their bare keys. `Set` does not accept link-local neighbors.
 
 ## gnmic Examples
 

@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,8 +18,8 @@ use crate::gnmi;
 use crate::gnmi_ext;
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
-    EnqueuedOperatorQuery, PeerInfo, PeerManagerCommand, PeerManagerOperatorQuery, SessionEvent,
-    SessionLifecycleEventType,
+    EnqueuedOperatorQuery, PeerInfo, PeerKey, PeerManagerCommand, PeerManagerOperatorQuery,
+    SessionEvent, SessionLifecycleEventType,
 };
 use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
@@ -345,9 +344,9 @@ impl GnmiService {
                 leaf.as_ref().copied(),
                 encoding,
             )),
-            SupportedPath::Neighbor { address, select } => {
+            SupportedPath::Neighbor { peer, select } => {
                 let peers = peers.unwrap_or(&[]);
-                render_neighbor_updates(peers, self.asn, *address, *select, encoding)
+                render_neighbor_updates(peers, self.asn, peer, *select, encoding)
             }
             SupportedPath::AllNeighbors { select } => {
                 let peers = peers.unwrap_or(&[]);
@@ -375,9 +374,9 @@ impl GnmiService {
         encoding: gnmi::Encoding,
     ) -> Result<Vec<gnmi::Update>, Status> {
         match (query, peers) {
-            (SupportedPath::Neighbor { address, select }, Some(peers)) => Ok(peers
+            (SupportedPath::Neighbor { peer: key, select }, Some(peers)) => Ok(peers
                 .iter()
-                .find(|peer| peer.address == *address)
+                .find(|peer| peer_info_key(peer) == *key)
                 .map_or_else(Vec::new, |peer| {
                     render_one_neighbor_updates(peer, self.asn, *select, encoding)
                 })),
@@ -898,10 +897,10 @@ impl GnmiService {
         let mut updates: Vec<gnmi::Update> = Vec::new();
         for query in &plan.paths {
             match query {
-                SupportedPath::Neighbor { address, .. } => {
-                    if let Some(peer) = peers.iter().find(|p| p.address == *address) {
+                SupportedPath::Neighbor { peer: key, .. } => {
+                    if let Some(peer) = peers.iter().find(|p| peer_info_key(p) == *key) {
                         updates.push(leaf_update(
-                            neighbor_leaf_path(peer.address, NeighborLeaf::SessionState),
+                            neighbor_leaf_path(&peer_info_key(peer), NeighborLeaf::SessionState),
                             &LeafValue::Str(session_state_name(peer.state).to_string()),
                             plan.encoding,
                         ));
@@ -910,7 +909,7 @@ impl GnmiService {
                 SupportedPath::AllNeighbors { .. } => {
                     for peer in &peers {
                         updates.push(leaf_update(
-                            neighbor_leaf_path(peer.address, NeighborLeaf::SessionState),
+                            neighbor_leaf_path(&peer_info_key(peer), NeighborLeaf::SessionState),
                             &LeafValue::Str(session_state_name(peer.state).to_string()),
                             plan.encoding,
                         ));
@@ -1091,7 +1090,9 @@ enum SupportedPath {
         leaf: Option<GlobalLeaf>,
     },
     Neighbor {
-        address: IpAddr,
+        /// The keyed neighbor: a bare address, or `address%interface` for a
+        /// scoped (IPv6 link-local) neighbor.
+        peer: PeerKey,
         select: NeighborSelect,
     },
     AllNeighbors {
@@ -1741,11 +1742,12 @@ fn parse_neighbors_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status
     // and most OpenConfig collectors emit when subscribing to every
     // neighbor; `neighbor` with no keys is the equivalent shorthand.
     // Both map to `AllNeighbors` so collectors can use either form.
+    // OpenConfig `inet:ip-address` admits a zone: an IPv6 link-local
+    // neighbor is keyed `fe80::1%eth0`, and a bare link-local key is refused
+    // like every other neighbor selector.
     let address = match neighbor.key.get("neighbor-address") {
         Some(raw) if raw == "*" => None,
-        Some(raw) => Some(raw.parse::<IpAddr>().map_err(|_| {
-            Status::invalid_argument(format!("invalid neighbor-address key {raw}"))
-        })?),
+        Some(raw) => crate::peer_selector::parse_neighbor("neighbor-address key", raw, "", None)?,
         None if neighbor.key.is_empty() => None,
         None => {
             return Err(Status::invalid_argument(
@@ -1763,8 +1765,8 @@ fn parse_neighbors_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status
         // A bare `.../neighbor[addr]` (or `.../neighbors/neighbor`) renders the
         // full supported state leaf set.
         return Ok(match address {
-            Some(address) => SupportedPath::Neighbor {
-                address,
+            Some(peer) => SupportedPath::Neighbor {
+                peer,
                 select: NeighborSelect::AllState,
             },
             None => SupportedPath::AllNeighbors {
@@ -1775,7 +1777,7 @@ fn parse_neighbors_path(tail: &[gnmi::PathElem]) -> Result<SupportedPath, Status
     expect_no_keys(&tail[1], "state")?;
     let select = parse_neighbor_state_leaf(&tail[2..])?;
     Ok(match address {
-        Some(address) => SupportedPath::Neighbor { address, select },
+        Some(peer) => SupportedPath::Neighbor { peer, select },
         None => SupportedPath::AllNeighbors { select },
     })
 }
@@ -1959,14 +1961,14 @@ fn render_global_updates(
 fn render_neighbor_updates(
     peers: &[PeerInfo],
     local_as: u32,
-    address: IpAddr,
+    key: &PeerKey,
     select: NeighborSelect,
     encoding: gnmi::Encoding,
 ) -> Result<Vec<gnmi::Update>, Status> {
     let peer = peers
         .iter()
-        .find(|peer| peer.address == address)
-        .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))?;
+        .find(|peer| peer_info_key(peer) == *key)
+        .ok_or_else(|| Status::not_found(format!("neighbor {key} not found")))?;
     Ok(render_one_neighbor_updates(
         peer, local_as, select, encoding,
     ))
@@ -1983,14 +1985,18 @@ fn render_one_neighbor_updates(
         .into_iter()
         .map(|leaf| {
             let value = neighbor_leaf_value(peer, local_as, leaf);
-            leaf_update(neighbor_leaf_path(peer.address, leaf), &value, encoding)
+            leaf_update(
+                neighbor_leaf_path(&peer_info_key(peer), leaf),
+                &value,
+                encoding,
+            )
         })
         .collect()
 }
 
 fn neighbor_leaf_value(peer: &PeerInfo, local_as: u32, leaf: NeighborLeaf) -> LeafValue {
     match leaf {
-        NeighborLeaf::NeighborAddress => LeafValue::Str(peer.address.to_string()),
+        NeighborLeaf::NeighborAddress => LeafValue::Str(peer_info_key(peer).label()),
         NeighborLeaf::Enabled => LeafValue::Bool(peer.enabled),
         NeighborLeaf::PeerAs => LeafValue::U32(peer.remote_asn),
         // `local-as` is derived from the global ASN: rustbgpd is single-AS and
@@ -2035,16 +2041,19 @@ fn build_session_state_on_change(
     let SessionEvent::Lifecycle(event) = event else {
         return None;
     };
-    let peer = event.peer;
+    let peer = PeerKey::new(
+        event.peer,
+        Some(PeerKey::label_interface(event.peer_label.as_deref()).to_string()),
+    );
     let targets_peer = plan.paths.iter().any(|query| match query {
-        SupportedPath::Neighbor { address, .. } => *address == peer,
+        SupportedPath::Neighbor { peer: key, .. } => *key == peer,
         SupportedPath::AllNeighbors { .. } => true,
         SupportedPath::Global { .. } => false,
     });
     if !targets_peer {
         return None;
     }
-    let path = neighbor_leaf_path(peer, NeighborLeaf::SessionState);
+    let path = neighbor_leaf_path(&peer, NeighborLeaf::SessionState);
     if event.event_type == SessionLifecycleEventType::PeerRemoved {
         return Some(SessionStateObservation::Delete(path));
     }
@@ -2061,11 +2070,18 @@ fn global_leaf_path(leaf: &str) -> gnmi::Path {
     mounted_path(&[pe("bgp"), pe("global"), pe("state"), pe(leaf)])
 }
 
-fn neighbor_leaf_path(address: IpAddr, leaf: NeighborLeaf) -> gnmi::Path {
+/// The configured identity of a peer snapshot row.
+fn peer_info_key(peer: &PeerInfo) -> PeerKey {
+    PeerKey::new(peer.address, peer.interface.clone())
+}
+
+/// A neighbor leaf path keyed by the neighbor's address, scoped as
+/// `address%interface` for an IPv6 link-local neighbor.
+fn neighbor_leaf_path(peer: &PeerKey, leaf: NeighborLeaf) -> gnmi::Path {
     let mut elems = vec![
         pe("bgp"),
         pe("neighbors"),
-        keyed_pe("neighbor", "neighbor-address", &address.to_string()),
+        keyed_pe("neighbor", "neighbor-address", &peer.label()),
         pe("state"),
     ];
     match leaf {
@@ -2262,9 +2278,8 @@ impl From<&gnmi::Path> for CanonicalPath {
 
 fn due_paths_cover(plan: &SubscriptionPlan, due: &[usize], identity: &CanonicalPath) -> bool {
     due.iter().any(|index| match &plan.paths[*index] {
-        SupportedPath::Neighbor { address, .. } => {
-            identity
-                == &CanonicalPath::from(&neighbor_leaf_path(*address, NeighborLeaf::SessionState))
+        SupportedPath::Neighbor { peer, .. } => {
+            identity == &CanonicalPath::from(&neighbor_leaf_path(peer, NeighborLeaf::SessionState))
         }
         SupportedPath::AllNeighbors { .. } => true,
         SupportedPath::Global { .. } => false,
@@ -2478,6 +2493,7 @@ mod tests {
     use super::*;
     use crate::test_support::peer_info;
     use gnmi::g_nmi_server::GNmi as _;
+    use std::net::IpAddr;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
@@ -3269,6 +3285,54 @@ mod tests {
         );
     }
 
+    /// A link-local neighbor is keyed `address%interface`, as the
+    /// `OpenConfig` `inet:ip-address` type allows: the scoped key selects it
+    /// and renders it back, a bare link-local key is refused, and another
+    /// interface on the same address is not this neighbor.
+    #[tokio::test]
+    async fn get_link_local_neighbor_requires_and_renders_its_scope() {
+        let mut peer = test_peer("fe80::1".parse().unwrap());
+        peer.interface = Some("eth0".to_string());
+        let service = test_service(vec![peer]);
+        let path = |key: &str| {
+            mounted_path(&[
+                pe("bgp"),
+                pe("neighbors"),
+                keyed_pe("neighbor", "neighbor-address", key),
+                pe("state"),
+                pe("neighbor-address"),
+            ])
+        };
+
+        let response = service
+            .get(get_request(path("fe80::1%eth0")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            json_ietf_values(&response),
+            vec!["\"fe80::1%eth0\"".to_string()]
+        );
+        let update = &response.notification[0].update[0];
+        let neighbor = update
+            .path
+            .as_ref()
+            .unwrap()
+            .elem
+            .iter()
+            .find(|elem| elem.name == "neighbor")
+            .unwrap();
+        assert_eq!(neighbor.key["neighbor-address"], "fe80::1%eth0");
+
+        let bare = service.get(get_request(path("fe80::1"))).await.unwrap_err();
+        assert_eq!(bare.code(), tonic::Code::InvalidArgument, "{bare}");
+        let other = service
+            .get(get_request(path("fe80::1%eth1")))
+            .await
+            .unwrap_err();
+        assert_eq!(other.code(), tonic::Code::NotFound, "{other}");
+    }
+
     #[tokio::test]
     async fn get_neighbor_message_leaf_renders_single_counter() {
         let peer = test_peer("203.0.113.2".parse().unwrap());
@@ -3830,7 +3894,10 @@ mod tests {
 
     fn two_interval_neighbor_sample_list() -> (gnmi::SubscriptionList, gnmi::Path, gnmi::Path) {
         let fast_path = neighbor_session_state_path("10.0.0.2");
-        let slow_path = neighbor_leaf_path("10.0.0.3".parse().unwrap(), NeighborLeaf::PeerAs);
+        let slow_path = neighbor_leaf_path(
+            &PeerKey::new("10.0.0.3".parse().unwrap(), None),
+            NeighborLeaf::PeerAs,
+        );
         let mut list = stream_sample_list(1_000_000_000);
         list.subscription[0].path = Some(fast_path.clone());
         let mut slow = list.subscription[0].clone();
@@ -4478,7 +4545,10 @@ mod tests {
         assert_eq!(
             notification.update,
             vec![leaf_update(
-                neighbor_leaf_path("10.0.0.2".parse().unwrap(), NeighborLeaf::SessionState),
+                neighbor_leaf_path(
+                    &PeerKey::new("10.0.0.2".parse().unwrap(), None),
+                    NeighborLeaf::SessionState
+                ),
                 &LeafValue::Str("ESTABLISHED".to_string()),
                 gnmi::Encoding::JsonIetf,
             )]

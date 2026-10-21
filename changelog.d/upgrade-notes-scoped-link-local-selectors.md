@@ -14,3 +14,7 @@
   its interface in the payload's new `peer_interface`. They used to put
   `address%interface` in `peer_address`; a consumer matching that string must
   join the two fields instead. `rbgp` output is unchanged.
+- gNMI `Get` and `Subscribe` paths key an IPv6 link-local neighbor as
+  `neighbor-address=fe80::1%eth0`, and render that key and the
+  `state/neighbor-address` leaf in the same scoped form. A bare link-local
+  key is now `INVALID_ARGUMENT`; numbered neighbors are unchanged.
