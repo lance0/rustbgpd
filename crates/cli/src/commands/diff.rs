@@ -440,6 +440,9 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             },
             limits,
         );
+        // An explicit scoped --peer goes out as given, so the daemon refuses
+        // a scope that does not match; otherwise the configured scope.
+        let selector = peer_filter.scoped_labels.get(peer_addr).unwrap_or(selector);
         fetch_advertised_into(
             &mut rib_client,
             &peer_id,
@@ -3277,8 +3280,10 @@ mod tests {
         .to_string();
         let file = snapshot_file(&[header_line(), route, trailer_line(1)]);
         let server = spawn_mock_server(None).await;
-        *server.state.list_neighbors_response.lock().await =
-            vec![neighbor("fe80::2%eth0", PEER_ASN)];
+        // The daemon reports the bare address and the interface separately.
+        let mut configured = neighbor("fe80::2", PEER_ASN);
+        configured.config.as_mut().unwrap().interface = "eth0".to_string();
+        *server.state.list_neighbors_response.lock().await = vec![configured];
         *server.state.list_route_pages.lock().await =
             vec![page(vec![live_route("10.0.0.0", 0)], "", 1)];
         let mut filtered = opts(file.path());
@@ -3302,11 +3307,28 @@ mod tests {
             "fe80:0:0:0:0:0:0:2%eth0"
         );
 
+        // An explicit scoped --peer goes out exactly as given, so the
+        // daemon judges its scope; the daemon refuses a bare link-local one.
         let requests = server.state.list_route_requests.lock().await;
         assert_eq!(requests.len(), 2);
-        // The daemon refuses a bare link-local selector.
-        assert_eq!(requests[0].neighbor_address, "fe80::2%eth0");
-        assert_eq!(requests[1].neighbor_address, "fe80::2%eth0");
+        assert_eq!(requests[0].neighbor_address, "fe80:0:0:0:0:0:0:2%eth0");
+        assert_eq!(requests[1].neighbor_address, "fe80:0:0:0:0:0:0:2%eth0");
+        drop(requests);
+
+        // Without --peer, the configured scope selects the neighbor.
+        server.state.list_route_requests.lock().await.clear();
+        *server.state.list_route_pages.lock().await =
+            vec![page(vec![live_route("10.0.0.0", 0)], "", 1)];
+        filtered.peers.clear();
+        let (rendered, _) = run_against(&server, &filtered).await.unwrap();
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(
+            requests
+                .first()
+                .map(|request| request.neighbor_address.as_str()),
+            Some("fe80::2%eth0"),
+            "output was:\n{rendered}"
+        );
     }
 
     /// Red proof: removing the scope-conflict check in `parse_peer_filter`
