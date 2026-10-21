@@ -611,7 +611,7 @@ fn rpol_deny_term_stops_the_walk_and_claims_no_modifications() {
     );
 }
 
-/// `evaluate_with_deny_validation` reports the validation states the
+/// `evaluate_with_deny_attribution` reports the validation states the
 /// deciding term's guard tests, from the evaluating walk itself: a
 /// validation condition beside others still counts, and so does one under
 /// `||`; a permit, a default-action deny and a term without one do not.
@@ -619,7 +619,7 @@ fn rpol_deny_term_stops_the_walk_and_claims_no_modifications() {
 fn deciding_term_reports_the_validation_states_it_tests() {
     use crate::ir::ValidationDimension::{Aspa, Rpki};
     let tests = |chain: &PolicyChain, ctx: &RouteContext<'_>| {
-        let (result, _, tested) = chain.compiled().evaluate_with_deny_validation(ctx);
+        let (result, _, _, tested) = chain.compiled().evaluate_with_deny_attribution(ctx);
         (result.action, tested)
     };
     let mut invalid = plain_ctx(v4_prefix([10, 10, 3, 0], 24));
@@ -676,6 +676,21 @@ fn deciding_term_reports_the_validation_states_it_tests() {
     );
     let plain = rpol("policy p { term t { if route.med == 0 { reject } } }");
     assert_eq!(tests(&plain, &invalid), (PolicyAction::Deny, vec![]));
+    // A reject term whose guard fails closed names the term but no
+    // validation state: the error, not the reject, decided.
+    let failing =
+        rpol("policy p { term t { if route.rpki == invalid && route.med - 100 >= 1 { reject } } }");
+    let mut underflow = invalid;
+    underflow.med = Some(5);
+    let (result, evaluation, term, tested) = failing
+        .compiled()
+        .evaluate_with_deny_attribution(&underflow);
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert!(
+        evaluation.eval_error.is_some(),
+        "the guard must fail closed"
+    );
+    assert_eq!((term, tested), (Some("t"), vec![]));
 }
 
 #[test]
@@ -825,6 +840,13 @@ fn rpol_statement_trace_agrees_with_live_evaluation_and_recorded_hits() {
                 reject_term.as_deref(),
                 traced_reject_term,
                 "single-walk reject term diverged for chain={chain_name} ctx={ctx_name}"
+            );
+            // The explain deny label's term comes from the evaluating walk
+            // and names the same term the statement trace does.
+            let (_, _, deny_term, _) = chain.compiled().evaluate_with_deny_attribution(&ctx);
+            assert_eq!(
+                deny_term, traced_reject_term,
+                "explain deny term diverged for chain={chain_name} ctx={ctx_name}"
             );
 
             // Matched-term parity with the counting evaluator: a term
@@ -1081,6 +1103,16 @@ fn action_view_walks_agree_across_action_and_error_matrix() {
             step,
         );
         assert_action_view_coverage_positions(case_name, step, &evaluated, &matched);
+        // Unlike the retention term, the explain deny term also names a
+        // term that failed closed, as the statement trace does.
+        let (_, _, deny_term, _) = compiled.evaluate_with_deny_attribution(&ctx);
+        assert_eq!(
+            deny_term,
+            (live.action == PolicyAction::Deny)
+                .then_some(step.term_name.as_deref())
+                .flatten(),
+            "explain deny term for {case_name}"
+        );
 
         match case_name {
             "all-actions" => {
