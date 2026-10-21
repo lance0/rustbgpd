@@ -40,7 +40,8 @@
 //!
 //! Every other NOTIFICATION ends an ordinary close, and it is the last
 //! frame too (RFC 4271 §4.5): the writer flushes the bulk frames queued
-//! before it, writes the NOTIFICATION, and writes nothing after it (see
+//! before it within a bounded budget, discards the rest, writes the
+//! NOTIFICATION, and writes nothing after it (see
 //! `WriterTask::close_with_notification`). Priority preemption applies to
 //! KEEPALIVE, OPEN and ROUTE-REFRESH frames only.
 //!
@@ -137,6 +138,15 @@ const MAX_BATCH_FRAMES: usize = 64;
 /// send-hold deadline and the teardown linger bound roughly the same
 /// wire time as before, while amortizing the syscall + flush cost.
 const MAX_BATCH_BYTES: usize = 256 * 1024;
+
+/// How long a closing writer may spend flushing queued bulk frames ahead of
+/// its NOTIFICATION before it discards the rest. The peer manager gives a
+/// shutting-down session 500 ms before aborting it (and the writer with it);
+/// spending at most half of that on the flush leaves the rest for the
+/// NOTIFICATION, so a peer that is reading, however slowly, still receives
+/// its Cease rather than a bare close. Error NOTIFICATIONs have no outer
+/// deadline and use the same budget.
+const CLOSE_FLUSH_BUDGET: Duration = Duration::from_millis(250);
 
 /// Whether a queued frame is a BGP NOTIFICATION (type 3).
 fn is_notification(frame: &[u8]) -> bool {
@@ -241,6 +251,7 @@ pub(super) fn spawn(
         priority_rx,
         keepalive_rx,
         teardown_rx,
+        closed_at: None,
         metrics,
         peer_label,
         send_hold_time,
@@ -265,6 +276,9 @@ struct WriterTask {
     priority_rx: mpsc::UnboundedReceiver<Bytes>,
     keepalive_rx: watch::Receiver<Option<Duration>>,
     teardown_rx: watch::Receiver<bool>,
+    /// When the session dropped its senders without a hard teardown: the
+    /// start of an ordinary close, which [`CLOSE_FLUSH_BUDGET`] runs from.
+    closed_at: Option<tokio::time::Instant>,
     metrics: BgpMetrics,
     peer_label: String,
     send_hold_time: Option<Duration>,
@@ -275,10 +289,16 @@ struct WriterTask {
 /// Resolve once the session has signalled hard teardown. Pends forever
 /// otherwise — including when the sender is dropped *without*
 /// signalling, which is the ordinary (non-hard-teardown) close path and
-/// must keep the writer's drain-then-exit semantics.
-async fn teardown_requested(rx: &mut watch::Receiver<bool>) {
+/// must keep the writer's drain-then-exit semantics. That drop is recorded
+/// in `closed_at`, so a write already in flight counts against the close's
+/// flush budget.
+async fn teardown_requested(
+    rx: &mut watch::Receiver<bool>,
+    closed_at: &mut Option<tokio::time::Instant>,
+) {
     while !*rx.borrow_and_update() {
         if rx.changed().await.is_err() {
+            closed_at.get_or_insert_with(tokio::time::Instant::now);
             std::future::pending::<()>().await;
         }
     }
@@ -336,6 +356,7 @@ impl WriterTask {
                         // close path, keep drain semantics and never
                         // poll this arm again.
                         teardown_open = false;
+                        self.closed_at.get_or_insert_with(tokio::time::Instant::now);
                     }
                     continue;
                 }
@@ -419,21 +440,37 @@ impl WriterTask {
     /// RFC 4271 §4.5 closes the connection right after a NOTIFICATION, so it
     /// must be the final frame. An ordinary close first writes the bulk
     /// frames the session admitted before it (UPDATEs, End-of-RIB markers,
-    /// and the EVPN withdraws that shutdown drains ahead of the Cease), then
-    /// the NOTIFICATION, and nothing after. A hard teardown signalled
+    /// and the EVPN withdraws that shutdown drains ahead of the Cease) for at
+    /// most [`CLOSE_FLUSH_BUDGET`], discards whatever is still queued, then
+    /// writes the NOTIFICATION, and nothing after. A hard teardown signalled
     /// meanwhile stops the flush, so its backlog is discarded as before. A
     /// write that fails or exceeds the send hold time ends the task without
     /// the NOTIFICATION. The session always drops its senders right after the
     /// NOTIFICATION; the writer waits for that, discarding anything queued
     /// later, so the session observes its exit only after the close.
     async fn close_with_notification(mut self, notification: Bytes) -> Result<(), WriterExit> {
-        while !*self.teardown_rx.borrow() {
-            let Ok(first) = self.bulk_rx.try_recv() else {
+        // The budget runs from the close, so a batch that was already in
+        // flight counts against it. One frame per write after that, so the
+        // budget is overshot by at most one frame.
+        let deadline =
+            self.closed_at.unwrap_or_else(tokio::time::Instant::now) + CLOSE_FLUSH_BUDGET;
+        while !*self.teardown_rx.borrow() && tokio::time::Instant::now() < deadline {
+            let Ok(frame) = self.bulk_rx.try_recv() else {
                 break;
             };
-            let batch = coalesce_bulk(first, &mut self.bulk_rx);
-            self.write_message(&batch).await?;
-            self.record_bulk_completed(batch.len())?;
+            self.write_message(&frame).await?;
+            self.record_bulk_completed(frame.len())?;
+        }
+        let mut discarded = 0usize;
+        while self.bulk_rx.try_recv().is_ok() {
+            discarded += 1;
+        }
+        if discarded > 0 {
+            debug!(
+                discarded,
+                budget_ms = CLOSE_FLUSH_BUDGET.as_millis(),
+                "writer: discarded queued bulk frames to send the closing NOTIFICATION"
+            );
         }
         self.write_message(&notification).await?;
         let (mut bulk_open, mut priority_open, mut teardown_open) = (true, true, true);
@@ -463,6 +500,7 @@ impl WriterTask {
         let Self {
             write_half,
             teardown_rx,
+            closed_at,
             send_hold_time,
             peer_label,
             #[cfg(all(target_os = "linux", feature = "bench-internals"))]
@@ -495,7 +533,7 @@ impl WriterTask {
             tokio::select! {
                 biased;
                 result = bounded_write => Some(result),
-                () = teardown_requested(teardown_rx) => None,
+                () = teardown_requested(teardown_rx, closed_at) => None,
             }
         };
         #[cfg(all(target_os = "linux", feature = "bench-internals"))]
@@ -646,6 +684,7 @@ mod tests {
     use super::*;
 
     use tokio::io::AsyncReadExt;
+    use tokio::net::tcp::OwnedReadHalf;
     use tokio::net::{TcpListener, TcpStream};
 
     #[cfg(all(target_os = "linux", feature = "bench-internals"))]
@@ -691,6 +730,128 @@ mod tests {
         let (server, _) = listener.accept().await.unwrap();
         let client = connect.await.unwrap();
         (server, client)
+    }
+
+    const SLOW_PEER_FRAMES: usize = 512;
+
+    /// A writer wedged behind a peer that has stopped reading, with
+    /// [`SLOW_PEER_FRAMES`] 4 KiB UPDATEs and then a Cease queued.
+    async fn wedged_writer_with_cease() -> (WriterHandle, TcpStream, OwnedReadHalf) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::spawn(async move {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_recv_buffer_size(4096).unwrap();
+            socket.connect(addr).await.unwrap()
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        socket2::SockRef::from(&server)
+            .set_send_buffer_size(4096)
+            .unwrap();
+        let peer = connect.await.unwrap();
+        let (read, write) = server.into_split();
+        let handle = spawn(
+            write,
+            SLOW_PEER_FRAMES,
+            BgpMetrics::new(),
+            "slow-peer".into(),
+            None,
+        );
+        let mut update = vec![0u8; 4096];
+        update[..16].fill(0xff);
+        update[16..18].copy_from_slice(&4096u16.to_be_bytes());
+        update[18] = 2;
+        let update = Bytes::from(update);
+        for _ in 0..SLOW_PEER_FRAMES {
+            handle.bulk_tx.send(update.clone()).await.unwrap();
+        }
+        let mut cease = vec![0xffu8; 16];
+        cease.extend_from_slice(&[0, 21, 3, 6, 2]);
+        handle.priority_tx.send(Bytes::from(cease)).unwrap();
+        (handle, peer, read)
+    }
+
+    /// Read to EOF, advancing the paused clock by `step` after each read, and
+    /// return the frame types seen, checking every frame is whole.
+    async fn read_frame_types(peer: &mut TcpStream, step: Duration) -> Vec<u8> {
+        let mut wire = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = peer.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            wire.extend_from_slice(&chunk[..n]);
+            tokio::time::advance(step).await;
+        }
+        let mut types = Vec::new();
+        let mut rest = wire.as_slice();
+        while !rest.is_empty() {
+            let len = usize::from(u16::from_be_bytes([rest[16], rest[17]]));
+            types.push(rest[18]);
+            rest = &rest[len..];
+        }
+        types
+    }
+
+    fn assert_cease_last_and_backlog_cut(types: &[u8]) {
+        assert_eq!(
+            types.last(),
+            Some(&3),
+            "the NOTIFICATION must be the final frame"
+        );
+        let count = |kind: u8| types.iter().fold(0, |n, &t| n + usize::from(t == kind));
+        assert_eq!(count(3), 1);
+        let flushed = count(2);
+        assert!(
+            flushed < SLOW_PEER_FRAMES,
+            "the backlog must be cut at the budget, but all {flushed} frames were flushed"
+        );
+    }
+
+    /// A slow peer that keeps reading cannot hold the Cease hostage behind a
+    /// large backlog: once [`CLOSE_FLUSH_BUDGET`] is spent, the writer
+    /// discards the queued frames and still ends with the NOTIFICATION. The
+    /// paused clock moves only when this reader advances it between reads,
+    /// so the budget expires after a fixed amount of reading.
+    #[tokio::test(start_paused = true)]
+    async fn close_flush_budget_discards_the_backlog_and_still_ends_with_the_notification() {
+        let (handle, mut peer, _read) = wedged_writer_with_cease().await;
+        let WriterHandle {
+            bulk_tx,
+            priority_tx,
+            join,
+            ..
+        } = handle;
+        drop((bulk_tx, priority_tx));
+        let types = read_frame_types(&mut peer, Duration::from_millis(25)).await;
+        assert!(join.await.unwrap().is_ok());
+        assert_cease_last_and_backlog_cut(&types);
+    }
+
+    /// The budget runs from the session's close, not from when the writer
+    /// reaches the NOTIFICATION, so time spent finishing a batch that was
+    /// already in flight counts against it. Here the whole budget passes
+    /// while the peer is not reading; once it reads, the writer must not
+    /// start a fresh budget's worth of flushing.
+    #[tokio::test(start_paused = true)]
+    async fn close_flush_budget_counts_the_write_in_flight_at_the_close() {
+        let (handle, mut peer, _read) = wedged_writer_with_cease().await;
+        let WriterHandle {
+            bulk_tx,
+            priority_tx,
+            keepalive_tx,
+            teardown_tx,
+            join,
+            ..
+        } = handle;
+        drop((bulk_tx, priority_tx, keepalive_tx, teardown_tx));
+        // The writer is parked in a bulk write; let it observe the close.
+        tokio::task::yield_now().await;
+        tokio::time::advance(CLOSE_FLUSH_BUDGET + Duration::from_millis(1)).await;
+        let types = read_frame_types(&mut peer, Duration::ZERO).await;
+        assert!(join.await.unwrap().is_ok());
+        assert_cease_last_and_backlog_cut(&types);
     }
 
     #[tokio::test]
