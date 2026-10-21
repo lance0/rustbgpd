@@ -19,7 +19,10 @@ Phases 1-4 run with rustbgpd's default configuration and record the restart
 gap as the control. Phases 5 and 6 repeat the restart cases with
 [`gr_eor_grace_time`](../../../docs/reference/configuration.md#planned-restart-end-of-rib-grace-window)
 `= 40` on the FRR neighbor, in a copy of the configuration that
-`rustbgpd --check` validates first.
+`rustbgpd --check` validates first. Phase 7 repeats the restart with a 100 s
+window and the bridge listed in
+[`gr_eor_replay_owners`](../../../docs/reference/configuration.md#planned-restart-end-of-rib-grace-window),
+so the bridge's replay-complete signal, not the timer, releases End-of-RIB.
 
 ## Shape
 
@@ -59,6 +62,7 @@ one UDP frame per victim; tcpreplay loops them at 10,000 frames per second.
 | Unban while rustbgpd is stopped | FastNetMon's two withdrawals fail (`UNAVAILABLE`) 24-28 s after the replay stops, and the stale blackholes stay at FRR. rustbgpd is then started; its End-of-RIB flushes them within 4 s. The bridge retries its pending withdrawals, and neither ban reappears over the next 65 s. |
 | rustbgpd restart with `gr_eor_grace_time = 40` | FRR keeps both bans through the outage. At no poll during the 55 s after the start was a ban missing without a withdrawal UPDATE in FRR's log. The bridge's liveness probe saw the new daemon incarnation and replayed at once: both bans were fresh at FRR 2 s after the start (1 s polls; the driver requires at most 5 s, against the 30 s reconcile pass that refreshed them in earlier runs), and FRR received End-of-RIB for IPv4 and IPv6 at 40 s, the end of the window. rustbgpd logged the timed release. The only removal was FastNetMon's own IPv6 unban mid-attack (below). |
 | Unban while rustbgpd is stopped, window on | The lifted bans stay at FRR as stale routes until the window releases End-of-RIB: still stale 40 s after the start and removed at 41 s. Neither reappears over the next 35 s. |
+| rustbgpd restart with a 100 s window and `gr_eor_replay_owners = ["gobgp-bridge"]` (2026-10-21) | The bridge's probe saw the new incarnation, replayed both bans and signalled `MarkReplayComplete`; rustbgpd released End-of-RIB on that signal. Judged on FRR's millisecond log: each family's replayed announcement precedes its End-of-RIB (IPv6 by 42 ms; IPv4 in the same millisecond, earlier in log order), and End-of-RIB for both families arrived 1 s after the start, against a deadline at 100 s. rustbgpd logged the signal release, not the deadline one, and `bgp_gr_eor_grace_released_total{reason="replay_complete"}` was 1 with `reason="deadline"` 0. In the same run the window-off control (phase 2) had End-of-RIB 173 ms before the replayed bans. A bridge built to signal before its reconcile pass fails this phase: End-of-RIB came 1 ms (IPv4) and 42 ms (IPv6) before the replay, a gap no 1 s poll would see. |
 
 50 checks, 0 failed, on the head that adds this leg. The window phases were
 added later. On 2026-10-20 the extended driver passed 75 checks with 0
@@ -67,7 +71,10 @@ the bans returned at 13 s. A re-run with the bridge's liveness probe passed
 76 checks: FRR's log showed both replayed bans before End-of-RIB in phase 5
 (gap 0 ms), against 409 ms in the control. With the daemon reporting its
 process incarnation, a later run passed 77 checks, with both bans fresh 2 s
-after the start in phase 5. Every ban, unban and
+after the start in phase 5. With phase 7 added, the driver passed 92 checks
+with 0 failed on 2026-10-21; the run above is on the final driver, which
+reads each replayed prefix's own line in FRR's log because FRR omits a
+repeated attribute line. Every ban, unban and
 absence check also requires the session to be Established without a flap
 since the last restart the driver caused: FRR's connection counters, and
 rustbgpd's `bgp_session_established_total` and `bgp_session_flaps_total`.
@@ -87,8 +94,12 @@ bridge's reconcile pass.
   window phases therefore count a ban missing at FRR as a gap only when FRR
   logged no withdrawal for it. Duplicate bans and unbans are covered by the
   bridge's own integration test, not this leg.
-- The window phases show the observed gap closed when the bridge replays
-  inside the window. A timer does not prove that replay completed, and a 1 s
-  poll could miss a shorter gap.
+- Phases 5 and 6 show the observed gap closed when the bridge replays inside
+  the window. A timer does not prove that replay completed, and a 1 s poll
+  could miss a shorter gap. Phase 7 closes the gap when the listed controller
+  signals before the deadline: the release follows the bridge's completed
+  replay, and the order is read from FRR's millisecond log rather than from
+  polls. The signal covers the bans the bridge tracks, not FastNetMon's own
+  view, and one run on this two-ban shape is not a scale or timing bound.
 - Not in CI: the leg downloads a 95 MB vendor package and runs for about
   seven minutes.
