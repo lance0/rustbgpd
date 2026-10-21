@@ -1184,6 +1184,14 @@ impl PeerManager {
             0,
             Config::effective_dynamic_neighbor_limit(&current_config),
         );
+        // The BFD runtime seeds per-peer series before the initial
+        // neighbors are added, so their scoped values must exist first.
+        for neighbor in &current_config.neighbors {
+            if let (Ok(address), Some(_)) = (neighbor.address.parse(), &neighbor.interface) {
+                let key = PeerKey::new(address, neighbor.interface.clone());
+                metrics.register_scoped_peer(address, &key.label());
+            }
+        }
         Self {
             peers: PeerTable::new(&current_config),
             configured_owners: configured_owners::ConfiguredOwners::new(&current_config),

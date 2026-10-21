@@ -728,7 +728,10 @@ async fn grace_deadlines_use_the_cached_deadline_map() {
     let start = tokio::time::Instant::now();
     assert!(!manager.eor_grace_deadlines.is_stale());
     assert_eq!(manager.next_eor_hold_deadline(), Some(start + WINDOW));
-    manager.handle_update(RibUpdate::PeerDeleted { peer: UPSTREAM });
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: UPSTREAM,
+        label: None,
+    });
     assert!(manager.eor_grace_deadlines.is_stale());
     assert_eq!(manager.next_eor_hold_deadline(), Some(start + WINDOW * 2));
     assert!(!manager.eor_grace_deadlines.is_stale());

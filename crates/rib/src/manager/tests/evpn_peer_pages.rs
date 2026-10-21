@@ -259,7 +259,10 @@ fn evpn_advertised_scope_is_destination_and_mutation_version_tracks_commit() {
     assert_eq!(page(&mut manager, scope, None, None, 1).unwrap().total, 0);
     let received = RouteQueryScope::Received { peer: Some(source) };
     let first = page(&mut manager, received, None, None, 1).unwrap();
-    manager.handle_update(RibUpdate::PeerDeleted { peer: source });
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: source,
+        label: None,
+    });
     assert_eq!(
         page(
             &mut manager,

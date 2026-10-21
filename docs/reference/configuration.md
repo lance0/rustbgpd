@@ -1137,6 +1137,8 @@ surfaces keep the two together:
   one neighbor uses the address. See
   [scoped neighbor identity](api.md#scoped-neighbor-identity) in the API
   reference.
+- Prometheus labels it with the same scoped value, `peer="fe80::5054:ff:fe00:1%eth1"`;
+  see [the `peer` label](operations.md#the-peer-label).
 
 RFC 4007 §11.6 permits a default zone for an unscoped link-local address;
 rustbgpd does not assume one, so a selector keeps its meaning when another
@@ -1145,10 +1147,9 @@ a standards requirement.
 
 BMP keeps its existing per-peer header encoding for these neighbors: the
 global-instance peer type with a zero peer distinguisher. A BMP collector
-cannot tell apart two
-neighbors that share an address, so neighbors sharing a link-local address are
-not claimed to work with BMP; the one-neighbor-per-address rule above still
-applies.
+cannot tell apart two neighbors that share an address, so neighbors sharing a
+link-local address are not claimed to work with BMP; the one-neighbor-per-address
+rule above still applies.
 
 TCP-AO (RFC 5925) `tcp_ao` is accepted directly on static `[[neighbors]]` and
 on `[[dynamic_neighbors]]` ranges. It is an ordered keyring containing
@@ -1496,8 +1497,11 @@ unique bare address plus `interface`; startup resolves that interface to the
 BFD transmit scope and rejects an unresolvable name before preparing sockets.
 Receive-side `IPV6_PKTINFO` must report the same interface for every link-local
 control packet, including zero-discriminator bootstrap packets. The public BFD
-status and metric key remains the bare peer address under the existing unique
-link-local-address rule.
+status key remains the bare peer address under the existing unique
+link-local-address rule; `GetBfdSessions` selects a link-local session by its
+scoped address (see [scoped neighbor identity](#scoped-neighbor-identity)). The BFD metrics' `peer` label is the scoped value
+(`fe80::1%eth0`), as for every other per-peer metric; see
+[the `peer` label](operations.md#the-peer-label).
 
 Neighbor and peer-group `bfd` attachments apply on **SIGHUP**, including BFD
 on a newly added neighbor or the first BFD session in the process. Removing a

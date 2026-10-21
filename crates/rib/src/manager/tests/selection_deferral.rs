@@ -2392,7 +2392,10 @@ fn peer_deleted_discards_unconsumed_gr_context() {
         local_llgr_stale_time: 0,
     });
     assert!(manager.pending_peer_gr_context.contains_key(&(a, 9)));
-    manager.handle_update(RibUpdate::PeerDeleted { peer: a });
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: a,
+        label: None,
+    });
     assert!(!manager.pending_peer_gr_context.contains_key(&(a, 9)));
 }
 
@@ -2592,7 +2595,12 @@ async fn deleted_peer_waiter_releases_family_when_remaining_waiters_satisfy() {
 
     // Deleting b from configuration removes its waiter outright, but cannot
     // release the family while a still owes its End-of-RIB.
-    tx.send(RibUpdate::PeerDeleted { peer: b }).await.unwrap();
+    tx.send(RibUpdate::PeerDeleted {
+        peer: b,
+        label: None,
+    })
+    .await
+    .unwrap();
     let held = query_state(&tx, a).await;
     assert!(held.selection_deferral[0].active);
     assert_eq!(held.selection_deferral[0].waiter_state, "awaiting_eor");

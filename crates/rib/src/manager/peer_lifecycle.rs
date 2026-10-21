@@ -748,7 +748,7 @@ impl RibManager {
     /// Deletion is a config decision, not a session event, so it runs the
     /// teardown unconditionally — the session-identity gate in
     /// `handle_peer_down` does not apply.
-    pub(super) fn handle_peer_deleted(&mut self, peer: IpAddr) {
+    pub(super) fn handle_peer_deleted(&mut self, peer: IpAddr, label: Option<Arc<str>>) {
         self.peer_down_teardown(peer);
         self.eor_grace_peer_deleted(peer);
         self.pending_peer_export_context
@@ -779,7 +779,9 @@ impl RibManager {
                 selection.peer_deleted(peer, &self.metrics)
             });
         self.apply_selection_deferral_transitions(transitions, "peer deleted from configuration");
-        self.metrics.reap_peer_series(&peer.to_string());
+        self.metrics.reap_exact_peer_series(
+            &label.map_or_else(|| peer.to_string(), |label| label.to_string()),
+        );
     }
 
     /// Clear the per-session outbound state shared by the `PeerDown` and

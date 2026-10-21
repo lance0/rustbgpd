@@ -3942,7 +3942,7 @@ impl RibManager {
                     }
                 }
             }
-            RibUpdate::PeerDeleted { peer } => self.handle_peer_deleted(peer),
+            RibUpdate::PeerDeleted { peer, label } => self.handle_peer_deleted(peer, label),
             RibUpdate::PeerUp {
                 peer,
                 session_id,

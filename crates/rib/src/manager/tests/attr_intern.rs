@@ -792,13 +792,13 @@ fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
         );
     }
 
-    manager.handle_peer_deleted(peer2);
+    manager.handle_peer_deleted(peer2, None);
     assert_eq!(
         manager.attr_intern.len(),
         usize::from(n),
         "peer2 teardown must NOT reclaim sets peer1's routes still share"
     );
-    manager.handle_peer_deleted(peer1);
+    manager.handle_peer_deleted(peer1, None);
     assert_eq!(
         manager.attr_intern.len(),
         0,
