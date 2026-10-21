@@ -3744,7 +3744,7 @@ service InjectionService {
   // WITHHELD with reason not_selected. Export policy evaluates a FlowSpec
   // rule with RPKI state not_found and ASPA state unknown, so deny_validation
   // carries those states when the deciding statement tests them. A key with
-  // no local rule returns NOT_FOUND. Outside v1, with FlowSpec (ADR-0135).
+  // no local rule returns NOT_FOUND. This new diagnostic RPC is outside v1.
   rpc ListFlowSpecExportDispositions(ListFlowSpecExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request

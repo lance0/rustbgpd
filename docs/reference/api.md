@@ -3492,8 +3492,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 `ListFlowSpecExportDispositions` reports the per-peer export disposition of
 one rule added with `AddFlowSpec` or `AddLeasedFlowSpec`, named by the same
-`(afi_safi, components)` key. It is outside v1, like FlowSpec itself
-([ADR-0135](../adr/0135-flowspec-feasibility.md)). Rows, peer order,
+`(afi_safi, components)` key. This new diagnostic RPC is outside v1. Rows, peer order,
 `include_configured`, paging, the page-to-page `ABORTED` check and the token
 rules are those of [`ListPathExportDispositions`](#export-read-back), applied
 to the rule: its content is its path attributes, and the token is bound to

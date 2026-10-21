@@ -5,5 +5,5 @@
   `AddFlowSpec` key, with the rows, reasons, `include_configured`, paging and
   `ABORTED` check of `ListPathExportDispositions`. A received rule with the
   same key never counts as the local rule's export. The RPC is a
-  `sensitive_read` and is outside v1, like FlowSpec. See
+  `sensitive_read`, and this new diagnostic RPC is outside v1. See
   [FlowSpec read-back](../docs/reference/api.md#flowspec-read-back).
