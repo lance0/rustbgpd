@@ -1623,10 +1623,14 @@ pub enum OwnedCatalogMutation {
     },
     SetNeighborPeerGroup {
         address: IpAddr,
+        /// Selector scope of a link-local neighbor; see
+        /// [`OwnedCatalogMutation::neighbor`].
+        interface: Option<String>,
         peer_group: String,
     },
     ClearNeighborPeerGroup {
         address: IpAddr,
+        interface: Option<String>,
     },
     SetPolicy {
         name: String,
@@ -1652,18 +1656,49 @@ pub enum OwnedCatalogMutation {
     ClearGlobalExportChain,
     SetNeighborImportChain {
         address: IpAddr,
+        interface: Option<String>,
         policy_names: Vec<String>,
     },
     SetNeighborExportChain {
         address: IpAddr,
+        interface: Option<String>,
         policy_names: Vec<String>,
     },
     ClearNeighborImportChain {
         address: IpAddr,
+        interface: Option<String>,
     },
     ClearNeighborExportChain {
         address: IpAddr,
+        interface: Option<String>,
     },
+}
+
+impl OwnedCatalogMutation {
+    /// The neighbor a per-neighbor mutation selects, with the selector's
+    /// scope. The owning actor checks it against the configured neighbor
+    /// when it applies the mutation, so a scope that a concurrent change
+    /// made stale is `NOT_FOUND` instead of reaching another neighbor.
+    #[must_use]
+    pub fn neighbor(&self) -> Option<PeerKey> {
+        match self {
+            Self::SetNeighborPeerGroup {
+                address, interface, ..
+            }
+            | Self::ClearNeighborPeerGroup { address, interface }
+            | Self::SetNeighborImportChain {
+                address, interface, ..
+            }
+            | Self::SetNeighborExportChain {
+                address, interface, ..
+            }
+            | Self::ClearNeighborImportChain { address, interface }
+            | Self::ClearNeighborExportChain { address, interface } => {
+                Some(PeerKey::new(*address, interface.clone()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Actor-owned settlement proof for a catalog mutation.

@@ -1687,3 +1687,64 @@ peer_group = "edge"
     );
     assert!(!managed.enabled);
 }
+
+/// A per-neighbor catalog mutation keyed by address keeps the selector's
+/// scope to the owning actor. The API parsed `fe80::2%eth0`; by the time the
+/// mutation applies, the neighbor on that address is configured on `eth1`,
+/// so the mutation is `NOT_FOUND` and never reaches the `eth1` neighbor.
+/// Red proof: dropping the scope check applies the chain to `eth1`'s
+/// address and reports success.
+#[tokio::test]
+async fn neighbor_mutation_with_a_stale_scope_is_not_found() {
+    use rustbgpd_api::peer_types::{CatalogMutationError, OwnedCatalogMutation};
+
+    let mut mgr = test_peer_manager();
+    let peer = IpAddr::V6("fe80::2".parse().unwrap());
+    insert_test_scoped_managed_peer(
+        &mut mgr,
+        peer,
+        "eth1",
+        11,
+        1,
+        fake_peer_handle(
+            peer,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.interface = Some("eth1".to_string());
+    mgr.current_config.neighbors.push(neighbor);
+    let before = mgr.current_config.neighbors.clone();
+    let stale = Some("eth0".to_string());
+    for mutation in [
+        OwnedCatalogMutation::SetNeighborImportChain {
+            address: peer,
+            interface: stale.clone(),
+            policy_names: vec!["edge".to_string()],
+        },
+        OwnedCatalogMutation::ClearNeighborExportChain {
+            address: peer,
+            interface: stale.clone(),
+        },
+        OwnedCatalogMutation::SetNeighborPeerGroup {
+            address: peer,
+            interface: stale.clone(),
+            peer_group: "edge".to_string(),
+        },
+    ] {
+        let (reply, response) = oneshot::channel();
+        let _ = Box::pin(
+            mgr.dispatch_command(PeerManagerCommand::OwnedCatalogMutation { mutation, reply }),
+        )
+        .await;
+        match response.await.unwrap() {
+            OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::NotFound(
+                message,
+            )) => assert_eq!(message, "neighbor fe80::2%eth0 not found"),
+            other => panic!("stale scope must be NOT_FOUND, got {other:?}"),
+        }
+    }
+    assert_eq!(mgr.current_config.neighbors, before);
+}

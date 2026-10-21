@@ -1062,13 +1062,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address = crate::peer_selector::require_neighbor(
+        let key = crate::peer_selector::require_neighbor(
             "address",
             &req.address,
             "",
             self.import_roster.as_ref(),
-        )?
-        .address;
+        )?;
+        let (address, interface) = (key.address, key.interface);
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let policy_names = req.policy_names;
         self.execute_owned_policy_mutation(
@@ -1076,6 +1076,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "PolicyService.SetNeighborImportChain",
             OwnedCatalogMutation::SetNeighborImportChain {
                 address,
+                interface,
                 policy_names: policy_names.clone(),
             },
             ConfigEvent::SetNeighborImportChain {
@@ -1098,13 +1099,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address = crate::peer_selector::require_neighbor(
+        let key = crate::peer_selector::require_neighbor(
             "address",
             &req.address,
             "",
             self.import_roster.as_ref(),
-        )?
-        .address;
+        )?;
+        let (address, interface) = (key.address, key.interface);
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let policy_names = req.policy_names;
         self.execute_owned_policy_mutation(
@@ -1112,6 +1113,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "PolicyService.SetNeighborExportChain",
             OwnedCatalogMutation::SetNeighborExportChain {
                 address,
+                interface,
                 policy_names: policy_names.clone(),
             },
             ConfigEvent::SetNeighborExportChain {
@@ -1134,18 +1136,18 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address = crate::peer_selector::require_neighbor(
+        let key = crate::peer_selector::require_neighbor(
             "address",
             &req.address,
             "",
             self.import_roster.as_ref(),
-        )?
-        .address;
+        )?;
+        let (address, interface) = (key.address, key.interface);
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         self.execute_owned_policy_mutation(
             RuntimeConfigOperationKind::NeighborImportChainClear,
             "PolicyService.ClearNeighborImportChain",
-            OwnedCatalogMutation::ClearNeighborImportChain { address },
+            OwnedCatalogMutation::ClearNeighborImportChain { address, interface },
             ConfigEvent::ClearNeighborImportChain { address, ack: None },
             persist_permit,
         )
@@ -1162,18 +1164,18 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address = crate::peer_selector::require_neighbor(
+        let key = crate::peer_selector::require_neighbor(
             "address",
             &req.address,
             "",
             self.import_roster.as_ref(),
-        )?
-        .address;
+        )?;
+        let (address, interface) = (key.address, key.interface);
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         self.execute_owned_policy_mutation(
             RuntimeConfigOperationKind::NeighborExportChainClear,
             "PolicyService.ClearNeighborExportChain",
-            OwnedCatalogMutation::ClearNeighborExportChain { address },
+            OwnedCatalogMutation::ClearNeighborExportChain { address, interface },
             ConfigEvent::ClearNeighborExportChain { address, ack: None },
             persist_permit,
         )

@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicNeighborInfo, EnqueuedOperatorQuery, OwnedCatalogMutation,
-    OwnedCatalogMutationOutcome, OwnedHotUpdatePeerOutcome, OwnedNeighborMutation,
-    OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerKey, PeerManagerCommand,
-    PeerManagerNeighborConfig, PeerManagerOperatorQuery, PeerManagerReadinessQuery,
-    PeerReconcileAuthority, PolicyEvent, RuntimeConfigTransactionPlanError, SessionEvent,
-    SessionLifecycleEvent,
+    CatalogMutationError, ConfigEvent, DynamicNeighborInfo, EnqueuedOperatorQuery,
+    OwnedCatalogMutation, OwnedCatalogMutationOutcome, OwnedHotUpdatePeerOutcome,
+    OwnedNeighborMutation, OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerKey,
+    PeerManagerCommand, PeerManagerNeighborConfig, PeerManagerOperatorQuery,
+    PeerManagerReadinessQuery, PeerReconcileAuthority, PolicyEvent,
+    RuntimeConfigTransactionPlanError, SessionEvent, SessionLifecycleEvent,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -1436,6 +1436,16 @@ impl PeerManager {
         matches.next().is_none().then_some(first)
     }
 
+    /// `NOT_FOUND` when a scoped selector names an address whose managed
+    /// neighbors all use other interfaces, so a mutation keyed by address
+    /// never lands on a neighbor the caller did not select. Checked when the
+    /// mutation is applied, after any concurrent reload has settled.
+    pub(super) fn stale_neighbor_scope(&self, key: &PeerKey) -> Option<CatalogMutationError> {
+        let keys = self.peer_keys_for_address(key.address);
+        (!keys.is_empty() && !keys.contains(key))
+            .then(|| CatalogMutationError::NotFound(format!("neighbor {key} not found")))
+    }
+
     pub(super) fn peer_keys_for_address(&self, address: IpAddr) -> Vec<PeerKey> {
         self.peers
             .keys()
@@ -1559,6 +1569,13 @@ impl PeerManager {
                 let _ = reply.send(outcome);
             }
             PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                if let Some(error) = mutation
+                    .neighbor()
+                    .and_then(|key| self.stale_neighbor_scope(&key))
+                {
+                    let _ = reply.send(OwnedCatalogMutationOutcome::RejectedNoEffect(error));
+                    return ControlFlow::Continue(());
+                }
                 let policy_routes_prior = self.installed_policy_routes_reachability();
                 let outcome = match mutation {
                     OwnedCatalogMutation::SetPeerGroup { name, definition } => {
@@ -1600,6 +1617,7 @@ impl PeerManager {
                     OwnedCatalogMutation::SetNeighborPeerGroup {
                         address,
                         peer_group,
+                        ..
                     } => {
                         self.apply_peer_group_change_owned(
                             ConfigEvent::SetNeighborPeerGroup {
@@ -1611,7 +1629,7 @@ impl PeerManager {
                         )
                         .await
                     }
-                    OwnedCatalogMutation::ClearNeighborPeerGroup { address } => {
+                    OwnedCatalogMutation::ClearNeighborPeerGroup { address, .. } => {
                         self.apply_peer_group_change_owned(
                             ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
                             vec![address],
@@ -1691,6 +1709,7 @@ impl PeerManager {
                     OwnedCatalogMutation::SetNeighborImportChain {
                         address,
                         policy_names,
+                        ..
                     } => {
                         self.apply_policy_change_owned(
                             ConfigEvent::SetNeighborImportChain {
@@ -1705,6 +1724,7 @@ impl PeerManager {
                     OwnedCatalogMutation::SetNeighborExportChain {
                         address,
                         policy_names,
+                        ..
                     } => {
                         self.apply_policy_change_owned(
                             ConfigEvent::SetNeighborExportChain {
@@ -1716,14 +1736,14 @@ impl PeerManager {
                         )
                         .await
                     }
-                    OwnedCatalogMutation::ClearNeighborImportChain { address } => {
+                    OwnedCatalogMutation::ClearNeighborImportChain { address, .. } => {
                         self.apply_policy_change_owned(
                             ConfigEvent::ClearNeighborImportChain { address, ack: None },
                             Some(vec![address]),
                         )
                         .await
                     }
-                    OwnedCatalogMutation::ClearNeighborExportChain { address } => {
+                    OwnedCatalogMutation::ClearNeighborExportChain { address, .. } => {
                         self.apply_policy_change_owned(
                             ConfigEvent::ClearNeighborExportChain { address, ack: None },
                             Some(vec![address]),

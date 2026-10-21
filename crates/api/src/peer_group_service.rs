@@ -438,10 +438,12 @@ enum PeerGroupMutationIntent {
     },
     SetNeighbor {
         address: std::net::IpAddr,
+        interface: Option<String>,
         peer_group: String,
     },
     ClearNeighbor {
         address: std::net::IpAddr,
+        interface: Option<String>,
     },
 }
 
@@ -530,10 +532,12 @@ async fn owned_peer_group_mutation_body(
         ),
         PeerGroupMutationIntent::SetNeighbor {
             address,
+            interface,
             peer_group,
         } => (
             OwnedCatalogMutation::SetNeighborPeerGroup {
                 address,
+                interface,
                 peer_group: peer_group.clone(),
             },
             ConfigEvent::SetNeighborPeerGroup {
@@ -542,8 +546,8 @@ async fn owned_peer_group_mutation_body(
                 ack: None,
             },
         ),
-        PeerGroupMutationIntent::ClearNeighbor { address } => (
-            OwnedCatalogMutation::ClearNeighborPeerGroup { address },
+        PeerGroupMutationIntent::ClearNeighbor { address, interface } => (
+            OwnedCatalogMutation::ClearNeighborPeerGroup { address, interface },
             ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
         ),
     };
@@ -772,13 +776,13 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address = crate::peer_selector::require_neighbor(
+        let key = crate::peer_selector::require_neighbor(
             "address",
             &req.address,
             "",
             self.roster.as_ref(),
-        )?
-        .address;
+        )?;
+        let (address, interface) = (key.address, key.interface);
         if req.peer_group.trim().is_empty() {
             return Err(Status::invalid_argument("peer_group is required"));
         }
@@ -789,6 +793,7 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             "PeerGroupService.SetNeighborPeerGroup",
             PeerGroupMutationIntent::SetNeighbor {
                 address,
+                interface,
                 peer_group: req.peer_group,
             },
             persist_permit,
@@ -806,19 +811,19 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(status);
         }
         let req = request.into_inner();
-        let address = crate::peer_selector::require_neighbor(
+        let key = crate::peer_selector::require_neighbor(
             "address",
             &req.address,
             "",
             self.roster.as_ref(),
-        )?
-        .address;
+        )?;
+        let (address, interface) = (key.address, key.interface);
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         self.execute_owned_peer_group_mutation(
             RuntimeConfigOperationKind::NeighborPeerGroupClear,
             "PeerGroupService.ClearNeighborPeerGroup",
-            PeerGroupMutationIntent::ClearNeighbor { address },
+            PeerGroupMutationIntent::ClearNeighbor { address, interface },
             persist_permit,
         )
         .await?;
@@ -1945,12 +1950,16 @@ mod tests {
                 RuntimeConfigOperationKind::NeighborPeerGroupSet,
                 PeerGroupMutationIntent::SetNeighbor {
                     address,
+                    interface: None,
                     peer_group: "edge".into(),
                 },
             ),
             (
                 RuntimeConfigOperationKind::NeighborPeerGroupClear,
-                PeerGroupMutationIntent::ClearNeighbor { address },
+                PeerGroupMutationIntent::ClearNeighbor {
+                    address,
+                    interface: None,
+                },
             ),
         ];
         for (kind, intent) in intents {
