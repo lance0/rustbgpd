@@ -1000,6 +1000,9 @@ jobs:
       - name: Reserved-NHID non-clobber netns test
         run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh foreign_state_nhid
 
+      - name: ADR-0142 Router Advertisement discovery netns test
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh ra_discovery
+
       # l3_multipath / l3_all_active_writer create a `vrf` device; the slim
       # hosted Azure kernel ships vrf only via linux-modules-extra for the exact
       # running kernel, which can lag the kernel in the apt mirror

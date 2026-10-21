@@ -337,7 +337,8 @@ interface, because one link-local address can exist on several links
 before.
 
 **Responses.** A `peer_address` that names the source or target neighbor of a
-route, route event, export disposition or explanation stays a bare IP literal.
+route, route event, export disposition, explanation, dataplane row, BFD session
+or policy statistics row stays a bare IP literal.
 A sibling interface field carries the scope, and the pair identifies the
 neighbor; the interface is empty for a numbered neighbor:
 
@@ -352,6 +353,12 @@ neighbor; the interface is empty for a numbered neighbor:
 | `PathExportDispositionEntry` | `peer_interface` |
 | `ExplainImportPolicyResponse`, `ImportExplainMatch`, `ListRejectedRoutesResponse` | `peer_interface` |
 | `SessionEvent`, `NotificationEvent`, `PolicyEvent` | `peer_interface` |
+| `FibRouteStatus`, `BlackholeDiscard`, `DataplaneRouteEvent` | `peer_interface` |
+| `BfdSession`, `BfdSessionEvent` | `peer_interface` |
+| `PolicyChainStats` | `peer_interface` (empty on the `global` row) |
+| `TestPolicyDiff`, `TestPolicyRejectedRoute` | `peer_interface` (beside `peer`) |
+| `TcpAoKeyState` | `peer_interface` (the owning neighbor's interface for a link-local key address) |
+| `BgpProtocolError`, `ResourceLimitError` (reserved `ErrorDetail` shapes, not populated today) | `peer_interface` |
 
 Route rows and route events report the interface recorded when the route was
 learned or the event was recorded, not the current neighbor inventory. The
@@ -364,15 +371,23 @@ Routes retained across a Graceful Restart and the history of a deleted
 neighbor keep the interface they had. A `BgpEvent` envelope's
 `peer_address`, `previous_peer_address` and `target_peer_address` are bare IP
 literals in every category; the interfaces are in its payload (`RouteEvent`,
-`SessionEvent`, `NotificationEvent` or `PolicyEvent`) and are not repeated on
-the envelope. Session, notification and policy events report the interface
-of the neighbor they name.
+`SessionEvent`, `NotificationEvent`, `PolicyEvent`, `BfdSessionEvent` or
+`DataplaneRouteEvent`) and are not repeated on the envelope. Session,
+notification, policy and BFD events and BFD sessions report the interface of
+the neighbor they name. FIB and blackhole rows, FIB route events and
+`TestPolicy` samples take the interface recorded with the route they describe,
+and FIB owned state keeps it across a daemon restart. `PolicyChainStats` rows
+report the interface of the neighbor whose chain they count. Export rows are
+matched to that neighbor by address until neighbor identity is carried through
+the RIB: the RIB publishes export counters by bare address, and the interface
+comes from the peer manager's roster, read separately. A reload that moves a
+link-local neighbor to another interface while the call runs can therefore
+report export counters under the wrong interface.
 
-EVPN, VPN, labeled,
-RTC, BGP-LS and FlowSpec route entries, EVPN route events, FIB and blackhole
-status rows, BFD sessions and policy statistics rows still report a bare
-address with no interface. Each link-local address can belong to only one
-configured neighbor in this release (see the
+EVPN, VPN, labeled, RTC, BGP-LS and FlowSpec route entries and EVPN route
+events still report a bare address with no interface: those route types do
+not yet record the receiving session's interface. Each link-local address can
+belong to only one configured neighbor in this release (see the
 [configuration reference](configuration.md#scoped-neighbor-identity)), so that
 bare address names one neighbor.
 
@@ -1448,7 +1463,7 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `ListRejectedRoutes` | List every rejected inbound route a peer's session has retained, each tagged with its canonical reject-reason token (`policy_reject`, `otc_route_leak`, `next_hop_ownership`, `as_path_loop`, `rr_loop`, `treat_as_withdraw`), a bounded sub-reason detail, and a best-effort attribute summary. A named `.rpol` deny identifies its deciding `policy:term`; named TOML/default denies retain policy-only detail. The enumeration complement to `ExplainImportPolicy`'s point lookup. Retention is a bounded per-peer LRU (`[policy.reject_retention]`); the response reports `retention_enabled`, `capacity`, and optional `evictions_since_reset` (absent from older daemons) so completeness is explicit. A bounded read timeout returns `DEADLINE_EXCEEDED`, not `NOT_FOUND`. Side-effect-free; IPv4/IPv6 unicast only. CLI: `rbgp rib received <peer> --rejected`. `SensitiveRead` tier. |
 | `TestPolicy` | Dry-run a candidate `.rpol` policy (source sent in the request, compiled before RIB access) read-only over a version-fenced walk of the retained post-policy Adj-RIB-In (import) or Loc-RIB best routes (export). Import sees routes admitted by import policy when they were received or last re-evaluated: retained Adj-RIB-In under an active GR/LLGR window, or not yet re-evaluated after an import-policy change, can hold routes the installed chain would now reject, and routes a candidate would newly admit are not visible (`ListRejectedRoutes` lists recent rejections). Routes are evaluated in canonical `(prefix, peer, path_id)` order in pages capped at 1,000; family, `limit`, `show_changes`, counts, and term hits apply globally. Candidate `datasets` carry `{name, entries}` text, with at most 16 bindings and a 4 MiB encoded-request limit; missing, duplicate, undeclared, or malformed bindings return `INVALID_ARGUMENT`. `show_rejected` returns up to 1,000 candidate rejections among retained post-policy routes. A conservative mutation of the selected Received/Best table returns `ABORTED` with no partial response: retry the whole RPC from the beginning. Paging-generation exhaustion or an unavailable RIB backend returns `UNAVAILABLE`. No route, session, or counter impact; IPv4/IPv6 unicast (ADR-0096). CLI: `rbgp policy test`. `SensitiveRead` tier. |
 | `ComparePolicy` | Compare a candidate `.rpol` export chain with the export chain installed for one peer (`peer`, required), over the same version-fenced walk of Loc-RIB best routes. `policies` lists candidate policies from `rpol_source` in chain order (at most 64); with `replace_member`, the single candidate replaces that exactly named installed member and every other installed member stays in place. The installed chain is read from the peer's live outbound registration when the walk starts; a peer without one, or a `replace_member` request for a peer with no installed chain, returns `FAILED_PRECONDITION`, and a `replace_member` that does not name exactly one installed member returns `INVALID_ARGUMENT`, as does a composed candidate chain over the configuration structural bound (`MAX_CHAIN_NODES`) or referencing more than 16 datasets. Each member keeps its own dataset binding, so a candidate dataset that shares a name with an installed one does not replace it, and candidate members resolve `prepend as self` to the daemon's ASN. Attribute changes are compared on a canonical form: attribute and community-set order and a next-hop rewrite to the route's own next hop do not count. Returns both chains' member names, `routes_evaluated`, exact `newly_rejected`, `newly_accepted` and `attributes_changed` counts, and up to `max_samples` (at most 1,000) routes per class with each side's rendered attribute changes. Policy chains only: native egress steps (split horizon, iBGP/RR rules, RS control communities, OTC, NO_EXPORT, ORF, families) apply to neither side. Compile diagnostics, datasets, size limit, paging, `ABORTED` and `UNAVAILABLE` behave as for `TestPolicy`. No route, session, or counter impact; IPv4/IPv6 unicast export only; outside the v1 inventory. CLI: `rbgp policy compare`. `SensitiveRead` tier. |
-| `GetPolicyStats` | Read live per-term hit counters for installed policy chains (since chain install; direction `import`, `export`, or `both`). Each row's `policy_generation` names its counters: the install generation for import chains, the counter-instance id for export chains. Explicit-peer validation plus export, import, and dataset reads share one absolute 2 s deadline. Peer validation, import counters and dataset status come from the roster the peer manager publishes, and export counters from the roster the RIB manager publishes, not from an actor query, so success does not show that the peer manager or the RIB manager is making progress; readiness and health test that. A request that sees, after its capture, that either owner has stopped returns `UNAVAILABLE`. Reads stop on caller disconnect. By default, errors return no partial rows; unfiltered import/both requests may opt in to partial session-closure results as described below. Chainless sessions contribute no row; unknown peers return `NOT_FOUND`. CLI: `rbgp policy stats`. `SensitiveRead` tier. |
+| `GetPolicyStats` | Read live per-term hit counters for installed policy chains (since chain install; direction `import`, `export`, or `both`). Each row's `policy_generation` names its counters: the install generation for import chains, the counter-instance id for export chains. Explicit-peer validation plus export, import, and dataset reads share one absolute 2 s deadline. Peer validation, import counters and dataset status come from the roster the peer manager publishes, and export counters from the roster the RIB manager publishes, not from an actor query, so success does not show that the peer manager or the RIB manager is making progress; readiness and health test that. A request that sees, after its capture, that either owner has stopped returns `UNAVAILABLE`. Reads stop on caller disconnect. By default, errors return no partial rows; unfiltered import/both requests may opt in to partial session-closure results as described below. Chainless sessions contribute no row; unknown peers return `NOT_FOUND`. Export rows are matched by address, so a reload that moves a link-local neighbor between interfaces during the call can mislabel their `peer_interface` (see [scoped neighbor identity](#scoped-neighbor-identity)). CLI: `rbgp policy stats`. `SensitiveRead` tier. |
 | `GetValidationPolicyPosture` | Conservatively classifies RPKI-invalid and ASPA-invalid routes as `ENFORCED`, `UNENFORCED`, or `UNKNOWN` for installed static/dynamic peers and one prospective row per accepted dynamic range. The bounded response reports `complete` and `omitted`; an incomplete aggregate is never `ENFORCED`. This proves policy disposition only, not validator readiness, connectivity, configured intent, FIB state, or runtime enforcement. `SensitiveRead` tier; outside the narrow v1-stable surface. |
 | `ListConditionalAdvertisements` | List each installed conditional-advertisement definition (ADR-0137), meaning each one attached to at least one static neighbor, directly or through its peer group, sorted by name. Each entry reports `advertise_if`, every condition entry (`prefix` plus optional range `ge`/`le`) with its own `state` (`present`, `absent`, or `unknown`), `present_prefix_count`, and up to eight `present_prefixes` in address order, the tracked `observed` condition and `observed_for_ms`, the `applied` gate (`pending`, `advertise`, or `suppress`), `settle_time_seconds`, `settle_pending` with `settle_remaining_ms`, `selection_deferred` (an RFC 4724 hold), and the sorted `attached_peers`. One RIB read, bounded by a 2 s deadline covering admission and reply (`DEADLINE_EXCEEDED`); it has no priority over route work. Side-effect-free: it reports the tracker's recorded verdicts and evaluates no policy. CLI: `rbgp policy conditional-advertisements`. `SensitiveRead` tier; alpha, outside the v1-stable surface. |
 

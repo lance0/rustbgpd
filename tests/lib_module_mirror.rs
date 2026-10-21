@@ -46,6 +46,7 @@ const NOT_MIRRORED: &[&str] = &[
     "metrics_server",
     "peer_manager",
     "policy_admin",
+    "ra_discovery",
     "reload",
     "runtime_probe",
     "sd_notify",

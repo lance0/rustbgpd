@@ -14,7 +14,7 @@ use std::io::Read;
 
 use serde::Serialize;
 
-use crate::commands::neighbor::bare_ip_rpc_address;
+use crate::commands::neighbor::{bare_ip_rpc_address, scope_address};
 use crate::commands::policy_input::{JsonPolicyDefinition, load_json};
 use crate::connection::{Connection, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
@@ -1219,9 +1219,15 @@ pub async fn test(
     }
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = read_rpc("TestPolicy", client.test_policy(request))
+    let mut resp = read_rpc("TestPolicy", client.test_policy(request))
         .await?
         .into_inner();
+    for diff in &mut resp.diffs {
+        scope_address(&mut diff.peer, &diff.peer_interface);
+    }
+    for route in &mut resp.rejected_routes {
+        scope_address(&mut route.peer, &route.peer_interface);
+    }
 
     if json {
         output::print_json_pretty(&test_to_json(&resp, &opts))?;
@@ -1605,7 +1611,7 @@ pub async fn stats(
 ) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = read_rpc(
+    let mut resp = read_rpc(
         "GetPolicyStats",
         client.get_policy_stats(GetPolicyStatsRequest {
             allow_partial,
@@ -1615,6 +1621,9 @@ pub async fn stats(
     )
     .await?
     .into_inner();
+    for chain in &mut resp.chains {
+        scope_address(&mut chain.peer_address, &chain.peer_interface);
+    }
 
     if json {
         output::print_json_pretty(&stats_to_json(&resp, peer))?;
@@ -2781,6 +2790,7 @@ mod tests {
                 prefix: "2001:db8::".into(),
                 prefix_length: 48,
                 peer: "192.0.2.9".into(),
+                peer_interface: String::new(),
                 changes: vec![
                     "local_pref 100 -> 200".into(),
                     "communities + 65001:7".into(),
@@ -2806,6 +2816,7 @@ mod tests {
             prefix: "192.0.2.0".into(),
             prefix_length: 24,
             peer: "192.0.2.9".into(),
+            peer_interface: String::new(),
         }];
         let json = serde_json::to_value(test_to_json(&response, &opts)).unwrap();
         assert_eq!(
@@ -4086,6 +4097,7 @@ mod tests {
             incomplete_peer_addresses: Vec::new(),
             chains: vec![proto::PolicyChainStats {
                 peer_address: "fe80::2".into(),
+                peer_interface: String::new(),
                 direction: "import".into(),
                 routes_evaluated: u64::MAX,
                 eval_errors: 7,

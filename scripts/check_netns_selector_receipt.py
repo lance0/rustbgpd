@@ -17,7 +17,7 @@ BASE = (
     "managed_ready", "link_carrier", "bond_lacp", "auto_lacp_daemon",
     "core_isolation", "core_isolation_daemon", "fast_external_failover",
     "ac_gate", "nexthop_raw", "foreign_state_l2",
-    "foreign_state_l2_dst", "foreign_state_nhid",
+    "foreign_state_l2_dst", "foreign_state_nhid", "ra_discovery",
 )
 VRF = (
     "l3_multipath", "managed_ip_vrf_ready", "l3_all_active_writer",
