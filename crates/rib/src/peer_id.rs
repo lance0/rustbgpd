@@ -12,9 +12,10 @@
 //! generational handle (a slot index plus a generation) allocated by the peer
 //! manager, with a RIB peer table resolving it to the current endpoint. The
 //! address therefore leaves the type only through [`PeerId::addr`], and only
-//! [`PeerId::from_addr`] builds one: those two calls, and the `Display` and
-//! `Debug` impls below, are the complete list of places that change with
-//! the representation.
+//! [`PeerId::from_addr`] (or [`PeerId::LOCAL`]) builds one. Those calls, the
+//! `Display` and `Debug` impls below, and maps that iterate peers in key
+//! order (today address order) are the places that change with the
+//! representation.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -104,6 +105,13 @@ mod tests {
             let sip = std::collections::hash_map::RandomState::new();
             assert_eq!(sip.hash_one(peer), sip.hash_one(a));
         }
+    }
+
+    /// Every route and map entry keeps its size.
+    #[test]
+    fn same_size_as_the_address() {
+        assert_eq!(size_of::<PeerId>(), size_of::<IpAddr>());
+        assert_eq!(size_of::<Option<PeerId>>(), size_of::<Option<IpAddr>>());
     }
 
     #[test]
