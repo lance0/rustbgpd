@@ -341,7 +341,9 @@ impl Bridge {
     /// Tell the daemon that this bridge finished replaying into
     /// `incarnation`, the value its probe saw before the pass started.
     /// Returns false when the signal should be retried after another pass:
-    /// the daemon restarted again (`FAILED_PRECONDITION`) or did not answer.
+    /// the daemon restarted again (`FAILED_PRECONDITION`), did not answer
+    /// (including a local deadline, which tonic reports as `CANCELLED`), or
+    /// failed in any other way another pass could change.
     async fn mark_replay_complete(&self, incarnation: u64) -> bool {
         let request = rbgp::MarkReplayCompleteRequest {
             owner: REPLAY_OWNER.to_string(),
@@ -356,17 +358,20 @@ impl Bridge {
             Err(status)
                 if matches!(
                     status.code(),
-                    Code::FailedPrecondition | Code::Unavailable | Code::DeadlineExceeded
+                    Code::Unimplemented
+                        | Code::PermissionDenied
+                        | Code::Unauthenticated
+                        | Code::InvalidArgument
                 ) =>
             {
-                warn!(code = ?status.code(), error = status.message(), "replay-complete signal not accepted; replaying again");
-                false
-            }
-            Err(status) => {
-                // UNIMPLEMENTED from a daemon that predates the signal, or a
-                // refusal another pass would not change.
+                // A daemon that predates the signal, or a refusal another
+                // pass would not change.
                 warn!(code = ?status.code(), error = status.message(), "replay-complete signal failed");
                 true
+            }
+            Err(status) => {
+                warn!(code = ?status.code(), error = status.message(), "replay-complete signal not accepted; replaying again");
+                false
             }
         }
     }

@@ -206,8 +206,11 @@ gr_eor_grace_time = 120   # an upper bound; the signal normally releases it
   to finish would release End-of-RIB for both.
 - If the daemon restarted again during the pass, it refuses the stale
   incarnation (`FAILED_PRECONDITION`); the bridge then replays and signals
-  again on the next probe. A daemon that predates the signal answers
-  `UNIMPLEMENTED`, which the bridge logs and ignores.
+  again on the next probe, as it does for a signal that is not answered
+  within the bridge's 10-second RPC deadline or fails in any other way
+  another pass could change. A daemon that predates the signal answers
+  `UNIMPLEMENTED`, which the bridge logs and ignores, as it does a refused
+  credential.
 - A daemon that does not list the bridge answers `NOT_EXPECTED`, and a cold
   boot `NOT_HOLDING`; neither changes anything.
 - The periodic pass and the first probe after the bridge starts never signal:

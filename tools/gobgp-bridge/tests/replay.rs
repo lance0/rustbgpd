@@ -44,6 +44,8 @@ struct Script {
     probes: usize,
     /// Refuse the next MarkReplayComplete with FAILED_PRECONDITION.
     stale_mark: bool,
+    /// Never answer the next MarkReplayComplete.
+    stall_mark: bool,
 }
 
 #[derive(Clone, Default)]
@@ -117,6 +119,19 @@ impl InjectionService for Daemon {
         request: Request<rbgp::MarkReplayCompleteRequest>,
     ) -> Result<Response<rbgp::MarkReplayCompleteResponse>, Status> {
         let req = request.into_inner();
+        let stall = {
+            let mut script = self.0.lock().unwrap();
+            let stall = std::mem::take(&mut script.stall_mark);
+            if stall {
+                script
+                    .calls
+                    .push(format!("stalled {} {}", req.owner, req.incarnation));
+            }
+            stall
+        };
+        if stall {
+            std::future::pending::<()>().await;
+        }
         let mut script = self.0.lock().unwrap();
         if script.down {
             return Err(Status::unavailable("scripted outage"));
@@ -510,4 +525,43 @@ async fn a_complete_post_restart_pass_signals_replay_complete() {
     pass.sort_unstable();
     assert_eq!(pass, replay, "{calls:?}");
     assert_eq!(calls[5..], [format!("mark {owner} 2")], "{calls:?}");
+}
+
+/// A signal the daemon never answers fails at the bridge's own RPC deadline
+/// (tonic reports it as `CANCELLED`); the bridge replays and signals again
+/// instead of treating it as final.
+#[tokio::test]
+async fn an_unanswered_signal_is_retried_after_another_pass() {
+    let (bridge, daemon) = bridge_with_deadline(8, Duration::from_millis(200)).await;
+    daemon.0.lock().unwrap().incarnation = 1;
+    bridge.spawn_restart_watch(Duration::from_millis(20));
+    bridge.add_path(ban(1, false)).await.unwrap();
+    for _ in 0..100 {
+        if daemon.0.lock().unwrap().probes >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    {
+        let mut script = daemon.0.lock().unwrap();
+        assert!(script.probes >= 2, "the watch never probed");
+        script.calls.clear();
+        script.routes.clear();
+        script.incarnation = 2;
+        script.stall_mark = true;
+    }
+    let owner = rustbgpd_gobgp_bridge::REPLAY_OWNER;
+    let calls = wait_calls(&daemon, |calls| {
+        calls.iter().any(|call| call.starts_with("mark"))
+    })
+    .await;
+    assert_eq!(
+        calls,
+        [
+            "add 203.0.113.1".to_string(),
+            format!("stalled {owner} 2"),
+            "add 203.0.113.1".to_string(),
+            format!("mark {owner} 2"),
+        ]
+    );
 }
