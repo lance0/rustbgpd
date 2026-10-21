@@ -554,6 +554,39 @@ async fn shutdown_resolves_only_after_the_writer_flushes_the_cease() {
     );
 }
 
+/// Joining the writer must not slow an ordinary shutdown: with a peer whose
+/// socket accepts the Cease, the writer exits as soon as it has flushed, so
+/// the session task resolves without waiting on any timer. The paused clock
+/// makes this deterministic: a writer that waited on a linger, a keepalive
+/// tick or a sender that is never dropped would let the clock auto-advance
+/// past the ceiling, far below the peer manager's 500 ms per-peer bound.
+#[tokio::test(start_paused = true)]
+async fn shutdown_with_a_draining_peer_resolves_without_waiting_on_a_timer() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    session.commands = cmd_rx;
+    let (client, mut peer) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let session_task = tokio::spawn(async move { session.run().await });
+
+    let started = tokio::time::Instant::now();
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_millis(50), session_task)
+        .await
+        .expect("an ordinary shutdown must not wait on a timer")
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
+    assert_eq!(started.elapsed(), Duration::ZERO);
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    let frames = parse_wire_frames(&wire);
+    let (msg_type, cease) = frames.last().expect("the peer must receive frames");
+    assert_eq!(*msg_type, 3, "the Cease must be the final frame");
+    assert_eq!(&cease[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
+}
+
 /// ADR-0078 rule 1: a full RIB channel parks the session task instead of
 /// dropping the batch — the routes arrive once the channel drains, and
 /// the saturation counter records the blocked send.
