@@ -7,7 +7,6 @@
 
 use serde::Serialize;
 
-use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::commands::policy_input::{JsonPeerGroupDefinition, load_json};
 use crate::connection::{Connection, SETTLED_MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
@@ -360,7 +359,7 @@ pub async fn attach(
         SETTLED_MUTATION_RPC_TIMEOUT,
         &format!("`rbgp neighbor {address}`"),
         client.set_neighbor_peer_group(SetNeighborPeerGroupRequest {
-            address: bare_ip_rpc_address(address).to_string(),
+            address: address.to_string(),
             peer_group: group.to_string(),
         }),
     )
@@ -381,7 +380,7 @@ pub async fn detach(connection: Connection, address: &str, json: bool) -> Result
         SETTLED_MUTATION_RPC_TIMEOUT,
         &format!("`rbgp neighbor {address}`"),
         client.clear_neighbor_peer_group(ClearNeighborPeerGroupRequest {
-            address: bare_ip_rpc_address(address).to_string(),
+            address: address.to_string(),
         }),
     )
     .await?;
@@ -639,7 +638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_scoped_link_local_sends_bare_request() {
+    async fn attach_scoped_link_local_sends_scoped_request() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         attach(connection, "fe80::2%eth0", "transit", true)
@@ -652,12 +651,12 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "fe80::2");
+        assert_eq!(captured.address, "fe80::2%eth0");
         assert_eq!(captured.peer_group, "transit");
     }
 
     #[tokio::test]
-    async fn detach_scoped_link_local_sends_bare_request() {
+    async fn detach_scoped_link_local_sends_scoped_request() {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
         detach(connection, "fe80::2%eth0", true).await.unwrap();
@@ -668,6 +667,6 @@ mod tests {
             .await
             .clone()
             .unwrap();
-        assert_eq!(captured.address, "fe80::2");
+        assert_eq!(captured.address, "fe80::2%eth0");
     }
 }

@@ -3,11 +3,12 @@
 //! an [`EvpnRouteEvent`] carries the full new and previous best route.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustbgpd_wire::{EvpnRouteKey, Prefix};
 
-use crate::route::EvpnRibRoute;
+use crate::route::{AspaContextId, EvpnRibRoute};
 
 /// Type of route change event emitted by the RIB manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,6 +38,16 @@ pub struct RouteEvent {
     pub previous_peer: Option<IpAddr>,
     /// Outbound peer whose export policy filtered the route, if any.
     pub target_peer: Option<IpAddr>,
+    /// Interned source context of `peer`, which records its interface when
+    /// it is a scoped (IPv6 link-local) neighbor. Captured when the event
+    /// is built, so history keeps the interface the route was learned on
+    /// after the neighbor changes or is deleted. Two bytes: the event keeps
+    /// its pre-scope size. Read it with [`Self::peer_interface`].
+    pub peer_scope: AspaContextId,
+    /// Interned source context of `previous_peer`, like `peer_scope`.
+    pub previous_peer_scope: AspaContextId,
+    /// Interned source context of `target_peer`, like `peer_scope`.
+    pub target_peer_scope: AspaContextId,
     /// Event time in Unix epoch milliseconds, captured when the event is
     /// built (see [`unix_time_ms_now`]).
     pub timestamp_unix_ms: i64,
@@ -44,6 +55,40 @@ pub struct RouteEvent {
     pub path_id: u32,
     /// Stable operator-facing reason, e.g. "`policy_denied`".
     pub reason: String,
+}
+
+impl RouteEvent {
+    /// Interface `peer` had when the event was recorded; `None` for a
+    /// numbered or absent peer.
+    #[must_use]
+    pub fn peer_interface(&self) -> Option<Arc<str>> {
+        self.peer_scope.peer_interface()
+    }
+
+    /// Interface `previous_peer` had when the event was recorded.
+    #[must_use]
+    pub fn previous_peer_interface(&self) -> Option<Arc<str>> {
+        self.previous_peer_scope.peer_interface()
+    }
+
+    /// Interface `target_peer` had when the event was recorded.
+    #[must_use]
+    pub fn target_peer_interface(&self) -> Option<Arc<str>> {
+        self.target_peer_scope.peer_interface()
+    }
+
+    /// Whether this event names the neighbor (`peer`, `interface`) as its
+    /// current, previous or target peer. A scoped neighbor matches only on
+    /// the interface the event recorded; a numbered one has none.
+    #[must_use]
+    pub fn involves(&self, peer: IpAddr, interface: Option<&str>) -> bool {
+        let named = |address: Option<IpAddr>, scope: AspaContextId| {
+            address == Some(peer) && scope.peer_interface().as_deref() == interface
+        };
+        named(self.peer, self.peer_scope)
+            || named(self.previous_peer, self.previous_peer_scope)
+            || named(self.target_peer, self.target_peer_scope)
+    }
 }
 
 /// EVPN best-path change event published on the EVPN broadcast.

@@ -324,14 +324,22 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
     )
     .await?
     .into_inner();
-    let mut neighbor_map: BTreeMap<IpAddr, (u32, Vec<String>)> = BTreeMap::new();
+    // Address -> (remote ASN, configured families, the neighbor's selector:
+    // its scoped form for an IPv6 link-local neighbor, which the daemon
+    // requires).
+    let mut neighbor_map: BTreeMap<IpAddr, (u32, Vec<String>, String)> = BTreeMap::new();
     for state in &neighbors.neighbors {
         // A retention-only row has no session or configured families.
         if state.retention_only != Some(true)
             && let Some(config) = &state.config
             && let Ok(addr) = bare_ip_rpc_address(&config.address).parse::<IpAddr>()
         {
-            neighbor_map.insert(addr, (config.remote_asn, config.families.clone()));
+            let selector = if config.interface.is_empty() {
+                config.address.clone()
+            } else {
+                format!("{addr}%{}", config.interface)
+            };
+            neighbor_map.insert(addr, (config.remote_asn, config.families.clone(), selector));
         }
     }
 
@@ -375,7 +383,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             .get(peer_addr)
             .map_or_else(|| peer_addr.to_string(), Clone::clone);
         let snapshot_bucket = snapshot.peers.remove(peer_addr);
-        let Some((remote_asn, configured_families)) = neighbor_map.get(peer_addr) else {
+        let Some((remote_asn, configured_families, selector)) = neighbor_map.get(peer_addr) else {
             report.incomparable_reasons.push(format!(
                 "peer {peer_display}: not configured on the daemon; equality refused"
             ));
@@ -432,9 +440,13 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
             },
             limits,
         );
+        // An explicit scoped --peer goes out as given, so the daemon refuses
+        // a scope that does not match; otherwise the configured scope.
+        let selector = peer_filter.scoped_labels.get(peer_addr).unwrap_or(selector);
         fetch_advertised_into(
             &mut rib_client,
             &peer_id,
+            selector,
             &mut live,
             &family_filter,
             &ignored,
@@ -974,9 +986,14 @@ struct LiveCaptureState {
 /// - the fetched route count must equal the server's `total_count`;
 /// - `--max-routes` is enforced before each page is buffered into the set;
 /// - every RPC await is bounded by the shared deadline.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the live capture threads one peer's identity, selector, sinks and shared budgets"
+)]
 async fn fetch_advertised_into(
     client: &mut RibClient,
     peer: &PeerId,
+    selector: &str,
     live: &mut RouteSet,
     family_filter: &[FamilyId],
     ignored: &[String],
@@ -985,7 +1002,7 @@ async fn fetch_advertised_into(
 ) -> Result<(), CliError> {
     let peer_addr = peer.address;
     let mut req = ListRoutesRequest {
-        neighbor_address: peer_addr.to_string(),
+        neighbor_address: selector.to_string(),
         afi_safi: requested_afi_safi(family_filter),
         page_size: ROUTE_PAGE_SIZE,
         page_token: String::new(),
@@ -3249,7 +3266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_peer_filter_queries_bare_adj_rib_out_address() {
+    async fn scoped_peer_filter_queries_scoped_adj_rib_out_address() {
         let route = serde_json::json!({
             "record": "route",
             "peer": "fe80::2",
@@ -3263,8 +3280,10 @@ mod tests {
         .to_string();
         let file = snapshot_file(&[header_line(), route, trailer_line(1)]);
         let server = spawn_mock_server(None).await;
-        *server.state.list_neighbors_response.lock().await =
-            vec![neighbor("fe80::2%eth0", PEER_ASN)];
+        // The daemon reports the bare address and the interface separately.
+        let mut configured = neighbor("fe80::2", PEER_ASN);
+        configured.config.as_mut().unwrap().interface = "eth0".to_string();
+        *server.state.list_neighbors_response.lock().await = vec![configured];
         *server.state.list_route_pages.lock().await =
             vec![page(vec![live_route("10.0.0.0", 0)], "", 1)];
         let mut filtered = opts(file.path());
@@ -3288,10 +3307,28 @@ mod tests {
             "fe80:0:0:0:0:0:0:2%eth0"
         );
 
+        // An explicit scoped --peer goes out exactly as given, so the
+        // daemon judges its scope; the daemon refuses a bare link-local one.
         let requests = server.state.list_route_requests.lock().await;
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].neighbor_address, "fe80::2");
-        assert_eq!(requests[1].neighbor_address, "fe80::2");
+        assert_eq!(requests[0].neighbor_address, "fe80:0:0:0:0:0:0:2%eth0");
+        assert_eq!(requests[1].neighbor_address, "fe80:0:0:0:0:0:0:2%eth0");
+        drop(requests);
+
+        // Without --peer, the configured scope selects the neighbor.
+        server.state.list_route_requests.lock().await.clear();
+        *server.state.list_route_pages.lock().await =
+            vec![page(vec![live_route("10.0.0.0", 0)], "", 1)];
+        filtered.peers.clear();
+        let (rendered, _) = run_against(&server, &filtered).await.unwrap();
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(
+            requests
+                .first()
+                .map(|request| request.neighbor_address.as_str()),
+            Some("fe80::2%eth0"),
+            "output was:\n{rendered}"
+        );
     }
 
     /// Red proof: removing the scope-conflict check in `parse_peer_filter`

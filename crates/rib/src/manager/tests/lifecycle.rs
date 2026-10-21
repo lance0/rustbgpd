@@ -2134,6 +2134,47 @@ async fn run_loop_advances_deferred_registrations() {
     handle.await.unwrap();
 }
 
+/// The scope an event or disposition reports is the active registration's
+/// (the newest live session), never an older collision session's.
+#[test]
+fn session_peer_scope_reads_only_the_active_session() {
+    use crate::update::PeerSourceContext;
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let context = |interface: Option<&str>| {
+        Arc::new(PeerSourceContext {
+            dampening_admission: None,
+            peer_interface: interface.map(str::to_string),
+            accepted_dynamic_range: None,
+            route_server_client: false,
+        })
+    };
+    let (older_tx, _older_rx) = mpsc::channel(64);
+    let (newer_tx, _newer_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::SetPeerSourceContext {
+        peer,
+        session_id: 1,
+        context: context(Some("eth0")),
+    });
+    manager.handle_update(session_peer_up(peer, 1, older_tx, ipv4_sendable()));
+    assert_eq!(
+        manager.session_peer_scope(peer).peer_interface().as_deref(),
+        Some("eth0")
+    );
+    manager.handle_update(RibUpdate::SetPeerSourceContext {
+        peer,
+        session_id: 2,
+        context: context(None),
+    });
+    manager.handle_update(session_peer_up(peer, 2, newer_tx, ipv4_sendable()));
+    assert_eq!(manager.live_sessions[&peer].len(), 2);
+    assert_eq!(
+        manager.session_peer_scope(peer),
+        crate::route::AspaContextId::DEFAULT
+    );
+}
+
 #[tokio::test]
 async fn accepted_source_context_survives_collision_failback_and_stamps_pending_input() {
     use crate::update::{AcceptedDynamicRange, PeerSourceContext};

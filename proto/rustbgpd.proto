@@ -11,6 +11,16 @@ import "google/protobuf/field_mask.proto";
 // Common types
 // ---------------------------------------------------------------------------
 
+// Neighbor selectors. Every request field that selects a neighbor by address
+// (neighbor_address, peer_address, address, peer, peer_filter,
+// source_peer_filter, received_from, advertised_to and the like) takes a bare
+// IP literal for a numbered neighbor. An IPv6 link-local (fe80::/10) neighbor
+// must be scoped: "fe80::1%eth0", or the bare address plus the request's
+// interface field where it has one. A bare link-local selector is
+// INVALID_ARGUMENT whatever the configuration; a scope on a numbered address
+// is INVALID_ARGUMENT. The scope is part of page-token identity. Response
+// peer addresses stay bare IP literals beside a peer_interface field.
+
 enum AddressFamily {
   ADDRESS_FAMILY_UNSPECIFIED = 0;
   ADDRESS_FAMILY_IPV4_UNICAST = 1;
@@ -1739,7 +1749,7 @@ enum ImportExplainOutcome {
 
 message ExplainImportPolicyRequest {
   // IPv4 or IPv6 literal of the peer whose import-decision cache
-  // should be consulted. Required.
+  // should be consulted, scoped for a link-local peer. Required.
   string peer_address = 1;
   // Address-family / sub-address-family scope. v1 supports
   // IPv4-unicast and IPv6-unicast only; FlowSpec and EVPN need
@@ -1813,6 +1823,10 @@ message ImportExplainMatch {
   // NOT_SEEN / EVICTED have no decision at all. Empty also when the
   // peer has no import chain (implicit permit — nothing to attribute).
   repeated ImportExplainStatementStep statements = 13;
+  // Scope echoed with peer_address for a scoped (IPv6 link-local)
+  // neighbor; empty for a numbered one. peer_address stays a bare IP
+  // literal.
+  string peer_interface = 14;
 }
 
 // One step of the statement-level import-chain trace: how a single
@@ -1900,6 +1914,10 @@ message ExplainImportPolicyResponse {
   // every decision recorded on this session is still cached. An evicted
   // prefix answers EVICTED, not NOT_SEEN, however large this count is.
   optional uint64 evictions_since_reset = 8;
+  // Scope echoed with peer_address for a scoped (IPv6 link-local)
+  // neighbor; empty for a numbered one. peer_address stays a bare IP
+  // literal.
+  string peer_interface = 9;
 }
 
 message ListRejectedRoutesRequest {
@@ -1981,6 +1999,10 @@ message ListRejectedRoutesResponse {
   // absent means the serving daemon predates this field, while present
   // zero proves no retention loss.
   optional uint64 evictions_since_reset = 5;
+  // Scope echoed with peer_address for a scoped (IPv6 link-local)
+  // neighbor; empty for a numbered one. peer_address stays a bare IP
+  // literal.
+  string peer_interface = 6;
 }
 
 message TestPolicyRequest {
@@ -2113,7 +2135,8 @@ message TestPolicyRejectedRoute {
 }
 
 message GetPolicyStatsRequest {
-  // Optional managed-peer filter (IPv4 or IPv6 literal). Empty =
+  // Optional managed-peer filter (IPv4 or IPv6 literal, scoped for a
+  // link-local peer). Empty =
   // every peer with an installed chain. An unknown peer returns
   // NOT_FOUND rather than falling through to a global chain.
   string peer_address = 1;
@@ -2574,6 +2597,8 @@ service EventService {
 }
 
 message ListRoutesRequest {
+  // Optional for received routes, required for advertised routes. A
+  // link-local neighbor needs its scope (see "Neighbor selectors").
   string neighbor_address = 1;
   AddressFamily afi_safi = 2;
   uint32 page_size = 3;
@@ -2680,8 +2705,15 @@ message ExplainAdvertisedRouteRequest {
 // are assigned locally by the advertising speaker, so this inbound identity
 // is independent of the outbound rank returned as `path_id` by export explain.
 message RouteSourceIdentity {
+  // Bare IP literal of the advertising neighbor. A request may instead
+  // give an IPv6 link-local neighbor in scoped form (fe80::1%eth0).
   string peer_address = 1;
   uint32 path_id = 2;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a
+  // numbered one. A request naming an IPv6 link-local peer_address must
+  // carry its scope here or in peer_address; a bare link-local address is
+  // INVALID_ARGUMENT.
+  string peer_interface = 3;
 }
 
 // Verdict of one export gate for one (route, peer) explain.
@@ -2747,6 +2779,10 @@ message OrrExplainCandidate {
   optional uint64 cost = 4;
   // True for the per-vantage winner (first in ORR best-path order).
   bool selected = 5;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor. peer_address stays a bare IP
+  // literal: the pair (peer_address, peer_interface) identifies the neighbor.
+  string peer_interface = 6;
 }
 
 message ExplainAdvertisedRouteResponse {
@@ -2795,6 +2831,11 @@ message ExplainAdvertisedRouteResponse {
   // legacy winner-oriented query. `path_id` above remains the independently
   // assigned outbound Add-Path rank (0 when the source is not selected).
   RouteSourceIdentity source = 17;
+  // Scope of the target peer_address (echoed from the request) and of
+  // route_peer_address (recorded with the selected route); empty for
+  // numbered neighbors. The addresses stay bare IP literals.
+  string peer_interface = 18;
+  string route_peer_interface = 19;
 }
 
 message ExplainBestPathRequest {
@@ -2802,8 +2843,8 @@ message ExplainBestPathRequest {
   // returns NOT_FOUND (there is nothing to explain).
   string prefix = 1;
   uint32 prefix_length = 2;
-  // Optional IP address (IPv4 or IPv6 literal) of the peer to
-  // scope the explanation to. With a resolved RFC 9107 ORR vantage,
+  // Optional IP address (IPv4 or IPv6 literal, scoped for a link-local
+  // peer) of the peer to scope the explanation to. With a resolved RFC 9107 ORR vantage,
   // `best_route` is the peer's per-vantage winner and `candidates`
   // contains the same split-horizon / reflection-eligible set as live
   // ORR distribution. Otherwise `best_route` remains the ordinary
@@ -2916,6 +2957,9 @@ message ExplainBestPathResponse {
   // peer-scoped best. Empty for a global view, a non-ORR peer, or an
   // unresolved vantage that fell back to the ordinary Loc-RIB best.
   string orr_vantage = 9;
+  // Scope echoed with peer_address for a scoped (IPv6 link-local) peer;
+  // empty for a numbered peer or a global view.
+  string peer_interface = 10;
 }
 
 message ListBlackholeDiscardsRequest {}
@@ -2961,7 +3005,8 @@ message ListFibRoutesRequest {
   // Optional page size. 0 preserves legacy behavior and returns the full
   // filtered snapshot.
   uint32 page_size = 7;
-  // Decimal offset returned by next_page_token. Requires page_size > 0.
+  // Opaque offset returned by next_page_token (bound to a scoped
+  // peer_address selector). Requires page_size > 0.
   string page_token = 8;
 }
 
@@ -3179,6 +3224,12 @@ message Route {
   string injection_owner = 23;
   LeaseGeneration lease_generation = 24;
   optional uint32 lease_remaining_ms = 25;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor. peer_address stays a bare IP
+  // literal: the pair (peer_address, peer_interface) identifies the neighbor.
+  // Recorded by the session that received the route, so retained routes
+  // report the interface they were learned on.
+  string peer_interface = 26;
 }
 
 enum RouteEventType {
@@ -3215,6 +3266,16 @@ message RouteEvent {
   // recorded. The deprecated timestamp string is this value truncated to
   // whole seconds.
   int64 timestamp_unix_ms = 12;
+  // Interfaces of the scoped (IPv6 link-local) neighbors named by
+  // peer_address, previous_peer_address and target_peer_address; empty
+  // for a numbered or absent neighbor. Each address stays a bare IP
+  // literal and pairs with its interface to identify the neighbor. They
+  // are captured when the event is recorded, so history keeps the
+  // interface a route was learned on after its neighbor changes or is
+  // deleted.
+  string peer_interface = 13;
+  string previous_peer_interface = 14;
+  string target_peer_interface = 15;
 }
 
 enum EventCategory {
@@ -3383,6 +3444,10 @@ message SessionEvent {
   string session_role = 6;
   // Stable operator-facing reason/summary string for this event.
   string reason = 7;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 8;
 }
 
 message StreamLagEvent {
@@ -3414,6 +3479,10 @@ message NotificationEvent {
   string shutdown_reason = 9;
   // Stable operator-facing reason/summary string for this event.
   string reason = 10;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 11;
 }
 
 message PolicyEvent {
@@ -3434,6 +3503,10 @@ message PolicyEvent {
   string timestamp = 7;
   // Stable operator-facing reason/summary string for this event.
   string reason = 8;
+  // Interface of a scoped (IPv6 link-local) neighbor; empty for a numbered
+  // one. peer_address is the bare IP literal; the pair identifies the
+  // neighbor, as on RouteEvent.
+  string peer_interface = 9;
 }
 
 message DataplaneEvent {
@@ -3524,6 +3597,10 @@ message BgpEvent {
   // Outbound peer affected by target-scoped route events such as
   // export-policy filtering. Empty for ordinary source-peer route events.
   string target_peer_address = 19;
+  // peer_address is a bare IP literal for every category. A scoped
+  // neighbor's interface is in the payload (RouteEvent, SessionEvent,
+  // NotificationEvent or PolicyEvent peer_interface fields); it is not
+  // duplicated here, which would grow every broadcast ring slot.
 
   // 21 was the durable event_id and 22 the OTC route-blocked payload, both
   // produced only by the removed durable event history.
@@ -3876,6 +3953,10 @@ message PathExportDispositionEntry {
   // after a validation-matching statement permitted, or an rpol term decided
   // by a loop or a fail-closed error. New codes may be added.
   repeated string deny_validation = 7;
+  // Interface of the scoped (IPv6 link-local) neighbor named by
+  // peer_address; empty for a numbered neighbor. peer_address stays a bare IP
+  // literal: the pair (peer_address, peer_interface) identifies the neighbor.
+  string peer_interface = 8;
 }
 
 message ListPathExportDispositionsResponse {

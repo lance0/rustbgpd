@@ -61,15 +61,21 @@ impl proto::bfd_service_server::BfdService for BfdService {
             // textual representations (notably IPv6) match — mirrors the
             // address-filter handling in NeighborService / RibService. Snapshot
             // peer addresses are already `IpAddr::to_string()` (canonical).
-            let peer = filter
-                .parse::<std::net::IpAddr>()
-                .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
+            let key = crate::peer_selector::require_neighbor(
+                "peer_address",
+                &filter,
+                "",
+                self.known_peers
+                    .as_ref()
+                    .and_then(|known| known.roster.as_ref()),
+            )?;
+            let peer = key.address;
             let wanted = peer.to_string();
             sessions.retain(|s| s.peer_address == wanted);
             if sessions.is_empty()
                 && let Some(known_peers) = &self.known_peers
             {
-                known_peers.require_known(peer).await?;
+                known_peers.require_known_key(&key).await?;
             }
         }
         Ok(Response::new(proto::GetBfdSessionsResponse { sessions }))
@@ -167,6 +173,15 @@ mod tests {
         let error = view("192.0.2.99").await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::NotFound);
         assert_eq!(error.message(), "neighbor 192.0.2.99 not found");
+        // A link-local view needs its scope, and the not-found message names
+        // the scoped neighbor the caller asked for.
+        assert_eq!(
+            view("fe80::99").await.unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        let error = view("fe80::99%eth1").await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.message(), "neighbor fe80::99%eth1 not found");
     }
 
     #[tokio::test]

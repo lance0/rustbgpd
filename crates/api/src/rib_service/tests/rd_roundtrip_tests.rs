@@ -233,6 +233,7 @@ async fn rd_output_round_trips_vpn_explain_and_filter() {
                             path_id: 0,
                             route_peer: None,
                             route_path_id: None,
+                            route_peer_interface: None,
                             route_type: None,
                             reasons: vec![],
                             modifications: rustbgpd_policy::RouteModifications::default(),

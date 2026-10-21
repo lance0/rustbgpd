@@ -184,9 +184,9 @@ fn family_page_tokens_bind_family_scope_filters_and_version() {
     assert!(parse_family_prefix("2001:db8::1/64", 64).is_err());
     assert!(parse_vpn_page_key("0000fde800000001~10.0.0.1/24~192.0.2.1~7").is_err());
     assert!(parse_labeled_page_key("2001:db8::1/64~192.0.2.1~7").is_err());
-    assert!(family_page_scope(0, "192.0.2.1", "").is_err());
-    assert!(family_page_scope(2, "", "").is_err());
-    assert!(family_page_scope(3, "invalid", "").is_err());
+    assert!(family_page_scope(0, "192.0.2.1", "", None).is_err());
+    assert!(family_page_scope(2, "", "", None).is_err());
+    assert!(family_page_scope(3, "invalid", "", None).is_err());
 }
 
 #[tokio::test]
@@ -825,12 +825,15 @@ async fn raw_page_filters_preserve_rd_and_rt_encoding_and_reject_non_targets() {
         rd_filter: raw.into(),
         ..Default::default()
     };
-    let (filter, raw_identity) = evpn_loc_filter(&request).unwrap();
+    let (filter, raw_identity) = evpn_loc_filter(&request, None).unwrap();
     assert!(filter.unwrap()(&route));
-    let (_, text_identity) = evpn_loc_filter(&proto::ListBestEvpnRoutesRequest {
-        rd_filter: "65000:100".into(),
-        ..Default::default()
-    })
+    let (_, text_identity) = evpn_loc_filter(
+        &proto::ListBestEvpnRoutesRequest {
+            rd_filter: "65000:100".into(),
+            ..Default::default()
+        },
+        None,
+    )
     .unwrap();
     assert_ne!(
         raw_identity, text_identity,
@@ -960,7 +963,7 @@ async fn evpn_loc_filters_and_page_scope_are_applied_before_materialization() {
         page_size: 1,
         ..Default::default()
     };
-    let (filter, identity) = evpn_loc_filter(&req).unwrap();
+    let (filter, identity) = evpn_loc_filter(&req, None).unwrap();
     assert!(filter.as_ref().unwrap()(&route));
     let mut wrong = route.clone();
     wrong.attributes = AttrSet::new(Vec::new());
@@ -989,27 +992,36 @@ async fn evpn_loc_filters_and_page_scope_are_applied_before_materialization() {
             ..req.clone()
         },
     ] {
-        assert!(!evpn_loc_filter(&changed).unwrap().0.unwrap()(&route));
+        assert!(!evpn_loc_filter(&changed, None).unwrap().0.unwrap()(&route));
     }
     assert!(
-        evpn_loc_filter(&proto::ListBestEvpnRoutesRequest {
-            mac_filter: "bad".into(),
-            ..Default::default()
-        })
+        evpn_loc_filter(
+            &proto::ListBestEvpnRoutesRequest {
+                mac_filter: "bad".into(),
+                ..Default::default()
+            },
+            None
+        )
         .is_err()
     );
     assert!(
-        evpn_loc_filter(&proto::ListBestEvpnRoutesRequest {
-            esi_filter: "bad".into(),
-            ..Default::default()
-        })
+        evpn_loc_filter(
+            &proto::ListBestEvpnRoutesRequest {
+                esi_filter: "bad".into(),
+                ..Default::default()
+            },
+            None
+        )
         .is_err()
     );
     assert!(
-        evpn_loc_filter(&proto::ListBestEvpnRoutesRequest {
-            vni_filter: Some(1 << 24),
-            ..Default::default()
-        })
+        evpn_loc_filter(
+            &proto::ListBestEvpnRoutesRequest {
+                vni_filter: Some(1 << 24),
+                ..Default::default()
+            },
+            None
+        )
         .is_err()
     );
     let (tx, mut rx) = mpsc::channel(1);

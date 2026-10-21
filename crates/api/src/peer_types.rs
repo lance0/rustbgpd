@@ -52,6 +52,24 @@ impl PeerKey {
             None => self.address.to_string(),
         }
     }
+
+    /// The interface in an operator label rendered by [`Self::label`]
+    /// (`address%interface`); empty for a numbered neighbor's label.
+    #[must_use]
+    pub fn label_interface(label: Option<&str>) -> &str {
+        label
+            .and_then(|label| label.split_once('%'))
+            .map_or("", |(_, interface)| interface)
+    }
+
+    /// Whether an event recorded for `address` with operator label `label`
+    /// (`address%interface` for a scoped neighbor) belongs to this neighbor.
+    /// A scoped key matches only the label it would render.
+    #[must_use]
+    pub fn names_event(&self, address: IpAddr, label: Option<&str>) -> bool {
+        self.address == address
+            && (self.interface.is_none() || label == Some(self.label().as_str()))
+    }
 }
 
 impl std::fmt::Display for PeerKey {
@@ -855,8 +873,9 @@ pub enum PeerManagerCommand {
     },
     /// Query recent policy mutation events from the bounded in-memory history.
     QueryPolicyEventHistory {
-        /// Optional peer filter. Matches only peer-scoped policy events.
-        peer: Option<IpAddr>,
+        /// Optional peer filter. Matches only peer-scoped policy events; a
+        /// scoped neighbor matches only on its recorded label.
+        peer: Option<PeerKey>,
         /// Maximum events to return. 0 uses [`POLICY_EVENT_HISTORY_CAPACITY`].
         limit: usize,
         /// Reply channel returning matching events.
@@ -864,8 +883,9 @@ pub enum PeerManagerCommand {
     },
     /// Query recent session lifecycle events from the bounded in-memory history.
     QuerySessionEventHistory {
-        /// Optional peer filter.
-        peer: Option<IpAddr>,
+        /// Optional peer filter; a scoped neighbor matches only on its
+        /// recorded label.
+        peer: Option<PeerKey>,
         /// Optional event-type filter.
         event_types: BTreeSet<SessionLifecycleEventType>,
         /// Maximum events to return. 0 uses [`SESSION_EVENT_HISTORY_CAPACITY`].
@@ -1603,10 +1623,14 @@ pub enum OwnedCatalogMutation {
     },
     SetNeighborPeerGroup {
         address: IpAddr,
+        /// Selector scope of a link-local neighbor; see
+        /// [`OwnedCatalogMutation::neighbor`].
+        interface: Option<String>,
         peer_group: String,
     },
     ClearNeighborPeerGroup {
         address: IpAddr,
+        interface: Option<String>,
     },
     SetPolicy {
         name: String,
@@ -1632,18 +1656,49 @@ pub enum OwnedCatalogMutation {
     ClearGlobalExportChain,
     SetNeighborImportChain {
         address: IpAddr,
+        interface: Option<String>,
         policy_names: Vec<String>,
     },
     SetNeighborExportChain {
         address: IpAddr,
+        interface: Option<String>,
         policy_names: Vec<String>,
     },
     ClearNeighborImportChain {
         address: IpAddr,
+        interface: Option<String>,
     },
     ClearNeighborExportChain {
         address: IpAddr,
+        interface: Option<String>,
     },
+}
+
+impl OwnedCatalogMutation {
+    /// The neighbor a per-neighbor mutation selects, with the selector's
+    /// scope. The owning actor checks it against the configured neighbor
+    /// when it applies the mutation, so a scope that a concurrent change
+    /// made stale is `NOT_FOUND` instead of reaching another neighbor.
+    #[must_use]
+    pub fn neighbor(&self) -> Option<PeerKey> {
+        match self {
+            Self::SetNeighborPeerGroup {
+                address, interface, ..
+            }
+            | Self::ClearNeighborPeerGroup { address, interface }
+            | Self::SetNeighborImportChain {
+                address, interface, ..
+            }
+            | Self::SetNeighborExportChain {
+                address, interface, ..
+            }
+            | Self::ClearNeighborImportChain { address, interface }
+            | Self::ClearNeighborExportChain { address, interface } => {
+                Some(PeerKey::new(*address, interface.clone()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Actor-owned settlement proof for a catalog mutation.

@@ -59,22 +59,23 @@ grpc_bfd_state() {
 
 grpc_ll_bfd_state() {
     grpcurl_call \
-        -d "{\"peer_address\": \"$LL_PEER\"}" \
+        -d "{\"peer_address\": \"$LL_PEER%$LL_INTERFACE\"}" \
         "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions 2>/dev/null \
         | jq -r '.sessions[0].state // ""'
 }
 
 grpc_ll_bfd_not_found() {
-    # True only when the daemon answers NOT_FOUND naming $LL_PEER, which is
+    # True only when the daemon answers NOT_FOUND naming the scoped
+    # $LL_PEER%$LL_INTERFACE (a link-local selector must carry its scope), which is
     # what a per-peer view returns once the neighbor is no longer configured.
     # Success, a transport error, or any other status is not "removed".
     local err
     if err=$(grpcurl_call \
-        -d "{\"peer_address\": \"$LL_PEER\"}" \
+        -d "{\"peer_address\": \"$LL_PEER%$LL_INTERFACE\"}" \
         "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions 2>&1 >/dev/null); then
         return 1
     fi
-    grep -q "Code: NotFound" <<<"$err" && grep -qF "neighbor $LL_PEER not found" <<<"$err"
+    grep -q "Code: NotFound" <<<"$err" && grep -qF "neighbor $LL_PEER%$LL_INTERFACE not found" <<<"$err"
 }
 
 grpc_bfd_json() {
@@ -240,7 +241,7 @@ dump_state_on_failure() {
         "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions >&2 2>&1 || true
     echo "===== rustbgpd link-local GetBfdSessions (raw) =====" >&2
     grpcurl_call \
-        -d "{\"peer_address\": \"$LL_PEER\"}" \
+        -d "{\"peer_address\": \"$LL_PEER%$LL_INTERFACE\"}" \
         "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions >&2 2>&1 || true
     echo "===== rustbgpd GetNeighborState (raw) =====" >&2
     grpcurl_call \

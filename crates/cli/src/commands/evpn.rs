@@ -46,11 +46,7 @@ pub async fn list_best_page(
     if let Some(peer) = &peer {
         validate_peer_view(peer, None)?;
     }
-    request.source_peer_filter = peer
-        .as_deref()
-        .map(bare_ip_rpc_address)
-        .unwrap_or_default()
-        .to_string();
+    request.source_peer_filter = peer.as_deref().unwrap_or_default().to_string();
     let mut client = connection.rib_listing_client();
     let mut response = read_rpc("ListBestEvpnRoutes", client.list_best_evpn_routes(request))
         .await?
@@ -90,11 +86,7 @@ pub async fn list(
         "ListEvpnRoutes",
         client.list_evpn_routes(ListEvpnRequest {
             route_type_filter: route_type.unwrap_or(0),
-            peer_filter: peer
-                .as_deref()
-                .map(bare_ip_rpc_address)
-                .unwrap_or_default()
-                .to_string(),
+            peer_filter: peer.as_deref().unwrap_or_default().to_string(),
             rd_filter: rd.unwrap_or_default(),
         }),
     )
@@ -214,7 +206,7 @@ pub(crate) fn validate_peer_view(peer: &str, rd: Option<&str>) -> Result<(), Cli
         .parse::<std::net::IpAddr>()
         .map_err(|_| {
             CliError::Argument(
-                "EVPN peer must be an IP address (optionally scoped link-local IPv6)".into(),
+                "EVPN peer must be an IP address; an IPv6 link-local address needs its interface, as fe80::1%eth0".into(),
             )
         })?;
     if let Some(rd) = rd {
@@ -237,7 +229,6 @@ pub async fn list_peer(
     if !request.rd_filter.is_empty() {
         request.rd_filter = parse_page_rd(&request.rd_filter).map_err(CliError::Argument)?;
     }
-    request.neighbor_address = bare_ip_rpc_address(&peer).to_string();
     let mut client = connection.rib_listing_client();
     let response = if received {
         read_rpc(
@@ -576,14 +567,12 @@ fn print_srv6_argument(argument: &crate::proto::ExplainSrv6Argument) -> Result<(
 
 pub async fn explain(
     connection: Connection,
-    mut request: crate::proto::ExplainEvpnRouteRequest,
+    request: crate::proto::ExplainEvpnRouteRequest,
     json: bool,
 ) -> Result<(), CliError> {
     let received_from = request.received_from.clone();
     let advertised_to = request.advertised_to.clone();
     let argument_requested = request.srv6_argument_companion.is_some();
-    request.received_from = bare_ip_rpc_address(&received_from).to_string();
-    request.advertised_to = bare_ip_rpc_address(&advertised_to).to_string();
     let mut response = read_rpc(
         "ExplainEvpnRoute",
         connection.rib_listing_client().explain_evpn_route(request),
@@ -2959,7 +2948,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_scoped_peer_sends_bare_filter() {
+    async fn list_scoped_peer_sends_scoped_filter() {
         let server = spawn_mock_server(None).await;
         let connection = crate::connection::connect(&server.addr, None)
             .await
@@ -2982,7 +2971,7 @@ mod tests {
             .await
             .clone()
             .expect("EVPN request captured");
-        assert_eq!(request.peer_filter, "fe80:0:0:0:0:0:0:2");
+        assert_eq!(request.peer_filter, "fe80:0:0:0:0:0:0:2%eth0");
     }
 
     #[tokio::test]
@@ -3022,7 +3011,7 @@ mod tests {
                 assert!(received_request.is_none());
                 advertised_request.unwrap()
             };
-            assert_eq!(request.neighbor_address, "fe80:0:0:0:0:0:0:2");
+            assert_eq!(request.neighbor_address, "fe80:0:0:0:0:0:0:2%eth0");
             assert_eq!(request.route_type_filter, 4);
             assert_eq!(request.rd_filter, "65000:100");
             assert_eq!(request.page_size, 25);

@@ -32,6 +32,9 @@ async fn route_history_and_live_broadcast_share_arc_but_queries_are_owned() {
         peer: None,
         previous_peer: None,
         target_peer: None,
+        peer_scope: crate::route::AspaContextId::DEFAULT,
+        previous_peer_scope: crate::route::AspaContextId::DEFAULT,
+        target_peer_scope: crate::route::AspaContextId::DEFAULT,
         timestamp_unix_ms: 1_000,
         path_id: 0,
         reason: "original".to_string(),
@@ -78,6 +81,9 @@ fn route_event_id_exhaustion_saturates_instead_of_panicking() {
             peer: None,
             previous_peer: None,
             target_peer: None,
+            peer_scope: crate::route::AspaContextId::DEFAULT,
+            previous_peer_scope: crate::route::AspaContextId::DEFAULT,
+            target_peer_scope: crate::route::AspaContextId::DEFAULT,
             timestamp_unix_ms: 0,
             path_id: 0,
             reason: String::new(),
@@ -1760,6 +1766,113 @@ async fn peer_deleted_reaps_metric_series_peer_down_does_not() {
     // Re-deleting an already-reaped peer is a no-op (no panic).
     manager.handle_update(RibUpdate::PeerDeleted { peer, label: None });
     assert_eq!(peer_series_count(&metrics, "10.0.0.2"), 0);
+}
+
+/// Scoped neighbor provenance in route events: each event records the
+/// interface its routes were learned on, keeps it after the neighbor is
+/// deleted, and a scoped history filter matches only that interface.
+/// Red proof: building events with the default scope, or dropping the
+/// interface from `RouteEvent::involves`, fails the interface assertions.
+#[tokio::test]
+async fn route_events_keep_the_scope_their_routes_were_learned_on() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let first_peer: IpAddr = "fe80::1".parse().unwrap();
+    let second_peer: IpAddr = "fe80::2".parse().unwrap();
+    let scoped = |peer: IpAddr, interface: &str, local_pref: u32| {
+        let mut route = make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 1), local_pref);
+        route.peer = peer;
+        route.aspa_context = crate::route::AspaContextId::intern_scoped(
+            rustbgpd_wire::AspaValidationContext::default(),
+            Some(interface),
+        );
+        route
+    };
+    for (peer, route) in [
+        (first_peer, scoped(first_peer, "eth0", 100)),
+        (second_peer, scoped(second_peer, "eth1", 200)),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+    }
+    // Deleting the winner withdraws its routes; the events already
+    // recorded keep its interface.
+    tx.send(RibUpdate::PeerDeleted {
+        peer: second_peer,
+        label: Some("fe80::2%eth1".into()),
+    })
+    .await
+    .unwrap();
+
+    let history = |peer: Option<IpAddr>, interface: Option<&str>| {
+        let tx = tx.clone();
+        let interface = interface.map(Arc::<str>::from);
+        async move {
+            let (reply, response) = oneshot::channel();
+            tx.send(RibUpdate::QueryRouteEventHistory {
+                peer,
+                peer_interface: interface,
+                afi: None,
+                prefix: None,
+                limit: 0,
+                reply,
+            })
+            .await
+            .unwrap();
+            response.await.unwrap()
+        }
+    };
+    let all = history(None, None).await;
+    let recorded: Vec<_> = all
+        .iter()
+        .map(|event| {
+            (
+                event.event_type,
+                event.peer_interface().as_deref().map(str::to_string),
+                event
+                    .previous_peer_interface()
+                    .as_deref()
+                    .map(str::to_string),
+            )
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        vec![
+            (RouteEventType::Added, Some("eth0".into()), None),
+            (
+                RouteEventType::BestChanged,
+                Some("eth1".into()),
+                Some("eth0".into())
+            ),
+            (
+                RouteEventType::BestChanged,
+                Some("eth0".into()),
+                Some("eth1".into())
+            ),
+        ]
+    );
+    assert_eq!(history(Some(second_peer), Some("eth1")).await.len(), 2);
+    assert_eq!(history(Some(first_peer), Some("eth0")).await.len(), 3);
+    assert!(history(Some(second_peer), Some("eth0")).await.is_empty());
+    assert!(history(Some(second_peer), None).await.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
 }
 
 /// The final reap targets the deleted neighbor's exact scoped value, so a

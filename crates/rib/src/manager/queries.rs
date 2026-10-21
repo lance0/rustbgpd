@@ -1888,6 +1888,19 @@ impl RibManager {
             (None, true) => self.explain_labeled_export(peer, prefix),
             (None, false) => self.explain_unicast_export(peer, prefix, source),
         };
+        let mut explanation = explanation;
+        if rd.is_none()
+            && !labeled
+            && explanation.route_peer_interface.is_none()
+            && let (Some(route_peer), Some(path_id)) =
+                (explanation.route_peer, explanation.route_path_id)
+        {
+            explanation.route_peer_interface = self
+                .ribs
+                .get(&route_peer)
+                .and_then(|rib| rib.get(&prefix, path_id))
+                .and_then(crate::route::Route::peer_interface);
+        }
         if reply.send(Ok(explanation)).is_err() {
             warn!("query caller dropped before receiving response");
         }
@@ -1943,8 +1956,10 @@ impl RibManager {
         use RouteExportDisposition::{Committed, Pending, Withheld};
         let prefix = route.prefix;
         let family = prefix_family(&prefix);
+        let peer_interface = self.session_peer_scope(peer).peer_interface();
         let row = |disposition, reason: &str, explain_code, detail: String| PeerRouteExport {
             peer,
+            peer_interface: peer_interface.clone(),
             disposition,
             reason: reason.to_string(),
             explain_code,
@@ -3315,7 +3330,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_route_event_history(
         &mut self,
-        peer: Option<IpAddr>,
+        peer: Option<(IpAddr, Option<&str>)>,
         afi: Option<Afi>,
         prefix: Option<Prefix>,
         limit: usize,
@@ -3338,11 +3353,7 @@ impl RibManager {
                 None => true,
             })
             .filter(|event| match peer {
-                Some(peer) => {
-                    event.peer == Some(peer)
-                        || event.previous_peer == Some(peer)
-                        || event.target_peer == Some(peer)
-                }
+                Some((peer, interface)) => event.involves(peer, interface),
                 None => true,
             })
             .filter(|event| match prefix {

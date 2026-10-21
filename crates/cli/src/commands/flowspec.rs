@@ -137,25 +137,33 @@ fn print_route(route: &crate::proto::FlowSpecRouteEntry) -> Result<(), CliError>
 pub async fn list(
     connection: Connection,
     family: Option<i32>,
-    received_peer: Option<std::net::IpAddr>,
-    advertised_peer: Option<std::net::IpAddr>,
+    received_peer: Option<String>,
+    advertised_peer: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = read_rpc(
+    // Selectors go out as given: a link-local peer keeps its scope, which
+    // the daemon requires.
+    let mut resp = read_rpc(
         "ListFlowSpecRoutes",
         client.list_flow_spec_routes(ListFlowSpecRequest {
             afi_safi: family.unwrap_or(0),
-            advertised_peer_address: advertised_peer
-                .map(|peer| peer.to_string())
-                .unwrap_or_default(),
-            received_peer_address: received_peer
-                .map(|peer| peer.to_string())
-                .unwrap_or_default(),
+            advertised_peer_address: advertised_peer.clone().unwrap_or_default(),
+            received_peer_address: received_peer.clone().unwrap_or_default(),
         }),
     )
     .await?
     .into_inner();
+    // FlowSpec rows carry a bare source address; a received view's rows all
+    // come from the scoped peer that was selected.
+    for row in &mut resp.received_routes {
+        if let Some(route) = row.route.as_mut() {
+            crate::commands::neighbor::restore_matching_scoped_address(
+                received_peer.as_deref(),
+                &mut route.peer_address,
+            );
+        }
+    }
 
     if advertised_peer.is_some() && !resp.advertised_view {
         return Err(tonic::Status::unimplemented(

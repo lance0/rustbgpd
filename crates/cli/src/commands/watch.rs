@@ -22,6 +22,49 @@ pub struct EventsWatchOptions {
     pub json: bool,
 }
 
+/// Render route-event peers in the scoped `fe80::1%eth0` form from the
+/// interfaces the daemon recorded with the event.
+fn scope_route_event(event: &mut RouteEvent) {
+    use crate::commands::neighbor::scope_address;
+    scope_address(&mut event.peer_address, &event.peer_interface);
+    scope_address(
+        &mut event.previous_peer_address,
+        &event.previous_peer_interface,
+    );
+    scope_address(&mut event.target_peer_address, &event.target_peer_interface);
+}
+
+/// Render a stream event's neighbors in scoped form: the payload carries
+/// the interfaces, which also scope the envelope's addresses.
+fn scope_bgp_event(event: &mut BgpEvent) {
+    use crate::commands::neighbor::scope_address;
+    use crate::proto::bgp_event::Payload;
+    match &mut event.payload {
+        Some(Payload::Route(route)) => {
+            scope_address(&mut event.peer_address, &route.peer_interface);
+            scope_address(
+                &mut event.previous_peer_address,
+                &route.previous_peer_interface,
+            );
+            scope_address(&mut event.target_peer_address, &route.target_peer_interface);
+            scope_route_event(route);
+        }
+        Some(Payload::Session(session)) => {
+            scope_address(&mut event.peer_address, &session.peer_interface);
+            scope_address(&mut session.peer_address, &session.peer_interface);
+        }
+        Some(Payload::Notification(notification)) => {
+            scope_address(&mut event.peer_address, &notification.peer_interface);
+            scope_address(&mut notification.peer_address, &notification.peer_interface);
+        }
+        Some(Payload::Policy(policy)) => {
+            scope_address(&mut event.peer_address, &policy.peer_interface);
+            scope_address(&mut policy.peer_address, &policy.peer_interface);
+        }
+        _ => {}
+    }
+}
+
 fn format_event_type(t: i32) -> &'static str {
     match RouteEventType::try_from(t) {
         Ok(RouteEventType::Added) => "added",
@@ -983,7 +1026,8 @@ pub async fn run(
         .await?
         .into_inner();
 
-    while let Some(event) = stream.message().await? {
+    while let Some(mut event) = stream.message().await? {
+        scope_bgp_event(&mut event);
         print_route_watch_event(&event, json)?;
     }
     Ok(())
@@ -1066,17 +1110,19 @@ pub async fn events_watch(
         }
         for event in events {
             last_backfilled_route_event_id = last_backfilled_route_event_id.max(event.event_id);
-            let event = route_event_to_bgp_event(event);
+            let mut event = route_event_to_bgp_event(event);
+            scope_bgp_event(&mut event);
             print_bgp_event(&event, json)?;
         }
     }
 
-    while let Some(event) = stream.message().await? {
+    while let Some(mut event) = stream.message().await? {
         if last_backfilled_route_event_id > 0
             && route_event_id(&event).is_some_and(|id| id <= last_backfilled_route_event_id)
         {
             continue;
         }
+        scope_bgp_event(&mut event);
         print_bgp_event(&event, json)?;
     }
     Ok(())
@@ -1128,7 +1174,8 @@ pub async fn history(
         print_empty_history(json, "route")?;
         return Ok(());
     }
-    for event in response.events {
+    for mut event in response.events {
+        scope_route_event(&mut event);
         print_event(&event, json)?;
     }
     Ok(())
@@ -1163,7 +1210,8 @@ pub async fn session_history(
         print_empty_history(json, "session")?;
         return Ok(());
     }
-    for event in response.events {
+    for mut event in response.events {
+        scope_bgp_event(&mut event);
         print_bgp_event(&event, json)?;
     }
     Ok(())
@@ -1198,7 +1246,8 @@ pub async fn policy_history(
         print_empty_history(json, "policy")?;
         return Ok(());
     }
-    for event in response.events {
+    for mut event in response.events {
+        scope_bgp_event(&mut event);
         print_bgp_event(&event, json)?;
     }
     Ok(())
@@ -1841,6 +1890,9 @@ mod tests {
     #[test]
     fn json_route_event_includes_event_id() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: 1,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1879,6 +1931,9 @@ mod tests {
     #[test]
     fn route_history_event_type_filter_matches_route_aliases() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: 3,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1906,6 +1961,9 @@ mod tests {
     #[test]
     fn route_history_event_converts_to_bgp_event_shape() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: 1,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1931,6 +1989,9 @@ mod tests {
     #[test]
     fn policy_filtered_route_event_json_includes_target_peer_and_reason() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: RouteEventType::PolicyFiltered as i32,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -1979,6 +2040,9 @@ mod tests {
     #[test]
     fn bgp_event_text_route_events_include_event_id() {
         let event = route_event_to_bgp_event(RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: RouteEventType::Added as i32,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -2233,6 +2297,9 @@ mod tests {
     #[test]
     fn json_route_event_omits_empty_optional_fields() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_id: 0,
             event_type: crate::proto::RouteEventType::Added as i32,
             prefix: "203.0.113.0".to_string(),
@@ -2261,6 +2328,9 @@ mod tests {
     #[test]
     fn json_route_event_includes_previous_peer_and_path_id() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_id: 0,
             event_type: crate::proto::RouteEventType::BestChanged as i32,
             prefix: "2001:db8::".to_string(),
@@ -2309,6 +2379,40 @@ mod tests {
         assert_eq!(value["summary"], "route best changed 203.0.113.0/24");
     }
 
+    /// The daemon reports a scoped neighbor as a bare address plus its
+    /// interface; rbgp keeps printing `address%interface` for session and
+    /// policy events, envelope and payload alike.
+    #[test]
+    fn session_and_policy_events_render_the_scoped_neighbor() {
+        use crate::proto::bgp_event::Payload;
+        let mut session = BgpEvent {
+            peer_address: "fe80::1".to_string(),
+            payload: Some(Payload::Session(crate::proto::SessionEvent {
+                peer_address: "fe80::1".to_string(),
+                peer_interface: "eth0".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        scope_bgp_event(&mut session);
+        assert_eq!(session.peer_address, "fe80::1%eth0");
+        let Some(Payload::Session(payload)) = &session.payload else {
+            panic!("expected session payload");
+        };
+        assert_eq!(payload.peer_address, "fe80::1%eth0");
+
+        let mut policy = BgpEvent {
+            peer_address: "192.0.2.1".to_string(),
+            payload: Some(Payload::Policy(crate::proto::PolicyEvent {
+                peer_address: "192.0.2.1".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        scope_bgp_event(&mut policy);
+        assert_eq!(policy.peer_address, "192.0.2.1");
+    }
+
     #[test]
     fn json_bgp_event_session_uses_null_family() {
         let event = BgpEvent {
@@ -2328,6 +2432,7 @@ mod tests {
                     new_state: "Established".to_string(),
                     session_role: "primary".to_string(),
                     reason: "session established".to_string(),
+                    peer_interface: String::new(),
                 },
             )),
             ..Default::default()
@@ -2416,6 +2521,7 @@ mod tests {
                     session_role: "primary".to_string(),
                     shutdown_reason: String::new(),
                     reason: "BGP NOTIFICATION sent for peer 10.0.0.1: 6/7 (Connection Collision Resolution)".to_string(),
+                    peer_interface: String::new(),
                 },
             )),
             ..Default::default()
@@ -2689,6 +2795,9 @@ mod tests {
     #[test]
     fn json_route_event_shape_is_stable() {
         let event = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: crate::proto::RouteEventType::BestChanged as i32,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -2766,6 +2875,9 @@ mod tests {
         assert_eq!(json["timestamp_unix_seconds"], 1_790_132_714_u64);
 
         let route = RouteEvent {
+            peer_interface: Default::default(),
+            previous_peer_interface: Default::default(),
+            target_peer_interface: Default::default(),
             event_type: RouteEventType::Added as i32,
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,

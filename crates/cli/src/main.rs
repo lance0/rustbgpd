@@ -240,7 +240,7 @@ const NEIGHBOR_EXAMPLES: &str = "Examples:
   # List peers, with optional summary columns
   rbgp neighbor
   rbgp neighbor --wide
-  # Inspect one peer, including a scoped IPv6 peer
+  # Inspect one peer; an IPv6 link-local peer always needs its interface
   rbgp neighbor 192.0.2.1
   rbgp neighbor fe80::1%eth0
   # Compare two peers' live update-group membership
@@ -248,8 +248,9 @@ const NEIGHBOR_EXAMPLES: &str = "Examples:
 
 const RIB_EXAMPLES: &str = "Examples:
   # Inspect bounded best, received, and advertised views
+  # (an IPv6 link-local peer always needs its interface)
   rbgp rib --limit 20
-  rbgp rib received 192.0.2.1 --limit 20
+  rbgp rib received fe80::1%eth0 --limit 20
   rbgp rib advertised 192.0.2.1 --limit 20
   # Explain best-path selection and export to one peer
   rbgp rib --prefix 203.0.113.0/24 --explain
@@ -1988,16 +1989,18 @@ enum TopologyAction {
 enum FlowspecAction {
     /// Show committed post-export-policy rules toward a destination peer
     Advertised {
-        /// Destination peer IP address
-        peer: std::net::IpAddr,
+        /// Destination peer IP address (fe80::1%eth0 for a link-local peer)
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
+        peer: String,
         /// Address family (ipv4_flowspec or ipv6_flowspec)
         #[arg(short = 'a', long)]
         family: Option<String>,
     },
     /// Show retained received candidates, including infeasible and nonselected rules
     Received {
-        /// Source peer IP address
-        peer: std::net::IpAddr,
+        /// Source peer IP address (fe80::1%eth0 for a link-local peer)
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
+        peer: String,
         /// Address family (ipv4_flowspec or ipv6_flowspec)
         #[arg(short = 'a', long)]
         family: Option<String>,

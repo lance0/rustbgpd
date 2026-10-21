@@ -307,6 +307,11 @@ fn export_disposition_to_proto(row: PeerRouteExport) -> proto::PathExportDisposi
     };
     proto::PathExportDispositionEntry {
         peer_address: row.peer.to_string(),
+        peer_interface: row
+            .peer_interface
+            .as_deref()
+            .unwrap_or_default()
+            .to_string(),
         disposition: disposition as i32,
         reason: row.reason,
         explain_code: row.explain_code.to_string(),
@@ -2028,6 +2033,10 @@ mod tests {
     /// the wire, resumes after the token's peer, clamps the page size, and
     /// reports a missing local route as `NOT_FOUND`.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one paged exchange drives the mapping, resume, clamp and not-found checks"
+    )]
     async fn list_path_export_dispositions_pages_and_maps_rows() {
         use rustbgpd_rib::update::{PeerRouteExport, RouteExportDisposition, RouteExportPage};
 
@@ -2051,6 +2060,7 @@ mod tests {
                     peers: vec![
                         PeerRouteExport {
                             peer: "192.0.2.1".parse().unwrap(),
+                            peer_interface: None,
                             disposition: RouteExportDisposition::Withheld,
                             reason: "family_suppressed:missing_ipv6_next_hop".to_string(),
                             explain_code: "family_not_sendable",
@@ -2060,6 +2070,7 @@ mod tests {
                         },
                         PeerRouteExport {
                             peer: "192.0.2.2".parse().unwrap(),
+                            peer_interface: Some("eth0".into()),
                             disposition: RouteExportDisposition::Withheld,
                             reason: "export_policy".to_string(),
                             explain_code: "policy_denied",
@@ -2099,6 +2110,14 @@ mod tests {
         assert_eq!(row.reason, "family_suppressed:missing_ipv6_next_hop");
         assert_eq!(row.explain_code, "family_not_sendable");
         assert_eq!(first.peers[1].deny_validation, ["rpki_invalid"]);
+        // The scope of a link-local destination travels beside its address.
+        assert_eq!(
+            (
+                row.peer_interface.as_str(),
+                first.peers[1].peer_interface.as_str()
+            ),
+            ("", "eth0")
+        );
         let last = svc
             .list_path_export_dispositions(request(5000, &first.next_page_token, 7))
             .await

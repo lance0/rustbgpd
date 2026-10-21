@@ -1114,12 +1114,25 @@ impl RibManager {
         let evpn_admitted_count = previous_session
             .filter(|record| record.outbound_tx.same_channel(&outbound_tx))
             .map_or(0, |record| record.evpn_admitted_count);
+        let source_context = self
+            .pending_peer_source_context
+            .remove(&(peer, session_id))
+            .or_else(|| previous_session.and_then(|record| record.source_context.clone()));
+        // Interned once per registration, so event and disposition reads
+        // never touch the global context table.
+        let peer_scope = source_context
+            .as_ref()
+            .and_then(|context| context.peer_interface.as_deref())
+            .map_or(crate::route::AspaContextId::DEFAULT, |interface| {
+                crate::route::AspaContextId::intern_scoped(
+                    rustbgpd_wire::AspaValidationContext::default(),
+                    Some(interface),
+                )
+            });
         let record = LiveSessionRecord {
             session_id,
-            source_context: self
-                .pending_peer_source_context
-                .remove(&(peer, session_id))
-                .or_else(|| previous_session.and_then(|record| record.source_context.clone())),
+            source_context,
+            peer_scope,
             peer_group: self
                 .pending_peer_policy_context
                 .remove(&(peer, session_id))

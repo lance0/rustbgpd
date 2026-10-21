@@ -1775,6 +1775,9 @@ pub(in crate::manager) const MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP: std::tim
 pub(super) struct LiveSessionRecord {
     session_id: u64,
     source_context: Option<Arc<crate::update::PeerSourceContext>>,
+    /// Interned scope of `source_context`'s interface, resolved at
+    /// registration; `DEFAULT` for a numbered neighbor.
+    peer_scope: crate::route::AspaContextId,
     peer_group: Option<String>,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     peer_asn: u32,
@@ -4364,11 +4367,13 @@ impl RibManager {
             }
             RibUpdate::QueryRouteEventHistory {
                 peer,
+                peer_interface,
                 afi,
                 prefix,
                 limit,
                 reply,
             } => {
+                let peer = peer.map(|peer| (peer, peer_interface.as_deref()));
                 self.handle_query_route_event_history(peer, afi, prefix, limit, reply);
             }
             RibUpdate::SubscribeEvpnRouteEvents { reply } => {
@@ -5182,6 +5187,22 @@ impl RibManager {
         retire_hash_set(&mut withdrawn, &mut checkpoint);
     }
 
+    /// Interned scope of the active session registered at `peer`, from the
+    /// accepted source context it staged. It resolves to that interface for
+    /// a scoped (IPv6 link-local) neighbor and to none for numbered
+    /// neighbors, an active session without one, and peers without a live
+    /// session.
+    pub(super) fn session_peer_scope(&self, peer: IpAddr) -> crate::route::AspaContextId {
+        // The active registration is the newest live record (see
+        // `register_active_session`); a collision loser's scope never counts.
+        self.live_sessions
+            .get(&peer)
+            .and_then(|records| records.last())
+            .map_or(crate::route::AspaContextId::DEFAULT, |record| {
+                record.peer_scope
+            })
+    }
+
     fn publish_route_event(&mut self, mut event: RouteEvent) {
         event.event_id = self.next_route_event_id;
         if let Some(next) = self.next_route_event_id.checked_add(1) {
@@ -5241,8 +5262,21 @@ impl RibManager {
             self.policy_filtered_routes.remove(&target_peer);
         }
         let mut newly_filtered = newly_filtered.into_iter();
+        // Resolved only when an event is published.
+        let target_peer_scope = if newly_filtered.as_slice().is_empty() {
+            crate::route::AspaContextId::DEFAULT
+        } else {
+            self.session_peer_scope(target_peer)
+        };
         for key in newly_filtered.by_ref() {
             self.replacement_checkpoint(false);
+            let peer_scope = self
+                .ribs
+                .get(&key.source_peer)
+                .and_then(|rib| rib.get(&key.prefix, key.path_id))
+                .map_or(crate::route::AspaContextId::DEFAULT, |route| {
+                    route.aspa_context
+                });
             self.publish_route_event(RouteEvent {
                 event_id: 0,
                 event_type: RouteEventType::PolicyFiltered,
@@ -5250,6 +5284,9 @@ impl RibManager {
                 peer: Some(key.source_peer),
                 previous_peer: None,
                 target_peer: Some(key.target_peer),
+                peer_scope,
+                previous_peer_scope: crate::route::AspaContextId::DEFAULT,
+                target_peer_scope,
                 timestamp_unix_ms: crate::event::unix_time_ms_now(),
                 path_id: key.path_id,
                 reason: "policy_denied".to_string(),

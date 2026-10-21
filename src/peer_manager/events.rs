@@ -299,7 +299,7 @@ impl PeerManager {
 
     pub(super) fn handle_query_session_event_history(
         &self,
-        peer: Option<IpAddr>,
+        peer: Option<&PeerKey>,
         event_types: &BTreeSet<SessionLifecycleEventType>,
         limit: usize,
         reply: oneshot::Sender<Vec<SessionLifecycleEvent>>,
@@ -314,9 +314,8 @@ impl PeerManager {
             .session_event_history
             .iter()
             .rev()
-            .filter(|event| match peer {
-                Some(peer) => event.peer == peer,
-                None => true,
+            .filter(|event| {
+                peer.is_none_or(|peer| peer.names_event(event.peer, event.peer_label.as_deref()))
             })
             .filter(|event| event_types.is_empty() || event_types.contains(&event.event_type))
             .take(limit)
@@ -328,7 +327,7 @@ impl PeerManager {
 
     pub(super) fn handle_query_policy_event_history(
         &self,
-        peer: Option<IpAddr>,
+        peer: Option<&PeerKey>,
         limit: usize,
         reply: oneshot::Sender<Vec<PolicyEvent>>,
     ) {
@@ -342,9 +341,12 @@ impl PeerManager {
             .policy_event_history
             .iter()
             .rev()
-            .filter(|event| match peer {
-                Some(peer) => event.peer == Some(peer),
-                None => true,
+            .filter(|event| {
+                peer.is_none_or(|peer| {
+                    event.peer.is_some_and(|address| {
+                        peer.names_event(address, event.peer_label.as_deref())
+                    })
+                })
             })
             .take(limit)
             .map(|event| event.as_ref().clone())

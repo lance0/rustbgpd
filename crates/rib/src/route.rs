@@ -153,20 +153,32 @@ impl ReceivedAt {
     }
 }
 
-/// The interned [`AspaValidationContext`] of the session that received a
-/// [`Route`]. Two bytes instead of the 12-byte context, which is constant per
-/// session: each route keeps the identity of its own session's context, so
-/// routes retained across a reconnect (GR or LLGR stale) are revalidated with
-/// the context they were received under, not the new session's.
+/// The interned per-session source context of a [`Route`]: the session's
+/// [`AspaValidationContext`] and, for an interface-scoped (IPv6 link-local)
+/// neighbor, its configured interface. Two bytes instead of the 12-byte
+/// context plus a name, all constant per session: each route keeps the
+/// identity of its own session's context, so routes retained across a
+/// reconnect (GR or LLGR stale) are revalidated with the context they were
+/// received under, and report the interface they were learned on, not the
+/// new session's or the current neighbor inventory's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AspaContextId(u16);
 
-/// Append-only context table. Contexts are keyed by negotiated neighbor ASN
-/// and configured local role, so the table grows only with distinct
-/// ASN/role pairs seen by the process.
+/// Append-only context table. Contexts are keyed by negotiated neighbor ASN,
+/// configured local role and, for a scoped neighbor, its interface, so the
+/// table grows only with distinct combinations seen by the process.
 struct AspaContextTable {
+    /// Ids of unscoped contexts.
     ids: FastMap<AspaValidationContext, u16>,
+    /// Ids of scoped contexts, by interface; keyed by `Arc<str>` so a lookup
+    /// borrows the caller's `&str` instead of allocating.
+    scoped_ids: FastMap<Arc<str>, FastMap<AspaValidationContext, u16>>,
+    /// The table has filled and the overflow was logged once.
+    overflow_reported: bool,
     contexts: Vec<AspaValidationContext>,
+    /// Interface of each context's scoped source neighbor, indexed like
+    /// `contexts`.
+    interfaces: Vec<Option<Arc<str>>>,
     /// Shared copy of `contexts` for readers; rebuilt after an insert.
     snapshot: Option<Arc<[AspaValidationContext]>>,
 }
@@ -176,23 +188,59 @@ impl AspaContextTable {
         let default = AspaValidationContext::default();
         Self {
             ids: std::iter::once((default, 0)).collect(),
+            scoped_ids: FastMap::default(),
+            overflow_reported: false,
             contexts: vec![default],
+            interfaces: vec![None],
             snapshot: None,
         }
     }
 
-    // Append-only and never shrinks: the ceiling is 65,535 distinct ASN/role
-    // pairs per process. Reclaiming ids would need per-context refcounts.
-    fn intern(&mut self, context: AspaValidationContext) -> AspaContextId {
-        if let Some(&id) = self.ids.get(&context) {
+    fn lookup(&self, context: AspaValidationContext, interface: Option<&str>) -> Option<u16> {
+        match interface {
+            None => self.ids.get(&context),
+            Some(interface) => self.scoped_ids.get(interface)?.get(&context),
+        }
+        .copied()
+    }
+
+    // Append-only and never shrinks: the ceiling is 65,535 distinct
+    // ASN/role/interface combinations per process. Reclaiming ids would need
+    // per-context refcounts.
+    fn intern(&mut self, context: AspaValidationContext, interface: Option<&str>) -> AspaContextId {
+        if let Some(id) = self.lookup(context, interface) {
             return AspaContextId(id);
         }
         let id = match u16::try_from(self.contexts.len()) {
             Ok(id) if id < AspaContextId::UNRESOLVED.0 => id,
-            _ => return AspaContextId::UNRESOLVED,
+            _ => {
+                if !self.overflow_reported {
+                    self.overflow_reported = true;
+                    tracing::warn!(
+                        capacity = self.contexts.len(),
+                        "route source context table is full: new sessions' routes keep \
+                         their stored ASPA verdicts on revalidation, and routes from new \
+                         IPv6 link-local neighbor sessions report no interface, so scoped \
+                         selectors do not find them until the daemon restarts"
+                    );
+                }
+                return AspaContextId::UNRESOLVED;
+            }
         };
         self.contexts.push(context);
-        self.ids.insert(context, id);
+        let interface = interface.map(Arc::<str>::from);
+        self.interfaces.push(interface.clone());
+        match interface {
+            None => {
+                self.ids.insert(context, id);
+            }
+            Some(interface) => {
+                self.scoped_ids
+                    .entry(interface)
+                    .or_default()
+                    .insert(context, id);
+            }
+        }
         self.snapshot = None;
         AspaContextId(id)
     }
@@ -216,21 +264,48 @@ impl AspaContextId {
     /// Panics if the table lock is poisoned.
     #[must_use]
     pub fn intern(context: AspaValidationContext) -> Self {
+        Self::intern_scoped(context, None)
+    }
+
+    /// Intern `context` for a session bound to `interface` (an IPv6
+    /// link-local neighbor), so its routes keep that interface as their
+    /// source provenance. Returns [`Self::UNRESOLVED`] once the table is full.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table lock is poisoned.
+    #[must_use]
+    pub fn intern_scoped(context: AspaValidationContext, interface: Option<&str>) -> Self {
         let known = ASPA_CONTEXTS
             .read()
             .expect("ASPA context table poisoned")
-            .ids
-            .get(&context)
-            .copied();
+            .lookup(context, interface);
         known.map_or_else(
             || {
                 ASPA_CONTEXTS
                     .write()
                     .expect("ASPA context table poisoned")
-                    .intern(context)
+                    .intern(context, interface)
             },
             Self,
         )
+    }
+
+    /// Interface of the scoped neighbor whose session interned this context;
+    /// `None` for numbered neighbors, local routes and [`Self::UNRESOLVED`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table lock is poisoned.
+    #[must_use]
+    pub fn peer_interface(self) -> Option<Arc<str>> {
+        ASPA_CONTEXTS
+            .read()
+            .expect("ASPA context table poisoned")
+            .interfaces
+            .get(usize::from(self.0))
+            .cloned()
+            .flatten()
     }
 
     /// Snapshot of every interned context, indexed by id. Take one per
@@ -368,6 +443,15 @@ pub struct FibInstallCandidate {
 }
 
 impl Route {
+    /// Interface of the scoped (IPv6 link-local) neighbor this route was
+    /// learned from, as recorded by its receiving session. `None` for
+    /// numbered neighbors and local routes. `peer` plus this interface
+    /// identifies the source neighbor.
+    #[must_use]
+    pub fn peer_interface(&self) -> Option<Arc<str>> {
+        self.aspa_context.peer_interface()
+    }
+
     /// Stored attributes for an encoder that emits the next hop itself, from
     /// [`Route::next_hop`].
     ///
@@ -1535,6 +1619,32 @@ mod tests {
         assert_eq!(contexts.get(AspaContextId::UNRESOLVED), None);
     }
 
+    /// The interface is part of the interned identity: a scoped session's
+    /// routes report its interface, the same context on another interface
+    /// or unscoped gets a different id, and the ASPA context still resolves.
+    #[test]
+    fn scoped_context_ids_record_the_source_interface() {
+        let context = AspaValidationContext {
+            neighbor_asn: Some(4_200_000_201),
+            local_role: None,
+            first_as_check_exempt: false,
+        };
+        let unscoped = AspaContextId::intern(context);
+        let eth0 = AspaContextId::intern_scoped(context, Some("eth0"));
+        let eth1 = AspaContextId::intern_scoped(context, Some("eth1"));
+        assert_ne!(unscoped, eth0);
+        assert_ne!(eth0, eth1);
+        assert_eq!(AspaContextId::intern_scoped(context, Some("eth0")), eth0);
+        assert_eq!(unscoped.peer_interface(), None);
+        assert_eq!(eth0.peer_interface().as_deref(), Some("eth0"));
+        assert_eq!(eth1.peer_interface().as_deref(), Some("eth1"));
+        assert_eq!(AspaContextId::DEFAULT.peer_interface(), None);
+        assert_eq!(AspaContextId::UNRESOLVED.peer_interface(), None);
+        let contexts = AspaContextId::snapshot();
+        assert_eq!(contexts.get(eth0), Some(context));
+        assert_eq!(contexts.get(eth1), Some(context));
+    }
+
     #[test]
     fn aspa_context_table_reports_overflow_as_unresolved() {
         let mut table = AspaContextTable::new();
@@ -1544,11 +1654,16 @@ mod tests {
             first_as_check_exempt: false,
         };
         for asn in 1..u32::from(u16::MAX) {
-            assert_eq!(table.intern(ctx(asn)).0, u16::try_from(asn).unwrap());
+            assert_eq!(table.intern(ctx(asn), None).0, u16::try_from(asn).unwrap());
         }
-        assert_eq!(table.intern(ctx(u32::MAX)), AspaContextId::UNRESOLVED);
-        assert_eq!(table.intern(ctx(7)).0, 7, "existing ids still resolve");
+        assert_eq!(table.intern(ctx(u32::MAX), None), AspaContextId::UNRESOLVED);
+        assert_eq!(
+            table.intern(ctx(7), None).0,
+            7,
+            "existing ids still resolve"
+        );
         assert_eq!(table.contexts.len(), usize::from(u16::MAX));
+        assert!(table.overflow_reported, "the first refusal is logged once");
     }
 
     fn bgpls_route(family: BgpLsFamily, nlri: BgpLsNlri) -> BgpLsRibRoute {

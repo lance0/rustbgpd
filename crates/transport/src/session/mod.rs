@@ -2074,6 +2074,15 @@ impl PeerSession {
         let peer_label = rustbgpd_telemetry::peer_label(peer_ip);
         initialize_route_safety_metric_series(&config, &metrics, &peer_label);
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
+        // Even a default ASPA context must carry a scoped neighbor's
+        // interface, so the cache never hands out the unscoped id.
+        let aspa_context_id = (
+            rustbgpd_wire::AspaValidationContext::default(),
+            rustbgpd_rib::route::AspaContextId::intern_scoped(
+                rustbgpd_wire::AspaValidationContext::default(),
+                config.peer_interface.as_deref(),
+            ),
+        );
         // Capability 77 is opt-in and needs a directly attached link-local peer.
         config.peer.link_local_next_hop &= link_local_next_hop_scope.is_some()
             && matches!(peer_ip, IpAddr::V6(addr) if is_ipv6_link_local(&addr));
@@ -2173,7 +2182,7 @@ impl PeerSession {
             peer_ip,
             link_local_next_hop_scope,
             negotiated: None,
-            aspa_context_id: Default::default(),
+            aspa_context_id,
             add_path_receive_families: Vec::new(),
             ipv6_unicast_withheld: false,
             received_eor_families: HashSet::new(),

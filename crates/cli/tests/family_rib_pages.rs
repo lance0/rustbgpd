@@ -197,7 +197,7 @@ async fn family_pages_preserve_output_and_source_identity_and_send_filters() {
         .await
         .clone()
         .unwrap();
-    assert_eq!(request.neighbor_address, "fe80::1");
+    assert_eq!(request.neighbor_address, "fe80::1%eth0");
     assert!(request.source_peer_filter.is_empty());
     assert_eq!(
         request.afi_safi,
@@ -407,7 +407,7 @@ async fn family_best_pages_send_source_filters_and_typed_exact_or_longer_prefixe
                 (
                     proto::FamilyRouteView::Best as i32,
                     String::new(),
-                    "fe80::1".into(),
+                    "fe80::1%eth0".into(),
                     afi_safi as i32,
                     address.into(),
                     length,
@@ -610,7 +610,7 @@ async fn evpn_peer_pages_forward_raw_rd_and_mac_esi_vni_without_changing_json() 
                 .clone()
                 .unwrap()
         };
-        assert_eq!(request.neighbor_address, peer.split('%').next().unwrap());
+        assert_eq!(request.neighbor_address, peer);
         assert_eq!(request.rd_filter, "0x00020000fde80064");
         assert_eq!(request.mac_filter, "00:11:22:33:44:55");
         assert_eq!(request.esi_filter, "00:01:02:03:04:05:06:07:08:09");

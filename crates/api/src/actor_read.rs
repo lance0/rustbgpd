@@ -64,6 +64,9 @@ pub(crate) struct KnownPeerQueries {
     pub(crate) operator_lane: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
     pub(crate) rib: mpsc::Sender<RibUpdate>,
     pub(crate) daemon_gate: DaemonGate,
+    /// Published managed-peer roster, for scoped-selector checks and the
+    /// candidates a bare link-local selector's error names.
+    pub(crate) roster: Option<crate::import_roster::ImportRosterReader>,
 }
 
 impl KnownPeerQueries {
@@ -112,6 +115,23 @@ impl KnownPeerQueries {
         } else {
             Err(Status::not_found(format!("neighbor {address} not found")))
         }
+    }
+}
+
+impl KnownPeerQueries {
+    /// [`Self::require_known`] for a parsed selector, naming its scoped
+    /// form (`fe80::1%eth0`) in the `NOT_FOUND` message.
+    pub(crate) async fn require_known_key(
+        &self,
+        key: &crate::peer_types::PeerKey,
+    ) -> Result<(), Status> {
+        self.require_known(key.address).await.map_err(|status| {
+            if status.code() == tonic::Code::NotFound {
+                Status::not_found(format!("neighbor {key} not found"))
+            } else {
+                status
+            }
+        })
     }
 }
 
@@ -184,6 +204,7 @@ pub(crate) fn mock_known_peer_queries(managed: IpAddr, retained: IpAddr) -> Know
         operator_lane: Some(operator_tx),
         rib: rib_tx,
         daemon_gate: DaemonGate::new(),
+        roster: None,
     }
 }
 
@@ -252,6 +273,7 @@ mod tests {
             operator_lane: None,
             rib: rib_tx,
             daemon_gate: DaemonGate::new(),
+            roster: None,
         };
         let started = tokio::time::Instant::now();
         let error = tokio::time::timeout(

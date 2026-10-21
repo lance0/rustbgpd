@@ -87,7 +87,7 @@ async fn peer_evpn_output_and_rpc_errors() {
             .as_ref()
             .unwrap()
             .neighbor_address,
-        "fe80::2"
+        "fe80::2%eth0"
     );
     for (code, prefix) in [
         (tonic::Code::Unimplemented, "not supported by this daemon"),

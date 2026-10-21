@@ -192,7 +192,12 @@ async fn query_session_event_history(
     limit: usize,
 ) -> Vec<SessionLifecycleEvent> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    mgr.handle_query_session_event_history(peer, &event_types, limit, reply_tx);
+    mgr.handle_query_session_event_history(
+        peer.map(|peer| PeerKey::new(peer, None)).as_ref(),
+        &event_types,
+        limit,
+        reply_tx,
+    );
     reply_rx.await.unwrap()
 }
 
@@ -202,7 +207,11 @@ async fn query_policy_event_history(
     limit: usize,
 ) -> Vec<PolicyEvent> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    mgr.handle_query_policy_event_history(peer, limit, reply_tx);
+    mgr.handle_query_policy_event_history(
+        peer.map(|peer| PeerKey::new(peer, None)).as_ref(),
+        limit,
+        reply_tx,
+    );
     reply_rx.await.unwrap()
 }
 

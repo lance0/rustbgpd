@@ -2038,6 +2038,7 @@ mod tests {
         let rejected =
             |routes: Vec<crate::proto::RejectedRoute>, retained: usize| RibPageState::Rejected {
                 page: crate::proto::ListRejectedRoutesResponse {
+                    peer_interface: Default::default(),
                     peer_address: "198.51.100.1".into(),
                     retention_enabled: true,
                     capacity: 1024,
@@ -2126,6 +2127,8 @@ mod tests {
         app.view = View::AdvertisedExplain("198.51.100.1".into());
         app.explain = Some(ExplainState::Ready(Box::new(
             crate::proto::ExplainAdvertisedRouteResponse {
+                peer_interface: Default::default(),
+                route_peer_interface: Default::default(),
                 decision: ExplainDecision::Deny as i32,
                 peer_address: "198.51.100.1".into(),
                 prefix: "203.0.113.0".into(),
@@ -2136,6 +2139,7 @@ mod tests {
                 path_id: 42,
                 rd: "65000:100".into(),
                 source: Some(crate::proto::RouteSourceIdentity {
+                    peer_interface: Default::default(),
                     peer_address: "192.0.2.9".into(),
                     path_id: 7,
                 }),
