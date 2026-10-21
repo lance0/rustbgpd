@@ -2929,7 +2929,7 @@ impl RibManager {
     /// (integer adds — no per-(prefix × peer) prometheus lookups).
     fn bump_export_counters(&mut self, peer: IpAddr, rows: &[(Option<String>, PolicyAction, u64)]) {
         let readiness = self.replacement_readiness.clone();
-        let stats = self.export_policy_stats.entry(peer).or_default();
+        let mut stats = crate::update::NeighborPolicyStats::default();
         let peer_label = peer.to_string();
         for (policy, action, n) in rows {
             super::replacement_readiness_checkpoint(&readiness, false);
@@ -2956,6 +2956,7 @@ impl RibManager {
                 *n,
             );
         }
+        super::add_export_tally(&mut self.export_policy_counters, peer, stats);
     }
 
     fn leave_group(&mut self, gid: usize, peer: IpAddr) {

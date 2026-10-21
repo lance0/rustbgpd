@@ -597,7 +597,8 @@ impl RibManager {
                 .adj_ribs_out
                 .entry(peer)
                 .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
-            let policy_stats = self.export_policy_stats.entry(peer).or_default();
+            let mut export_tally = crate::update::NeighborPolicyStats::default();
+            let policy_stats = &mut export_tally;
 
             let mut fs_announce = Vec::new();
             let mut fs_withdraw = Vec::new();
@@ -623,6 +624,7 @@ impl RibManager {
                 &mut fs_withdraw,
                 &mut checkpoint,
             );
+            crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
 
             if (!fs_announce.is_empty() || !fs_withdraw.is_empty())
                 && let Err(failure) = self.try_send_and_commit_outbound_update(

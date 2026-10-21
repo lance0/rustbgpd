@@ -75,6 +75,18 @@ fn with_executor_handoff<T>(work: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Add one export batch's tally for `peer` to its neighbor's totals, one map
+/// lookup per peer per batch. An empty tally touches nothing.
+fn add_export_tally(
+    counters: &mut HashMap<IpAddr, crate::update::ExportPolicyCounters>,
+    peer: IpAddr,
+    tally: NeighborPolicyStats,
+) {
+    if tally != NeighborPolicyStats::default() {
+        counters.entry(peer).or_default().add(tally);
+    }
+}
+
 /// Release owned temporary elements while the actor still owns readiness.
 fn retire_vec<T>(values: &mut Vec<T>, checkpoint: &mut impl FnMut()) {
     checkpoint();
@@ -640,6 +652,9 @@ pub struct RibManager {
     /// avoids making every non-transport `PeerUp` producer construct a fake
     /// wire encoder while still fencing collision losers by session id.
     pending_peer_export_encoders: HashMap<(IpAddr, u64), Arc<dyn ExactExportEncoder>>,
+    /// Neighbor export-policy totals staged before `PeerUp`, keyed like the
+    /// encoders above.
+    pending_peer_export_counters: HashMap<(IpAddr, u64), crate::update::ExportPolicyCounters>,
     /// Session-stamped peer GR capability context staged immediately before
     /// `PeerUp`, used only by the process-start RFC 4724 selection gate.
     pending_peer_gr_context: HashMap<(IpAddr, u64), PeerSelectionDeferralContext>,
@@ -919,8 +934,11 @@ pub struct RibManager {
     /// route-level policy-filtered events transition-based instead of
     /// re-emitting on every dirty or forced outbound resync.
     policy_filtered_routes: HashMap<IpAddr, HashSet<PolicyFilteredRouteKey>>,
-    /// Aggregate export-policy evaluation counters keyed by target peer.
-    export_policy_stats: HashMap<IpAddr, NeighborPolicyStats>,
+    /// The attached session's export-policy totals handle, keyed by target
+    /// peer. The handle belongs to the neighbor (`PeerUp` carries it), so the
+    /// totals outlive this registration; only the RIB's reference ends with
+    /// the session.
+    export_policy_counters: HashMap<IpAddr, crate::update::ExportPolicyCounters>,
     /// Bounded recent route-event history for after-the-fact operator
     /// timeline queries. Live streaming still uses `route_events_tx`.
     route_event_history: VecDeque<Arc<RouteEvent>>,
@@ -1799,6 +1817,8 @@ pub(super) struct LiveSessionRecord {
     /// Actual group-owned EVPN admission, including clean deltas without keys.
     evpn_admitted_count: usize,
     group_recovery_fallback: Option<update_groups::RecoveryFallbackCause>,
+    /// The neighbor's export-policy totals, installed with the registration.
+    export_policy_counters: crate::update::ExportPolicyCounters,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2348,6 +2368,7 @@ impl RibManager {
             pending_peer_withheld_families: HashMap::new(),
             pending_peer_rs_control: HashMap::new(),
             pending_peer_export_encoders: HashMap::new(),
+            pending_peer_export_counters: HashMap::new(),
             pending_peer_gr_context: HashMap::new(),
             pending_peer_source_context: HashMap::new(),
             dampening_history: dampening_history::DampeningHistoryState::default(),
@@ -2466,7 +2487,7 @@ impl RibManager {
             route_events_tx,
             fib_candidate_changes_tx: watch::channel(0).0,
             policy_filtered_routes: HashMap::new(),
-            export_policy_stats: HashMap::new(),
+            export_policy_counters: HashMap::new(),
             route_event_history: VecDeque::new(),
             next_route_event_id: 1,
             route_event_id_exhausted: false,
@@ -4133,6 +4154,14 @@ impl RibManager {
                 // keyed by session id against collision-window interleaving.
                 self.pending_peer_rs_control
                     .insert((peer, session_id), rs_control_asn);
+            }
+            RibUpdate::SetPeerExportPolicyCounters {
+                peer,
+                session_id,
+                counters,
+            } => {
+                self.pending_peer_export_counters
+                    .insert((peer, session_id), counters);
             }
             RibUpdate::SetPeerExportEncoder {
                 peer,

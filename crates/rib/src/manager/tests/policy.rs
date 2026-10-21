@@ -57,11 +57,12 @@ async fn export_policy_counter_records_single_best_permit() {
     assert_eq!(stats.export_policy_routes_permitted, 1);
     assert_eq!(stats.export_policy_routes_denied, 0);
 
-    // Peer-down clears per-peer state including the export policy
-    // counters. Without this cleanup the HashMap grows unbounded across
-    // peer add/delete churn — see handle_peer_down in peer_lifecycle.rs.
-    // The counter resets here matches the import-side per-session
-    // contract: both directions zero on the next session.
+    // Peer-down drops the RIB's reference to the session's export totals
+    // with the rest of the per-peer state, so the map stays bounded across
+    // peer churn. The totals themselves live in the neighbor's handle (a
+    // session without a staged handle, as here, counts into a fresh one);
+    // `export_policy_totals_survive_a_session_reset` in the transport tests
+    // pins that a neighbor's handle keeps counting across sessions.
     tx.send(RibUpdate::PeerDown {
         peer: target,
         session_id: 0,
@@ -71,7 +72,7 @@ async fn export_policy_counter_records_single_best_permit() {
     let stats_after = query_neighbor_policy_stats(&tx, target).await;
     assert_eq!(
         stats_after.export_policy_routes_permitted, 0,
-        "PeerDown must clear export_policy_stats; saw {stats_after:?}"
+        "PeerDown must drop the RIB's export totals reference; saw {stats_after:?}"
     );
     assert_eq!(stats_after.export_policy_routes_denied, 0);
 
@@ -81,14 +82,9 @@ async fn export_policy_counter_records_single_best_permit() {
 
 #[tokio::test]
 async fn graceful_restart_clears_export_policy_stats() {
-    // Mirror of the PeerDown cleanup assertion. A GR-driven session
-    // teardown reuses the outbound peer state slot on reconnect, so the
-    // export policy aggregates must reset alongside the rest of the
-    // per-peer state cleared in handle_peer_graceful_restart. Without
-    // this, `rbgp neighbor show` shows import counters at 0
-    // (reset on SessionDown in transport/session/fsm.rs) but export
-    // counters carrying forward — a directional asymmetry that
-    // confuses operators.
+    // Mirror of the PeerDown cleanup assertion: a GR-driven teardown also
+    // drops the RIB's reference to the session's export totals. The next
+    // session stages its neighbor's handle again before `PeerUp`.
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
@@ -154,7 +150,7 @@ async fn graceful_restart_clears_export_policy_stats() {
     let stats_after = query_neighbor_policy_stats(&tx, target).await;
     assert_eq!(
         stats_after.export_policy_routes_permitted, 0,
-        "PeerGracefulRestart must clear export_policy_stats; saw {stats_after:?}"
+        "PeerGracefulRestart must drop the RIB's export totals reference; saw {stats_after:?}"
     );
     assert_eq!(stats_after.export_policy_routes_denied, 0);
 

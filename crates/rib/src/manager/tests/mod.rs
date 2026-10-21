@@ -324,14 +324,13 @@ fn neighbor_rib_snapshot_query_projects_policy_stats() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-    manager.export_policy_stats.insert(
-        peer,
-        NeighborPolicyStats {
-            export_policy_routes_permitted: 17,
-            export_policy_routes_denied: 19,
-            ..Default::default()
-        },
-    );
+    let counters = crate::update::ExportPolicyCounters::default();
+    counters.add(NeighborPolicyStats {
+        export_policy_routes_permitted: 17,
+        export_policy_routes_denied: 19,
+        ..Default::default()
+    });
+    manager.export_policy_counters.insert(peer, counters);
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryNeighborRibSnapshots {
         peers: vec![peer],

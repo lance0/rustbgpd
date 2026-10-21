@@ -3469,9 +3469,9 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<NeighborPolicyStats>,
     ) {
         let stats = self
-            .export_policy_stats
+            .export_policy_counters
             .get(&peer)
-            .copied()
+            .map(crate::update::ExportPolicyCounters::snapshot)
             .unwrap_or_default();
         let _ = reply.send(stats);
     }
@@ -3507,9 +3507,9 @@ impl RibManager {
                 .grouped_advertised_count(peer)
                 .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
             policy_stats: self
-                .export_policy_stats
+                .export_policy_counters
                 .get(&peer)
-                .copied()
+                .map(crate::update::ExportPolicyCounters::snapshot)
                 .unwrap_or_default(),
             outbound: self.peer_outbound_state(peer),
             remote_asn: self.peer_asn.get(&peer).copied(),

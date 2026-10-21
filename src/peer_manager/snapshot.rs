@@ -173,6 +173,11 @@ fn manager_peer_info(
 ) -> PeerInfo {
     let (rfc8212_import_policy, rfc8212_export_policy) =
         rfc8212_statuses(managed, ebgp_requires_policy);
+    let export_policy = managed
+        .transport_config
+        .neighbor_counters
+        .export_policy()
+        .snapshot();
     PeerInfo {
         address: peer.address,
         interface: peer.interface.clone(),
@@ -233,8 +238,10 @@ fn manager_peer_info(
         otc_routes_blocked: 0,
         import_policy_routes_permitted: 0,
         import_policy_routes_denied: 0,
-        export_policy_routes_permitted: 0,
-        export_policy_routes_denied: 0,
+        // Owned by the neighbor's counter block, not the session, so a stale
+        // or down session still reports them.
+        export_policy_routes_permitted: export_policy.export_policy_routes_permitted,
+        export_policy_routes_denied: export_policy.export_policy_routes_denied,
         flap_count: 0,
         uptime_secs: 0,
         reconnect_in_secs: 0,
