@@ -528,14 +528,7 @@ impl RibManager {
             checkpoint();
             target.record_eval(&evaluation, best.peer);
             if let Some(trace) = target.trace() {
-                trace.policy_label = export_pol.map(|chain| {
-                    super::policy_label_with_term(
-                        Some(chain),
-                        &ctx,
-                        evaluation.action,
-                        evaluation.matched_policy.as_deref(),
-                    )
-                });
+                trace.policy_label = trace.evaluated_label.take();
             }
             if result.action != rustbgpd_policy::PolicyAction::Permit {
                 if let Some(trace) = target.trace() {
