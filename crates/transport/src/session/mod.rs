@@ -18,7 +18,7 @@ mod writer;
 pub use io::{connect_authenticated, preflight_authenticated_dial};
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -606,6 +606,12 @@ pub(crate) struct PeerSession {
     /// carried it is down, so retained routes would point into a dead link.
     /// Skip GR/LLGR retention on this teardown.
     suppress_gr_retention: bool,
+    /// The current TCP connection, if any (fast external failover).
+    connection: Option<ConnectionStamp>,
+    /// The previous connection while its routes are retained under GR/LLGR,
+    /// so a confirmed interface-down that arrives after the TCP loss can
+    /// still purge them.
+    gr_retained_connection: Option<RetainedConnection>,
     /// Whether the import-decision cache is populated (ADR-0073
     /// `[policy.explain].enabled`). Read on the inbound UPDATE hot path
     /// to skip the decision snapshot build/clone entirely when explain
@@ -883,6 +889,34 @@ const SEND_HOLD_TIMER_EXPIRES_FSM_EVENT: u16 = 29;
 /// external failover closes the session: RFC 4271 §8.1 Event 8,
 /// `AutomaticStop` (the local system stops the connection on its own).
 const AUTOMATIC_STOP_FSM_EVENT: u16 = 8;
+
+/// Endpoints and start time of the session's current TCP connection, captured
+/// when the connection is installed so fast external failover can still match
+/// it after the socket is gone.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ConnectionStamp {
+    pub(super) local: SocketAddr,
+    pub(super) remote: SocketAddr,
+    pub(super) started_at: std::time::Instant,
+}
+
+impl ConnectionStamp {
+    fn of(read_half: &OwnedReadHalf) -> Option<Self> {
+        Some(Self {
+            local: read_half.local_addr().ok()?,
+            remote: read_half.peer_addr().ok()?,
+            started_at: std::time::Instant::now(),
+        })
+    }
+}
+
+/// The connection whose routes the RIB is holding under GR/LLGR after an
+/// ordinary transport loss, and whether that session was eBGP.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RetainedConnection {
+    pub(super) connection: ConnectionStamp,
+    pub(super) ebgp: bool,
+}
 
 /// The writer's RFC 9687 `SendHoldTime` for this session, as a
 /// `Duration`. `0` in config means disabled (`None`).
@@ -2166,6 +2200,7 @@ impl PeerSession {
             }
             None => (None, None, None, None, None, None, None),
         };
+        let connection = read_half.as_ref().and_then(ConnectionStamp::of);
         Self {
             config,
             fsm,
@@ -2277,6 +2312,8 @@ impl PeerSession {
             received_hard_reset: false,
             sent_hard_reset: false,
             suppress_gr_retention: false,
+            connection,
+            gr_retained_connection: None,
             import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
                 explain_cache_size,
@@ -2901,6 +2938,7 @@ impl PeerSession {
                                 self.peer_label.clone(),
                                 send_hold_duration(&self.config),
                             );
+                            self.connection = ConnectionStamp::of(&rh);
                             self.read_half = Some(rh);
                             self.tcp_ao_info = tcp_ao_info;
                             self.tcp_ao_key_metadata =
@@ -2974,6 +3012,7 @@ impl PeerSession {
             self.peer_label.clone(),
             send_hold_duration(&self.config),
         );
+        self.connection = ConnectionStamp::of(&rh);
         self.read_half = Some(rh);
         self.cancel_outbound_replay();
         self.writer_bulk_admitted = 0;

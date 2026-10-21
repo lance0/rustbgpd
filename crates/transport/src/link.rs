@@ -10,6 +10,7 @@
 //! here looks at eBGP status or TTL.
 
 use std::net::{IpAddr, SocketAddr};
+use std::time::Instant;
 
 /// What the kernel reported about the interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +65,10 @@ pub struct LinkDownEvent {
     /// Addresses the interface carried when the event arrived. For
     /// [`LinkDownCause::AddressRemoved`], only the removed address.
     pub addresses: Vec<InterfaceAddress>,
+    /// When the monitor read the kernel message. A connection that started
+    /// after this cannot be the one the event describes, so a delivery that
+    /// was delayed past a reconnect is ignored.
+    pub observed_at: Instant,
 }
 
 impl LinkDownEvent {
@@ -123,6 +128,7 @@ mod tests {
             ifindex,
             ifname: "eth0".into(),
             cause: LinkDownCause::CarrierLost,
+            observed_at: Instant::now(),
             addresses: addresses
                 .iter()
                 .map(|(local, prefix, len)| InterfaceAddress {

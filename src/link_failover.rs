@@ -165,6 +165,7 @@ impl LinkTable {
             ifname: self.name(ifindex),
             cause,
             addresses,
+            observed_at: std::time::Instant::now(),
         }
     }
 }

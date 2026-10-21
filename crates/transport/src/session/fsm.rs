@@ -333,23 +333,41 @@ impl PeerSession {
         self.last_error = cause;
     }
 
+    /// The peer's ASN as far as this session knows it (negotiated OPEN first,
+    /// then a non-zero configured value) differs from the local ASN. An
+    /// accept-any child whose OPEN has not arrived is not provably eBGP.
+    fn peer_is_ebgp(&self) -> bool {
+        self.negotiated
+            .as_deref()
+            .or(self.fsm.negotiated())
+            .map(|negotiated| negotiated.peer_asn)
+            .or(Some(self.config.peer.remote_asn).filter(|asn| *asn != 0))
+            .is_some_and(|asn| asn != self.config.peer.local_asn)
+    }
+
     /// Fast external failover. Close the connection locally, without a
     /// NOTIFICATION (the link it would travel on is gone) and without GR/LLGR
-    /// retention, when this session's own socket proves the downed interface
-    /// carries it. Anything else (no connection, a different interface, or an
-    /// unreadable socket address) leaves the session alone. The session is not
+    /// retention, when this session's own connection proves the downed
+    /// interface carries it and the session is eBGP. If the TCP connection
+    /// already failed on its own and its routes are retained under GR/LLGR,
+    /// purge them instead. Anything else (a different interface, an iBGP or
+    /// not-yet-identified peer, or an event observed before the current
+    /// connection started) leaves the session alone. The session is not
     /// stop-requested, so the ordinary reconnect path brings it back.
     pub(super) async fn handle_interface_down(&mut self, event: &crate::link::LinkDownEvent) {
-        let Some(read_half) = self.read_half.as_ref() else {
-            return;
-        };
-        let (Ok(local), Ok(remote)) = (read_half.local_addr(), read_half.peer_addr()) else {
-            return;
-        };
-        if !event.carries(local, remote) {
+        if self.read_half.is_none() {
+            self.purge_retained_on_interface_down(event).await;
             return;
         }
-        let cause = event.teardown_cause();
+        let Some(connection) = self.connection else {
+            return;
+        };
+        if connection.started_at > event.observed_at
+            || !event.carries(connection.local, connection.remote)
+            || !self.peer_is_ebgp()
+        {
+            return;
+        }
         warn!(
             peer = %self.peer_label,
             interface = %event.ifname,
@@ -365,13 +383,61 @@ impl PeerSession {
             self.session_telemetry_metric_lease
                 .latch_down_reason(SessionDownReason::LocalNoNotification);
         }
-        self.record_transport_cause(cause);
+        self.record_transport_cause(event.teardown_cause());
+        self.abort_connection().await;
         self.suppress_gr_retention = true;
         self.handle_tcp_disconnect();
         self.drive_fsm(Event::TcpConnectionFails).await;
         // Only an Established teardown reaches `SessionDown`, which clears
         // the latch; a pre-Established close must not leak it forward.
         self.suppress_gr_retention = false;
+    }
+
+    /// Discard everything still queued toward the dead link. Unlike ordinary
+    /// closes, which let the writer drain so a NOTIFICATION or final UPDATE
+    /// reaches the peer, the writer is aborted and joined here, and the
+    /// socket is closed with a zero linger (RST), so no backlog can leave on
+    /// the old connection when carrier returns.
+    async fn abort_connection(&mut self) {
+        if let Some(read_half) = self.read_half.as_ref() {
+            let _ = socket2::SockRef::from(read_half.as_ref()).set_linger(Some(Duration::ZERO));
+        }
+        if let Some(join) = self.writer_join.take() {
+            join.abort();
+            let _ = join.await;
+        }
+    }
+
+    /// The TCP connection failed first and its routes are held under GR/LLGR:
+    /// a confirmed interface-down for that connection purges them now rather
+    /// than at retention expiry.
+    async fn purge_retained_on_interface_down(&mut self, event: &crate::link::LinkDownEvent) {
+        let Some(retained) = self.gr_retained_connection else {
+            return;
+        };
+        let connection = retained.connection;
+        if !retained.ebgp
+            || connection.started_at > event.observed_at
+            || !event.carries(connection.local, connection.remote)
+        {
+            return;
+        }
+        warn!(
+            peer = %self.peer_label,
+            interface = %event.ifname,
+            ifindex = event.ifindex,
+            reason = event.cause.as_str(),
+            "fast external failover: interface down, purging routes retained from the lost connection"
+        );
+        self.gr_retained_connection = None;
+        self.last_error = event.teardown_cause();
+        let _ = self
+            .rib_tx
+            .send(RibUpdate::PeerDown {
+                peer: self.peer_ip,
+                session_id: self.session_identity.id,
+            })
+            .await;
     }
 
     /// Handle a hold-timer expiry observed by the select loop.
@@ -846,6 +912,8 @@ impl PeerSession {
                     }
                 }
                 Action::SessionEstablished(legacy_negotiated) => {
+                    // The new session takes over from any GR-retained one.
+                    self.gr_retained_connection = None;
                     let negotiated = if let Some(shared) = self.fsm.negotiated_shared() {
                         debug_assert_eq!(shared.as_ref(), legacy_negotiated.as_ref());
                         drop(legacy_negotiated);
@@ -1298,6 +1366,14 @@ impl PeerSession {
                             None
                         }
                     });
+                    // Remember which connection the retained routes came
+                    // from, so a confirmed interface-down that arrives after
+                    // this transport loss can still purge them.
+                    let ebgp = self.peer_is_ebgp();
+                    self.gr_retained_connection = gr_update
+                        .as_ref()
+                        .and(self.connection)
+                        .map(|connection| super::RetainedConnection { connection, ebgp });
 
                     self.negotiated = None;
                     self.ipv6_unicast_withheld = false;

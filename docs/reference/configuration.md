@@ -1437,8 +1437,16 @@ interface is judged by its own carrier, so losing one bond member does not stop
 a session while the bond stays up.
 
 The stop is local. No NOTIFICATION is sent, because the link it would travel on
-is gone. Routes from the session are withdrawn rather than retained under
-Graceful Restart or LLGR, because their next hop sits behind the dead link.
+is gone, and anything still queued for the peer is discarded: the socket is
+reset rather than drained. Routes from the session are withdrawn rather than
+retained under Graceful Restart or LLGR, because their next hop sits behind
+the dead link. If the TCP connection already failed on its own (for example
+with "network unreachable" after its address was removed) and its routes are
+being retained, the confirmed interface-down purges them. An interface-down
+observed before the session's current connection started is ignored, so a
+session that already reconnected over the recovered link is not stopped. An
+accept-any dynamic neighbor is affected only once its OPEN shows an external
+AS.
 The neighbor stays enabled and reconnects on its normal retry timer when the
 link returns. The teardown cause names the interface and the reason, for
 example `fast external failover: interface eth1 (ifindex 4) carrier lost`. It

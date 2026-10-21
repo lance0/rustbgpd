@@ -612,9 +612,9 @@ pub struct PeerManager {
     /// session set; the BFD actor is a pure session-runner that reconciles it.
     /// `None` when no neighbor configures BFD.
     bfd_coupling: Option<bfd::BfdCoupling>,
-    /// Fast external failover: confirmed interface-down events from the
-    /// daemon's link monitor. Taken into a `run`-local at loop start.
-    link_down_rx: Option<mpsc::Receiver<Arc<rustbgpd_transport::LinkDownEvent>>>,
+    /// Fast external failover: the link monitor's event feed and the bounded
+    /// deliveries waiting for full session mailboxes.
+    link_down: link_failover::LinkDownDelivery,
     /// Per-process key for the optimistic config-transaction snapshot token.
     /// Seeded once at construction; never leaves the process. Keeps the token
     /// from acting as an offline oracle for config secrets. See
@@ -1265,7 +1265,7 @@ impl PeerManager {
             conditional_reconcile_retry: None,
             current_config,
             bfd_coupling: None,
-            link_down_rx: None,
+            link_down: link_failover::LinkDownDelivery::default(),
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             accepted_rx: None,
             #[cfg(test)]
@@ -2517,6 +2517,7 @@ impl PeerManager {
             }
             let bfd_retry_at = self.bfd_retry_deadline();
             let evpn_recovery_retry_at = self.evpn_recovery_retry_at;
+            let link_down_retry_at = self.link_down.retry_at;
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             tokio::select! {
@@ -2747,6 +2748,13 @@ impl PeerManager {
                         std::future::pending::<()>().await;
                     }
                 } => self.retry_evpn_recovery_resets(),
+                () = async {
+                    if let Some(deadline) = link_down_retry_at {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => self.retry_link_down(),
                 change = async {
                     match bfd_state_change_rx.as_mut() {
                         Some(rx) => rx.recv().await,
