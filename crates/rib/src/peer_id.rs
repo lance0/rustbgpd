@@ -7,7 +7,7 @@
 //! interface, so the address alone cannot identify one.
 //!
 //! Today a `PeerId` still wraps the neighbor's address, so its ordering and
-//! hashing are exactly those of [`IpAddr`] and every map keyed by it keeps
+//! hashing are exactly those of [`IpAddr`](std::net::IpAddr) and every map keyed by it keeps
 //! the same iteration order. The intended representation is a compact
 //! generational handle (a slot index plus a generation) allocated by the peer
 //! manager, with a RIB peer table resolving it to the current endpoint. The
