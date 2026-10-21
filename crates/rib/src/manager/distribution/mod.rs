@@ -1449,43 +1449,42 @@ fn rr_suppression_reason(
 }
 
 /// Stable export decision attribution. A Deny uses `"<policy>"` or
-/// `"<policy>:<term>"` for its deciding member, enriched via the rpol
-/// statement trace; a nonempty Permit uses the shared chain-completion
-/// label and therefore has no member-term suffix. The explain-only re-walk
-/// is pinned to agree with the counted evaluation by the policy crate's
-/// agreement tests. TOML denying members carry no term name and render
-/// unchanged.
-fn policy_label_with_term(
-    chain: Option<&PolicyChain>,
-    ctx: &RouteContext<'_>,
-    action: PolicyAction,
-    matched_policy: Option<&str>,
-) -> String {
-    let term_suffix = if action == PolicyAction::Deny {
-        matched_policy.and_then(|matched_policy| {
-            rustbgpd_policy::explain_chain_statements(chain, ctx)
-                .steps
-                .last()
-                .filter(|step| step.policy_name.as_deref() == Some(matched_policy))
-                .and_then(|step| step.term_name.as_deref())
-                .map(|term| format!(":{term}"))
-        })
-    } else {
-        None
+/// `"<policy>:<term>"` for its deciding member, where `deny_term` is the
+/// deciding `.rpol` term from the evaluating walk itself
+/// ([`explain_export_evaluation`]); a nonempty Permit uses the shared
+/// chain-completion label and therefore has no member-term suffix. TOML
+/// denying members carry no term name and render unchanged.
+fn policy_label(matched_policy: Option<&str>, deny_term: Option<&str>) -> String {
+    match (matched_policy, deny_term) {
+        (Some(policy), Some(term)) => format!("{policy}:{term}"),
+        (policy, _) => policy.unwrap_or("inline").to_string(),
     }
-    .unwrap_or_default();
-    format!("{}{term_suffix}", matched_policy.unwrap_or("inline"))
 }
 
-/// Export-policy evaluation for an explain, plus the deny-validation codes
-/// of its deciding term from the same walk: one `rpki_<state>` /
-/// `aspa_<state>` code, with the route's state in `ctx`, for each
-/// validation state the term's guard tests
-/// (`CompiledChain::evaluate_with_deny_validation`).
+#[cfg(test)]
+thread_local! {
+    /// Test hook run once right after an explain's export-policy walk, to
+    /// land a dataset refresh before its deny attribution is derived.
+    pub(in crate::manager) static AFTER_EXPORT_EXPLAIN_WALK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Export-policy evaluation for an explain, with the deny attribution of
+/// its deciding term from the same walk and dataset pin
+/// (`CompiledChain::evaluate_with_deny_attribution`): the
+/// [`policy_label`], and one `rpki_<state>` / `aspa_<state>` code, with the
+/// route's state in `ctx`, for each validation state the term's guard
+/// tests. A second walk could pin a refreshed dataset and name a different
+/// term than the one that decided.
 fn explain_export_evaluation(
     export_pol: Option<&PolicyChain>,
     ctx: &RouteContext<'_>,
-) -> (rustbgpd_policy::PolicyResult, PolicyEvaluation, Vec<String>) {
+) -> (
+    rustbgpd_policy::PolicyResult,
+    PolicyEvaluation,
+    String,
+    Vec<String>,
+) {
     let Some(chain) = export_pol else {
         return (
             rustbgpd_policy::PolicyResult::permit(),
@@ -1494,10 +1493,17 @@ fn explain_export_evaluation(
                 matched_policy: None,
                 eval_error: None,
             },
+            policy_label(None, None),
             Vec::new(),
         );
     };
-    let (result, evaluation, tested) = chain.compiled().evaluate_with_deny_validation(ctx);
+    let (result, evaluation, deny_term, tested) =
+        chain.compiled().evaluate_with_deny_attribution(ctx);
+    #[cfg(test)]
+    if let Some(hook) = AFTER_EXPORT_EXPLAIN_WALK.take() {
+        hook();
+    }
+    let label = policy_label(evaluation.matched_policy.as_deref(), deny_term);
     let codes = tested
         .into_iter()
         .map(|dimension| match dimension {
@@ -1507,7 +1513,7 @@ fn explain_export_evaluation(
             rustbgpd_policy::ir::ValidationDimension::Aspa => format!("aspa_{}", ctx.aspa_state),
         })
         .collect();
-    (result, evaluation, codes)
+    (result, evaluation, label, codes)
 }
 
 /// The consumer identity for the shared single-best export tail
@@ -1575,6 +1581,10 @@ pub(in crate::manager) struct ExportGateTrace {
     /// Deny-validation codes of the export-policy evaluation
     /// (`explain_export_evaluation`).
     pub deny_validation: Vec<String>,
+    /// [`policy_label`] of the latest export-policy evaluation, from the
+    /// same walk as `deny_validation`; `None` without a chain. A
+    /// single-best arm adopts it as `policy_label`.
+    pub evaluated_label: Option<String>,
     /// Post-modification next hop the route would be staged with.
     pub staged_next_hop: Option<IpAddr>,
     /// Post-modification Add-Path identifier (always 0 on single-best).
@@ -1760,7 +1770,8 @@ impl<'a> ExportTarget<'a> {
                 evaluate_chain_with_attribution(export_pol, ctx)
             }
             Self::Explain { trace, .. } => {
-                let (result, evaluation, codes) = explain_export_evaluation(export_pol, ctx);
+                let (result, evaluation, label, codes) = explain_export_evaluation(export_pol, ctx);
+                trace.evaluated_label = export_pol.map(|_| label);
                 trace.deny_validation = codes;
                 (result, evaluation)
             }
