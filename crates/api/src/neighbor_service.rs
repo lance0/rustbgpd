@@ -459,8 +459,6 @@ async fn query_neighbor_rib_snapshots(
 
 fn apply_rib_snapshot(state: &mut proto::NeighborState, snapshot: &NeighborRibSnapshot) {
     state.prefixes_sent = u64::try_from(snapshot.advertised_count).unwrap_or(u64::MAX);
-    state.export_policy_routes_permitted = snapshot.policy_stats.export_policy_routes_permitted;
-    state.export_policy_routes_denied = snapshot.policy_stats.export_policy_routes_denied;
     state
         .update_group
         .clone_from(&snapshot.outbound.update_group);
@@ -3820,6 +3818,8 @@ mod tests {
                 info.remote_asn = 65001;
                 info.prefix_count = 5;
                 info.families = vec![(Afi::Ipv4, Safi::Unicast)];
+                info.export_policy_routes_permitted = 13;
+                info.export_policy_routes_denied = 14;
                 let _ = reply.send(Some(info));
             }
         });
@@ -3899,8 +3899,15 @@ mod tests {
             .into_inner();
 
         assert_eq!(resp.prefixes_sent, 7);
-        assert_eq!(resp.export_policy_routes_permitted, 3);
-        assert_eq!(resp.export_policy_routes_denied, 4);
+        // Export totals come from the neighbor row, keyed by full neighbor
+        // identity, not from the RIB's address-keyed snapshot.
+        assert_eq!(
+            (
+                resp.export_policy_routes_permitted,
+                resp.export_policy_routes_denied
+            ),
+            (13, 14)
+        );
         assert_eq!(resp.update_group, "group:0");
         assert_eq!(
             resp.effective_distribution_mode,
@@ -4056,10 +4063,12 @@ mod tests {
             ]
         );
         assert_eq!(neighbors[0].prefixes_sent, 7);
-        assert_eq!(neighbors[0].export_policy_routes_permitted, 3);
+        // The RIB's address-keyed export stats are not projected (they would
+        // merge fe80::1%eth0 and %eth1); the rows carry the neighbor's own.
+        assert_eq!(neighbors[0].export_policy_routes_permitted, 0);
         assert_eq!(neighbors[0].update_group, "group:7");
         assert_eq!(neighbors[1].prefixes_sent, 9);
-        assert_eq!(neighbors[1].export_policy_routes_denied, 6);
+        assert_eq!(neighbors[1].export_policy_routes_denied, 0);
         assert_eq!(neighbors[1].update_group, "private:policy_peer_context");
         assert_eq!(
             neighbors[1].effective_distribution_mode,
@@ -4452,8 +4461,7 @@ mod tests {
         rib_task.await.unwrap();
         assert_eq!(state.update_group, "group:7");
         assert_eq!(state.prefixes_sent, 7);
-        assert_eq!(state.export_policy_routes_permitted, 3);
-        assert_eq!(state.export_policy_routes_denied, 4);
+        assert_eq!((state.export_policy_routes_permitted, state.export_policy_routes_denied), (0, 0));
         assert_eq!(state.effective_distribution_mode, proto::EffectiveDistributionMode::AddPath as i32);
         assert_eq!(state.selection_deferral.len(), 1);
         assert_eq!(state.selection_deferral[0].family, "ipv4_unicast");

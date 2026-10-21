@@ -8373,7 +8373,8 @@ impl RibManager {
                     let loc_rib = &self.loc_rib;
                     let loc_rib_len = loc_rib.len();
                     let target_peer_label = peer.to_string();
-                    let policy_stats = self.export_policy_stats.entry(peer).or_default();
+                    let mut export_tally = crate::update::NeighborPolicyStats::default();
+                    let policy_stats = &mut export_tally;
 
                     let rib_out = self
                         .adj_ribs_out
@@ -8749,6 +8750,12 @@ impl RibManager {
                             &mut || checkpoint(),
                         );
                     }
+
+                    crate::manager::add_export_tally(
+                        &mut self.export_policy_counters,
+                        peer,
+                        export_tally,
+                    );
 
                     // A dirty group leaver can hold keys absent from the private
                     // Adj-RIB-Out. Heal only its actually admitted keys, preserving

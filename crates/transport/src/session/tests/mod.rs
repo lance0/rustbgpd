@@ -1015,6 +1015,10 @@ async fn recv_peer_up_after_export_context(rib_rx: &mut mpsc::Receiver<RibUpdate
     ));
     assert!(matches!(
         rib_rx.recv().await.unwrap(),
+        RibUpdate::SetPeerExportPolicyCounters { .. }
+    ));
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
         RibUpdate::SetPeerGracefulRestartContext { .. }
     ));
     // Load-bearing ordering: the peer group must reach the RIB BEFORE
@@ -1082,13 +1086,22 @@ fn deny_export_to_peer_group(group: &str) -> PolicyChain {
 /// announced. The peer's export chain denies everything advertised to
 /// peer-group `rs-members`.
 async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
+    let (rib_tx, manager) = spawn_rib_with_one_route().await;
+    let config = initial_dump_config(peer_group);
+    let mut session = initial_dump_session(config, rib_tx);
+    let announced = establish_and_collect_initial_dump(&mut session).await;
+    manager.abort();
+    announced
+}
+
+/// A real `RibManager` holding one route from an unrelated peer, so an
+/// initial dump has something to carry.
+async fn spawn_rib_with_one_route() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let (_query_tx, query_rx) = mpsc::channel(8);
     let manager = tokio::spawn(
         rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
     );
-
-    // One route from an unrelated peer, so the dump has something to carry.
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
     let mut route = make_route(100);
     route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
@@ -1115,14 +1128,24 @@ async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
         })
         .await
         .unwrap();
+    (rib_tx, manager)
+}
 
+/// Transport config for the initial-dump peer (AS 65010) in `peer_group`.
+fn initial_dump_config(peer_group: Option<&str>) -> TransportConfig {
     let mut peer_config = PeerConfig::new(65001, 65010, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
     let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
     config.peer_group = peer_group.map(str::to_string);
+    config
+}
+
+/// A session whose export chain denies every route advertised to a member
+/// of peer-group `rs-members`.
+fn initial_dump_session(config: TransportConfig, rib_tx: mpsc::Sender<RibUpdate>) -> PeerSession {
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
-    let mut session = PeerSession::new(
+    PeerSession::new(
         config,
         BgpMetrics::new(),
         cmd_rx,
@@ -1133,10 +1156,14 @@ async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
         None,
         None,
         false,
-    );
+    )
+}
+
+/// Establish `session` and return the prefixes its initial dump announced.
+async fn establish_and_collect_initial_dump(session: &mut PeerSession) -> Vec<Prefix> {
     let (client, _peer_end) = connected_stream_pair().await;
     session.test_install_stream(client);
-    establish_test_session(&mut session, 65010).await;
+    establish_test_session(session, 65010).await;
 
     // Collect the dump through its End-of-RIB — the marker the RIB always
     // emits for a negotiated family, so an empty result is observed, not
@@ -1152,8 +1179,37 @@ async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
             break;
         }
     }
-    manager.abort();
     announced
+}
+
+/// The RIB counts a session's export evaluations into the neighbor's counter
+/// block, which the session hands over before `PeerUp`. A replacement session
+/// for the neighbor shares that block (the peer manager clones its transport
+/// config), so the export totals survive the reset and keep counting.
+#[tokio::test]
+async fn export_policy_totals_survive_a_session_reset() {
+    let (rib_tx, manager) = spawn_rib_with_one_route().await;
+    let neighbor = initial_dump_config(None);
+    // The first session permits the route; the second, as an rs-members
+    // member, denies it.
+    for peer_group in [None, Some("rs-members")] {
+        let mut config = neighbor.clone();
+        config.peer_group = peer_group.map(str::to_string);
+        let mut session = initial_dump_session(config, rib_tx.clone());
+        establish_and_collect_initial_dump(&mut session).await;
+        session.drive_fsm(Event::TcpConnectionFails).await;
+        assert_ne!(session.fsm.state(), SessionState::Established);
+    }
+    let totals = neighbor.neighbor_counters.export_policy().snapshot();
+    assert_eq!(
+        (
+            totals.export_policy_routes_permitted,
+            totals.export_policy_routes_denied
+        ),
+        (1, 1),
+        "the second session's denial adds to the first session's permit"
+    );
+    manager.abort();
 }
 
 /// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.

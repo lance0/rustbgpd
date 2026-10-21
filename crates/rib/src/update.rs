@@ -1211,6 +1211,64 @@ pub struct NeighborPolicyStats {
     pub export_policy_routes_denied: u64,
 }
 
+/// Export-policy totals of one neighbor, shared between the peer manager
+/// (which owns one per configured or dynamic neighbor, keyed by its full
+/// identity: address plus interface for a scoped address) and every session
+/// the RIB attaches for it. The RIB adds each batch's tally once per peer, so
+/// the totals survive session resets, replacement sessions and reconfigures,
+/// and end only when the peer manager deletes the neighbor.
+///
+/// Runtime state, not configuration: two handles compare equal regardless of
+/// contents.
+#[derive(Clone, Debug, Default)]
+pub struct ExportPolicyCounters(Arc<ExportPolicyCounterBlock>);
+
+#[derive(Debug, Default)]
+struct ExportPolicyCounterBlock {
+    permitted: std::sync::atomic::AtomicU64,
+    denied: std::sync::atomic::AtomicU64,
+}
+
+impl ExportPolicyCounters {
+    /// Add one batch's export tally (its `export_*` fields).
+    pub fn add(&self, tally: NeighborPolicyStats) {
+        if tally.export_policy_routes_permitted != 0 {
+            self.0
+                .permitted
+                .fetch_add(tally.export_policy_routes_permitted, Ordering::Relaxed);
+        }
+        if tally.export_policy_routes_denied != 0 {
+            self.0
+                .denied
+                .fetch_add(tally.export_policy_routes_denied, Ordering::Relaxed);
+        }
+    }
+
+    /// The totals as export fields of a [`NeighborPolicyStats`].
+    #[must_use]
+    pub fn snapshot(&self) -> NeighborPolicyStats {
+        NeighborPolicyStats {
+            export_policy_routes_permitted: self.0.permitted.load(Ordering::Relaxed),
+            export_policy_routes_denied: self.0.denied.load(Ordering::Relaxed),
+            ..NeighborPolicyStats::default()
+        }
+    }
+
+    /// Whether both handles share one block.
+    #[must_use]
+    pub fn same_block(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl PartialEq for ExportPolicyCounters {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ExportPolicyCounters {}
+
 /// Per-term hit-counter snapshot for one installed export chain, captured
 /// from the published export roster
 /// ([`capture_export`](crate::export_roster::capture_export)).
@@ -2592,6 +2650,20 @@ pub enum RibUpdate {
         session_id: u64,
         /// Optional peer-group membership.
         peer_group: Option<String>,
+    },
+    /// Stage the neighbor's export-policy totals handle immediately before
+    /// [`RibUpdate::PeerUp`], so the initial Adj-RIB-Out build already counts
+    /// into it. The handle belongs to the neighbor (address plus interface for
+    /// a scoped address), not to the session, so the totals survive session
+    /// resets and replacement sessions. Only the matching session consumes
+    /// it; a session registered without one counts into a fresh handle.
+    SetPeerExportPolicyCounters {
+        /// Peer whose export totals handle is being staged.
+        peer: IpAddr,
+        /// Transport session identity that will accompany `PeerUp`.
+        session_id: u64,
+        /// The neighbor's export-policy totals.
+        counters: ExportPolicyCounters,
     },
     /// Session-bound export context needed before the initial Adj-RIB-Out
     /// build. Sent immediately before `PeerUp`; the session id prevents a

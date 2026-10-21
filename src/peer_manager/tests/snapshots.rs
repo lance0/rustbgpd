@@ -671,3 +671,87 @@ async fn neighbor_counters_survive_reconfigure_and_end_with_deletion() {
         .unwrap();
     assert_eq!(neighbor_counter_row(&mgr, &peer).await, (0, 0));
 }
+
+/// The `(export_policy_routes_permitted, export_policy_routes_denied)` the
+/// neighbor row reports.
+async fn export_policy_row(mgr: &PeerManager, peer: &PeerKey) -> (u64, u64) {
+    let row = mgr
+        .list_peers()
+        .await
+        .into_iter()
+        .find(|info| info.address == peer.address && info.interface == peer.interface)
+        .expect("neighbor row");
+    (
+        row.export_policy_routes_permitted,
+        row.export_policy_routes_denied,
+    )
+}
+
+/// Count one export batch into a neighbor's totals, as the RIB does through
+/// the handle the neighbor's session stages before `PeerUp`.
+fn record_exports(mgr: &PeerManager, peer: &PeerKey, permitted: u64, denied: u64) {
+    mgr.peers[peer]
+        .transport_config
+        .neighbor_counters
+        .export_policy()
+        .add(rustbgpd_rib::NeighborPolicyStats {
+            export_policy_routes_permitted: permitted,
+            export_policy_routes_denied: denied,
+            ..Default::default()
+        });
+}
+
+/// Export totals are keyed by the full neighbor identity. `fe80::1` on two
+/// interfaces is two neighbors (the configuration guard rejects that pair
+/// today, so this drives the peer manager directly): each keeps its own
+/// totals, a reconfigure keeps them, deleting one leaves the other's intact,
+/// and a re-add starts at 0.
+#[tokio::test]
+async fn export_policy_totals_follow_the_interface_bound_neighbor() {
+    let mut mgr = test_peer_manager();
+    let address: IpAddr = "fe80::1".parse().unwrap();
+    let config_on = |interface: &str, scope_id| {
+        let mut config = make_config(address, 65002);
+        config.interface = Some(interface.to_string());
+        config.scope_id = Some(scope_id);
+        config
+    };
+    for (interface, scope_id) in [("rustbgpd-test-e0", 51), ("rustbgpd-test-e1", 52)] {
+        mgr.add_peer_with_admin_state(config_on(interface, scope_id), false, false)
+            .await
+            .unwrap();
+    }
+    let (eth0, eth1) = (
+        scoped_key(address, "rustbgpd-test-e0"),
+        scoped_key(address, "rustbgpd-test-e1"),
+    );
+    record_exports(&mgr, &eth0, 3, 1);
+    record_exports(&mgr, &eth1, 5, 2);
+    assert_eq!(export_policy_row(&mgr, &eth0).await, (3, 1));
+    assert_eq!(export_policy_row(&mgr, &eth1).await, (5, 2));
+
+    let mut changed = config_on("rustbgpd-test-e0", 51);
+    changed.hold_time = Some(30);
+    mgr.reconfigure_peer(changed).await.unwrap();
+    assert_eq!(
+        export_policy_row(&mgr, &eth0).await,
+        (3, 1),
+        "a reconfigure is not a deletion"
+    );
+
+    for (deleted, kept, kept_totals) in [(&eth0, &eth1, (5, 2)), (&eth1, &eth0, (7, 4))] {
+        mgr.delete_peer(deleted.clone(), false).await.unwrap();
+        assert_eq!(
+            export_policy_row(&mgr, kept).await,
+            kept_totals,
+            "deleting {deleted:?} must not touch {kept:?}"
+        );
+        let scope_id = if deleted == &eth0 { 51 } else { 52 };
+        let interface = deleted.interface.as_deref().unwrap();
+        mgr.add_peer_with_admin_state(config_on(interface, scope_id), false, false)
+            .await
+            .unwrap();
+        assert_eq!(export_policy_row(&mgr, deleted).await, (0, 0));
+        record_exports(&mgr, deleted, 7, 4);
+    }
+}

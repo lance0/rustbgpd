@@ -218,7 +218,7 @@ impl RibManager {
             .outbound_peers
             .keys()
             .chain(self.adj_ribs_out.keys())
-            .chain(self.export_policy_stats.keys())
+            .chain(self.export_policy_counters.keys())
             .chain(self.update_groups.members.keys())
             // A peer in GR/LLGR retention may have no outbound registration
             // while its session is down; its retention row must survive.

@@ -1599,13 +1599,18 @@ fn backpressured_recovery_stays_internal_and_retries_transactionally() {
         .clone();
     while outbound_tx.try_send(OutboundRouteUpdate::default()).is_ok() {}
 
-    let exported = manager.export_policy_stats[&peer].export_policy_routes_permitted;
+    let exported = manager.export_policy_counters[&peer]
+        .snapshot()
+        .export_policy_routes_permitted;
     let drops = counter_metric_value(&metrics, "bgp_outbound_route_drops_total", &[]);
     for _ in 0..3 {
         assert!(manager.outbound_channel_full(peer));
         assert!(!manager.resync_dirty_peers_bounded());
         assert_eq!(
-            manager.export_policy_stats[&peer].export_policy_routes_permitted, exported,
+            manager.export_policy_counters[&peer]
+                .snapshot()
+                .export_policy_routes_permitted,
+            exported,
             "a full channel must not rebuild the family export replay"
         );
         assert!(
@@ -1662,7 +1667,9 @@ fn backpressured_recovery_stays_internal_and_retries_transactionally() {
     assert_eq!(ipv4_row(&manager, peer).usage, 2);
     assert!(!ipv4_row(&manager, peer).blocking);
     assert_eq!(
-        manager.export_policy_stats[&peer].export_policy_routes_permitted,
+        manager.export_policy_counters[&peer]
+            .snapshot()
+            .export_policy_routes_permitted,
         exported + 2
     );
     assert_eq!(outbound_limit_actor_samples(&metrics)["recovery"], 1);
@@ -1670,7 +1677,9 @@ fn backpressured_recovery_stays_internal_and_retries_transactionally() {
     assert!(!manager.resync_dirty_peers_bounded());
     assert!(outbound_rx.try_recv().is_err());
     assert_eq!(
-        manager.export_policy_stats[&peer].export_policy_routes_permitted,
+        manager.export_policy_counters[&peer]
+            .snapshot()
+            .export_policy_routes_permitted,
         exported + 2
     );
 }
@@ -2238,12 +2247,16 @@ fn a_limited_grouped_member_reports_only_what_it_advertised() {
         2,
         limit_config(&[(member, Some(3), None)], &[]),
     );
-    let exported = manager.export_policy_stats[&member].export_policy_routes_permitted;
+    let exported = manager.export_policy_counters[&member]
+        .snapshot()
+        .export_policy_routes_permitted;
     let drops = counter_metric_value(&metrics, "bgp_outbound_route_drops_total", &[]);
     for _ in 0..3 {
         assert!(!manager.resync_dirty_peers_bounded());
         assert_eq!(
-            manager.export_policy_stats[&member].export_policy_routes_permitted,
+            manager.export_policy_counters[&member]
+                .snapshot()
+                .export_policy_routes_permitted,
             exported
         );
         assert!(

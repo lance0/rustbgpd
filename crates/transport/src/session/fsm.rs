@@ -1017,6 +1017,18 @@ impl PeerSession {
                         })
                         .await;
 
+                    // Hand over the neighbor's export-policy totals before
+                    // `PeerUp` builds the initial Adj-RIB-Out, so every export
+                    // evaluation for this session counts toward the neighbor.
+                    let _ = self
+                        .rib_tx
+                        .send(RibUpdate::SetPeerExportPolicyCounters {
+                            peer: self.peer_ip,
+                            session_id: self.session_identity.id,
+                            counters: self.config.neighbor_counters.export_policy().clone(),
+                        })
+                        .await;
+
                     // Stage immutable RFC 4724 OPEN context before `PeerUp`.
                     // The restarting-speaker selection gate consumes only the
                     // matching session, so a collision loser cannot satisfy or

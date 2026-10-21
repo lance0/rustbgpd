@@ -568,6 +568,9 @@ struct NeighborCounterBlock {
     flaps: AtomicU64,
     notifications_received: AtomicU64,
     notifications_sent: AtomicU64,
+    /// The RIB adds this neighbor's export-policy evaluations here; every
+    /// session hands it over in `PeerUp`.
+    export_policy: rustbgpd_rib::ExportPolicyCounters,
 }
 
 impl NeighborCounters {
@@ -604,6 +607,12 @@ impl NeighborCounters {
     /// Count one NOTIFICATION sent.
     pub fn record_notification_sent(&self) {
         self.0.notifications_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The export-policy totals the RIB counts into for this neighbor.
+    #[must_use]
+    pub fn export_policy(&self) -> &rustbgpd_rib::ExportPolicyCounters {
+        &self.0.export_policy
     }
 
     /// Whether both handles share one block.

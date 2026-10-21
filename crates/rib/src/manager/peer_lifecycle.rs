@@ -159,6 +159,8 @@ impl RibManager {
         self.pending_peer_rs_control.remove(&(peer, session_id));
         self.pending_peer_export_encoders
             .remove(&(peer, session_id));
+        self.pending_peer_export_counters
+            .remove(&(peer, session_id));
         self.pending_peer_gr_context.remove(&(peer, session_id));
         self.pending_peer_source_context.remove(&(peer, session_id));
         self.pending_peer_policy_context.remove(&(peer, session_id));
@@ -757,6 +759,8 @@ impl RibManager {
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_export_encoders
             .retain(|(context_peer, _), _| *context_peer != peer);
+        self.pending_peer_export_counters
+            .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_gr_context
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_source_context
@@ -946,19 +950,12 @@ impl RibManager {
         // (`clear_peer_adj_rib_in`) is followed by this purge in every
         // caller, so a queued chunk can never outlive its rib.
         self.pending_route_batches.retain(|prb| prb.peer() != peer);
-        // Drop per-peer export-policy counters alongside the rest of the
-        // per-peer state. Without this the HashMap grows unbounded as
-        // peers come and go (especially under dynamic neighbors), and
-        // stale aggregates leak across peer-identity reuse. The reset
-        // also gives operators consistent semantics: the import-side
-        // counters reset on session-down (they live on PeerSessionState),
-        // and the export-side aggregates do too — same per-session
-        // contract in both directions. Operators that need across-flap
-        // totals can use `rate()` / `increase()` over
-        // `bgp_policy_routes_total`: each installed label identity is
-        // monotonic, while a successfully retired identity goes stale and
-        // restarts from zero if that exact identity is later installed again.
-        self.export_policy_stats.remove(&peer);
+        // Drop the RIB's reference to the session's export-policy totals
+        // alongside the rest of the per-peer state, so the map stays bounded
+        // as peers come and go. The totals themselves belong to the neighbor
+        // and survive the session; the next registration brings the handle
+        // back.
+        self.export_policy_counters.remove(&peer);
         if let Some(mut baseline) = self.pending_regroup_baseline.remove(&peer) {
             #[cfg(feature = "bench-internals")]
             let retirement = super::bench_support::retirement_begin(|| {
@@ -1092,6 +1089,10 @@ impl RibManager {
         let exact_export_encoder = self
             .pending_peer_export_encoders
             .remove(&(peer, session_id));
+        let export_policy_counters = self
+            .pending_peer_export_counters
+            .remove(&(peer, session_id))
+            .unwrap_or_default();
 
         // Receipt ownership moves only across an exact actor/channel replay.
         // A replacement never receives the prior connection's acknowledgement.
@@ -1159,6 +1160,7 @@ impl RibManager {
             evpn_feed_completion,
             evpn_admitted_count,
             group_recovery_fallback,
+            export_policy_counters,
         };
         self.drop_evpn_feed_receipts(peer, Some(session_id));
         self.evpn_feed_receipt_count += usize::from(record.evpn_feed_completion.is_some());
@@ -1226,6 +1228,10 @@ impl RibManager {
         let local_role = record.local_role;
         let per_client_best = record.per_client_best;
         let interpret_rfc1997 = record.interpret_rfc1997;
+        // Before the initial export evaluation: this session's export
+        // results count toward its neighbor's totals.
+        self.export_policy_counters
+            .insert(peer, record.export_policy_counters.clone());
 
         let asn_changed = self.peer_asn.insert(peer, peer_asn) != Some(peer_asn);
         // Install the active session's identity before deferred registration,
@@ -2361,7 +2367,8 @@ impl RibManager {
         // ADR-0137: the initial dump goes through the same gate.
         let conditional = self.conditional_gate(peer, false);
         let loc_rib = &self.loc_rib;
-        let policy_stats = self.export_policy_stats.entry(peer).or_default();
+        let mut export_tally = crate::update::NeighborPolicyStats::default();
+        let policy_stats = &mut export_tally;
         for prefix in staging_prefixes {
             checkpoint_at("initial_ungrouped_staging");
             if orf_gated.contains(&prefix_family(prefix)) {
@@ -2793,6 +2800,8 @@ impl RibManager {
                 &mut checkpoint,
             );
         }
+
+        crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
 
         // Determine EoR families from this peer's sendable families, plus an
         // empty EoR for each negotiated family the session withholds: we

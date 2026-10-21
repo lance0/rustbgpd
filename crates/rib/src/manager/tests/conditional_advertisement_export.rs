@@ -686,7 +686,10 @@ async fn first_denial_is_unchanged_in_every_body() {
                 advertised(&manager, TARGET),
                 explanation.decision,
                 first_stop(&explanation),
-                manager.export_policy_stats.get(&ip(TARGET)).copied(),
+                manager
+                    .export_policy_counters
+                    .get(&ip(TARGET))
+                    .map(crate::update::ExportPolicyCounters::snapshot),
             ));
         }
         assert_eq!(outcomes[0], outcomes[1], "{label}: first denial changed");
