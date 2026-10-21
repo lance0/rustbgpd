@@ -451,6 +451,7 @@ impl RibManager {
             modifications: rustbgpd_policy::RouteModifications::default(),
             orr_vantage: None,
             orr_candidates: Vec::new(),
+            deny_validation: Vec::new(),
             gates: Vec::new(),
             update_group_id: None,
             already_advertised: false,
@@ -1174,17 +1175,8 @@ impl RibManager {
         // counts each route once, and double-counting explain calls
         // would skew both metrics (hence the IR-level non-counting
         // evaluation instead of `PolicyChain::evaluate_with_attribution`).
-        let (result, evaluation) = match export_pol {
-            Some(chain) => chain.compiled().evaluate_with_attribution(&ctx),
-            None => (
-                rustbgpd_policy::PolicyResult::permit(),
-                rustbgpd_policy::PolicyEvaluation {
-                    action: PolicyAction::Permit,
-                    matched_policy: None,
-                    eval_error: None,
-                },
-            ),
-        };
+        let (result, evaluation, deny_validation) =
+            super::explain_export_evaluation(export_pol, &ctx);
         let policy_label = super::policy_label_with_term(
             export_pol,
             &ctx,
@@ -1195,6 +1187,9 @@ impl RibManager {
             explain.decision = ExplainDecision::Deny;
             let (code, message) =
                 export_deny_attribution(evaluation.matched_policy.as_deref(), &policy_label);
+            if code == "policy_denied" {
+                explain.deny_validation = deny_validation;
+            }
             gate(
                 &mut explain.gates,
                 "export_policy",

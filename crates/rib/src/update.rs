@@ -1421,6 +1421,10 @@ pub struct ExplainAdvertisedRoute {
     /// first — the same candidate set and order distribution would
     /// use. Empty for non-ORR explains.
     pub orr_candidates: Vec<OrrExplainCandidate>,
+    /// For a `policy_denied` export-policy stop: one `rpki_<state>` /
+    /// `aspa_<state>` code, with the route's state, for each validation
+    /// state the deciding statement's match tests. Empty otherwise.
+    pub deny_validation: Vec<String>,
     /// The full export gate ladder in the exact order the live export
     /// path evaluates it, one step per gate with a pass/stop verdict.
     /// The single-best unicast and VPN ladders come from a dry-run of
@@ -1476,6 +1480,9 @@ pub struct PeerRouteExport {
     pub detail: String,
     /// Outbound Add-Path identifier when committed (0 on single-best).
     pub advertised_path_id: u32,
+    /// [`ExplainAdvertisedRoute::deny_validation`] when `explain_code` is
+    /// `policy_denied`; empty otherwise.
+    pub deny_validation: Vec<String>,
 }
 
 /// One page of [`PeerRouteExport`] rows in peer-address order.

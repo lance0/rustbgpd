@@ -9066,6 +9066,7 @@ mod tests {
                         selected: false,
                     },
                 ],
+                deny_validation: Vec::new(),
                 gates: vec![rustbgpd_rib::ExportGateStep {
                     gate: "export_policy",
                     code: "policy_permitted",

@@ -1950,6 +1950,7 @@ impl RibManager {
             explain_code,
             detail,
             advertised_path_id: 0,
+            deny_validation: Vec::new(),
         };
         if let Some((reason, detail)) = self.unexported_family(peer, family) {
             return row(Withheld, &reason, "family_not_sendable", detail);
@@ -2007,7 +2008,10 @@ impl RibManager {
             }
         } else {
             let (disposition, reason) = self.stopped_export_reason(peer, route, &explanation, code);
-            row(disposition, &reason, code, stop_detail)
+            PeerRouteExport {
+                deny_validation: explanation.deny_validation.clone(),
+                ..row(disposition, &reason, code, stop_detail)
+            }
         };
         if export.disposition != Committed
             && self

@@ -1457,6 +1457,39 @@ fn policy_label_with_term(
     format!("{}{term_suffix}", matched_policy.unwrap_or("inline"))
 }
 
+/// Export-policy evaluation for an explain, plus the deny-validation codes
+/// of its deciding term from the same walk: one `rpki_<state>` /
+/// `aspa_<state>` code, with the route's state in `ctx`, for each
+/// validation state the term's guard tests
+/// (`CompiledChain::evaluate_with_deny_validation`).
+fn explain_export_evaluation(
+    export_pol: Option<&PolicyChain>,
+    ctx: &RouteContext<'_>,
+) -> (rustbgpd_policy::PolicyResult, PolicyEvaluation, Vec<String>) {
+    let Some(chain) = export_pol else {
+        return (
+            rustbgpd_policy::PolicyResult::permit(),
+            PolicyEvaluation {
+                action: PolicyAction::Permit,
+                matched_policy: None,
+                eval_error: None,
+            },
+            Vec::new(),
+        );
+    };
+    let (result, evaluation, tested) = chain.compiled().evaluate_with_deny_validation(ctx);
+    let codes = tested
+        .into_iter()
+        .map(|dimension| match dimension {
+            rustbgpd_policy::ir::ValidationDimension::Rpki => {
+                format!("rpki_{}", ctx.validation_state)
+            }
+            rustbgpd_policy::ir::ValidationDimension::Aspa => format!("aspa_{}", ctx.aspa_state),
+        })
+        .collect();
+    (result, evaluation, codes)
+}
+
 /// The consumer identity for the shared single-best export tail
 /// ([`RibManager::distribute_single_best_prefix`]): a concrete peer
 /// (today's per-peer path — split horizon against the peer,
@@ -1519,6 +1552,9 @@ pub(in crate::manager) struct ExportGateTrace {
     /// chain, or `"<policy>"` / `"<policy>:<term>"` for Deny. `None` means
     /// the chain is absent or genuinely empty.
     pub policy_label: Option<String>,
+    /// Deny-validation codes of the export-policy evaluation
+    /// (`explain_export_evaluation`).
+    pub deny_validation: Vec<String>,
     /// Post-modification next hop the route would be staged with.
     pub staged_next_hop: Option<IpAddr>,
     /// Post-modification Add-Path identifier (always 0 on single-best).
@@ -1610,6 +1646,12 @@ impl ExportGateTrace {
             modifications: self.modifications,
             orr_vantage: None,
             orr_candidates: Vec::new(),
+            // Only a policy_denied stop keeps the codes of its deciding term.
+            deny_validation: if self.gates.iter().any(|step| step.code == "policy_denied") {
+                self.deny_validation
+            } else {
+                Vec::new()
+            },
             gates: self.gates,
             update_group_id,
             already_advertised: self.suppressed_identical,
@@ -1686,7 +1728,7 @@ impl<'a> ExportTarget<'a> {
     /// a one-shot operator query cannot skew `rbgp policy stats` — the
     /// two are pinned to agree by the policy crate's parity tests.
     fn evaluate_export_chain(
-        &self,
+        &mut self,
         export_pol: Option<&PolicyChain>,
         ctx: &RouteContext<'_>,
     ) -> (rustbgpd_policy::PolicyResult, PolicyEvaluation) {
@@ -1694,17 +1736,11 @@ impl<'a> ExportTarget<'a> {
             Self::Peer { .. } | Self::Group { .. } => {
                 evaluate_chain_with_attribution(export_pol, ctx)
             }
-            Self::Explain { .. } => match export_pol {
-                Some(chain) => chain.compiled().evaluate_with_attribution(ctx),
-                None => (
-                    rustbgpd_policy::PolicyResult::permit(),
-                    PolicyEvaluation {
-                        action: PolicyAction::Permit,
-                        matched_policy: None,
-                        eval_error: None,
-                    },
-                ),
-            },
+            Self::Explain { trace, .. } => {
+                let (result, evaluation, codes) = explain_export_evaluation(export_pol, ctx);
+                trace.deny_validation = codes;
+                (result, evaluation)
+            }
         }
     }
 

@@ -3843,6 +3843,16 @@ message PathExportDispositionEntry {
   string detail = 5;
   // Outbound Add-Path path identifier when COMMITTED; 0 on single-best.
   uint32 advertised_path_id = 6;
+  // Empty unless explain_code is policy_denied. Then one code for each
+  // validation state the deciding export-policy statement's match tests,
+  // carrying the route's state: rpki_valid, rpki_invalid or rpki_not_found,
+  // then aspa_valid, aspa_invalid or aspa_unknown. A statement's conditions
+  // AND together, so others may also have matched; under an rpol || or !,
+  // the validation comparison need not be the operand that held. Empty when
+  // the deciding statement tests neither, such as a later statement's deny
+  // after a validation-matching statement permitted, or an rpol term decided
+  // by a loop or a fail-closed error. New codes may be added.
+  repeated string deny_validation = 7;
 }
 
 message ListPathExportDispositionsResponse {
