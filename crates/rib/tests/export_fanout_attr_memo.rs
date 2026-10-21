@@ -14,6 +14,7 @@
 //! ~100 MB transiently and its bound is a heap ratio, not exact bytes. Still
 //! compiled by a normal `cargo test` run, so it cannot bit-rot.
 
+use rustbgpd_rib::PeerId;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -147,7 +148,7 @@ fn route(prefix: Prefix, peer: IpAddr, attributes: Arc<AttrSet>) -> Route {
         next_hop: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer,
+        peer: PeerId::from_addr(peer),
         attributes,
         received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -198,7 +199,7 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
         let mut receivers = Vec::with_capacity(n_peers);
         for i in 0..n_peers {
             let [_, b1, b2, b3] = (i as u32).to_be_bytes();
-            let peer = IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3.wrapping_add(1)));
+            let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, b1, b2, b3.wrapping_add(1))));
             let session_id = 1 + i as u64;
             let (out_tx, out_rx) = mpsc::channel(n_prefixes as usize + 64);
             tx.send(RibUpdate::SetPeerExportEncoder {
@@ -235,7 +236,7 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
         // One source floods n_prefixes sharing a single attribute set
         // (the profile harness shape: attrs maximally Arc-shared at
         // ingest; per-peer structural fanout is what is measured).
-        let src = IpAddr::V4(Ipv4Addr::new(172, 20, 0, 10));
+        let src = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(172, 20, 0, 10)));
         let shared: Arc<AttrSet> = AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
@@ -255,7 +256,7 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
                         Ipv4Addr::new(20 + (j >> 16) as u8, (j >> 8) as u8, j as u8, 0),
                         24,
                     ));
-                    route(p, src, Arc::clone(&shared))
+                    route(p, src.addr(), Arc::clone(&shared))
                 })
                 .collect();
             i = hi;

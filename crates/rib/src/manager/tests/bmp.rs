@@ -2,6 +2,7 @@
 //! VPN best-change emission, the collector-connect table dump, and
 //! install-time timestamps.
 
+use crate::test_support::peer_v4;
 use std::time::SystemTime;
 
 use rustbgpd_bmp::{BmpDumpCursor, BmpEvent, BmpPathStatus, tlv as bmp_tlv};
@@ -125,7 +126,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
 
     // 1. New best → announce.
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer_a),
+        peer: peer_v4(peer_a),
         session_id: 0,
         announced: vec![make_route_with_lp(prefix, peer_a, 100)],
         withdrawn: vec![],
@@ -150,7 +151,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
     // 2. Higher LOCAL_PREF from another peer → best changes → announce
     // of the new best (next-hop = peer B).
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer_b),
+        peer: peer_v4(peer_b),
         session_id: 0,
         announced: vec![make_route_with_lp(prefix, peer_b, 200)],
         withdrawn: vec![],
@@ -181,7 +182,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
     // 3. Losing path withdrawn — the best (peer B) is unchanged → no
     // Loc-RIB emission.
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer_a),
+        peer: peer_v4(peer_a),
         session_id: 0,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix), 0)],
@@ -199,7 +200,7 @@ async fn recompute_best_changes_emit_loc_rib_route_monitoring() {
 
     // 4. Best withdrawn entirely → RM withdraw.
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer_b),
+        peer: peer_v4(peer_b),
         session_id: 0,
         announced: vec![],
         withdrawn: vec![(Prefix::V4(prefix), 0)],
@@ -237,7 +238,7 @@ async fn stale_best_route_sets_stale_path_status_bit() {
     let mut route = make_route_with_lp(prefix, peer, 100);
     route.is_stale = true; // what the RFC 4724 helper marks at restart
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![route],
         withdrawn: vec![],
@@ -284,7 +285,7 @@ async fn received_llgr_stale_best_has_consistent_loc_rib_status() {
     assert!(!vpn.is_stale && !vpn.is_llgr_stale);
 
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![unicast],
         withdrawn: vec![],
@@ -297,7 +298,7 @@ async fn received_llgr_stale_best_has_consistent_loc_rib_status() {
     .await
     .unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![vpn],
         withdrawn: vec![],
@@ -372,7 +373,7 @@ async fn vpn_best_change_emits_loc_rib_route_monitoring() {
     let route = make_vpn_rib_route(peer, 42, 1042, 100);
     let nlri = route.nlri.clone();
     tx.send(RibUpdate::VpnRoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![route],
         withdrawn: vec![],
@@ -398,7 +399,7 @@ async fn vpn_best_change_emits_loc_rib_route_monitoring() {
     assert_eq!(status.reason, None);
 
     tx.send(RibUpdate::VpnRoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![],
         withdrawn: vec![crate::route::VpnRibRouteKey {
@@ -437,7 +438,7 @@ async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
 
     let peer = Ipv4Addr::new(10, 0, 0, 1);
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![
             make_route_with_lp(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16), peer, 100),
@@ -453,7 +454,7 @@ async fn query_bmp_loc_rib_dump_streams_routes_then_eor_per_family() {
     .await
     .unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![make_vpn_rib_route(peer, 42, 1042, 100)],
         withdrawn: vec![],
@@ -552,7 +553,7 @@ async fn dump_timestamps_equal_stored_install_time() {
     let peer = Ipv4Addr::new(10, 0, 0, 1);
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16);
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![make_route_with_lp(prefix, peer, 100)],
         withdrawn: vec![],
@@ -567,7 +568,7 @@ async fn dump_timestamps_equal_stored_install_time() {
     let (_, unicast_live_ts, _) = recv_loc_rib_rm(&mut bmp_rx).await;
 
     tx.send(RibUpdate::VpnRoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![make_vpn_rib_route(peer, 42, 1042, 100)],
         withdrawn: vec![],
@@ -626,7 +627,7 @@ async fn loc_rib_dump_chunks_stream_complete_table() {
         })
         .collect();
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: prefixes
             .iter()
@@ -710,7 +711,7 @@ async fn loc_rib_dump_interleaves_live_commands_between_chunks() {
         })
         .collect();
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: prefixes
             .iter()
@@ -763,7 +764,7 @@ async fn loc_rib_dump_interleaves_live_commands_between_chunks() {
     let high = Ipv4Prefix::new(Ipv4Addr::new(240, 0, 0, 0), 24);
     let withdrawn_mid = prefixes[BMP_DUMP_CHUNK_SIZE + 10];
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![
             make_route_with_lp(low, peer, 100),
@@ -863,7 +864,7 @@ async fn loc_rib_dump_excludes_routes_admitted_after_dump_start() {
         })
         .collect();
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: prefixes
             .iter()
@@ -914,7 +915,7 @@ async fn loc_rib_dump_excludes_routes_admitted_after_dump_start() {
     let fresh = Ipv4Prefix::new(Ipv4Addr::new(240, 0, 0, 0), 24);
     let replaced = prefixes[BMP_DUMP_CHUNK_SIZE + 4];
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![
             make_route_with_lp(fresh, peer, 100),
@@ -930,7 +931,7 @@ async fn loc_rib_dump_excludes_routes_admitted_after_dump_start() {
     .await
     .unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![make_vpn_rib_route(peer, 42, 1042, 100)],
         withdrawn: vec![],
@@ -982,7 +983,7 @@ async fn query_bmp_loc_rib_stats_counts_per_family() {
 
     let peer = Ipv4Addr::new(10, 0, 0, 1);
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![
             make_route_with_lp(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16), peer, 100),
@@ -998,7 +999,7 @@ async fn query_bmp_loc_rib_stats_counts_per_family() {
     .await
     .unwrap();
     tx.send(RibUpdate::VpnRoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![make_vpn_rib_route(peer, 42, 1042, 100)],
         withdrawn: vec![],
@@ -1037,7 +1038,7 @@ async fn no_bmp_tx_means_no_synthesis() {
     let handle = tokio::spawn(manager.run());
     let peer = Ipv4Addr::new(10, 0, 0, 1);
     tx.send(RibUpdate::RoutesReceived {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: 0,
         announced: vec![make_route_with_lp(
             Ipv4Prefix::new(Ipv4Addr::new(10, 9, 0, 0), 16),

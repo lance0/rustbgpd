@@ -4,11 +4,13 @@
 //! identities, not operation ordering. The ignored extension sweeps those same
 //! schedules under hard parameter/operation caps on a weekly hosted runner.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -887,7 +889,7 @@ async fn assert_membership(
     }
 }
 
-fn announced_paths(messages: &[NormMsg], prefix: Ipv4Prefix) -> HashSet<(u32, IpAddr)> {
+fn announced_paths(messages: &[NormMsg], prefix: Ipv4Prefix) -> HashSet<(u32, PeerId)> {
     messages
         .iter()
         .flat_map(|message| &message.announce)
@@ -1207,7 +1209,7 @@ async fn run_path(
     });
     if schedule.schedule.require_vpn_churn {
         let left = streams
-            .get(&IpAddr::V4(LEFT))
+            .get(&peer_v4(LEFT))
             .expect("LEFT is registered in every schedule");
         assert!(
             left.iter().any(|message| !message.vpn_announce.is_empty())
@@ -1217,7 +1219,7 @@ async fn run_path(
         );
         assert!(
             fold_vpn(&streams)
-                .get(&IpAddr::V4(LEFT))
+                .get(&peer_v4(LEFT))
                 .is_none_or(std::collections::HashMap::is_empty),
             "final RTC withdrawal must leave LEFT with no advertised VPN route: {}",
             schedule.replay()
@@ -1231,7 +1233,7 @@ fn validate_terminal_stream(streams: &Streams) -> Result<(), String> {
     for peer in [LEFT, RIGHT] {
         let key = (Prefix::V4(sentinel()), 0);
         if !terminal
-            .get(&IpAddr::V4(peer))
+            .get(&peer_v4(peer))
             .is_some_and(|routes| routes.contains_key(&key))
         {
             return Err(format!(
@@ -2034,7 +2036,7 @@ fn session_start_message(generation: u64) -> NormMsg {
 }
 
 fn one_peer_stream(messages: Vec<NormMsg>) -> Streams {
-    [(IpAddr::V4(LEFT), messages)].into_iter().collect()
+    [(peer_v4(LEFT), messages)].into_iter().collect()
 }
 
 #[test]
@@ -2084,7 +2086,7 @@ fn corpus_parity_rejects_unknown_and_duplicate_withdrawals() {
 
 #[test]
 fn completion_gate_rejects_equal_but_incomplete_streams() {
-    let empty: Streams = [(IpAddr::V4(LEFT), vec![]), (IpAddr::V4(RIGHT), vec![])]
+    let empty: Streams = [(peer_v4(LEFT), vec![]), (peer_v4(RIGHT), vec![])]
         .into_iter()
         .collect();
     assert!(
@@ -2094,8 +2096,8 @@ fn completion_gate_rejects_equal_but_incomplete_streams() {
 
     let truncated_message = norm_message(vec![norm_announce(pfx(42, 0), 100)], vec![]);
     let truncated: Streams = [
-        (IpAddr::V4(LEFT), vec![truncated_message.clone()]),
-        (IpAddr::V4(RIGHT), vec![truncated_message]),
+        (peer_v4(LEFT), vec![truncated_message.clone()]),
+        (peer_v4(RIGHT), vec![truncated_message]),
     ]
     .into_iter()
     .collect();
@@ -2106,15 +2108,15 @@ fn completion_gate_rejects_equal_but_incomplete_streams() {
 
     let sentinel_message = norm_message(vec![norm_announce(sentinel(), 250)], vec![]);
     let mut complete: Streams = [
-        (IpAddr::V4(LEFT), vec![sentinel_message.clone()]),
-        (IpAddr::V4(RIGHT), vec![sentinel_message]),
+        (peer_v4(LEFT), vec![sentinel_message.clone()]),
+        (peer_v4(RIGHT), vec![sentinel_message]),
     ]
     .into_iter()
     .collect();
     assert!(validate_terminal_stream(&complete).is_ok());
 
     complete
-        .get_mut(&IpAddr::V4(RIGHT))
+        .get_mut(&peer_v4(RIGHT))
         .unwrap()
         .push(session_start_message(9));
     assert!(

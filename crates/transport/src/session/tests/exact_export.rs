@@ -152,7 +152,7 @@ async fn exact_export_probe_matches_real_writer_for_every_family_and_limit() {
                 }),
                 next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
                 link_local_next_hop: None,
-                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
                 attributes: AttrSet::new(vec![
                     PathAttribute::Origin(Origin::Igp),
                     PathAttribute::AsPath(AsPath {

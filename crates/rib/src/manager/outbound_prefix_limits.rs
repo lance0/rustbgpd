@@ -18,8 +18,8 @@
 //! itself, so an accepted dynamic child inherits its configured group's
 //! effective values with no separate enumeration of live sessions.
 
+use crate::PeerId;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -308,17 +308,17 @@ pub(in crate::manager) struct OutboundLimitControl {
     activated: Option<u64>,
     /// Coalesced capacity-recovery intent: at most one resync per peer and
     /// family, regardless of how often capacity opens.
-    recovery: BTreeMap<IpAddr, HashSet<Afi>>,
+    recovery: BTreeMap<PeerId, HashSet<Afi>>,
     /// Peer whose recovery was most recently attempted. Selection resumes
     /// after it and wraps, so one backpressured peer cannot retain the head.
-    recovery_cursor: Option<IpAddr>,
+    recovery_cursor: Option<PeerId>,
 }
 
 impl OutboundLimitControl {
     /// Drop one departing registration's pending recovery intent. The
     /// resolver tables are configuration and survive the session; a
     /// reconnect resolves them again.
-    pub(in crate::manager) fn reap_peer(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn reap_peer(&mut self, peer: PeerId) {
         self.recovery.remove(&peer);
         if self.recovery.is_empty() {
             self.recovery_cursor = None;
@@ -334,7 +334,7 @@ struct PreparedOutboundLimits {
     config: OutboundPrefixLimitConfig,
     /// The complete live target set at preparation, each bound to the peer
     /// generation the candidate was preflighted against.
-    targets: Vec<(IpAddr, u64, OutboundPrefixLimitPair)>,
+    targets: Vec<(PeerId, u64, OutboundPrefixLimitPair)>,
 }
 
 /// One family's verdict for a single outgoing batch.
@@ -439,9 +439,9 @@ impl RibManager {
     )]
     fn outbound_limit_verdicts(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         grouped: bool,
-        announce_source_exclusion: Option<IpAddr>,
+        announce_source_exclusion: Option<PeerId>,
         announce: &[crate::route::Route],
         withdraw: &[(Prefix, u32)],
     ) -> Vec<FamilyVerdict> {
@@ -591,9 +591,9 @@ impl RibManager {
     )]
     pub(super) fn enforce_outbound_prefix_limits(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         grouped: bool,
-        announce_source_exclusion: Option<IpAddr>,
+        announce_source_exclusion: Option<PeerId>,
         announce: &mut Arc<Vec<crate::route::Route>>,
         next_hop_override: &mut Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
         withdraw: &[(Prefix, u32)],
@@ -773,7 +773,7 @@ impl RibManager {
     /// the truth.
     pub(in crate::manager) fn outbound_family_usage(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         afi: Afi,
         grouped: bool,
     ) -> usize {
@@ -808,7 +808,7 @@ impl RibManager {
     fn resolve_outbound_limits(
         &self,
         config: &OutboundPrefixLimitConfig,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> OutboundPrefixLimitPair {
         config.neighbors.get(&peer).copied().unwrap_or_else(|| {
             self.peer_group
@@ -822,7 +822,7 @@ impl RibManager {
     /// Neighbor-facing rows for one peer, one per limited unicast family.
     pub(in crate::manager) fn outbound_prefix_limit_rows(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
     ) -> Vec<OutboundPrefixLimitFamilyState> {
         if !self.outbound_peers.contains_key(&peer) {
             return Vec::new();
@@ -853,7 +853,7 @@ impl RibManager {
     /// Republish one peer's capacity gauges from the same admitted truth the
     /// API reports. A family that became unlimited drops its limit and
     /// headroom series instead of keeping a stale finite value.
-    pub(in crate::manager) fn refresh_outbound_limit_gauges(&mut self, peer: IpAddr) {
+    pub(in crate::manager) fn refresh_outbound_limit_gauges(&mut self, peer: PeerId) {
         self.replacement_checkpoint(true);
         let peer_label = peer.to_string();
         for row in self.outbound_prefix_limit_rows(peer) {
@@ -872,7 +872,7 @@ impl RibManager {
     /// Install this registration's effective limits before its initial feed
     /// is built, so a reconnect starts empty and admits up to the cap
     /// instead of flooding and then discovering it is over one.
-    pub(super) fn install_registration_outbound_limits(&mut self, peer: IpAddr) {
+    pub(super) fn install_registration_outbound_limits(&mut self, peer: PeerId) {
         let resolved = self.resolve_outbound_limits(&self.outbound_limit_control.config, peer);
         for afi in LIMITED_FAMILIES {
             if let Some(limit) = resolved.family(afi) {
@@ -889,7 +889,7 @@ impl RibManager {
 
     /// Families with a pending capacity-recovery resync for `peer`.
     #[cfg(test)]
-    pub(in crate::manager) fn outbound_limit_recovery_for(&self, peer: IpAddr) -> Vec<Afi> {
+    pub(in crate::manager) fn outbound_limit_recovery_for(&self, peer: PeerId) -> Vec<Afi> {
         LIMITED_FAMILIES
             .into_iter()
             .filter(|afi| {
@@ -940,7 +940,7 @@ impl RibManager {
     }
 
     /// Coalesce one family-scoped capacity-recovery resync.
-    fn schedule_outbound_limit_recovery(&mut self, peer: IpAddr, afi: Afi) {
+    fn schedule_outbound_limit_recovery(&mut self, peer: PeerId, afi: Afi) {
         if self.outbound_limit_control.recovery.is_empty() {
             self.outbound_limit_control.recovery_cursor = None;
         }
@@ -957,7 +957,7 @@ impl RibManager {
     /// Empty/corrupt entries and closed/departed peers are discarded rather than
     /// parking the queue. Gate-blocked entries remain in place while the
     /// first runnable sibling is selected.
-    fn take_next_outbound_limit_recovery(&mut self) -> Option<(IpAddr, Afi)> {
+    fn take_next_outbound_limit_recovery(&mut self) -> Option<(PeerId, Afi)> {
         let outbound_peers = &self.outbound_peers;
         self.outbound_limit_control
             .recovery
@@ -1001,7 +1001,7 @@ impl RibManager {
     }
 
     /// Remove one recovery only after its replay committed.
-    fn complete_outbound_limit_recovery(&mut self, peer: IpAddr, afi: Afi) {
+    fn complete_outbound_limit_recovery(&mut self, peer: PeerId, afi: Afi) {
         let remove_peer = self
             .outbound_limit_control
             .recovery
@@ -1060,7 +1060,7 @@ impl RibManager {
         true
     }
 
-    pub(in crate::manager) fn outbound_blocking(&self, peer: IpAddr, afi: Afi) -> bool {
+    pub(in crate::manager) fn outbound_blocking(&self, peer: PeerId, afi: Afi) -> bool {
         self.outbound_prefix_limits
             .get(&peer)
             .and_then(|limits| limits.family(afi))
@@ -1069,7 +1069,7 @@ impl RibManager {
 
     pub(in crate::manager) fn set_outbound_blocking(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         afi: Afi,
         blocking: bool,
     ) {
@@ -1242,7 +1242,7 @@ impl RibManager {
     }
 
     /// Move one live family to an already-preflighted maximum.
-    fn install_outbound_limit(&mut self, peer: IpAddr, afi: Afi, limit: Option<NonZeroU32>) {
+    fn install_outbound_limit(&mut self, peer: PeerId, afi: Afi, limit: Option<NonZeroU32>) {
         let previous = self
             .outbound_prefix_limits
             .get(&peer)
@@ -1309,7 +1309,7 @@ impl RibManager {
     /// fresh capacity.
     pub(in crate::manager) fn carry_outbound_admitted_across_regroup(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         entering_group: bool,
     ) {
         if !self.outbound_prefix_limits.contains_key(&peer) {

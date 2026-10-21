@@ -2199,6 +2199,7 @@ enum RibQueryError {
 
 #[cfg(test)]
 mod tests {
+    use rustbgpd_rib::PeerId;
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::Ipv4Addr;
 
@@ -2346,7 +2347,7 @@ mod tests {
             route: EvpnRoute::MacIp(macip),
             next_hop: ipa(dst),
             link_local_next_hop: None,
-            peer: ipa("10.0.0.99"),
+            peer: PeerId::from_addr(ipa("10.0.0.99")),
             attributes: AttrSet::new(attrs),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
@@ -2378,7 +2379,7 @@ mod tests {
             }),
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
-            peer: ipa("10.0.0.99"),
+            peer: PeerId::from_addr(ipa("10.0.0.99")),
             attributes: AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
                 RouteTarget::TwoOctetAs {
                     asn: 65001,
@@ -2436,7 +2437,7 @@ mod tests {
             }),
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
-            peer: ipa("10.0.0.99"),
+            peer: PeerId::from_addr(ipa("10.0.0.99")),
             attributes: AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
                 ExtendedCommunity::esi_label(single_active, 123),
             ])]),
@@ -2471,7 +2472,7 @@ mod tests {
             }),
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
-            peer: ipa("10.0.0.99"),
+            peer: PeerId::from_addr(ipa("10.0.0.99")),
             attributes: AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
                 RouteTarget::TwoOctetAs {
                     asn: 65001,
@@ -2798,7 +2799,7 @@ mod tests {
         outbound_tx: mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>,
     ) -> RibUpdate {
         RibUpdate::PeerUp {
-            peer: std::net::IpAddr::V4(peer),
+            peer: PeerId::from_addr(std::net::IpAddr::V4(peer)),
             session_id: 0,
             peer_asn: 65000,
             peer_router_id: peer,
@@ -2881,7 +2882,7 @@ mod tests {
         for peer in [origin, client] {
             rib_tx
                 .send(RibUpdate::SetPeerExportEncoder {
-                    peer: std::net::IpAddr::V4(peer),
+                    peer: PeerId::from_addr(std::net::IpAddr::V4(peer)),
                     session_id: 0,
                     encoder: Arc::new(AnyExport),
                 })
@@ -2907,7 +2908,7 @@ mod tests {
         };
         macip.ethernet_tag = EthernetTagId(10);
         macip.rd = rd(65001, 100);
-        route.peer = std::net::IpAddr::V4(origin);
+        route.peer = PeerId::from_addr(std::net::IpAddr::V4(origin));
         route.peer_router_id = origin;
         route.origin_type = rustbgpd_rib::route::RouteOrigin::Ibgp;
         AttrSet::edit(&mut route.attributes, |attrs| {
@@ -2919,7 +2920,7 @@ mod tests {
         rib_tx
             .send(RibUpdate::RoutesReceived {
                 session_id: 0,
-                peer: std::net::IpAddr::V4(origin),
+                peer: PeerId::from_addr(std::net::IpAddr::V4(origin)),
                 announced: vec![],
                 withdrawn: vec![],
                 flowspec_announced: vec![],
@@ -3031,7 +3032,7 @@ mod tests {
             }),
             next_hop: ipa("10.0.0.2"),
             link_local_next_hop: None,
-            peer: ipa("10.0.0.99"),
+            peer: PeerId::from_addr(ipa("10.0.0.99")),
             attributes: AttrSet::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
@@ -3073,7 +3074,7 @@ mod tests {
             }),
             next_hop: ipa(originator),
             link_local_next_hop: None,
-            peer: ipa("10.0.0.99"),
+            peer: PeerId::from_addr(ipa("10.0.0.99")),
             attributes: AttrSet::new(attrs),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,

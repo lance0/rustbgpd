@@ -1,4 +1,6 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use rustbgpd_wire::RouteRefreshSubtype;
 
 fn orf_permit(seq: u32, min: u8, max: u8, p: Ipv4Prefix) -> AddressPrefixOrf {
@@ -25,7 +27,7 @@ fn orf_deny(seq: u32, min: u8, max: u8, p: Ipv4Prefix) -> AddressPrefixOrf {
 
 async fn send_peer_orf(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     when: WhenToRefresh,
     entries: Vec<AddressPrefixOrf>,
 ) {
@@ -84,14 +86,14 @@ async fn collect_until_announced(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate
 async fn orf_setup() -> (
     mpsc::Sender<RibUpdate>,
     tokio::task::JoinHandle<()>,
-    IpAddr,
+    PeerId,
     mpsc::Receiver<OutboundRouteUpdate>,
 ) {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -115,7 +117,7 @@ async fn orf_setup() -> (
     .await
     .unwrap();
 
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -493,7 +495,7 @@ async fn orf_unknown_when_resets_filter_and_sweeps() {
 }
 
 /// A manager with `peer` registered for outbound updates and nothing else.
-fn manager_with_outbound_peer(peer: IpAddr) -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
+fn manager_with_outbound_peer(peer: PeerId) -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let (out_tx, out_rx) = mpsc::channel(1);
@@ -509,7 +511,7 @@ fn manager_with_outbound_peer(peer: IpAddr) -> (RibManager, mpsc::Receiver<Outbo
 async fn orf_unmatchable_entry_is_installed_and_warned() {
     use std::sync::{Arc as StdArc, Mutex};
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let entry = orf_permit(2, 0, 4, Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
     let (mut manager, _out_rx) = manager_with_outbound_peer(peer);
     let captured = StdArc::new(Mutex::new(Vec::new()));
@@ -728,7 +730,7 @@ async fn graceful_restart_clears_orf_filter() {
     // dead session's 10/8-only filter would deny and assert it floods.
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        peer: peer_v4(Ipv4Addr::new(10, 0, 0, 1)),
         announced: vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 12),
             Ipv4Addr::new(10, 0, 0, 1),
@@ -761,7 +763,7 @@ async fn graceful_restart_clears_orf_filter() {
 /// the new session's outbound receiver.
 async fn gr_flap_and_reup(
     tx: &mpsc::Sender<RibUpdate>,
-    target: IpAddr,
+    target: PeerId,
     gr_families: Vec<(Afi, Safi)>,
     sendable_families: Vec<(Afi, Safi)>,
     negotiated_orf_recv: Vec<(Afi, Safi)>,
@@ -972,10 +974,10 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let source = Ipv4Addr::new(10, 0, 0, 1);
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let family = (Afi::Ipv4, Safi::Unicast);
     manager.enqueue_routes_received(
-        source.into(),
+        peer_v4(source),
         vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
             source,
@@ -1051,7 +1053,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     let v6_prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        peer: peer_v4(Ipv4Addr::new(10, 0, 0, 1)),
         announced: vec![
             make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1)),
             make_v6_route(v6_prefix, "2001:db8::1".parse().unwrap()),
@@ -1067,7 +1069,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
     .unwrap();
 
     let both = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         per_client_best: false,
@@ -1187,7 +1189,7 @@ async fn gr_restarter_without_orf_keeps_immediate_eor() {
 async fn peer_down_clears_gr_deferred_eor() {
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let family = (Afi::Ipv4, Safi::Unicast);
 
     // Session 1 (no ORF), then a GR flap.
@@ -1262,7 +1264,7 @@ async fn peer_down_clears_gr_deferred_eor() {
 
 /// Register `peer` on a synchronous manager with ORF receive negotiated for
 /// both unicast families, so both RFC 5291 §6 gates start armed.
-fn dual_stack_orf_manager(peer: IpAddr) -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
+fn dual_stack_orf_manager(peer: PeerId) -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let (out_tx, out_rx) = mpsc::channel(16);
@@ -1294,7 +1296,7 @@ fn dual_stack_orf_manager(peer: IpAddr) -> (RibManager, mpsc::Receiver<OutboundR
 
 fn push_orf_entries(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     afi: Afi,
     entries: Vec<AddressPrefixOrf>,
 ) -> Result<(), String> {
@@ -1313,7 +1315,7 @@ fn push_orf_entries(
 
 #[test]
 fn orf_capacity_accumulates_atomically_and_remove_all_recovers() {
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
     let family = (Afi::Ipv4, Safi::Unicast);
     let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
@@ -1402,7 +1404,7 @@ fn orf_capacity_accumulates_atomically_and_remove_all_recovers() {
 
 #[test]
 fn orf_malformed_field_resets_even_after_an_overflowing_add() {
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
     let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
@@ -1436,7 +1438,7 @@ fn orf_malformed_field_resets_even_after_an_overflowing_add() {
 
 #[test]
 fn orf_capacity_rejects_oversized_first_group_without_lifting_gate() {
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
     let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
@@ -1462,7 +1464,7 @@ fn orf_capacity_rejects_oversized_first_group_without_lifting_gate() {
 /// of the session.
 #[test]
 fn orf_pending_entry_drops_after_last_route_refresh_lift() {
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
     assert!(!manager.clean_policy_transition_peer_ready(peer));
 
@@ -1509,7 +1511,7 @@ fn orf_pending_entry_drops_after_last_route_refresh_lift() {
 
 /// The `orf_installed` classifier input the live update-group snapshot
 /// reports for `peer`.
-fn orf_installed_classifier_input(manager: &RibManager, peer: IpAddr) -> bool {
+fn orf_installed_classifier_input(manager: &RibManager, peer: PeerId) -> bool {
     let (reply, mut response) = oneshot::channel();
     manager.handle_query_update_group_snapshot(reply);
     response
@@ -1527,7 +1529,7 @@ fn orf_installed_classifier_input(manager: &RibManager, peer: IpAddr) -> bool {
 /// is itself a ROUTE-REFRESH (RFC 5291 §6) and lifts the family's gate.
 #[test]
 fn orf_pending_entry_drops_after_last_orf_message_lift() {
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
     for afi in [Afi::Ipv4, Afi::Ipv6] {
         let (reply, mut response) = oneshot::channel();
@@ -1591,7 +1593,7 @@ fn orf_pending_entry_drops_after_last_orf_message_lift() {
 /// family still holds a filter.
 #[test]
 fn orf_filter_entry_tracks_installed_filters() {
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
     let v4 = (Afi::Ipv4, Safi::Unicast);
     let v6 = (Afi::Ipv6, Safi::Unicast);

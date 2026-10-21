@@ -2,12 +2,14 @@
 //! writer-channel loss under `bgp_outbound_route_drops_total` for every
 //! family, and fail-closed refusals under `bgp_outbound_commit_refusals_total`.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use rustbgpd_telemetry::reason_labels::OutboundCommitRefusal;
 
 use super::*;
 use crate::manager::distribution::{OutboundCommitBatch, OutboundCommitFailure};
 
-const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 70));
+const PEER: PeerId = peer_v4(Ipv4Addr::new(192, 0, 2, 70));
 const PEER_LABEL: &str = "192.0.2.70";
 const SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 
@@ -251,7 +253,7 @@ fn dirty_resync(metrics: &BgpMetrics, outcome: &str) -> f64 {
 }
 
 fn peer_up(
-    peer: IpAddr,
+    peer: PeerId,
     router_id: Ipv4Addr,
     outbound_tx: mpsc::Sender<crate::OutboundRouteUpdate>,
 ) -> RibUpdate {
@@ -316,7 +318,7 @@ async fn handler_drained_resync_records_one_cleared_outcome() {
     tx.send(peer_up(PEER, Ipv4Addr::new(192, 0, 2, 70), target_tx))
         .await
         .unwrap();
-    let source = IpAddr::V4(SOURCE);
+    let source = peer_v4(SOURCE);
     let (source_tx, _source_rx) = mpsc::channel(64);
     tx.send(peer_up(source, SOURCE, source_tx)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
@@ -373,7 +375,7 @@ async fn outbound_dirty_peers_gauge_tracks_dirty_set() {
     tx.send(peer_up(PEER, Ipv4Addr::new(192, 0, 2, 70), target_tx))
         .await
         .unwrap();
-    let source = IpAddr::V4(SOURCE);
+    let source = peer_v4(SOURCE);
     let (source_tx, _source_rx) = mpsc::channel(64);
     tx.send(peer_up(source, SOURCE, source_tx)).await.unwrap();
     barrier(&tx).await;
@@ -430,15 +432,17 @@ async fn outbound_dirty_oldest_seconds_is_max_over_current_episodes() {
     let [settled, old, young] = [70, 71, 72].map(|o| IpAddr::V4(Ipv4Addr::new(192, 0, 2, o)));
     manager
         .dirty_since
-        .insert(settled, tokio::time::Instant::now());
+        .insert(PeerId::from_addr(settled), tokio::time::Instant::now());
     tokio::time::advance(Duration::from_mins(15)).await;
-    manager.dirty_peers.insert(old);
-    manager.dirty_since.insert(old, tokio::time::Instant::now());
-    tokio::time::advance(Duration::from_secs(95)).await;
-    manager.dirty_peers.insert(young);
+    manager.dirty_peers.insert(PeerId::from_addr(old));
     manager
         .dirty_since
-        .insert(young, tokio::time::Instant::now());
+        .insert(PeerId::from_addr(old), tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(95)).await;
+    manager.dirty_peers.insert(PeerId::from_addr(young));
+    manager
+        .dirty_since
+        .insert(PeerId::from_addr(young), tokio::time::Instant::now());
     tokio::time::advance(Duration::from_secs(5)).await;
 
     manager.sample_outbound_dirty_gauges();
@@ -448,7 +452,7 @@ async fn outbound_dirty_oldest_seconds_is_max_over_current_episodes() {
         2.0
     );
 
-    manager.dirty_peers.remove(&old);
+    manager.dirty_peers.remove(&PeerId::from_addr(old));
     manager.sample_outbound_dirty_gauges();
     assert_eq!(oldest(&manager), 5.0);
 

@@ -1,4 +1,6 @@
 use super::*;
+use crate::PeerId;
+use crate::test_support::peer_v4;
 
 #[tokio::test]
 #[expect(
@@ -17,8 +19,8 @@ async fn channel_full_marks_dirty_and_resyncs() {
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
@@ -169,8 +171,8 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     let (out_tx, mut out_rx) = mpsc::channel(1);
@@ -321,8 +323,8 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Pre-populate Loc-RIB
@@ -389,8 +391,8 @@ async fn initial_dump_failure_resyncs_via_timer() {
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
 
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
     // Pre-populate Loc-RIB
@@ -498,8 +500,8 @@ async fn stale_peer_down_after_replacement_peer_up_is_discarded() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
@@ -653,8 +655,8 @@ async fn stale_graceful_restart_from_superseded_session_is_discarded() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
@@ -783,8 +785,8 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
@@ -991,7 +993,7 @@ async fn failover_inbound_refresh_retries_once_after_channel_drains() {
     let metrics = BgpMetrics::new();
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let handle = tokio::spawn(manager.run());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     // Capacity one makes the failover initial EoR occupy the only slot, so
     // the immediately-following inbound refresh request must be deferred.
@@ -1059,7 +1061,7 @@ fn pending_inbound_refresh_coalesces_and_closed_channel_is_terminal() {
     let (_tx, rx) = mpsc::channel(1);
     let metrics = BgpMetrics::new();
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (out_tx, mut out_rx) = mpsc::channel(1);
     manager.handle_update(session_peer_up(peer, 11, out_tx, evpn_sendable()));
 
@@ -1090,7 +1092,7 @@ fn pending_inbound_refresh_coalesces_and_closed_channel_is_terminal() {
 fn newer_registration_reaps_older_pending_inbound_refresh() {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (old_tx, mut old_rx) = mpsc::channel(1);
     manager.handle_update(session_peer_up(peer, 21, old_tx, evpn_sendable()));
     manager.request_inbound_refresh(peer);
@@ -1118,7 +1120,7 @@ fn inbound_refresh_retry_attempts_at_most_one_resync_slice() {
     let mut receivers = Vec::with_capacity(peer_count);
 
     for index in 0..peer_count {
-        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, u8::try_from(index + 1).unwrap()));
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 0, u8::try_from(index + 1).unwrap()));
         let (out_tx, out_rx) = mpsc::channel(1);
         manager.handle_update(session_peer_up(
             peer,
@@ -1167,7 +1169,7 @@ async fn graceful_restart_of_replacement_session_fails_over_to_surviving_session
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     let peer_up =
         |outbound_tx: mpsc::Sender<OutboundRouteUpdate>, session_id: u64| RibUpdate::PeerUp {
@@ -1264,7 +1266,7 @@ async fn failover_inbound_refresh_covers_negotiated_but_not_sendable_families() 
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     // Both sessions advertise an EMPTY sendable set — every negotiated
     // family is receive-only from the manager's point of view.
@@ -1333,7 +1335,7 @@ async fn failover_inbound_refresh_covers_negotiated_but_not_sendable_families() 
 /// `RibUpdate::PeerUp` boilerplate for the stale-data-message tests
 /// below: an iBGP RR-client peer with the given sendable families.
 pub(super) fn session_peer_up(
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     sendable_families: Vec<(Afi, Safi)>,
@@ -1371,7 +1373,7 @@ async fn stale_routes_received_from_superseded_session_is_discarded() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     // Loser registers, winner's PeerUp replaces the registration.
     let (loser_tx, mut loser_rx) = mpsc::channel(8);
@@ -1448,7 +1450,7 @@ async fn stale_end_of_rib_from_superseded_session_is_discarded() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, metrics.clone());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     // Session 1 establishes, announces a route, then goes down with GR —
     // the route is retained stale, awaiting the reconnect's End-of-RIB.
@@ -1542,7 +1544,7 @@ async fn stale_enhanced_refresh_markers_from_superseded_session_are_discarded() 
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     let (loser_tx, mut loser_rx) = mpsc::channel(8);
     tx.send(session_peer_up(peer, 1, loser_tx, ipv4_sendable()))
@@ -1639,7 +1641,7 @@ async fn stale_route_refresh_request_from_superseded_session_is_discarded() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     let (loser_tx, mut loser_rx) = mpsc::channel(8);
     tx.send(session_peer_up(peer, 1, loser_tx, ipv4_sendable()))
@@ -1706,7 +1708,7 @@ async fn stale_orf_update_from_superseded_session_is_discarded() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let orf_peer_up = |session_id, outbound_tx| {
         let mut update = session_peer_up(peer, session_id, outbound_tx, ipv4_sendable());
         let RibUpdate::PeerUp {
@@ -1790,7 +1792,7 @@ async fn active_session_messages_flow_after_replacement() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
 
     // Replacement scenario: the gate sees a non-trivial registration.
     let (loser_tx, mut loser_rx) = mpsc::channel(8);
@@ -1854,7 +1856,7 @@ async fn unregistered_session_message_keeps_legacy_accept_behavior() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 44, 0, 0), 24);
 
     tx.send(RibUpdate::RoutesReceived {
@@ -1897,7 +1899,7 @@ async fn unregistered_session_message_keeps_legacy_accept_behavior() {
 // ---------------------------------------------------------------------------
 
 fn test_peer_up(
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
 ) -> RibUpdate {
@@ -1921,7 +1923,7 @@ fn test_peer_up(
     }
 }
 
-fn test_routes_received(peer: IpAddr, announced: Vec<Route>) -> RibUpdate {
+fn test_routes_received(peer: PeerId, announced: Vec<Route>) -> RibUpdate {
     RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -1950,9 +1952,9 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
     // the host's speed.
     super::distribution_window::untimed_window(&mut manager);
 
-    let survivor = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let third = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    let restarter = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let survivor = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let third = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let restarter = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let third_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let restarter_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
@@ -2044,7 +2046,7 @@ async fn deferred_registration_dropped_when_session_dies_first() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.initial_dump_defer_min_routes = 0;
 
-    let restarter = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let restarter = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     tx.try_send(test_routes_received(restarter, vec![]))
         .unwrap();
     let (restarter_tx, mut restarter_rx) = mpsc::channel(16);
@@ -2074,7 +2076,7 @@ async fn run_loop_advances_deferred_registrations() {
     manager.initial_dump_defer_min_routes = 0;
     let handle = tokio::spawn(manager.run());
 
-    let survivor = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let survivor = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let (survivor_tx, mut survivor_rx) = mpsc::channel(64);
     tx.send(test_peer_up(survivor, 1, survivor_tx))
         .await
@@ -2082,8 +2084,8 @@ async fn run_loop_advances_deferred_registrations() {
     drain_eor(&mut survivor_rx).await;
 
     // Reconnect burst: two peers re-establish and re-announce.
-    let r1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let r2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let r1 = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let r2 = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
     let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
     let (r1_tx, mut r1_rx) = mpsc::channel(64);
@@ -2141,7 +2143,7 @@ fn session_peer_scope_reads_only_the_active_session() {
     use crate::update::PeerSourceContext;
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let context = |interface: Option<&str>| {
         Arc::new(PeerSourceContext {
             dampening_admission: None,
@@ -2193,7 +2195,7 @@ async fn accepted_source_context_survives_collision_failback_and_stamps_pending_
     use crate::update::{AcceptedDynamicRange, PeerSourceContext};
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let context = Arc::new(PeerSourceContext {
         dampening_admission: None,
         peer_interface: Some("eth1".into()),
@@ -2272,7 +2274,7 @@ async fn repeated_peer_up_preserves_only_matching_source_context() {
         ] {
             let (_tx, rx) = mpsc::channel(64);
             let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-            let peer: IpAddr = "192.0.2.1".parse().unwrap();
+            let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
             let context = Arc::new(PeerSourceContext {
                 dampening_admission: None,
                 peer_interface: Some("eth1".into()),
@@ -2333,7 +2335,7 @@ async fn ending_session_preserves_newer_staged_registration_context() {
     use crate::update::PeerSourceContext;
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let (old_tx, _old_rx) = mpsc::channel(64);
     manager.handle_update(session_peer_up(peer, 1, old_tx, ipv4_sendable()));
     let context = Arc::new(PeerSourceContext {
@@ -2408,7 +2410,7 @@ async fn aborted_registration_reaps_only_its_own_staged_source_context() {
         for graceful in [false, true] {
             let (_tx, rx) = mpsc::channel(64);
             let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-            let peer: IpAddr = "192.0.2.1".parse().unwrap();
+            let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
             let (active_tx, _active_rx) = mpsc::channel(64);
             if registered {
                 manager.handle_update(session_peer_up(peer, 99, active_tx, ipv4_sendable()));
@@ -2467,7 +2469,7 @@ async fn aborted_registration_reaps_only_its_own_staged_source_context() {
 async fn live_peer_policy_context_follows_failback_without_publishing_standby_updates() {
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
     let (first_tx, _first_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::SetPeerPolicyContext {
         peer,

@@ -1,5 +1,6 @@
 //! Unified live event stream service.
 
+use rustbgpd_rib::PeerId;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -504,7 +505,7 @@ impl proto::event_service_server::EventService for EventService {
         let filter = parse_list_evpn_events_filter(&request.into_inner(), self.roster.as_ref())?;
         let events = rib_manager_read(&self.rib_tx, |reply| {
             RibUpdate::QueryEvpnRouteEventHistory {
-                peer: filter.peer,
+                peer: filter.peer.map(PeerId::from_addr),
                 route_type: filter.route_type,
                 rd: filter.rd,
                 event_types: filter.event_types,
@@ -571,6 +572,7 @@ mod tests {
         spawn_fake_peer_manager_with_policy_history, spawn_fake_rib,
         spawn_fake_rib_with_evpn_history,
     };
+    use rustbgpd_rib::PeerId;
     use rustbgpd_rib::RouteEvent;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -950,8 +952,8 @@ mod tests {
             event_id: 0,
             event_type: RouteEventType::BestChanged,
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
-            peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-            previous_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            peer: Some(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))),
+            previous_peer: Some(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))),
             target_peer: None,
             peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
             previous_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
@@ -991,9 +993,9 @@ mod tests {
             event_id: 7,
             event_type: RouteEventType::PolicyFiltered,
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
-            peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            peer: Some(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))),
             previous_peer: None,
-            target_peer: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            target_peer: Some(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))),
             peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
             previous_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
             target_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,

@@ -12,6 +12,8 @@
 //! `distribution::rs_control`; these tests drive the full
 //! message-in/announcement-out path.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use rustbgpd_wire::LargeCommunity;
 
 use super::*;
@@ -53,7 +55,7 @@ fn tagged(
 /// initial Adj-RIB-Out build).
 async fn rs_peer_up(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     peer_asn: u32,
     rs_control_asn: Option<u32>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -65,7 +67,7 @@ async fn rs_peer_up(
 /// route) need sessions whose export chain mutates communities.
 async fn rs_peer_up_with_policy(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     peer_asn: u32,
     rs_control_asn: Option<u32>,
     export_policy: Option<rustbgpd_policy::PolicyChain>,
@@ -103,7 +105,7 @@ async fn rs_peer_up_with_policy(
     out_rx
 }
 
-async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, source: IpAddr, routes: Vec<Route>) {
+async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, source: PeerId, routes: Vec<Route>) {
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -119,7 +121,7 @@ async fn announce_unicast(tx: &mpsc::Sender<RibUpdate>, source: IpAddr, routes: 
     .unwrap();
 }
 
-async fn query_update_group_label(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
+async fn query_update_group_label(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> String {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
         .await
@@ -151,9 +153,9 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let client_a: IpAddr = "192.0.2.201".parse().unwrap();
-    let client_b: IpAddr = "192.0.2.202".parse().unwrap();
-    let transparent: IpAddr = "192.0.2.203".parse().unwrap();
+    let client_a = PeerId::from_addr("192.0.2.201".parse().unwrap());
+    let client_b = PeerId::from_addr("192.0.2.202".parse().unwrap());
+    let transparent = PeerId::from_addr("192.0.2.203".parse().unwrap());
 
     let mut a_rx = rs_peer_up(&tx, client_a, 65001, Some(RS_AS)).await;
     let mut b_rx = rs_peer_up(&tx, client_b, 65002, Some(RS_AS)).await;
@@ -173,7 +175,7 @@ async fn control_communities_steer_per_target_announcement_and_scrub() {
     );
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 119, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 40));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 40));
     let plain = make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 40), vec![65010]);
 
     announce_unicast(&tx, source, vec![plain.clone()]).await;
@@ -247,9 +249,9 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let client_a: IpAddr = "192.0.2.231".parse().unwrap();
-    let client_b: IpAddr = "192.0.2.232".parse().unwrap();
-    let transparent: IpAddr = "192.0.2.233".parse().unwrap();
+    let client_a = PeerId::from_addr("192.0.2.231".parse().unwrap());
+    let client_b = PeerId::from_addr("192.0.2.232".parse().unwrap());
+    let transparent = PeerId::from_addr("192.0.2.233".parse().unwrap());
 
     let mut a_rx = rs_peer_up(&tx, client_a, 65001, Some(RS_AS)).await;
     let mut b_rx = rs_peer_up(&tx, client_b, 65002, Some(RS_AS)).await;
@@ -265,7 +267,7 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
 
     let plain_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24);
     let tagged_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 123, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 43));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 43));
     let unrelated = std_c(64999, 42);
     let plain = make_route_with_as_path(plain_prefix, Ipv4Addr::new(198, 51, 100, 43), vec![65010]);
     let steered = tagged(
@@ -317,7 +319,7 @@ async fn untagged_routes_share_the_group_path_while_tagged_diverge() {
 
     // Late join with the steered-away ASN: the group-table replay
     // (initial dump) applies the same filter — only the untagged route.
-    let late: IpAddr = "192.0.2.234".parse().unwrap();
+    let late = PeerId::from_addr("192.0.2.234".parse().unwrap());
     tx.send(RibUpdate::SetPeerRsControl {
         peer: late,
         session_id: 0,
@@ -372,14 +374,14 @@ async fn announce_to_none_std_form_with_announce_override() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let client_a: IpAddr = "192.0.2.211".parse().unwrap();
-    let client_b: IpAddr = "192.0.2.212".parse().unwrap();
+    let client_a = PeerId::from_addr("192.0.2.211".parse().unwrap());
+    let client_b = PeerId::from_addr("192.0.2.212".parse().unwrap());
 
     let mut a_rx = rs_peer_up(&tx, client_a, 65001, Some(RS_AS)).await;
     let mut b_rx = rs_peer_up(&tx, client_b, 65002, Some(RS_AS)).await;
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 41));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 41));
     let route = tagged(
         make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 41), vec![65010]),
         // 0:RS (announce to none) + RS:65002 (except to 65002).
@@ -420,14 +422,14 @@ async fn prepend_toward_target_asn_only() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let client_a: IpAddr = "192.0.2.221".parse().unwrap();
-    let client_b: IpAddr = "192.0.2.222".parse().unwrap();
+    let client_a = PeerId::from_addr("192.0.2.221".parse().unwrap());
+    let client_b = PeerId::from_addr("192.0.2.222".parse().unwrap());
 
     let mut a_rx = rs_peer_up(&tx, client_a, 65001, Some(RS_AS)).await;
     let mut b_rx = rs_peer_up(&tx, client_b, 65002, Some(RS_AS)).await;
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 121, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 42));
     let route = tagged(
         make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 42), vec![65010, 64510]),
         vec![],
@@ -502,8 +504,8 @@ async fn policy_stripped_suppression_community_still_suppresses_toward_target() 
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let client_a: IpAddr = "192.0.2.241".parse().unwrap();
-    let client_b: IpAddr = "192.0.2.242".parse().unwrap();
+    let client_a = PeerId::from_addr("192.0.2.241".parse().unwrap());
+    let client_b = PeerId::from_addr("192.0.2.242".parse().unwrap());
 
     // Both members strip the control community on export.
     let strip = rustbgpd_policy::RouteModifications {
@@ -521,7 +523,7 @@ async fn policy_stripped_suppression_community_still_suppresses_toward_target() 
     );
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 124, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 44));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 44));
     let steered = tagged(
         make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 44), vec![65010]),
         vec![],
@@ -551,8 +553,8 @@ async fn policy_added_control_communities_scrub_but_do_not_steer() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
-    let client_a: IpAddr = "192.0.2.243".parse().unwrap();
-    let client_b: IpAddr = "192.0.2.244".parse().unwrap();
+    let client_a = PeerId::from_addr("192.0.2.243".parse().unwrap());
+    let client_b = PeerId::from_addr("192.0.2.244".parse().unwrap());
 
     // Policy stamps a deny-to-65001 and a prepend-toward-65002 tag onto
     // every route; neither may act.
@@ -566,7 +568,7 @@ async fn policy_added_control_communities_scrub_but_do_not_steer() {
     let mut b_rx = rs_peer_up_with_policy(&tx, client_b, 65002, Some(RS_AS), Some(chain)).await;
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 125, 0), 24);
-    let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 45));
+    let source = peer_v4(Ipv4Addr::new(198, 51, 100, 45));
     let plain = make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 45), vec![65010]);
     announce_unicast(&tx, source, vec![plain]).await;
     let _ = query_best_routes(&tx).await;
@@ -607,8 +609,8 @@ async fn grouped_matches_ungrouped_for_stripped_suppression_tag() {
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
         manager.test_force_ungrouped = force_ungrouped;
         let handle = tokio::spawn(manager.run());
-        let client_a: IpAddr = "192.0.2.245".parse().unwrap();
-        let client_b: IpAddr = "192.0.2.246".parse().unwrap();
+        let client_a = PeerId::from_addr("192.0.2.245".parse().unwrap());
+        let client_b = PeerId::from_addr("192.0.2.246".parse().unwrap());
 
         let strip = rustbgpd_policy::RouteModifications {
             large_communities_remove: vec![large(0, 65001)],
@@ -620,7 +622,7 @@ async fn grouped_matches_ungrouped_for_stripped_suppression_tag() {
         let mut b_rx = rs_peer_up_with_policy(&tx, client_b, 65002, Some(RS_AS), Some(chain)).await;
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 126, 0), 24);
-        let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 46));
+        let source = peer_v4(Ipv4Addr::new(198, 51, 100, 46));
         let plain = make_route_with_as_path(prefix, Ipv4Addr::new(198, 51, 100, 46), vec![65010]);
         // Pass 1: untagged — everyone receives. Pass 2: the source
         // re-announces with a deny-to-65001 tag the policy strips —

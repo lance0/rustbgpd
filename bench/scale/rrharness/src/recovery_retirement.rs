@@ -5,6 +5,7 @@ use super::recovery_memory::{
     EvpnCounts, RecoveryHarness, Spec,
 };
 use super::{oneshot, RibManager, RibUpdate};
+use rustbgpd_rib::PeerId;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -259,7 +260,7 @@ async fn run(spec: Spec, empty: bool, measured: bool) {
         // creates the empty Adj-RIB-In that the control must then destroy.
         let update = if spec.seed[2] + spec.seed[3] > 0 {
             RibUpdate::VpnRoutesReceived {
-                peer: harness.source,
+                peer: PeerId::from_addr(harness.source),
                 session_id: 1,
                 announced: Vec::new(),
                 withdrawn: Vec::new(),
@@ -283,7 +284,7 @@ async fn run(spec: Spec, empty: bool, measured: bool) {
     harness
         .tx
         .send(RibUpdate::PeerDown {
-            peer: harness.source,
+            peer: PeerId::from_addr(harness.source),
             session_id: 1,
         })
         .await
@@ -416,7 +417,7 @@ async fn receiver_retirement(spec: Spec, kind: ReceiverRetirement, empty: bool, 
         harness
             .tx
             .send(RibUpdate::PeerSlowState {
-                peer: harness.receiver_peer(0),
+                peer: PeerId::from_addr(harness.receiver_peer(0)),
                 session_id: 1,
                 slow: true,
             })
@@ -504,7 +505,7 @@ async fn receiver_retirement(spec: Spec, kind: ReceiverRetirement, empty: bool, 
         harness
             .tx
             .send(RibUpdate::PeerSlowState {
-                peer: harness.receiver_peer(0),
+                peer: PeerId::from_addr(harness.receiver_peer(0)),
                 session_id: 1,
                 slow: false,
             })
@@ -530,7 +531,7 @@ async fn receiver_retirement(spec: Spec, kind: ReceiverRetirement, empty: bool, 
     harness
         .tx
         .send(RibUpdate::PeerDown {
-            peer: harness.receiver_peer(0),
+            peer: PeerId::from_addr(harness.receiver_peer(0)),
             session_id: 1,
         })
         .await

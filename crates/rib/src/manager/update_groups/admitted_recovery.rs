@@ -4,9 +4,9 @@
 //! full old/new overlap during growth. Allocator overhead and RSS need their
 //! separate qualification receipt; a failed proof uses the actor's fallback.
 
+use crate::PeerId;
 use std::cmp::Ordering;
 use std::mem::size_of;
-use std::net::IpAddr;
 
 use rustbgpd_wire::{Prefix, VpnPrefix, VpnRouteKey};
 use smallvec::SmallVec;
@@ -134,7 +134,7 @@ impl FailureCause {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::manager) struct Failure {
     pub(in crate::manager) cause: FailureCause,
-    pub(in crate::manager) limiting_peer: Option<IpAddr>,
+    pub(in crate::manager) limiting_peer: Option<PeerId>,
     pub(in crate::manager) attempted_peer_bytes: usize,
     pub(in crate::manager) attempted_daemon_bytes: usize,
 }
@@ -333,7 +333,7 @@ enum State {
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone, PartialEq, Eq))]
 struct Record {
-    peer: IpAddr,
+    peer: PeerId,
     state: State,
     keys: AdmittedKeys,
     snapshot: Option<SnapshotHandle>,
@@ -439,15 +439,15 @@ impl AdmittedRecovery {
         self.peak
     }
 
-    pub(in crate::manager) fn contains_record(&self, peer: IpAddr) -> bool {
+    pub(in crate::manager) fn contains_record(&self, peer: PeerId) -> bool {
         self.index(peer).is_ok()
     }
 
-    pub(in crate::manager) fn contains_key(&self, peer: &IpAddr) -> bool {
+    pub(in crate::manager) fn contains_key(&self, peer: &PeerId) -> bool {
         self.get(peer).is_some()
     }
 
-    pub(in crate::manager) fn get(&self, peer: &IpAddr) -> Option<AdmittedKeyView<'_>> {
+    pub(in crate::manager) fn get(&self, peer: &PeerId) -> Option<AdmittedKeyView<'_>> {
         let record = &self.records[self.index(*peer).ok()?];
         if record.state != State::Complete {
             return None;
@@ -469,12 +469,12 @@ impl AdmittedRecovery {
     }
 
     #[cfg(test)]
-    pub(in crate::manager) fn owned_proof(&self, peer: &IpAddr) -> Option<AdmittedKeys> {
+    pub(in crate::manager) fn owned_proof(&self, peer: &PeerId) -> Option<AdmittedKeys> {
         self.get(peer).map(|proof| proof.iter().collect())
     }
 
     #[cfg(test)]
-    pub(in crate::manager) fn keys(&self) -> impl Iterator<Item = &IpAddr> {
+    pub(in crate::manager) fn keys(&self) -> impl Iterator<Item = &PeerId> {
         self.records
             .iter()
             .filter_map(|record| (record.state == State::Complete).then_some(&record.peer))
@@ -559,7 +559,7 @@ impl AdmittedRecovery {
     )]
     fn create_snapshot<A: Iterator<Item = Key>>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         count: usize,
         keys: A,
         slot_source: Option<&AdjRibOut>,
@@ -833,7 +833,7 @@ impl AdmittedRecovery {
     #[cfg(test)]
     pub(in crate::manager) fn share_capture_with_checkpoint<A: Iterator<Item = Key>>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         hint: Option<SnapshotHandle>,
         count: usize,
         keys: A,
@@ -847,7 +847,7 @@ impl AdmittedRecovery {
     /// before publication.
     pub(in crate::manager) fn share_group_capture_with_checkpoint(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         hint: Option<SnapshotHandle>,
         table: &AdjRibOut,
         shape: (usize, usize),
@@ -876,7 +876,7 @@ impl AdmittedRecovery {
     )]
     fn share_capture_inner<A: Iterator<Item = Key>>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         hint: Option<SnapshotHandle>,
         count: usize,
         keys: A,
@@ -1224,7 +1224,7 @@ impl AdmittedRecovery {
     )]
     pub(in crate::manager) fn capture_full_old_with_checkpoint<U, V>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         hint: Option<SnapshotHandle>,
         table: &AdjRibOut,
         sharing_allowed: bool,
@@ -1393,7 +1393,7 @@ impl AdmittedRecovery {
     /// An attached empty proof's universe takes precedence over a group hint.
     pub(in crate::manager) fn candidate_universe_contains(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         hint: Option<SnapshotHandle>,
         key: &Key,
         checkpoint: &mut impl FnMut(bool),
@@ -1415,7 +1415,7 @@ impl AdmittedRecovery {
     /// Reserve flat keys or the exact sparse additions of a shared capture.
     pub(in crate::manager) fn reserve_capture_with_checkpoint(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         count: usize,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Failure> {
@@ -1426,14 +1426,14 @@ impl AdmittedRecovery {
         Ok(())
     }
 
-    fn index(&self, peer: IpAddr) -> Result<usize, usize> {
+    fn index(&self, peer: PeerId) -> Result<usize, usize> {
         self.records
             .binary_search_by_key(&peer, |record| record.peer)
     }
 
     fn index_with_checkpoint(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<usize, usize> {
         self.records.binary_search_by(|record| {
@@ -1442,7 +1442,7 @@ impl AdmittedRecovery {
         })
     }
 
-    fn missing_proof(&self, peer: IpAddr) -> Failure {
+    fn missing_proof(&self, peer: PeerId) -> Failure {
         Failure {
             cause: FailureCause::MissingProof,
             limiting_peer: None,
@@ -1463,7 +1463,7 @@ impl AdmittedRecovery {
         }
     }
 
-    fn check(&self, address: IpAddr, peer: usize, daemon: usize) -> Result<(), Failure> {
+    fn check(&self, address: PeerId, peer: usize, daemon: usize) -> Result<(), Failure> {
         let cause = if peer > self.peer_limit {
             Some(FailureCause::PeerLimit)
         } else if daemon > self.daemon_limit {
@@ -1506,7 +1506,7 @@ impl AdmittedRecovery {
 
     fn insert_record(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         state: State,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Failure> {
@@ -1589,7 +1589,7 @@ impl AdmittedRecovery {
 
     pub(in crate::manager) fn begin_capture_with_checkpoint(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Failure> {
         if let Ok(index) = self.index_with_checkpoint(peer, checkpoint) {
@@ -1604,7 +1604,7 @@ impl AdmittedRecovery {
 
     pub(in crate::manager) fn insert_empty_with_checkpoint(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Failure> {
         if let Ok(index) = self.index_with_checkpoint(peer, checkpoint) {
@@ -1693,7 +1693,7 @@ impl AdmittedRecovery {
 
     pub(in crate::manager) fn push_capture_with_checkpoint(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         key: Key,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Failure> {
@@ -1737,7 +1737,7 @@ impl AdmittedRecovery {
 
     pub(in crate::manager) fn seal_capture_with_checkpoint(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Failure> {
         let Ok(index) = self.index_with_checkpoint(peer, checkpoint) else {
@@ -1756,7 +1756,7 @@ impl AdmittedRecovery {
 
     fn complete_index(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<usize>, Failure> {
         let Ok(index) = self.index_with_checkpoint(peer, checkpoint) else {
@@ -1793,7 +1793,7 @@ impl AdmittedRecovery {
     /// Reserve the union with unique, possibly unordered candidates; no withdrawal credit.
     pub(in crate::manager) fn reserve_admitted_with_checkpoint<A>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announcements: A,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Failure>
@@ -1864,7 +1864,7 @@ impl AdmittedRecovery {
     #[cfg(test)]
     pub(in crate::manager) fn apply_admitted_with_checkpoint<A, W>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announcements: A,
         withdrawals: W,
         checkpoint: &mut impl FnMut(bool),
@@ -1883,7 +1883,7 @@ impl AdmittedRecovery {
     /// instead of growing it.
     pub(in crate::manager) fn apply_reserved_admitted_with_checkpoint<A, W>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announcements: A,
         withdrawals: W,
         checkpoint: &mut impl FnMut(bool),
@@ -1897,7 +1897,7 @@ impl AdmittedRecovery {
 
     fn apply_admitted_inner<A, W>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announcements: A,
         withdrawals: W,
         reserve: bool,
@@ -1991,7 +1991,7 @@ impl AdmittedRecovery {
 
     pub(in crate::manager) fn remove_with_checkpoint(
         &mut self,
-        peer: &IpAddr,
+        peer: &PeerId,
         checkpoint: &mut impl FnMut(bool),
     ) -> bool {
         let Ok(index) = self.index_with_checkpoint(*peer, checkpoint) else {
@@ -2033,29 +2033,29 @@ impl AdmittedRecovery {
         self.records.is_empty()
     }
 
-    pub(in crate::manager) fn begin_capture(&mut self, peer: IpAddr) -> Result<bool, Failure> {
+    pub(in crate::manager) fn begin_capture(&mut self, peer: PeerId) -> Result<bool, Failure> {
         self.begin_capture_with_checkpoint(peer, &mut |_| {})
     }
 
     pub(in crate::manager) fn push_capture(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         key: Key,
     ) -> Result<(), Failure> {
         self.push_capture_with_checkpoint(peer, key, &mut |_| {})
     }
 
-    pub(in crate::manager) fn seal_capture(&mut self, peer: IpAddr) -> Result<(), Failure> {
+    pub(in crate::manager) fn seal_capture(&mut self, peer: PeerId) -> Result<(), Failure> {
         self.seal_capture_with_checkpoint(peer, &mut |_| {})
     }
 
-    pub(in crate::manager) fn insert_empty(&mut self, peer: IpAddr) -> Result<(), Failure> {
+    pub(in crate::manager) fn insert_empty(&mut self, peer: PeerId) -> Result<(), Failure> {
         self.insert_empty_with_checkpoint(peer, &mut |_| {})
     }
 
     pub(in crate::manager) fn reserve_admitted<A: Iterator<Item = Key>>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announcements: A,
     ) -> Result<bool, Failure> {
         self.reserve_admitted_with_checkpoint(peer, announcements, &mut |_| {})
@@ -2063,7 +2063,7 @@ impl AdmittedRecovery {
 
     pub(in crate::manager) fn apply_admitted<A, W>(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announcements: A,
         withdrawals: W,
     ) -> Result<bool, Failure>
@@ -2074,7 +2074,7 @@ impl AdmittedRecovery {
         self.apply_admitted_with_checkpoint(peer, announcements, withdrawals, &mut |_| {})
     }
 
-    pub(in crate::manager) fn remove(&mut self, peer: &IpAddr) -> bool {
+    pub(in crate::manager) fn remove(&mut self, peer: &PeerId) -> bool {
         self.remove_with_checkpoint(peer, &mut |_| {})
     }
 
@@ -2098,14 +2098,15 @@ impl FromIterator<ExactExportKey> for AdmittedKeys {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, RouteDistinguisher, VpnPrefix};
 
     use super::*;
 
-    fn peer(n: u8) -> IpAddr {
-        IpAddr::V4(Ipv4Addr::new(192, 0, 2, n))
+    fn peer(n: u8) -> PeerId {
+        PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, n)))
     }
 
     fn key(n: u8) -> Key {
@@ -2217,7 +2218,7 @@ mod tests {
         }
     }
 
-    fn capture(ledger: &mut AdmittedRecovery, peer: IpAddr, keys: &[Key]) {
+    fn capture(ledger: &mut AdmittedRecovery, peer: PeerId, keys: &[Key]) {
         assert!(ledger.begin_capture(peer).unwrap());
         for &key in keys {
             ledger.push_capture(peer, key).unwrap();
@@ -2706,7 +2707,7 @@ mod tests {
         raw: &[Key],
         actual: &[Key],
     ) -> SnapshotHandle {
-        ledger.begin_capture(address).unwrap();
+        ledger.begin_capture(PeerId::from_addr(address)).unwrap();
         let additions = hint
             .and_then(|handle| ledger.snapshot_index(handle))
             .map_or(0, |index| {
@@ -2718,7 +2719,7 @@ mod tests {
         let shape = (actual.len(), additions);
         let handle = ledger
             .share_capture_with_checkpoint(
-                address,
+                PeerId::from_addr(address),
                 hint,
                 raw.len(),
                 raw.iter().copied(),
@@ -2728,9 +2729,11 @@ mod tests {
             .unwrap()
             .unwrap();
         for key in actual {
-            ledger.push_capture(address, *key).unwrap();
+            ledger
+                .push_capture(PeerId::from_addr(address), *key)
+                .unwrap();
         }
-        ledger.seal_capture(address).unwrap();
+        ledger.seal_capture(PeerId::from_addr(address)).unwrap();
         handle
     }
 
@@ -2738,7 +2741,7 @@ mod tests {
     fn shared_proof_checkpoints_excluded_trailing_keys_and_idempotent_candidates() {
         let mut ledger = AdmittedRecovery::new();
         let raw: Vec<_> = (1..=100).map(key).collect();
-        shared_capture(&mut ledger, peer(1), None, &raw, &raw[..1]);
+        shared_capture(&mut ledger, peer(1).addr(), None, &raw, &raw[..1]);
         let mut visited = 0;
         let actual: Vec<_> = ledger
             .get(&peer(1))
@@ -2796,9 +2799,9 @@ mod tests {
     fn shared_key_storage_is_charged_once_but_each_peer_references_its_full_charge() {
         let mut ledger = AdmittedRecovery::new();
         let raw: Vec<_> = (1..=100).map(key).collect();
-        let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let handle = shared_capture(&mut ledger, peer(1).addr(), None, &raw, &raw);
         let first = ledger.bytes();
-        let handle2 = shared_capture(&mut ledger, peer(2), Some(handle), &raw, &raw[..50]);
+        let handle2 = shared_capture(&mut ledger, peer(2).addr(), Some(handle), &raw, &raw[..50]);
         assert_eq!(handle, handle2);
         assert_eq!(ledger.snapshots.len(), 1);
         assert_eq!(ledger.snapshots[0].references, 2);
@@ -2849,7 +2852,7 @@ mod tests {
             0,
         );
         let raw = [key(1), key(2), key(4), vpn];
-        let handle = shared_capture(&mut ledger, peer(1), None, &raw, &[key(1), vpn]);
+        let handle = shared_capture(&mut ledger, peer(1).addr(), None, &raw, &[key(1), vpn]);
         let unused = ledger.get(&peer(1)).unwrap();
         assert!(!unused.contains(&key(2).into()));
         assert_eq!(
@@ -2914,7 +2917,7 @@ mod tests {
         ];
         shared_capture(
             &mut ledger,
-            peer(1),
+            peer(1).addr(),
             None,
             &raw,
             &[key(2), key(6), bulk_vpn_key(4)],
@@ -2969,9 +2972,14 @@ mod tests {
             vec![key(2), bulk_vpn_key(4)],
         ] {
             let mut ledger = AdmittedRecovery::new();
-            let handle =
-                shared_capture(&mut ledger, peer(1), None, &raw, &[key(2), bulk_vpn_key(2)]);
-            shared_capture(&mut ledger, peer(2), Some(handle), &raw, &raw);
+            let handle = shared_capture(
+                &mut ledger,
+                peer(1).addr(),
+                None,
+                &raw,
+                &[key(2), bulk_vpn_key(2)],
+            );
+            shared_capture(&mut ledger, peer(2).addr(), Some(handle), &raw, &raw);
             ledger
                 .apply_admitted(
                     peer(1),
@@ -3004,9 +3012,14 @@ mod tests {
         for cause in [FailureCause::AllocationFailure, FailureCause::PeerLimit] {
             let mut ledger = AdmittedRecovery::new();
             let raw = [key(2), key(4), bulk_vpn_key(2), bulk_vpn_key(4)];
-            let handle =
-                shared_capture(&mut ledger, peer(1), None, &raw, &[key(2), bulk_vpn_key(2)]);
-            shared_capture(&mut ledger, peer(2), Some(handle), &raw, &raw);
+            let handle = shared_capture(
+                &mut ledger,
+                peer(1).addr(),
+                None,
+                &raw,
+                &[key(2), bulk_vpn_key(2)],
+            );
+            shared_capture(&mut ledger, peer(2).addr(), Some(handle), &raw, &raw);
             ledger
                 .apply_admitted(peer(1), [key(1)].into_iter(), [].into_iter())
                 .unwrap();
@@ -3093,7 +3106,7 @@ mod tests {
             let mut ledger = AdmittedRecovery::new();
             let raw: Vec<_> = (0..count).map(|n| full_key(4 * n)).collect();
             let masked: Vec<_> = raw.iter().step_by(2).copied().collect();
-            shared_capture(&mut ledger, peer(1), None, &raw, &masked);
+            shared_capture(&mut ledger, peer(1).addr(), None, &raw, &masked);
             let sparse: Vec<_> = (0..count).map(|n| full_key(4 * n + 1)).collect();
             ledger
                 .apply_admitted(peer(1), sparse.iter().copied(), [].into_iter())
@@ -3133,7 +3146,7 @@ mod tests {
     fn older_universe_capture_reserves_only_actual_sparse_keys_before_population() {
         let mut ledger = AdmittedRecovery::new();
         let raw = [key(1), key(2), bulk_vpn_key(1)];
-        let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let handle = shared_capture(&mut ledger, peer(1).addr(), None, &raw, &raw);
         let actual = [bulk_vpn_key(2), key(99), key(2)]; // Deliberately unordered.
         // This fixture has one retained key and two known sparse additions.
         let (count, additions) = (actual.len(), 2);
@@ -3189,7 +3202,7 @@ mod tests {
         ] {
             let mut ledger = AdmittedRecovery::new();
             let raw = [key(1), key(2), bulk_vpn_key(1)];
-            let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+            let handle = shared_capture(&mut ledger, peer(1).addr(), None, &raw, &raw);
             let actual = [key(2), key(3), bulk_vpn_key(2)];
             ledger.begin_capture(peer(2)).unwrap();
             ledger
@@ -3233,7 +3246,7 @@ mod tests {
             let mut ledger = AdmittedRecovery::new();
             let raw: Vec<_> = (1..=100).map(key).collect();
             let actual: Vec<_> = (1..=99).map(key).chain(std::iter::once(key(200))).collect();
-            let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+            let handle = shared_capture(&mut ledger, peer(1).addr(), None, &raw, &raw);
             ledger.begin_capture(peer(2)).unwrap();
             let before = ledger.bytes();
             ledger.allocation_countdown = Some(stage);
@@ -3285,11 +3298,17 @@ mod tests {
     #[test]
     fn released_snapshot_hint_never_aliases_a_later_key_universe() {
         let mut ledger = AdmittedRecovery::new();
-        let first = shared_capture(&mut ledger, peer(1), None, &[key(1), key(2)], &[key(1)]);
+        let first = shared_capture(
+            &mut ledger,
+            peer(1).addr(),
+            None,
+            &[key(1), key(2)],
+            &[key(1)],
+        );
         ledger.remove(&peer(1));
         let next = shared_capture(
             &mut ledger,
-            peer(2),
+            peer(2).addr(),
             Some(first),
             &[key(3), key(4)],
             &[key(4)],
@@ -3338,7 +3357,7 @@ mod tests {
     fn refused_new_member_mask_keeps_the_other_members_snapshot_and_charge() {
         let mut ledger = AdmittedRecovery::new();
         let raw: Vec<_> = (1..=100).map(key).collect();
-        let handle = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let handle = shared_capture(&mut ledger, peer(1).addr(), None, &raw, &raw);
         ledger.begin_capture(peer(2)).unwrap();
         let before = ledger.bytes();
         ledger.fail_next_allocation_for_test();
@@ -3491,7 +3510,7 @@ mod tests {
                 prefix: VpnPrefix::v4(Ipv4Addr::from(n), 32).unwrap(),
             },
             path_id: 0,
-            next_hop: peer(250),
+            next_hop: peer(250).addr(),
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: peer(250),
@@ -3514,7 +3533,7 @@ mod tests {
 
     fn capture_vpn(
         ledger: &mut AdmittedRecovery,
-        member: IpAddr,
+        member: PeerId,
         hint: Option<SnapshotHandle>,
         table: &AdjRibOut,
         sharing: bool,
@@ -3524,7 +3543,7 @@ mod tests {
 
     fn capture_vpn_where(
         ledger: &mut AdmittedRecovery,
-        member: IpAddr,
+        member: PeerId,
         hint: Option<SnapshotHandle>,
         table: &AdjRibOut,
         sharing: bool,
@@ -3582,7 +3601,7 @@ mod tests {
         assert!(hint.is_some());
         // Replacing an existing route's value keeps the VPN key set current.
         let mut replaced = vpn_route(7);
-        replaced.next_hop = peer(9);
+        replaced.next_hop = peer(9).addr();
         table.insert_vpn(replaced);
         let shape = vpn_shape(&ledger, hint, &table);
         assert_eq!((shape.count, shape.vpn, shape.additions), (200, 200, 0));
@@ -3708,7 +3727,7 @@ mod tests {
         assert_eq!(table.vpn_shard_count(), crate::fast_hash::SHARDS);
         assert!(checkpoints > 400, "every row moved through the reservation");
         let mut replaced = vpn_route(7);
-        replaced.next_hop = peer(9);
+        replaced.next_hop = peer(9).addr();
         table.insert_vpn(replaced);
         table.insert_vpn(vpn_route(500));
         let shape = vpn_shape(&ledger, hint, &table);
@@ -3900,7 +3919,7 @@ mod tests {
 
     fn capture_slots(
         ledger: &mut AdmittedRecovery,
-        member: IpAddr,
+        member: PeerId,
         hint: Option<SnapshotHandle>,
         table: &AdjRibOut,
         checkpoint: &mut impl FnMut(bool),
@@ -4253,7 +4272,7 @@ mod tests {
             .map(|route| Key::Unicast(route.prefix, 0))
             .collect();
         let mut ledger = AdmittedRecovery::new();
-        let legacy = shared_capture(&mut ledger, peer(1), None, &raw, &raw);
+        let legacy = shared_capture(&mut ledger, peer(1).addr(), None, &raw, &raw);
         let result = capture_slots(&mut ledger, peer(2), Some(legacy), &table, &mut |_| {});
         assert_eq!(result.strategy, FullCaptureStrategy::Flat);
         assert_eq!(result.fallback, Some(FullCaptureFallback::MissingIndex));

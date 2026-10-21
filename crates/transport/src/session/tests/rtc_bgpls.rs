@@ -536,7 +536,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
     let local_default = rustbgpd_rib::RtcRibRoute {
         nlri: rustbgpd_wire::RtcNlri::DEFAULT,
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,

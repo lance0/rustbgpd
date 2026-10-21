@@ -3,6 +3,8 @@
 //! ingestion, the settle timer, the bounded dirty resync — under a paused
 //! clock and observes the target's outbound UPDATE stream and Adj-RIB-Out.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -37,8 +39,8 @@ fn condition() -> Ipv4Prefix {
 fn v4(prefix: Ipv4Prefix) -> Prefix {
     Prefix::V4(prefix)
 }
-fn ip(addr: Ipv4Addr) -> IpAddr {
-    IpAddr::V4(addr)
+fn ip(addr: Ipv4Addr) -> PeerId {
+    peer_v4(addr)
 }
 
 fn rpol(source: &str, name: &str) -> PolicyChain {
@@ -235,7 +237,7 @@ fn wire(announced: &[(Ipv4Prefix, u32)], withdrawn: &[(Ipv4Prefix, u32)]) -> Wir
 }
 
 /// Advertised `(prefix, path id) -> source peer`.
-fn advertised(manager: &RibManager, peer: Ipv4Addr) -> BTreeMap<(Prefix, u32), IpAddr> {
+fn advertised(manager: &RibManager, peer: Ipv4Addr) -> BTreeMap<(Prefix, u32), PeerId> {
     manager
         .adj_ribs_out
         .get(&ip(peer))

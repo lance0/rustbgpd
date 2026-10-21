@@ -5,9 +5,9 @@
 //! connect owner publication and finite history admission to the actors;
 //! production does not install that history consumer or suppress routes.
 
+use crate::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::net::IpAddr;
 use std::num::NonZeroU64;
 use std::ops::RangeBounds;
 use std::sync::Arc;
@@ -195,7 +195,7 @@ pub struct DampeningSource {
     /// Committed configured incarnation.
     pub owner: NonZeroU64,
     /// Remote transport address.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Negotiated OPEN ASN.
     pub peer_asn: u32,
 }

@@ -16,7 +16,7 @@
 //! published instances; a request checks the closure after capture, so a
 //! roster loaded before the owner stopped cannot report its values as success.
 
-use std::net::IpAddr;
+use crate::PeerId;
 use std::sync::Arc;
 use std::sync::TryLockError;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +29,7 @@ use crate::update::ExportPolicyTermHits;
 /// One peer's export-map entry: its installed chain's counter instance, or
 /// `None` when export policy is explicitly disabled for the peer (the global
 /// fallback does not apply to it).
-pub type ExportRosterPeer = (IpAddr, Option<Arc<PolicyHitCounters>>);
+pub type ExportRosterPeer = (PeerId, Option<Arc<PolicyHitCounters>>);
 
 /// One immutable roster publication.
 #[derive(Debug, Default)]
@@ -62,7 +62,7 @@ impl ExportRoster {
     /// The instance that evaluates `peer`'s exports: its own entry if it has
     /// one (`None` when explicitly disabled), otherwise the global fallback.
     #[must_use]
-    pub fn for_peer(&self, peer: IpAddr) -> Option<&Arc<PolicyHitCounters>> {
+    pub fn for_peer(&self, peer: PeerId) -> Option<&Arc<PolicyHitCounters>> {
         match self
             .peers
             .binary_search_by_key(&peer, |(address, _)| *address)
@@ -185,7 +185,7 @@ const DEADLINE_CHECK_ROWS: usize = 1024;
 /// Deadline expiry or a poisoned error lock fails the whole capture.
 pub async fn capture_export(
     roster: &ExportRoster,
-    peer: Option<IpAddr>,
+    peer: Option<PeerId>,
     deadline: tokio::time::Instant,
 ) -> Result<Vec<ExportPolicyTermHits>, ExportCaptureError> {
     capture_export_until(roster, peer, |_| deadline <= tokio::time::Instant::now()).await
@@ -195,10 +195,10 @@ pub async fn capture_export(
 /// read so far, so a test can pass it mid-pass.
 async fn capture_export_until(
     roster: &ExportRoster,
-    peer: Option<IpAddr>,
+    peer: Option<PeerId>,
     mut expired: impl FnMut(usize) -> bool,
 ) -> Result<Vec<ExportPolicyTermHits>, ExportCaptureError> {
-    let selected: Vec<(Option<IpAddr>, &Arc<PolicyHitCounters>)> = match peer {
+    let selected: Vec<(Option<PeerId>, &Arc<PolicyHitCounters>)> = match peer {
         Some(peer) => roster
             .for_peer(peer)
             .map(|counters| (Some(peer), counters))
@@ -265,6 +265,7 @@ async fn capture_export_until(
 #[cfg(test)]
 mod tests {
     use std::future::{Future, poll_fn};
+    use std::net::IpAddr;
     use std::task::Poll;
     use std::time::Duration;
 
@@ -308,14 +309,14 @@ mod tests {
         tokio::time::Instant::now() + Duration::from_secs(60)
     }
 
-    fn address(last: u8) -> IpAddr {
-        IpAddr::from([192, 0, 2, last])
+    fn address(last: u8) -> PeerId {
+        PeerId::from_addr(IpAddr::from([192, 0, 2, last]))
     }
 
     /// Poll a capture once: it must complete without yielding.
     async fn capture_in_one_poll(
         roster: &ExportRoster,
-        peer: Option<IpAddr>,
+        peer: Option<PeerId>,
         expired: impl FnMut(usize) -> bool,
     ) -> Result<Vec<ExportPolicyTermHits>, ExportCaptureError> {
         let capture = capture_export_until(roster, peer, expired);

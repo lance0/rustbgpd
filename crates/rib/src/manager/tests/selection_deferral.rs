@@ -1,5 +1,7 @@
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use rustbgpd_telemetry::BgpMetrics;
@@ -70,12 +72,12 @@ fn counter_values_by_label(
         })
 }
 
-fn peer(octet: u8) -> IpAddr {
-    IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet))
+fn peer(octet: u8) -> PeerId {
+    peer_v4(Ipv4Addr::new(10, 0, 0, octet))
 }
 
 fn peer_up(
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     outbound_tx: mpsc::Sender<crate::OutboundRouteUpdate>,
 ) -> RibUpdate {
@@ -83,7 +85,7 @@ fn peer_up(
 }
 
 fn peer_up_with_families(
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     outbound_tx: mpsc::Sender<crate::OutboundRouteUpdate>,
     sendable_families: Vec<(Afi, Safi)>,
@@ -108,13 +110,13 @@ fn peer_up_with_families(
     }
 }
 
-async fn stage_gr_context(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, session_id: u64) {
+async fn stage_gr_context(tx: &mpsc::Sender<RibUpdate>, peer: PeerId, session_id: u64) {
     stage_gr_context_with(tx, peer, session_id, false, vec![FAMILY]).await;
 }
 
 async fn stage_gr_context_with(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     peer_restart_state: bool,
     peer_gr_families: Vec<(Afi, Safi)>,
@@ -137,7 +139,7 @@ async fn stage_gr_context_with(
 /// RFC 2918 route refresh (no RFC 7313 enhanced route refresh).
 async fn stage_gr_context_plain_refresh(
     tx: &mpsc::Sender<RibUpdate>,
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
 ) {
     tx.send(RibUpdate::SetPeerGracefulRestartContext {
@@ -154,7 +156,7 @@ async fn stage_gr_context_plain_refresh(
     .unwrap();
 }
 
-async fn query_state(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> PeerOutboundState {
+async fn query_state(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> PeerOutboundState {
     let (reply, rx) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerOutboundState { peer, reply })
         .await
@@ -162,7 +164,7 @@ async fn query_state(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> PeerOutbound
     rx.await.unwrap()
 }
 
-async fn advertised_count(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> usize {
+async fn advertised_count(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> usize {
     let (reply, rx) = oneshot::channel();
     tx.send(RibUpdate::QueryAdvertisedCount { peer, reply })
         .await
@@ -182,7 +184,7 @@ async fn assert_table_before_eor(rx: &mut mpsc::Receiver<crate::OutboundRouteUpd
     }
 }
 
-fn config(timeout: Duration, peers: &[IpAddr]) -> SelectionDeferralConfig {
+fn config(timeout: Duration, peers: &[PeerId]) -> SelectionDeferralConfig {
     SelectionDeferralConfig {
         timeout,
         waiters: peers
@@ -234,7 +236,7 @@ fn selection_deferral_construction_materializes_failure_counter_children() {
 
 fn commit_control_markers(
     manager: &mut RibManager,
-    peer: IpAddr,
+    peer: PeerId,
     end_of_rib: Vec<(Afi, Safi)>,
     refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
 ) -> bool {

@@ -3,11 +3,11 @@ use rustbgpd_rib::{EvpnRecoveryExhaustionCause, EvpnRecoveryReset, EvpnRecoveryR
 
 fn request(session: &PeerSession) -> EvpnRecoveryReset {
     EvpnRecoveryReset {
-        peer: session.peer_ip,
+        peer: PeerId::from_addr(session.peer_ip),
         session_id: session.session_identity.id,
         outbound: session.outbound_tx.clone(),
         cause: EvpnRecoveryExhaustionCause::PeerLimit,
-        limiting_peer: Some(session.peer_ip),
+        limiting_peer: Some(PeerId::from_addr(session.peer_ip)),
         attempted_peer_bytes: 17,
         attempted_daemon_bytes: 18,
         peer_limit_bytes: 16,
@@ -150,7 +150,7 @@ async fn evpn_recovery_guard_rejects_wrong_actor_peer_or_connection() {
                 (None, None)
             }
             "peer" => {
-                reset.peer = "192.0.2.99".parse().unwrap();
+                reset.peer = PeerId::from_addr("192.0.2.99".parse().unwrap());
                 (None, None)
             }
             _ => {

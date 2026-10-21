@@ -5,6 +5,7 @@
 //! through the manager's existing general-query drain. Each invocation emits
 //! one JSON receipt; no statistical campaign policy lives in this binary.
 
+use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
@@ -371,20 +372,18 @@ fn withdraw_inventory(manager: &mut RibManager, v4: usize, v6: usize, peers: usi
     let mut by_peer: BTreeMap<IpAddr, Vec<(Prefix, u32)>> = BTreeMap::new();
     for index in 0..v4 {
         by_peer
-            .entry(RibManager::bench_peer_address(index % peers))
+            .entry(RibManager::bench_peer_address(index % peers).addr())
             .or_default()
             .push((prefix_v4(index, filler), 0));
     }
     for index in 0..v6 {
         by_peer
-            .entry(RibManager::bench_peer_address(
-                v4.saturating_add(index) % peers,
-            ))
+            .entry((RibManager::bench_peer_address(v4.saturating_add(index) % peers)).addr())
             .or_default()
             .push((prefix_v6(index, filler), 0));
     }
     for (peer, withdrawn) in by_peer {
-        manager.bench_withdraw_loc_rib(peer, withdrawn);
+        manager.bench_withdraw_loc_rib(PeerId::from_addr(peer), withdrawn);
     }
 }
 

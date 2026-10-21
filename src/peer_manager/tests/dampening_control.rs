@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 use rustbgpd_api::peer_types::OwnedDampeningControlOutcome as Outcome;
 use rustbgpd_rib::dampening::{
@@ -69,7 +70,7 @@ async fn register_source(
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     rib_tx
         .send(RibUpdate::SetPeerSourceContext {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 1,
             context: Arc::new(PeerSourceContext {
                 dampening_admission: Some(admission),
@@ -82,7 +83,7 @@ async fn register_source(
         .unwrap();
     rib_tx
         .send(RibUpdate::PeerUp {
-            peer,
+            peer: PeerId::from_addr(peer),
             session_id: 1,
             peer_asn: 65002,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -107,7 +108,7 @@ async fn register_source(
 
 fn empty_wire_batch(peer: IpAddr) -> RibUpdate {
     RibUpdate::WireRoutesReceived(WireRoutesReceived {
-        peer,
+        peer: PeerId::from_addr(peer),
         session_id: 1,
         announced: Vec::new(),
         withdrawn: Vec::new(),
@@ -276,7 +277,7 @@ async fn capacity_disable_joins_both_producers_before_primary_barrier() {
             let command = proxy_rx.recv().await.unwrap();
             match command {
                 RibUpdate::PeerDown { peer, session_id } => {
-                    assert_eq!(peer, fixture.peer.address);
+                    assert_eq!(peer, PeerId::from_addr(fixture.peer.address));
                     if session_id == 2 {
                         assert!(candidate_joined.load(Ordering::SeqCst));
                     }
@@ -560,12 +561,12 @@ async fn dynamic_retirement_waits_for_queued_wire_capacity_decision() {
             .unwrap();
         let held_batch = proxy_rx.recv().await.unwrap();
         assert!(!fixture.admission.is_blocked());
-        let peer_addr = fixture.peer.address;
+        let peer_addr = PeerId::from_addr(fixture.peer.address);
         let retiring = tokio::spawn(async move {
             fixture
                 .manager
                 .handle_session_notification(SessionNotification::BackToIdle {
-                    peer_addr,
+                    peer_addr: peer_addr.addr(),
                     session_id: 1,
                     role: rustbgpd_transport::SessionRole::Primary,
                 })

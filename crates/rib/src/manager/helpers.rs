@@ -1,3 +1,4 @@
+use crate::PeerId;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr};
@@ -12,8 +13,8 @@ use rustbgpd_wire::{
 
 use crate::route::BgpLsFamily;
 
-/// Sentinel peer address for locally-injected routes.
-pub(super) const LOCAL_PEER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+/// Sentinel peer for locally-injected routes.
+pub(super) const LOCAL_PEER: crate::PeerId = crate::PeerId::LOCAL;
 
 /// How long to wait before retrying distribution to dirty peers.
 pub(super) const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -285,7 +286,7 @@ pub(super) fn should_suppress_ibgp_inner(
     target_is_ebgp: bool,
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
-    peer_is_rr_client: &HashMap<IpAddr, bool>,
+    peer_is_rr_client: &HashMap<PeerId, bool>,
 ) -> bool {
     // eBGP targets never suppressed
     if target_is_ebgp {

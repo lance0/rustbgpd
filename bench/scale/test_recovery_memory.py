@@ -452,7 +452,15 @@ class RecoveryReceiptTests(unittest.TestCase):
             path.write_text(header + indent + "#[cfg(test)]\n" + anchor + "\n", encoding="utf-8")
         return self.root
 
-    def control_api_tree(self, swaps: bool, hook: bool = True) -> tuple[Path, Path]:
+    def control_api_tree(
+        self, swaps: bool, hook: bool = True, peer_id: bool = True
+    ) -> tuple[Path, Path]:
+        lib = self.root / "crates/rib/src/lib.rs"
+        lib.parent.mkdir(parents=True, exist_ok=True)
+        lib.write_text(
+            "pub mod peer_id;\n" + receipt.PEER_ID_EXPORT + "\n" if peer_id else "pub mod route;\n",
+            encoding="utf-8",
+        )
         manager = self.root / "crates/rib/src/manager/mod.rs"
         manager.parent.mkdir(parents=True, exist_ok=True)
         builder = "    " + receipt.MEMBER_FULL_PASS_BUILDER + "mut self) -> Self {}\n"
@@ -475,7 +483,68 @@ class RecoveryReceiptTests(unittest.TestCase):
                    + "                reply,\n            })\n")
         setup = "                RibManager::new()\n" + receipt.HARNESS_MEMBER_FULL_PASS
         harness.write_text(setup + request + "\n" + request, encoding="utf-8")
+        (harness.parent / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
         return self.root, harness
+
+    PEER_ID_MAIN = (
+        "use rustbgpd_rib::PeerId;\n"
+        "fn add(peer: IpAddr) {\n"
+        "    let peer = PeerId::from_addr(client_addr(i));\n"
+        "    clients.push(peer.addr());\n"
+        "    send(RibUpdate::PeerUp { peer: PeerId::from_addr(IpAddr::V4(src)) });\n"
+        "    counts.map(|(peer, v4)| (peer.addr(), v4));\n"
+        "}\n"
+    )
+    ADDRESS_MAIN = (
+        "fn add(peer: IpAddr) {\n"
+        "    let peer = client_addr(i);\n"
+        "    clients.push(peer);\n"
+        "    send(RibUpdate::PeerUp { peer: IpAddr::V4(src) });\n"
+        "    counts.map(|(peer, v4)| (peer, v4));\n"
+        "}\n"
+    )
+
+    def peer_id_harness(self, harness: Path, main: str) -> Path:
+        entrypoint = harness.parent / "main.rs"
+        entrypoint.write_text(main, encoding="utf-8")
+        harness.write_text(
+            "    use rustbgpd_rib::PeerId;\n"
+            + harness.read_text(encoding="utf-8").replace(
+                "peers: vec![peer],", "peers: vec![PeerId::from_addr(peer.addr())],"
+            ),
+            encoding="utf-8",
+        )
+        return entrypoint
+
+    def test_control_api_keeps_peer_ids_for_a_control_that_has_them(self) -> None:
+        tree, harness = self.control_api_tree(swaps=True)
+        entrypoint = self.peer_id_harness(harness, self.PEER_ID_MAIN)
+        original = (harness.read_bytes(), entrypoint.read_bytes())
+        receipt.derive_control_api(tree)
+        self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
+
+    def test_control_api_maps_peer_ids_to_addresses_before_peer_id(self) -> None:
+        tree, harness = self.control_api_tree(swaps=True, peer_id=False)
+        original = harness.read_text(encoding="utf-8")
+        entrypoint = self.peer_id_harness(harness, self.PEER_ID_MAIN)
+        receipt.derive_control_api(tree)
+        self.assertEqual(entrypoint.read_text(encoding="utf-8"), self.ADDRESS_MAIN)
+        self.assertEqual(harness.read_text(encoding="utf-8"), original)
+
+    def test_control_api_refuses_peer_id_uses_without_a_one_to_one_mapping(self) -> None:
+        for main in (
+            self.PEER_ID_MAIN.replace("peer.addr()", "source.addr()", 1),
+            self.PEER_ID_MAIN + "const LOCAL: PeerId = PeerId::LOCAL;\n",
+            "use rustbgpd_rib::{PeerId, Route};\n" + self.PEER_ID_MAIN,
+            self.PEER_ID_MAIN + "fn f() { PeerId::from_addr(peer; }\n",
+        ):
+            with self.subTest(main=main):
+                tree, harness = self.control_api_tree(swaps=True, peer_id=False)
+                entrypoint = self.peer_id_harness(harness, main)
+                original = (harness.read_bytes(), entrypoint.read_bytes())
+                with self.assertRaises(receipt.InvalidReceipt):
+                    receipt.derive_control_api(tree)
+                self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
 
     def test_control_api_drops_default_swaps_only_for_historical_requests(self) -> None:
         tree, harness = self.control_api_tree(swaps=True)

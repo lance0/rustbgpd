@@ -998,7 +998,9 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
         .try_recv()
         .expect("GR lifecycle message must follow route withdrawal")
     {
-        RibUpdate::PeerGracefulRestart { peer, .. } => assert_eq!(peer, session.peer_ip),
+        RibUpdate::PeerGracefulRestart { peer, .. } => {
+            assert_eq!(peer, PeerId::from_addr(session.peer_ip));
+        }
         _ => panic!("expected PeerGracefulRestart after route withdrawal"),
     }
 }

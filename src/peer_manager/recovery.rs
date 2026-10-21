@@ -29,7 +29,7 @@ impl PeerManager {
             let _ = reply.send(EvpnRecoveryResetOutcome::Rejected);
             return;
         };
-        if key.address != request.peer {
+        if key.address != request.peer.addr() {
             let _ = reply.send(EvpnRecoveryResetOutcome::Rejected);
             return;
         }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::peer_v4;
 
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -38,7 +39,7 @@ fn owner(id: u64) -> Arc<DampeningOwner> {
 
 fn source(peer: u8, session_id: u64, asn: u32, owner: &Arc<DampeningOwner>) -> ReceivedRouteSource {
     ReceivedRouteSource {
-        peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, peer)),
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, peer)),
         session_id,
         peer_asn: Some(asn),
         context: Some(Arc::new(PeerSourceContext {
@@ -76,7 +77,7 @@ fn register(
         peer: source.peer,
         session_id: source.session_id,
         peer_asn: source.peer_asn.unwrap(),
-        peer_router_id: crate::test_support::session_router_id(source.peer),
+        peer_router_id: crate::test_support::session_router_id(source.peer.addr()),
         outbound_tx,
         export_policy: None,
         sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
@@ -117,7 +118,7 @@ fn batch(
     withdrawn: &[u8],
     wire: bool,
 ) -> RibUpdate {
-    let IpAddr::V4(peer) = source.peer else {
+    let IpAddr::V4(peer) = source.peer.addr() else {
         panic!("IPv4 fixture")
     };
     let batch = RibUpdate::RoutesReceived {
@@ -679,12 +680,12 @@ async fn blocked_source_still_withdraws_rtc_while_rejecting_rtc_announcements() 
     let _refused_out = register(&mut manager, &refused, true, false);
     let old = crate::route::RtcRibRoute {
         nlri: rustbgpd_wire::RtcNlri::DEFAULT,
-        next_hop: refused.peer,
+        next_hop: refused.peer.addr(),
         peer: refused.peer,
         attributes: crate::AttrSet::new(vec![]),
         received_at: std::time::Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: crate::test_support::session_router_id(refused.peer),
+        peer_router_id: crate::test_support::session_router_id(refused.peer.addr()),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,

@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 /// A policy-acking peer with a controllable first and subsequent state-query
 /// result. `None` drops the reply and produces a typed session-gone outcome.
@@ -151,8 +152,8 @@ async fn owned_policy_cohort_failure_reports_fully_compensated() {
     };
 
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
-    let first = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let failing = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let first = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    let failing = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
     let rib_driver = tokio::spawn(async move {
         let RibUpdate::PrepareExportPolicyDestination { reply, .. } =
@@ -191,20 +192,20 @@ async fn owned_policy_cohort_failure_reports_fully_compensated() {
     );
     insert_test_managed_peer(
         &mut mgr,
-        first,
-        acking_policy_handle(first, SessionState::Established),
+        first.addr(),
+        acking_policy_handle(first.addr(), SessionState::Established),
         false,
     );
     insert_test_managed_peer(
         &mut mgr,
-        failing,
-        export_fails_once_policy_handle(failing, SessionState::Established),
+        failing.addr(),
+        export_fails_once_policy_handle(failing.addr(), SessionState::Established),
         false,
     );
     mgr.current_config.neighbors = [first, failing]
         .into_iter()
         .map(|address| {
-            let mut neighbor = config_neighbor(address, 65002);
+            let mut neighbor = config_neighbor(address.addr(), 65002);
             neighbor.export_policy_chain = vec!["edge-export".into()];
             neighbor
         })
@@ -220,15 +221,15 @@ async fn owned_policy_cohort_failure_reports_fully_compensated() {
                 },
                 ack: None,
             },
-            Some(vec![first, failing]),
+            Some(vec![first.addr(), failing.addr()]),
         )
         .await;
     assert!(
         matches!(outcome, OwnedCatalogMutationOutcome::FullyCompensated(_)),
         "the failing member and acknowledged prefix must restore exactly: {outcome:?}"
     );
-    assert!(!mgr.peers[&key(first)].pending_export_apply);
-    assert!(!mgr.peers[&key(failing)].pending_export_apply);
+    assert!(!mgr.peers[&key(first.addr())].pending_export_apply);
+    assert!(!mgr.peers[&key(failing.addr())].pending_export_apply);
     assert!(
         !mgr.current_config
             .policy
@@ -407,13 +408,13 @@ async fn assert_non_established_rollback_rib_outcome(
         rib_tx,
         None,
     );
-    let flapping = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let failing = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let flapping = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    let failing = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
     insert_test_managed_peer(
         &mut mgr,
-        flapping,
+        flapping.addr(),
         sequenced_policy_state_handle(
-            flapping,
+            flapping.addr(),
             Some(SessionState::Established),
             (!matches!(
                 rollback_outcome,
@@ -425,15 +426,15 @@ async fn assert_non_established_rollback_rib_outcome(
     );
     insert_test_managed_peer(
         &mut mgr,
-        failing,
-        acking_policy_handle(failing, SessionState::Established),
+        failing.addr(),
+        acking_policy_handle(failing.addr(), SessionState::Established),
         false,
     );
 
     let prior_import = validation_policy_chain(ImportValidationDependency::Rpki);
     let prior_export = validation_policy_chain(ImportValidationDependency::Aspa);
     for peer in [flapping, failing] {
-        let managed = mgr.peers.get_mut(&key(peer)).unwrap();
+        let managed = mgr.peers.get_mut(&key(peer.addr())).unwrap();
         managed.import_policy = Some(prior_import.clone());
         managed.export_policy = Some(prior_export.clone());
     }
@@ -512,7 +513,7 @@ async fn assert_non_established_rollback_rib_outcome(
                 .into_iter()
                 .enumerate()
                 .map(|(index, address)| ResolvedPeerPolicy {
-                    address,
+                    address: address.addr(),
                     interface: None,
                     import_policy: Some(next.clone()),
                     export_policy: Some(if index == 0 {
@@ -527,7 +528,7 @@ async fn assert_non_established_rollback_rib_outcome(
     let error = result.expect_err("the second peer's forward RIB failure must abort the apply");
     rib_driver.await.unwrap();
 
-    let managed = mgr.peers.get(&key(flapping)).unwrap();
+    let managed = mgr.peers.get(&key(flapping.addr())).unwrap();
     assert_eq!(
         format!("{:?}", managed.import_policy),
         format!("{:?}", Some(prior_import)),
@@ -570,8 +571,8 @@ async fn assert_non_established_rollback_rib_outcome(
         }
     }
 
-    mgr.delete_peer(key(flapping), false).await.unwrap();
-    mgr.delete_peer(key(failing), false).await.unwrap();
+    mgr.delete_peer(key(flapping.addr()), false).await.unwrap();
+    mgr.delete_peer(key(failing.addr()), false).await.unwrap();
 }
 
 #[tokio::test]
@@ -611,20 +612,23 @@ async fn ordinary_export_apply_unknown_state_rearms_until_established_retry() {
         rib_tx,
         None,
     );
-    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)));
     insert_test_managed_peer(
         &mut mgr,
-        peer,
-        sequenced_policy_state_handle(peer, None, Some(SessionState::Established)),
+        peer.addr(),
+        sequenced_policy_state_handle(peer.addr(), None, Some(SessionState::Established)),
         false,
     );
     let next = deny_policy_chain();
 
-    mgr.update_runtime_policies(peer, None, Some(next.clone()))
+    mgr.update_runtime_policies(peer.addr(), None, Some(next.clone()))
         .await
         .expect("an unknown state keeps ordinary forward compatibility");
     assert!(
-        mgr.peers.get(&key(peer)).unwrap().pending_export_apply,
+        mgr.peers
+            .get(&key(peer.addr()))
+            .unwrap()
+            .pending_export_apply,
         "an unknown state must retain fresh export intent because the peer may actually be Established"
     );
     assert!(
@@ -632,7 +636,7 @@ async fn ordinary_export_apply_unknown_state_rearms_until_established_retry() {
         "the unknown-state call must not blindly address an unconfirmed RIB registration"
     );
 
-    let retry = mgr.update_runtime_policies(peer, None, Some(next));
+    let retry = mgr.update_runtime_policies(peer.addr(), None, Some(next));
     let drive_rib = async {
         let RibUpdate::ReplacePeerExportPolicy {
             peer: actual,
@@ -648,11 +652,14 @@ async fn ordinary_export_apply_unknown_state_rearms_until_established_retry() {
     let (result, ()) = tokio::join!(retry, drive_rib);
     result.expect("the Established retry must consume the retained RIB intent");
     assert!(
-        !mgr.peers.get(&key(peer)).unwrap().pending_export_apply,
+        !mgr.peers
+            .get(&key(peer.addr()))
+            .unwrap()
+            .pending_export_apply,
         "a successful authoritative retry must clear export intent"
     );
 
-    mgr.delete_peer(key(peer), false).await.unwrap();
+    mgr.delete_peer(key(peer.addr()), false).await.unwrap();
 }
 
 #[tokio::test]
@@ -794,24 +801,24 @@ async fn apply_resolved_policy_snapshot_restores_partially_mutated_failing_peer(
         rib_tx,
         None,
     );
-    let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let address = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     insert_test_managed_peer(
         &mut mgr,
-        address,
-        export_fails_once_policy_handle(address, SessionState::Idle),
+        address.addr(),
+        export_fails_once_policy_handle(address.addr(), SessionState::Idle),
         false,
     );
     let import_prior = validation_policy_chain(ImportValidationDependency::Rpki);
     let export_prior = validation_policy_chain(ImportValidationDependency::Aspa);
     {
-        let managed = mgr.peers.get_mut(&key(address)).unwrap();
+        let managed = mgr.peers.get_mut(&key(address.addr())).unwrap();
         managed.import_policy = Some(import_prior.clone());
         managed.export_policy = Some(export_prior.clone());
     }
 
     let new_chain = deny_policy_chain();
     let apply = mgr.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
-        address,
+        address: address.addr(),
         interface: None,
         import_policy: Some(new_chain.clone()),
         export_policy: Some(new_chain),
@@ -838,7 +845,7 @@ async fn apply_resolved_policy_snapshot_restores_partially_mutated_failing_peer(
         "the one-shot export failure must surface as Err: {result:?}"
     );
 
-    let managed = mgr.peers.get(&key(address)).unwrap();
+    let managed = mgr.peers.get(&key(address.addr())).unwrap();
     assert_eq!(
         format!("{:?}", managed.import_policy),
         format!("{:?}", Some(import_prior)),

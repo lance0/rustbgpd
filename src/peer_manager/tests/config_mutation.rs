@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 
 #[tokio::test]
 async fn runtime_create_rejects_an_omitted_listen_family_before_mutation() {
@@ -675,13 +676,15 @@ async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
         rib_tx,
         None,
     );
-    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    let addr = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    mgr.add_peer(make_config(addr.addr(), 65002), false)
+        .await
+        .unwrap();
 
     // `local_ipv6_nexthop` decides the exact-export preflight's
     // `MissingIpv6NextHop` suppression: remediating it must re-probe
     // the peer's suppressed routes without waiting for unrelated churn.
-    let mut updated = make_config(addr, 65002);
+    let mut updated = make_config(addr.addr(), 65002);
     updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
     mgr.hot_update_peer(updated).await.unwrap();
     assert_eq!(
@@ -692,7 +695,7 @@ async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
     );
 
     // `remove_private_as` changes already-advertised AS_PATHs.
-    let mut updated = make_config(addr, 65002);
+    let mut updated = make_config(addr.addr(), 65002);
     updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
     updated.remove_private_as = rustbgpd_transport::RemovePrivateAs::All;
     mgr.hot_update_peer(updated).await.unwrap();

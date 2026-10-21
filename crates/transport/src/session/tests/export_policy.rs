@@ -16,7 +16,7 @@ async fn register_export_session(
     session
         .rib_tx
         .send(RibUpdate::SetPeerExportEncoder {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id,
             encoder: session.export_encoder.clone(),
         })
@@ -25,7 +25,7 @@ async fn register_export_session(
     session
         .rib_tx
         .send(RibUpdate::PeerUp {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id,
             peer_asn: 65002,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -74,7 +74,7 @@ async fn accepted_export_policy_survives_rib_collision_promotion() {
     session
         .rib_tx
         .send(RibUpdate::RoutesReceived {
-            peer: IpAddr::V4(source),
+            peer: PeerId::from_addr(IpAddr::V4(source)),
             session_id: 0,
             announced: vec![make_sourced_route(source, prefix, 65009)],
             withdrawn: vec![],
@@ -101,7 +101,7 @@ async fn accepted_export_policy_survives_rib_collision_promotion() {
     session
         .rib_tx
         .send(RibUpdate::ReplacePeerExportPolicy {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             export_policy: Some(next.clone()),
             reply,
         })
@@ -115,7 +115,7 @@ async fn accepted_export_policy_survives_rib_collision_promotion() {
     session
         .rib_tx
         .send(RibUpdate::PeerDown {
-            peer: session.peer_ip,
+            peer: PeerId::from_addr(session.peer_ip),
             session_id: 8,
         })
         .await
@@ -153,7 +153,7 @@ async fn accepted_export_policy_is_queued_before_ack_even_if_reply_dropped() {
             session_id,
             export_policy,
         } => {
-            assert_eq!(peer, session.peer_ip);
+            assert_eq!(peer, PeerId::from_addr(session.peer_ip));
             assert_eq!(session_id, 7);
             assert_eq!(export_policy, Some(next));
         }
@@ -169,7 +169,7 @@ async fn accepted_export_policy_waits_for_capacity_and_rejects_closed_rib() {
     session.export_policy = Some(old.clone());
     let (tx, mut rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerDown {
-        peer: session.peer_ip,
+        peer: PeerId::from_addr(session.peer_ip),
         session_id: 99,
     })
     .await
@@ -278,7 +278,7 @@ async fn policy_ipv6_next_hop_on_injected_self_route_falls_back_to_self_on_the_w
                 next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 link_local_next_hop: None,
                 next_hop_scope: None,
-                peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
                 attributes: AttrSet::new(vec![
                     PathAttribute::Origin(Origin::Igp),
                     PathAttribute::AsPath(AsPath { segments: vec![] }),

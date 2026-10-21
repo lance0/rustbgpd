@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::PeerId;
 use rustbgpd_rib::{
     EvpnRecoveryExhaustionCause, EvpnRecoveryReset, EvpnRecoveryResetOutcome, OutboundRouteUpdate,
 };
@@ -17,11 +18,11 @@ fn request(
     outbound: mpsc::Sender<OutboundRouteUpdate>,
 ) -> EvpnRecoveryReset {
     EvpnRecoveryReset {
-        peer,
+        peer: PeerId::from_addr(peer),
         session_id,
         outbound,
         cause: EvpnRecoveryExhaustionCause::PeerLimit,
-        limiting_peer: Some(peer),
+        limiting_peer: Some(PeerId::from_addr(peer)),
         attempted_peer_bytes: 17,
         attempted_daemon_bytes: 18,
         peer_limit_bytes: 16,

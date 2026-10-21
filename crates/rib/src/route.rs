@@ -3,6 +3,7 @@
 //! (EVPN uses the wire `EvpnRouteKey`), and the FIB install candidates
 //! derived from best-path selection.
 
+use crate::peer_id::PeerId;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -362,7 +363,7 @@ pub struct Route {
     /// Boxed so the common `None` case keeps clone-heavy `Route` values small.
     pub next_hop_scope: Option<Box<NextHopScope>>,
     /// The peer that advertised this route.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// BGP path attributes (ORIGIN, `AS_PATH`, communities, etc.).
     ///
     /// Wrapped in `Arc` for cheap cloning when routes are copied between
@@ -414,7 +415,7 @@ pub struct FibInstallNextHop {
     /// any. FIB projection uses it only for a link-local primary.
     pub next_hop_scope: Option<NextHopScope>,
     /// The peer that advertised the path this next-hop came from.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Add-Path path id of the source path (0 = no Add-Path).
     pub path_id: u32,
     /// ADR-0068 multipath weight, `1..=256` (the Linux kernel weight, encoded as
@@ -595,7 +596,7 @@ pub struct FlowSpecRoute {
     /// Address family (IPv4 or IPv6).
     pub afi: Afi,
     /// The peer that advertised this route.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// BGP path attributes.
     pub attributes: Vec<PathAttribute>,
     /// When this route was received (monotonic clock).
@@ -649,7 +650,7 @@ pub struct BgpLsRibRoute {
     /// BGP-LS next-hop from `MP_REACH_NLRI`.
     pub next_hop: IpAddr,
     /// The peer that advertised this route.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// BGP path attributes.
     pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
@@ -793,7 +794,7 @@ pub struct VpnRibRoute {
     /// bound to the same interface (RFC 4659 §3.2.1.1).
     pub next_hop_scope: Option<Box<NextHopScope>>,
     /// The peer that advertised this route.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// BGP path attributes. Route Targets ride here as extended communities.
     pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
@@ -968,7 +969,7 @@ pub struct LabeledRibRoute {
     /// bound to the same interface (RFC 2545 §3).
     pub next_hop_scope: Option<Box<NextHopScope>>,
     /// The peer that advertised this route.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// BGP path attributes.
     pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
@@ -1103,7 +1104,7 @@ pub struct RtcRibRoute {
     /// Next-hop from `MP_REACH_NLRI`.
     pub next_hop: IpAddr,
     /// The peer that advertised this route.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// BGP path attributes.
     pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
@@ -1358,7 +1359,7 @@ pub struct EvpnRibRoute {
     /// emit the same wire form.
     pub link_local_next_hop: Option<Ipv6Addr>,
     /// The peer that advertised this route.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// BGP path attributes (ORIGIN, `AS_PATH`, extended communities, etc.).
     pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
@@ -1671,7 +1672,7 @@ mod tests {
             family,
             nlri,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
@@ -1733,7 +1734,7 @@ mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
@@ -1829,7 +1830,7 @@ mod tests {
         RtcRibRoute {
             nlri: RtcNlri::new(65001, rt, 96).unwrap(),
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
             attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,

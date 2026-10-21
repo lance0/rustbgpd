@@ -45,6 +45,8 @@ pub mod manager;
 mod orf;
 /// Optimal Route Reflection topology graph + SPF engine (RFC 9107).
 pub mod orr;
+/// Opaque neighbor identity keying every per-peer RIB structure.
+pub mod peer_id;
 /// Family-split prefix-trie map backing the compact prefix-keyed RIB indexes.
 mod prefix_map;
 /// Route and `FlowSpec` route data types.
@@ -89,6 +91,7 @@ pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
     OrrState, OrrStatusSnapshot, OrrTopology, OrrTopologySnapshot, OrrVantageStatus, SpfResult,
 };
+pub use peer_id::PeerId;
 pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
     FibInstallNextHop, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey, LabeledRibRoute,

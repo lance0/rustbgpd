@@ -3,12 +3,12 @@
 
 use super::update_groups::{GroupKey, GroupMembership, compare_update_groups};
 use super::{QUERY_BUDGET_PER_CHUNK, RibManager};
+use crate::PeerId;
 use crate::update::{
     EffectiveDistributionMode, NeighborPolicyStats, NeighborRibSnapshot, PeerOutboundState,
     RibSummaryQuery,
 };
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 
@@ -19,9 +19,9 @@ pub(super) struct ReplacementSummaries {
 }
 
 struct SummaryProjection {
-    neighbors: HashMap<IpAddr, NeighborRibSnapshot>,
+    neighbors: HashMap<PeerId, NeighborRibSnapshot>,
     unknown_outbound: PeerOutboundState,
-    memberships: HashMap<IpAddr, GroupMembership>,
+    memberships: HashMap<PeerId, GroupMembership>,
     group_keys: HashMap<usize, GroupKey>,
 }
 
@@ -386,8 +386,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn replacement_summaries_preserve_unknown_roster_and_cancellation() {
-        let unknown: IpAddr = "192.0.2.3".parse().unwrap();
-        let waiter: IpAddr = "192.0.2.4".parse().unwrap();
+        let unknown = PeerId::from_addr("192.0.2.3".parse().unwrap());
+        let waiter = PeerId::from_addr("192.0.2.4".parse().unwrap());
         let (_tx, rx) = mpsc::channel(1);
         let (_general_tx, general_rx) = mpsc::channel(1);
         let (tx, rx_summary) = mpsc::channel(16);

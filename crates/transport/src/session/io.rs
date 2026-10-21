@@ -148,7 +148,7 @@ impl PeerSession {
             if self
                 .rib_tx
                 .send(RibUpdate::PeerOrfUpdate {
-                    peer: self.peer_ip,
+                    peer: self.rib_peer(),
                     session_id: self.session_identity.id,
                     afi,
                     safi,
@@ -433,7 +433,7 @@ impl PeerSession {
             return;
         }
         let update = RibUpdate::PeerSlowState {
-            peer: self.peer_ip,
+            peer: self.rib_peer(),
             session_id: self.session_identity.id,
             slow: self.slow_peer,
         };
@@ -680,7 +680,7 @@ impl PeerSession {
         if self
             .rib_tx
             .send(RibUpdate::RouteRefreshRequest {
-                peer: self.peer_ip,
+                peer: self.rib_peer(),
                 session_id: self.session_identity.id,
                 afi,
                 safi,
@@ -970,7 +970,7 @@ impl PeerSession {
                                     } else if self
                                         .rib_tx
                                         .send(RibUpdate::BeginRouteRefresh {
-                                            peer: self.peer_ip,
+                                            peer: self.rib_peer(),
                                             session_id: self.session_identity.id,
                                             afi,
                                             safi,
@@ -1009,7 +1009,7 @@ impl PeerSession {
                                     } else if self
                                         .rib_tx
                                         .send(RibUpdate::EndRouteRefresh {
-                                            peer: self.peer_ip,
+                                            peer: self.rib_peer(),
                                             session_id: self.session_identity.id,
                                             afi,
                                             safi,

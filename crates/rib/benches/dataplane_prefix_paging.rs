@@ -1,5 +1,6 @@
 //! Large-table receipt harness for bounded internal dataplane prefix pages.
 
+use rustbgpd_rib::PeerId;
 use std::io::{self, BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -149,7 +150,7 @@ fn make_routes(prefixes: usize, announcers: usize) -> Vec<Route> {
                 next_hop: IpAddr::V4(peer),
                 link_local_next_hop: None,
                 next_hop_scope: None,
-                peer: IpAddr::V4(peer),
+                peer: PeerId::from_addr(IpAddr::V4(peer)),
                 attributes: Arc::clone(&attributes),
                 received_at: rustbgpd_rib::route::ReceivedAt::now(),
                 origin_type: RouteOrigin::Ebgp,

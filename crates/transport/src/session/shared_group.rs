@@ -55,6 +55,7 @@ use super::{
 };
 use crate::fast_hash::FastMap as HashMap;
 use bytes::Bytes;
+use rustbgpd_rib::PeerId;
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
@@ -83,7 +84,7 @@ pub(super) fn source_grouped_order(announce: &[Route]) -> Vec<usize> {
         .iter()
         .map(|route| {
             let next = ids.len();
-            *ids.entry(route.peer).or_insert(next)
+            *ids.entry(route.peer.addr()).or_insert(next)
         })
         .collect();
     let mut sources: Vec<(IpAddr, usize)> = ids.into_iter().collect();
@@ -110,7 +111,7 @@ pub(super) fn source_grouped_order(announce: &[Route]) -> Vec<usize> {
 /// and one unicast family.
 #[derive(Clone)]
 pub(super) struct SharedUnicastChunk {
-    pub(super) source: IpAddr,
+    pub(super) source: PeerId,
     pub(super) afi: Afi,
     pub(super) bytes: Bytes,
 }
@@ -293,7 +294,7 @@ fn encode_chunks<E>(
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct SharedGroupKey {
-    source: IpAddr,
+    source: PeerId,
     attrs_ptr: usize,
     next_hop: Option<IpAddr>,
     link_local_next_hop: Option<Ipv6Addr>,
@@ -315,7 +316,7 @@ enum SharedGroupBody {
 }
 
 struct SharedGroup {
-    source: IpAddr,
+    source: PeerId,
     body: SharedGroupBody,
 }
 

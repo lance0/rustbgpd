@@ -19,8 +19,8 @@
 //! distributed first. The deadline still wins when a controller stays
 //! silent.
 
+use crate::PeerId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::net::IpAddr;
 
 use rustbgpd_telemetry::reason_labels::GrEorGraceReleaseReason;
 use rustbgpd_wire::{Afi, Safi};
@@ -34,7 +34,7 @@ use crate::update::RibCommandError;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EorGracePeerConfig {
     /// Static peer address.
-    pub peer: IpAddr,
+    pub peer: PeerId,
     /// Absolute release deadline: daemon start plus the configured window,
     /// clamped to the restarting-speaker (marker) window. Counting from
     /// daemon start keeps startup work from stretching the window.
@@ -118,7 +118,7 @@ impl RibManager {
     #[must_use]
     pub fn with_eor_grace(mut self, config: EorGraceConfig) -> Self {
         let now = tokio::time::Instant::now();
-        let mut peers: HashMap<IpAddr, EorGracePeer> = HashMap::new();
+        let mut peers: HashMap<PeerId, EorGracePeer> = HashMap::new();
         let mut deadlines = super::graceful_restart::DeadlineMap::default();
         for entry in config.peers {
             if entry.families.is_empty() {
@@ -210,7 +210,7 @@ impl RibManager {
         // deadline first, and a signal in that backlog must not claim the
         // release. The expiry turn counts it as `deadline` and names the
         // controllers that had not signalled by that window's deadline.
-        let holding: Vec<IpAddr> = self
+        let holding: Vec<PeerId> = self
             .eor_grace_deadlines
             .iter()
             .filter(|&(_, &deadline)| deadline > now)
@@ -248,7 +248,7 @@ impl RibManager {
     /// replays. Returns the session's helper flag and the held families.
     fn release_eor_grace_peer(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         reason: GrEorGraceReleaseReason,
     ) -> (bool, String) {
         self.eor_grace_deadlines.remove(&peer);
@@ -274,7 +274,7 @@ impl RibManager {
     }
 
     /// Whether the grace window holds `family`'s End-of-RIB toward `peer`.
-    pub(super) fn eor_grace_held(&self, peer: IpAddr, family: (Afi, Safi)) -> bool {
+    pub(super) fn eor_grace_held(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
         self.eor_grace
             .get(&peer)
             .is_some_and(|grace| grace.helper_session && grace.families.contains(&family))
@@ -283,7 +283,7 @@ impl RibManager {
     /// Classify a newly registered session. The deadline never moves.
     pub(super) fn eor_grace_classify_session(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         peer_gr_helper: bool,
         peer_restart_state: bool,
     ) {
@@ -293,7 +293,7 @@ impl RibManager {
     }
 
     /// A deleted peer has no future session to hold for.
-    pub(super) fn eor_grace_peer_deleted(&mut self, peer: IpAddr) {
+    pub(super) fn eor_grace_peer_deleted(&mut self, peer: PeerId) {
         self.eor_grace.remove(&peer);
         self.eor_grace_deadlines.remove(&peer);
     }
@@ -310,7 +310,7 @@ impl RibManager {
     /// timer-driven only: it does not know whether controller replay
     /// finished, and the log says so.
     pub(super) fn expire_eor_grace(&mut self, due: tokio::time::Instant) {
-        let expired: Vec<IpAddr> = self
+        let expired: Vec<PeerId> = self
             .eor_grace_deadlines
             .iter()
             .filter(|&(_, &deadline)| deadline <= due)

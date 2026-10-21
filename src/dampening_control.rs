@@ -76,6 +76,7 @@ pub(crate) async fn run(
 
 #[cfg(test)]
 mod tests {
+    use rustbgpd_rib::PeerId;
     use std::future::Future as _;
     use std::task::Poll;
     use std::time::Duration;
@@ -89,7 +90,7 @@ mod tests {
     fn notice() -> DampeningCapacityNotice {
         DampeningCapacityNotice {
             source: ReceivedRouteSource {
-                peer: "192.0.2.1".parse().unwrap(),
+                peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
                 session_id: 1,
                 peer_asn: Some(65002),
                 context: None,

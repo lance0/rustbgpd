@@ -766,6 +766,7 @@ mod tests {
     use super::*;
     use crate::codec::{RibEntry, encode_rib_entries, encode_snapshot};
     use rustbgpd_rib::AttrSet;
+    use rustbgpd_rib::PeerId;
     use rustbgpd_rib::route::{EvpnRibRoute, Route, RouteOrigin};
     use rustbgpd_wire::{
         AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Origin, RpkiValidation, decode_evpn_nlri,
@@ -803,7 +804,7 @@ mod tests {
             next_hop,
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer,
+            peer: PeerId::from_addr(peer),
             attributes: AttrSet::new(base_attrs()),
             received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: RouteOrigin::Ebgp,
@@ -836,7 +837,7 @@ mod tests {
             route,
             next_hop,
             link_local_next_hop: None,
-            peer,
+            peer: PeerId::from_addr(peer),
             attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
@@ -866,7 +867,7 @@ mod tests {
             route,
             next_hop,
             link_local_next_hop: None,
-            peer,
+            peer: PeerId::from_addr(peer),
             attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,

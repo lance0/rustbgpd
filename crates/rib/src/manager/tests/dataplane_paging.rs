@@ -1,5 +1,6 @@
 //! Internal bounded dataplane prefix pages.
 
+use crate::test_support::peer_v4;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -56,7 +57,7 @@ fn route(prefix: Prefix, peer: Ipv4Addr, next_hop: IpAddr, as_path: &[u32]) -> R
             },
         ),
     };
-    route.peer = IpAddr::V4(peer);
+    route.peer = peer_v4(peer);
     route.peer_router_id = peer;
     route.next_hop = next_hop;
     route.attributes = AttrSet::new(vec![
@@ -72,7 +73,7 @@ fn route(prefix: Prefix, peer: Ipv4Addr, next_hop: IpAddr, as_path: &[u32]) -> R
 fn apply_routes(manager: &mut RibManager, peer: Ipv4Addr, announced: Vec<Route>) {
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced,
         withdrawn: Vec::new(),
         flowspec_announced: Vec::new(),
@@ -87,7 +88,7 @@ fn apply_routes(manager: &mut RibManager, peer: Ipv4Addr, announced: Vec<Route>)
 fn withdraw(manager: &mut RibManager, peer: Ipv4Addr, prefixes: &[Prefix]) {
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 0,
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         announced: Vec::new(),
         withdrawn: prefixes.iter().copied().map(|prefix| (prefix, 0)).collect(),
         flowspec_announced: Vec::new(),
@@ -231,7 +232,7 @@ fn exact_fib_matches_page_and_rejects_path_budget() {
 #[test]
 fn peer_group_version_advances_only_on_content_change() {
     let mut manager = manager(false);
-    let peer = IpAddr::V4(peer(0));
+    let peer = peer_v4(peer(0));
     let initial = manager.peer_group_version;
     manager.set_peer_group(peer, None);
     assert_eq!(manager.peer_group_version, initial);
@@ -409,7 +410,7 @@ fn prefix_cursor_has_live_churn_semantics() {
     assert_ne!(again.observed_version, page.observed_version);
     assert_eq!(again.routes.len(), 1);
     assert_eq!(again.routes[0].prefix, prefix(25));
-    assert_eq!(again.routes[0].peer, IpAddr::V4(replacement_peer));
+    assert_eq!(again.routes[0].peer, peer_v4(replacement_peer));
 }
 
 #[test]
@@ -634,14 +635,14 @@ fn fib_page_probes_only_indexed_announcers_for_each_prefix() {
     );
     for index in 1..=300usize {
         let unrelated_peer = peer(index);
-        let mut rib = AdjRibIn::new(IpAddr::V4(unrelated_peer));
+        let mut rib = AdjRibIn::new(peer_v4(unrelated_peer));
         rib.insert(route(
             prefix(10_000 + index),
             unrelated_peer,
             IpAddr::V4(unrelated_peer),
             &[65001],
         ));
-        manager.ribs.insert(IpAddr::V4(unrelated_peer), rib);
+        manager.ribs.insert(peer_v4(unrelated_peer), rib);
     }
 
     manager

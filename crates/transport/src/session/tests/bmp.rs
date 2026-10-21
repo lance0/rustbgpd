@@ -545,7 +545,7 @@ async fn outbound_evpn_update_emits_rib_out_bmp_byte_exact() {
         }),
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
         link_local_next_hop: None,
-        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {

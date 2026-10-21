@@ -12,6 +12,8 @@
 //! transport shared-encoding tests compare shared and private encoding of one
 //! envelope; they do not encode grouped and per-peer RIB output.
 
+use crate::PeerId;
+use crate::test_support::peer_v4;
 use std::collections::BTreeMap;
 
 use rustbgpd_policy::{
@@ -47,7 +49,7 @@ pub(super) fn ibgp_route(
         next_hop: IpAddr::V4(src),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(src),
+        peer: peer_v4(src),
         attributes: AttrSet::new(attributes),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ibgp,
@@ -110,7 +112,7 @@ pub(super) fn vpn_route(
         next_hop: IpAddr::V4(src),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(src),
+        peer: peer_v4(src),
         attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,
@@ -127,7 +129,7 @@ pub(super) fn rtc_default(src: Ipv4Addr) -> RtcRibRoute {
     RtcRibRoute {
         nlri: RtcNlri::DEFAULT,
         next_hop: IpAddr::V4(src),
-        peer: IpAddr::V4(src),
+        peer: peer_v4(src),
         attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
@@ -249,7 +251,7 @@ pub(super) type NormAnnounce = (
     Prefix,
     u32,
     IpAddr,
-    IpAddr,
+    PeerId,
     Vec<PathAttribute>,
     Option<NextHopAction>,
 );
@@ -258,14 +260,14 @@ pub(super) type NormAnnounce = (
 /// stack, next hop, source peer, attributes, AFI, path id). Keys/NLRI are `Debug`
 /// strings — `VpnRouteKey` has no `Display` and only sort stability
 /// matters here.
-pub(super) type NormVpnAnnounce = (String, String, IpAddr, IpAddr, Vec<PathAttribute>, u16, u32);
+pub(super) type NormVpnAnnounce = (String, String, IpAddr, PeerId, Vec<PathAttribute>, u16, u32);
 
 pub(super) type NormEvpnAnnounce = (
     String,
     rustbgpd_wire::EvpnRoute,
     IpAddr,
     Option<std::net::Ipv6Addr>,
-    IpAddr,
+    PeerId,
     Ipv4Addr,
     RouteOrigin,
     Vec<PathAttribute>,
@@ -394,14 +396,14 @@ pub(super) fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
     }
 }
 
-pub(super) type Streams = BTreeMap<IpAddr, Vec<NormMsg>>;
+pub(super) type Streams = BTreeMap<PeerId, Vec<NormMsg>>;
 
 type Family = (u16, u8);
 
 /// Incarnation also distinguishes fixture reconnects that reuse a session id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SessionKey {
-    peer: IpAddr,
+    peer: PeerId,
     incarnation: usize,
     id: u64,
 }
@@ -775,7 +777,7 @@ fn one_receiver(messages: Vec<NormMsg>) -> Streams {
         ..Default::default()
     }];
     stamped.extend(messages);
-    [(IpAddr::V4(C), stamped)].into_iter().collect()
+    [(peer_v4(C), stamped)].into_iter().collect()
 }
 
 /// Real outbound values exercise each family, including full VPN label data
@@ -1187,7 +1189,7 @@ fn normalize_excludes_own_source_and_keeps_overrides_aligned() {
             Some(NextHopAction::Self_),
         ]
         .into(),
-        announce_source_exclusion: Some(IpAddr::V4(A)),
+        announce_source_exclusion: Some(peer_v4(A)),
         ..Default::default()
     };
     let expect = |route: &Route, nh: Option<NextHopAction>| {
@@ -1223,8 +1225,8 @@ fn normalize_excludes_own_source_and_keeps_overrides_aligned() {
 
 /// Fold admitted unicast state, rejecting unknown or duplicate withdrawals.
 /// (next hop, source peer, attributes, nh-override).
-pub(super) type FoldedEntry = (IpAddr, IpAddr, Vec<PathAttribute>, Option<NextHopAction>);
-pub(super) type FoldedState = BTreeMap<IpAddr, HashMap<(Prefix, u32), FoldedEntry>>;
+pub(super) type FoldedEntry = (IpAddr, PeerId, Vec<PathAttribute>, Option<NextHopAction>);
+pub(super) type FoldedState = BTreeMap<PeerId, HashMap<(Prefix, u32), FoldedEntry>>;
 
 pub(super) fn fold(streams: &Streams) -> FoldedState {
     let mut state = FoldedState::new();
@@ -1243,7 +1245,7 @@ pub(super) fn fold(streams: &Streams) -> FoldedState {
             for (prefix, path_id, nh, src, attrs, nh_override) in &msg.announce {
                 table.insert(
                     (*prefix, *path_id),
-                    (*nh, *src, attrs.clone(), nh_override.clone()),
+                    (*nh, (*src), attrs.clone(), nh_override.clone()),
                 );
             }
         }
@@ -1254,7 +1256,7 @@ pub(super) fn fold(streams: &Streams) -> FoldedState {
 /// VPN counterpart of [`fold`]: final advertised VPN state per peer,
 /// keyed by RD+prefix identity (`path_id` 0 only in these scenarios).
 pub(super) type FoldedVpnState =
-    BTreeMap<IpAddr, HashMap<String, (String, IpAddr, IpAddr, Vec<PathAttribute>)>>;
+    BTreeMap<PeerId, HashMap<String, (String, IpAddr, PeerId, Vec<PathAttribute>)>>;
 
 pub(super) fn fold_vpn(streams: &Streams) -> FoldedVpnState {
     let mut state = FoldedVpnState::new();
@@ -1279,7 +1281,7 @@ pub(super) fn fold_vpn(streams: &Streams) -> FoldedVpnState {
                     *path, 0,
                     "VPN folded scenarios use single-best path identity"
                 );
-                table.insert(key.clone(), (nlri.clone(), *nh, *src, attrs.clone()));
+                table.insert(key.clone(), (nlri.clone(), *nh, (*src), attrs.clone()));
             }
         }
     }
@@ -1289,7 +1291,7 @@ pub(super) fn fold_vpn(streams: &Streams) -> FoldedVpnState {
 pub(super) struct Oracle {
     tx: mpsc::Sender<RibUpdate>,
     roster: crate::export_roster::ExportRosterReader,
-    outs: BTreeMap<IpAddr, mpsc::Receiver<OutboundRouteUpdate>>,
+    outs: BTreeMap<PeerId, mpsc::Receiver<OutboundRouteUpdate>>,
     handle: tokio::task::JoinHandle<()>,
     /// Messages drained so far (incremental collection so the VPN
     /// invariant checker can fold mid-scenario); `finish` drains the
@@ -1370,7 +1372,7 @@ impl Oracle {
     pub(super) async fn set_rs_control(&mut self, peer: Ipv4Addr, rs_control_asn: u32) {
         self.tx
             .send(RibUpdate::SetPeerRsControl {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 session_id: SESSION,
                 rs_control_asn: Some(rs_control_asn),
             })
@@ -1479,7 +1481,7 @@ impl Oracle {
                 per_client_best: features.per_client_best,
                 interpret_rfc1997: true,
                 session_id,
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 peer_asn: if is_ebgp { 65010 } else { 65000 },
                 peer_router_id: peer,
                 outbound_tx: out_tx,
@@ -1498,8 +1500,8 @@ impl Oracle {
         // A re-registration (e.g. GR re-establish) replaces the
         // receiver; drain the predecessor first so its messages stay in
         // the collected stream.
-        let msgs = self.collected.entry(IpAddr::V4(peer)).or_default();
-        if let Some(mut old_rx) = self.outs.insert(IpAddr::V4(peer), out_rx) {
+        let msgs = self.collected.entry(peer_v4(peer)).or_default();
+        if let Some(mut old_rx) = self.outs.insert(peer_v4(peer), out_rx) {
             while let Ok(update) = old_rx.try_recv() {
                 msgs.push(normalize(&update));
             }
@@ -1519,7 +1521,7 @@ impl Oracle {
     ) {
         self.tx
             .send(RibUpdate::PeerAddPathLimits {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 session_id,
                 limits: vec![((Afi::Ipv4, Safi::Unicast), limit)],
             })
@@ -1537,7 +1539,7 @@ impl Oracle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::PeerOrfUpdate {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 session_id,
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
@@ -1559,7 +1561,7 @@ impl Oracle {
     pub(super) async fn peer_down_generation(&mut self, peer: Ipv4Addr, session_id: u64) {
         self.tx
             .send(RibUpdate::PeerDown {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 session_id,
             })
             .await
@@ -1587,7 +1589,7 @@ impl Oracle {
         self.tx
             .send(RibUpdate::RoutesReceived {
                 session_id,
-                peer: IpAddr::V4(from),
+                peer: peer_v4(from),
                 announced: announce,
                 withdrawn: withdraw.into_iter().map(|p| (Prefix::V4(p), 0)).collect(),
                 flowspec_announced: vec![],
@@ -1620,7 +1622,7 @@ impl Oracle {
     ) {
         self.tx
             .send(RibUpdate::VpnRoutesReceived {
-                peer: IpAddr::V4(from),
+                peer: peer_v4(from),
                 session_id,
                 announced: announce,
                 withdrawn: withdraw,
@@ -1659,7 +1661,7 @@ impl Oracle {
     ) {
         self.tx
             .send(RibUpdate::RtcRoutesReceived {
-                peer: IpAddr::V4(from),
+                peer: peer_v4(from),
                 session_id,
                 announced: announce,
                 withdrawn: withdraw,
@@ -1672,7 +1674,7 @@ impl Oracle {
     async fn vpn_routes_no_quiesce(&mut self, from: Ipv4Addr, announce: Vec<VpnRibRoute>) {
         self.tx
             .send(RibUpdate::VpnRoutesReceived {
-                peer: IpAddr::V4(from),
+                peer: peer_v4(from),
                 session_id: SESSION,
                 announced: announce,
                 withdrawn: vec![],
@@ -1686,7 +1688,7 @@ impl Oracle {
     async fn graceful_restart(&mut self, peer: Ipv4Addr) {
         self.tx
             .send(RibUpdate::PeerGracefulRestart {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 session_id: SESSION,
                 restart_time: 120,
                 stale_routes_time: 300,
@@ -1716,7 +1718,7 @@ impl Oracle {
     /// summing every per-peer row would multiply one real evaluation by the
     /// number of members and cannot measure a zero-evaluation delta.
     async fn export_policy_evals_for(&mut self, peer: Ipv4Addr) -> u64 {
-        published_export_rows(&self.tx, &self.roster, Some(IpAddr::V4(peer)))
+        published_export_rows(&self.tx, &self.roster, Some(peer_v4(peer)))
             .await
             .iter()
             .map(|row| row.evals)
@@ -1742,7 +1744,7 @@ impl Oracle {
         self.settle().await;
         self.drain_collected();
         let folded = fold_vpn(&self.collected);
-        let peers: Vec<IpAddr> = self.outs.keys().copied().collect();
+        let peers: Vec<PeerId> = self.outs.keys().copied().collect();
         for peer in peers {
             let (reply_tx, reply_rx) = oneshot::channel();
             self.tx
@@ -1753,8 +1755,8 @@ impl Oracle {
                 .await
                 .unwrap();
             let advertised = reply_rx.await.unwrap();
-            let adv: BTreeMap<String, IpAddr> = advertised.into_iter().collect();
-            let fold: BTreeMap<String, IpAddr> = folded
+            let adv: BTreeMap<String, PeerId> = advertised.into_iter().collect();
+            let fold: BTreeMap<String, PeerId> = folded
                 .get(&peer)
                 .map(|table| {
                     table
@@ -1776,7 +1778,7 @@ impl Oracle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::QueryPeerUpdateGroup {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 reply: reply_tx,
             })
             .await
@@ -1810,7 +1812,7 @@ impl Oracle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::ReplacePeerExportPolicy {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 export_policy,
                 reply: reply_tx,
             })
@@ -1825,7 +1827,7 @@ impl Oracle {
         self.tx
             .send(RibUpdate::RouteRefreshRequest {
                 queued: Arc::default(),
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 session_id: SESSION,
                 afi,
                 safi,
@@ -1839,7 +1841,7 @@ impl Oracle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::RefreshPeerOutbound {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 reply: reply_tx,
             })
             .await
@@ -1891,9 +1893,11 @@ impl Oracle {
     /// the dirty probes sent after the quiesce, so the probes observe it.
     async fn settle(&mut self) {
         self.quiesce().await;
-        let peers: Vec<IpAddr> = self.outs.keys().copied().collect();
+        let peers: Vec<PeerId> = self.outs.keys().copied().collect();
         for peer in peers {
-            let IpAddr::V4(peer) = peer else { continue };
+            let IpAddr::V4(peer) = peer.addr() else {
+                continue;
+            };
             assert!(
                 !self.peer_outbound_dirty(peer).await,
                 "{peer} is still outbound-dirty after its resync"
@@ -1916,7 +1920,7 @@ impl Oracle {
             let (reply, state) = oneshot::channel();
             self.tx
                 .send(RibUpdate::QueryPeerOutboundState {
-                    peer: IpAddr::V4(A),
+                    peer: peer_v4(A),
                     reply,
                 })
                 .await
@@ -1941,13 +1945,13 @@ impl Oracle {
     pub(super) async fn drain_one(&mut self, peer: Ipv4Addr) -> OutboundRouteUpdate {
         let update = self
             .outs
-            .get_mut(&IpAddr::V4(peer))
+            .get_mut(&peer_v4(peer))
             .expect("peer registered")
             .recv()
             .await
             .expect("message pending");
         self.collected
-            .entry(IpAddr::V4(peer))
+            .entry(peer_v4(peer))
             .or_default()
             .push(normalize(&update));
         update
@@ -1968,7 +1972,7 @@ impl Oracle {
     /// Record a named interval without changing admission or channel capacity.
     pub(super) fn begin_recovery(&mut self, peer: Ipv4Addr, path: RecoveryPath) {
         self.collected
-            .entry(IpAddr::V4(peer))
+            .entry(peer_v4(peer))
             .or_default()
             .push(NormMsg {
                 recovery: Some(RecoveryBoundary::Begin(path)),
@@ -1979,7 +1983,7 @@ impl Oracle {
     /// Record settlement after the schedule has drained its admitted updates.
     pub(super) fn close_recovery(&mut self, peer: Ipv4Addr) {
         self.collected
-            .entry(IpAddr::V4(peer))
+            .entry(peer_v4(peer))
             .or_default()
             .push(NormMsg {
                 recovery: Some(RecoveryBoundary::End),
@@ -2000,7 +2004,7 @@ impl Oracle {
     /// collected history as well as returned to the operation-level oracle.
     pub(super) async fn drain_peer_available(&mut self, peer: Ipv4Addr) -> Vec<NormMsg> {
         self.quiesce().await;
-        let peer = IpAddr::V4(peer);
+        let peer = peer_v4(peer);
         let rx = self.outs.get_mut(&peer).expect("peer registered");
         let mut drained = Vec::new();
         while let Ok(update) = rx.try_recv() {
@@ -2039,7 +2043,7 @@ impl Oracle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RibUpdate::TestQueryPeerOutboundDirty {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 reply: reply_tx,
             })
             .await
@@ -2155,11 +2159,11 @@ async fn check_dataset_export_refresh(per_client_best: bool) {
             let initial = fold(&oracle.collected);
             for peer in [B, C] {
                 assert_eq!(
-                    initial[&IpAddr::V4(peer)].contains_key(&(prefix, 0)),
+                    initial[&peer_v4(peer)].contains_key(&(prefix, 0)),
                     initially_permitted
                 );
             }
-            let bystander = oracle.collected[&IpAddr::V4(D)].clone();
+            let bystander = oracle.collected[&peer_v4(D)].clone();
             let bystander_evals = oracle.export_policy_evals_for(D).await;
             let prior_evals = oracle.export_policy_evals_for(B).await;
 
@@ -2171,7 +2175,7 @@ async fn check_dataset_export_refresh(per_client_best: bool) {
             oracle
                 .tx
                 .send(RibUpdate::ReevaluatePeerExportPolicies {
-                    peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                    peers: vec![peer_v4(B), peer_v4(C)],
                     swaps: None,
                     reply,
                 })
@@ -2193,13 +2197,13 @@ async fn check_dataset_export_refresh(per_client_best: bool) {
             assert_eq!(oracle.export_policy_evals_for(D).await, bystander_evals);
             let streams = oracle.finish().await;
             assert_eq!(
-                streams[&IpAddr::V4(D)],
+                streams[&peer_v4(D)],
                 bystander,
                 "unrelated group was re-emitted"
             );
             let final_state = fold(&streams);
             for peer in [B, C] {
-                let advertised = final_state[&IpAddr::V4(peer)].contains_key(&(prefix, 0));
+                let advertised = final_state[&peer_v4(peer)].contains_key(&(prefix, 0));
                 assert_eq!(
                     advertised, !initially_permitted,
                     "stale dataset verdict: ungrouped={force_ungrouped} pcb={per_client_best} initial={initially_permitted} peer={peer}"
@@ -2230,14 +2234,14 @@ async fn dataset_content_refresh_missing_target_has_no_effects() {
         .routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
         .await;
     oracle.drain_available();
-    let before = oracle.collected[&IpAddr::V4(B)].clone();
+    let before = oracle.collected[&peer_v4(B)].clone();
     let evals = oracle.export_policy_evals_for(B).await;
     handle.refresh(dataset_prefix_data(prefix, false)).unwrap();
     let (reply, result) = oneshot::channel();
     oracle
         .tx
         .send(RibUpdate::ReevaluatePeerExportPolicies {
-            peers: vec![IpAddr::V4(B), IpAddr::V4(F)],
+            peers: vec![peer_v4(B), peer_v4(F)],
             swaps: None,
             reply,
         })
@@ -2249,7 +2253,7 @@ async fn dataset_content_refresh_missing_target_has_no_effects() {
     ));
     assert_eq!(oracle.export_policy_evals_for(B).await, evals);
     let streams = oracle.finish().await;
-    assert_eq!(streams[&IpAddr::V4(B)], before);
+    assert_eq!(streams[&peer_v4(B)], before);
 }
 
 #[tokio::test]
@@ -2274,7 +2278,7 @@ async fn dataset_content_refresh_rechecks_grouped_vpn_export_verdicts() {
         oracle.drain_available();
         let initial = fold_vpn(&oracle.collected);
         for peer in [B, C] {
-            assert_eq!(!initial[&IpAddr::V4(peer)].is_empty(), initially_permitted);
+            assert_eq!(!initial[&peer_v4(peer)].is_empty(), initially_permitted);
         }
         handle
             .refresh(dataset_prefix_data(prefix, !initially_permitted))
@@ -2283,7 +2287,7 @@ async fn dataset_content_refresh_rechecks_grouped_vpn_export_verdicts() {
         oracle
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
-                peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                peers: vec![peer_v4(B), peer_v4(C)],
                 swaps: None,
                 reply,
             })
@@ -2292,10 +2296,7 @@ async fn dataset_content_refresh_rechecks_grouped_vpn_export_verdicts() {
         result.await.unwrap().unwrap();
         let final_state = fold_vpn(&oracle.finish().await);
         for peer in [B, C] {
-            assert_eq!(
-                final_state[&IpAddr::V4(peer)].is_empty(),
-                initially_permitted
-            );
+            assert_eq!(final_state[&peer_v4(peer)].is_empty(), initially_permitted);
         }
     }
 }
@@ -2551,7 +2552,7 @@ async fn run_swap_case(
         oracle
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
-                peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                peers: vec![peer_v4(B), peer_v4(C)],
                 swaps: (reeval == Reeval::Bounded).then_some(swaps),
                 reply,
             })
@@ -2718,8 +2719,8 @@ async fn check_swap_cases(mode: SwapMode) {
         );
         if mode.rs_control {
             let p8 = (Prefix::V4(pfx(8, 0)), 0);
-            assert!(!reference[&IpAddr::V4(C)].contains_key(&p8), "{name}");
-            diverged |= reference[&IpAddr::V4(B)].contains_key(&p8);
+            assert!(!reference[&peer_v4(C)].contains_key(&p8), "{name}");
+            diverged |= reference[&peer_v4(B)].contains_key(&p8);
         }
         if mode.jam {
             continue;
@@ -2826,7 +2827,7 @@ async fn dataset_full_pass_shares_one_group_payload() {
         oracle
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
-                peers: vec![IpAddr::V4(B)],
+                peers: vec![peer_v4(B)],
                 swaps: Some(vec![crate::update::DatasetSwap {
                     handle: Arc::clone(tagged),
                     prior,
@@ -2875,7 +2876,7 @@ async fn dataset_full_pass_shares_one_group_payload() {
         }
         let folded = fold(&oracle.finish().await);
         for peer in [B, C, F] {
-            let advertised: BTreeSet<_> = folded[&IpAddr::V4(peer)].keys().copied().collect();
+            let advertised: BTreeSet<_> = folded[&peer_v4(peer)].keys().copied().collect();
             assert_eq!(
                 advertised,
                 [1, 2, 7]
@@ -3039,7 +3040,7 @@ fn vpn_swap_route(
 
 /// Final advertised VPN state per peer, keyed by identity and path ID.
 type FoldedVpnPaths =
-    BTreeMap<IpAddr, BTreeMap<(String, u32), (String, IpAddr, IpAddr, Vec<PathAttribute>)>>;
+    BTreeMap<PeerId, BTreeMap<(String, u32), (String, IpAddr, IpAddr, Vec<PathAttribute>)>>;
 
 fn fold_vpn_paths(streams: &Streams) -> FoldedVpnPaths {
     let mut state = FoldedVpnPaths::new();
@@ -3058,7 +3059,7 @@ fn fold_vpn_paths(streams: &Streams) -> FoldedVpnPaths {
             for (key, nlri, nh, src, attrs, _, path) in &msg.vpn_announce {
                 table.insert(
                     (key.clone(), *path),
-                    (nlri.clone(), *nh, *src, attrs.clone()),
+                    (nlri.clone(), *nh, (*src).addr(), attrs.clone()),
                 );
             }
         }
@@ -3117,7 +3118,7 @@ async fn run_vpn_swap_case(
                         crate::SelectionDeferralConfig {
                             timeout: Duration::from_secs(30),
                             waiters: vec![crate::SelectionDeferralWaiterConfig {
-                                peer: IpAddr::V4(F),
+                                peer: peer_v4(F),
                                 families: vec![(Afi::Ipv4, Safi::MplsVpn)],
                             }],
                         },
@@ -3231,7 +3232,7 @@ async fn run_vpn_swap_case(
         oracle
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
-                peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                peers: vec![peer_v4(B), peer_v4(C)],
                 swaps: (reeval == Reeval::Bounded).then_some(swaps),
                 reply,
             })
@@ -3387,7 +3388,7 @@ async fn check_vpn_swap_cases(mode: VpnSwapMode) {
         let (_, before_vpn, _) = run_vpn_swap_case(&initial, None, mode, Reeval::Group).await;
         assert_eq!(
             path == SwapPath::Empty,
-            before_vpn[&IpAddr::V4(B)] == reference_vpn[&IpAddr::V4(B)],
+            before_vpn[&peer_v4(B)] == reference_vpn[&peer_v4(B)],
             "{name} {mode:?}: the swap must change B's VPN exports unless it affects nothing"
         );
         // RT-Constrain and a held VPN selection fall back for every swap.
@@ -3515,7 +3516,7 @@ async fn dataset_swap_with_intervening_publication_uses_full_pass() {
         oracle
             .tx
             .send(RibUpdate::ReevaluatePeerExportPolicies {
-                peers: vec![IpAddr::V4(B)],
+                peers: vec![peer_v4(B)],
                 swaps,
                 reply,
             })
@@ -3534,7 +3535,7 @@ async fn dataset_swap_with_intervening_publication_uses_full_pass() {
     };
     reevaluate(&mut oracle, Some(vec![swap])).await;
     let folded = fold(&oracle.finish().await);
-    let advertised: BTreeSet<_> = folded[&IpAddr::V4(B)].keys().copied().collect();
+    let advertised: BTreeSet<_> = folded[&peer_v4(B)].keys().copied().collect();
     assert_eq!(advertised, BTreeSet::from([(Prefix::V4(pfx(1, 0)), 0)]));
 }
 
@@ -3568,7 +3569,7 @@ async fn later_generation_supersedes_a_pending_resync() {
             handle.refresh(dataset_prefix_data(p1, permit));
             let (reply, result) = oneshot::channel();
             o.tx.send(RibUpdate::ReevaluatePeerExportPolicies {
-                peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                peers: vec![peer_v4(B), peer_v4(C)],
                 swaps: None,
                 reply,
             })
@@ -3613,7 +3614,7 @@ async fn later_generation_supersedes_a_pending_resync() {
         let state = fold(&o.finish().await);
         for peer in [B, C] {
             assert!(
-                state[&IpAddr::V4(peer)].contains_key(&(p1, 0)),
+                state[&peer_v4(peer)].contains_key(&(p1, 0)),
                 "member_path={member_path}: {peer}"
             );
         }
@@ -3829,10 +3830,7 @@ async fn oracle_dirty_resync_converges_to_identical_state() {
     // the grouped path: its folded table must not contain p1 (fold
     // starts after the pre-drained p1 announce, so a leftover p1 key
     // could only come from a resync bug).
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(
         !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
         "tombstoned prefix must not survive the grouped resync"
@@ -3870,9 +3868,9 @@ async fn oracle_dirty_missed_announce_then_withdraw_has_no_unknown_tombstone() {
     let (grouped, private) =
         run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
     assert_route_parity(&grouped, &private);
-    let c = &grouped[&IpAddr::V4(C)];
+    let c = &grouped[&peer_v4(C)];
     assert!(c.iter().all(|message| message.withdraw.is_empty()));
-    assert!(fold(&grouped)[&IpAddr::V4(C)].contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
+    assert!(fold(&grouped)[&peer_v4(C)].contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
 }
 
 /// C never receives its own p2. D did admit p2. Both become dirty, so the
@@ -3923,12 +3921,12 @@ async fn oracle_dirty_source_excluded_sibling_has_no_shared_tombstone_withdraw()
     assert_route_parity(&grouped, &private);
     let key = (Prefix::V4(pfx(2, 0)), 0);
     assert!(
-        grouped[&IpAddr::V4(C)]
+        grouped[&peer_v4(C)]
             .iter()
             .all(|message| !message.withdraw.contains(&key))
     );
     assert_eq!(
-        grouped[&IpAddr::V4(D)]
+        grouped[&peer_v4(D)]
             .iter()
             .flat_map(|message| &message.withdraw)
             .filter(|withdraw| **withdraw == key)
@@ -3989,14 +3987,14 @@ async fn oracle_dirty_rtc_excluded_sibling_has_no_shared_tombstone_withdraw() {
         run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
     assert_route_parity(&grouped, &private);
     let key = format!("{:?}", vpn_nlri(2, 200).key());
-    assert!(grouped[&IpAddr::V4(C)].iter().all(|message| {
+    assert!(grouped[&peer_v4(C)].iter().all(|message| {
         message
             .vpn_withdraw
             .iter()
             .all(|withdraw| withdraw.0 != key)
     }));
     assert_eq!(
-        grouped[&IpAddr::V4(D)]
+        grouped[&peer_v4(D)]
             .iter()
             .flat_map(|message| &message.vpn_withdraw)
             .filter(|withdraw| withdraw.0 == key)
@@ -4053,10 +4051,7 @@ async fn oracle_deferred_force_then_churn_converges_to_identical_state() {
         fold(&ungrouped),
         "failed force plus churn must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(!c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
     assert!(c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)));
 }
@@ -4105,10 +4100,7 @@ async fn oracle_source_flip_withdraw_lost_to_full_channel_recovers() {
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(
         !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
         "the source-flip withdraw lost to the full channel must be recovered by the resync"
@@ -4165,10 +4157,7 @@ async fn oracle_source_flip_onto_already_dirty_member_withdraws_stale_route() {
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(
         !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
         "a source flip staged onto an already-dirty member must withdraw the displaced route"
@@ -4227,10 +4216,7 @@ async fn oracle_regroup_while_dirty_after_source_flip_withdraws_stale_route() {
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(
         !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
         "the extras recorded at staging must survive the regroup and withdraw the stale route"
@@ -4284,19 +4270,16 @@ async fn oracle_source_flip_back_before_resync_keeps_route_without_spurious_with
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     let p1_entry = c_final.get(&(Prefix::V4(pfx(1, 0)), 0));
     assert_eq!(
         p1_entry.map(|(_, src, _, _)| *src),
-        Some(IpAddr::V4(A)),
+        Some(peer_v4(A)),
         "after the flip-back the member must retain p1 sourced from A"
     );
     // The retention guard must have dropped the staged extra withdraw:
     // no withdraw of p1 ever reaches C's wire.
-    let spurious = grouped[&IpAddr::V4(C)]
+    let spurious = grouped[&peer_v4(C)]
         .iter()
         .any(|msg| msg.withdraw.contains(&(Prefix::V4(pfx(1, 0)), 0)));
     assert!(
@@ -4361,10 +4344,7 @@ async fn oracle_second_regroup_while_dirty_unions_baseline_no_leak() {
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
     assert_route_parity(&grouped, &ungrouped);
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     // The leak: p1 was on C's wire, is absent from group C's table, and
     // is absent from the second group-view snapshot. A baseline overwrite
     // never withdraws it (it never reaches the withdraw candidate set);
@@ -4437,10 +4417,7 @@ async fn oracle_announce_missed_while_dirty_heals_across_regroup() {
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(
         c_final.contains_key(&(Prefix::V4(pfx(3, 0)), 0)),
         "the announce missed while dirty must not be equality-suppressed \
@@ -4493,10 +4470,7 @@ async fn oracle_announce_missed_while_dirty_heals_across_move_to_per_peer_path()
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(
         c_final.contains_key(&(Prefix::V4(pfx(3, 0)), 0)),
         "the announce missed while dirty must not be equality-suppressed \
@@ -4536,7 +4510,7 @@ async fn oracle_clean_member_regroup_suppresses_unchanged_announces() {
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_msgs = &grouped[&IpAddr::V4(C)];
+    let c_msgs = &grouped[&peer_v4(C)];
     for prefix in [pfx(1, 0), pfx(2, 0)] {
         let announces = c_msgs
             .iter()
@@ -4640,10 +4614,7 @@ async fn oracle_dirty_leaver_extras_withdraw_on_per_peer_path() {
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(
         !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
         "the withdraw missed while dirty must reach the wire after the move to the per-peer path"
@@ -4710,10 +4681,7 @@ async fn oracle_regroup_while_dirty_empty_enumeration_emits_residue_withdraws() 
         fold(&ungrouped),
         "final advertised state must converge on both paths"
     );
-    let c_final = fold(&grouped)
-        .get(&IpAddr::V4(C))
-        .cloned()
-        .unwrap_or_default();
+    let c_final = fold(&grouped).get(&peer_v4(C)).cloned().unwrap_or_default();
     assert!(
         !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
         "the residue withdraw of p1 must be emitted, not dropped on the empty-enumeration exit"
@@ -4750,7 +4718,7 @@ async fn oracle_nh_override_survives_group_join_replay() {
         run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
     assert_route_parity(&grouped, &ungrouped);
     // Belt and braces: E's dump carries the override flag on both paths.
-    let e_msgs = &grouped[&IpAddr::V4(E)];
+    let e_msgs = &grouped[&peer_v4(E)];
     let announced_with_flag = e_msgs.iter().flat_map(|m| &m.announce).any(|entry| {
         entry.5
             == Some(NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(
@@ -4916,7 +4884,7 @@ async fn oracle_vpn_dirty_resync_converges_to_identical_state() {
         "final advertised VPN state must converge on both paths"
     );
     let c_final = fold_vpn(&grouped)
-        .get(&IpAddr::V4(C))
+        .get(&peer_v4(C))
         .cloned()
         .unwrap_or_default();
     let key1 = format!("{:?}", vpn_nlri(1, 100).key());
@@ -4984,7 +4952,7 @@ async fn oracle_vpn_source_flip_withdraw_lost_to_full_channel_recovers() {
         "final advertised VPN state must converge on both paths"
     );
     let c_final = fold_vpn(&grouped)
-        .get(&IpAddr::V4(C))
+        .get(&peer_v4(C))
         .cloned()
         .unwrap_or_default();
     let key1 = format!("{:?}", vpn_nlri(1, 100).key());
@@ -5055,7 +5023,7 @@ async fn oracle_vpn_passes_while_already_dirty_fold_exactly() {
         "final advertised VPN state must converge on both paths"
     );
     let c_final = fold_vpn(&grouped)
-        .get(&IpAddr::V4(C))
+        .get(&peer_v4(C))
         .cloned()
         .unwrap_or_default();
     let key = |n: u8, label: u32| format!("{:?}", vpn_nlri(n, label).key());
@@ -5113,7 +5081,7 @@ async fn oracle_rtc_negotiated_vpn_filtered_at_emit() {
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
     assert_route_parity(&grouped, &ungrouped);
     let vpn_count = |streams: &Streams, peer: Ipv4Addr| {
-        streams[&IpAddr::V4(peer)]
+        streams[&peer_v4(peer)]
             .iter()
             .map(|m| m.vpn_announce.len())
             .sum::<usize>()
@@ -5408,7 +5376,7 @@ async fn oracle_rtc_membership_change_while_dirty_converges() {
         "final advertised VPN state must converge on both paths"
     );
     let c_final = fold_vpn(&grouped)
-        .get(&IpAddr::V4(C))
+        .get(&peer_v4(C))
         .cloned()
         .unwrap_or_default();
     let key = |n: u8, label: u32| format!("{:?}", vpn_nlri(n, label).key());
@@ -5573,7 +5541,7 @@ async fn rtc_membership_flip_at_scale_emits_delta_only_zero_evals() {
     }
     o.quiesce().await;
     o.drain_collected();
-    let msgs_before = o.collected.get(&IpAddr::V4(C)).map_or(0, Vec::len);
+    let msgs_before = o.collected.get(&peer_v4(C)).map_or(0, Vec::len);
     // B and C share one group counter instance. Observe one representative
     // member: summing both operator-visible aliases would double-count the
     // same real group evaluation after each RTC reflection.
@@ -5587,7 +5555,7 @@ async fn rtc_membership_flip_at_scale_emits_delta_only_zero_evals() {
     o.rtc_routes(C, vec![rtc_interest(C, 2)]).await;
     o.quiesce().await;
     o.drain_collected();
-    let c_msgs = &o.collected[&IpAddr::V4(C)];
+    let c_msgs = &o.collected[&peer_v4(C)];
     assert_eq!(
         c_msgs.len(),
         msgs_before + 1,
@@ -5610,7 +5578,7 @@ async fn rtc_membership_flip_at_scale_emits_delta_only_zero_evals() {
     o.rtc_routes_full(C, vec![], vec![rtc_key_for(1)]).await;
     o.quiesce().await;
     o.drain_collected();
-    let c_msgs = &o.collected[&IpAddr::V4(C)];
+    let c_msgs = &o.collected[&peer_v4(C)];
     assert_eq!(c_msgs.len(), msgs_before + 2);
     let narrow = &c_msgs[msgs_before + 1];
     assert!(narrow.vpn_announce.is_empty(), "narrow must not announce");
@@ -5689,7 +5657,7 @@ pub(super) fn rs_route(
         next_hop: IpAddr::V4(src),
         link_local_next_hop: None,
         next_hop_scope: None,
-        peer: IpAddr::V4(src),
+        peer: peer_v4(src),
         attributes: AttrSet::new(attributes),
         received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
@@ -5736,14 +5704,15 @@ pub(super) async fn pcb_peer_up(
 /// The member's final advertised source for a prefix in the folded state.
 fn folded_src(state: &FoldedState, member: Ipv4Addr, prefix: Ipv4Prefix) -> Option<IpAddr> {
     state
-        .get(&IpAddr::V4(member))
+        .get(&peer_v4(member))
         .and_then(|table| table.get(&(Prefix::V4(prefix), 0)))
         .map(|(_, src, _, _)| *src)
+        .map(PeerId::addr)
 }
 
 /// The ordered sequence of announce sources on a member's wire.
-fn src_seq(streams: &Streams, member: Ipv4Addr) -> Vec<IpAddr> {
-    streams[&IpAddr::V4(member)]
+fn src_seq(streams: &Streams, member: Ipv4Addr) -> Vec<PeerId> {
+    streams[&peer_v4(member)]
         .iter()
         .flat_map(|msg| &msg.announce)
         .map(|entry| entry.3)
@@ -5802,9 +5771,9 @@ async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(None, scenario).await;
     assert_route_parity(&grouped, &ungrouped);
-    assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B)]);
-    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A), IpAddr::V4(C)]);
-    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A), IpAddr::V4(B)]);
+    assert_eq!(src_seq(&grouped, A), vec![peer_v4(B)]);
+    assert_eq!(src_seq(&grouped, B), vec![peer_v4(A), peer_v4(C)]);
+    assert_eq!(src_seq(&grouped, C), vec![peer_v4(A), peer_v4(B)]);
     let folded = fold(&grouped);
     assert_eq!(
         folded,
@@ -5821,7 +5790,7 @@ async fn oracle_pcb_best_source_withdraw_promotes_runner_up() {
     assert_eq!(folded_src(&folded, C, pfx(1, 0)), Some(IpAddr::V4(B)));
     for member in [A, B, C] {
         assert!(
-            grouped[&IpAddr::V4(member)]
+            grouped[&peer_v4(member)]
                 .iter()
                 .all(|msg| msg.withdraw.is_empty()),
             "promotion is an implicit replace at path_id 0 — never withdraw+announce"
@@ -5997,7 +5966,7 @@ async fn oracle_action_only_same_update_pcb_winner_promotion() {
             let promoted: Vec<_> = observer
                 .iter()
                 .flat_map(|msg| &msg.announce)
-                .filter(|entry| entry.3 == IpAddr::V4(B))
+                .filter(|entry| entry.3 == peer_v4(B))
                 .collect();
             assert_eq!(promoted.len(), 1, "raw rank must promote B before export");
             let promoted = promoted[0];
@@ -6020,7 +5989,7 @@ async fn oracle_action_only_same_update_pcb_winner_promotion() {
 /// same bytes, overriding the conservative `old == new` trait default.
 async fn equivalent_action_profile(o: &mut Oracle, peer: Ipv4Addr) {
     o.tx.send(RibUpdate::SetPeerExportEncoder {
-        peer: IpAddr::V4(peer),
+        peer: peer_v4(peer),
         session_id: SESSION,
         encoder: super::exportability::MockExactExportEncoder::equivalent_next_hop_actions(1),
     })
@@ -6091,7 +6060,7 @@ async fn oracle_action_only_equivalent_profile_pcb_prior_suppression() {
             o.routes(A, vec![ranked(pfx(2, 0), A, 1)], vec![]).await;
             let lane = o.drain_peer_available(A).await;
             let lane: Vec<_> = lane.iter().flat_map(|msg| &msg.announce).collect();
-            assert!(lane.iter().all(|entry| entry.3 == IpAddr::V4(B)));
+            assert!(lane.iter().all(|entry| entry.3 == peer_v4(B)));
             assert_eq!(
                 lane.last().map(|entry| entry.5.clone()),
                 Some(initially_self.then_some(NextHopAction::Self_))
@@ -6171,7 +6140,7 @@ async fn oracle_action_only_equivalent_profile_dirty_baseline_suppression() {
         }
         assert_route_parity(&runs[0], &runs[1]);
         for stream in &runs {
-            let messages = &stream[&IpAddr::V4(C)];
+            let messages = &stream[&peer_v4(C)];
             let announced: Vec<_> = messages
                 .iter()
                 .flat_map(|msg| &msg.announce)
@@ -6272,7 +6241,7 @@ async fn oracle_action_only_suppressed_resync_keeps_eor_after_its_table() {
                 o.end_recovery(C).await;
                 let stream = o.finish().await;
 
-                let messages = &stream[&IpAddr::V4(C)];
+                let messages = &stream[&peer_v4(C)];
                 let flipped = (!initially_self).then_some(NextHopAction::Self_);
                 let announced: Vec<_> = messages
                     .iter()
@@ -6354,9 +6323,9 @@ async fn oracle_pcb_new_winner_keeps_unchanged_runner_up_without_reannounce() {
     };
     let (grouped, private) = run_grouped_and_ungrouped(None, scenario).await;
     assert_route_parity(&grouped, &private);
-    assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B), IpAddr::V4(B)]);
-    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A)]);
-    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A), IpAddr::V4(B)]);
+    assert_eq!(src_seq(&grouped, A), vec![peer_v4(B), peer_v4(B)]);
+    assert_eq!(src_seq(&grouped, B), vec![peer_v4(A)]);
+    assert_eq!(src_seq(&grouped, C), vec![peer_v4(A), peer_v4(B)]);
     assert!(
         grouped
             .values()
@@ -6428,14 +6397,14 @@ async fn oracle_pcb_lane_only_churn_reaches_only_the_best_source() {
     // initial substitution, the attribute churn, the refill from C.
     assert_eq!(
         src_seq(&grouped, A),
-        vec![IpAddr::V4(B), IpAddr::V4(B), IpAddr::V4(C)]
+        vec![peer_v4(B), peer_v4(B), peer_v4(C)]
     );
     // The non-source members hold the unchanged winner throughout.
-    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A)]);
-    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A)]);
+    assert_eq!(src_seq(&grouped, B), vec![peer_v4(A)]);
+    assert_eq!(src_seq(&grouped, C), vec![peer_v4(A)]);
     for member in [A, B, C] {
         assert!(
-            grouped[&IpAddr::V4(member)]
+            grouped[&peer_v4(member)]
                 .iter()
                 .all(|msg| msg.withdraw.is_empty()),
             "lane churn under a standing best must never reach a wire as a withdraw"
@@ -6520,14 +6489,14 @@ async fn oracle_pcb_route_refresh_replays_runner_up_substitution() {
     assert_route_parity(&grouped, &ungrouped);
     // A: the initial substitution, then the refresh replay of the SAME
     // substituted runner-up (never A's own winner).
-    assert_eq!(src_seq(&grouped, A), vec![IpAddr::V4(B), IpAddr::V4(B)]);
+    assert_eq!(src_seq(&grouped, A), vec![peer_v4(B), peer_v4(B)]);
     // C: the initial winner, then the refresh replay of the winner.
-    assert_eq!(src_seq(&grouped, C), vec![IpAddr::V4(A), IpAddr::V4(A)]);
+    assert_eq!(src_seq(&grouped, C), vec![peer_v4(A), peer_v4(A)]);
     // B was not refreshed: exactly the initial winner announce.
-    assert_eq!(src_seq(&grouped, B), vec![IpAddr::V4(A)]);
+    assert_eq!(src_seq(&grouped, B), vec![peer_v4(A)]);
     for member in [A, B, C] {
         assert!(
-            grouped[&IpAddr::V4(member)]
+            grouped[&peer_v4(member)]
                 .iter()
                 .all(|msg| msg.withdraw.is_empty()),
             "refresh replay must not withdraw anything"
@@ -6576,7 +6545,7 @@ async fn oracle_queued_refresh_cohort_matches_private_replays() {
             o.routes(C, vec![ibgp_route(pfx(3, 0), C, 100, vec![])], vec![])
                 .await;
             let requests = [A, B, C].map(|peer| RibUpdate::RouteRefreshRequest {
-                peer: IpAddr::V4(peer),
+                peer: peer_v4(peer),
                 session_id: SESSION,
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
@@ -6590,7 +6559,7 @@ async fn oracle_queued_refresh_cohort_matches_private_replays() {
             o.queue(
                 [A, B, C]
                     .map(|peer| RibUpdate::RouteRefreshRequest {
-                        peer: IpAddr::V4(peer),
+                        peer: peer_v4(peer),
                         session_id: SESSION,
                         afi: Afi::Ipv4,
                         safi: Safi::Unicast,
@@ -6605,7 +6574,7 @@ async fn oracle_queued_refresh_cohort_matches_private_replays() {
         assert_route_parity(&grouped, &ungrouped);
         for peer in [A, B, C] {
             assert!(
-                grouped[&IpAddr::V4(peer)]
+                grouped[&peer_v4(peer)]
                     .iter()
                     .any(|message| { !message.refresh_markers.is_empty() }),
                 "each member received a refresh response"
@@ -6715,7 +6684,7 @@ async fn oracle_action_only_refusal_regroup_and_replay() {
             o.routes(A, vec![candidate(!initially_self)], vec![]).await;
             let (reply, response) = oneshot::channel();
             o.tx.send(RibUpdate::ExplainAdvertisedRoute {
-                peer: IpAddr::V4(C),
+                peer: peer_v4(C),
                 prefix: Prefix::V4(pfx(1, 0)),
                 rd: None,
                 labeled: false,
@@ -6751,7 +6720,7 @@ async fn oracle_action_only_refusal_regroup_and_replay() {
             o.quiesce().await;
             o.end_recovery(C).await;
             let after =
-                query_explain_advertised_route(&o.tx, IpAddr::V4(C), Prefix::V4(pfx(1, 0))).await;
+                query_explain_advertised_route(&o.tx, peer_v4(C), Prefix::V4(pfx(1, 0))).await;
             assert!(
                 after.already_advertised,
                 "recovery admits the replacement action"
@@ -6760,7 +6729,7 @@ async fn oracle_action_only_refusal_regroup_and_replay() {
         }
         assert_route_parity(&runs[0], &runs[1]);
         for stream in &runs {
-            let messages = &stream[&IpAddr::V4(C)];
+            let messages = &stream[&peer_v4(C)];
             assert!(messages.iter().all(|msg| msg.withdraw.is_empty()));
             let actions: Vec<_> = messages
                 .iter()
@@ -6844,7 +6813,7 @@ async fn oracle_strip_many_communities_export_parity() {
     assert_route_parity(&grouped, &ungrouped);
 
     let last_communities = |streams: &Streams, peer: Ipv4Addr, prefix: Ipv4Prefix| {
-        streams[&IpAddr::V4(peer)]
+        streams[&peer_v4(peer)]
             .iter()
             .flat_map(|msg| &msg.announce)
             .rfind(|announce| announce.0 == Prefix::V4(prefix))
@@ -6867,7 +6836,7 @@ async fn oracle_strip_many_communities_export_parity() {
                 "{peer} {prefix}"
             );
         }
-        let first_p1 = grouped[&IpAddr::V4(peer)]
+        let first_p1 = grouped[&peer_v4(peer)]
             .iter()
             .flat_map(|msg| &msg.announce)
             .find(|announce| announce.0 == Prefix::V4(pfx(1, 0)))

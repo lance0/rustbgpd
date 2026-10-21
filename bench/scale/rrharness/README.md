@@ -353,7 +353,10 @@ runs A/B/B/A separately against each historical control.
 A historical control whose `RibUpdate::ReevaluatePeerExportPolicies` predates
 dataset swaps receives the shared harness without its `swaps: None` arguments;
 `None` selects the full re-evaluation that control performs anyway, and any
-other value refuses the derivation. Ordinary CI runs
+other value refuses the derivation. A control whose RIB predates `PeerId`
+keys peers by address, so the harness's `PeerId::from_addr(x)` becomes `x`
+and `peer.addr()` becomes `peer`; any other `PeerId` or `.addr()` use refuses
+the derivation. Ordinary CI runs
 `compare-recovery-memory.sh --check-controls`, which compiles the derived
 harness against both controls, so harness API drift fails before a dispatch.
 

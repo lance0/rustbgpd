@@ -868,7 +868,7 @@ async fn reconcile_once<F>(
             }
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
-                peer: candidate.route.peer,
+                peer: candidate.route.peer.addr(),
                 peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: candidate.reason.to_string(),
@@ -879,7 +879,7 @@ async fn reconcile_once<F>(
         if !state.ownership.available {
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
-                peer: candidate.route.peer,
+                peer: candidate.route.peer.addr(),
                 peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Failed,
                 reason: "ownership_state_unavailable".to_string(),
@@ -899,7 +899,7 @@ async fn reconcile_once<F>(
                     // discard stays installed; keep the retained source
                     // current so a later failed removal names it.
                     let source = OwnedBlackhole {
-                        peer: candidate.route.peer,
+                        peer: candidate.route.peer.addr(),
                         peer_interface: candidate.route.peer_interface(),
                     };
                     statuses.push(BlackholeStatus {
@@ -939,7 +939,7 @@ async fn reconcile_once<F>(
                     );
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
-                        peer: candidate.route.peer,
+                        peer: candidate.route.peer.addr(),
                         peer_interface: candidate.route.peer_interface(),
                         state: BlackholeState::Failed,
                         reason: "foreign_route_exists".to_string(),
@@ -954,7 +954,7 @@ async fn reconcile_once<F>(
                 if !state.ownership.prefixes.contains(&candidate.prefix) {
                     statuses.push(BlackholeStatus {
                         prefix: candidate.prefix,
-                        peer: candidate.route.peer,
+                        peer: candidate.route.peer.addr(),
                         peer_interface: candidate.route.peer_interface(),
                         state: BlackholeState::Failed,
                         reason: "foreign_route_exists".to_string(),
@@ -966,7 +966,7 @@ async fn reconcile_once<F>(
                 state.owned.insert(
                     candidate.prefix,
                     OwnedBlackhole {
-                        peer: candidate.route.peer,
+                        peer: candidate.route.peer.addr(),
                         peer_interface: candidate.route.peer_interface(),
                     },
                 );
@@ -977,7 +977,7 @@ async fn reconcile_once<F>(
                 );
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
-                    peer: candidate.route.peer,
+                    peer: candidate.route.peer.addr(),
                     peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Installed,
                     reason: "adopted".to_string(),
@@ -987,7 +987,7 @@ async fn reconcile_once<F>(
             KernelRoutePresence::Foreign => {
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
-                    peer: candidate.route.peer,
+                    peer: candidate.route.peer.addr(),
                     peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Failed,
                     reason: "foreign_route_exists".to_string(),
@@ -1008,7 +1008,7 @@ async fn reconcile_once<F>(
         if guarded_churn {
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
-                peer: candidate.route.peer,
+                peer: candidate.route.peer.addr(),
                 peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: "route_churn_deferred".to_string(),
@@ -1030,7 +1030,7 @@ async fn reconcile_once<F>(
             }
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
-                peer: candidate.route.peer,
+                peer: candidate.route.peer.addr(),
                 peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: reason.to_string(),
@@ -1049,7 +1049,7 @@ async fn reconcile_once<F>(
                 state.owned.insert(
                     candidate.prefix,
                     OwnedBlackhole {
-                        peer: candidate.route.peer,
+                        peer: candidate.route.peer.addr(),
                         peer_interface: candidate.route.peer_interface(),
                     },
                 );
@@ -1061,7 +1061,7 @@ async fn reconcile_once<F>(
                 );
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
-                    peer: candidate.route.peer,
+                    peer: candidate.route.peer.addr(),
                     peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Installed,
                     reason: "installed".to_string(),
@@ -1077,7 +1077,7 @@ async fn reconcile_once<F>(
                 );
                 statuses.push(BlackholeStatus {
                     prefix: candidate.prefix,
-                    peer: candidate.route.peer,
+                    peer: candidate.route.peer.addr(),
                     peer_interface: candidate.route.peer_interface(),
                     state: BlackholeState::Failed,
                     reason: e,
@@ -1107,7 +1107,7 @@ async fn reconcile_once<F>(
 fn ownership_unavailable_status(candidate: &Candidate) -> BlackholeStatus {
     BlackholeStatus {
         prefix: candidate.prefix,
-        peer: candidate.route.peer,
+        peer: candidate.route.peer.addr(),
         peer_interface: candidate.route.peer_interface(),
         state: BlackholeState::Failed,
         reason: "ownership_state_unavailable".to_string(),
@@ -1305,7 +1305,7 @@ async fn degraded_pass_without_dump<F>(
         if candidate.installable {
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
-                peer: candidate.route.peer,
+                peer: candidate.route.peer.addr(),
                 peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Failed,
                 reason: if state.ownership.available {
@@ -1326,7 +1326,7 @@ async fn degraded_pass_without_dump<F>(
             }
             statuses.push(BlackholeStatus {
                 prefix: candidate.prefix,
-                peer: candidate.route.peer,
+                peer: candidate.route.peer.addr(),
                 peer_interface: candidate.route.peer_interface(),
                 state: BlackholeState::Rejected,
                 reason: candidate.reason.to_string(),
@@ -1629,6 +1629,7 @@ pub(super) mod tests {
     use super::*;
     use prometheus::Registry;
     use rustbgpd_rib::AttrSet;
+    use rustbgpd_rib::PeerId;
     use rustbgpd_rib::RouteEvent;
     use rustbgpd_rib::route::RouteOrigin;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute};
@@ -1854,7 +1855,7 @@ pub(super) mod tests {
             )
         };
         let candidates = vec![announced(prefix), announced(new_prefix), announced(adopted)];
-        let peer = candidates[0].peer;
+        let peer = candidates[0].peer.addr();
         let (rib_tx, mut rib_rx) = mpsc::channel(8);
         tokio::spawn(async move {
             while let Some(update) = rib_rx.recv().await {
@@ -2008,7 +2009,7 @@ pub(super) mod tests {
             tokio::time::Instant::now() + Duration::from_hours(1),
             OwnershipState::ephemeral([protected]),
         );
-        state.owned.insert(protected, owned_blackhole(peer));
+        state.owned.insert(protected, owned_blackhole(peer.addr()));
         state.adoption.swept = true;
 
         reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
@@ -2071,7 +2072,7 @@ pub(super) mod tests {
             tokio::time::Instant::now() + Duration::from_hours(1),
             OwnershipState::ephemeral([prefix]),
         );
-        state.owned.insert(prefix, owned_blackhole(peer));
+        state.owned.insert(prefix, owned_blackhole(peer.addr()));
         state.adoption.swept = true;
 
         reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
@@ -2173,7 +2174,7 @@ pub(super) mod tests {
             let metrics = BgpMetrics::with_registry(Registry::new());
             let sentinel = vec![BlackholeStatus {
                 prefix,
-                peer,
+                peer: peer.addr(),
                 peer_interface: None,
                 state: BlackholeState::Installed,
                 reason: "last_good".to_string(),
@@ -2187,7 +2188,7 @@ pub(super) mod tests {
                 tokio::time::Instant::now() + Duration::from_hours(1),
                 OwnershipState::ephemeral([prefix]),
             );
-            state.owned.insert(prefix, owned_blackhole(peer));
+            state.owned.insert(prefix, owned_blackhole(peer.addr()));
             state.adoption.swept = true;
             let owned_before = state.owned.clone();
             let receipt_before = state.ownership.prefixes.clone();
@@ -2240,7 +2241,7 @@ pub(super) mod tests {
         });
         let sentinel = vec![BlackholeStatus {
             prefix,
-            peer,
+            peer: peer.addr(),
             peer_interface: None,
             state: BlackholeState::Installed,
             reason: "last_good".to_string(),
@@ -2562,7 +2563,7 @@ pub(super) mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             link_local_next_hop: None,
             next_hop_scope: None,
-            peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            peer: PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
             attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::Communities(communities),
@@ -3209,7 +3210,7 @@ pub(super) mod tests {
             RouteOrigin::Ebgp,
             vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
         );
-        scoped.peer = "fe80::1".parse().unwrap();
+        scoped.peer = PeerId::from_addr("fe80::1".parse().unwrap());
         scoped.aspa_context = rustbgpd_rib::route::AspaContextId::intern_scoped(
             rustbgpd_wire::AspaValidationContext::default(),
             Some("eth0"),

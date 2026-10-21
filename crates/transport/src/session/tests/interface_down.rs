@@ -127,7 +127,7 @@ async fn each_down_cause_in_the_current_state_tears_down() {
 
         assert_eq!(session.fsm.state(), SessionState::Idle, "{cause:?}");
         match rib_rx.try_recv() {
-            Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.peer_ip),
+            Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.rib_peer()),
             Ok(RibUpdate::PeerGracefulRestart { .. }) => {
                 panic!("{cause:?}: routes retained under GR after an interface down")
             }
@@ -260,7 +260,7 @@ async fn retained_routes_are_purged_when_the_lost_connection_is_down() {
     set(&tx, iface(1, true, true, &[]));
     check(&mut session).await;
     match rib_rx.try_recv() {
-        Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.peer_ip),
+        Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.rib_peer()),
         _ => panic!("expected the retained routes to be purged"),
     }
     assert!(session.gr_retained_connection.is_none());
@@ -297,7 +297,7 @@ async fn a_healthy_replacement_survives_while_retained_routes_are_purged() {
     set(&tx, merge(healthy(), iface(7, true, false, &["127.0.0.3"])));
     check(&mut session).await;
     match rib_rx.try_recv() {
-        Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.peer_ip),
+        Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.rib_peer()),
         _ => panic!("the retained routes must be purged while a replacement handshakes"),
     }
     assert!(session.read_half.is_some(), "the healthy replacement stays");

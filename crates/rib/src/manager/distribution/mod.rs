@@ -3,6 +3,7 @@
 //! commits the resulting payloads to sessions. Per-family walks live in the
 //! submodules.
 
+use crate::PeerId;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -174,7 +175,7 @@ thread_local! {
 #[derive(Default)]
 pub(in crate::manager) struct SharedUnicastProbeCache {
     groups: HashMap<usize, Vec<SharedUnicastProbeCacheEntry>>,
-    prestaged_origin: Option<(IpAddr, u64, u64)>,
+    prestaged_origin: Option<(PeerId, u64, u64)>,
 }
 
 /// Deferred advertised-state input for the ordinary clean grouped path.
@@ -185,13 +186,13 @@ pub(in crate::manager) struct SharedUnicastProbeCache {
 /// the per-route key set it would otherwise allocate.
 #[derive(Clone, Copy)]
 pub(in crate::manager) struct LazyCleanGroupPrior<'a> {
-    pub(in crate::manager) peer: IpAddr,
+    pub(in crate::manager) peer: PeerId,
     pub(in crate::manager) deltas: &'a [super::update_groups::GroupDelta],
 }
 
 pub(in crate::manager) fn resolve_lazy_clean_group_prior<'a>(
     eligible: bool,
-    peer: IpAddr,
+    peer: PeerId,
     group_id: Option<usize>,
     staged_deltas: impl FnOnce(usize) -> Option<&'a [super::update_groups::GroupDelta]>,
 ) -> Option<LazyCleanGroupPrior<'a>> {
@@ -251,7 +252,7 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) defer_grouped_refresh_prior: bool,
     /// Explicit family replay re-emits even a wire-equivalent action change.
     pub(in crate::manager) force_unicast_replay: bool,
-    pub(in crate::manager) announce_source_exclusion: Option<IpAddr>,
+    pub(in crate::manager) announce_source_exclusion: Option<PeerId>,
     pub(in crate::manager) shared_group_encode: Option<Arc<crate::update::SharedGroupEncode>>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
@@ -477,7 +478,7 @@ impl SharedUnicastProbeCache {
 
 #[inline(never)]
 fn probe_exact_export_announcements(
-    peer: IpAddr,
+    peer: PeerId,
     snapshot: &dyn crate::update::ExactExportSnapshot,
     candidates: &[crate::update::ExactExportCandidate<'_>],
     checkpoint: &mut dyn FnMut(),
@@ -519,7 +520,7 @@ fn probe_exact_export_announcements(
 /// records a scoped neighbor's interface.
 #[derive(Clone, Copy)]
 struct BestSource {
-    peer: IpAddr,
+    peer: PeerId,
     path_id: u32,
     context: crate::route::AspaContextId,
 }
@@ -537,7 +538,7 @@ impl BestSource {
 impl RibManager {
     fn clean_group_delta_was_admitted(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         delta: &super::update_groups::GroupDelta,
     ) -> bool {
         if let Some(prior) = &delta.prior {
@@ -608,7 +609,7 @@ struct ExactExportOverlayDecision {
 }
 
 struct PreparedCleanPolicyTransitionPeer {
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     export_policy: Option<PolicyChain>,
     snapshot: Option<Arc<dyn crate::update::ExactExportSnapshot>>,
@@ -619,7 +620,7 @@ struct PreparedCleanPolicyTransitionPeer {
 /// A successful unfenced probe, aligned with the unpublished inventory vectors.
 /// It holds no payload references, so row ownership can move during reconciliation.
 pub(in crate::manager) struct PrestagedTransitionProbe {
-    peer: IpAddr,
+    peer: PeerId,
     snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
     pub(in crate::manager) cursor: usize,
     pub(in crate::manager) encoded_lengths: Vec<usize>,
@@ -690,7 +691,7 @@ pub(super) struct DestinationPrestage {
     /// ([`RibManager::extend_prestaged_transition_inventory`]) runs.
     staged: bool,
     inventory_complete: bool,
-    peer: IpAddr,
+    peer: PeerId,
     prefixes: Vec<Prefix>,
     cursor: usize,
     memo: ExportMemo,
@@ -726,7 +727,7 @@ pub(super) struct PendingCleanPolicyTransition {
 enum CleanPolicyTransitionPhase {
     Classify {
         cursor: usize,
-        seen: HashSet<IpAddr>,
+        seen: HashSet<PeerId>,
         transition: Option<(usize, usize)>,
     },
     StageDestination {
@@ -837,7 +838,7 @@ impl CleanPolicyTransitionPhase {
 }
 
 struct CleanPolicyTransitionProbe {
-    peer: IpAddr,
+    peer: PeerId,
     session_id: u64,
     export_policy: Option<PolicyChain>,
     snapshot: Arc<dyn crate::update::ExactExportSnapshot>,
@@ -1428,7 +1429,7 @@ fn rr_suppression_reason(
     target_is_ebgp: bool,
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
-    peer_is_rr_client: &HashMap<IpAddr, bool>,
+    peer_is_rr_client: &HashMap<PeerId, bool>,
 ) -> (&'static str, &'static str) {
     if !target_is_ebgp
         && !best.is_ebgp()
@@ -1528,7 +1529,7 @@ fn explain_export_evaluation(
 /// (design risk 1 — parameterized, never copied).
 pub(in crate::manager) enum ExportTarget<'a> {
     Peer {
-        peer: IpAddr,
+        peer: PeerId,
         peer_asn: Option<u32>,
         peer_group: Option<&'a str>,
         metrics: &'a BgpMetrics,
@@ -1548,7 +1549,7 @@ pub(in crate::manager) enum ExportTarget<'a> {
     /// `trace` instead. The explain handler passes scratch output
     /// vectors and never commits, so the run is fully side-effect-free.
     Explain {
-        peer: IpAddr,
+        peer: PeerId,
         peer_asn: Option<u32>,
         peer_group: Option<&'a str>,
         local_role: Option<BgpRole>,
@@ -1567,7 +1568,7 @@ pub(in crate::manager) struct ExportGateTrace {
     /// Gate ladder in live evaluation order.
     pub gates: Vec<ExportGateStep>,
     /// Source peer of the selected best route (once the ladder reached it).
-    pub best_peer: Option<IpAddr>,
+    pub best_peer: Option<PeerId>,
     /// Adj-RIB-In path ID of the selected unicast best route.
     pub best_path_id: Option<u32>,
     /// Route type of the selected best route.
@@ -1657,7 +1658,7 @@ impl ExportGateTrace {
     /// advertise) so existing consumers see unchanged output.
     pub(in crate::manager) fn into_explain(
         self,
-        peer: IpAddr,
+        peer: PeerId,
         prefix: Prefix,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
         update_group_id: Option<u64>,
@@ -1699,7 +1700,7 @@ impl<'a> ExportTarget<'a> {
     /// staging (lifted out — applied per member at emit time; the
     /// explain dry run applies it against the member directly, which is
     /// exactly what the source-flip matrix does per member at emit).
-    fn split_horizon_peer(&self) -> Option<IpAddr> {
+    fn split_horizon_peer(&self) -> Option<PeerId> {
         match self {
             Self::Peer { peer, .. } | Self::Explain { peer, .. } => Some(*peer),
             Self::Group { .. } => None,
@@ -1724,7 +1725,7 @@ impl<'a> ExportTarget<'a> {
                 peer_asn,
                 peer_group,
                 ..
-            } => (Some(*peer), *peer_asn, *peer_group),
+            } => (Some(peer.addr()), *peer_asn, *peer_group),
             Self::Group { .. } => (None, None, None),
         }
     }
@@ -1733,7 +1734,7 @@ impl<'a> ExportTarget<'a> {
     /// the group accumulator for per-member replay. Explain dry runs
     /// record nothing — counting a one-shot operator query would skew
     /// `bgp_policy_routes_total` and the per-term hit counters.
-    fn record_eval(&mut self, evaluation: &PolicyEvaluation, source: IpAddr) {
+    fn record_eval(&mut self, evaluation: &PolicyEvaluation, source: PeerId) {
         match self {
             Self::Peer {
                 metrics,
@@ -1748,7 +1749,7 @@ impl<'a> ExportTarget<'a> {
 
     /// Target stamped on policy-denial records; group records carry the
     /// `LOCAL_PEER` placeholder and are restamped per member.
-    fn policy_filtered_target(&self) -> IpAddr {
+    fn policy_filtered_target(&self) -> PeerId {
         match self {
             Self::Peer { peer, .. } | Self::Explain { peer, .. } => *peer,
             Self::Group { .. } => LOCAL_PEER,
@@ -1873,7 +1874,7 @@ impl RibManager {
     /// RS ASN (`extend_clean_policy_transition_inventory`) — a tagged
     /// inventory rejects the whole optimized plan there, before any
     /// member is moved or an envelope emitted.
-    pub(super) fn clean_policy_transition_peer_ready(&self, peer: IpAddr) -> bool {
+    pub(super) fn clean_policy_transition_peer_ready(&self, peer: PeerId) -> bool {
         let sendable = self.peer_sendable_families.get(&peer);
         let only_unicast = sendable.is_some_and(|families| {
             !families.is_empty() && families.iter().all(|(_, safi)| *safi == Safi::Unicast)
@@ -2685,7 +2686,7 @@ impl RibManager {
 
     fn clean_group_route_was_admitted(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         route: &crate::route::Route,
         source_attrs: Option<&Arc<crate::attr_set::AttrSet>>,
     ) -> bool {
@@ -2718,7 +2719,7 @@ impl RibManager {
     /// gauges and the route-drop counter already track the episode.
     pub(super) fn mark_dirty_after_family_send_failure(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         failure: OutboundCommitFailure,
     ) -> bool {
         let newly_dirty = !self.dirty_peers.contains(&peer);
@@ -2734,7 +2735,7 @@ impl RibManager {
 
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         batch: OutboundCommitBatch,
     ) -> Result<(), OutboundCommitFailure> {
         self.try_send_and_commit_outbound_update_with_group_prior(
@@ -2749,7 +2750,7 @@ impl RibManager {
     /// it, so no caller can attribute a refusal to a writer-channel drop.
     fn outbound_commit_failed(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         failure: OutboundCommitFailure,
     ) -> Result<(), OutboundCommitFailure> {
         let label = peer.to_string();
@@ -2769,7 +2770,7 @@ impl RibManager {
     /// edges; unchanged blocked identities remain current without re-emitting.
     pub(super) fn reconcile_peer_otc_blocked(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         affected_prefixes: &HashSet<Prefix>,
         blocked_routes: Vec<crate::route::Route>,
     ) {
@@ -2883,7 +2884,7 @@ impl RibManager {
     )]
     fn suppress_equivalent_unicast_actions(
         &self,
-        peer: IpAddr,
+        peer: PeerId,
         batch: &mut OutboundCommitBatch,
         snapshot: &dyn crate::update::ExactExportSnapshot,
         stage: Option<&super::update_groups::GroupStageOutput>,
@@ -3013,7 +3014,7 @@ impl RibManager {
 
     pub(super) fn try_send_and_commit_outbound_update_with_group_prior(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         batch: OutboundCommitBatch,
         group_prior: FastSet<crate::update::ExactExportKey>,
         shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
@@ -3036,7 +3037,7 @@ impl RibManager {
     )]
     pub(super) fn try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         mut batch: OutboundCommitBatch,
         mut group_prior: FastSet<crate::update::ExactExportKey>,
         mut shared_unicast_precommit: Option<SharedUnicastPrecommit<'_>>,
@@ -4821,7 +4822,7 @@ impl RibManager {
 
     pub(in crate::manager) fn replace_peer_export_policy_synchronously(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         export_policy: Option<PolicyChain>,
     ) -> Result<(), RibCommandError> {
         self.with_replacement_summary_reads("single", |manager| {
@@ -4870,7 +4871,7 @@ impl RibManager {
 
     pub(super) fn handle_replace_peer_export_policy(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         export_policy: Option<PolicyChain>,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
@@ -5192,7 +5193,7 @@ impl RibManager {
         // replacement per peer. Apply duplicates in caller order through
         // the single-peer seam instead — last-writer-wins, exactly the
         // serial loop's shape (a departed peer is skipped identically).
-        let mut seen: HashSet<IpAddr> = HashSet::new();
+        let mut seen: HashSet<PeerId> = HashSet::new();
         receipt.duplicate_peers = replacements
             .iter()
             .inspect(|_| checkpoint())
@@ -5330,10 +5331,10 @@ impl RibManager {
         // destinations agree. A source group with mixed or ungrouped
         // destinations degrades wholesale to the per-member machinery.
         let phase = std::time::Instant::now();
-        let mut cohorts: Vec<(usize, usize, Vec<IpAddr>)> = Vec::new();
-        let mut residual: Vec<IpAddr> = Vec::new();
+        let mut cohorts: Vec<(usize, usize, Vec<PeerId>)> = Vec::new();
+        let mut residual: Vec<PeerId> = Vec::new();
         {
-            let mut by_source: HashMap<usize, Option<(usize, Vec<IpAddr>)>> = HashMap::new();
+            let mut by_source: HashMap<usize, Option<(usize, Vec<PeerId>)>> = HashMap::new();
             for (index, replacement) in present.iter().inspect(|_| checkpoint()).enumerate() {
                 checkpoint();
                 match (previous[index], destinations[index]) {
@@ -5488,7 +5489,7 @@ impl RibManager {
         &mut self,
         source: usize,
         destination: usize,
-        members: &[IpAddr],
+        members: &[PeerId],
         receipt: &mut AuthoritativeTransitionReceipt,
     ) -> bool {
         let readiness = self.replacement_readiness.clone();
@@ -5644,7 +5645,7 @@ impl RibManager {
         // heal. It still moves with the cohort, carrying the source
         // group's candidate tombstones; the retained admitted proof bounds
         // their targeted recovery duty.
-        let mut lagging: HashSet<IpAddr> = members
+        let mut lagging: HashSet<PeerId> = members
             .iter()
             .inspect(|_| checkpoint())
             .copied()
@@ -5874,7 +5875,7 @@ impl RibManager {
     )]
     fn prepare_batched_member_envelopes(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         destination: usize,
         inventory: &super::update_groups::BatchedTransitionInventory,
         shared_encode: Option<&Arc<crate::update::SharedGroupEncode>>,
@@ -6089,7 +6090,7 @@ impl RibManager {
     /// skipped and the transition will stage under its fence, as before.
     pub(super) fn begin_destination_prestage(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         export_policy: Option<&rustbgpd_policy::PolicyChain>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
@@ -6258,7 +6259,7 @@ impl RibManager {
 
     /// Probe the owned inventory in unfenced bounded slices. Rejection costs
     /// only this optimization: the fenced path remains authoritative.
-    fn extend_prestaged_transition_probe(&mut self, peer: IpAddr) -> bool {
+    fn extend_prestaged_transition_probe(&mut self, peer: PeerId) -> bool {
         let Some(prestaged) = self.prestaged_inventory.as_mut() else {
             return true;
         };
@@ -6408,7 +6409,7 @@ impl RibManager {
     /// see the updated wire form on routes already in `AdjRibOut`).
     pub(super) fn handle_refresh_peer_outbound(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
         if !self.outbound_peers.contains_key(&peer) {
@@ -6435,7 +6436,7 @@ impl RibManager {
     }
 
     /// Empty families mean permit-all; absent peer keys keep readiness accurate.
-    fn reap_empty_orf_filter(&mut self, peer: IpAddr, family: (Afi, Safi)) {
+    fn reap_empty_orf_filter(&mut self, peer: PeerId, family: (Afi, Safi)) {
         if let Some(by_family) = self.peer_orf_filters.get_mut(&peer) {
             if by_family
                 .get(&family)
@@ -6456,7 +6457,7 @@ impl RibManager {
     /// installs the filter for outbound churn and a later route refresh.
     pub(super) fn handle_peer_orf_update(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         afi: Afi,
         safi: Safi,
         when: rustbgpd_wire::WhenToRefresh,
@@ -6592,7 +6593,7 @@ impl RibManager {
     )]
     pub(super) fn enqueue_routes_received(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         announced: Vec<crate::route::Route>,
         withdrawn: Vec<(Prefix, u32)>,
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
@@ -6844,7 +6845,7 @@ impl RibManager {
     /// Register `peer` as a unicast announcer for `prefix` in the reverse
     /// index. MUST be called by every seam that inserts a unicast route
     /// into an Adj-RIB-In — see the [`UnicastPrefixPeers`] contract.
-    pub(in crate::manager) fn register_unicast_announcer(&mut self, peer: IpAddr, prefix: Prefix) {
+    pub(in crate::manager) fn register_unicast_announcer(&mut self, peer: PeerId, prefix: Prefix) {
         self.unicast_prefix_peers.register(peer, prefix);
     }
 
@@ -6854,7 +6855,7 @@ impl RibManager {
     /// stale index entry (peer withdrew / went down and was not yet pruned)
     /// yields no candidates and is skipped — over-counting is benign.
     pub(in crate::manager) fn unicast_candidates<'a>(
-        ribs: &'a HashMap<IpAddr, AdjRibIn>,
+        ribs: &'a HashMap<PeerId, AdjRibIn>,
         prefix_peers: &'a UnicastPrefixPeers,
         prefix: &'a Prefix,
     ) -> impl Iterator<Item = &'a crate::route::Route> {
@@ -6911,7 +6912,7 @@ impl RibManager {
     ///    conservative full rescan.
     pub(super) fn recompute_best_after_announce(
         &mut self,
-        peer: IpAddr,
+        peer: PeerId,
         affected: &HashSet<Prefix>,
     ) -> HashSet<Prefix> {
         use std::cmp::Ordering;
@@ -7222,7 +7223,7 @@ impl RibManager {
     pub(in crate::manager) fn distribute_changes_to_targets(
         &mut self,
         changed: &HashSet<Prefix>,
-        targets: &HashSet<IpAddr>,
+        targets: &HashSet<PeerId>,
     ) {
         self.distribute_changes_inner(
             changed,
@@ -7251,7 +7252,7 @@ impl RibManager {
 
     pub(in crate::manager) fn distribute_changes_with_evpn_feeds(
         &mut self,
-        feeds: HashMap<IpAddr, super::evpn_recovery::EvpnCompleteFeed>,
+        feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         advertised_generation_already_advanced: bool,
     ) {
         self.distribute_changes_inner(
@@ -7287,8 +7288,8 @@ impl RibManager {
         all_affected: &HashSet<Prefix>,
         service_ingest_readiness: bool,
         advertised_generation_already_advanced: bool,
-        mut evpn_feeds: HashMap<IpAddr, super::evpn_recovery::EvpnCompleteFeed>,
-        targets: Option<&HashSet<IpAddr>>,
+        mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
+        targets: Option<&HashSet<PeerId>>,
     ) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -7349,7 +7350,7 @@ impl RibManager {
             self.advance_advertised_pages();
         }
 
-        let peers: Vec<IpAddr> = self
+        let peers: Vec<PeerId> = self
             .outbound_peers
             .keys()
             .filter(|peer| {
