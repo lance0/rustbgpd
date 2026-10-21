@@ -5187,20 +5187,20 @@ impl RibManager {
         retire_hash_set(&mut withdrawn, &mut checkpoint);
     }
 
-    /// Interned scope of the neighbor whose session is registered at
-    /// `peer`, from the accepted source context its session staged. It
-    /// resolves to that interface for a scoped (IPv6 link-local) neighbor
-    /// and to none for numbered neighbors and peers without a live session.
+    /// Interned scope of the active session registered at `peer`, from the
+    /// accepted source context it staged. It resolves to that interface for
+    /// a scoped (IPv6 link-local) neighbor and to none for numbered
+    /// neighbors, an active session without one, and peers without a live
+    /// session.
     pub(super) fn session_peer_scope(&self, peer: IpAddr) -> crate::route::AspaContextId {
+        // The active registration is the newest live record (see
+        // `register_active_session`); a collision loser's scope never counts.
         self.live_sessions
             .get(&peer)
-            .and_then(|records| {
-                records
-                    .iter()
-                    .map(|record| record.peer_scope)
-                    .find(|scope| *scope != crate::route::AspaContextId::DEFAULT)
+            .and_then(|records| records.last())
+            .map_or(crate::route::AspaContextId::DEFAULT, |record| {
+                record.peer_scope
             })
-            .unwrap_or(crate::route::AspaContextId::DEFAULT)
     }
 
     fn publish_route_event(&mut self, mut event: RouteEvent) {
