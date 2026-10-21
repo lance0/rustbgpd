@@ -246,21 +246,21 @@ async fn failed_start_exact_reaps_provisional_truth_and_preserves_scoped_sibling
     );
     for family in ["bgp_peer_admin_enabled", "bgp_peer_session_established"] {
         assert_eq!(
-            peer_identity_gauge(&metrics, family, "fe80::1", "eth0"),
+            peer_identity_gauge(&metrics, family, "fe80::1%eth0", "eth0"),
             None
         );
         assert_eq!(
-            peer_identity_gauge(&metrics, family, "fe80::1", "eth1"),
+            peer_identity_gauge(&metrics, family, "fe80::1%eth1", "eth1"),
             Some(0.0)
         );
     }
     for family in ["bgp_peer_session_state", "bgp_session_down_total"] {
         assert_eq!(
-            peer_identity_series_count(&metrics, family, "fe80::1", "eth0"),
+            peer_identity_series_count(&metrics, family, "fe80::1%eth0", "eth0"),
             0
         );
         assert_eq!(
-            peer_identity_series_count(&metrics, family, "fe80::1", "eth1"),
+            peer_identity_series_count(&metrics, family, "fe80::1%eth1", "eth1"),
             6
         );
     }
@@ -301,6 +301,106 @@ fn seed_peer_metric_series(metrics: &BgpMetrics, peer_label: &str) {
     // direct-insert test helpers bypass that path, so seed them here to keep
     // the reap accounting comparable to production.
     metrics.set_rfc8212_missing_policy(peer_label, false, false);
+}
+
+/// Every distinct `peer` label value in the registry.
+fn peer_label_values(metrics: &BgpMetrics) -> BTreeSet<String> {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .flat_map(|family| family.get_metric().iter())
+        .flat_map(|metric| metric.get_label().iter())
+        .filter(|label| label.name() == "peer")
+        .map(|label| label.value().to_owned())
+        .collect()
+}
+
+/// A link-local neighbor has one scoped `peer` value whether the series
+/// comes from the peer manager (scoped key) or from an emitter that knows
+/// only the bare address (session, RIB, BFD); the delete and the RIB's
+/// final bare-address reap remove all of it.
+#[tokio::test]
+async fn link_local_neighbor_series_share_one_scoped_peer_value() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics.clone(),
+        rib_tx,
+        None,
+    );
+    let addr: IpAddr = "fe80::1".parse().unwrap();
+    let mut config = make_config(addr, 65002);
+    config.interface = Some("eth0".to_string());
+    config.scope_id = Some(1);
+    mgr.add_peer(config, false).await.unwrap();
+    let key = scoped_key(addr, "eth0");
+    mgr.refresh_rfc8212_policy_metrics(&key);
+    mgr.publish_peer_info_metric(&key);
+    seed_peer_metric_series(&metrics, "fe80::1");
+
+    assert_eq!(
+        peer_label_values(&metrics),
+        BTreeSet::from(["fe80::1%eth0".to_owned()])
+    );
+    assert_eq!(
+        rustbgpd_telemetry::non_canonical_peer_labels(metrics.registry()),
+        Vec::<(String, String)>::new()
+    );
+
+    mgr.delete_peer(key, false).await.unwrap();
+    assert!(peer_label_values(&metrics).is_empty());
+    // The RIB's teardown emission and its final reap, both bare.
+    let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
+    assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == addr));
+    metrics.set_rib_prefixes("fe80::1", "ipv4_unicast", 0);
+    assert_eq!(
+        peer_label_values(&metrics),
+        BTreeSet::from(["fe80::1%eth0".to_owned()])
+    );
+    metrics.reap_peer_series("fe80::1");
+    assert!(peer_label_values(&metrics).is_empty());
+}
+
+/// The BFD runtime seeds `bfd_session_up` before the initial neighbors are
+/// added, so constructing the manager registers configured scopes.
+#[test]
+fn configured_link_local_scope_is_registered_before_neighbors_are_added() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut config = make_dynamic_manager_config();
+    let mut neighbor = config_neighbor("fe80::7".parse().unwrap(), 65007);
+    neighbor.interface = Some("eth3".to_string());
+    config.neighbors.push(neighbor);
+    config
+        .neighbors
+        .push(config_neighbor("192.0.2.7".parse().unwrap(), 65008));
+    let _mgr = PeerManager::new_with_config(
+        rx,
+        mpsc::channel(1).1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    metrics.record_bfd_state("fe80::7", false, false);
+    metrics.record_bfd_state("192.0.2.7", false, false);
+    assert_eq!(
+        peer_label_values(&metrics),
+        BTreeSet::from(["192.0.2.7".to_owned(), "fe80::7%eth3".to_owned()])
+    );
 }
 
 #[tokio::test]
@@ -371,9 +471,10 @@ async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
     original.scope_id = Some(42);
     mgr.add_peer(original, false).await.unwrap();
 
-    let peer_label = rustbgpd_telemetry::peer_label(addr);
-    seed_peer_metric_series(&metrics_view, &peer_label);
-    assert!(peer_metric_series_count(&metrics_view, &peer_label) > 0);
+    // Bare-address emitters land on the neighbor's scoped value.
+    let peer_label = "fe80::1%rustbgpd-test-missing0";
+    seed_peer_metric_series(&metrics_view, &rustbgpd_telemetry::peer_label(addr));
+    assert!(peer_metric_series_count(&metrics_view, peer_label) > 0);
 
     // Reconcile with replacement missing scope_id on nonexistent interface,
     // so delete_peer_for_reconfigure succeeds, but add_peer_with_admin_state
@@ -402,7 +503,7 @@ async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
     );
 
     // Metric series must be reaped on failed replacement
-    assert_eq!(peer_metric_series_count(&metrics_view, &peer_label), 0);
+    assert_eq!(peer_metric_series_count(&metrics_view, peer_label), 0);
     // The ordered RIB-side reap marker was queued
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
     assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == addr));
@@ -462,14 +563,19 @@ async fn reconcile_changed_peer_failed_replacement_preserves_scoped_sibling() {
         peer_identity_series_count(
             &metrics_view,
             "bgp_peer_session_state",
-            &peer_label,
+            "fe80::1%rustbgpd-test-missing0",
             "rustbgpd-test-missing0"
         ),
         0
     );
-    // Surviving eth0 sibling still owns bare address series
+    // The surviving eth0 sibling keeps its own scoped series
     assert_eq!(
-        peer_identity_series_count(&metrics_view, "bgp_peer_session_state", &peer_label, "eth0"),
+        peer_identity_series_count(
+            &metrics_view,
+            "bgp_peer_session_state",
+            "fe80::1%eth0",
+            "eth0"
+        ),
         6
     );
     assert!(
@@ -527,19 +633,29 @@ async fn peer_presence_rollback_reap_after_shutdown_preserves_scoped_sibling() {
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].peer_label.as_deref(), Some("fe80::1%eth0"));
     assert_eq!(
-        peer_identity_gauge(&metrics, "bgp_peer_session_established", "fe80::1", "eth0"),
+        peer_identity_gauge(
+            &metrics,
+            "bgp_peer_session_established",
+            "fe80::1%eth0",
+            "eth0"
+        ),
         None
     );
     assert_eq!(
-        peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", "fe80::1", "eth0"),
+        peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", "fe80::1%eth0", "eth0"),
         None
     );
     assert_eq!(
-        peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", "fe80::1", "eth1"),
+        peer_identity_gauge(&metrics, "bgp_peer_admin_enabled", "fe80::1%eth1", "eth1"),
         Some(0.0)
     );
     assert_eq!(
-        peer_identity_gauge(&metrics, "bgp_peer_session_established", "fe80::1", "eth1"),
+        peer_identity_gauge(
+            &metrics,
+            "bgp_peer_session_established",
+            "fe80::1%eth1",
+            "eth1"
+        ),
         Some(0.0)
     );
     assert!(mgr.peers.contains_key(&sibling));
@@ -574,15 +690,30 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
 
     mgr.delete_peer(first, false).await.unwrap();
     assert_eq!(
-        peer_identity_series_count(&mgr.metrics, "bgp_peer_session_state", "fe80::1", "eth0"),
+        peer_identity_series_count(
+            &mgr.metrics,
+            "bgp_peer_session_state",
+            "fe80::1%eth0",
+            "eth0"
+        ),
         0
     );
     assert_eq!(
-        peer_identity_series_count(&mgr.metrics, "bgp_peer_session_state", "fe80::1", "eth1"),
+        peer_identity_series_count(
+            &mgr.metrics,
+            "bgp_peer_session_state",
+            "fe80::1%eth1",
+            "eth1"
+        ),
         6
     );
     assert_eq!(
-        peer_identity_series_count(&mgr.metrics, "bgp_session_down_total", "fe80::1", "eth1"),
+        peer_identity_series_count(
+            &mgr.metrics,
+            "bgp_session_down_total",
+            "fe80::1%eth1",
+            "eth1"
+        ),
         6
     );
     assert!(
@@ -591,11 +722,21 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
     );
     mgr.delete_peer(last, false).await.unwrap();
     assert_eq!(
-        peer_identity_series_count(&mgr.metrics, "bgp_peer_session_state", "fe80::1", "eth1"),
+        peer_identity_series_count(
+            &mgr.metrics,
+            "bgp_peer_session_state",
+            "fe80::1%eth1",
+            "eth1"
+        ),
         0
     );
     assert_eq!(
-        peer_identity_series_count(&mgr.metrics, "bgp_session_down_total", "fe80::1", "eth1"),
+        peer_identity_series_count(
+            &mgr.metrics,
+            "bgp_session_down_total",
+            "fe80::1%eth1",
+            "eth1"
+        ),
         0
     );
     assert!(matches!(

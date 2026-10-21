@@ -485,6 +485,8 @@ impl PeerManager {
     pub(super) fn installed_policy_routes_reachability(&self) -> InstalledPolicyRoutesReachability {
         let mut snapshot = InstalledPolicyRoutesReachability::default();
         for (peer, managed) in &self.peers {
+            // Bare, like the transport and RIB emitters: the metrics bridge
+            // maps it to a link-local neighbor's scoped value.
             let peer_label = rustbgpd_telemetry::peer_label(peer.address);
             for (direction, chain, clean) in [
                 (

@@ -1717,13 +1717,24 @@ for the precise observation rules and the separate RR gate.
 ### The `peer` label
 
 Every `peer`-labeled series — session, RIB, policy, max-prefix, BFD, BMP —
-identifies the peer the same way: by its bare neighbor address, `192.0.2.1`
-or `2001:db8::1`, never the transport endpoint's `addr:port`. `sum by (peer)`
-therefore returns one series per peer, and a `by (peer)` join across any two
-families matches. The current administrative and session-state gauges add the
-configured `interface` (empty for unscoped peers), so exact
-`on (instance, peer, interface)` joins distinguish the same IPv6 link-local
-address configured on multiple interfaces.
+identifies the peer the same way, never by the transport endpoint's
+`addr:port`. `sum by (peer)` therefore returns one series per peer, and a
+`by (peer)` join across any two families matches.
+
+- A numbered neighbor's value is its bare address: `192.0.2.1` or
+  `2001:db8::1`.
+- An IPv6 link-local neighbor's value is its scoped address, `addr%interface`,
+  for example `fe80::1%eth0`. The scope is always present, even when no other
+  neighbor uses that address, so adding a second neighbor never renames the
+  first one's series.
+- A future interface-only neighbor (configured by interface, with no address)
+  will use `peer="interface:<name>"`, for example `peer="interface:swp1"`.
+  That value stays the same when the learned link-local address changes; the
+  learned address will be exported as separate metadata, not in `peer`.
+
+The current administrative and session-state gauges also carry the configured
+`interface` label (empty for unscoped peers), so exact
+`on (instance, peer, interface)` joins keep working unchanged.
 
 ### Per-peer series lifecycle
 
