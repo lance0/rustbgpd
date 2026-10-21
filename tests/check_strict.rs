@@ -292,6 +292,43 @@ fn check_strict_exits_zero_on_a_clean_config() {
     );
 }
 
+/// Deliberate IPv6 export suppression is valid, but it cannot pass a gate
+/// that requires a warning-free configuration.
+#[test]
+fn ipv6_family_suppression_obeys_check_and_strict_exit_contract() {
+    let suppressed = format!("{CLEAN}\nfamilies = [\"ipv4_unicast\", \"ipv6_unicast\"]\n");
+    for (args, expected) in [(&["--check"][..], 0), (&["--check", "--strict"][..], 1)] {
+        let (code, stdout, stderr) = run(&suppressed, args);
+        assert_eq!(code, Some(expected), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(stdout.contains("config VALID, 1 WARNING — NOT a clean check"));
+        assert!(
+            stderr.contains("ipv6_unicast is configured toward eBGP neighbors on IPv4 transport"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("Neighbors: 10.0.0.2."), "{stderr}");
+        assert!(stderr.contains("withheld from export"), "{stderr}");
+        assert!(
+            stderr.contains("bgp_export_family_suppressed_total"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("local_ipv6_nexthop on the neighbor or its peer group"),
+            "{stderr}"
+        );
+    }
+
+    for setting in [
+        "local_ipv6_nexthop = \"2001:db8::1\"\n",
+        "peer_group = \"edge\"\n\n[peer_groups.edge]\nlocal_ipv6_nexthop = \"2001:db8::1\"\n",
+    ] {
+        let configured = format!("{suppressed}{setting}");
+        let (code, stdout, stderr) = run(&configured, &["--check", "--strict"]);
+        assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(stdout.contains("config OK"), "{stdout}");
+        assert!(!stderr.contains("WARNING"), "{stderr}");
+    }
+}
+
 #[test]
 fn check_strict_rejects_oversized_policy_caches_and_accepts_edited_config() {
     for (section, field) in [

@@ -1766,6 +1766,13 @@ session reset. It logs one WARN and counts the session in
 neighbor. Route-server-client sessions keep the family and instead refuse such
 routes one at a time (`bgp_exact_export_rejections_total`).
 
+The missing-next-hop configuration is valid: plain `--check` exits 0 with the
+warning, while `--check --strict` exits 1 because the check is not warning-free.
+Fixtures that deliberately exercise `family_suppressed:missing_ipv6_next_hop`
+should run plain `--check` and assert the warning. To clear this warning, set
+`local_ipv6_nexthop` on the neighbor or its peer group, or remove
+`ipv6_unicast` from that neighbor's families.
+
 Configuring `"l3vpn_ipv4_unicast"` also advertises IPv6 next-hop receive
 support for VPNv4 (AFI 1, SAFI 128, next-hop AFI 2), independently of the
 unicast families and `"l3vpn_ipv6_unicast"`. Reflected VPNv4 routes retain
