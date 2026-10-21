@@ -1148,3 +1148,43 @@ async fn signal_release_while_dirty_waits_for_the_resync() {
     assert_eq!(helper.eor, vec![V4]);
     assert_eq!(helper.log.last().map(String::as_str), Some("eor"));
 }
+
+/// A signal applied after the deadline but before the expiry turn (the run
+/// loop drains the backlog captured at the deadline first) does not claim
+/// the release: it is `NotHolding`, and the expiry turn counts `deadline`
+/// and names the late controller.
+#[tokio::test(start_paused = true)]
+async fn a_signal_after_the_deadline_does_not_claim_the_release() {
+    use std::sync::Mutex;
+
+    let metrics = BgpMetrics::new();
+    let mut manager = replay_manager(&[UPSTREAM], &[BRIDGE], &metrics);
+    let incarnation = manager.injection_leases.incarnation();
+    let mut rx = connect(&mut manager, UPSTREAM, HELPER);
+    tokio::time::advance(LONG_WINDOW).await;
+    assert_eq!(
+        signal(&mut manager, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::NotHolding
+    );
+    assert_no_eor(&mut rx, "a signal past the deadline");
+    assert!(released_count(&metrics, UPSTREAM, "replay_complete") < 0.5);
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = CaptureSubscriber {
+        level: tracing::Level::WARN,
+        events: Arc::clone(&captured),
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        manager.expire_eor_holds(tokio::time::Instant::now());
+    });
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, vec![V4]);
+    assert!((eor_count(&metrics, UPSTREAM) - 1.0).abs() < f64::EPSILON);
+    let events = captured.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.0.get("awaiting").map(String::as_str) == Some(BRIDGE)),
+        "{events:?}"
+    );
+}

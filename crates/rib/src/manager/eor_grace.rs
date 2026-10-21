@@ -181,7 +181,19 @@ impl RibManager {
             );
             return Ok(ReplayComplete::NotExpected);
         }
-        if self.eor_grace.is_empty() {
+        // A window whose deadline has passed is over even before its expiry
+        // turn runs: the run loop drains the backlog captured at the
+        // deadline first, and a signal in that backlog must not claim the
+        // release. The expiry turn counts it as `deadline` and names the
+        // controllers that had not signalled by then.
+        let now = tokio::time::Instant::now();
+        let holding: Vec<IpAddr> = self
+            .eor_grace_deadlines
+            .iter()
+            .filter(|&(_, &deadline)| deadline > now)
+            .map(|(&peer, _)| peer)
+            .collect();
+        if holding.is_empty() {
             info!(owner = %owner, "replay-complete signal: no End-of-RIB is held");
             return Ok(ReplayComplete::NotHolding);
         }
@@ -195,8 +207,7 @@ impl RibManager {
             );
             return Ok(ReplayComplete::Recorded { awaiting });
         }
-        let peers: Vec<IpAddr> = self.eor_grace.keys().copied().collect();
-        for peer in peers {
+        for peer in holding {
             let (helper_session, held) =
                 self.release_eor_grace_peer(peer, GrEorGraceReleaseReason::ReplayComplete);
             info!(
