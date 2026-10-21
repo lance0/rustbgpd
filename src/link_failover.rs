@@ -143,6 +143,36 @@ impl LinkTable {
     }
 }
 
+/// Apply every observation that was available at once, then publish a single
+/// snapshot if it differs from the published one. Queued messages from before
+/// a dump, or a down whose recovery is already queued behind it, net out
+/// instead of reaching sessions as a transient state.
+pub(crate) fn ingest(
+    table: &mut LinkTable,
+    batch: impl IntoIterator<Item = Observation>,
+    tx: &tokio::sync::watch::Sender<std::sync::Arc<LinkSnapshot>>,
+) -> bool {
+    for observation in batch {
+        table.apply(observation);
+    }
+    publish(table, tx)
+}
+
+/// Publish the table if it differs from what sessions currently read.
+pub(crate) fn publish(
+    table: &LinkTable,
+    tx: &tokio::sync::watch::Sender<std::sync::Arc<LinkSnapshot>>,
+) -> bool {
+    tx.send_if_modified(|published| {
+        if **published == *table.snapshot() {
+            false
+        } else {
+            *published = std::sync::Arc::new(table.snapshot().clone());
+            true
+        }
+    })
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) use linux::spawn;
 
@@ -151,7 +181,7 @@ mod linux {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{Dump, LinkTable, Observation};
+    use super::{Dump, LinkTable, Observation, ingest, publish};
     use futures::{StreamExt, TryStreamExt};
     use netlink_packet_route::RouteNetlinkMessage;
     use netlink_packet_route::address::{AddressAttribute, AddressMessage};
@@ -190,15 +220,16 @@ mod linux {
             }
         }
         tokio::spawn(connection);
+        let mut messages = messages;
         let mut table = LinkTable::default();
-        table.resync(dump(&handle).await);
+        let (tx, rx) = watch::channel(Arc::new(table.snapshot().clone()));
+        resync(&handle, &mut messages, &mut table, &tx).await;
         if !table.snapshot().valid {
             warn!(
                 "fast external failover: initial interface dump failed; no session is stopped \
                  until a dump succeeds"
             );
         }
-        let (tx, rx) = watch::channel(Arc::new(table.snapshot().clone()));
         tokio::spawn(run(handle, messages, table, tx, metrics));
         info!("fast external failover link monitor started");
         Some(rx)
@@ -235,12 +266,51 @@ mod linux {
         Ok((links, addresses))
     }
 
+    type Messages = futures::channel::mpsc::UnboundedReceiver<(
+        NetlinkMessage<RouteNetlinkMessage>,
+        rtnetlink::sys::SocketAddr,
+    )>;
+
+    /// Every message available right now, without waiting, starting with
+    /// `first`. Returns the observations and whether an overrun was among
+    /// them.
+    fn drain(
+        first: Option<NetlinkMessage<RouteNetlinkMessage>>,
+        messages: &mut Messages,
+    ) -> (Vec<Observation>, bool) {
+        let mut batch = Vec::new();
+        let mut overrun = false;
+        let mut next = first;
+        while let Some(message) = next {
+            match message.payload {
+                NetlinkPayload::InnerMessage(inner) => batch.extend(observation(&inner)),
+                NetlinkPayload::Overrun(_) => overrun = true,
+                _ => {}
+            }
+            next = messages.try_recv().ok().map(|(message, _)| message);
+        }
+        (batch, overrun)
+    }
+
+    /// Full dump, then whatever was queued meanwhile, then one publish.
+    async fn resync(
+        handle: &rtnetlink::Handle,
+        messages: &mut Messages,
+        table: &mut LinkTable,
+        tx: &watch::Sender<Arc<LinkSnapshot>>,
+    ) {
+        table.resync(dump(handle).await);
+        let (batch, overrun) = drain(None, messages);
+        if overrun {
+            // Lost again while dumping: stay invalid; the retry re-dumps.
+            table.invalidate();
+        }
+        ingest(table, batch, tx);
+    }
+
     async fn run(
         handle: rtnetlink::Handle,
-        mut messages: futures::channel::mpsc::UnboundedReceiver<(
-            NetlinkMessage<RouteNetlinkMessage>,
-            rtnetlink::sys::SocketAddr,
-        )>,
+        mut messages: Messages,
         mut table: LinkTable,
         tx: watch::Sender<Arc<LinkSnapshot>>,
         metrics: BgpMetrics,
@@ -248,39 +318,32 @@ mod linux {
         let mut retry = tokio::time::interval(RESYNC_RETRY);
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            let changed = tokio::select! {
+            tokio::select! {
                 message = messages.next() => {
                     let Some((message, _)) = message else {
                         break;
                     };
-                    match message.payload {
-                        NetlinkPayload::InnerMessage(inner) => {
-                            observation(&inner).is_some_and(|observation| table.apply(observation))
-                        }
-                        NetlinkPayload::Overrun(_) => {
-                            metrics.record_netlink_subscription_overrun(
-                                NetlinkSubscriber::FastExternalFailover,
-                            );
-                            warn!(
-                                "fast external failover: netlink overrun; link state is unknown \
-                                 and no session is stopped until a re-dump succeeds"
-                            );
-                            let invalidated = table.invalidate();
-                            if invalidated {
-                                tx.send_replace(Arc::new(table.snapshot().clone()));
-                            }
-                            table.resync(dump(&handle).await) || invalidated
-                        }
-                        _ => false,
+                    let (batch, overrun) = drain(Some(message), &mut messages);
+                    if overrun {
+                        metrics.record_netlink_subscription_overrun(
+                            NetlinkSubscriber::FastExternalFailover,
+                        );
+                        warn!(
+                            "fast external failover: netlink overrun; link state is unknown \
+                             and no session is stopped until a re-dump succeeds"
+                        );
+                        // Everything drained so far is older than the
+                        // re-dump that supersedes it.
+                        table.invalidate();
+                        publish(&table, &tx);
+                        resync(&handle, &mut messages, &mut table, &tx).await;
+                    } else {
+                        ingest(&mut table, batch, &tx);
                     }
                 }
                 _ = retry.tick(), if !table.snapshot().valid => {
-                    table.resync(dump(&handle).await)
+                    resync(&handle, &mut messages, &mut table, &tx).await;
                 }
-            };
-            if changed {
-                // The peer manager wakes on the watch and pokes sessions.
-                tx.send_replace(Arc::new(table.snapshot().clone()));
             }
             if tx.is_closed() {
                 return;
@@ -288,7 +351,7 @@ mod linux {
         }
         // The snapshot can no longer be kept current.
         table.invalidate();
-        tx.send_replace(Arc::new(table.snapshot().clone()));
+        publish(&table, &tx);
         warn!("fast external failover: netlink connection closed; link monitor exiting");
     }
 
@@ -440,6 +503,25 @@ mod tests {
         assert!(table.snapshot().links.is_empty());
         assert!(table.snapshot().addresses.is_empty());
         assert!(table.snapshot().valid);
+    }
+
+    /// A down and its recovery drained in one batch net out: sessions never
+    /// see the transient down. A persistent down is published.
+    #[test]
+    fn a_queued_down_then_up_burst_is_never_published() {
+        let mut table = dumped();
+        let (tx, mut rx) =
+            tokio::sync::watch::channel(std::sync::Arc::new(table.snapshot().clone()));
+        rx.mark_unchanged();
+        assert!(!ingest(
+            &mut table,
+            [eth0(true, false), eth0(true, true)],
+            &tx
+        ));
+        assert!(!rx.has_changed().unwrap());
+        assert!(ingest(&mut table, [eth0(true, false)], &tx));
+        assert!(rx.has_changed().unwrap());
+        assert!(!rx.borrow_and_update().links[&4].lower_up);
     }
 
     #[test]

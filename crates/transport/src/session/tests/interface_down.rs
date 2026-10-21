@@ -46,7 +46,7 @@ fn healthy() -> LinkSnapshot {
 
 fn feed(initial: LinkSnapshot) -> (watch::Sender<Arc<LinkSnapshot>>, LinkStateFeed) {
     let (tx, rx) = watch::channel(Arc::new(initial));
-    (tx, LinkStateFeed::new(rx))
+    (tx, LinkStateFeed::new(rx, true))
 }
 
 async fn check(session: &mut PeerSession) {
@@ -399,4 +399,114 @@ async fn a_blocked_writer_backlog_is_discarded() {
         received < FRAMES * FRAME_LEN,
         "the queued backlog must not reach the peer ({received} bytes did)"
     );
+}
+
+fn open_from(asn: u32) -> rustbgpd_wire::OpenMessage {
+    rustbgpd_wire::OpenMessage {
+        version: 4,
+        my_as: u16::try_from(asn).unwrap_or(23_456),
+        hold_time: 90,
+        bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+        capabilities: vec![
+            Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            Capability::FourOctetAs { asn },
+        ],
+    }
+}
+
+/// Accept-any ordering: the carrier is already down while the peer is
+/// unidentified, so the check leaves it alone; once its OPEN shows an
+/// external AS, the session judges the current state itself and closes,
+/// with no manager round trip.
+#[tokio::test]
+async fn an_accept_any_peer_is_checked_once_its_open_shows_ebgp() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 0);
+    session.config.link_state = feed(iface(1, true, false, &["127.0.0.1"])).1;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    check(&mut session).await;
+    assert!(
+        session.read_half.is_some(),
+        "unidentified: not provably eBGP"
+    );
+
+    session
+        .drive_fsm(Event::OpenReceived(open_from(65002)))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+    session.run_due_link_check().await;
+    assert!(
+        session.read_half.is_none(),
+        "the OPEN identified an eBGP peer on a link that is down now"
+    );
+    assert!(session.last_error.ends_with("carrier lost"));
+}
+
+/// The neighbor's live setting, shared through the feed, is honored by the
+/// session itself: a hot-applied opt-out stops the check without a rebuild.
+#[tokio::test]
+async fn a_hot_applied_opt_out_is_honored_by_the_session() {
+    let (mut session, _server, mut rib_rx, tx) = established_gr_session(healthy()).await;
+    session.config.link_state.set_enabled(false);
+    set(&tx, iface(1, true, false, &["127.0.0.1"]));
+    check(&mut session).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert!(rib_rx.try_recv().is_err());
+}
+
+/// The retained connection learns its carrier from the first valid snapshot
+/// that proves it, so a later address removal still purges its routes even
+/// though the snapshot was invalid when the connection started.
+#[tokio::test]
+async fn a_retained_connection_learns_its_carrier_from_a_later_valid_snapshot() {
+    let mut invalid = healthy();
+    invalid.valid = false;
+    let (mut session, _server, mut rib_rx, tx) = established_gr_session(invalid).await;
+    session.handle_tcp_disconnect();
+    session.drive_fsm(Event::TcpConnectionFails).await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::PeerGracefulRestart { .. })
+    ));
+    assert_eq!(
+        session.gr_retained_connection.unwrap().connection.carrier,
+        None
+    );
+
+    set(&tx, healthy());
+    check(&mut session).await;
+    assert!(rib_rx.try_recv().is_err(), "healthy: keep retaining");
+    set(&tx, iface(1, true, true, &[]));
+    check(&mut session).await;
+    assert!(
+        matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerDown { .. })),
+        "the learned carrier ties the removed address to the lost connection"
+    );
+}
+
+/// Retained routes of an iBGP session are never purged by this check.
+#[tokio::test]
+async fn retained_ibgp_routes_are_not_purged() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    let (tx, feed) = feed(healthy());
+    session.config.link_state = feed;
+    session.config.peer.graceful_restart = true;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65001).await;
+    retain_gr(&mut session);
+    while rib_rx.try_recv().is_ok() {}
+    session.handle_tcp_disconnect();
+    session.drive_fsm(Event::TcpConnectionFails).await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::PeerGracefulRestart { .. })
+    ));
+    set(&tx, iface(1, true, false, &["127.0.0.1"]));
+    check(&mut session).await;
+    assert!(rib_rx.try_recv().is_err());
 }

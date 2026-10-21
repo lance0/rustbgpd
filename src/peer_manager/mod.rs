@@ -1408,7 +1408,7 @@ impl PeerManager {
         transport.slow_peer_duration = config.slow_peer_duration;
         transport.slow_peer_isolation = config.slow_peer_isolation;
         transport.fast_external_failover = config.fast_external_failover;
-        transport.link_state = self.link_state_feed();
+        transport.link_state = self.link_state_feed(config.fast_external_failover);
         // RFC 1997: resolved in config (default !route_server_client);
         // pinned by the build_transport_config field-threading test.
         transport.interpret_rfc1997 = config.interpret_rfc1997;

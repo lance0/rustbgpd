@@ -356,6 +356,9 @@ impl PeerSession {
     /// surviving connection alone. The session is not stop-requested, so the
     /// ordinary reconnect path brings it back.
     pub(super) async fn handle_check_links(&mut self) {
+        if !self.config.link_state.enabled() {
+            return;
+        }
         let snapshot = self.config.link_state.current();
         if !snapshot.valid {
             return;
@@ -404,6 +407,13 @@ impl PeerSession {
         self.suppress_gr_retention = false;
     }
 
+    /// Run the check the FSM asked for when the peer's ASN became known.
+    pub(super) async fn run_due_link_check(&mut self) {
+        if std::mem::take(&mut self.link_check_due) {
+            self.handle_check_links().await;
+        }
+    }
+
     /// Discard everything still queued toward the dead link. Unlike ordinary
     /// closes, which let the writer drain so a NOTIFICATION or final UPDATE
     /// reaches the peer, the writer is aborted and joined here, and the
@@ -423,11 +433,18 @@ impl PeerSession {
     /// GR/LLGR: if that connection's interface is down now, purge them rather
     /// than wait for retention to expire.
     async fn purge_retained_if_link_down(&mut self, snapshot: &crate::link::LinkSnapshot) {
-        let Some(retained) = self.gr_retained_connection else {
+        let Some(retained) = self.gr_retained_connection.as_mut() else {
             return;
         };
         if !retained.ebgp {
             return;
+        }
+        // Remember the carrier once a valid snapshot proves it, as the live
+        // path does, so a later address or interface removal still maps here.
+        if let Some(carrier) =
+            snapshot.carrier(retained.connection.local, retained.connection.remote)
+        {
+            retained.connection.carrier = Some(carrier);
         }
         let connection = retained.connection;
         let Some(down) =
@@ -853,6 +870,13 @@ impl PeerSession {
                     );
                     if old == SessionState::Established {
                         self.config.neighbor_counters.record_flap();
+                    }
+                    // The peer's ASN is known from its OPEN now: judge the
+                    // connection once against the current link state, so an
+                    // accept-any eBGP peer whose interface went down while
+                    // the manager could not yet classify it is still caught.
+                    if matches!(new, SessionState::OpenConfirm | SessionState::Established) {
+                        self.link_check_due = true;
                     }
 
                     // Publish operator-facing lifecycle state changes over one

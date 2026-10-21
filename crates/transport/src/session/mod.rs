@@ -612,6 +612,9 @@ pub(crate) struct PeerSession {
     /// so a confirmed interface-down that arrives after the TCP loss can
     /// still purge them.
     gr_retained_connection: Option<RetainedConnection>,
+    /// The FSM reached `OpenConfirm` or `Established`: judge the connection once
+    /// against the current link state at the top of the next run-loop turn.
+    link_check_due: bool,
     /// Whether the import-decision cache is populated (ADR-0073
     /// `[policy.explain].enabled`). Read on the inbound UPDATE hot path
     /// to skip the decision snapshot build/clone entirely when explain
@@ -2317,6 +2320,7 @@ impl PeerSession {
             suppress_gr_retention: false,
             connection,
             gr_retained_connection: None,
+            link_check_due: false,
             import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
                 explain_cache_size,
@@ -2762,6 +2766,7 @@ impl PeerSession {
     )]
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
         loop {
+            self.run_due_link_check().await;
             if let Some(command) = self.deferred_command.take()
                 && self.handle_command(command).await == ControlFlow::Break(())
             {

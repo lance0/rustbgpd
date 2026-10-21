@@ -152,3 +152,36 @@ async fn transport_config_carries_the_link_state_feed() {
         "reads the current snapshot"
     );
 }
+
+/// An opt-out hot-applied while a check waits for mailbox space drops the
+/// pending entry, collision candidate included: the retry delivers nothing.
+#[tokio::test]
+async fn a_pending_check_is_dropped_after_a_hot_applied_opt_out() {
+    let mut mgr = test_peer_manager();
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let (handle, mut primary_rx) = full_handle();
+    insert_test_managed_peer_with_asn(&mut mgr, peer, 65002, handle, false);
+    let (candidate, mut candidate_rx) = full_handle();
+    mgr.peers.get_mut(&key(peer)).unwrap().pending_inbound = Some(PendingInbound {
+        recovery_reset: None,
+        handle: candidate,
+        session_id: 99,
+    });
+    mgr.handle_links_changed();
+    assert_eq!(mgr.link_check.pending.len(), 2);
+
+    let mut config = make_config(peer, 65002);
+    config.fast_external_failover = false;
+    mgr.hot_update_peer(config).await.expect("hot update");
+    assert!(
+        !mgr.peers[&key(peer)].transport_config.link_state.enabled(),
+        "the session's shared setting follows the hot apply"
+    );
+    for rx in [&mut primary_rx, &mut candidate_rx] {
+        assert!(matches!(rx.try_recv(), Ok(PeerCommand::Start)));
+    }
+    mgr.retry_link_checks();
+    assert!(mgr.link_check.pending.is_empty());
+    assert!(!got_check(&mut primary_rx));
+    assert!(!got_check(&mut candidate_rx));
+}

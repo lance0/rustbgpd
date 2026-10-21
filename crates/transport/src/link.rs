@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::watch;
 
@@ -162,6 +163,15 @@ impl LinkSnapshot {
             })
         };
         let Some(link) = self.links.get(&ifindex) else {
+            // A deletion removes the interface's addresses too; addresses
+            // without their link are an inconsistent table, so unknown.
+            if self
+                .addresses
+                .get(&ifindex)
+                .is_some_and(|addresses| !addresses.is_empty())
+            {
+                return None;
+            }
             return down(LinkDownCause::InterfaceRemoved);
         };
         if !link.admin_up {
@@ -194,24 +204,53 @@ fn link_local_scope(local: SocketAddr, peer: SocketAddr) -> Option<u32> {
     }
 }
 
-/// Read handle on the monitor's snapshot, carried in the transport config.
-/// Runtime state, not configuration: two configs compare equal on it.
-#[derive(Clone, Debug, Default)]
-pub struct LinkStateFeed(Option<watch::Receiver<Arc<LinkSnapshot>>>);
+/// Read handle on the monitor's snapshot plus the neighbor's live
+/// `fast_external_failover` setting, carried in the transport config. The
+/// setting is shared with the peer manager, so a hot-applied opt-out reaches
+/// a running session without a rebuild. Runtime state, not configuration:
+/// two configs compare equal on it.
+#[derive(Clone, Debug)]
+pub struct LinkStateFeed {
+    receiver: Option<watch::Receiver<Arc<LinkSnapshot>>>,
+    enabled: Arc<AtomicBool>,
+}
+
+impl Default for LinkStateFeed {
+    fn default() -> Self {
+        Self {
+            receiver: None,
+            enabled: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
 
 impl LinkStateFeed {
-    /// Wrap the monitor's receiver.
+    /// Wrap the monitor's receiver for one neighbor.
     #[must_use]
-    pub fn new(receiver: watch::Receiver<Arc<LinkSnapshot>>) -> Self {
-        Self(Some(receiver))
+    pub fn new(receiver: watch::Receiver<Arc<LinkSnapshot>>, enabled: bool) -> Self {
+        Self {
+            receiver: Some(receiver),
+            enabled: Arc::new(AtomicBool::new(enabled)),
+        }
     }
 
     /// The current snapshot; an invalid empty one when there is no monitor.
     #[must_use]
     pub fn current(&self) -> Arc<LinkSnapshot> {
-        self.0
+        self.receiver
             .as_ref()
             .map_or_else(Arc::default, |receiver| Arc::clone(&receiver.borrow()))
+    }
+
+    /// Whether fast external failover is on for this neighbor now.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Hot-apply the neighbor's setting to every session sharing this feed.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
     }
 }
 
@@ -322,6 +361,25 @@ mod tests {
                 Some(4)
             ),
             Some(LinkDownCause::InterfaceRemoved)
+        );
+    }
+
+    /// A link entry missing while its addresses remain is an inconsistent
+    /// table, not a deletion (which removes the addresses too).
+    #[test]
+    fn addresses_without_their_link_are_unknown() {
+        let mut orphan = snapshot(true, true, V4);
+        orphan.links.clear();
+        assert_eq!(
+            down(&orphan, "10.0.0.1:179", "10.0.0.2:4000", Some(4)),
+            None
+        );
+        let ll = &[("fe80::1", "fe80::", 64)];
+        let mut orphan = snapshot(true, true, ll);
+        orphan.links.clear();
+        assert_eq!(
+            down(&orphan, "[fe80::1%4]:179", "[fe80::2%4]:4000", None),
+            None
         );
     }
 
