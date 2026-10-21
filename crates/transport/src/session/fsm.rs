@@ -345,38 +345,45 @@ impl PeerSession {
             .is_some_and(|asn| asn != self.config.peer.local_asn)
     }
 
-    /// Fast external failover. Close the connection locally, without a
-    /// NOTIFICATION (the link it would travel on is gone) and without GR/LLGR
-    /// retention, when this session's own connection proves the downed
-    /// interface carries it and the session is eBGP. If the TCP connection
-    /// already failed on its own and its routes are retained under GR/LLGR,
-    /// purge them instead. Anything else (a different interface, an iBGP or
-    /// not-yet-identified peer, or an event observed before the current
-    /// connection started) leaves the session alone. The session is not
-    /// stop-requested, so the ordinary reconnect path brings it back.
-    pub(super) async fn handle_interface_down(&mut self, event: &crate::link::LinkDownEvent) {
-        // Routes retained from a lost connection are judged on that
-        // connection alone, whether or not a replacement socket is already
-        // mid-handshake: closing a replacement before Established emits no
-        // `SessionDown`, so it would never release them.
-        self.purge_retained_on_interface_down(event).await;
+    /// Fast external failover, level-triggered: judge this session's own
+    /// connections against the *current* link snapshot. An invalid snapshot
+    /// proves nothing. Routes retained from a lost connection are purged if
+    /// its interface is down now, independently of any replacement socket
+    /// (closing a replacement before Established emits no `SessionDown`). The
+    /// live connection closes locally, without a NOTIFICATION and without
+    /// GR/LLGR retention, if its interface is down now and the peer is eBGP.
+    /// A link that went down and came back before this check leaves a
+    /// surviving connection alone. The session is not stop-requested, so the
+    /// ordinary reconnect path brings it back.
+    pub(super) async fn handle_check_links(&mut self) {
+        let snapshot = self.config.link_state.current();
+        if !snapshot.valid {
+            return;
+        }
+        self.purge_retained_if_link_down(&snapshot).await;
         if self.read_half.is_none() {
             return;
         }
-        let Some(connection) = self.connection else {
+        let Some(connection) = self.connection.as_mut() else {
             return;
         };
-        if connection.started_at > event.observed_at
-            || !event.carries(connection.local, connection.remote)
-            || !self.peer_is_ebgp()
-        {
+        if let Some(carrier) = snapshot.carrier(connection.local, connection.remote) {
+            connection.carrier = Some(carrier);
+        }
+        let connection = *connection;
+        let Some(down) =
+            snapshot.connection_down(connection.local, connection.remote, connection.carrier)
+        else {
+            return;
+        };
+        if !self.peer_is_ebgp() {
             return;
         }
         warn!(
             peer = %self.peer_label,
-            interface = %event.ifname,
-            ifindex = event.ifindex,
-            reason = event.cause.as_str(),
+            interface = %down.ifname,
+            ifindex = down.ifindex,
+            reason = down.cause.as_str(),
             state = %self.fsm.state(),
             "fast external failover: interface down, closing session without NOTIFICATION"
         );
@@ -387,7 +394,7 @@ impl PeerSession {
             self.session_telemetry_metric_lease
                 .latch_down_reason(SessionDownReason::LocalNoNotification);
         }
-        self.record_transport_cause(event.teardown_cause());
+        self.record_transport_cause(down.teardown_cause());
         self.abort_connection().await;
         self.suppress_gr_retention = true;
         self.handle_tcp_disconnect();
@@ -413,29 +420,30 @@ impl PeerSession {
     }
 
     /// An earlier TCP connection failed first and its routes are held under
-    /// GR/LLGR: a confirmed interface-down for that connection purges them now
-    /// rather than at retention expiry, independently of any replacement
-    /// connection.
-    async fn purge_retained_on_interface_down(&mut self, event: &crate::link::LinkDownEvent) {
+    /// GR/LLGR: if that connection's interface is down now, purge them rather
+    /// than wait for retention to expire.
+    async fn purge_retained_if_link_down(&mut self, snapshot: &crate::link::LinkSnapshot) {
         let Some(retained) = self.gr_retained_connection else {
             return;
         };
-        let connection = retained.connection;
-        if !retained.ebgp
-            || connection.started_at > event.observed_at
-            || !event.carries(connection.local, connection.remote)
-        {
+        if !retained.ebgp {
             return;
         }
+        let connection = retained.connection;
+        let Some(down) =
+            snapshot.connection_down(connection.local, connection.remote, connection.carrier)
+        else {
+            return;
+        };
         warn!(
             peer = %self.peer_label,
-            interface = %event.ifname,
-            ifindex = event.ifindex,
-            reason = event.cause.as_str(),
+            interface = %down.ifname,
+            ifindex = down.ifindex,
+            reason = down.cause.as_str(),
             "fast external failover: interface down, purging routes retained from the lost connection"
         );
         self.gr_retained_connection = None;
-        self.last_error = event.teardown_cause();
+        self.last_error = down.teardown_cause();
         let _ = self
             .rib_tx
             .send(RibUpdate::PeerDown {

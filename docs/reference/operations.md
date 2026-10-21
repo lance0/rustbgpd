@@ -1340,13 +1340,15 @@ synchronous actor work: a clone already running cannot be interrupted.
 
 ### A directly connected link fails (fast external failover)
 
-When the kernel reports that an interface lost carrier, went administratively
-down, was removed, or lost a local address, every eBGP session that the
-interface directly carries closes at once rather than at hold-timer expiry
-([how a session qualifies](configuration.md#fast-external-failover)). Look for:
+When the kernel's interface state shows that the interface carrying an eBGP
+session lost carrier, went administratively down, was removed, or lost the
+session's local address, the session closes at once rather than at hold-timer
+expiry ([how a session qualifies](configuration.md#fast-external-failover)).
+Look for:
 
-- the `fast external failover: ...` WARN lines above, which name the interface
-  and the reason;
+- the `fast external failover: ...` WARN lines (see
+  [Key log messages](#key-log-messages)), which name the interface and the
+  reason;
 - a neighbor last error such as
   `fast external failover: interface eth1 (ifindex 4) carrier lost`, which is
   also the `reason` of the `SESSION_LOST` event in `rbgp events`;
@@ -1354,10 +1356,10 @@ interface directly carries closes at once rather than at hold-timer expiry
 
 The session's routes are withdrawn, not held under Graceful Restart, and the
 session reconnects on its normal retry timer once the link is back. Nothing is
-stopped for an unknown link state: when
+stopped while the link state is unknown: when
 `bgp_netlink_subscription_overruns_total{actor="fast_external_failover"}`
-increases, some kernel messages were lost, and affected sessions fall back to
-their hold timer or BFD.
+increases, sessions are checked again only after a fresh interface dump
+succeeds, and the hold timer or BFD covers the gap.
 
 A session that keeps flapping with the link is reporting a flapping link.
 Dampen carrier where it originates (for example the bond's `downdelay`). To keep
@@ -2815,8 +2817,8 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `starting rustbgpd` | INFO | Daemon started successfully |
 | `session established` | INFO | BGP session reached Established |
 | `session down` | INFO | BGP session left Established |
-| `fast external failover: interface down confirmed by the kernel` | WARN | The link monitor saw carrier loss, admin down, interface removal, or a local address removal (`interface`, `ifindex`, `reason`) |
 | `fast external failover: interface down, closing session without NOTIFICATION` | WARN | A session whose own connection runs over that interface stopped without waiting for its hold timer |
+| `fast external failover: interface down, purging routes retained from the lost connection` | WARN | A session's earlier connection had already failed and its routes were held under Graceful Restart; its interface is now down, so they are withdrawn |
 | `TCP connect failed` | INFO / WARN | First socket failure in a failed-connect episode; WARN after an Established epoch, INFO for a peer that has not established yet |
 | `TCP connect task failed` | WARN | First internal connect-task failure in a failed-connect episode |
 | `received SIGTERM` / `received SIGINT` | INFO | Process signal received |

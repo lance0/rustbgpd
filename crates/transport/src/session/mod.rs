@@ -890,22 +890,23 @@ const SEND_HOLD_TIMER_EXPIRES_FSM_EVENT: u16 = 29;
 /// `AutomaticStop` (the local system stops the connection on its own).
 const AUTOMATIC_STOP_FSM_EVENT: u16 = 8;
 
-/// Endpoints and start time of the session's current TCP connection, captured
-/// when the connection is installed so fast external failover can still match
-/// it after the socket is gone.
+/// Endpoints of the session's current TCP connection, captured when it is
+/// installed so fast external failover can still judge it after the socket
+/// is gone, plus the interface last proven to carry it.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ConnectionStamp {
     pub(super) local: SocketAddr,
     pub(super) remote: SocketAddr,
-    pub(super) started_at: std::time::Instant,
+    pub(super) carrier: Option<u32>,
 }
 
 impl ConnectionStamp {
-    fn of(read_half: &OwnedReadHalf) -> Option<Self> {
+    fn of(read_half: &OwnedReadHalf, link_state: &crate::link::LinkStateFeed) -> Option<Self> {
+        let (local, remote) = (read_half.local_addr().ok()?, read_half.peer_addr().ok()?);
         Some(Self {
-            local: read_half.local_addr().ok()?,
-            remote: read_half.peer_addr().ok()?,
-            started_at: std::time::Instant::now(),
+            local,
+            remote,
+            carrier: link_state.current().carrier(local, remote),
         })
     }
 }
@@ -2200,7 +2201,9 @@ impl PeerSession {
             }
             None => (None, None, None, None, None, None, None),
         };
-        let connection = read_half.as_ref().and_then(ConnectionStamp::of);
+        let connection = read_half
+            .as_ref()
+            .and_then(|read_half| ConnectionStamp::of(read_half, &config.link_state));
         Self {
             config,
             fsm,
@@ -2938,7 +2941,7 @@ impl PeerSession {
                                 self.peer_label.clone(),
                                 send_hold_duration(&self.config),
                             );
-                            self.connection = ConnectionStamp::of(&rh);
+                            self.connection = ConnectionStamp::of(&rh, &self.config.link_state);
                             self.read_half = Some(rh);
                             self.tcp_ao_info = tcp_ao_info;
                             self.tcp_ao_key_metadata =
@@ -3012,7 +3015,7 @@ impl PeerSession {
             self.peer_label.clone(),
             send_hold_duration(&self.config),
         );
-        self.connection = ConnectionStamp::of(&rh);
+        self.connection = ConnectionStamp::of(&rh, &self.config.link_state);
         self.read_half = Some(rh);
         self.cancel_outbound_replay();
         self.writer_bulk_admitted = 0;

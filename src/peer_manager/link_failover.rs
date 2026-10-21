@@ -1,128 +1,63 @@
-//! Fast external failover: fan confirmed interface-down events out to the
-//! sessions that may be carried by that interface.
+//! Fast external failover: poke eligible sessions when the kernel link state
+//! changes.
 //!
-//! The manager owns eligibility (operator knob, administratively enabled, not
-//! known to be iBGP); each session owns the proof that the interface carries
-//! its connection ([`rustbgpd_transport::LinkDownEvent::carries`]), that the
-//! event is newer than that connection, and that the negotiated peer is eBGP,
-//! because only the session knows its socket and its OPEN. A session the event
-//! does not apply to ignores the command.
-//!
-//! A busy session mailbox does not get a detached waiter per event. Deliveries
-//! that find it full wait in a bounded map keyed by (session, interface). A
-//! flapping link coalesces into one pending entry per session and interface
-//! holding the newest link-level event plus each distinct address removal with
-//! its own observation time, and distinct interfaces stay distinct.
+//! Delivery is level-triggered. The link monitor publishes its current
+//! snapshot on a `watch` channel; every published change wakes the manager,
+//! which asks each eligible session (operator knob on, administratively
+//! enabled, not known to be iBGP) to `CheckLinks`. The session re-reads the
+//! *current* snapshot through its transport config and judges its own
+//! connections, so nothing per event is queued here: a session whose mailbox
+//! is full keeps a single pending flag until the retry delivers, and any
+//! number of link changes in between collapse into that one check.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustbgpd_transport::{LinkDownCause, LinkDownEvent, PeerCommand};
-use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use rustbgpd_transport::{LinkSnapshot, LinkStateFeed, PeerCommand};
+use tokio::sync::{mpsc, watch};
+use tracing::debug;
 
 use super::{ManagedPeerState, PeerManager};
 
-/// Pending interface-down deliveries the manager holds for full mailboxes.
-/// Past this, a delivery is dropped and logged; that session then relies on
-/// its hold timer or BFD, as it would without fast external failover.
-pub(super) const LINK_DOWN_PENDING_MAX: usize = 1024;
-const LINK_DOWN_RETRY: Duration = Duration::from_millis(100);
-/// Distinct address removals kept per pending (session, interface) entry.
-/// Past this, a further removal is folded into the oldest one, which keeps
-/// the older observation time: a later connection then ignores the folded
-/// address rather than being stopped by it, so the overflow can only miss a
-/// teardown (the hold timer still applies), never cause a wrong one.
-pub(super) const LINK_DOWN_PENDING_ADDRESSES_MAX: usize = 8;
+const LINK_CHECK_RETRY: Duration = Duration::from_millis(100);
 
-/// Deliveries for one (session, interface) waiting for mailbox capacity.
-pub(super) struct PendingLinkDown {
-    commands: mpsc::Sender<PeerCommand>,
-    /// Newest carrier-loss, admin-down or removal event: it carries every
-    /// address the interface had, so it supersedes older link-level events.
-    pub(super) link: Option<Arc<LinkDownEvent>>,
-    /// Address removals, oldest first, each with its original observation
-    /// time; a removal of one address does not supersede another.
-    pub(super) addresses: Vec<Arc<LinkDownEvent>>,
-}
-
-impl PendingLinkDown {
-    fn new(commands: mpsc::Sender<PeerCommand>) -> Self {
-        Self {
-            commands,
-            link: None,
-            addresses: Vec::new(),
-        }
-    }
-
-    fn merge(&mut self, event: &Arc<LinkDownEvent>) {
-        if event.cause != LinkDownCause::AddressRemoved {
-            self.link = Some(Arc::clone(event));
-        } else if self
-            .addresses
-            .iter()
-            .any(|known| known.addresses == event.addresses)
-        {
-            // Same address again: keep the original observation time.
-        } else if self.addresses.len() < LINK_DOWN_PENDING_ADDRESSES_MAX {
-            self.addresses.push(Arc::clone(event));
-        } else {
-            Arc::make_mut(&mut self.addresses[0])
-                .addresses
-                .extend(event.addresses.iter().copied());
-        }
-    }
-
-    /// Hand queued events to the session in order. True when nothing is left
-    /// to deliver (all sent, or the session exited).
-    fn flush(&mut self) -> bool {
-        loop {
-            let Some(event) = self
-                .link
-                .clone()
-                .or_else(|| self.addresses.first().cloned())
-            else {
-                return true;
-            };
-            match self.commands.try_send(PeerCommand::InterfaceDown(event)) {
-                Ok(()) => {
-                    if self.link.take().is_none() {
-                        self.addresses.remove(0);
-                    }
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => return true,
-                Err(mpsc::error::TrySendError::Full(_)) => return false,
-            }
-        }
-    }
-}
-
-/// The link monitor's event feed (taken into a `run`-local at loop start) and
-/// the deliveries waiting for full mailboxes: one entry per (session id,
-/// ifindex), at most [`LINK_DOWN_PENDING_MAX`] entries.
+/// The monitor's snapshot feed and the sessions whose check did not fit their
+/// mailbox: one entry per session id, so at most one per live session.
 #[derive(Default)]
-pub(super) struct LinkDownDelivery {
-    rx: Option<mpsc::Receiver<Arc<LinkDownEvent>>>,
-    pub(super) pending: BTreeMap<(u64, u32), PendingLinkDown>,
+pub(super) struct LinkCheckDelivery {
+    pub(super) state: Option<watch::Receiver<Arc<LinkSnapshot>>>,
+    pub(super) pending: BTreeMap<u64, mpsc::Sender<PeerCommand>>,
     pub(super) retry_at: Option<tokio::time::Instant>,
 }
 
 impl PeerManager {
-    /// Attach the fast-external-failover event feed. Without it (non-Linux, or
+    /// Attach the fast-external-failover link state. Without it (non-Linux, or
     /// the monitor could not open its netlink socket) sessions keep relying on
     /// the hold timer and BFD.
     #[must_use]
-    pub fn with_link_failover(mut self, events: mpsc::Receiver<Arc<LinkDownEvent>>) -> Self {
-        self.link_down.rx = Some(events);
+    pub fn with_link_failover(mut self, state: watch::Receiver<Arc<LinkSnapshot>>) -> Self {
+        self.link_check.state = Some(state);
         self
     }
 
-    pub(super) fn take_link_down_rx(&mut self) -> Option<mpsc::Receiver<Arc<LinkDownEvent>>> {
-        self.link_down.rx.take()
+    /// The read handle a session's transport config carries.
+    pub(super) fn link_state_feed(&self) -> LinkStateFeed {
+        self.link_check
+            .state
+            .clone()
+            .map(LinkStateFeed::new)
+            .unwrap_or_default()
     }
 
-    pub(super) fn handle_link_down(&mut self, event: &Arc<LinkDownEvent>) {
+    /// A receiver for the run loop's "links changed" arm.
+    pub(super) fn link_state_changes(&self) -> Option<watch::Receiver<Arc<LinkSnapshot>>> {
+        self.link_check.state.clone()
+    }
+
+    /// The link state changed: ask every eligible session to check. A session
+    /// already waiting for mailbox space keeps its single pending flag.
+    pub(super) fn handle_links_changed(&mut self) {
         let targets: Vec<(u64, mpsc::Sender<PeerCommand>)> = self
             .peers
             .values()
@@ -136,68 +71,42 @@ impl PeerManager {
                     .chain(pending)
             })
             .collect();
-        let mut dropped = 0_usize;
-        for (session_id, commands) in &targets {
-            let key = (*session_id, event.ifindex);
-            if let Some(pending) = self.link_down.pending.get_mut(&key) {
-                pending.merge(event);
+        debug!(
+            candidate_sessions = targets.len(),
+            "fast external failover: link state changed; asking sessions to check"
+        );
+        for (session_id, commands) in targets {
+            if self.link_check.pending.contains_key(&session_id) {
                 continue;
             }
-            match commands.try_send(PeerCommand::InterfaceDown(Arc::clone(event))) {
-                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    if self.link_down.pending.len() < LINK_DOWN_PENDING_MAX {
-                        let mut pending = PendingLinkDown::new(commands.clone());
-                        pending.merge(event);
-                        self.link_down.pending.insert(key, pending);
-                    } else {
-                        dropped += 1;
-                    }
-                }
+            if let Err(mpsc::error::TrySendError::Full(_)) =
+                commands.try_send(PeerCommand::CheckLinks)
+            {
+                self.link_check.pending.insert(session_id, commands);
             }
         }
-        // Keep an armed deadline: events arriving faster than the retry
+        // Keep an armed deadline: changes arriving faster than the retry
         // interval must not postpone delivery indefinitely.
-        if self.link_down.retry_at.is_none() {
-            self.schedule_link_down_retry();
-        }
-        if dropped > 0 {
-            warn!(
-                interface = %event.ifname,
-                ifindex = event.ifindex,
-                dropped,
-                "fast external failover: pending deliveries at capacity; affected sessions \
-                 fall back to their hold timer or BFD"
-            );
-        }
-        if targets.is_empty() {
-            debug!(
-                interface = %event.ifname,
-                ifindex = event.ifindex,
-                reason = event.cause.as_str(),
-                "fast external failover: interface down; no eligible sessions"
-            );
-        } else {
-            info!(
-                interface = %event.ifname,
-                ifindex = event.ifindex,
-                reason = event.cause.as_str(),
-                candidate_sessions = targets.len(),
-                "fast external failover: interface down; checking candidate sessions"
-            );
+        if self.link_check.retry_at.is_none() {
+            self.schedule_link_check_retry();
         }
     }
 
-    /// Retry deliveries that found a full mailbox. A session that exited is
+    /// Retry checks that found a full mailbox. A session that exited is
     /// forgotten; a still-full one waits for the next retry.
-    pub(super) fn retry_link_down(&mut self) {
-        self.link_down.pending.retain(|_, pending| !pending.flush());
-        self.schedule_link_down_retry();
+    pub(super) fn retry_link_checks(&mut self) {
+        self.link_check.pending.retain(|_, commands| {
+            matches!(
+                commands.try_send(PeerCommand::CheckLinks),
+                Err(mpsc::error::TrySendError::Full(_))
+            )
+        });
+        self.schedule_link_check_retry();
     }
 
-    fn schedule_link_down_retry(&mut self) {
-        self.link_down.retry_at = (!self.link_down.pending.is_empty())
-            .then(|| tokio::time::Instant::now() + LINK_DOWN_RETRY);
+    fn schedule_link_check_retry(&mut self) {
+        self.link_check.retry_at = (!self.link_check.pending.is_empty())
+            .then(|| tokio::time::Instant::now() + LINK_CHECK_RETRY);
     }
 }
 

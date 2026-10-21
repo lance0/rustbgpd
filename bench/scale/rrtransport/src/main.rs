@@ -191,6 +191,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         slow_peer_duration: DEFAULT_SLOW_PEER_DURATION_SECS,
         slow_peer_isolation: false,
         fast_external_failover: true,
+        link_state: rustbgpd_transport::LinkStateFeed::default(),
         neighbor_counters: rustbgpd_transport::NeighborCounters::default(),
     }
 }

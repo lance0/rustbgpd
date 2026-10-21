@@ -1380,8 +1380,8 @@ impl PeerSession {
                 self.drive_fsm(Event::BfdDown).await;
                 ControlFlow::Continue(())
             }
-            PeerCommand::InterfaceDown(event) => {
-                self.handle_interface_down(&event).await;
+            PeerCommand::CheckLinks => {
+                self.handle_check_links().await;
                 ControlFlow::Continue(())
             }
             PeerCommand::Shutdown => {

@@ -1414,13 +1414,15 @@ sourcing live in [COMPARISON.md](../explanation/comparison.md).
 ### Fast external failover
 
 A directly connected eBGP session does not have to wait for its hold timer
-when its link fails. rustbgpd watches the kernel's link and address
-notifications and closes a session at once when the interface that carries it:
+when its link fails. rustbgpd keeps the kernel's interface and address state
+from its link and address notifications. Whenever that state changes, each
+eligible session checks its own connection against the current state and
+closes at once if the interface that carries it:
 
-- loses carrier (`IFF_LOWER_UP` clears while the interface is up);
-- is set administratively down (`IFF_UP` clears);
-- is removed; or
-- loses the local address the session is sourced from.
+- has no carrier (`IFF_LOWER_UP` clear while the interface is up);
+- is administratively down (`IFF_UP` clear);
+- no longer exists; or
+- no longer holds the local address the session is sourced from.
 
 This is on by default, like FRR's `bgp fast-external-failover` and Cisco's
 `bgp fast-external-fallover`. Turn it off with `fast_external_failover = false`
@@ -1434,7 +1436,14 @@ the socket's interface scope must be that interface. Nothing is inferred from
 TTL, GTSM, or eBGP status. Multihop sessions, sessions sourced from a loopback,
 iBGP sessions and sessions on other interfaces are untouched. A bond or VLAN
 interface is judged by its own carrier, so losing one bond member does not stop
-a session while the bond stays up.
+a session while the bond stays up. An accept-any dynamic neighbor is affected
+only once its OPEN shows an external AS.
+
+The check is against the state at the moment it runs, not against a queue of
+past events. A carrier bounce (down, then up), or an address removed and added
+back, that completes before the check leaves the session alone: its TCP
+connection survived, so there is nothing to tear down. In practice the check
+runs within milliseconds of the kernel notification.
 
 The stop is local. No NOTIFICATION is sent, because the link it would travel on
 is gone, and anything still queued for the peer is discarded: the socket is
@@ -1442,23 +1451,20 @@ reset rather than drained. Routes from the session are withdrawn rather than
 retained under Graceful Restart or LLGR, because their next hop sits behind
 the dead link. If the TCP connection already failed on its own (for example
 with "network unreachable" after its address was removed) and its routes are
-being retained, the confirmed interface-down purges them. An interface-down
-observed before the session's current connection started is ignored, so a
-session that already reconnected over the recovered link is not stopped. An
-accept-any dynamic neighbor is affected only once its OPEN shows an external
-AS.
-The neighbor stays enabled and reconnects on its normal retry timer when the
-link returns. The teardown cause names the interface and the reason, for
-example `fast external failover: interface eth1 (ifindex 4) carrier lost`. It
-appears as the neighbor's last error and as the `reason` of the session-lost
-event, and `bgp_session_down_total` counts it under
-`reason="local_no_notification"`.
+being retained, they are purged once that connection's interface is down, even
+while a replacement connection is still being set up; a replacement over a
+healthy interface is left alone. The neighbor stays enabled and reconnects on
+its normal retry timer when the link returns. The teardown cause names the
+interface and the reason, for example
+`fast external failover: interface eth1 (ifindex 4) carrier lost`. It appears
+as the neighbor's last error and as the `reason` of the session-lost event,
+and `bgp_session_down_total` counts it under `reason="local_no_notification"`.
 
-Only an explicit kernel message counts as down. If the monitor misses messages
-(a netlink receive-buffer overrun, counted by
-`bgp_netlink_subscription_overruns_total{actor="fast_external_failover"}`), the
-link state is treated as unknown and nothing is stopped; the hold timer or BFD
-still covers the session. There is no debounce. A flapping link flaps its
+Unknown state is never down. The state is trusted only after a complete dump
+of interfaces and addresses. After a netlink receive-buffer overrun (counted by
+`bgp_netlink_subscription_overruns_total{actor="fast_external_failover"}`), or
+while a dump fails, nothing is stopped until a fresh dump succeeds; then
+sessions check against it. There is no debounce. A flapping link flaps its
 sessions, so dampen carrier at the link (for example the bond's `downdelay`).
 The monitor runs on Linux only.
 

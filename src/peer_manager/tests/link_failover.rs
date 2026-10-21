@@ -1,5 +1,5 @@
 use super::*;
-use rustbgpd_transport::{InterfaceAddress, LinkDownCause, LinkDownEvent, PeerCommand};
+use rustbgpd_transport::PeerCommand;
 
 fn recording_handle() -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
     let (tx, rx) = mpsc::channel(8);
@@ -7,37 +7,28 @@ fn recording_handle() -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
     (PeerHandle::from_parts(tx, task), rx)
 }
 
-fn event() -> Arc<LinkDownEvent> {
-    event_on(4)
+/// A mailbox that is already full, as for a session busy with other work.
+fn full_handle() -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
+    let (tx, rx) = mpsc::channel(1);
+    tx.try_send(PeerCommand::Start).unwrap();
+    let task = tokio::spawn(async { Ok(()) });
+    (PeerHandle::from_parts(tx, task), rx)
 }
 
-fn event_on(ifindex: u32) -> Arc<LinkDownEvent> {
-    Arc::new(LinkDownEvent {
-        ifindex,
-        ifname: "eth0".into(),
-        cause: LinkDownCause::CarrierLost,
-        observed_at: std::time::Instant::now(),
-        addresses: vec![InterfaceAddress {
-            local: "10.0.0.1".parse().unwrap(),
-            prefix: "10.0.0.0".parse().unwrap(),
-            prefix_len: 30,
-        }],
-    })
+fn got_check(rx: &mut mpsc::Receiver<PeerCommand>) -> bool {
+    matches!(rx.try_recv(), Ok(PeerCommand::CheckLinks))
 }
 
-fn got_interface_down(rx: &mut mpsc::Receiver<PeerCommand>) -> bool {
-    matches!(rx.try_recv(), Ok(PeerCommand::InterfaceDown(_)))
-}
-
-/// Eligibility is knob + eBGP + enabled; the interface match itself is the
-/// session's job, so every eligible session is a candidate.
+/// Eligibility is knob + not-known-iBGP + enabled; whether the interface
+/// carries the connection is the session's call against current state.
 #[tokio::test]
-async fn link_down_reaches_only_eligible_sessions() {
+async fn link_change_reaches_only_eligible_sessions() {
     let mut mgr = test_peer_manager();
     let ebgp: IpAddr = "10.0.0.2".parse().unwrap();
     let ibgp: IpAddr = "10.0.0.3".parse().unwrap();
     let opted_out: IpAddr = "10.0.0.4".parse().unwrap();
     let disabled: IpAddr = "10.0.0.5".parse().unwrap();
+    let unlearned: IpAddr = "10.0.0.6".parse().unwrap();
     let (handle, mut ebgp_rx) = recording_handle();
     insert_test_managed_peer_with_asn(&mut mgr, ebgp, 65002, handle, false);
     let (handle, mut ibgp_rx) = recording_handle();
@@ -52,20 +43,23 @@ async fn link_down_reaches_only_eligible_sessions() {
     let (handle, mut disabled_rx) = recording_handle();
     insert_test_managed_peer_with_asn(&mut mgr, disabled, 65002, handle, false);
     mgr.peers.get_mut(&key(disabled)).unwrap().enabled = false;
+    let (handle, mut unlearned_rx) = recording_handle();
+    insert_test_managed_peer_with_asn(&mut mgr, unlearned, 0, handle, false);
 
-    mgr.handle_link_down(&event());
+    mgr.handle_links_changed();
 
-    assert!(got_interface_down(&mut ebgp_rx), "eBGP peer is a candidate");
-    assert!(!got_interface_down(&mut ibgp_rx), "iBGP is untouched");
-    assert!(!got_interface_down(&mut opted_out_rx), "opt-out honored");
+    assert!(got_check(&mut ebgp_rx), "eBGP peer is asked to check");
+    assert!(!got_check(&mut ibgp_rx), "iBGP is untouched");
+    assert!(!got_check(&mut opted_out_rx), "opt-out honored");
+    assert!(!got_check(&mut disabled_rx), "disabled peer untouched");
     assert!(
-        !got_interface_down(&mut disabled_rx),
-        "disabled peer untouched"
+        got_check(&mut unlearned_rx),
+        "an unlearned ASN is deferred to the session's negotiated-ASN check"
     );
 }
 
 #[tokio::test]
-async fn link_down_also_reaches_a_pending_inbound_collision_candidate() {
+async fn link_change_also_reaches_a_pending_inbound_collision_candidate() {
     let mut mgr = test_peer_manager();
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let (handle, mut primary_rx) = recording_handle();
@@ -76,17 +70,15 @@ async fn link_down_also_reaches_a_pending_inbound_collision_candidate() {
         handle: candidate,
         session_id: 99,
     });
-
-    mgr.handle_link_down(&event());
-
-    assert!(got_interface_down(&mut primary_rx));
-    assert!(got_interface_down(&mut candidate_rx));
+    mgr.handle_links_changed();
+    assert!(got_check(&mut primary_rx));
+    assert!(got_check(&mut candidate_rx));
 }
 
-/// The opt-out is read when the event arrives, so a hot-applied change takes
+/// The opt-out is read when the change arrives, so a hot-applied change takes
 /// effect without rebuilding the session.
 #[tokio::test]
-async fn hot_applied_opt_out_takes_effect_on_the_next_event() {
+async fn hot_applied_opt_out_takes_effect_on_the_next_change() {
     let mut mgr = test_peer_manager();
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let (handle, mut rx) = recording_handle();
@@ -95,179 +87,68 @@ async fn hot_applied_opt_out_takes_effect_on_the_next_event() {
     config.fast_external_failover = false;
     mgr.hot_update_peer(config).await.expect("hot update");
     while rx.try_recv().is_ok() {}
-
-    mgr.handle_link_down(&event());
-    assert!(!got_interface_down(&mut rx));
+    mgr.handle_links_changed();
+    assert!(!got_check(&mut rx));
 }
 
-/// A mailbox that is already full, as for a session busy with other work.
-fn full_handle() -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
-    let (tx, rx) = mpsc::channel(1);
-    tx.try_send(PeerCommand::Start).unwrap();
-    let task = tokio::spawn(async { Ok(()) });
-    (PeerHandle::from_parts(tx, task), rx)
-}
-
-/// An accept-any child whose ASN the manager has not learned is forwarded;
-/// the session decides from its negotiated ASN.
-#[tokio::test]
-async fn link_down_defers_unlearned_asn_to_the_session() {
-    let mut mgr = test_peer_manager();
-    let peer: IpAddr = "10.0.0.2".parse().unwrap();
-    let (handle, mut rx) = recording_handle();
-    insert_test_managed_peer_with_asn(&mut mgr, peer, 0, handle, false);
-    mgr.handle_link_down(&event());
-    assert!(got_interface_down(&mut rx));
-}
-
-/// A flapping link against blocked mailboxes coalesces to one pending entry
-/// per (session, interface), keeps distinct interfaces distinct, never exceeds
-/// the bound, and delivers once the mailbox frees.
-#[tokio::test]
-async fn link_down_pending_is_coalesced_and_bounded() {
-    let mut mgr = test_peer_manager();
-    let mut mailboxes = Vec::new();
-    for host in 0..3_u8 {
-        let (handle, rx) = full_handle();
-        let peer = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, host));
-        insert_test_managed_peer_with_asn(&mut mgr, peer, 65002, handle, false);
-        mailboxes.push(rx);
-    }
-    for _ in 0..100 {
-        mgr.handle_link_down(&event_on(4));
-    }
-    assert_eq!(
-        mgr.link_down.pending.len(),
-        3,
-        "one per session for one link"
-    );
-    mgr.handle_link_down(&event_on(5));
-    assert_eq!(
-        mgr.link_down.pending.len(),
-        6,
-        "a second link stays distinct"
-    );
-    assert!(mgr.link_down.retry_at.is_some());
-
-    // Free one mailbox: the retry delivers its two pending events in turn.
-    let mailbox = &mut mailboxes[0];
-    assert!(matches!(mailbox.try_recv(), Ok(PeerCommand::Start)));
-    mgr.retry_link_down();
-    assert!(got_interface_down(mailbox));
-    assert_eq!(mgr.link_down.pending.len(), 5);
-
-    // Saturation: far more blocked sessions than the bound.
-    let mut mgr = test_peer_manager();
-    let mut held = Vec::new();
-    for index in 0..(super::super::link_failover::LINK_DOWN_PENDING_MAX + 50) {
-        let (handle, rx) = full_handle();
-        let index = u32::try_from(index).unwrap();
-        let peer = IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + index + 1));
-        insert_test_managed_peer_with_asn(&mut mgr, peer, 65002, handle, false);
-        held.push(rx);
-    }
-    for _ in 0..3 {
-        mgr.handle_link_down(&event_on(4));
-    }
-    assert_eq!(
-        mgr.link_down.pending.len(),
-        super::super::link_failover::LINK_DOWN_PENDING_MAX
-    );
-}
-
-fn address_removed(ifindex: u32, local: &str) -> Arc<LinkDownEvent> {
-    Arc::new(LinkDownEvent {
-        ifindex,
-        ifname: "eth0".into(),
-        cause: LinkDownCause::AddressRemoved,
-        observed_at: std::time::Instant::now(),
-        addresses: vec![InterfaceAddress {
-            local: local.parse().unwrap(),
-            prefix: local.parse().unwrap(),
-            prefix_len: 32,
-        }],
-    })
-}
-
-fn delivered(rx: &mut mpsc::Receiver<PeerCommand>) -> Option<Arc<LinkDownEvent>> {
-    match rx.try_recv() {
-        Ok(PeerCommand::InterfaceDown(event)) => Some(event),
-        _ => None,
-    }
-}
-
-/// Events arriving faster than the retry interval must not keep pushing the
-/// retry deadline out: the first armed deadline stands.
+/// A full mailbox keeps the session's single pending flag; the retry
+/// delivers once there is room, and any number of further changes neither
+/// grows the pending state nor postpones the armed retry.
 #[tokio::test(start_paused = true)]
-async fn link_down_retry_is_not_starved_by_frequent_events() {
+async fn a_full_mailbox_keeps_one_flag_and_the_retry_delivers() {
     let mut mgr = test_peer_manager();
     let (handle, mut rx) = full_handle();
     insert_test_managed_peer_with_asn(&mut mgr, "10.0.0.2".parse().unwrap(), 65002, handle, false);
-    mgr.handle_link_down(&event_on(4));
-    let armed = mgr.link_down.retry_at.expect("retry armed");
-    for ifindex in 5..12 {
+    mgr.handle_links_changed();
+    let armed = mgr.link_check.retry_at.expect("retry armed");
+    for _ in 0..10 {
         tokio::time::advance(Duration::from_millis(50)).await;
-        mgr.handle_link_down(&event_on(ifindex));
+        mgr.handle_links_changed();
         assert_eq!(
-            mgr.link_down.retry_at,
+            mgr.link_check.retry_at,
             Some(armed),
             "deadline must not slide"
         );
     }
-    // The mailbox frees while events keep arriving; the retry delivers.
+    assert_eq!(mgr.link_check.pending.len(), 1);
     assert!(matches!(rx.try_recv(), Ok(PeerCommand::Start)));
-    mgr.retry_link_down();
-    assert!(delivered(&mut rx).is_some());
+    mgr.retry_link_checks();
+    assert!(got_check(&mut rx));
+    assert!(mgr.link_check.pending.is_empty());
+    assert!(mgr.link_check.retry_at.is_none());
 }
 
-/// Two address removals on one interface while the mailbox is blocked: both
-/// are delivered, each with its own observation time, so the removal of the
-/// session's source address is not overwritten by a later, unrelated one.
+/// Per-session state stays O(1): 1000 flaps against blocked mailboxes leave
+/// one pending entry per session.
 #[tokio::test]
-async fn link_down_pending_keeps_distinct_address_removals() {
+async fn pending_state_is_one_entry_per_session_under_flapping() {
     let mut mgr = test_peer_manager();
-    let (handle, mut rx) = full_handle();
-    insert_test_managed_peer_with_asn(&mut mgr, "10.0.0.2".parse().unwrap(), 65002, handle, false);
-    let source = address_removed(4, "10.0.0.1");
-    let other = address_removed(4, "10.0.9.1");
-    mgr.handle_link_down(&source);
-    // A repeat of the same removal keeps the original observation time.
-    mgr.handle_link_down(&address_removed(4, "10.0.0.1"));
-    mgr.handle_link_down(&other);
-    assert_eq!(mgr.link_down.pending.len(), 1);
-
-    assert!(matches!(rx.try_recv(), Ok(PeerCommand::Start)));
-    mgr.retry_link_down();
-    let first = delivered(&mut rx).expect("source-address removal delivered");
-    assert_eq!(first.addresses, source.addresses);
-    assert_eq!(first.observed_at, source.observed_at);
-    mgr.retry_link_down();
-    let second = delivered(&mut rx).expect("second removal delivered");
-    assert_eq!(second.addresses, other.addresses);
-    mgr.retry_link_down();
-    assert!(mgr.link_down.pending.is_empty());
-    assert!(mgr.link_down.retry_at.is_none());
-}
-
-/// Past the per-entry cap, a further removal folds into the oldest one
-/// rather than being dropped.
-#[tokio::test]
-async fn link_down_pending_address_overflow_folds_instead_of_dropping() {
-    let mut mgr = test_peer_manager();
-    let (handle, _rx) = full_handle();
-    insert_test_managed_peer_with_asn(&mut mgr, "10.0.0.2".parse().unwrap(), 65002, handle, false);
-    let max = super::super::link_failover::LINK_DOWN_PENDING_ADDRESSES_MAX;
-    for host in 0..=max {
-        let host = u8::try_from(host).unwrap();
-        mgr.handle_link_down(&address_removed(4, &format!("10.0.0.{}", host + 1)));
+    let mut held = Vec::new();
+    for host in 1..=5_u8 {
+        let (handle, rx) = full_handle();
+        let peer = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, host));
+        insert_test_managed_peer_with_asn(&mut mgr, peer, 65002, handle, false);
+        held.push(rx);
     }
-    let pending = mgr.link_down.pending.values().next().unwrap();
-    assert_eq!(pending.addresses.len(), max);
-    let overflow: IpAddr = format!("10.0.0.{}", max + 1).parse().unwrap();
+    for _ in 0..1000 {
+        mgr.handle_links_changed();
+    }
+    assert_eq!(mgr.link_check.pending.len(), 5);
+}
+
+/// Sessions get the monitor's read handle through their transport config.
+#[tokio::test]
+async fn transport_config_carries_the_link_state_feed() {
+    let (tx, rx) = tokio::sync::watch::channel(Arc::new(rustbgpd_transport::LinkSnapshot {
+        valid: true,
+        ..Default::default()
+    }));
+    let mgr = test_peer_manager().with_link_failover(rx);
+    let transport = mgr.build_transport_config(&make_config("10.0.0.2".parse().unwrap(), 65002));
+    assert!(transport.link_state.current().valid);
+    tx.send_replace(Arc::default());
     assert!(
-        pending.addresses[0]
-            .addresses
-            .iter()
-            .any(|address| address.local == overflow)
+        !transport.link_state.current().valid,
+        "reads the current snapshot"
     );
 }

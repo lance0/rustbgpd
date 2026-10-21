@@ -890,6 +890,9 @@ pub struct TransportConfig {
     /// so a change applies without a session reset. Operator knob:
     /// `fast_external_failover`. Default on.
     pub fast_external_failover: bool,
+    /// Read handle on the daemon's link-state snapshot (fast external
+    /// failover). Runtime state: two configs compare equal on it.
+    pub link_state: crate::link::LinkStateFeed,
     /// The neighbor's lifetime counter block. [`TransportConfig::new`]
     /// starts a standalone one; the peer manager installs the block it owns
     /// for the neighbor before spawning any session.
@@ -966,6 +969,7 @@ impl TransportConfig {
             slow_peer_duration: DEFAULT_SLOW_PEER_DURATION_SECS,
             slow_peer_isolation: false,
             fast_external_failover: true,
+            link_state: crate::link::LinkStateFeed::default(),
             neighbor_counters: NeighborCounters::default(),
         }
     }

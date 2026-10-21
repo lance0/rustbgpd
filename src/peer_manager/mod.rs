@@ -612,9 +612,9 @@ pub struct PeerManager {
     /// session set; the BFD actor is a pure session-runner that reconciles it.
     /// `None` when no neighbor configures BFD.
     bfd_coupling: Option<bfd::BfdCoupling>,
-    /// Fast external failover: the link monitor's event feed and the bounded
-    /// deliveries waiting for full session mailboxes.
-    link_down: link_failover::LinkDownDelivery,
+    /// Fast external failover: the link monitor's snapshot feed and the
+    /// sessions whose `CheckLinks` is waiting for mailbox space.
+    link_check: link_failover::LinkCheckDelivery,
     /// Per-process key for the optimistic config-transaction snapshot token.
     /// Seeded once at construction; never leaves the process. Keeps the token
     /// from acting as an offline oracle for config secrets. See
@@ -1265,7 +1265,7 @@ impl PeerManager {
             conditional_reconcile_retry: None,
             current_config,
             bfd_coupling: None,
-            link_down: link_failover::LinkDownDelivery::default(),
+            link_check: link_failover::LinkCheckDelivery::default(),
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             accepted_rx: None,
             #[cfg(test)]
@@ -1408,6 +1408,7 @@ impl PeerManager {
         transport.slow_peer_duration = config.slow_peer_duration;
         transport.slow_peer_isolation = config.slow_peer_isolation;
         transport.fast_external_failover = config.fast_external_failover;
+        transport.link_state = self.link_state_feed();
         // RFC 1997: resolved in config (default !route_server_client);
         // pinned by the build_transport_config field-threading test.
         transport.interpret_rfc1997 = config.interpret_rfc1997;
@@ -2489,7 +2490,7 @@ impl PeerManager {
         if bfd_state_change_rx.is_some() {
             self.republish_bfd_desired();
         }
-        let mut link_down_rx = self.take_link_down_rx();
+        let mut link_state_changes = self.link_state_changes();
 
         loop {
             if self.dampening_control_failed {
@@ -2514,7 +2515,7 @@ impl PeerManager {
             }
             let bfd_retry_at = self.bfd_retry_deadline();
             let evpn_recovery_retry_at = self.evpn_recovery_retry_at;
-            let link_down_retry_at = self.link_down.retry_at;
+            let link_check_retry_at = self.link_check.retry_at;
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             tokio::select! {
@@ -2746,12 +2747,12 @@ impl PeerManager {
                     }
                 } => self.retry_evpn_recovery_resets(),
                 () = async {
-                    if let Some(deadline) = link_down_retry_at {
+                    if let Some(deadline) = link_check_retry_at {
                         tokio::time::sleep_until(deadline).await;
                     } else {
                         std::future::pending::<()>().await;
                     }
-                } => self.retry_link_down(),
+                } => self.retry_link_checks(),
                 change = async {
                     match bfd_state_change_rx.as_mut() {
                         Some(rx) => rx.recv().await,
@@ -2766,15 +2767,16 @@ impl PeerManager {
                         None => bfd_state_change_rx = None,
                     }
                 }
-                event = async {
-                    match link_down_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
+                changed = async {
+                    match link_state_changes.as_mut() {
+                        Some(rx) => rx.changed().await,
                         None => std::future::pending().await,
                     }
                 } => {
-                    match event {
-                        Some(event) => self.handle_link_down(&event),
-                        None => link_down_rx = None,
+                    match changed {
+                        Ok(()) => self.handle_links_changed(),
+                        // The monitor exited; stop polling a closed channel.
+                        Err(_) => link_state_changes = None,
                     }
                 }
                 () = async {
