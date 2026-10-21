@@ -1506,8 +1506,9 @@ pub type ExportDestination = (IpAddr, Option<Arc<str>>);
 pub struct LocalRouteExports {
     /// Index of the key in the query's keys.
     pub key: usize,
-    /// Whether a local route has this key. `false` carries no rows; within a
-    /// walk it means no local route had the key since the first page.
+    /// Whether a local route had this key when this page read it. `false`
+    /// carries no rows. A resumed walk's version check also ensures the key
+    /// had no route on the first page, but not in between.
     pub found: bool,
     /// Rows for this key on this page, in destination order. A key whose
     /// rows continue on the next page is listed there again.

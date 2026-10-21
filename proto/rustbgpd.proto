@@ -3677,20 +3677,24 @@ service InjectionService {
   // another key, another include_configured or from another daemon process
   // returns INVALID_ARGUMENT.
   rpc ListPathExportDispositions(ListPathExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
-  // ListPathExportDispositions for up to 1000 local route keys in one paged
-  // walk, such as every key ListLeasedKeys lists for an owner. Keys are
-  // listed in request order, each with its peers as ListPathExportDispositions
-  // lists them. A key with no local route is listed with found false and no
-  // rows; the call itself does not return NOT_FOUND. An empty key list, more
-  // than 1000 keys or a key named twice returns INVALID_ARGUMENT. page_size
-  // bounds the entries per page: each peer row counts one, and so does a
-  // key listed with no rows. A key whose rows continue on the next page is
-  // listed there again with the remaining peers. A resumed page returns
-  // ABORTED on the changes ListPathExportDispositions checks, applied to
-  // every key: the content of any key's route changed, or a key's route
-  // appeared or was removed. A token for another key list, another
-  // include_configured or from another daemon process returns
-  // INVALID_ARGUMENT.
+  // ListPathExportDispositions over a list of local route keys in one paged
+  // walk, such as every key ListLeasedKeys lists for an owner. A walk names
+  // 1 to 1000 keys; an empty key list, more than 1000 keys or a key named
+  // twice returns INVALID_ARGUMENT. The 1000 bounds the keys per walk, not
+  // what one response holds: a response holds at most page_size entries,
+  // each peer row is one entry, and a key listed with no rows is one, so one
+  // key's rows can span several pages. A key whose rows continue on the
+  // next page is listed there again with the remaining peers. Keys are
+  // listed in request order, each with its peers as
+  // ListPathExportDispositions lists them. A key with no local route on the
+  // page that lists it is listed with found false and no rows; the call
+  // itself does not return NOT_FOUND. A resumed page returns ABORTED on the
+  // changes ListPathExportDispositions checks, applied to every key: the
+  // content of any key's route, or whether it has a route, differs from the
+  // first page. The check compares each page's read, not the history between
+  // pages, so a route added and removed again between pages does not abort
+  // the walk. A token for another key list, another include_configured or
+  // from another daemon process returns INVALID_ARGUMENT.
   rpc BatchListPathExportDispositions(BatchListPathExportDispositionsRequest) returns (BatchListPathExportDispositionsResponse);
   // Inject or replace a locally originated FlowSpec rule. The rule is an
   // upsert keyed on (afi_safi, components): repeating an identical request
@@ -4004,11 +4008,12 @@ message ListPathExportDispositionsResponse {
 }
 
 message BatchListPathExportDispositionsRequest {
-  // The local routes' AddPath keys, in walk order: 1 to 1000 keys, none
-  // named twice.
+  // The local routes' AddPath keys, in walk order: 1 to 1000 keys per walk,
+  // none named twice.
   repeated LeasedPathKey keys = 1;
   // Entries per page: 0 selects 100, and larger values are capped at 1000.
-  // A peer row is one entry, and so is a key listed with no rows.
+  // A peer row is one entry, and so is a key listed with no rows, so a page
+  // can end inside one key's rows.
   uint32 page_size = 2;
   // next_page_token of the previous page; empty for the first page. Opaque.
   string page_token = 3;
@@ -4020,8 +4025,10 @@ message BatchListPathExportDispositionsRequest {
 message PathExportDispositions {
   // The key as the request named it.
   LeasedPathKey key = 1;
-  // Whether a local route has this key. false lists no peers; on a resumed
-  // page it means no local route has had the key since the walk began.
+  // Whether a local route had this key when this page read it. false lists
+  // no peers. A resumed walk also had no route for the key on its first
+  // page, but a route added and removed again between pages is not
+  // detected.
   bool found = 2;
   // One row per peer, as ListPathExportDispositions lists them; the key's
   // remaining peers continue on the next page when it ends mid-key.

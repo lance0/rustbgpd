@@ -997,9 +997,11 @@ fn managed_peers_without_a_session_are_listed_only_when_named() {
 }
 
 /// A managed link-local peer matches a registered session only on the same
-/// interface: the same address on another interface is a separate,
-/// not-Established destination with its own scope, and a walk pages between
-/// the two by scope.
+/// interface. This pins the matching rule for the roster the RIB is handed;
+/// it is not a supported configuration, since the daemon refuses one
+/// link-local address on two interfaces. A same-address entry on another
+/// interface stays a separate, not-Established destination, and a walk pages
+/// between the two by scope.
 #[test]
 fn managed_peers_match_registered_sessions_by_scope() {
     let (mut manager, _tx) = manager();

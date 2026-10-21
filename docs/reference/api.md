@@ -3096,7 +3096,7 @@ export policy).
 | `AddPath` | Inject a route with specified attributes |
 | `DeletePath` | Withdraw a previously injected route |
 | `ListPathExportDispositions` | Per-peer export disposition of one injected unicast route; see [export read-back](#export-read-back) |
-| `BatchListPathExportDispositions` | The same for up to 1000 injected unicast routes in one paged walk; see [batch read-back](#batch-read-back) |
+| `BatchListPathExportDispositions` | The same for up to 1000 injected unicast route keys per paged walk; see [batch read-back](#batch-read-back) |
 | `AddFlowSpec` | Inject a FlowSpec rule with actions |
 | `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
 | `AddLeasedPath` / `AddLeasedFlowSpec` | Inject a route or FlowSpec rule under an owner's lease; see [leased injection](#leased-injection) |
@@ -3306,10 +3306,9 @@ means no session exists to export to.
 Set `include_configured` to also list every managed peer without an
 Established session, with disposition `PATH_EXPORT_DISPOSITION_NOT_ESTABLISHED`,
 in the same order. Managed peers are the configured neighbors, plus dynamic
-neighbors while the daemon tracks them. A link-local neighbor is identified
-by its address and `peer_interface`, so the same address configured on two
-interfaces gives two rows. Both lists come from the same read, so no join
-with `NeighborService.ListNeighbors` is needed.
+neighbors while the daemon tracks them. A link-local neighbor's row carries its
+`peer_interface`, as Established rows do. Both lists come from the same read,
+so no join with `NeighborService.ListNeighbors` is needed.
 
 | `disposition` | Meaning |
 |---|---|
@@ -3429,19 +3428,26 @@ above. Each page lists keys in request order. Each key appears as one
 `ListPathExportDispositions` lists them.
 
 A key with no local route is listed with `found = false` and no rows; the
-call does not fail with `NOT_FOUND`. Within a walk, `found = false` means no
-local route has had the key since the first page, because a route that
-appears or disappears mid-walk returns `ABORTED`.
+call does not fail with `NOT_FOUND`. `found = false` means the key had no
+local route when the page that lists it was read. Each resumed page also
+checks that every key has a route exactly when it had one on the first page,
+so a key that gains or loses its route between those reads returns `ABORTED`.
+The check compares reads, not the history between them: a route added and
+removed again between two pages leaves nothing to compare and does not abort
+the walk.
 
 The cost of a walk is bounded in three ways:
 
-- **Keys per walk.** A request names 1 to 1000 keys. An empty list, more than
-  1000 keys, or a key named twice after host bits are masked returns
+- **Keys per walk.** A request names 1 to 1000 keys. This bounds the keys,
+  not the routes or rows one response returns. An empty list, more than 1000
+  keys, or a key named twice after host bits are masked returns
   `INVALID_ARGUMENT` before any work. Split a larger set across walks.
 - **Entries per page.** `page_size` 0 returns up to 100 entries, and larger
-  values are capped at 1000. Each row is one entry, and so is a key listed
-  with no rows. Each row costs at most one single-prefix export explain;
-  `NOT_ESTABLISHED` rows and keys without a route cost none.
+  values are capped at 1000. Each peer row is one entry, and so is a key
+  listed with no rows. Peer rows use up the page budget, so a page covers
+  fewer keys as the peer count grows, and one key with more peers than the
+  page size spans several pages. Each row costs at most one single-prefix
+  export explain; `NOT_ESTABLISHED` rows and keys without a route cost none.
 - **Route checks per page.** Every page re-reads the route of each named key
   to check the walk, so this per-page cost grows with the key count, up to
   1000 route lookups.
@@ -3452,8 +3458,8 @@ pages.
 
 A resumed page returns `ABORTED` on the changes `ListPathExportDispositions`
 checks. The route check covers every named key, not only the one being listed:
-if any key's route content changes, a route is removed, or a key that had no
-route gains one, the whole walk aborts. Changes to local routes outside the
+if any key's route content, or whether it has a route, differs from the
+first page, the whole walk aborts. Changes to local routes outside the
 key list do not abort it. The `next_page_token` is bound to the key list in
 order, `include_configured` and the daemon process. A token for another key
 list returns `INVALID_ARGUMENT`.
