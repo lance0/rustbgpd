@@ -873,28 +873,45 @@ impl CompiledChain {
         let mut fuel: u64 = MAX_EVAL_COST;
         let (result, evaluation, term) =
             self.evaluate_fueled::<true, true, true>(ctx, Some(hits), &mut fuel);
+        let term = term.filter(|_| evaluation.eval_error.is_none());
         (result, evaluation, term.and_then(|term| term.name.clone()))
     }
 
     /// [`evaluate_with_attribution`](Self::evaluate_with_attribution) plus
-    /// the validation states the deciding term's guard tests, read from the
-    /// same walk and dataset pin, so they describe the term that produced
-    /// the verdict. Non-empty only when a term's own `reject` decided and
-    /// its guard contains an RPKI ([`MatchExpr::RpkiIs`]) or ASPA
-    /// ([`MatchExpr::AspaIs`]) comparison, at any depth: a TOML
-    /// statement's validation condition beside its others, or one operand
-    /// of an `.rpol` `||` or `!`. A loop verdict, a fail-closed bound or
-    /// error, and a default-action deny report none. Explain-only.
+    /// the deny attribution of the deciding term, read from the same walk
+    /// and dataset pin, so it describes the term that produced the verdict:
+    ///
+    /// - the deciding `.rpol` term's name, for any deny a named term
+    ///   decided: its own `reject`, a loop verdict, a fail-closed bound, or
+    ///   an evaluation error on it. `None` for a permit, a default-action
+    ///   deny and an unnamed (TOML) statement. Borrowed from the chain, so
+    ///   nothing is allocated.
+    /// - the validation states the deciding term's guard tests. Non-empty
+    ///   only when a term's own `reject` decided without an evaluation
+    ///   error and its guard contains an RPKI ([`MatchExpr::RpkiIs`]) or
+    ///   ASPA ([`MatchExpr::AspaIs`]) comparison, at any depth: a TOML
+    ///   statement's validation condition beside its others, or one operand
+    ///   of an `.rpol` `||` or `!`.
+    ///
+    /// Explain-only: the term name is what an explain renders as
+    /// `"<policy>:<term>"`.
     #[must_use]
-    pub fn evaluate_with_deny_validation(
+    pub fn evaluate_with_deny_attribution(
         &self,
         ctx: &RouteContext<'_>,
-    ) -> (PolicyResult, PolicyEvaluation, Vec<ValidationDimension>) {
+    ) -> (
+        PolicyResult,
+        PolicyEvaluation,
+        Option<&str>,
+        Vec<ValidationDimension>,
+    ) {
         let mut fuel: u64 = MAX_EVAL_COST;
         let (result, evaluation, term) =
             self.evaluate_fueled::<false, true, true>(ctx, None, &mut fuel);
         let mut tested = Vec::new();
-        if let Some(term) = term.filter(|term| matches!(term.action, TermAction::Deny)) {
+        if let Some(term) = term.filter(|term| {
+            evaluation.eval_error.is_none() && matches!(term.action, TermAction::Deny)
+        }) {
             if term
                 .guard
                 .any_node(&|expr| matches!(expr, MatchExpr::RpkiIs(_)))
@@ -908,7 +925,8 @@ impl CompiledChain {
                 tested.push(ValidationDimension::Aspa);
             }
         }
-        (result, evaluation, tested)
+        let term_name = term.and_then(|term| term.name.as_deref());
+        (result, evaluation, term_name, tested)
     }
 
     /// `COUNT` monomorphizes the walk: the non-counting instantiation
@@ -1034,7 +1052,9 @@ impl CompiledChain {
                             matched_policy: if ATTR { policy.name.clone() } else { None },
                             eval_error: Some(error),
                         },
-                        None,
+                        // The failing term decided; callers that want only a
+                        // clean reject check `eval_error`.
+                        if TERM { term } else { None },
                     );
                 }
                 PolicyDecision::Permit(Some(mods)) if !mods.is_empty() => {

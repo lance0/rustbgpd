@@ -7,10 +7,10 @@ use super::{
     ExplainReason, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib, NeighborPolicyStats,
     PolicyAction, PolicyChain, PolicyFilteredRouteKey, Prefix, RibCommandError, RibManager,
     RouteContext, Safi, UnicastDistributionResult, UnicastPrefixPeers, debug,
-    evaluate_chain_with_attribution, family_label, policy_label_with_term, prefix_family,
-    record_export_policy_eval, route_type, route_type_label, route_type_message,
-    rr_suppression_reason, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
-    validate_route_aspa, validate_route_rpki,
+    evaluate_chain_with_attribution, family_label, prefix_family, record_export_policy_eval,
+    route_type, route_type_label, route_type_message, rr_suppression_reason,
+    should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal, validate_route_aspa,
+    validate_route_rpki,
 };
 use crate::injection_lease::{InjectedKey, LeaseGeneration};
 use crate::update::InjectOutcome;
@@ -783,15 +783,14 @@ impl RibManager {
                 }
                 let permitted = match export_pol {
                     Some(chain) => {
-                        let (result, evaluation) = chain.compiled().evaluate_with_attribution(&ctx);
+                        let (result, evaluation, deny_term, _) =
+                            chain.compiled().evaluate_with_deny_attribution(&ctx);
                         if result.action == PolicyAction::Permit {
                             let (modified, _) = policy_memo.apply(candidate, &result.modifications);
                             if super::no_advertise_export_suppressed(modified.communities()) {
-                                let label = super::policy_label_with_term(
-                                    export_pol,
-                                    &ctx,
-                                    evaluation.action,
+                                let label = super::policy_label(
                                     evaluation.matched_policy.as_deref(),
+                                    deny_term,
                                 );
                                 if first_no_advertise_suppression.is_none() {
                                     first_no_advertise_suppression =
@@ -813,11 +812,9 @@ impl RibManager {
                                 true
                             }
                         } else {
-                            let label = super::policy_label_with_term(
-                                export_pol,
-                                &ctx,
-                                evaluation.action,
+                            let label = super::policy_label(
                                 evaluation.matched_policy.as_deref(),
+                                deny_term,
                             );
                             explain.reasons.push(ExplainReason {
                                 code: "per_client_candidate_denied",
@@ -1178,14 +1175,8 @@ impl RibManager {
         // counts each route once, and double-counting explain calls
         // would skew both metrics (hence the IR-level non-counting
         // evaluation instead of `PolicyChain::evaluate_with_attribution`).
-        let (result, evaluation, deny_validation) =
+        let (result, evaluation, policy_label, deny_validation) =
             super::explain_export_evaluation(export_pol, &ctx);
-        let policy_label = super::policy_label_with_term(
-            export_pol,
-            &ctx,
-            evaluation.action,
-            evaluation.matched_policy.as_deref(),
-        );
         if result.action != PolicyAction::Permit {
             explain.decision = ExplainDecision::Deny;
             let (code, message) =
@@ -2707,18 +2698,9 @@ impl RibManager {
         checkpoint();
         target.record_eval(&evaluation, best.peer);
         if let Some(trace) = target.trace() {
-            // Keep Permit on the chain-default label. For Deny, enrich the
-            // deciding rpol member with its term through an explain-only
-            // statement-trace re-walk, pinned to agree with the evaluation by
-            // policy-crate agreement tests. TOML members carry no term name.
-            trace.policy_label = export_pol.map(|chain| {
-                policy_label_with_term(
-                    Some(chain),
-                    &ctx,
-                    evaluation.action,
-                    evaluation.matched_policy.as_deref(),
-                )
-            });
+            // Chain-default label for Permit; `<policy>:<term>` for an rpol
+            // Deny, from the evaluating walk itself.
+            trace.policy_label = trace.evaluated_label.take();
         }
         if policy_result.action != PolicyAction::Permit {
             if let Some(trace) = target.trace() {

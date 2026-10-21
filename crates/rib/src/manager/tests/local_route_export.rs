@@ -730,6 +730,35 @@ fn allowed_dataset(listed: bool) -> rustbgpd_policy::datasets::DatasetData {
     )))
 }
 
+/// rpol policy `p` from `policy`, bound to a prefix dataset `allowed` that
+/// lists the local route's prefix when `listed`.
+fn allowed_dataset_chain(
+    policy: &str,
+    listed: bool,
+) -> (PolicyChain, Arc<rustbgpd_policy::datasets::DatasetHandle>) {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::sets::SetStore;
+
+    let handle = Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        allowed_dataset(listed),
+    ));
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::clone(&handle));
+    let compiled =
+        rustbgpd_policy::rpol::RpolFile::parse(&format!("dataset prefix-set allowed\n{policy}"))
+            .unwrap()
+            .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+            .unwrap()
+            .unwrap();
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )]);
+    (chain, handle)
+}
+
 /// Peers 10.0.0.2..=4 whose export chain accepts the local route only while
 /// it is listed in the returned dataset, and the route itself.
 fn dataset_walk_setup() -> (
@@ -737,28 +766,10 @@ fn dataset_walk_setup() -> (
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
     Arc<rustbgpd_policy::datasets::DatasetHandle>,
 ) {
-    use rustbgpd_policy::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
-    use rustbgpd_policy::sets::SetStore;
-
-    let handle = Arc::new(DatasetHandle::new(
-        "allowed",
-        DatasetKind::Prefix,
-        allowed_dataset(true),
-    ));
-    let mut bindings = DatasetBindings::new();
-    bindings.insert(Arc::clone(&handle));
-    let compiled = rustbgpd_policy::rpol::RpolFile::parse(
-        "dataset prefix-set allowed\npolicy p { term t { if route.prefix in allowed { accept } reject } }",
-    )
-    .unwrap()
-    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
-    .unwrap()
-    .unwrap();
-    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
-        "p".to_string(),
-        Arc::new(compiled),
-    )]);
-
+    let (chain, handle) = allowed_dataset_chain(
+        "policy p { term t { if route.prefix in allowed { accept } reject } }",
+        true,
+    );
     let (mut manager, _tx) = manager();
     let receivers = [2, 3, 4]
         .into_iter()
@@ -826,6 +837,73 @@ fn export_dataset_swapped_while_a_page_evaluates_invalidates_the_page() {
     );
     // Without a refresh in the window, a restarted walk is served.
     assert!(query(&mut manager, v4_prefix(), 0, None, 2).is_ok());
+}
+
+/// An explain's deny label and its deny-validation codes come from the one
+/// walk that decided, so a dataset refresh landing after that walk cannot
+/// make the label name another term. The RPKI term decides; the hook then
+/// lists the prefix, which would make the earlier `listed` term decide a
+/// second walk. Both the single-best and the Add-Path explain arms are
+/// covered. Red proof: deriving the label from a separate statement-trace
+/// walk names `p:listed` beside the `rov` term's `rpki_invalid`.
+#[test]
+fn explain_deny_label_names_the_deciding_term_across_a_dataset_refresh() {
+    use crate::manager::distribution::AFTER_EXPORT_EXPLAIN_WALK;
+    use crate::update::ExportGateVerdict;
+
+    let (chain, handle) = allowed_dataset_chain(
+        "policy p { term listed { if route.prefix in allowed { reject } } \
+         term rov { if route.rpki == invalid { reject } } term rest { accept } }",
+        false,
+    );
+    let (mut manager, _tx) = manager();
+    let single_best = v4(1);
+    let add_path = v4(2);
+    let _single_rx = peer_up(
+        &mut manager,
+        single_best,
+        ipv4_sendable(),
+        Some(chain.clone()),
+        0,
+        64,
+    );
+    let _add_path_rx = peer_up(&mut manager, add_path, ipv4_sendable(), Some(chain), 2, 64);
+    let mut route = local_route(v4_prefix(), 0);
+    route.validation_state = RpkiValidation::Invalid;
+    inject(&mut manager, route);
+
+    for peer in [single_best, add_path] {
+        handle.refresh(allowed_dataset(false));
+        let refresh = Arc::clone(&handle);
+        AFTER_EXPORT_EXPLAIN_WALK.set(Some(Box::new(move || {
+            refresh.refresh(allowed_dataset(true));
+        })));
+        let (reply, mut explained) = oneshot::channel();
+        manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+            peer,
+            prefix: v4_prefix(),
+            rd: None,
+            labeled: false,
+            source: None,
+            reply,
+        });
+        let explain = explained.try_recv().unwrap().unwrap();
+        assert!(
+            AFTER_EXPORT_EXPLAIN_WALK.take().is_none(),
+            "the refresh must land after the walk for peer {peer}"
+        );
+        let stop = explain
+            .gates
+            .iter()
+            .find(|step| step.verdict == ExportGateVerdict::Stop)
+            .expect("export policy stops the route");
+        assert_eq!(
+            (stop.code, stop.detail.as_str()),
+            ("policy_denied", "export policy \"p:rov\" denied this route"),
+            "peer {peer}"
+        );
+        assert_eq!(explain.deny_validation, ["rpki_invalid"], "peer {peer}");
+    }
 }
 
 fn prefix_at(octet: u8) -> Prefix {
