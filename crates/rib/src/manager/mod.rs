@@ -1158,6 +1158,10 @@ pub struct RibManager {
     /// cohort admission (LAN-1826): the per-turn work bound.
     #[cfg(test)]
     join_cohort_tag_scans: usize,
+    /// Full-table dataset re-evaluation scans by group: an empty target set
+    /// must run none.
+    #[cfg(test)]
+    dataset_full_table_scans: usize,
     /// Grouped VPN member emissions and clean→dirty deferral warnings:
     /// an already-dirty member must cost neither on later passes.
     #[cfg(test)]
@@ -2481,6 +2485,8 @@ impl RibManager {
             full_pass_path: FullPassPath::Group,
             #[cfg(test)]
             join_cohort_tag_scans: 0,
+            #[cfg(test)]
+            dataset_full_table_scans: 0,
             #[cfg(test)]
             vpn_group_member_emits: 0,
             #[cfg(test)]
