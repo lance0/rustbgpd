@@ -2340,6 +2340,60 @@ async fn dataset_reevaluation_skips_member_with_deferred_registration() {
     assert!(dumped, "the deferred dump reads the current dataset");
 }
 
+/// LAN-2512: a dataset re-evaluation whose every target is unregistered
+/// returns before choosing a pass. The empty target set would otherwise
+/// qualify for the group pass and scan the whole table for nobody, delaying
+/// the deferred registrations queued behind it. The control batch with a
+/// registered target proves the counter observes the scan.
+#[tokio::test]
+async fn dataset_reevaluation_of_only_unregistered_targets_scans_nothing() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let registered = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 9));
+    let (registered_tx, _registered_rx) = mpsc::channel(64);
+    manager.handle_update(test_peer_up(registered, 1, registered_tx));
+    manager.handle_update(test_routes_received(
+        source,
+        vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(192, 168, 8, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 9),
+        )],
+    ));
+    drain_route_chunks(&mut manager);
+
+    let reevaluate = |manager: &mut RibManager, peers: Vec<PeerId>| {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        manager.handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+            peers,
+            swaps: None,
+            reply,
+        });
+        response
+    };
+    let unregistered = vec![
+        peer_v4(Ipv4Addr::new(10, 0, 0, 3)),
+        peer_v4(Ipv4Addr::new(10, 0, 0, 4)),
+    ];
+    assert_eq!(
+        reevaluate(&mut manager, unregistered).await.unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        manager.dataset_full_table_scans, 0,
+        "no table scan for nobody"
+    );
+
+    assert_eq!(
+        reevaluate(&mut manager, vec![registered]).await.unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        manager.dataset_full_table_scans, 1,
+        "control: a target scans"
+    );
+}
+
 /// LAN-2512: a reload during a mass reconnect finds every cohort member's
 /// registration deferred after the peer manager prepared the destination
 /// group. The all-skipped cohort releases that preparation (nothing will adopt

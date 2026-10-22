@@ -2415,6 +2415,10 @@ impl RibManager {
     /// against their own Adj-RIB-Out; dirty and channel-full members keep
     /// their ordinary resync and deferral handling.
     fn reevaluate_full_pass_by_group(&mut self, targets: &HashSet<PeerId>) {
+        #[cfg(test)]
+        {
+            self.dataset_full_table_scans += 1;
+        }
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let groups: HashSet<usize> = targets
