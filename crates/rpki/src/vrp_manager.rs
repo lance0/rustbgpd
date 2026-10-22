@@ -19,41 +19,66 @@ use crate::rtr_client::VrpUpdate;
 use crate::vrp::{VrpEntry, VrpTable};
 
 const CACHE_QUERY_CAPACITY: usize = 16;
+/// Maximum number of configured cache rows returned by one inventory query.
 pub const MAX_CACHE_ROWS: usize = 256;
 
+/// Most recent accepted contribution from one configured cache.
+///
+/// This state can remain present after a disconnect until it is flushed or
+/// expires. Counts describe this cache's retained data, not the merged table.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedCacheState {
+    /// RTR protocol version at the last accepted End of Data, when known.
     pub protocol_version: Option<u8>,
+    /// RTR session ID at the last accepted End of Data, when known.
     pub session_id: Option<u16>,
+    /// RTR serial at the last accepted End of Data, when known.
     pub serial: Option<u32>,
+    /// Distinct IPv4 VRPs retained from this cache.
     pub vrp_v4_count: usize,
+    /// Distinct IPv6 VRPs retained from this cache.
     pub vrp_v6_count: usize,
+    /// Customer ASNs with retained ASPA records from this cache.
     pub aspa_count: usize,
+    /// Whole seconds elapsed since the last accepted update's monotonic instant.
     pub age_seconds: u64,
 }
 
+/// Connection and accepted-data state for one configured cache server.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CacheState {
+    /// Configured cache address.
     pub server: SocketAddr,
+    /// Whether the RTR session is currently connected.
     pub connected: bool,
+    /// Retained accepted data, independent of current connectivity.
+    /// `None` means no update has been accepted, or data was flushed or expired.
     pub accepted: Option<AcceptedCacheState>,
 }
 
+/// Bounded snapshot of configured cache servers, ordered by socket address.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CacheList {
+    /// First [`MAX_CACHE_ROWS`] configured servers in address order.
     pub rows: Vec<CacheState>,
+    /// Configured servers excluded by the row limit.
     pub omitted: u64,
 }
 
+/// Inventory request delivered to the manager actor.
 pub struct CacheQuery {
     reply: oneshot::Sender<CacheList>,
 }
 
+/// Cloneable sender for cache inventory requests to a running [`VrpManager`].
 #[derive(Clone)]
 pub struct CacheQueryHandle(mpsc::Sender<CacheQuery>);
 
 impl CacheQueryHandle {
     /// Request the current bounded cache inventory.
+    ///
+    /// Awaits channel capacity and then the actor's reply without an internal
+    /// timeout. Callers needing a deadline must bound the whole operation.
     ///
     /// # Errors
     ///
@@ -69,6 +94,7 @@ impl CacheQueryHandle {
     }
 }
 
+/// The manager actor stopped before accepting or answering an inventory query.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("RPKI cache inventory actor is unavailable")]
 pub struct CacheQueryError;
@@ -156,9 +182,15 @@ pub(crate) enum EnhancedVrpUpdate {
     },
 }
 
+/// Cloneable sender used by RTR clients to report cache updates to the manager.
 #[derive(Clone)]
 pub struct CacheUpdateHandle(pub(crate) mpsc::Sender<EnhancedVrpUpdate>);
 
+/// Inventory state and receivers owned by one [`VrpManager`].
+///
+/// Attach this to the manager before running it. Retain update senders for
+/// active clients; closing all update senders and the legacy update channel
+/// ends the actor. Query senders alone do not keep it running.
 pub struct CacheInventoryAttachment {
     update_rx: mpsc::Receiver<EnhancedVrpUpdate>,
     query_rx: mpsc::Receiver<CacheQuery>,
@@ -181,6 +213,10 @@ struct AcceptedMetadata {
 }
 
 impl CacheInventoryAttachment {
+    /// Initialize rows for configured servers and return the attachment,
+    /// update sender, and query sender. Rows start disconnected with no
+    /// accepted data. Pass the attachment to
+    /// [`VrpManager::with_cache_inventory`] and run that manager to serve queries.
     #[must_use]
     pub fn new(
         servers: impl IntoIterator<Item = SocketAddr>,
@@ -292,6 +328,11 @@ impl VrpManager {
         }
     }
 
+    /// Attach cache inventory receivers and state before [`Self::run`].
+    /// Pass the update handle from [`CacheInventoryAttachment::new`] to RTR
+    /// clients and retain its query handle for inventory readers. Without
+    /// this attachment, inventory updates and queries have no receiver in
+    /// the manager.
     #[must_use]
     pub fn with_cache_inventory(mut self, attachment: CacheInventoryAttachment) -> Self {
         self.cache_inventory = Some(attachment);

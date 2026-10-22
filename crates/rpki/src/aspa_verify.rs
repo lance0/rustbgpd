@@ -33,14 +33,19 @@ type CompressedPath = SmallVec<[u32; 8]>;
 /// Proven customer/provider pair that made an ASPA path invalid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AspaInvalidHop {
+    /// ASN with an attestation that excludes the candidate provider.
     pub customer_asn: u32,
+    /// Candidate provider ASN absent from that customer's provider set.
     pub provider_asn: u32,
 }
 
 /// ASPA verdict plus the first proven `NotProviderPlus` hop, when one exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AspaVerificationResult {
+    /// Overall path verdict, including structural and session preconditions.
     pub state: AspaValidation,
+    /// First proven non-provider pair, only when that pair caused `Invalid`.
+    /// An `Invalid` verdict from a structural or session precondition has no hop.
     pub invalid_hop: Option<AspaInvalidHop>,
 }
 

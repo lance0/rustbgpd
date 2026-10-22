@@ -3,6 +3,7 @@ use std::collections::HashMap;
 /// A single ASPA record: a customer ASN and its authorized provider ASNs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AspaRecord {
+    /// Customer ASN whose provider set this record describes.
     pub customer_asn: u32,
     /// Authorized provider ASNs, sorted ascending and deduplicated.
     pub provider_asns: Vec<u32>,
@@ -77,6 +78,7 @@ impl AspaTable {
         self.records.len()
     }
 
+    /// Whether the table contains no customer ASPA records.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
