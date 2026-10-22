@@ -363,7 +363,7 @@ import_policy_chain = ["shared-import"]
         .map(|index| {
             let mut neighbor = template.clone();
             neighbor.address = format!("192.0.2.{}", index + 1);
-            neighbor.remote_asn = 65_002 + index;
+            neighbor.remote_asn = (65_002 + index).into();
             neighbor
         })
         .collect();

@@ -91,7 +91,7 @@ impl Config {
         if let Some(ref cid) = self.global.cluster_id {
             return Some(cid.parse().expect("validated in Config::load"));
         }
-        let static_rr = self.neighbors.iter().any(|n| {
+        let static_rr = self.neighbors.all().any(|n| {
             n.route_reflector_client.unwrap_or_else(|| {
                 n.peer_group
                     .as_deref()
@@ -154,12 +154,12 @@ impl Config {
     #[must_use]
     pub fn unpoliced_ebgp_neighbors(&self) -> Vec<UnpolicedEbgpNeighbor> {
         self.neighbors
-            .iter()
+            .all()
             .filter_map(|neighbor| {
                 let resolved = self.effective_policy_for_neighbor(neighbor, false).ok()?;
                 (resolved.external && !(resolved.import_explicit && resolved.export_explicit)).then(
                     || UnpolicedEbgpNeighbor {
-                        address: neighbor.address.clone(),
+                        address: neighbor.label(),
                         remote_asn: neighbor.remote_asn,
                         import_missing: !resolved.import_explicit,
                         export_missing: !resolved.export_explicit,
@@ -458,7 +458,7 @@ impl Config {
                 (&group.export_policy_chain, ChainDirection::Export),
             ]
         }))
-        .chain(self.neighbors.iter().flat_map(|neighbor| {
+        .chain(self.neighbors.all().flat_map(|neighbor| {
             [
                 (&neighbor.import_policy_chain, ChainDirection::Import),
                 (&neighbor.export_policy_chain, ChainDirection::Export),
@@ -506,10 +506,10 @@ impl Config {
         export_families: bool,
     ) -> Result<(), ConfigError> {
         let mut stores = ChunkedSetStore::default();
-        for neighbor in &self.neighbors {
+        for neighbor in self.neighbors.all() {
             let binding = || match &neighbor.peer_group {
-                Some(group) => format!("neighbor {} (peer_group {group:?})", neighbor.address),
-                None => format!("neighbor {}", neighbor.address),
+                Some(group) => format!("neighbor {} (peer_group {group:?})", neighbor.label()),
+                None => format!("neighbor {}", neighbor.label()),
             };
             self.validate_effective_chains_of(
                 neighbor,
@@ -557,7 +557,7 @@ impl Config {
         let (Some(binding), Some(export)) = (binding, chains.export.as_ref()) else {
             return Ok(());
         };
-        let Ok(peer_addr) = neighbor.address.parse::<IpAddr>() else {
+        let Ok(peer_addr) = neighbor.family_address() else {
             return Ok(());
         };
         let group = self.peer_group_for_neighbor(neighbor)?;
@@ -727,7 +727,7 @@ impl Config {
         // that knows about confederation sub-AS topology rather than
         // the simple `remote_asn != global.asn` shortcut. Tracked in
         // ROADMAP under "RFC 8326 confederation gating".
-        let is_ebgp = neighbor.remote_asn != self.global.asn;
+        let is_ebgp = neighbor.remote_asn.resolve(self.global.asn) != self.global.asn;
         let import =
             if (self.global.honor_graceful_shutdown || self.global.honor_blackhole) && is_ebgp {
                 let mut chain = import.unwrap_or_default();
@@ -751,7 +751,8 @@ impl Config {
         // so it is always external; `external_pinned` keeps a session that was
         // accepted through such a range external after OPEN overwrote the
         // sentinel with a learned ASN.
-        let external = external_pinned || self.rfc8212_external_asn(neighbor.remote_asn);
+        let external = external_pinned
+            || self.rfc8212_external_asn(neighbor.remote_asn.resolve(self.global.asn));
         let enforced = self.rfc8212_posture().policy_effective && external;
         // Substituting the whole direction (rather than prepending) keeps the
         // reserved deny unambiguous: nothing an operator can name or configure
@@ -931,7 +932,7 @@ impl Config {
         clippy::too_many_lines,
         reason = "neighbor resolution centralizes inheritance, validation, and transport projection"
     )]
-    fn resolve_neighbor_pinned_with_store(
+    pub(super) fn resolve_neighbor_pinned_with_store(
         &self,
         neighbor: &Neighbor,
         external_pinned: bool,
@@ -952,7 +953,12 @@ impl Config {
         let families = Self::resolved_families(neighbor, group, peer_addr)?;
         let add_path = Self::resolved_add_path(neighbor, group);
 
-        let mut peer = PeerConfig::new(self.global.asn, neighbor.remote_asn, router_id);
+        let mut peer = PeerConfig::new(
+            self.global.asn,
+            neighbor.remote_asn.resolve(self.global.asn),
+            router_id,
+        );
+        peer.remote_asn_external = neighbor.remote_asn.is_external();
         peer.hold_time = neighbor
             .hold_time
             .or_else(|| group.and_then(|g| g.hold_time))
@@ -1292,7 +1298,7 @@ impl Config {
             min_hold_time: None,
             address: addr.to_string(),
             interface: None,
-            remote_asn,
+            remote_asn: super::RemoteAsn::Asn(remote_asn),
             description: Some(description.to_string()),
             peer_group: Some(peer_group_name.to_string()),
             hold_time: None,
@@ -1648,8 +1654,9 @@ pub fn is_reserved_rfc8212_deny(chain: Option<&PolicyChain>, name: &str) -> bool
 /// direction. Produced by [`Config::unpoliced_ebgp_neighbors`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnpolicedEbgpNeighbor {
+    /// The address, or `interface <name>` for an interface-only neighbor.
     pub address: String,
-    pub remote_asn: u32,
+    pub remote_asn: super::RemoteAsn,
     pub import_missing: bool,
     pub export_missing: bool,
 }

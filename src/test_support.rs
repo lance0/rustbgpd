@@ -93,7 +93,10 @@ mod tier_auth_tests {
         let config = Config::load_toml_with_diagnostics(&augmented, "tier auth helper").unwrap();
 
         assert_eq!(config.neighbors[0].address, "192.0.2.1");
-        assert_eq!(config.neighbors[0].remote_asn, 65001);
+        assert_eq!(
+            config.neighbors[0].remote_asn,
+            crate::config::RemoteAsn::Asn(65001)
+        );
         assert_tier_authorized_test_config(&config);
     }
 

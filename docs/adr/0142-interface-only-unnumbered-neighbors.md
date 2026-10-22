@@ -113,6 +113,12 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   optional GTSM. Deployments that require TCP-layer authentication on every
   session cannot use this mode yet.
 
+Implementation note (2026-10-22): the first implementation also rejects
+`ttl_security` (GTSM) on interface-only neighbors. The listener's per-peer
+GTSM selectors are built from configured addresses, so a learned address
+would otherwise be accepted without the check. Optional GTSM returns when the
+learned endpoint is installed in that inventory.
+
 ### Discovery
 
 - **Primary: Router Advertisements.** One raw ICMPv6 socket receives RAs on
@@ -309,6 +315,12 @@ purge. Only ordinary transport loss with GR or LLGR retention keeps a
 reservation alive. That includes the case where the bound source's RA expires
 and the TCP session then fails: the neighbor may be unbound, but its old
 address stays reserved to it until its retained routes are gone.
+
+Implementation note (2026-10-22): the first implementation releases an
+unbound neighbor's reservation only when the neighbor rebinds or its link is
+confirmed down, not when its retained GR or LLGR state retires. Until that
+release lands, a peer that goes silent on a link that stays up keeps its last
+address reserved, and the neighbor keeps redialing it.
 
 That covers the common Clos shape, where each fabric link goes to a different
 switch with its own MAC. **Limitation:** parallel links to the same device

@@ -67,8 +67,13 @@ pub fn default_send_hold_time(hold_time: u16) -> u32 {
 pub struct PeerConfig {
     /// Our ASN (4-byte).
     pub local_asn: u32,
-    /// Expected remote ASN (4-byte).
+    /// Expected remote ASN (4-byte). `0` accepts any ASN (dynamic
+    /// neighbors) unless [`Self::remote_asn_external`] is set.
     pub remote_asn: u32,
+    /// `remote_asn = "external"`: accept any ASN in OPEN except `local_asn`.
+    /// This is its own check: it does not rely on the accept-any `0`, which
+    /// also admits iBGP. `remote_asn` is not compared while it is set.
+    pub remote_asn_external: bool,
     /// Our router ID.
     pub local_router_id: Ipv4Addr,
     /// Proposed hold time in seconds (0 = no keepalives, or >= 3;
@@ -137,6 +142,7 @@ impl Default for PeerConfig {
         Self {
             local_asn: 0,
             remote_asn: 0,
+            remote_asn_external: false,
             local_router_id: Ipv4Addr::UNSPECIFIED,
             hold_time: DEFAULT_HOLD_TIME,
             min_hold_time: None,
@@ -408,6 +414,7 @@ pub(crate) mod test_support {
         PeerConfig {
             local_asn: 65001,
             remote_asn: 65002,
+            remote_asn_external: false,
             local_router_id: Ipv4Addr::new(10, 0, 0, 1),
             hold_time: 90,
             min_hold_time: None,

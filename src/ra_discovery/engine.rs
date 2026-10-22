@@ -387,8 +387,13 @@ impl Engine {
     }
 
     /// The neighbor's session reached Established: freeze the binding.
+    /// Ignored without a binding: Established means "the bound peer is
+    /// Established", and a report queued from a session retired by carrier
+    /// loss must not freeze an interface that has nothing bound.
     pub(crate) fn session_established(&mut self, name: &str) {
-        if let Some(iface) = self.interfaces.get_mut(name) {
+        if let Some(iface) = self.interfaces.get_mut(name)
+            && iface.binding.is_some()
+        {
             iface.established = true;
         }
     }

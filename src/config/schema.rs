@@ -97,9 +97,10 @@ pub struct Config {
     /// authorization until operators opt into later ADR-0064 slices.
     #[serde(default)]
     pub security: SecurityConfig,
-    /// Statically configured BGP neighbors.
+    /// Statically configured BGP neighbors, including interface-only
+    /// neighbors (an `interface` and no `address`).
     #[serde(default)]
-    pub neighbors: Vec<Neighbor>,
+    pub neighbors: super::NeighborList,
     /// Named peer groups providing inherited defaults for neighbors.
     #[serde(default, serialize_with = "serialize_sorted_hash_map")]
     pub peer_groups: HashMap<String, PeerGroupConfig>,
@@ -914,6 +915,10 @@ pub struct Global {
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,
+    /// Router Advertisement settings for interface-only unnumbered
+    /// neighbors (ADR-0142). Restart-required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unnumbered: Option<super::UnnumberedConfig>,
     /// Telemetry and control-plane listeners (Prometheus, gRPC,
     /// looking glass) plus logging format.
     pub telemetry: TelemetryConfig,
@@ -1183,12 +1188,17 @@ macro_rules! define_neighbor_and_peer_group_configs {
         #[serde(deny_unknown_fields)]
         #[schemars(transform = add_legacy_max_prefix_key_properties)]
         pub struct Neighbor {
-            /// Peer IP address (IPv4 or IPv6).
+            /// Peer IP address (IPv4 or IPv6). Omit it, and name only the
+            /// `interface`, for an interface-only unnumbered neighbor whose
+            /// IPv6 link-local address is discovered (ADR-0142).
+            #[serde(default, skip_serializing_if = "String::is_empty")]
             pub address: String,
             /// Interface name required for IPv6 link-local / BGP unnumbered peers.
             pub interface: Option<String>,
-            /// Peer autonomous system number. Equal to `global.asn` for iBGP.
-            pub remote_asn: u32,
+            /// Peer autonomous system number, or `"external"` (any ASN except
+            /// `global.asn`) or `"internal"` (`global.asn`). Equal to
+            /// `global.asn` for iBGP.
+            pub remote_asn: super::RemoteAsn,
             /// Free-form operator description.
             pub description: Option<String>,
             /// Optional peer-group reference for inherited transport/policy defaults.
@@ -3975,6 +3985,8 @@ pub enum ConfigError {
     InvalidLocalAsn { value: u32 },
     #[error("invalid router_id {value:?}: {reason}")]
     InvalidRouterId { value: String, reason: String },
+    #[error("invalid global.unnumbered: {reason}")]
+    InvalidUnnumbered { reason: String },
     #[error("invalid global.listen_addresses: {reason}")]
     InvalidListenAddresses { reason: String },
     #[error("invalid neighbor address {value:?}: {reason}")]

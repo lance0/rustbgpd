@@ -70,7 +70,7 @@ impl ConfiguredOwners {
                 let address = neighbor.address.parse().ok()?;
                 Some(OwnerIdentity::Static(
                     PeerKey::new(address, neighbor.interface.clone()),
-                    neighbor.remote_asn,
+                    neighbor.remote_asn.resolve(config.global.asn),
                 ))
             })
             .chain(config.dynamic_neighbors.iter().filter_map(|range| {

@@ -122,9 +122,10 @@ impl EffectivePeerModes {
     fn try_for_neighbor(
         neighbor: &Neighbor,
         group: Option<&PeerGroupConfig>,
+        local_asn: u32,
     ) -> Result<Self, String> {
         Ok(Self {
-            remote_asn: neighbor.remote_asn,
+            remote_asn: neighbor.remote_asn.resolve(local_asn),
             route_reflector_client: neighbor
                 .route_reflector_client
                 .or_else(|| group.and_then(|g| g.route_reflector_client))
@@ -746,6 +747,15 @@ impl Config {
             let mut seen = std::collections::HashSet::new();
             let mut seen_link_local_addrs = std::collections::HashSet::new();
             for neighbor in &self.neighbors {
+                if neighbor.address.is_empty() {
+                    return Err(ConfigError::InvalidNeighborConfig {
+                        address: String::new(),
+                        field: "address".to_string(),
+                        reason: "address is required unless interface names an \
+                                 interface-only neighbor"
+                            .to_string(),
+                    });
+                }
                 let addr = neighbor.address.parse::<IpAddr>().map_err(|e| {
                     ConfigError::InvalidNeighborAddress {
                         value: neighbor.address.clone(),
@@ -811,10 +821,13 @@ impl Config {
             }
         }
 
-        for neighbor in &self.neighbors {
-            if neighbor.remote_asn == 0 {
+        self.validate_interface_only_neighbors()?;
+
+        for neighbor in self.neighbors.all() {
+            let remote_asn = neighbor.remote_asn.resolve(self.global.asn);
+            if neighbor.remote_asn == super::RemoteAsn::Asn(0) {
                 return Err(ConfigError::InvalidNeighborConfig {
-                    address: neighbor.address.clone(),
+                    address: neighbor.label(),
                     field: "remote_asn".to_string(),
                     reason: "must be > 0 for static neighbors".to_string(),
                 });
@@ -828,14 +841,14 @@ impl Config {
                 .unwrap_or(false);
             if neighbor.ttl_security_hops.is_some() && !effective_ttl_security {
                 return Err(ConfigError::InvalidNeighborConfig {
-                    address: neighbor.address.clone(),
+                    address: neighbor.label(),
                     field: "ttl_security_hops".to_string(),
                     reason: "requires effective ttl_security = true".to_string(),
                 });
             }
 
             validate_max_prefix_modes(
-                &neighbor.address,
+                &neighbor.label(),
                 neighbor
                     .max_prefix_action
                     .as_deref()
@@ -853,9 +866,9 @@ impl Config {
                     .or_else(|| group.and_then(|group| group.max_prefix_warning_percent)),
             )?;
             if let Some(mss) = neighbor.tcp_mss {
-                validate_tcp_mss(&neighbor.address, mss)?;
+                validate_tcp_mss(&neighbor.label(), mss)?;
             }
-            validate_admin_down_reason(&neighbor.address, neighbor.admin_down_reason.as_deref())?;
+            validate_admin_down_reason(&neighbor.label(), neighbor.admin_down_reason.as_deref())?;
 
             if let Some(reason) = neighbor
                 .md5_password
@@ -863,7 +876,7 @@ impl Config {
                 .and_then(md5_password_length_error)
             {
                 return Err(ConfigError::InvalidNeighborConfig {
-                    address: neighbor.address.clone(),
+                    address: neighbor.label(),
                     field: "md5_password".to_string(),
                     reason: reason.to_string(),
                 });
@@ -871,21 +884,21 @@ impl Config {
             if let Some(tcp_ao) = &neighbor.tcp_ao {
                 if neighbor.md5_password.is_some() {
                     return Err(ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
+                        address: neighbor.label(),
                         field: "tcp_ao".to_string(),
                         reason: "tcp_ao is mutually exclusive with md5_password".to_string(),
                     });
                 }
                 if group.and_then(|g| g.md5_password.as_ref()).is_some() {
                     return Err(ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
+                        address: neighbor.label(),
                         field: "tcp_ao".to_string(),
                         reason:
                             "tcp_ao is mutually exclusive with inherited peer-group md5_password"
                                 .to_string(),
                     });
                 }
-                validate_tcp_ao_config(&neighbor.address, tcp_ao)?;
+                validate_tcp_ao_config(&neighbor.label(), tcp_ao)?;
             }
 
             EffectiveHoldTimers::for_neighbor(neighbor, group).validate()?;
@@ -902,19 +915,17 @@ impl Config {
                 return Err(ConfigError::InvalidSlowPeerThreshold { value });
             }
 
-            let modes =
-                EffectivePeerModes::try_for_neighbor(neighbor, group).map_err(|reason| {
-                    ConfigError::InvalidOrrVantage {
-                        reason: format!("neighbor {}: {reason}", neighbor.address),
-                    }
+            let modes = EffectivePeerModes::try_for_neighbor(neighbor, group, self.global.asn)
+                .map_err(|reason| ConfigError::InvalidOrrVantage {
+                    reason: format!("neighbor {}: {reason}", neighbor.label()),
                 })?;
             validate_effective_peer_modes(
                 modes,
                 self.global.asn,
                 &self.global.router_id,
-                &neighbor.address,
+                &neighbor.label(),
             )
-            .map_err(|violation| violation.into_static_error(&neighbor.address))?;
+            .map_err(|violation| violation.into_static_error(&neighbor.label()))?;
 
             let dampening = neighbor
                 .route_flap_dampening
@@ -926,22 +937,19 @@ impl Config {
                         .is_some_and(|p| p.apply_to_ebgp)
                 });
             let reason = if neighbor.route_flap_dampening == Some(true)
-                && neighbor.remote_asn == self.global.asn
+                && remote_asn == self.global.asn
             {
                 Some("cannot be enabled on an iBGP neighbor (RFC 2439 section 5)")
             } else if neighbor.route_flap_dampening == Some(true) && modes.route_server_client {
                 Some("cannot be enabled on a route-server client")
-            } else if dampening
-                && neighbor.remote_asn != self.global.asn
-                && !modes.route_server_client
-            {
+            } else if dampening && remote_asn != self.global.asn && !modes.route_server_client {
                 Some("runtime integration is not implemented; effective enablement is unavailable")
             } else {
                 None
             };
             if let Some(reason) = reason {
                 return Err(ConfigError::InvalidNeighborConfig {
-                    address: neighbor.address.clone(),
+                    address: neighbor.label(),
                     field: "route_flap_dampening".to_string(),
                     reason: reason.to_string(),
                 });
@@ -956,14 +964,14 @@ impl Config {
             {
                 validate_discard_path_attributes(codes).map_err(|reason| {
                     ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
+                        address: neighbor.label(),
                         field: "discard_path_attributes".to_string(),
                         reason,
                     }
                 })?;
                 if !modes.route_server_client {
                     return Err(ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
+                        address: neighbor.label(),
                         field: "discard_path_attributes".to_string(),
                         reason: "discard_path_attributes requires route_server_client = true"
                             .to_string(),
@@ -977,7 +985,7 @@ impl Config {
                 .or_else(|| group.and_then(|g| g.remove_private_as.as_deref()))
             {
                 validate_remove_private_as_mode(mode, None)?;
-                if neighbor.remote_asn == self.global.asn {
+                if remote_asn == self.global.asn {
                     return Err(ConfigError::InvalidRemovePrivateAs {
                         reason: format!(
                             "remove_private_as requires eBGP (remote_asn {} == local asn {})",
@@ -1005,7 +1013,7 @@ impl Config {
                     .unwrap_or(false)
             {
                 return Err(ConfigError::InvalidNeighborConfig {
-                    address: neighbor.address.clone(),
+                    address: neighbor.label(),
                     field: "link_local_next_hop".to_string(),
                     reason: "link_local_next_hop = true requires an interface-bound IPv6 \
                              link-local neighbor"
@@ -1020,22 +1028,14 @@ impl Config {
                 .or_else(|| group.and_then(|g| g.disable_ipv4_unicast))
                 .unwrap_or(false);
             if disable_ipv4_unicast {
-                // Address parse was validated earlier in this function.
-                let peer_addr: IpAddr =
-                    neighbor
-                        .address
-                        .parse()
-                        .map_err(|e| ConfigError::InvalidNeighborAddress {
-                            value: neighbor.address.clone(),
-                            reason: format!("{e}"),
-                        })?;
+                let peer_addr = neighbor.family_address()?;
                 let families = Self::resolved_families(neighbor, group, peer_addr)?;
                 if families
                     .iter()
                     .all(|f| *f == (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast))
                 {
                     return Err(ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
+                        address: neighbor.label(),
                         field: "disable_ipv4_unicast".to_string(),
                         reason: "disable_ipv4_unicast = true requires at least one \
                                  non-ipv4_unicast family (effective families resolve \
@@ -1047,7 +1047,7 @@ impl Config {
 
             let required_families = Self::resolved_required_families(neighbor, group)?;
             if !required_families.is_empty() {
-                let peer_addr: IpAddr = neighbor.address.parse().expect("validated above");
+                let peer_addr = neighbor.family_address()?;
                 let mut effective = Self::resolved_families(neighbor, group, peer_addr)?;
                 if disable_ipv4_unicast {
                     effective.retain(|family| {
@@ -1059,7 +1059,7 @@ impl Config {
                     .find(|family| !effective.contains(family))
                 {
                     return Err(ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
+                        address: neighbor.label(),
                         field: "required_families".to_string(),
                         reason: format!(
                             "required family {:?}/{:?} is not in the effective configured family set",
@@ -1105,7 +1105,7 @@ impl Config {
                 return Err(ConfigError::InvalidPolicyEntry {
                     reason: format!(
                         "neighbor {}: import_policy and import_policy_chain are mutually exclusive",
-                        neighbor.address
+                        neighbor.label()
                     ),
                 });
             }
@@ -1113,7 +1113,7 @@ impl Config {
                 return Err(ConfigError::InvalidPolicyEntry {
                     reason: format!(
                         "neighbor {}: export_policy and export_policy_chain are mutually exclusive",
-                        neighbor.address
+                        neighbor.label()
                     ),
                 });
             }
@@ -1141,7 +1141,7 @@ impl Config {
                 store,
             )?;
             self.validate_conditional_advertisement_attachments(
-                &neighbor.address,
+                &neighbor.label(),
                 &neighbor.conditional_advertisements,
             )?;
         }
@@ -1740,7 +1740,7 @@ impl Config {
                 .iter()
                 .filter_map(|range| self.peer_groups.get(&range.peer_group))
         };
-        let any_vantage = self.neighbors.iter().any(|n| {
+        let any_vantage = self.neighbors.all().any(|n| {
             n.orr_vantage
                 .as_deref()
                 .or_else(|| group_of(n).and_then(|g| g.orr_vantage.as_deref()))
@@ -1749,7 +1749,7 @@ impl Config {
         if !any_vantage {
             return false;
         }
-        let static_linkstate = self.neighbors.iter().any(|n| {
+        let static_linkstate = self.neighbors.all().any(|n| {
             let own = &n.families;
             let effective: &[String] = if own.is_empty() {
                 group_of(n).map_or(&[], |g| g.families.as_slice())
@@ -1865,7 +1865,7 @@ impl Config {
     /// [`EOR_GRACE_ADVISORY_CEILING_SECS`], with that value.
     pub(crate) fn eor_grace_above_ceiling(&self) -> Vec<(String, u16)> {
         self.neighbors
-            .iter()
+            .all()
             .filter_map(|neighbor| {
                 let grace = neighbor.gr_eor_grace_time.or_else(|| {
                     neighbor
@@ -1874,7 +1874,7 @@ impl Config {
                         .and_then(|name| self.peer_groups.get(name))
                         .and_then(|group| group.gr_eor_grace_time)
                 })?;
-                (grace > EOR_GRACE_ADVISORY_CEILING_SECS).then(|| (neighbor.address.clone(), grace))
+                (grace > EOR_GRACE_ADVISORY_CEILING_SECS).then(|| (neighbor.label(), grace))
             })
             .collect()
     }

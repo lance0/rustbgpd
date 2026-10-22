@@ -57,6 +57,60 @@ mod recovery;
 mod rotation;
 pub(crate) use rotation::TCP_AO_AWAITING_PEER_PREFIX;
 mod snapshot;
+#[cfg(target_os = "linux")]
+mod unnumbered;
+/// Interface-only neighbors need Linux; configuration validation refuses
+/// them elsewhere, so this stand-in is never constructed.
+#[cfg(not(target_os = "linux"))]
+mod unnumbered {
+    use rustbgpd_api::peer_types::PeerKey;
+    use std::net::IpAddr;
+
+    pub(crate) enum Unnumbered {}
+    pub(crate) enum DiscoveryEvent {}
+
+    impl Unnumbered {
+        pub(super) async fn shutdown(self) {
+            match self {}
+        }
+    }
+
+    impl super::PeerManager {
+        pub(super) async fn receive_discovery_event(
+            _: &mut Option<Box<Unnumbered>>,
+        ) -> Option<DiscoveryEvent> {
+            std::future::pending().await
+        }
+        pub(super) fn handle_discovery_event(&mut self, event: DiscoveryEvent) {
+            match event {}
+        }
+        pub(super) fn unnumbered_reconcile_due(&self) -> bool {
+            false
+        }
+        pub(super) async fn reconcile_unnumbered(&mut self) {}
+        pub(super) fn feed_unnumbered_links(&mut self) {}
+        pub(super) fn note_unnumbered_session_state(
+            &mut self,
+            _: &PeerKey,
+            _: rustbgpd_fsm::SessionState,
+            _: rustbgpd_fsm::SessionState,
+        ) {
+        }
+        pub(super) fn note_peer_removed(&mut self) {}
+        pub(super) fn note_unnumbered_session_idle(&mut self, _: &PeerKey) {}
+        pub(super) fn unnumbered_retry_at(&self) -> Option<tokio::time::Instant> {
+            None
+        }
+        pub(super) fn unnumbered_retry_due(&mut self) {}
+        pub(super) fn unnumbered_holder_of(&self, _: IpAddr, _: &PeerKey) -> Option<&str> {
+            None
+        }
+        pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
+            None
+        }
+    }
+}
+pub(crate) use unnumbered::Unnumbered;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod update_group_plan;
@@ -615,6 +669,9 @@ pub struct PeerManager {
     /// Fast external failover: the link monitor's snapshot feed and the
     /// sessions whose `CheckLinks` is waiting for mailbox space.
     link_check: link_failover::LinkCheckDelivery,
+    /// ADR-0142 interface-only neighbors: Router Advertisement discovery and
+    /// the peers created for its bindings. `None` when none is configured.
+    unnumbered: Option<Box<Unnumbered>>,
     /// Per-process key for the optimistic config-transaction snapshot token.
     /// Seeded once at construction; never leaves the process. Keeps the token
     /// from acting as an offline oracle for config secrets. See
@@ -685,6 +742,7 @@ impl PeerManager {
                     listen_addresses: None,
                     cluster_id: cluster_id.map(|id| id.to_string()),
                     runtime_state_dir: "/tmp/rustbgpd-tests".to_string(),
+                    unnumbered: None,
                     telemetry: crate::config::TelemetryConfig {
                         prometheus_addr: Some("127.0.0.1:9179".to_string()),
                         dataplane_readiness: false,
@@ -719,7 +777,7 @@ impl PeerManager {
                 // via reload / config-bridge with its own
                 // [security.grpc] block.
                 security: crate::config::SecurityConfig::default(),
-                neighbors: Vec::new(),
+                neighbors: Vec::new().into(),
                 peer_groups: HashMap::new(),
                 policy: crate::config::PolicyConfig::default(),
                 flowspec: crate::config::FlowSpecConfig::default(),
@@ -1290,6 +1348,7 @@ impl PeerManager {
             current_config,
             bfd_coupling: None,
             link_check: link_failover::LinkCheckDelivery::default(),
+            unnumbered: None,
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             accepted_rx: None,
             #[cfg(test)]
@@ -1348,6 +1407,7 @@ impl PeerManager {
             config.families.clone()
         };
         let mut peer = PeerConfig::new(self.local_asn, config.remote_asn, self.router_id);
+        peer.remote_asn_external = config.remote_asn_external;
         peer.hold_time = config.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
         peer.min_hold_time = config.min_hold_time;
         // RFC 9687 §6 default: greater of 8 minutes or 2× hold time.
@@ -1627,6 +1687,9 @@ impl PeerManager {
                         };
                         if self.peer_group_policy_only_update(&name, &definition) {
                             self.apply_policy_change_owned(event, None).await
+                        } else if let Err(error) = self.refuse_interface_only_session_change(&event)
+                        {
+                            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
                         } else {
                             let affected: Vec<IpAddr> = self
                                 .current_config
@@ -2352,6 +2415,8 @@ impl PeerManager {
                 };
                 let result = if self.peer_group_policy_only_update(&name, &definition) {
                     self.apply_policy_change(event, None).await
+                } else if let Err(error) = self.refuse_interface_only_session_change(&event) {
+                    Err(error)
                 } else {
                     let affected: Vec<IpAddr> = self
                         .current_config
@@ -2477,6 +2542,10 @@ impl PeerManager {
                         error!(%error, "peer shutdown worker failed");
                     }
                 }
+                // Final lifetime-0 Router Advertisements (RFC 4861 §6.2.5).
+                if let Some(unnumbered) = self.unnumbered.take() {
+                    unnumbered.shutdown().await;
+                }
                 return ControlFlow::Break(());
             }
         }
@@ -2539,12 +2608,16 @@ impl PeerManager {
             if self.conditional_reconcile_pending {
                 self.reconcile_conditional_advertisements().await;
             }
+            if self.unnumbered_reconcile_due() {
+                self.reconcile_unnumbered().await;
+            }
             let bfd_retry_at = self.bfd_retry_deadline();
             let evpn_recovery_retry_at = self.evpn_recovery_retry_at;
             let link_check_retry_at = self.link_check.retry_at;
             let bfd_scope_retry_at = self.link_check.bfd_retry_at;
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
+            let unnumbered_retry_at = self.unnumbered_retry_at();
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
@@ -2806,6 +2879,17 @@ impl PeerManager {
                         self.handle_links_changed();
                     }
                 }
+                event = Self::receive_discovery_event(&mut self.unnumbered) => {
+                    if let Some(event) = event {
+                        self.handle_discovery_event(event);
+                    }
+                }
+                () = async {
+                    match unnumbered_retry_at {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => self.unnumbered_retry_due(),
                 () = async {
                     if let Some(interval) = bmp_stats_interval.as_mut() {
                         interval.tick().await;

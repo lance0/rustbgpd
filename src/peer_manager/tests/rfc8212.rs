@@ -410,7 +410,7 @@ async fn owned_rfc8212_preflight_rejection_is_failed_precondition_without_mutati
     mgr.current_config.global.ebgp_requires_policy = Some(true);
     mgr.current_config.policy.import_chain.clear();
     mgr.current_config.policy.export_chain.clear();
-    mgr.current_config.neighbors = vec![config_neighbor(addr, 65002)];
+    *mgr.current_config.neighbors = vec![config_neighbor(addr, 65002)];
     let setup = mgr
         .apply_policy_change_owned(
             ConfigEvent::SetPolicy {

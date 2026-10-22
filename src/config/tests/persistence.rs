@@ -865,7 +865,7 @@ fn canonical_projection_borrows_every_large_config_field() {
     let source = include_str!("../canonical.rs");
     for field in [
         "security: Option<&'a SecurityConfig>",
-        "neighbors: &'a [Neighbor]",
+        "neighbors: &'a NeighborList",
         "peer_groups: &'a std::collections::HashMap",
         "policy: Option<&'a PolicyConfig>",
         "dynamic_neighbors: &'a [DynamicNeighborConfig]",

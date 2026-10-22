@@ -333,20 +333,20 @@ pub fn policy_references(config: &Config, name: &str) -> Vec<String> {
     if config.policy.export_chain.iter().any(|entry| entry == name) {
         refs.push("global export_chain".to_string());
     }
-    for neighbor in &config.neighbors {
+    for neighbor in config.neighbors.all() {
         if neighbor
             .import_policy_chain
             .iter()
             .any(|entry| entry == name)
         {
-            refs.push(format!("neighbor {} import_policy_chain", neighbor.address));
+            refs.push(format!("neighbor {} import_policy_chain", neighbor.label()));
         }
         if neighbor
             .export_policy_chain
             .iter()
             .any(|entry| entry == name)
         {
-            refs.push(format!("neighbor {} export_policy_chain", neighbor.address));
+            refs.push(format!("neighbor {} export_policy_chain", neighbor.label()));
         }
     }
     let mut conditional: Vec<_> = config.policy.conditional_advertisements.iter().collect();
@@ -381,20 +381,20 @@ pub fn neighbor_set_references(config: &Config, name: &str) -> Vec<String> {
         }
     }
 
-    for neighbor in &config.neighbors {
+    for neighbor in config.neighbors.all() {
         if neighbor
             .import_policy
             .iter()
             .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
         {
-            refs.push(format!("neighbor {} import_policy", neighbor.address));
+            refs.push(format!("neighbor {} import_policy", neighbor.label()));
         }
         if neighbor
             .export_policy
             .iter()
             .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
         {
-            refs.push(format!("neighbor {} export_policy", neighbor.address));
+            refs.push(format!("neighbor {} export_policy", neighbor.label()));
         }
     }
 
@@ -422,9 +422,9 @@ pub fn neighbor_set_references(config: &Config, name: &str) -> Vec<String> {
 #[must_use]
 pub fn peer_group_references(config: &Config, name: &str) -> Vec<String> {
     let mut refs = Vec::new();
-    for neighbor in &config.neighbors {
+    for neighbor in config.neighbors.all() {
         if neighbor.peer_group.as_deref() == Some(name) {
-            refs.push(format!("neighbor {}", neighbor.address));
+            refs.push(format!("neighbor {}", neighbor.label()));
         }
     }
     for range in &config.dynamic_neighbors {
@@ -506,7 +506,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         tcp_mss: None,
         address: raw.address.to_string(),
         interface: raw.interface.clone(),
-        remote_asn: raw.remote_asn,
+        remote_asn: raw.remote_asn.into(),
         description: raw.description.clone(),
         peer_group: raw.peer_group.clone(),
         // Runtime neighbor creation has no admin-state field; the peer
@@ -619,7 +619,11 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     tcp_mss: cfg.tcp_mss,
                     address: cfg.address.to_string(),
                     interface: cfg.interface.clone(),
-                    remote_asn: cfg.remote_asn,
+                    remote_asn: if cfg.remote_asn_external {
+                        crate::config::RemoteAsn::External
+                    } else {
+                        cfg.remote_asn.into()
+                    },
                     description: Some(cfg.description.clone()),
                     peer_group: cfg.peer_group.clone(),
                     admin_down: cfg.admin_down.is_some().then_some(true),
@@ -989,10 +993,7 @@ pub fn neighbor_policy_chains_from_config(
     config: &Config,
     peer: &PeerKey,
 ) -> Option<PolicyChainAssignment> {
-    let address = peer.address.to_string();
-    let neighbor = config.neighbors.iter().find(|neighbor| {
-        neighbor.address == address && neighbor.interface.as_deref() == peer.interface.as_deref()
-    })?;
+    let neighbor = config.neighbor_record(peer)?;
     Some(PolicyChainAssignment {
         import_policy_names: neighbor.import_policy_chain.clone(),
         export_policy_names: neighbor.export_policy_chain.clone(),
@@ -1485,6 +1486,7 @@ peer_group = "fabric"
             interface: None,
             scope_id: None,
             remote_asn: 65003,
+            remote_asn_external: false,
             description: "protected".to_string(),
             peer_group: None,
             hold_time: None,
