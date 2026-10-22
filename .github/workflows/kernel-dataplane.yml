@@ -1011,29 +1011,11 @@ jobs:
       # running kernel, which can lag the kernel in the apt mirror
       # (actions/runner-images #7570 / #7587). Load it best-effort on the host
       # (the --cap-add netns containers share the host kernel) and report
-      # availability so the L3 selectors skip rather than fail on mirror skew.
+      # availability so the L3 selectors skip rather than fail on mirror skew
+      # or a slow mirror.
       - name: Load vrf kernel module (for the L3 netns selectors)
         id: vrf
-        run: |
-          set -uo pipefail
-          vrf_available=false
-          if sudo modprobe vrf 2>/dev/null; then
-            vrf_available=true
-          else
-            sudo timeout 240 apt-get -o Acquire::Retries=3 \
-              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-              install -y "linux-modules-extra-$(uname -r)" \
-              || echo "::warning::linux-modules-extra-$(uname -r) unavailable or slow"
-            if sudo modprobe vrf 2>/dev/null; then
-              vrf_available=true
-            fi
-          fi
-          if [ "$vrf_available" = true ]; then
-            echo "::notice::vrf available; L3 netns selectors will run"
-          else
-            echo "::warning::vrf unavailable on this runner (kernel $(uname -r) likely ahead of linux-modules-extra in the apt mirror); L3 netns selectors will skip"
-          fi
-          echo "vrf-available=${vrf_available}" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/load-vrf-module
 
       - name: LAN-70 L3VNI multipath and FDB-NHG netns proof
         if: steps.vrf.outputs.vrf-available == 'true'
