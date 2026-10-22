@@ -977,6 +977,103 @@ async fn admission_failure_during_the_close_drain_still_hard_tears_down() {
     session_task.abort();
 }
 
+/// When the drain's Cease/8 has already closed the connection, the stop,
+/// shutdown or reset that asked for the close must not record a second
+/// NOTIFICATION it can no longer send: the counters, the BMP Peer Down
+/// reason and the lost session's teardown cause all describe the Cease/8
+/// that reached the wire, and the session still goes down.
+#[tokio::test]
+async fn admission_failure_during_the_close_drain_records_only_the_cease_8() {
+    let cases = [
+        ("stop", PeerCommand::Stop { reason: None }),
+        ("shutdown", PeerCommand::Shutdown),
+        (
+            "administrative reset",
+            PeerCommand::AdministrativeReset { reason: None },
+        ),
+    ];
+    for (path, command) in cases {
+        let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+        let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel(16);
+        session.session_lifecycle_tx = Some(lifecycle_tx);
+        let (client, mut peer) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let reader = tokio::spawn(async move {
+            let mut wire = Vec::new();
+            let _ = peer.read_to_end(&mut wire).await;
+            wire
+        });
+        session
+            .outbound_tx
+            .send(OutboundRouteUpdate {
+                announce: vec![make_route(100)].into(),
+                next_hop_override: vec![None].into(),
+                ..OutboundRouteUpdate::default()
+            })
+            .await
+            .unwrap();
+
+        let _ = session.handle_command(command).await;
+
+        assert_eq!(
+            session.fsm.state(),
+            SessionState::Idle,
+            "{path}: the session must go down"
+        );
+        assert_eq!(
+            session.config.neighbor_counters.notifications_sent(),
+            1,
+            "{path}: only the Cease/8 that reached the wire counts as sent"
+        );
+        let mut losses = Vec::new();
+        while let Ok(SessionLifecycleNotification::StateChanged {
+            old,
+            teardown_cause,
+            ..
+        }) = lifecycle_rx.try_recv()
+        {
+            if old == SessionState::Established {
+                losses.push(teardown_cause.unwrap_or_default());
+            }
+        }
+        assert_eq!(losses.len(), 1, "{path}: one Established loss");
+        assert!(
+            losses[0].starts_with("sent NOTIFICATION 6/8"),
+            "{path}: the teardown cause must be the Cease/8, got {:?}",
+            losses[0]
+        );
+        let mut peer_downs = Vec::new();
+        while let Ok(event) = bmp_rx.try_recv() {
+            if let BmpEvent::PeerDown { reason, .. } = event {
+                peer_downs.push(reason);
+            }
+        }
+        match peer_downs.as_slice() {
+            [PeerDownReason::LocalNotification(pdu)] => assert_eq!(
+                &pdu[19..21],
+                &[6, cease_subcode::OUT_OF_RESOURCES],
+                "{path}: BMP must report the Cease/8"
+            ),
+            other => panic!("{path}: expected one BMP Peer Down with the Cease/8, got {other:?}"),
+        }
+
+        drop(session);
+        let wire = reader.await.unwrap();
+        let frames = parse_wire_frames(&wire);
+        let notifications: Vec<_> = frames
+            .iter()
+            .filter(|(msg_type, _)| *msg_type == 3)
+            .map(|(_, frame)| frame[19..21].to_vec())
+            .collect();
+        assert_eq!(
+            notifications,
+            vec![vec![6, cease_subcode::OUT_OF_RESOURCES]],
+            "{path}: the wire carries only the Cease/8"
+        );
+    }
+}
+
 /// The close drain stops at its budget even when every admission step is
 /// ready immediately: it checks the deadline and yields after each step, so
 /// a long run of queued envelopes cannot finish in one uninterruptible
@@ -1016,7 +1113,7 @@ async fn close_drain_yields_and_stops_at_the_budget_with_ready_admission() {
     });
 
     let started = tokio::time::Instant::now();
-    session.drain_outbound_before_close().await;
+    assert!(!session.drain_outbound_before_close().await);
     ticker.abort();
     reader.abort();
     assert!(

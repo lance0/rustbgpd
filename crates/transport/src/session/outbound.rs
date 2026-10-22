@@ -340,11 +340,17 @@ impl PeerSession {
     /// teardown; the hard-teardown signal stays live, so a Cease/8 raised
     /// during the drain still discards the backlog. Cease/8 and
     /// fast-failover aborts never come through here.
-    pub(super) async fn drain_outbound_before_close(&mut self) {
+    ///
+    /// Returns `true` when admission raised that Cease/8 during the drain.
+    /// The connection is then already closing with its own NOTIFICATION, and
+    /// the caller must finish with [`Self::finish_drain_teardown`] instead of
+    /// its administrative NOTIFICATION.
+    #[must_use]
+    pub(super) async fn drain_outbound_before_close(&mut self) -> bool {
         if self.fsm.state() != rustbgpd_fsm::SessionState::Established
             || self.writer_bulk_tx.is_none()
         {
-            return;
+            return false;
         }
         let started = tokio::time::Instant::now();
         if let Some(close_started) = &self.writer_close_started {
@@ -378,6 +384,25 @@ impl PeerSession {
                 peer = %self.peer_label,
                 "close drain reached its budget; queued outbound updates are not sent"
             );
+        }
+        // Only the Cease/8 teardown clears the priority sender mid-drain.
+        self.writer_priority_tx.is_none()
+    }
+
+    /// Finish a close whose drain raised Cease/8 the way the run loop's
+    /// writer-exit arm finishes any hard teardown: wait for the writer to
+    /// put the Cease/8 out (bounded by its teardown linger), then take the
+    /// session down through `TcpConnectionFails`. No second NOTIFICATION is
+    /// recorded, so its counters, events, BMP Peer Down reason and teardown
+    /// cause stay those of the Cease/8 that reached the wire.
+    pub(super) async fn finish_drain_teardown(&mut self) {
+        if let Some(join) = self.writer_join.take() {
+            let result = join.await;
+            self.handle_writer_exit(result).await;
+        } else {
+            self.handle_tcp_disconnect();
+            self.drive_fsm(rustbgpd_fsm::Event::TcpConnectionFails)
+                .await;
         }
     }
 
