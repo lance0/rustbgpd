@@ -285,6 +285,9 @@ pub(crate) struct PeerSession {
     /// writer-exit arm maps to `TcpConnectionFails`. Ordinary close paths
     /// drop it unsignalled (drain semantics preserved).
     writer_teardown_tx: Option<watch::Sender<bool>>,
+    /// Start of an ordinary close, shared with the writer: its close flush
+    /// budget runs from here (see `drain_outbound_before_close`).
+    writer_close_started: Option<writer::CloseStarted>,
     /// `JoinHandle` of the writer task. Polled by the session's
     /// `select!` so writer-exit (clean shutdown, TCP error, or RFC 9687
     /// send-hold expiry) surfaces as a TCP-disconnect event.
@@ -2186,6 +2189,7 @@ impl PeerSession {
             writer_priority_tx,
             writer_keepalive_tx,
             writer_teardown_tx,
+            writer_close_started,
             writer_join,
         ) = match stream {
             Some(stream) => {
@@ -2204,10 +2208,11 @@ impl PeerSession {
                     Some(writer_handle.priority_tx),
                     Some(writer_handle.keepalive_tx),
                     Some(writer_handle.teardown_tx),
+                    Some(writer_handle.close_started),
                     Some(writer_handle.join),
                 )
             }
-            None => (None, None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None, None),
         };
         let connection = read_half
             .as_ref()
@@ -2221,6 +2226,7 @@ impl PeerSession {
             writer_priority_tx,
             writer_keepalive_tx,
             writer_teardown_tx,
+            writer_close_started,
             writer_join,
             writer_bulk_admitted: 0,
             pending_replay: None,
@@ -2973,6 +2979,7 @@ impl PeerSession {
                             self.writer_priority_tx = Some(handle.priority_tx);
                             self.writer_keepalive_tx = Some(handle.keepalive_tx);
                             self.writer_teardown_tx = Some(handle.teardown_tx);
+                            self.writer_close_started = Some(handle.close_started);
                             self.writer_join = Some(handle.join);
                             self.drive_fsm(Event::TcpConnectionConfirmed).await;
                         }
@@ -3039,6 +3046,7 @@ impl PeerSession {
         self.writer_priority_tx = Some(handle.priority_tx);
         self.writer_keepalive_tx = Some(handle.keepalive_tx);
         self.writer_teardown_tx = Some(handle.teardown_tx);
+        self.writer_close_started = Some(handle.close_started);
         self.writer_join = Some(handle.join);
     }
 }

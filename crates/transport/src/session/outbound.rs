@@ -322,6 +322,90 @@ impl PeerSession {
         self.advance_pending_outbound();
     }
 
+    /// Before an administrative close's NOTIFICATION, admit the outbound
+    /// updates the RIB has already queued for this session, so that a
+    /// withdraw staged just before the close (shutdown drains EVPN withdraws
+    /// ahead of `PeerManagerCommand::Shutdown` for exactly this) reaches the
+    /// peer ahead of the Cease. A GR peer that receives Cease/2 rather than a
+    /// Hard Reset may otherwise keep the withdrawn route as stale.
+    ///
+    /// The drain shares the writer's close flush budget: it marks the close
+    /// as started, which starts the writer's
+    /// [`super::writer::CLOSE_FLUSH_BUDGET`] clock now, and it stops at the
+    /// same deadline, so admitting more updates can never push the Cease
+    /// past that bound. It checks the deadline and yields after every bounded
+    /// admission step, as the run loop does, so a long envelope cannot run
+    /// past the budget in one poll. Admission is capacity-checked, so the
+    /// drain waits for writer room rather than tripping the saturation
+    /// teardown; the hard-teardown signal stays live, so a Cease/8 raised
+    /// during the drain still discards the backlog. Cease/8 and
+    /// fast-failover aborts never come through here.
+    ///
+    /// Returns `true` when admission raised that Cease/8 during the drain.
+    /// The connection is then already closing with its own NOTIFICATION, and
+    /// the caller must finish with [`Self::finish_drain_teardown`] instead of
+    /// its administrative NOTIFICATION.
+    #[must_use]
+    pub(super) async fn drain_outbound_before_close(&mut self) -> bool {
+        if self.fsm.state() != rustbgpd_fsm::SessionState::Established
+            || self.writer_bulk_tx.is_none()
+        {
+            return false;
+        }
+        let started = tokio::time::Instant::now();
+        if let Some(close_started) = &self.writer_close_started {
+            let _ = close_started.set(started);
+        }
+        let deadline = started + super::writer::CLOSE_FLUSH_BUDGET;
+        let drain = async {
+            while tokio::time::Instant::now() < deadline {
+                if let Some(pending) = self.pending_outbound.as_ref() {
+                    pending.ready(self.writer_bulk_tx.as_ref()).await;
+                    self.advance_pending_outbound();
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                let replay_waiting = self
+                    .pending_replay
+                    .as_ref()
+                    .is_some_and(|pending| pending.target.is_some());
+                if replay_waiting || self.writer_bulk_tx.is_none() {
+                    break;
+                }
+                let Ok(update) = self.outbound_rx.try_recv() else {
+                    break;
+                };
+                self.handle_outbound_route_update(update).await;
+                tokio::task::yield_now().await;
+            }
+        };
+        if tokio::time::timeout_at(deadline, drain).await.is_err() {
+            debug!(
+                peer = %self.peer_label,
+                "close drain reached its budget; queued outbound updates are not sent"
+            );
+        }
+        // Only the Cease/8 teardown clears the priority sender mid-drain.
+        self.writer_priority_tx.is_none()
+    }
+
+    /// Finish a close whose drain raised Cease/8 the way the run loop's
+    /// writer-exit arm finishes any hard teardown: wait for the writer to
+    /// put the Cease/8 out (bounded by its teardown linger), then take the
+    /// session down through `TcpConnectionFails`. No second NOTIFICATION is
+    /// recorded, so its counters, events, BMP Peer Down reason and teardown
+    /// cause stay those of the Cease/8 that reached the wire.
+    pub(super) async fn finish_drain_teardown(&mut self) {
+        if let Some(join) = self.writer_join.take() {
+            let result = join.await;
+            self.handle_writer_exit(result).await;
+        } else {
+            self.handle_tcp_disconnect();
+            self.drive_fsm(rustbgpd_fsm::Event::TcpConnectionFails)
+                .await;
+        }
+    }
+
     pub(super) fn expire_outbound_admission(&mut self) {
         self.outbound_admission_timer = None;
         if self

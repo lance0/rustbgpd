@@ -1371,7 +1371,11 @@ impl PeerSession {
             PeerCommand::Stop { reason } => {
                 self.stop_requested = true;
                 self.reconnect_timer = None;
-                self.drive_fsm(Event::ManualStop { reason }).await;
+                if self.drain_outbound_before_close().await {
+                    self.finish_drain_teardown().await;
+                } else {
+                    self.drive_fsm(Event::ManualStop { reason }).await;
+                }
                 ControlFlow::Continue(())
             }
             PeerCommand::BfdDown => {
@@ -1389,7 +1393,11 @@ impl PeerSession {
                 self.reconnect_timer = None;
                 info!(peer = %self.peer_label, "shutdown requested");
                 if self.fsm.state() == SessionState::Established {
-                    self.drive_fsm(Event::ManualStop { reason: None }).await;
+                    if self.drain_outbound_before_close().await {
+                        self.finish_drain_teardown().await;
+                    } else {
+                        self.drive_fsm(Event::ManualStop { reason: None }).await;
+                    }
                 }
                 self.close_tcp();
                 self.timers.stop_all();
@@ -1442,7 +1450,11 @@ impl PeerSession {
                 // subcode 4) through the FSM, which closes TCP and arms the
                 // ordinary reconnect timer on the Idle transition because
                 // `stop_requested` is deliberately left alone.
-                self.administrative_reset(reason).await;
+                if self.drain_outbound_before_close().await {
+                    self.finish_drain_teardown().await;
+                } else {
+                    self.administrative_reset(reason).await;
+                }
                 ControlFlow::Continue(())
             }
             PeerCommand::QueryState { reply } => {
