@@ -78,20 +78,20 @@ runs:
         downloaded=false
         # Every .deb, cached or downloaded, must match the hash in the
         # runner's signed apt index before it is installed as root.
-        # One URI line: 'URL' file size ALGO:hash.
-        uri='' hash=''
-        read -r uri _ _ hash < <(apt-get download --print-uris "$pkg" 2>/dev/null) || true
+        # --print-uris gives one line: 'URL' file size hash; the candidate's
+        # SHA-256 comes from the same index entry.
+        uri=''
+        read -r uri _ < <(apt-get download --print-uris "$pkg" 2>/dev/null) || true
         uri=${uri//\'/}
-        algo=${hash%%:*}
-        algo=${algo,,}
-        verify() { [ -f "$1" ] && echo "${hash#*:}  $1" | "${algo}sum" --check --status; }
+        sha256=$(apt-cache show --no-all-versions "$pkg" 2>/dev/null | awk '$1 == "SHA256:" {print $2; exit}')
+        verify() { [ -f "$1" ] && echo "${sha256}  $1" | sha256sum --check --status; }
         apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
         # apt-get resolves the package's small dependencies (wireless-regdb)
         # that a bare dpkg -i would not. The install is local work with its
         # own bound, so a download finishing near the deadline is not killed
         # mid-unpack.
         install_deb() { sudo timeout 120 apt-get "${apt_opts[@]}" install -y "$deb" && sudo modprobe vrf; }
-        if [ -z "$uri" ] || ! command -v "${algo}sum" >/dev/null; then
+        if [ -z "$uri" ] || [ -z "$sha256" ]; then
           echo "::warning::${pkg} is not in the runner's apt index"
         elif verify "$deb" && install_deb; then
           echo "::notice::vrf loaded from the cached ${pkg} .deb"
