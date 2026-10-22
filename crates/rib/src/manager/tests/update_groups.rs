@@ -3868,20 +3868,25 @@ async fn rejected_policy_transition_batches_leave_observability_idle() {
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)
     );
 
-    let (invalid_reply, invalid_response) = oneshot::channel();
+    // LAN-2512: an unregistered member is skipped, not rejected, so a batch
+    // naming only unregistered peers settles like an empty one.
+    let (unregistered_reply, unregistered_response) = oneshot::channel();
     manager.handle_replace_peer_export_policies(
         vec![crate::update::PeerExportPolicyReplacement {
             peer: PeerId::from_addr("192.0.2.250".parse().unwrap()),
             export_policy: None,
         }],
-        invalid_reply,
+        unregistered_reply,
     );
-    assert!(invalid_response.await.unwrap().is_err());
+    assert_eq!(
+        unregistered_response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
 
     assert_metric(
         gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
         0.0,
-        "empty and rejected batches never acquire transition ownership",
+        "empty and all-unregistered batches never acquire transition ownership",
     );
     assert_metric(
         gauge_metric_value(

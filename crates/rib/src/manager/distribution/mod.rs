@@ -4892,22 +4892,27 @@ impl RibManager {
             let readiness = manager.replacement_readiness.clone();
             let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
             let mut replacements = replacements;
-            let error = replacements
-                .iter()
-                .inspect(|_| checkpoint())
-                .find(|replacement| !manager.outbound_peers.contains_key(&replacement.peer))
-                .map(|replacement| {
-                    format!(
-                        "peer {} not registered for outbound updates",
-                        replacement.peer
-                    )
-                })
-                .or_else(|| {
-                    manager.pending_clean_policy_transition.as_ref().map(|_| {
-                        "internal RIB sequencing error: policy transition already in progress"
-                            .to_string()
-                    })
-                });
+            // An unregistered member (deferred `PeerUp` registration, or a
+            // session that went down after the caller's state probe) has no
+            // outbound object to transition. Its session recorded the
+            // accepted chain on this channel before acknowledging the
+            // hot-apply, so its registration installs the new chain. Skip
+            // it as the authoritative batch does; rejecting the cohort
+            // would roll back every other member for no divergence.
+            replacements.retain(|replacement| {
+                checkpoint();
+                let registered = manager.outbound_peers.contains_key(&replacement.peer);
+                if !registered {
+                    info!(
+                        peer = %replacement.peer,
+                        "export-policy cohort skipped a peer not registered in the RIB; its registration installs the session's accepted policy"
+                    );
+                }
+                registered
+            });
+            let error = manager.pending_clean_policy_transition.as_ref().map(|_| {
+                "internal RIB sequencing error: policy transition already in progress".to_string()
+            });
             if replacements.is_empty() || error.is_some() {
                 let result = if replacements.is_empty() {
                     Ok(crate::update::ExportPolicyCohortOutcome::Committed)

@@ -383,6 +383,10 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
 enum NonEstablishedRollbackRibOutcome {
     Registered,
     NotFound,
+    /// LAN-2512: the session is Established again by the rollback probe, but
+    /// its RIB outbound registration is still deferred, so the restore batch
+    /// finds no registration. That absence is not divergence.
+    EstablishedNotFound,
     SessionGoneNotFound,
     Internal,
 }
@@ -416,11 +420,13 @@ async fn assert_non_established_rollback_rib_outcome(
         sequenced_policy_state_handle(
             flapping.addr(),
             Some(SessionState::Established),
-            (!matches!(
-                rollback_outcome,
-                NonEstablishedRollbackRibOutcome::SessionGoneNotFound
-            ))
-            .then_some(SessionState::Idle),
+            match rollback_outcome {
+                NonEstablishedRollbackRibOutcome::SessionGoneNotFound => None,
+                NonEstablishedRollbackRibOutcome::EstablishedNotFound => {
+                    Some(SessionState::Established)
+                }
+                _ => Some(SessionState::Idle),
+            },
         ),
         false,
     );
@@ -493,6 +499,7 @@ async fn assert_non_established_rollback_rib_outcome(
                 rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer: flapping },
             ]),
             NonEstablishedRollbackRibOutcome::NotFound
+            | NonEstablishedRollbackRibOutcome::EstablishedNotFound
             | NonEstablishedRollbackRibOutcome::SessionGoneNotFound => Ok(vec![
                 rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored { peer: failing },
                 rustbgpd_rib::PeerExportPolicyRestoreReceipt::NotFound { peer: flapping },
@@ -539,13 +546,19 @@ async fn assert_non_established_rollback_rib_outcome(
         format!("{:?}", Some(prior_export)),
         "rollback must restore the flapping peer's session export policy"
     );
-    assert!(
-        managed.pending_refresh,
-        "the non-Established rollback must defer its import refresh"
-    );
+    if !matches!(
+        rollback_outcome,
+        NonEstablishedRollbackRibOutcome::EstablishedNotFound
+    ) {
+        assert!(
+            managed.pending_refresh,
+            "the non-Established rollback must defer its import refresh"
+        );
+    }
     match rollback_outcome {
         NonEstablishedRollbackRibOutcome::Registered
-        | NonEstablishedRollbackRibOutcome::NotFound => {
+        | NonEstablishedRollbackRibOutcome::NotFound
+        | NonEstablishedRollbackRibOutcome::EstablishedNotFound => {
             assert!(
                 error.contains("already-applied peers restored")
                     && !error.contains("restoring already-applied peers also failed"),
@@ -583,6 +596,87 @@ async fn non_established_rollback_restores_registered_rib_entry() {
 #[tokio::test]
 async fn non_established_rollback_accepts_typed_rib_absence() {
     assert_non_established_rollback_rib_outcome(NonEstablishedRollbackRibOutcome::NotFound).await;
+}
+
+#[tokio::test]
+async fn established_rollback_accepts_typed_rib_absence_of_deferred_registration() {
+    assert_non_established_rollback_rib_outcome(
+        NonEstablishedRollbackRibOutcome::EstablishedNotFound,
+    )
+    .await;
+}
+
+/// LAN-2512: a forward per-peer apply to an Established session whose RIB
+/// outbound registration is still deferred gets a typed `NotFound`. The
+/// session accepted the new chain, and its registration installs it, so the
+/// apply succeeds without retaining export intent.
+#[tokio::test]
+async fn forward_apply_accepts_typed_rib_absence_for_established_peer() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    insert_test_managed_peer(
+        &mut mgr,
+        peer.addr(),
+        acking_policy_handle(peer.addr(), SessionState::Established),
+        false,
+    );
+    let import_policy = Some(validation_policy_chain(ImportValidationDependency::Rpki));
+    {
+        let managed = mgr.peers.get_mut(&key(peer.addr())).unwrap();
+        managed.import_policy.clone_from(&import_policy);
+        managed.export_policy = Some(validation_policy_chain(ImportValidationDependency::Aspa));
+    }
+    let next = deny_policy_chain();
+    let rib_driver = tokio::spawn(async move {
+        let RibUpdate::ReplacePeerExportPolicy {
+            peer: target,
+            reply,
+            ..
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected the forward RIB replacement");
+        };
+        assert_eq!(target, peer);
+        reply
+            .send(Err(rustbgpd_rib::RibCommandError::not_found(format!(
+                "peer {peer} not registered for outbound updates"
+            ))))
+            .unwrap();
+        rib_rx
+    });
+
+    let result = mgr
+        .apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+            address: peer.addr(),
+            interface: None,
+            import_policy,
+            export_policy: Some(next.clone()),
+        }])
+        .await;
+    let _rib_rx = rib_driver.await.unwrap();
+    result.expect("a deferred registration is not a failed export apply");
+    let managed = mgr.peers.get(&key(peer.addr())).unwrap();
+    assert_eq!(
+        format!("{:?}", managed.export_policy),
+        format!("{:?}", Some(next))
+    );
+    assert!(
+        !managed.pending_export_apply,
+        "the registration installs the accepted chain; no export intent remains"
+    );
 }
 
 #[tokio::test]

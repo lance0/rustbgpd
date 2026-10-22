@@ -2197,6 +2197,15 @@ impl RibManager {
     ) {
         let result = self.with_replacement_summary_reads("reevaluate", |manager| {
             let started = std::time::Instant::now();
+            // An unregistered peer has nothing staged to re-evaluate; its
+            // registration evaluates the current datasets. Dropping it keeps
+            // one deferred `PeerUp` from rejecting the whole batch.
+            let peers: Vec<PeerId> = peers
+                .iter()
+                .copied()
+                .filter(|peer| manager.outbound_peers.contains_key(peer))
+                .collect();
+            let peers = peers.as_slice();
             let bounded = swaps.and_then(|swaps| manager.dataset_swap_bound(peers, swaps));
             let mode = if bounded.is_some() { "delta" } else { "full" };
             let affected = bounded.as_ref().map(|bound| bound.prefixes.len());
