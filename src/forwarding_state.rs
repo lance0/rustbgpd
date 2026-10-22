@@ -40,6 +40,19 @@ struct Roles {
 }
 
 /// OPEN emission never takes config-transaction or EVPN planning locks.
+///
+/// Lock-poison contract: every `roles` critical section is straight-line
+/// `bool` updates plus a lock-free fence read, so a writer cannot panic
+/// part-way through and a poisoned lock never holds a partial snapshot.
+/// Poison adds no uncertainty of its own and is recovered with `into_inner`;
+/// [`EvpnAttempt`]'s destructor runs during unwinding and must not panic
+/// again. The settlement fence owns conservative output: each runtime writer
+/// runs in, or answers, a registered owner, and a panic there drops the
+/// owner's executor guard (`executor_lost`) or its awaited reply
+/// (`acknowledgement_lost`). Fenced readers add possible effects, fenced
+/// writers only widen them, and the fence ends in the exit-70 fail-stop, so
+/// process restart is the only reinitialization boundary. A critical section
+/// that can panic voids this argument.
 #[derive(Debug)]
 pub(crate) struct ForwardingState {
     blackhole: bool,
@@ -141,6 +154,18 @@ impl ForwardingState {
             prior_potential,
             settled: false,
         }
+    }
+
+    /// Fault hook: panic while holding the roles write lock.
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn panic_holding_roles_for_test(&self) {
+        let _roles = self.roles.write();
+        panic!("injected panic inside the forwarding roles critical section");
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn roles_poisoned_for_test(&self) -> bool {
+        self.roles.is_poisoned()
     }
 }
 

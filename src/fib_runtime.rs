@@ -5497,45 +5497,41 @@ mod tests {
         assert!(!path.exists());
     }
 
+    // The fail-stop hold seam exists only in debug builds; without it the proof
+    // would race the watchdog grace, so the test is not compiled in release.
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn forwarding_state_fenced_actor_keeps_compensated_candidate_family() {
         const CHILD_ENV: &str = "RUSTBGPD_FIB_FORWARDING_FENCE_CHILD";
+        const MARKER: &str = "forwarding fence actor proof complete";
         if std::env::var_os(CHILD_ENV).is_some() {
             assert_fenced_actor_forwarding_union().await;
-            println!("forwarding fence actor proof complete");
-            // The real dependency watchdog retains a fenced owner and exits
-            // after its grace period. Contain it in this test subprocess.
-            std::process::exit(0);
+            println!("{MARKER}");
+            // The real dependency watchdog retains the fenced owner and ends
+            // this test subprocess once the parent releases its fail-stop.
+            std::future::pending::<()>().await;
         }
-        let output = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "fib_runtime::tests::forwarding_state_fenced_actor_keeps_compensated_candidate_family",
-                    "--nocapture",
-                ])
-                .env(CHILD_ENV, "1")
-                .kill_on_drop(true)
-                .output(),
+        let child = crate::test_support::run_fail_stop_child(
+            "fib_runtime::tests::forwarding_state_fenced_actor_keeps_compensated_candidate_family",
+            CHILD_ENV,
+            MARKER,
         )
-        .await
-        .expect("forwarding fence subprocess timed out")
-        .expect("forwarding fence subprocess failed to start");
+        .await;
         assert!(
-            output.status.success(),
+            child.stdout.contains(MARKER),
             "forwarding fence subprocess failed: {}\n{}\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
+            child.status,
+            child.stdout,
+            child.stderr,
         );
-        assert!(
-            String::from_utf8_lossy(&output.stdout)
-                .contains("forwarding fence actor proof complete"),
-            "subprocess must execute the selected regression, not pass with zero tests"
+        assert_eq!(
+            child.status.code(),
+            Some(rustbgpd_api::runtime_config_settlement::AMBIGUOUS_CONFIG_EXIT_STATUS),
+            "the fenced owner must fail-stop the process"
         );
     }
 
+    #[cfg(debug_assertions)]
     async fn assert_fenced_actor_forwarding_union() {
         use rustbgpd_api::health_probe::DaemonGate;
         use rustbgpd_api::runtime_config_settlement::{
