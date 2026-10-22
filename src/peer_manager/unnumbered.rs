@@ -37,6 +37,8 @@ use super::PeerManager;
 
 /// How long reconciliation waits for a bound session to report its state.
 const BOUND_STATE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// How soon a reconcile is retried after a bound session did not answer.
+const RECONCILE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The discovery actor, its events, and one entry per interface-only
 /// neighbor, by interface name.
@@ -45,6 +47,8 @@ pub(crate) struct Unnumbered {
     events: Option<mpsc::UnboundedReceiver<DiscoveryEvent>>,
     ports: BTreeMap<String, Port>,
     reconcile_due: bool,
+    /// A bound session did not answer its state query: reconcile again then.
+    retry_at: Option<tokio::time::Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +76,7 @@ impl Unnumbered {
             events: Some(events),
             ports: BTreeMap::new(),
             reconcile_due: false,
+            retry_at: None,
         }
     }
 
@@ -244,13 +249,15 @@ impl PeerManager {
         unnumbered.reconcile_due = true;
     }
 
-    /// Whether the bound peer's session is Established now, read from the
-    /// session itself: the decision to replace it never rests on an edge
-    /// event that may have been dropped. A session that does not answer in
-    /// time is taken to be Established, so it is never displaced on doubt.
-    async fn bound_session_established(&self, peer: &PeerKey) -> bool {
+    /// The bound peer's session state now, read from the session itself:
+    /// the decision to replace it never rests on an edge event that may have
+    /// been dropped. `None` when the session did not answer in time.
+    // ponytail: one bounded query per port that needs replacing, run in turn
+    // on the owner loop, so N stalled sessions cost up to N x 500 ms; join
+    // the queries if fabrics ever replace many ports at once.
+    async fn bound_session_established(&self, peer: &PeerKey) -> Option<bool> {
         let Some(managed) = self.peers.get(peer) else {
-            return false;
+            return Some(false);
         };
         match managed
             .handle()
@@ -258,10 +265,23 @@ impl PeerManager {
             .await
         {
             rustbgpd_transport::StateQueryOutcome::State(state) => {
-                state.fsm_state == SessionState::Established
+                Some(state.fsm_state == SessionState::Established)
             }
-            rustbgpd_transport::StateQueryOutcome::TimedOut => true,
-            rustbgpd_transport::StateQueryOutcome::SessionGone => false,
+            rustbgpd_transport::StateQueryOutcome::TimedOut => None,
+            rustbgpd_transport::StateQueryOutcome::SessionGone => Some(false),
+        }
+    }
+
+    /// When an unanswered state query is due to be asked again.
+    pub(super) fn unnumbered_retry_at(&self) -> Option<tokio::time::Instant> {
+        self.unnumbered.as_ref()?.retry_at
+    }
+
+    /// The retry deadline passed: reconcile again.
+    pub(super) fn unnumbered_retry_due(&mut self) {
+        if let Some(unnumbered) = self.unnumbered.as_mut() {
+            unnumbered.retry_at = None;
+            unnumbered.reconcile_due = true;
         }
     }
 
@@ -353,12 +373,27 @@ impl PeerManager {
                 return;
             }
             // Level-triggered check of what the edge events claimed.
-            if !link_down && self.bound_session_established(&key).await {
-                if let Some(unnumbered) = self.unnumbered.as_mut() {
-                    unnumbered.discovery.session_established(name);
+            if !link_down {
+                match self.bound_session_established(&key).await {
+                    Some(true) => {
+                        if let Some(unnumbered) = self.unnumbered.as_mut() {
+                            unnumbered.discovery.session_established(name);
+                        }
+                        self.port_mut(name).established = true;
+                        return;
+                    }
+                    // No answer: keep the session, claim nothing to
+                    // discovery, and ask again shortly.
+                    None => {
+                        if let Some(unnumbered) = self.unnumbered.as_mut() {
+                            unnumbered.retry_at.get_or_insert_with(|| {
+                                tokio::time::Instant::now() + RECONCILE_RETRY
+                            });
+                        }
+                        return;
+                    }
+                    Some(false) => {}
                 }
-                self.port_mut(name).established = true;
-                return;
             }
             let reason = if link_down {
                 "link_down"

@@ -2229,6 +2229,14 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // any external apply. The desired snapshot still carries the edited TOML
     // so restart intent is preserved and the same drift remains visible on
     // every reload.
+    for interface in config::interface_only_session_changes(current, &new_config) {
+        error!(
+            interface,
+            "the session settings of the interface-only neighbor on this interface changed \
+             (for example through its peer group): a bound peer takes them only when it \
+             binds. Restart rustbgpd to apply them; policy chains still follow this reload."
+        );
+    }
     if config::interface_only_neighbors_changed(current, &new_config) {
         error!(
             "interface-only [[neighbors]] (interface with no address) or \

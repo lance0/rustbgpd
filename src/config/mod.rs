@@ -8,7 +8,10 @@ mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
 mod unnumbered;
-pub use unnumbered::{NeighborList, RemoteAsn, UnnumberedConfig, interface_only_neighbors_changed};
+pub use unnumbered::{
+    NeighborList, RemoteAsn, UnnumberedConfig, interface_only_neighbors_changed,
+    interface_only_session_changes,
+};
 mod validation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

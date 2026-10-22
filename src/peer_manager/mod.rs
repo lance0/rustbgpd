@@ -98,6 +98,10 @@ mod unnumbered {
         }
         pub(super) fn note_peer_removed(&mut self) {}
         pub(super) fn note_unnumbered_session_idle(&mut self, _: &PeerKey) {}
+        pub(super) fn unnumbered_retry_at(&self) -> Option<tokio::time::Instant> {
+            None
+        }
+        pub(super) fn unnumbered_retry_due(&mut self) {}
         pub(super) fn unnumbered_holder_of(&self, _: IpAddr, _: &PeerKey) -> Option<&str> {
             None
         }
@@ -2608,6 +2612,7 @@ impl PeerManager {
             let bfd_scope_retry_at = self.link_check.bfd_retry_at;
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
+            let unnumbered_retry_at = self.unnumbered_retry_at();
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
@@ -2874,6 +2879,12 @@ impl PeerManager {
                         self.handle_discovery_event(event);
                     }
                 }
+                () = async {
+                    match unnumbered_retry_at {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => self.unnumbered_retry_due(),
                 () = async {
                     if let Some(interval) = bmp_stats_interval.as_mut() {
                         interval.tick().await;

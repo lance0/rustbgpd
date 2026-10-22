@@ -459,3 +459,55 @@ async fn a_dropped_transition_to_established_never_displaces_the_session() {
     assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
     assert_eq!(h.drain(), [Command::SessionEstablished("swp1".into())]);
 }
+
+/// A bound session that does not answer its state query is kept, nothing is
+/// claimed to discovery, and reconciliation is retried.
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_state_query_keeps_the_session_and_retries() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.drain();
+    // A session task that never answers.
+    let (commands, _held) = mpsc::channel(8);
+    let silent = PeerHandle::from_parts(commands, tokio::spawn(async { Ok(()) }));
+    insert_test_managed_peer_for_key(&mut h.mgr, &swp1_key(2), 0, silent, false);
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept on doubt");
+    assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
+    // Mutation-red: asserting Established to discovery on a timeout freezes
+    // the binding until the next BackToIdle, and no retry is armed.
+    assert_eq!(h.drain(), []);
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "retry armed");
+    h.mgr.unnumbered_retry_due();
+    assert!(h.mgr.unnumbered_reconcile_due());
+}
+
+/// A peer-group edit that changes an interface-only neighbor's session
+/// settings is reported restart-required for it.
+#[test]
+fn a_group_session_edit_is_restart_required_for_its_interface_only_neighbor() {
+    let config = |hold: u16| -> crate::config::Config {
+        toml::from_str(&format!(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+             [global.telemetry]\nlog_format = \"json\"\n\
+             [peer_groups.fabric]\nhold_time = {hold}\n\
+             [peer_groups.other]\nhold_time = 90\n\
+             [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\npeer_group = \"fabric\"\n"
+        ))
+        .unwrap()
+    };
+    let (old, new) = (config(9), config(30));
+    // Mutation-red: comparing only the neighbor records misses the edit.
+    assert_eq!(
+        crate::config::interface_only_session_changes(&old, &new),
+        ["swp1"]
+    );
+    assert!(crate::config::diff_config(&old, &new).interface_only_neighbors_changed);
+    let mut unrelated: crate::config::Config = old.clone();
+    unrelated.peer_groups.get_mut("other").unwrap().hold_time = Some(60);
+    assert_eq!(
+        crate::config::interface_only_session_changes(&old, &unrelated),
+        Vec::<&str>::new()
+    );
+}

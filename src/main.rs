@@ -1899,6 +1899,23 @@ fn family_partitioned_listener_mss(
     (min_v4, min_v6)
 }
 
+/// [`family_partitioned_listener_mss`] plus interface-only neighbors: they are
+/// IPv6 and accept passively on the same listener once bound, so their clamp
+/// joins the IPv6 minimum.
+fn listener_mss_clamps(
+    config: &Config,
+    static_neighbors: &[config::ResolvedNeighbor],
+) -> (Option<u16>, Option<u16>) {
+    let (min_v4, min_v6) = family_partitioned_listener_mss(static_neighbors);
+    let interface_only = config
+        .interface_only_resolved_for_comparison()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|neighbor| neighbor.transport_config.tcp_mss)
+        .min();
+    (min_v4, [min_v6, interface_only].into_iter().flatten().min())
+}
+
 /// Emit every `--check` warning and return the total count.
 ///
 /// The single place the check-time warning set is defined. `--strict` turns
@@ -4483,21 +4500,7 @@ async fn run<T>(
             error,
         );
     });
-    let (min_v4_mss, min_v6_mss) = family_partitioned_listener_mss(&peer_configs);
-    // Interface-only neighbors are IPv6 and accept passively on the same
-    // listener once bound; their clamp joins the IPv6 minimum.
-    let min_v6_mss = [
-        min_v6_mss,
-        config
-            .interface_only_resolved_for_comparison()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|neighbor| neighbor.transport_config.tcp_mss)
-            .min(),
-    ]
-    .into_iter()
-    .flatten()
-    .min();
+    let (min_v4_mss, min_v6_mss) = listener_mss_clamps(&config, &peer_configs);
     let listener_options =
         ListenerSocketOptions {
             tcp_ao_keys: peer_configs
@@ -11314,6 +11317,49 @@ peer_group = "plain"
             Some(180),
             "resolution failure must retain the previous raw-config marker fallback"
         );
+    }
+
+    /// An interface-only neighbor whose port is absent (allowed at load)
+    /// still counts toward the startup inventories: the GR restart window and
+    /// the listener MSS clamp. The warm checkpoint uses the same resolution.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interface_only_neighbors_count_toward_startup_inventories_with_their_port_absent() {
+        let config: Config = toml::from_str(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.fabric]
+gr_restart_time = 300
+
+[[neighbors]]
+interface = "rbgp-absent0"
+remote_asn = "external"
+peer_group = "fabric"
+tcp_mss = 1200
+"#,
+        )
+        .unwrap();
+        // Mutation-red: a placeholder that is not link-local looks the absent
+        // interface up and fails every one of these.
+        assert_eq!(
+            config
+                .interface_only_resolved_for_comparison()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            max_gr_restart_time_secs(&config),
+            Some(300),
+            "the group's restart time, not the raw-config fallback"
+        );
+        assert_eq!(listener_mss_clamps(&config, &[]), (None, Some(1200)));
     }
 
     /// Helper: build a `ResolvedNeighbor` with the given remote address and

@@ -1371,7 +1371,9 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   router MAC on every port, or `fe80::1` on every port, therefore bring up
   only the first link admitted.
 - **Restart-required.** Adding, removing or editing an interface-only
-  neighbor, or `[global.unnumbered]`, takes a restart; a reload keeps the
+  neighbor, `[global.unnumbered]`, or a peer-group setting that changes the
+  neighbor's session (its policy chains still follow a reload) takes a
+  restart; a reload keeps the
   running set, logs an error, and is refused if the rest of the new
   configuration is invalid against that running set (for example a static
   link-local neighbor on the same interface, or a deleted peer group the

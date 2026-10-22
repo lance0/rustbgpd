@@ -25,6 +25,11 @@ use super::{Config, ConfigError, Neighbor, ResolvedNeighbor};
 /// discovery engine enforces the same range.
 const RA_INTERVAL_SECS: std::ops::RangeInclusive<u16> = 4..=1800;
 
+/// Stand-in learned address for resolving an interface-only neighbor before
+/// it binds. It must be link-local: resolution then takes the given scope
+/// instead of looking up an interface that may not exist yet.
+const LINK_LOCAL_PLACEHOLDER: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+
 /// A neighbor's `remote_asn`: a number, `"external"` (any ASN except
 /// `global.asn`) or `"internal"` (`global.asn`). Both string forms are
 /// checked against the ASN the peer actually sends in OPEN.
@@ -324,8 +329,33 @@ impl JsonSchema for NeighborList {
     }
 }
 
+/// Interface-only neighbors whose own record is unchanged but whose resolved
+/// session settings differ, through a peer-group edit for example. A bound
+/// peer takes session settings only when it binds, so these are
+/// restart-required for that neighbor; policy chains still follow live.
+#[must_use]
+pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<&'a str> {
+    let session = |config: &Config, neighbor: &Neighbor| {
+        config
+            .resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
+            .ok()
+            .map(|resolved| resolved.transport_config)
+    };
+    new.neighbors
+        .interface_only()
+        .iter()
+        .filter_map(|neighbor| {
+            let interface = neighbor.interface.as_deref()?;
+            let prior = old.neighbors.interface_only_on(interface)?;
+            (prior == neighbor && session(old, prior) != session(new, neighbor))
+                .then_some(interface)
+        })
+        .collect()
+}
+
 /// Interface-only neighbors (compared by interface, so reordering is not a
-/// change) or `[global.unnumbered]` differ: restart-required.
+/// change), their resolved session settings, or `[global.unnumbered]`
+/// differ: restart-required.
 #[must_use]
 pub fn interface_only_neighbors_changed(old: &Config, new: &Config) -> bool {
     fn by_interface(config: &Config) -> std::collections::BTreeMap<Option<&str>, &Neighbor> {
@@ -336,7 +366,9 @@ pub fn interface_only_neighbors_changed(old: &Config, new: &Config) -> bool {
             .map(|neighbor| (neighbor.interface.as_deref(), neighbor))
             .collect()
     }
-    old.global.unnumbered != new.global.unnumbered || by_interface(old) != by_interface(new)
+    old.global.unnumbered != new.global.unnumbered
+        || by_interface(old) != by_interface(new)
+        || !interface_only_session_changes(old, new).is_empty()
 }
 
 fn invalid(neighbor: &Neighbor, field: &str, reason: &str) -> ConfigError {
@@ -557,7 +589,7 @@ impl Config {
             .interface_only()
             .iter()
             .map(|neighbor| {
-                self.resolve_bound_interface_neighbor(neighbor, Ipv6Addr::UNSPECIFIED, 0)
+                self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
             })
             .collect()
     }
@@ -589,7 +621,7 @@ impl Neighbor {
     /// IPv6 link-local placeholder for an interface-only neighbor.
     pub(crate) fn family_address(&self) -> Result<IpAddr, ConfigError> {
         if self.is_interface_only() {
-            return Ok(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0)));
+            return Ok(IpAddr::V6(LINK_LOCAL_PLACEHOLDER));
         }
         self.address
             .parse()
