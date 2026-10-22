@@ -579,9 +579,11 @@ An [interface-only neighbor](configuration.md#interface-only-neighbors) has an
 `interface` and no `address`. Configuring even one requires `CAP_NET_RAW` for
 the raw ICMPv6 socket used for discovery. This applies with
 `[global.unnumbered] router_advertisements = false` too: disabling rustbgpd's
-advertisements and solicitations does not disable RA reception. `--check`,
-startup and a reload introducing the first interface-only neighbor report an error naming
-`CAP_NET_RAW` if that socket cannot be opened.
+advertisements and solicitations does not disable RA reception. `--check` and
+startup report an error naming `CAP_NET_RAW` if that socket cannot be opened.
+Adding or removing an interface-only neighbor requires a restart: reload
+reports that requirement and retains the running set without probing new
+discovery privileges.
 
 Static link-local neighbors with an explicit `address` and `interface` do not
 use this discovery socket. RS/RR deployments without interface-only neighbors
