@@ -399,6 +399,7 @@ impl ScriptedRib {
 
 /// Exit status and output of a child test that fail-stops through the real
 /// settlement watchdog.
+#[cfg(debug_assertions)]
 pub(crate) struct FailStopChild {
     pub(crate) status: std::process::ExitStatus,
     pub(crate) stdout: String,
@@ -411,7 +412,9 @@ pub(crate) struct FailStopChild {
 /// The debug-build `RUSTBGPD_TEST_FAIL_STOP_HOLD` seam makes the watchdog ask
 /// this parent before starting the fence grace and again before its exit.
 /// The first is released at once; the second only after the child's proof
-/// line, so the child's checks never race the grace clock.
+/// line, so the child's checks never race the grace clock. The seam is
+/// compiled only with `debug_assertions`, so callers must be gated the same way.
+#[cfg(debug_assertions)]
 pub(crate) async fn run_fail_stop_child(
     test: &str,
     child_env: &str,

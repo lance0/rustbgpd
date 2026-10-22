@@ -173,6 +173,7 @@ async fn forwarding_state_transaction_stage_commit_rollback_and_reload_publicati
 }
 
 /// GR and LLGR forwarding bits from one real dynamic-session OPEN on the wire.
+#[cfg(debug_assertions)]
 async fn dynamic_open_forwarding(
     mgr: &mut PeerManager,
     source: Ipv4Addr,
@@ -224,6 +225,7 @@ async fn dynamic_open_forwarding(
     gr
 }
 
+#[cfg(debug_assertions)]
 async fn assert_poisoned_writer_fails_closed() {
     use rustbgpd_api::health_probe::DaemonGate;
     use rustbgpd_api::runtime_config_settlement::{
@@ -306,8 +308,17 @@ async fn assert_poisoned_writer_fails_closed() {
     // Late publication after poison cannot clear possible effects.
     state.publish_fib(&[]);
     assert_eq!(state.kernel_families(), vec![ipv4, ipv6]);
-    // An unsettled EVPN attempt unwinding over the poisoned lock records
-    // uncertainty instead of aborting on a second panic.
+    // EVPN had no possible effect before this attempt, so only the fence
+    // check keeps rejection from restoring that prior state.
+    state.begin_evpn_attempt(true).reject_no_effect();
+    state.publish_evpn(false);
+    assert_eq!(
+        state.kernel_families(),
+        vec![ipv4, ipv6, evpn],
+        "neither rejection nor publication restores authority after the fence"
+    );
+    // An unsettled EVPN attempt unwinding over the poisoned lock does not
+    // abort the process with a second panic from its destructor.
     let writer = state.clone();
     let unwinding = tokio::spawn(async move {
         let _attempt = writer.begin_evpn_attempt(true);
@@ -315,13 +326,6 @@ async fn assert_poisoned_writer_fails_closed() {
     });
     assert!(unwinding.await.unwrap_err().is_panic());
     assert_eq!(state.kernel_families(), vec![ipv4, ipv6, evpn]);
-    state.begin_evpn_attempt(false).reject_no_effect();
-    state.publish_evpn(false);
-    assert_eq!(
-        state.kernel_families(),
-        vec![ipv4, ipv6, evpn],
-        "neither rejection nor publication restores authority after the fence"
-    );
 
     // An OPEN inside the fail-stop grace certifies no family.
     assert_eq!(
@@ -333,6 +337,9 @@ async fn assert_poisoned_writer_fails_closed() {
     );
 }
 
+// The fail-stop hold seam exists only in debug builds; without it the proof
+// would race the watchdog grace, so the test is not compiled in release.
+#[cfg(debug_assertions)]
 #[tokio::test]
 async fn forwarding_state_poisoned_writer_fails_closed_through_settlement_fence() {
     const CHILD_ENV: &str = "RUSTBGPD_FORWARDING_POISON_CHILD";

@@ -157,13 +157,13 @@ impl ForwardingState {
     }
 
     /// Fault hook: panic while holding the roles write lock.
-    #[cfg(test)]
+    #[cfg(all(test, debug_assertions))]
     pub(crate) fn panic_holding_roles_for_test(&self) {
         let _roles = self.roles.write();
         panic!("injected panic inside the forwarding roles critical section");
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, debug_assertions))]
     pub(crate) fn roles_poisoned_for_test(&self) -> bool {
         self.roles.is_poisoned()
     }

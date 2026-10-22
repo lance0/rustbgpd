@@ -5497,6 +5497,9 @@ mod tests {
         assert!(!path.exists());
     }
 
+    // The fail-stop hold seam exists only in debug builds; without it the proof
+    // would race the watchdog grace, so the test is not compiled in release.
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn forwarding_state_fenced_actor_keeps_compensated_candidate_family() {
         const CHILD_ENV: &str = "RUSTBGPD_FIB_FORWARDING_FENCE_CHILD";
@@ -5528,6 +5531,7 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     async fn assert_fenced_actor_forwarding_union() {
         use rustbgpd_api::health_probe::DaemonGate;
         use rustbgpd_api::runtime_config_settlement::{
