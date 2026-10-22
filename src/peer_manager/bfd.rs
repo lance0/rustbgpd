@@ -702,6 +702,130 @@ impl PeerManager {
         }
     }
 
+    /// Follow a recreated interface: re-resolve each scoped link-local BFD
+    /// session's interface by name and, when its index changed, replace the
+    /// session under a fresh revision. Driven by link-state changes,
+    /// independently of TCP dialing, because strict BFD can hold a peer before
+    /// any connect attempt. A name that resolves to nothing leaves the session
+    /// as it is until it does.
+    ///
+    /// The replacement is staged as a BFD membership change and settled by
+    /// [`Self::commit_bfd_reload`], exactly as a reload that replaces a session:
+    /// the actor acknowledges the new set, a strict peer whose replacement is
+    /// not yet Up is held again (stopping its BGP session and any pending
+    /// inbound candidate), and an undelivered stop retry moves to the new
+    /// revision.
+    pub(super) async fn refresh_bfd_link_local_scopes(&mut self) {
+        let Some(coupling) = self.bfd_coupling.as_ref() else {
+            return;
+        };
+        if coupling.reloading {
+            // A generation owns BFD membership now; look again afterwards.
+            self.schedule_bfd_scope_retry();
+            return;
+        }
+        let updates: Vec<(IpAddr, u32)> = coupling
+            .configured
+            .values()
+            .filter_map(|params| {
+                let scope = params.scope_id?;
+                let key = self.unique_peer_key_for_address(params.peer)?;
+                let interface = key.interface.as_deref()?;
+                let current = self
+                    .peers
+                    .get(&key)?
+                    .transport_config
+                    .link_state
+                    .resolve_interface(interface)?;
+                (current != scope).then_some((params.peer, current))
+            })
+            .collect();
+        if updates.is_empty() && self.link_check.bfd_unsettled.is_empty() {
+            return;
+        }
+        let mut moving = std::mem::take(&mut self.link_check.bfd_unsettled);
+        moving.extend(updates.iter().map(|(peer, _)| *peer));
+        let coupling = self.bfd_coupling.as_mut().expect("checked above");
+        coupling.prior_held.clone_from(&coupling.held_down);
+        coupling
+            .prior_initially_withheld
+            .clone_from(&coupling.initially_withheld);
+        let strict: Vec<IpAddr> = moving
+            .iter()
+            .copied()
+            .filter(|peer| {
+                coupling
+                    .configured
+                    .get(peer)
+                    .is_some_and(|params| params.strict)
+            })
+            .collect();
+        // A strict peer must not admit BGP between staging the replacement
+        // and the replacement's confirmed Up: hold it now, before waiting on
+        // the actor. The Up acknowledgement at the new revision releases it,
+        // on this attempt or a retry.
+        for peer in &strict {
+            if !self.bfd_withholding(peer)
+                && let Err(error) = self.hold_bgp_for_bfd(*peer).await
+            {
+                warn!(%peer, %error, "failed to stop strict BGP peer for a BFD scope move");
+            }
+        }
+        let coupling = self.bfd_coupling.as_mut().expect("checked above");
+        let mut configured = coupling.configured.clone();
+        for (peer, ifindex) in updates {
+            let Some(params) = configured.get_mut(&peer) else {
+                continue;
+            };
+            let Ok(destination) =
+                crate::bfd_runtime::bfd_destination(peer, Some(ifindex), params.multihop)
+            else {
+                continue;
+            };
+            info!(
+                %peer,
+                old_scope = ?params.scope_id,
+                new_scope = ifindex,
+                "BFD link-local interface has a new index; replacing the session"
+            );
+            params.scope_id = Some(ifindex);
+            params.destination = destination;
+            params.revision = coupling.next_revision;
+            coupling.next_revision = coupling.next_revision.saturating_add(1);
+            // An undelivered stop for this peer's BGP session belongs to the
+            // replacement too, whether or not the actor acknowledges it.
+            if let Some(retry) = coupling.retries.get_mut(&peer)
+                && !retry.start
+            {
+                retry.revision = Some(params.revision);
+            }
+        }
+        coupling.pending = Some(configured);
+        coupling.reloading = true;
+        coupling.rollback_lookup = false;
+        if let Err(error) = self.commit_bfd_reload(None).await {
+            // Fail closed, as an uncertain reload does: the replacement is not
+            // confirmed, so the strict peers held above stay held until a
+            // later attempt settles it.
+            warn!(
+                %error,
+                "BFD link-local scope move was not acknowledged; strict peers stay held and the \
+                 move will be retried"
+            );
+            if let Some(coupling) = self.bfd_coupling.as_mut() {
+                coupling.held_down.extend(strict.iter().copied());
+            }
+            self.link_check.bfd_unsettled = moving;
+            self.schedule_bfd_scope_retry();
+        }
+    }
+
+    fn schedule_bfd_scope_retry(&mut self) {
+        self.link_check.bfd_retry_at.get_or_insert_with(|| {
+            tokio::time::Instant::now() + super::link_failover::BFD_SCOPE_RETRY
+        });
+    }
+
     /// Take the BFD state-change receiver into a `run`-local (so the `select!`
     /// arm captures the local rather than `self`, mirroring the BMP interval).
     pub(super) fn take_bfd_state_change_rx(&mut self) -> Option<BfdStateChangeReceiver> {

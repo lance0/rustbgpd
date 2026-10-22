@@ -284,23 +284,40 @@ impl PeerManager {
         true
     }
 
-    fn inbound_peer_key(&self, peer_addr: SocketAddr) -> Option<PeerKey> {
+    /// The arrival matched by the interface's current index: adopt it, so
+    /// the accepted session, its next-hop provenance and later dials use the
+    /// index this connection actually arrived on.
+    pub(super) fn adopt_inbound_link_local_scope(&mut self, key: &PeerKey, peer_addr: SocketAddr) {
+        if let SocketAddr::V6(v6) = peer_addr
+            && let Some(managed) = self.peers.get_mut(key)
+        {
+            managed.transport_config.set_link_local_scope(v6.scope_id());
+        }
+    }
+
+    pub(super) fn inbound_peer_key(&self, peer_addr: SocketAddr) -> Option<PeerKey> {
         let ip = peer_addr.ip();
         if let SocketAddr::V6(v6) = peer_addr
             && v6.ip().segments()[0] & 0xffc0 == 0xfe80
         {
+            // Match the arrival scope against each interface's *current*
+            // index, resolved by name, so a recreated interface (same name,
+            // new index) is followed; a name that resolves to nothing now
+            // matches no arrival.
             return self
                 .peers
-                .keys()
-                .find(|key| {
+                .iter()
+                .find(|(key, managed)| {
                     key.address == ip
-                        && self
-                            .peers
-                            .get(key)
-                            .and_then(|managed| managed.transport_config.peer_scope_id)
-                            == Some(v6.scope_id())
+                        && match managed.transport_config.link_local_interface() {
+                            Some(name) => {
+                                managed.transport_config.link_state.resolve_interface(name)
+                                    == Some(v6.scope_id())
+                            }
+                            None => managed.transport_config.peer_scope_id == Some(v6.scope_id()),
+                        }
                 })
-                .cloned();
+                .map(|(key, _)| key.clone());
         }
         let key = PeerKey::new(ip, None);
         self.peers.contains_key(&key).then_some(key)
@@ -339,6 +356,9 @@ impl PeerManager {
         }
         let accepted_generation = tcp_ao_generation.unwrap_or(self.tcp_ao_generation);
         let peer_key = self.inbound_peer_key(peer_addr);
+        if let Some(key) = &peer_key {
+            self.adopt_inbound_link_local_scope(key, peer_addr);
+        }
         // If peer is not statically configured, try dynamic range matching.
         if peer_key.is_none() {
             if self.config_snapshot_staged {
