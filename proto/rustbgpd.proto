@@ -3705,17 +3705,21 @@ service InjectionService {
   // report. A key with no local route returns NOT_FOUND. A resumed page
   // returns ABORTED when, since the walk's first page, the route's content
   // changed (including its removal), a peer joined or left the Established
-  // set, or an Established peer's export policy or a dataset it reads
-  // changed; restart the walk with an empty page_token. Any page, including
-  // the first, also returns ABORTED when such a dataset is refreshed while
+  // set, or an Established peer's export policy, a dataset it or an
+  // attached conditional advertisement reads, or another of its export
+  // settings changed: outbound prefix limits, conditional advertisement,
+  // peer group, Add-Path send limits, exported families, ORF state or the
+  // session's outbound encoding profile. Restart
+  // the walk with an empty page_token. Any page, including the first, also
+  // returns ABORTED when such a dataset or encoding profile changes while
   // the page is being evaluated. Removing the route and restoring identical
-  // content between pages is indistinguishable and the walk stays valid. Other inputs, such as outbound prefix limits,
-  // conditional advertisement or other routes for the prefix, are read live
-  // on each page and are not checked. With include_configured, a resumed
-  // page also returns ABORTED when the managed peer set changed, and a
-  // managed peer becoming Established counts as a peer joining. A token for
-  // another key, another include_configured or from another daemon process
-  // returns INVALID_ARGUMENT.
+  // content between pages is indistinguishable and the walk stays valid.
+  // Other inputs, such as other routes for the prefix or outbound delivery
+  // progress, are read live on each page and are not checked. With
+  // include_configured, a resumed page also returns ABORTED when the managed
+  // peer set changed, and a managed peer becoming Established counts as a
+  // peer joining. A token for another key, another include_configured or
+  // from another daemon process returns INVALID_ARGUMENT.
   rpc ListPathExportDispositions(ListPathExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
   // ListPathExportDispositions over a list of local route keys in one paged
   // walk, such as every key ListLeasedKeys lists for an owner. A walk names

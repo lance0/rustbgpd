@@ -1127,6 +1127,7 @@ impl RibManager {
         if dirty.is_empty() {
             return;
         }
+        self.advance_export_settings();
         let mut regrouped = false;
         let mut evpn_feeds = std::collections::HashMap::new();
         for peer in regroup {
@@ -1166,6 +1167,9 @@ impl RibManager {
             })
             .map(|(peer, _)| *peer)
             .collect();
+        if !peers.is_empty() {
+            self.advance_export_settings();
+        }
         for peer in peers {
             self.mark_outbound_dirty(peer);
         }
@@ -1181,6 +1185,21 @@ impl RibManager {
         self.conditional_advertisements
             .attachments
             .contains_key(&peer)
+    }
+
+    /// The `advertise_policy` of every installed definition attached to
+    /// `peer`: the chains its export gate may evaluate.
+    pub(super) fn attached_advertise_policies(
+        &self,
+        peer: PeerId,
+    ) -> impl Iterator<Item = &PolicyChain> {
+        self.conditional_advertisements
+            .attachments
+            .get(&peer)
+            .into_iter()
+            .flatten()
+            .filter_map(|name| self.conditional_advertisements.definitions.get(name))
+            .map(|state| &state.definition.advertise_policy)
     }
 
     /// The export gate for `peer`. Live staging gets `None` when nothing is
