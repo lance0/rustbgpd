@@ -3,8 +3,8 @@ description: >-
   Load the `vrf` kernel module. The slim hosted Azure kernel ships it only in
   linux-modules-extra for the EXACT running kernel, so this installs that
   package when needed: from an actions/cache entry keyed on `uname -r`, or on
-  a miss by downloading the .deb (configured apt mirror first, then
-  archive.ubuntu.com). Cached and downloaded bytes are both checked against
+  a miss by downloading the .deb (the runner's configured apt mirrors first,
+  then archive.ubuntu.com). Cached and downloaded bytes are both checked against
   the hash in the runner's apt index before install. A slow
   mirror must not hang a job, so the download is bounded: 240 s by default, a
   longer budget only for callers that declare VRF required (the local install
@@ -98,12 +98,24 @@ runs:
         else
           [ -f "$deb" ] && echo "::warning::discarding cached ${pkg} .deb (hash mismatch or install failure)"
           rm -f "$deb"
-          fallback=$(sed -E 's#^https?://[^/]+/ubuntu/#http://archive.ubuntu.com/ubuntu/#' <<<"$uri")
-          # Rotate mirror -> archive until one serves verified bytes or the
+          # Hosted runners use `mirror+file:/etc/apt/apt-mirrors.txt` (one
+          # base URL per line, Azure first), which curl cannot fetch: expand
+          # it to the listed mirrors, then always add archive.ubuntu.com.
+          pool="pool/${uri#*/pool/}"
+          base=${uri%%/pool/*}
+          bases=()
+          if [[ "$base" == mirror+file:* ]]; then
+            mapfile -t bases < <(awk '$1 ~ /^https?:\/\// {print $1}' "${base#mirror+file:}" 2>/dev/null)
+          else
+            bases=("$base")
+          fi
+          bases+=(http://archive.ubuntu.com/ubuntu)
+          mapfile -t urls < <(for b in "${bases[@]}"; do echo "${b%/}/${pool}"; done | awk '!seen[$0]++')
+          # Rotate through the sources until one serves verified bytes or the
           # budget runs out. --speed-limit drops a stalled transfer after
           # 30 s below 100 KB/s so the next source gets the remaining time.
           while [ "$downloaded" = false ] && [ "$SECONDS" -lt "$deadline" ]; do
-            for url in "$uri" "$fallback"; do
+            for url in "${urls[@]}"; do
               [ "$SECONDS" -lt "$deadline" ] || break
               if curl -fsSL --connect-timeout 15 --speed-limit 102400 --speed-time 30 \
                 --max-time "$(left)" "$url" -o "$deb.part" && verify "$deb.part"; then
