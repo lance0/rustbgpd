@@ -1112,6 +1112,30 @@ impl PeerManager {
                         return None;
                     }
                 }
+                // Fast external failover never waits behind this step: link
+                // changes dispatch their checks and full-mailbox retries keep
+                // being delivered. Both are non-blocking.
+                changed = Self::receive_link_change(&mut self.link_check.changes) => {
+                    remaining = remaining.saturating_sub(attended.elapsed());
+                    if changed {
+                        self.handle_links_changed();
+                    }
+                    if remaining.is_zero() {
+                        return None;
+                    }
+                }
+                () = async {
+                    match self.link_check.retry_at {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    remaining = remaining.saturating_sub(attended.elapsed());
+                    self.retry_link_checks();
+                    if remaining.is_zero() {
+                        return None;
+                    }
+                }
             }
         }
     }
@@ -2490,7 +2514,6 @@ impl PeerManager {
         if bfd_state_change_rx.is_some() {
             self.republish_bfd_desired();
         }
-        let mut link_state_changes = self.link_state_changes();
 
         loop {
             if self.dampening_control_failed {
@@ -2510,12 +2533,16 @@ impl PeerManager {
                     && self.deferred_session_notifications.is_empty()
                     && self.deferred_session_notification_counts.is_empty()
             );
+            // Link-local BFD scope moves run after the link checks they
+            // follow were dispatched, never ahead of them.
+            self.run_due_bfd_scope_refresh().await;
             if self.conditional_reconcile_pending {
                 self.reconcile_conditional_advertisements().await;
             }
             let bfd_retry_at = self.bfd_retry_deadline();
             let evpn_recovery_retry_at = self.evpn_recovery_retry_at;
             let link_check_retry_at = self.link_check.retry_at;
+            let bfd_scope_retry_at = self.link_check.bfd_retry_at;
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             tokio::select! {
@@ -2753,6 +2780,13 @@ impl PeerManager {
                         std::future::pending::<()>().await;
                     }
                 } => self.retry_link_checks(),
+                () = async {
+                    if let Some(deadline) = bfd_scope_retry_at {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => self.bfd_scope_retry_due(),
                 change = async {
                     match bfd_state_change_rx.as_mut() {
                         Some(rx) => rx.recv().await,
@@ -2767,16 +2801,9 @@ impl PeerManager {
                         None => bfd_state_change_rx = None,
                     }
                 }
-                changed = async {
-                    match link_state_changes.as_mut() {
-                        Some(rx) => rx.changed().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    match changed {
-                        Ok(()) => self.handle_links_changed(),
-                        // The monitor exited; stop polling a closed channel.
-                        Err(_) => link_state_changes = None,
+                changed = Self::receive_link_change(&mut self.link_check.changes) => {
+                    if changed {
+                        self.handle_links_changed();
                     }
                 }
                 () = async {

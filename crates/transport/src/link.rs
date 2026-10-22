@@ -108,6 +108,18 @@ impl LinkDown {
 }
 
 impl LinkSnapshot {
+    /// The current index of the interface named `name`, when the snapshot is
+    /// valid and has one.
+    #[must_use]
+    pub fn ifindex_of(&self, name: &str) -> Option<u32> {
+        if !self.valid {
+            return None;
+        }
+        self.links
+            .iter()
+            .find_map(|(ifindex, link)| (link.name == name).then_some(*ifindex))
+    }
+
     /// The interface that directly carries `local` → `peer`: for a link-local
     /// peer the socket's scope, otherwise the interface holding the local
     /// address with the peer inside its connected prefix. `None` when the
@@ -240,6 +252,20 @@ impl LinkStateFeed {
         self.receiver
             .as_ref()
             .map_or_else(Arc::default, |receiver| Arc::clone(&receiver.borrow()))
+    }
+
+    /// The current index of the interface named `name`: the monitor's
+    /// snapshot when it is valid and knows the name, otherwise the kernel
+    /// (`if_nametoindex`), so an absent or opted-out monitor still resolves.
+    /// `None` means no interface has that name now. Link-local scoped
+    /// neighbors resolve their scope through this at every connection
+    /// attempt and inbound match, so a deleted and recreated interface is
+    /// followed by name; interface-only neighbors share it.
+    #[must_use]
+    pub fn resolve_interface(&self, name: &str) -> Option<u32> {
+        self.current()
+            .ifindex_of(name)
+            .or_else(|| crate::socket_opts::interface_index(name))
     }
 
     /// Whether fast external failover is on for this neighbor now.

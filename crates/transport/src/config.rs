@@ -911,6 +911,50 @@ pub const DEFAULT_SLOW_PEER_DURATION_SECS: u32 = 30;
 pub const DEFAULT_MAX_AS_PATH_LENGTH: u16 = 750;
 
 impl TransportConfig {
+    /// The interface name of a scoped IPv6 link-local peer.
+    #[must_use]
+    pub fn link_local_interface(&self) -> Option<&str> {
+        match self.remote_addr {
+            SocketAddr::V6(addr) if addr.ip().is_unicast_link_local() => {
+                self.peer_interface.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Point a scoped link-local peer at interface index `ifindex`: the
+    /// active-open destination and the scope used for inbound matching and
+    /// next-hop provenance. No effect for any other peer.
+    pub fn set_link_local_scope(&mut self, ifindex: u32) {
+        if self.link_local_interface().is_none() {
+            return;
+        }
+        if let SocketAddr::V6(addr) = &mut self.remote_addr {
+            addr.set_scope_id(ifindex);
+        }
+        self.peer_scope_id = Some(ifindex);
+    }
+
+    /// Re-resolve a scoped link-local peer's interface by name, so a deleted
+    /// and recreated interface (new index, same name) is followed. `Ok(true)`
+    /// when the index changed, `Ok(false)` when it did not or the peer is not
+    /// scoped, `Err(name)` when no interface has that name now: the peer
+    /// cannot be dialed yet.
+    ///
+    /// # Errors
+    /// Returns the interface name when it does not resolve.
+    pub fn refresh_link_local_scope(&mut self) -> Result<bool, String> {
+        let Some(name) = self.link_local_interface() else {
+            return Ok(false);
+        };
+        let Some(ifindex) = self.link_state.resolve_interface(name) else {
+            return Err(name.to_owned());
+        };
+        let changed = self.peer_scope_id != Some(ifindex);
+        self.set_link_local_scope(ifindex);
+        Ok(changed)
+    }
+
     /// Default TCP connect timeout (30 seconds).
     const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 

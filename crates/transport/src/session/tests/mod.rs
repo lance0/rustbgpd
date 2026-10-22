@@ -2219,6 +2219,7 @@ mod import_policy;
 mod inbound_update;
 mod interface_down;
 mod labeled;
+mod link_local_scope;
 mod local_revalidation;
 mod loop_detection;
 mod max_prefix;

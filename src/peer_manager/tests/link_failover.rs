@@ -185,3 +185,75 @@ async fn a_pending_check_is_dropped_after_a_hot_applied_opt_out() {
     assert!(!got_check(&mut primary_rx));
     assert!(!got_check(&mut candidate_rx));
 }
+
+fn snapshot_with(name: &str, ifindex: u32) -> Arc<rustbgpd_transport::LinkSnapshot> {
+    Arc::new(rustbgpd_transport::LinkSnapshot {
+        valid: true,
+        links: std::collections::BTreeMap::from([(
+            ifindex,
+            rustbgpd_transport::LinkState {
+                name: name.into(),
+                admin_up: true,
+                lower_up: true,
+            },
+        )]),
+        addresses: std::collections::BTreeMap::new(),
+    })
+}
+
+/// A static link-local neighbor on `interface`, last dialed at index 4, with
+/// the link monitor reporting `interface` at index 9 now.
+pub(super) fn insert_recreated_link_local_peer(
+    mgr: &mut PeerManager,
+    interface: &str,
+    handle: PeerHandle,
+) -> (
+    PeerKey,
+    tokio::sync::watch::Sender<Arc<rustbgpd_transport::LinkSnapshot>>,
+) {
+    let key = PeerKey::new("fe80::2".parse().unwrap(), Some(interface.to_owned()));
+    insert_test_managed_peer_for_key(mgr, &key, 65002, handle, false);
+    let (tx, rx) = tokio::sync::watch::channel(snapshot_with("eth1", 9));
+    let transport = &mut mgr.peers.get_mut(&key).unwrap().transport_config;
+    transport.remote_addr = "[fe80::2%4]:179".parse().unwrap();
+    transport.peer_interface = Some(interface.to_owned());
+    transport.peer_scope_id = Some(4);
+    transport.link_state = rustbgpd_transport::LinkStateFeed::new(rx, true);
+    (key, tx)
+}
+
+/// Inbound matching follows the interface's current index, not the index the
+/// neighbor was resolved at; the accepted arrival's scope is adopted.
+#[tokio::test]
+async fn inbound_link_local_matches_the_current_interface_index() {
+    let mut mgr = test_peer_manager();
+    let (handle, _rx) = recording_handle();
+    let (key, _tx) = insert_recreated_link_local_peer(&mut mgr, "eth1", handle);
+    let new: SocketAddr = "[fe80::2%9]:40000".parse().unwrap();
+    let stale: SocketAddr = "[fe80::2%4]:40000".parse().unwrap();
+    assert_eq!(mgr.inbound_peer_key(new), Some(key.clone()));
+    assert_eq!(mgr.inbound_peer_key(stale), None, "the old index is gone");
+
+    mgr.adopt_inbound_link_local_scope(&key, new);
+    let transport = &mgr.peers[&key].transport_config;
+    assert_eq!(transport.peer_scope_id, Some(9));
+    assert_eq!(transport.remote_addr, "[fe80::2%9]:179".parse().unwrap());
+}
+
+/// A configured interface name that resolves to nothing now matches no
+/// arrival, whatever its scope.
+#[tokio::test]
+async fn inbound_link_local_does_not_match_a_missing_interface() {
+    let mut mgr = test_peer_manager();
+    let (handle, _rx) = recording_handle();
+    let (_key, _tx) = insert_recreated_link_local_peer(&mut mgr, "rbgp-ll-missing0", handle);
+    for scope in [4, 9] {
+        let addr = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::2".parse().unwrap(),
+            40000,
+            0,
+            scope,
+        ));
+        assert_eq!(mgr.inbound_peer_key(addr), None);
+    }
+}

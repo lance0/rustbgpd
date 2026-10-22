@@ -10,7 +10,8 @@
 //! is full keeps a single pending flag until the retry delivers, and any
 //! number of link changes in between collapse into that one check.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,14 +22,29 @@ use tracing::debug;
 use super::{ManagedPeerState, PeerManager};
 
 const LINK_CHECK_RETRY: Duration = Duration::from_millis(100);
+/// How often an unacknowledged link-local BFD scope move is re-attempted.
+pub(super) const BFD_SCOPE_RETRY: Duration = Duration::from_secs(1);
 
 /// The monitor's snapshot feed and the sessions whose check did not fit their
 /// mailbox: one entry per session id, so at most one per live session.
+///
+/// Link checks never wait on BFD. A link change dispatches checks and arms
+/// their retry at once; moving link-local BFD sessions to a recreated
+/// interface's index is a separate run-loop step (`bfd_refresh_due`), and
+/// the long waits inside it keep servicing link changes and check retries.
 #[derive(Default)]
 pub(super) struct LinkCheckDelivery {
     pub(super) state: Option<watch::Receiver<Arc<LinkSnapshot>>>,
+    /// The run loop's (and long waits') "links changed" receiver.
+    pub(super) changes: Option<watch::Receiver<Arc<LinkSnapshot>>>,
     pub(super) pending: BTreeMap<u64, mpsc::Sender<PeerCommand>>,
     pub(super) retry_at: Option<tokio::time::Instant>,
+    /// Re-resolve link-local BFD scopes at the top of the next run-loop turn.
+    pub(super) bfd_refresh_due: bool,
+    /// BFD peers whose scope move the actor has not acknowledged yet.
+    pub(super) bfd_unsettled: BTreeSet<IpAddr>,
+    /// When to re-attempt an unacknowledged move.
+    pub(super) bfd_retry_at: Option<tokio::time::Instant>,
 }
 
 impl PeerManager {
@@ -37,6 +53,7 @@ impl PeerManager {
     /// the hold timer and BFD.
     #[must_use]
     pub fn with_link_failover(mut self, state: watch::Receiver<Arc<LinkSnapshot>>) -> Self {
+        self.link_check.changes = Some(state.clone());
         self.link_check.state = Some(state);
         self
     }
@@ -54,14 +71,40 @@ impl PeerManager {
         feed
     }
 
-    /// A receiver for the run loop's "links changed" arm.
-    pub(super) fn link_state_changes(&self) -> Option<watch::Receiver<Arc<LinkSnapshot>>> {
-        self.link_check.state.clone()
+    /// Wait for the next published link-state change. `false` when the
+    /// monitor has exited (the receiver is then dropped).
+    pub(super) async fn receive_link_change(
+        changes: &mut Option<watch::Receiver<Arc<LinkSnapshot>>>,
+    ) -> bool {
+        let alive = match changes.as_mut() {
+            Some(rx) => rx.changed().await.is_ok(),
+            None => std::future::pending().await,
+        };
+        if !alive {
+            *changes = None;
+        }
+        alive
     }
 
-    /// The link state changed: ask every eligible session to check. A session
-    /// already waiting for mailbox space keeps its single pending flag.
+    /// Run the BFD scope refresh a link change or retry asked for.
+    pub(super) async fn run_due_bfd_scope_refresh(&mut self) {
+        if std::mem::take(&mut self.link_check.bfd_refresh_due) {
+            self.refresh_bfd_link_local_scopes().await;
+        }
+    }
+
+    /// The unacknowledged BFD scope move is due for another attempt.
+    pub(super) fn bfd_scope_retry_due(&mut self) {
+        self.link_check.bfd_retry_at = None;
+        self.link_check.bfd_refresh_due = true;
+    }
+
+    /// The link state changed: ask every eligible session to check, without
+    /// waiting on anything. A session already waiting for mailbox space keeps
+    /// its single pending flag. Link-local BFD scopes are reconciled
+    /// afterwards, as their own run-loop step.
     pub(super) fn handle_links_changed(&mut self) {
+        self.link_check.bfd_refresh_due = true;
         let targets = self.link_check_targets();
         debug!(
             candidate_sessions = targets.len(),
