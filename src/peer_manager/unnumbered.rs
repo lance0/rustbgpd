@@ -293,6 +293,16 @@ impl PeerManager {
         self.unnumbered.as_ref()?.retry_at
     }
 
+    /// Reconcile again after [`RECONCILE_RETRY`]; an armed deadline is kept,
+    /// which bounds the retry rate.
+    fn arm_unnumbered_retry(&mut self) {
+        if let Some(unnumbered) = self.unnumbered.as_mut() {
+            unnumbered
+                .retry_at
+                .get_or_insert_with(|| tokio::time::Instant::now() + RECONCILE_RETRY);
+        }
+    }
+
     /// The retry deadline passed: reconcile again.
     pub(super) fn unnumbered_retry_due(&mut self) {
         if let Some(unnumbered) = self.unnumbered.as_mut() {
@@ -413,11 +423,7 @@ impl PeerManager {
                     // No answer: keep the session, claim nothing to
                     // discovery, and ask again shortly.
                     None => {
-                        if let Some(unnumbered) = self.unnumbered.as_mut() {
-                            unnumbered.retry_at.get_or_insert_with(|| {
-                                tokio::time::Instant::now() + RECONCILE_RETRY
-                            });
-                        }
+                        self.arm_unnumbered_retry();
                         return;
                     }
                     Some(false) => {}
@@ -478,7 +484,10 @@ impl PeerManager {
         }
         self.port_mut(name).refused = None;
         if let Err(error) = self.bind_port(name, endpoint).await {
-            warn!(interface = %name, address = %endpoint.address, %error, "unnumbered: could not add the bound peer");
+            // Nothing else re-raises this binding (refreshed RAs and an
+            // unchanged link emit no event), so retry on the timer.
+            warn!(interface = %name, address = %endpoint.address, %error, "unnumbered: could not add the bound peer; retrying");
+            self.arm_unnumbered_retry();
         }
     }
 

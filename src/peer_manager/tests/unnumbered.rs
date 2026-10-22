@@ -657,3 +657,30 @@ async fn a_rediscovered_peer_carries_the_restart_state_only_within_the_window() 
         "R=0 after the window"
     );
 }
+
+/// A bind that fails once is retried on the reconcile timer: refreshed RAs
+/// and an unchanged link raise no new event to retry it.
+#[tokio::test]
+async fn a_failed_bind_is_retried_without_a_new_event() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    // The first attempt fails: the neighbor's record is briefly unavailable.
+    let config = h.mgr.current_config.clone();
+    let mut moved = config.neighbors.interface_only()[0].clone();
+    moved.interface = Some("swp9".into());
+    h.mgr
+        .current_config
+        .neighbors
+        .set_interface_only_for_test(vec![moved]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)));
+    // Mutation-red: without arming the retry nothing ever re-attempts it.
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "retry armed");
+
+    h.mgr.current_config = config;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert!(
+        h.mgr.peers.contains_key(&swp1_key(2)),
+        "recovered on the retry"
+    );
+}
