@@ -330,16 +330,17 @@ impl JsonSchema for NeighborList {
 }
 
 /// Interface-only neighbors whose own record is unchanged but whose resolved
-/// session settings differ, through a peer-group edit for example. A bound
-/// peer takes session settings only when it binds, so these are
-/// restart-required for that neighbor; policy chains still follow live.
+/// bind-time settings differ, through a peer-group edit for example
+/// (transport knobs, `admin_down`, max-prefix restart). A bound peer takes
+/// them only when it binds, so these are restart-required for that
+/// neighbor; policy chains still follow live.
 #[must_use]
 pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<&'a str> {
     let session = |config: &Config, neighbor: &Neighbor| {
         config
             .resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
             .ok()
-            .map(|resolved| resolved.transport_config)
+            .map(bind_time_projection)
     };
     new.neighbors
         .interface_only()
@@ -351,6 +352,40 @@ pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<
                 .then_some(interface)
         })
         .collect()
+}
+
+/// Everything a bound peer takes from its resolution only when it binds:
+/// all of it except the policy chains, which follow a reload live.
+/// Destructured without `..`, so a new resolved field must be classified
+/// here before it compiles.
+type BindTimeProjection = (
+    rustbgpd_transport::TransportConfig,
+    Option<String>,
+    Option<u32>,
+    String,
+    Option<String>,
+    bool,
+);
+
+fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
+    let ResolvedNeighbor {
+        transport_config,
+        admin_down,
+        max_prefix_restart_seconds,
+        label,
+        import_policy: _,
+        export_policy: _,
+        peer_group,
+        rfc8212_external,
+    } = resolved;
+    (
+        transport_config,
+        admin_down,
+        max_prefix_restart_seconds,
+        label,
+        peer_group,
+        rfc8212_external,
+    )
 }
 
 /// Interface-only neighbors (compared by interface, so reordering is not a

@@ -513,6 +513,29 @@ fn a_group_session_edit_is_restart_required_for_its_interface_only_neighbor() {
         ["swp1"]
     );
     assert!(crate::config::diff_config(&old, &new).interface_only_neighbors_changed);
+    // Group-inherited settings the manager owns, outside the transport
+    // config. Mutation-red: comparing the transport config alone misses both.
+    let with_group = |group: &str| {
+        let mut config = old.clone();
+        config.peer_groups.insert(
+            "fabric".to_string(),
+            toml::from_str::<crate::config::PeerGroupConfig>(group).unwrap(),
+        );
+        config
+    };
+    for (before, after) in [
+        ("hold_time = 9", "hold_time = 9\nadmin_down = true"),
+        (
+            "hold_time = 9\nmax_prefixes = 10",
+            "hold_time = 9\nmax_prefixes = 10\nmax_prefix_restart_seconds = 60",
+        ),
+    ] {
+        assert_eq!(
+            crate::config::interface_only_session_changes(&with_group(before), &with_group(after)),
+            ["swp1"],
+            "{after}"
+        );
+    }
     let mut unrelated: crate::config::Config = old.clone();
     unrelated.peer_groups.get_mut("other").unwrap().hold_time = Some(60);
     assert_eq!(
