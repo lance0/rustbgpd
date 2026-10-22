@@ -2262,24 +2262,55 @@ async fn export_policy_cohort_skips_member_between_sessions() {
     cohort_skips_unregistered_member(UnregisteredMember::BetweenSessions).await;
 }
 
+fn peer_up_with_policy(
+    peer: PeerId,
+    session_id: u64,
+    outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+    policy: rustbgpd_policy::PolicyChain,
+) -> RibUpdate {
+    let mut peer_up = test_peer_up(peer, session_id, outbound_tx);
+    if let RibUpdate::PeerUp { export_policy, .. } = &mut peer_up {
+        *export_policy = Some(policy);
+    }
+    peer_up
+}
+
 /// LAN-2512: a dataset re-evaluation naming a member whose registration is
-/// still deferred re-evaluates the registered members instead of rejecting
-/// the batch; the deferred registration evaluates the current datasets.
+/// still deferred re-evaluates the registered member instead of rejecting the
+/// batch, and the deferred registration's initial dump reads the CURRENT
+/// dataset content.
 #[tokio::test]
 async fn dataset_reevaluation_skips_member_with_deferred_registration() {
+    use super::update_groups_oracle::{dataset_prefix_data, dataset_prefix_policy};
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.initial_dump_defer_min_routes = 0;
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 7, 0), 24);
+    let (dataset, chain) = dataset_prefix_policy(Prefix::V4(prefix), false);
     let registered = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
     let deferred = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
-    let (registered_tx, _registered_rx) = mpsc::channel(64);
-    manager.handle_update(test_peer_up(registered, 1, registered_tx));
-    tx.try_send(test_routes_received(registered, vec![]))
-        .unwrap();
-    let (deferred_tx, _deferred_rx) = mpsc::channel(64);
-    manager.handle_update(test_peer_up(deferred, 3, deferred_tx));
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 9));
+    let (registered_tx, mut registered_rx) = mpsc::channel(64);
+    manager.handle_update(peer_up_with_policy(
+        registered,
+        1,
+        registered_tx,
+        chain.clone(),
+    ));
+    manager.handle_update(test_routes_received(
+        source,
+        vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 9))],
+    ));
+    drain_route_chunks(&mut manager);
+    tx.try_send(test_routes_received(source, vec![])).unwrap();
+    let (deferred_tx, mut deferred_rx) = mpsc::channel(64);
+    manager.handle_update(peer_up_with_policy(deferred, 3, deferred_tx, chain));
     assert_eq!(manager.pending_initial_registrations.len(), 1);
+    while registered_rx.try_recv().is_ok() {}
 
+    dataset
+        .refresh(dataset_prefix_data(Prefix::V4(prefix), true))
+        .unwrap();
     let (reply, response) = tokio::sync::oneshot::channel();
     manager.handle_update(RibUpdate::ReevaluatePeerExportPolicies {
         peers: vec![registered, deferred],
@@ -2287,6 +2318,138 @@ async fn dataset_reevaluation_skips_member_with_deferred_registration() {
         reply,
     });
     assert_eq!(response.await.expect("the RIB replies"), Ok(()));
+    let mut announced = false;
+    while let Ok(update) = registered_rx.try_recv() {
+        announced |= update
+            .announce
+            .iter()
+            .any(|r| r.prefix == Prefix::V4(prefix));
+    }
+    assert!(announced, "the registered member is re-evaluated");
+
+    while manager.drain_ready_updates().await {}
+    manager.advance_pending_initial_registration();
+    assert!(manager.outbound_peers.contains_key(&deferred));
+    let mut dumped = false;
+    while let Ok(update) = deferred_rx.try_recv() {
+        dumped |= update
+            .announce
+            .iter()
+            .any(|r| r.prefix == Prefix::V4(prefix));
+    }
+    assert!(dumped, "the deferred dump reads the current dataset");
+}
+
+/// LAN-2512: a reload during a mass reconnect finds every cohort member's
+/// registration deferred after the peer manager prepared the destination
+/// group. The all-skipped cohort releases that preparation (nothing will adopt
+/// it, and the caller discards only on failure), and each member registers on
+/// the new chain.
+#[tokio::test]
+async fn all_deferred_cohort_releases_prepared_destination() {
+    use rustbgpd_policy::PolicyAction;
+    let (tx, rx) = mpsc::channel(64);
+    let old = policy_chain(PolicyAction::Permit);
+    let new = policy_chain(PolicyAction::Deny);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        Some(old.clone()),
+        None,
+        BgpMetrics::new(),
+    );
+    manager.initial_dump_defer_min_routes = 0;
+    let members = [
+        peer_v4(Ipv4Addr::new(10, 0, 0, 1)),
+        peer_v4(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let source = peer_v4(Ipv4Addr::new(10, 0, 0, 9));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 9, 0), 24);
+    let mut first_sessions = Vec::new();
+    for (session_id, &peer) in (1..).zip(&members) {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        manager.handle_update(test_peer_up(peer, session_id, outbound_tx));
+        first_sessions.push(outbound_rx);
+    }
+    manager.handle_update(test_routes_received(
+        source,
+        vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 9))],
+    ));
+    drain_route_chunks(&mut manager);
+
+    let (reply, prepared) = tokio::sync::oneshot::channel();
+    manager.handle_update(RibUpdate::PrepareExportPolicyDestination {
+        peer: members[0],
+        export_policy: Some(new.clone()),
+        reply,
+    });
+    while manager.pending_destination_prestage.is_some() {
+        manager.advance_destination_prestage();
+    }
+    assert_eq!(prepared.await.unwrap(), Ok(()));
+    let destination = manager
+        .prepared_destination
+        .expect("the preparation staged a destination");
+
+    // Mass reconnect: both members drop and re-establish behind queued work,
+    // then each session accepts the new chain.
+    for (session_id, &peer) in (1..).zip(&members) {
+        manager.handle_update(RibUpdate::PeerDown { peer, session_id });
+    }
+    tx.try_send(test_routes_received(source, vec![])).unwrap();
+    let mut receivers = Vec::new();
+    for (session_id, &peer) in (3..).zip(&members) {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        manager.handle_update(test_peer_up(peer, session_id, outbound_tx));
+        manager.handle_update(RibUpdate::SetPeerSessionExportPolicy {
+            peer,
+            session_id,
+            export_policy: Some(new.clone()),
+        });
+        receivers.push(outbound_rx);
+    }
+    assert_eq!(manager.pending_initial_registrations.len(), members.len());
+
+    let (reply, response) = tokio::sync::oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicies {
+        replacements: members
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(new.clone()),
+            })
+            .collect(),
+        reply,
+    });
+    assert_eq!(
+        response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    assert!(manager.pending_clean_policy_transition.is_none());
+    assert_eq!(manager.prepared_destination, None, "no leaked preparation");
+    assert!(manager.prestaged_inventory.is_none(), "no leaked inventory");
+    assert!(
+        !manager.group_ribs.contains_key(&destination),
+        "the memberless prepared group is removed"
+    );
+
+    while manager.drain_ready_updates().await {}
+    while !manager.pending_initial_registrations.is_empty() {
+        manager.advance_pending_initial_registration();
+    }
+    for (&peer, receiver) in members.iter().zip(&mut receivers) {
+        assert!(manager.outbound_peers.contains_key(&peer));
+        assert_eq!(manager.export_chains[&peer], Some(new.clone()));
+        let mut saw_eor = false;
+        while let Ok(update) = receiver.try_recv() {
+            assert!(
+                update.announce.is_empty(),
+                "{peer}: dump uses the new chain"
+            );
+            saw_eor |= !update.end_of_rib.is_empty();
+        }
+        assert!(saw_eor, "{peer}: initial dump completed");
+    }
 }
 
 /// End-to-end through the run loop: a reconnect burst (`PeerUp`s and the

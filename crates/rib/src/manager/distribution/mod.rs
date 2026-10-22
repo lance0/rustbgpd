@@ -4892,13 +4892,19 @@ impl RibManager {
             let readiness = manager.replacement_readiness.clone();
             let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
             let mut replacements = replacements;
-            // An unregistered member (deferred `PeerUp` registration, or a
-            // session that went down after the caller's state probe) has no
-            // outbound object to transition. Its session recorded the
-            // accepted chain on this channel before acknowledging the
-            // hot-apply, so its registration installs the new chain. Skip
-            // it as the authoritative batch does; rejecting the cohort
-            // would roll back every other member for no divergence.
+            // An unregistered member has no outbound object to transition.
+            // Skip it as the authoritative batch does; rejecting the cohort
+            // would roll back every other member for no divergence. Each
+            // way a member gets here installs the accepted chain later:
+            // - a deferred `PeerUp`: the session recorded the accepted chain
+            //   on this channel before acknowledging the hot-apply, and the
+            //   deferred registration re-reads that live-session record;
+            // - a session that went down, even one that exited after its
+            //   acknowledgement: its next `PeerUp` carries the session's
+            //   chain, and a replacement session is spawned from the peer
+            //   manager's bookkeeping, which already holds the accepted
+            //   chain. This is why the cohort commits rather than failing
+            //   closed on a session that ended mid-reload.
             replacements.retain(|replacement| {
                 checkpoint();
                 let registered = manager.outbound_peers.contains_key(&replacement.peer);
@@ -4914,6 +4920,11 @@ impl RibManager {
                 "internal RIB sequencing error: policy transition already in progress".to_string()
             });
             if replacements.is_empty() || error.is_some() {
+                // With no member left, nothing will adopt a destination the
+                // caller prepared for this cohort, and the caller discards
+                // only on failure. Release it here; an in-flight transition
+                // still owns its own destination.
+                let discard_prepared = replacements.is_empty() && error.is_none();
                 let result = if replacements.is_empty() {
                     Ok(crate::update::ExportPolicyCohortOutcome::Committed)
                 } else {
@@ -4921,7 +4932,7 @@ impl RibManager {
                 };
                 super::retire_vec(&mut replacements, &mut || checkpoint());
                 manager.replacement_checkpoint(true);
-                return Some((reply, result));
+                return Some((reply, result, discard_prepared));
             }
             if let Some(mut prestage) = manager.pending_destination_prestage.take() {
                 manager.retire_prestaged_transition_inventory();
@@ -4936,7 +4947,10 @@ impl RibManager {
                 Some(PendingCleanPolicyTransition::new(replacements, Some(reply)));
             None
         });
-        if let Some((reply, result)) = terminal {
+        if let Some((reply, result, discard_prepared)) = terminal {
+            if discard_prepared {
+                self.discard_prepared_export_destination();
+            }
             let _ = reply.send(result);
         }
     }

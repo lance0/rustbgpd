@@ -2205,6 +2205,11 @@ impl RibManager {
                 .copied()
                 .filter(|peer| manager.outbound_peers.contains_key(peer))
                 .collect();
+            if peers.is_empty() {
+                // An empty target set would still qualify for the group
+                // pass and scan the whole table for nobody.
+                return Ok(());
+            }
             let peers = peers.as_slice();
             let bounded = swaps.and_then(|swaps| manager.dataset_swap_bound(peers, swaps));
             let mode = if bounded.is_some() { "delta" } else { "full" };

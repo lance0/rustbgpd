@@ -2072,7 +2072,10 @@ const D: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
 const E: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 5);
 const F: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 6);
 
-fn dataset_prefix_data(prefix: Prefix, permit: bool) -> rustbgpd_policy::datasets::DatasetData {
+pub(super) fn dataset_prefix_data(
+    prefix: Prefix,
+    permit: bool,
+) -> rustbgpd_policy::datasets::DatasetData {
     use rustbgpd_policy::datasets::DatasetData;
     use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
     DatasetData::Prefix(PrefixSet::new(permit.then_some(PrefixSetEntry {
@@ -2082,7 +2085,7 @@ fn dataset_prefix_data(prefix: Prefix, permit: bool) -> rustbgpd_policy::dataset
     })))
 }
 
-fn dataset_prefix_policy(
+pub(super) fn dataset_prefix_policy(
     prefix: Prefix,
     permit: bool,
 ) -> (Arc<rustbgpd_policy::datasets::DatasetHandle>, PolicyChain) {
