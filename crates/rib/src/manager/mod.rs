@@ -684,6 +684,12 @@ pub struct RibManager {
     /// Advances whenever a peer joins or leaves `peer_sendable_families`, so
     /// a paged export-disposition walk detects a roster change between pages.
     outbound_roster_generation: u64,
+    /// Advances whenever a registered peer's export settings change without
+    /// a session reset: its outbound prefix limits, conditional
+    /// advertisement gate, peer group, Add-Path send limits, sendable
+    /// families or ORF state. Folded into the export-disposition walk's
+    /// policy version so a paged walk detects such a change between pages.
+    export_settings_generation: u64,
     /// Families for which each registered outbound peer advertised the
     /// Long-Lived Graceful Restart capability (RFC 9494). Gates the
     /// export of LLGR-stale routes: absent family + eBGP target =
@@ -2396,6 +2402,7 @@ impl RibManager {
             export_chains: export_chains::ExportChains::new(export_policy),
             peer_sendable_families: HashMap::new(),
             outbound_roster_generation: 0,
+            export_settings_generation: 0,
             peer_advertised_llgr_families: HashMap::new(),
             peer_is_ebgp: HashMap::new(),
             peer_is_rr_client: HashMap::new(),
@@ -3199,10 +3206,17 @@ impl RibManager {
             None => self.peer_group.remove(&peer).is_some(),
         };
         if changed {
+            self.advance_export_settings();
             Self::advance_route_page_version(&mut self.peer_group_version);
             // ADR-0137: a `condition_policy` reads the source peer's group.
             let _ = self.reobserve_conditional_advertisement_source(peer);
         }
+    }
+
+    /// Record a change to a peer's export settings for paged
+    /// export-disposition walks ([`Self::export_settings_generation`]).
+    pub(super) fn advance_export_settings(&mut self) {
+        self.export_settings_generation = self.export_settings_generation.wrapping_add(1);
     }
 
     pub(super) fn advance_advertised_pages(&mut self) {
@@ -4051,6 +4065,7 @@ impl RibManager {
                         });
                     self.peer_add_path_send_limits.insert(peer, new_limits);
                     if effective_limit_changed {
+                        self.advance_export_settings();
                         self.send_initial_table(peer);
                     }
                     self.ensure_advertised_pages_advanced(page_versions);

@@ -1251,6 +1251,7 @@ impl RibManager {
         if previous == limit {
             return;
         }
+        self.advance_export_settings();
         let grouped = self.grouped_member_of(peer).is_some();
         // A raise or removal is the only edit that opens capacity a blocking
         // episode was withholding; a first install or a lowering can only
