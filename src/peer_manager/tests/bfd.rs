@@ -2085,3 +2085,49 @@ async fn a_pending_stop_survives_an_unacknowledged_bfd_scope_move() {
     mgr.retry_bfd_commands(None);
     assert!(matches!(receiver.try_recv(), Ok(PeerCommand::BfdDown)));
 }
+
+/// A strict peer never admits BGP while its BFD scope move awaits the actor:
+/// it is held and its BGP session stopped as soon as the move is staged, and
+/// nothing starts it until the replacement's Up acknowledgement.
+#[tokio::test(start_paused = true)]
+async fn a_strict_peer_is_held_while_its_bfd_scope_move_awaits_the_actor() {
+    let peer: IpAddr = "fe80::2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _desired_rx, mut reload_rx) =
+        link_local_bfd_mgr("eth1", true, fake_bfd_peer_handle(counters.clone()));
+    assert!(!mgr.bfd_withholding(&peer), "starts admitted");
+
+    mgr.handle_links_changed();
+    let refresh = tokio::spawn(async move {
+        mgr.run_due_bfd_scope_refresh().await;
+        mgr
+    });
+    let command = reload_rx.recv().await.expect("the move asks the actor");
+    tokio::time::timeout(Duration::from_secs(1), wait_counter(&counters.bfd_down, 1))
+        .await
+        .expect("held and stopped before the acknowledgement");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        counters.start.load(Ordering::SeqCst),
+        0,
+        "nothing starts BGP while the acknowledgement is pending"
+    );
+    assert!(!refresh.is_finished(), "still waiting on the actor");
+
+    let acks = command
+        .desired
+        .sessions
+        .iter()
+        .map(|params| {
+            let mut ack = up_ack(params.peer);
+            ack.revision = params.revision;
+            ack
+        })
+        .collect();
+    command.reply.send(acks).unwrap();
+    let mgr = refresh.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), wait_counter(&counters.start, 1))
+        .await
+        .expect("the Up acknowledgement admits BGP");
+    assert!(!mgr.bfd_withholding(&peer));
+}

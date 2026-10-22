@@ -743,9 +743,36 @@ impl PeerManager {
         if updates.is_empty() && self.link_check.bfd_unsettled.is_empty() {
             return;
         }
+        let mut moving = std::mem::take(&mut self.link_check.bfd_unsettled);
+        moving.extend(updates.iter().map(|(peer, _)| *peer));
+        let coupling = self.bfd_coupling.as_mut().expect("checked above");
+        coupling.prior_held.clone_from(&coupling.held_down);
+        coupling
+            .prior_initially_withheld
+            .clone_from(&coupling.initially_withheld);
+        let strict: Vec<IpAddr> = moving
+            .iter()
+            .copied()
+            .filter(|peer| {
+                coupling
+                    .configured
+                    .get(peer)
+                    .is_some_and(|params| params.strict)
+            })
+            .collect();
+        // A strict peer must not admit BGP between staging the replacement
+        // and the replacement's confirmed Up: hold it now, before waiting on
+        // the actor. The Up acknowledgement at the new revision releases it,
+        // on this attempt or a retry.
+        for peer in &strict {
+            if !self.bfd_withholding(peer)
+                && let Err(error) = self.hold_bgp_for_bfd(*peer).await
+            {
+                warn!(%peer, %error, "failed to stop strict BGP peer for a BFD scope move");
+            }
+        }
         let coupling = self.bfd_coupling.as_mut().expect("checked above");
         let mut configured = coupling.configured.clone();
-        let mut moving = std::mem::take(&mut self.link_check.bfd_unsettled);
         for (peer, ifindex) in updates {
             let Some(params) = configured.get_mut(&peer) else {
                 continue;
@@ -772,42 +799,21 @@ impl PeerManager {
             {
                 retry.revision = Some(params.revision);
             }
-            moving.insert(peer);
         }
-        coupling.prior_held.clone_from(&coupling.held_down);
-        coupling
-            .prior_initially_withheld
-            .clone_from(&coupling.initially_withheld);
         coupling.pending = Some(configured);
         coupling.reloading = true;
         coupling.rollback_lookup = false;
-        let strict: Vec<IpAddr> = moving
-            .iter()
-            .copied()
-            .filter(|peer| {
-                coupling
-                    .pending
-                    .as_ref()
-                    .and_then(|pending| pending.get(peer))
-                    .is_some_and(|params| params.strict)
-            })
-            .collect();
         if let Err(error) = self.commit_bfd_reload(None).await {
             // Fail closed, as an uncertain reload does: the replacement is not
-            // confirmed, so a strict peer's BGP admission is fenced until a
+            // confirmed, so the strict peers held above stay held until a
             // later attempt settles it.
             warn!(
                 %error,
-                "BFD link-local scope move was not acknowledged; strict peers are held and the \
+                "BFD link-local scope move was not acknowledged; strict peers stay held and the \
                  move will be retried"
             );
             if let Some(coupling) = self.bfd_coupling.as_mut() {
                 coupling.held_down.extend(strict.iter().copied());
-            }
-            for peer in strict {
-                if let Err(error) = self.hold_bgp_for_bfd(peer).await {
-                    warn!(%peer, %error, "failed to stop strict BGP peer after an unacknowledged BFD move");
-                }
             }
             self.link_check.bfd_unsettled = moving;
             self.schedule_bfd_scope_retry();
