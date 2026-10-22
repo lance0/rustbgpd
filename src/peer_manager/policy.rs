@@ -2697,13 +2697,14 @@ impl PeerManager {
                                     self.finish_policy_rollback_rib_success(plan);
                                 }
                                 PeerExportPolicyRestoreReceipt::NotFound { .. }
-                                    if plan.export_restore.as_ref().is_some_and(
-                                        |(_, is_known_non_established)| *is_known_non_established,
-                                    ) =>
+                                    if plan
+                                        .export_restore
+                                        .as_ref()
+                                        .is_some_and(|(_, state_observed)| *state_observed) =>
                                 {
                                     info!(
                                         peer = %plan.peer_key.address,
-                                        "policy rollback acknowledged absent RIB registration; restored session policy is authoritative on PeerUp"
+                                        "policy rollback acknowledged absent RIB registration; the restored session policy is authoritative when the peer registers"
                                     );
                                     self.finish_policy_rollback_rib_success(plan);
                                 }
@@ -3195,7 +3196,6 @@ impl PeerManager {
             let outcome = self
                 .reevaluate_dataset_exports(
                     export_peers.clone(),
-                    false,
                     OperatorReadAdmission::Served,
                     None,
                 )
@@ -3362,8 +3362,9 @@ impl PeerManager {
         }
     }
 
-    /// The down-peer exception is only used for a singleton batch, so typed
-    /// `NotFound` proves that exact peer has no old outbound object to retain.
+    /// The RIB skips a target it has not registered (a down peer, or a
+    /// deferred `PeerUp`): it has no staged exports, and its registration
+    /// evaluates the current datasets.
     ///
     /// Only channel admission has a deadline: nothing has been dispatched
     /// before it, so expiry is a clean rejection. Once dispatched, the RIB
@@ -3377,7 +3378,6 @@ impl PeerManager {
     pub(super) async fn reevaluate_dataset_exports(
         &mut self,
         peers: Vec<IpAddr>,
-        known_down: bool,
         operator_reads: OperatorReadAdmission,
         swaps: Option<Vec<rustbgpd_rib::DatasetSwap>>,
     ) -> Result<(), DatasetRefreshFailure> {
@@ -3418,7 +3418,6 @@ impl PeerManager {
         });
         match self.await_with_readiness(response, operator_reads).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(RibCommandError::NotFound(_))) if known_down => Ok(()),
             Ok(Err(error @ RibCommandError::NotFound(_))) => Err(DatasetRefreshFailure::Rejected(
                 format!("dataset export re-evaluation: {error}"),
             )),
@@ -3490,7 +3489,6 @@ impl PeerManager {
                     let export_started = tokio::time::Instant::now();
                     self.reevaluate_dataset_exports(
                         vec![dependent.peer.address],
-                        true,
                         operator_reads,
                         None,
                     )
@@ -3517,7 +3515,7 @@ impl PeerManager {
             }
         }
         let refresh_started = tokio::time::Instant::now();
-        self.reevaluate_dataset_exports(exports, false, operator_reads, swaps)
+        self.reevaluate_dataset_exports(exports, operator_reads, swaps)
             .await?;
         for (dependent, is_established) in dependents.iter().zip(&established) {
             if dependent.import
@@ -3972,7 +3970,7 @@ impl PeerManager {
             *rollback_plan = Some(PolicyRollbackPeerPlan {
                 peer_key,
                 export_restore: needs_export_apply
-                    .then_some((export_policy, is_known_non_established)),
+                    .then_some((export_policy, is_established || is_known_non_established)),
                 refresh_failure: needs_refresh.then_some(refresh_failure),
                 is_established,
                 restore_prior_pending: None,
@@ -4002,12 +4000,17 @@ impl PeerManager {
             // its old outbound object is still registered, and skipping this
             // step would leave that object evaluating the policy being rolled
             // back. Try the authoritative restore even when the session query
-            // positively reports a non-Established state. A typed NotFound is
-            // safe only for rollback of such a known-down peer: there is no
-            // outbound object left to retain the forward policy, and the next
-            // PeerUp carries the restored policy from the session. A timed-out
-            // state query remains ambiguous and therefore fail-closed, as do
-            // forward applies and peers still reporting Established.
+            // positively reports a non-Established state.
+            //
+            // Nor does Established prove registration: the RIB defers a large
+            // table's `PeerUp` registration behind queued work, and a session
+            // can drop after the probe. A typed NotFound proves no outbound
+            // object holds any chain, and the session enqueued its accepted
+            // chain on the RIB channel before acknowledging the hot-apply, so
+            // the registration that follows installs it. Accept that absence
+            // for any positively observed session state, forward or rollback.
+            // A SessionGone or timed-out probe remains ambiguous and
+            // fail-closed: it cannot show which session took the edit.
             let rib_outcome = self
                 .replace_peer_export_policy_in_rib(
                     address,
@@ -4019,12 +4022,13 @@ impl PeerManager {
             match rib_outcome {
                 Ok(()) => {}
                 Err(error @ RibCommandError::NotFound(_))
-                    if is_rollback && is_known_non_established =>
+                    if is_established || is_known_non_established =>
                 {
                     info!(
                         peer = %address,
                         %error,
-                        "policy rollback found no RIB outbound registration; the restored session policy will be authoritative on PeerUp"
+                        rollback = is_rollback,
+                        "policy apply found no RIB outbound registration; the accepted session policy is authoritative when the peer registers"
                     );
                 }
                 Err(error) => {

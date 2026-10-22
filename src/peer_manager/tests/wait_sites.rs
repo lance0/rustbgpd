@@ -1528,7 +1528,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::ExportReplacementCapacity => manager.replace_peer_export_policy_in_rib(
             peers[0], Some(deny_policy_chain()), None, OperatorReadAdmission::Served).await.map_err(|e| e.to_string()),
         Drive::DatasetExportCapacity { failed_restore } => manager.reevaluate_dataset_exports(
-            peers.to_vec(), false, if failed_restore { OperatorReadAdmission::Fenced {
+            peers.to_vec(), if failed_restore { OperatorReadAdmission::Fenced {
                 reason: "an earlier failed restoration retains its fence while awaiting capacity",
             }} else { OperatorReadAdmission::Served }, None).await.map_err(|e| e.to_string()),
         Drive::MaxPrefixRestart => {
@@ -2714,7 +2714,7 @@ async fn dataset_reply_waits_for_completion_past_rib_reply_timeout() {
     insert_test_managed_peer(&mut manager, peer, handle, false);
     let transaction = tokio::spawn(async move {
         let result = manager
-            .reevaluate_dataset_exports(vec![peer], false, OperatorReadAdmission::Served, None)
+            .reevaluate_dataset_exports(vec![peer], OperatorReadAdmission::Served, None)
             .await;
         (manager, result)
     });

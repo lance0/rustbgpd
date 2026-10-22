@@ -12,8 +12,8 @@ use tracing::{info, warn};
 
 use super::ManagedPeerState;
 use super::{
-    ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound,
-    TcpAoDesiredInventory,
+    ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT,
+    PeerManager, PendingInbound, TcpAoDesiredInventory,
 };
 
 /// NOTIFICATION streak at which a neighbor's Idle reconnect wait also holds
@@ -1113,19 +1113,33 @@ impl PeerManager {
     /// candidate that is Idle, exited, or unconfirmed is dropped and the
     /// primary is never retired for it. Returns what
     /// [`Self::finish_inbound_promotion`] takes.
+    ///
+    /// The candidate is synced from the managed peer BEFORE the claim. Its
+    /// session handles commands in order, so the claim reply is the last word
+    /// on whether it is still viable: a hold or verdict timer that expires
+    /// during the sync marks it lost, the claim answers `false`, and the
+    /// primary is kept. Claiming first would let a candidate that died during
+    /// the sync be promoted over a viable primary.
     async fn claim_pending_inbound(
         &mut self,
         peer_key: &PeerKey,
     ) -> Option<(PeerHandle, u64, u64)> {
         self.drain_before_candidate_promotion(peer_key).await;
-        let claim = self
-            .peers
-            .get(peer_key)?
-            .pending_inbound
-            .as_ref()?
-            .handle
-            .claim_collision_promotion_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-            .await;
+        let claim = match self.sync_promotion_candidate(peer_key).await {
+            Ok(()) => {
+                self.peers
+                    .get(peer_key)?
+                    .pending_inbound
+                    .as_ref()?
+                    .handle
+                    .claim_collision_promotion_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                    .await
+            }
+            Err(error) => {
+                warn!(peer = %peer_key.address, %error, "collision candidate did not accept the current session settings; keeping the primary");
+                Err(error)
+            }
+        };
         let collision_dump = match claim {
             Ok(true) => return self.promote_pending_inbound_handle(peer_key),
             Ok(false) => {
@@ -1150,6 +1164,57 @@ impl PeerManager {
             )
             .await;
         None
+    }
+
+    /// The candidate copied the managed policies and session knobs when it
+    /// was spawned. A later edit (SIGHUP generation, gRPC policy or knob
+    /// change, peer-group reshape, honor toggle, dataset) reached only the
+    /// primary. Reassert the current managed state on the candidate before it
+    /// is claimed and promoted: it holds its KEEPALIVE until activation, so
+    /// these commands precede its `PeerUp` and its first export already uses
+    /// the current chain. Promotion is the one place a candidate becomes
+    /// the session, so this one sync covers every mutation path.
+    async fn sync_promotion_candidate(
+        &self,
+        peer_key: &PeerKey,
+    ) -> Result<(), rustbgpd_transport::PeerCommandError> {
+        let Some(managed) = self.peers.get(peer_key) else {
+            return Ok(());
+        };
+        let Some(pending) = managed.pending_inbound.as_ref() else {
+            return Ok(());
+        };
+        let handle = &pending.handle;
+        let config = &managed.transport_config;
+        handle
+            .update_import_policy_timeout(managed.import_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
+            .await?;
+        handle
+            .update_export_policy_timeout(managed.export_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
+            .await?;
+        handle
+            .update_graceful_shutdown_timeout(
+                managed.advertise_graceful_shutdown,
+                PEER_POLICY_UPDATE_TIMEOUT,
+            )
+            .await?;
+        handle
+            .update_runtime_config_timeout(
+                config.max_prefixes,
+                config.max_prefixes_ipv4,
+                config.max_prefixes_ipv6,
+                config.max_prefixes_received_ipv4,
+                config.max_prefixes_received_ipv6,
+                config.max_prefixes_family,
+                config.max_prefix_action,
+                config.max_prefix_warning_percent,
+                config.gr_stale_routes_time,
+                config.gr_peer_restart_time_max,
+                config.local_ipv6_nexthop,
+                config.remove_private_as,
+                PEER_POLICY_UPDATE_TIMEOUT,
+            )
+            .await
     }
 
     pub(super) async fn promote_pending_inbound(

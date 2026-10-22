@@ -1059,6 +1059,12 @@ fn backoff_session_handle(
                 PeerCommand::ClaimCollisionPromotion { reply } => {
                     let _ = reply.send(true);
                 }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::UpdateGracefulShutdown { reply, .. }
+                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
                 PeerCommand::ActivateMaxPrefixMetrics {
                     notification_idle_failures,
                     reply,

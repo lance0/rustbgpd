@@ -324,3 +324,39 @@ async fn policy_ipv6_next_hop_on_injected_self_route_falls_back_to_self_on_the_w
     drop(query_tx);
     manager_task.await.unwrap();
 }
+
+/// LAN-2512: a policy the session accepts before it establishes is the one its
+/// `PeerUp` registers. An export-policy cohort that skipped the unregistered
+/// peer in the RIB therefore installs the accepted chain at registration.
+#[tokio::test]
+async fn export_policy_accepted_before_establishment_rides_peer_up() {
+    let (mut session, mut rib_rx, _bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.export_policy = Some(export_chain(PolicyAction::Deny));
+    let next = export_chain(PolicyAction::Permit);
+    let (reply, accepted) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::UpdateExportPolicy {
+            policy: Some(Box::new(next.clone())),
+            reply,
+        })
+        .await;
+    assert_eq!(accepted.await.unwrap(), Ok(()));
+    assert!(matches!(
+        rib_rx.recv().await.unwrap(),
+        RibUpdate::SetPeerSessionExportPolicy { .. }
+    ));
+
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session
+        .execute_actions(vec![Action::SessionEstablished(Box::new(
+            negotiated_session(65002, false),
+        ))])
+        .await;
+    let RibUpdate::PeerUp { export_policy, .. } =
+        recv_peer_up_after_export_context(&mut rib_rx).await
+    else {
+        unreachable!("the helper returns PeerUp");
+    };
+    assert_eq!(export_policy, Some(next));
+}

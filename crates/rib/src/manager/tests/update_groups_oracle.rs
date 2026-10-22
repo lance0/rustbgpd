@@ -2072,7 +2072,10 @@ const D: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
 const E: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 5);
 const F: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 6);
 
-fn dataset_prefix_data(prefix: Prefix, permit: bool) -> rustbgpd_policy::datasets::DatasetData {
+pub(super) fn dataset_prefix_data(
+    prefix: Prefix,
+    permit: bool,
+) -> rustbgpd_policy::datasets::DatasetData {
     use rustbgpd_policy::datasets::DatasetData;
     use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
     DatasetData::Prefix(PrefixSet::new(permit.then_some(PrefixSetEntry {
@@ -2082,7 +2085,7 @@ fn dataset_prefix_data(prefix: Prefix, permit: bool) -> rustbgpd_policy::dataset
     })))
 }
 
-fn dataset_prefix_policy(
+pub(super) fn dataset_prefix_policy(
     prefix: Prefix,
     permit: bool,
 ) -> (Arc<rustbgpd_policy::datasets::DatasetHandle>, PolicyChain) {
@@ -2223,8 +2226,11 @@ async fn dataset_content_refresh_rechecks_per_client_best_export_verdicts() {
     check_dataset_export_refresh(true).await;
 }
 
+/// LAN-2512: a target not registered in the RIB (a deferred `PeerUp`, or a
+/// session already down) has nothing staged to re-evaluate. It no longer
+/// rejects the batch; the registered target is still re-evaluated.
 #[tokio::test]
-async fn dataset_content_refresh_missing_target_has_no_effects() {
+async fn dataset_content_refresh_skips_missing_target() {
     let prefix = Prefix::V4(pfx(1, 0));
     let (handle, chain) = dataset_prefix_policy(prefix, true);
     let mut oracle = Oracle::spawn(false, None);
@@ -2247,13 +2253,14 @@ async fn dataset_content_refresh_missing_target_has_no_effects() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        result.await.unwrap(),
-        Err(crate::update::RibCommandError::NotFound(_))
-    ));
-    assert_eq!(oracle.export_policy_evals_for(B).await, evals);
+    assert_eq!(result.await.unwrap(), Ok(()));
+    assert!(oracle.export_policy_evals_for(B).await > evals);
     let streams = oracle.finish().await;
-    assert_eq!(streams[&peer_v4(B)], before);
+    assert_ne!(
+        streams[&peer_v4(B)],
+        before,
+        "the registered target's now-denied route is withdrawn"
+    );
 }
 
 #[tokio::test]

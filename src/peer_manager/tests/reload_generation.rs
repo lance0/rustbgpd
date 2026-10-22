@@ -3661,7 +3661,7 @@ async fn dataset_generation_with_unused_set_changes_still_refreshes_and_compensa
         let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
         let prior_data = live.pin().data.clone();
         let mut harness = GenerationHarness::new(&prior);
-        let (exports, relay) = intercept_dataset_rib(&mut harness, 0, None);
+        let (exports, relay) = intercept_dataset_rib(&mut harness, 0);
         std::fs::write(
             &path,
             format!("prefix-set unused {{ 20.0.1.0/24 }}\n{source}"),
@@ -3985,7 +3985,6 @@ type DatasetExportBatches = Arc<Mutex<Vec<Vec<IpAddr>>>>;
 fn intercept_dataset_rib(
     harness: &mut GenerationHarness,
     retained: usize,
-    missing: Option<IpAddr>,
 ) -> (DatasetExportBatches, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
     let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
@@ -4002,15 +4001,9 @@ fn intercept_dataset_rib(
                         .lock()
                         .unwrap()
                         .push(peers.iter().map(|peer| peer.addr()).collect());
-                    let outcome =
-                        if missing.is_some_and(|peer| peers.contains(&PeerId::from_addr(peer))) {
-                            Err(rustbgpd_rib::RibCommandError::not_found(
-                                "missing outbound registration",
-                            ))
-                        } else {
-                            Ok(())
-                        };
-                    let _ = reply.send(outcome);
+                    // The RIB skips a target it has not registered, so a
+                    // down dependent's re-evaluation settles like any other.
+                    let _ = reply.send(Ok(()));
                 }
                 other => {
                     if downstream.send(other).await.is_err() {
@@ -4090,7 +4083,7 @@ async fn dataset_generation_clean_down_missing_export_is_vacuous_only_for_that_p
         .lock()
         .unwrap()
         .push_back(SessionState::Idle);
-    let (exports, relay) = intercept_dataset_rib(&mut harness, 0, Some(down));
+    let (exports, relay) = intercept_dataset_rib(&mut harness, 0);
     let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
     let outcome = Box::pin(
         harness
@@ -4199,7 +4192,7 @@ async fn dataset_generation_down_peer_with_gr_retention_rejects_before_publicati
         .lock()
         .unwrap()
         .push_back(SessionState::Idle);
-    let (exports, relay) = intercept_dataset_rib(&mut harness, 3, None);
+    let (exports, relay) = intercept_dataset_rib(&mut harness, 3);
     let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
     let outcome = Box::pin(
         harness
@@ -4602,7 +4595,7 @@ async fn dataset_generation_restores_old_only_dependency_after_chain_change() {
     let prior = fixture.load();
     let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
     let mut harness = GenerationHarness::new(&prior);
-    let (exports, relay) = intercept_dataset_rib(&mut harness, 0, None);
+    let (exports, relay) = intercept_dataset_rib(&mut harness, 0);
     // The declaration and binding stay, but no candidate chain references it.
     std::fs::write(
         fixture.dir.path().join("members.rpol"),
@@ -4661,7 +4654,7 @@ async fn dataset_generation_refreshes_candidate_only_dependencies() {
     .unwrap();
     let prior = fixture.load();
     let mut harness = GenerationHarness::new(&prior);
-    let (exports, relay) = intercept_dataset_rib(&mut harness, 0, None);
+    let (exports, relay) = intercept_dataset_rib(&mut harness, 0);
     std::fs::write(&rpol_path, referencing_policy).unwrap();
     let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
     let outcome = Box::pin(

@@ -2197,6 +2197,20 @@ impl RibManager {
     ) {
         let result = self.with_replacement_summary_reads("reevaluate", |manager| {
             let started = std::time::Instant::now();
+            // An unregistered peer has nothing staged to re-evaluate; its
+            // registration evaluates the current datasets. Dropping it keeps
+            // one deferred `PeerUp` from rejecting the whole batch.
+            let peers: Vec<PeerId> = peers
+                .iter()
+                .copied()
+                .filter(|peer| manager.outbound_peers.contains_key(peer))
+                .collect();
+            if peers.is_empty() {
+                // An empty target set would still qualify for the group
+                // pass and scan the whole table for nobody.
+                return Ok(());
+            }
+            let peers = peers.as_slice();
             let bounded = swaps.and_then(|swaps| manager.dataset_swap_bound(peers, swaps));
             let mode = if bounded.is_some() { "delta" } else { "full" };
             let affected = bounded.as_ref().map(|bound| bound.prefixes.len());
@@ -2401,6 +2415,10 @@ impl RibManager {
     /// against their own Adj-RIB-Out; dirty and channel-full members keep
     /// their ordinary resync and deferral handling.
     fn reevaluate_full_pass_by_group(&mut self, targets: &HashSet<PeerId>) {
+        #[cfg(test)]
+        {
+            self.dataset_full_table_scans += 1;
+        }
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let groups: HashSet<usize> = targets
