@@ -75,10 +75,44 @@ impl<T> Spanned<T> {
     }
 }
 
+/// Compiler stage that produced a diagnostic, with stable CLI labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticCode {
+    /// A diagnostic constructed without an explicit stage.
+    Compile,
+    /// Tokenization failed.
+    Lex,
+    /// Source syntax is invalid.
+    Parse,
+    /// Module or external binding resolution failed.
+    Resolve,
+    /// Typechecking, name checking, or a static resource bound failed.
+    Typecheck,
+    /// Lowering to the executable policy representation failed.
+    Lower,
+}
+
+impl DiagnosticCode {
+    /// Stable `rbgp policy check -j` finding code.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Compile => "compile-error",
+            Self::Lex => "lex-error",
+            Self::Parse => "parse-error",
+            Self::Resolve => "resolve-error",
+            Self::Typecheck => "typecheck-error",
+            Self::Lower => "lower-error",
+        }
+    }
+}
+
 /// One compile error: a message, labeled source spans (the first is
 /// primary), and free-form notes (used for did-you-mean suggestions).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
+    /// The compiler stage, independent of the human-readable message.
+    pub code: DiagnosticCode,
     /// Top-line error message.
     pub message: String,
     /// Labeled spans; the first is the primary location.
@@ -91,7 +125,19 @@ impl Diagnostic {
     /// A diagnostic with one primary label.
     #[must_use]
     pub fn new(span: Span, message: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::coded(DiagnosticCode::Compile, span, message, label)
+    }
+
+    /// A diagnostic attributed to one compiler stage.
+    #[must_use]
+    pub fn coded(
+        code: DiagnosticCode,
+        span: Span,
+        message: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
         Self {
+            code,
             message: message.into(),
             labels: vec![(span, label.into())],
             notes: Vec::new(),

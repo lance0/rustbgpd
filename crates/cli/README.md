@@ -534,7 +534,8 @@ the flag and always includes the raw `received_at_epoch_seconds` field.
 | 4 | A lint selected by `--deny-lints` |
 
 Every check computes the static lints. Their stable names are `unused-set`,
-`unused-dataset`, `unused-fn`, `unreachable-term` and `unreferenced-policy`
+`unused-dataset`, `unused-fn`, `unreachable-term`, `unreferenced-policy` and
+`optional-field-negation`
 (see "Coverage and lints" in the
 [language reference](../../docs/reference/rpol-language.md)). A lint is a
 warning and never changes the exit code unless selected:
@@ -562,14 +563,29 @@ unknown fields; additive fields increment the minor version.
 | `coverage` | object | Present only under `--coverage` or a coverage threshold |
 
 Each finding has `severity` (`error` fails the check, `warning` does not),
-`code` (`compile-error` or a lint name), `message`, and its location: `file`
+`code` (a compiler-stage code or a lint name), `message`, and its location: `file`
 (the resolved path of the module that contains it, which may be an imported
 file), 1-based `line` and `column`, and an exclusive `end_line` and
 `end_column`. Columns count Unicode characters. A compile error adds its primary
 `label`, its `notes` (such as a did-you-mean suggestion), and `related`
 secondary locations, each with the same location keys plus `label`. Lints
 have a null `label` and empty `notes` and `related`. A lint is located at the
-name of the definition it flags.
+definition name or expression it flags.
+
+Compiler-stage codes are stable values of the existing `code` field:
+
+| Code | Meaning |
+|------|---------|
+| `lex-error` | An invalid source token |
+| `parse-error` | Invalid syntax or a malformed literal |
+| `resolve-error` | Import/module resolution, source-graph bounds, or an unavailable external binding |
+| `typecheck-error` | Names, field/operator types, call graphs, or static evaluation bounds |
+| `lower-error` | Executable policy lowering, including the composed-chain node budget |
+
+Older releases used `compile-error` for every compile finding. Consumers
+should use `severity: "error"` to select all errors and the stage code only
+when filtering a particular compiler stage. The JSON keys, version, legacy
+`diagnostics` messages and exit precedence are unchanged.
 
 ### Bounded family route pages
 

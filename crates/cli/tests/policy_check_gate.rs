@@ -153,7 +153,7 @@ fn json_document_shape_is_pinned() {
             "diagnostics": ["unknown field `route.prefx`"],
             "findings": [{
                 "severity": "error",
-                "code": "compile-error",
+                "code": "typecheck-error",
                 "message": "unknown field `route.prefx`",
                 "file": canonical,
                 "line": 2, "column": 21, "end_line": 2, "end_column": 26,
@@ -166,6 +166,84 @@ fn json_document_shape_is_pinned() {
             "failures": []
         })
     );
+}
+
+#[test]
+fn compile_findings_have_stage_codes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policy.rpol");
+    for (source, expected) in [
+        ("@", "lex-error"),
+        ("policy", "parse-error"),
+        ("import \"missing.rpol\"", "resolve-error"),
+        (
+            "policy p { term t { if route.med == \"bad\" { accept } } }",
+            "typecheck-error",
+        ),
+    ] {
+        std::fs::write(&path, source).unwrap();
+        let output = run(&path, &["-j"]);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let json = json_of(&output);
+        let findings = json["findings"].as_array().unwrap();
+        assert!(
+            findings.iter().any(|finding| finding["code"] == expected),
+            "{expected}: {json}"
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding["code"] != "compile-error")
+        );
+        assert_eq!(json["format_version"], "1.0");
+        assert!(!json["diagnostics"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn optional_field_negation_is_located_and_gateable() {
+    let directory = tempfile::tempdir().unwrap();
+    let main = directory.path().join("main.rpol");
+    let library = directory.path().join("library.rpol");
+    std::fs::write(
+        &library,
+        "policy p { term t { if !(peer.group == \"leaf\") { accept } } }",
+    )
+    .unwrap();
+    std::fs::write(&main, "import \"library.rpol\"").unwrap();
+    for args in [vec!["-j"], vec!["-j", "--coverage"]] {
+        let output = run(&main, &args);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let json = json_of(&output);
+        let finding = json["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["code"] == "optional-field-negation")
+            .unwrap();
+        assert_eq!(finding["severity"], "warning");
+        assert!(finding["file"].as_str().unwrap().ends_with("library.rpol"));
+        assert_eq!(located_text(finding), "!(peer.group == \"leaf\"");
+    }
+
+    for args in [
+        vec!["-j", "--deny-lints=optional-field-negation"],
+        vec!["-j", "--deny-lints"],
+    ] {
+        let output = run(&main, &args);
+        assert_eq!(output.status.code(), Some(4), "{output:?}");
+        assert!(
+            json_of(&output)["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["code"] == "optional-field-negation"
+                    && finding["severity"] == "error")
+        );
+    }
+    let text = run(&main, &["--deny-lints=optional-field-negation"]);
+    assert_eq!(text.status.code(), Some(4));
+    assert!(stderr(&text).contains("error[optional-field-negation]"));
 }
 
 /// Resolve a finding's `line`/`column`..`end_line`/`end_column` back to
@@ -270,7 +348,7 @@ fn findings_locate_definitions_across_imported_files() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let json = json_of(&output);
     let finding = &json["findings"][0];
-    assert_eq!(finding["code"], "compile-error");
+    assert_eq!(finding["code"], "typecheck-error");
     assert!(
         finding["file"].as_str().unwrap().ends_with("library.rpol"),
         "{finding}"
