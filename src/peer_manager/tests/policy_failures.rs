@@ -353,7 +353,8 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
 
     let ebgp = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let ibgp = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
-    mgr.current_config.neighbors = vec![config_neighbor(ebgp, 65002), config_neighbor(ibgp, 65001)];
+    *mgr.current_config.neighbors =
+        vec![config_neighbor(ebgp, 65002), config_neighbor(ibgp, 65001)];
 
     let ebgp_import_updates = Arc::new(AtomicU32::new(0));
     let ebgp_refresh_calls = Arc::new(AtomicU32::new(0));

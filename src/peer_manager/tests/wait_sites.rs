@@ -1503,7 +1503,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             )
             .unwrap();
             if compensate {
-                candidate.neighbors[2].remote_asn = 65014;
+                candidate.neighbors[2].remote_asn = 65014.into();
             }
             let staged =
                 candidate.prepare_staged_datasets(&manager.current_config.policy.dataset_bindings);

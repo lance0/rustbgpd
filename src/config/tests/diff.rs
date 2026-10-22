@@ -39,7 +39,10 @@ fn diff_neighbors_detects_changed() {
     assert_eq!(diff.added.len(), 0);
     assert_eq!(diff.removed.len(), 0);
     assert_eq!(diff.changed.len(), 1);
-    assert_eq!(diff.changed[0].remote_asn, 65099);
+    assert_eq!(
+        diff.changed[0].remote_asn,
+        crate::config::RemoteAsn::Asn(65099)
+    );
 }
 
 #[test]
@@ -911,7 +914,7 @@ log_format = "json"
     assert!(runtime.validate().is_ok());
     assert!(runtime.neighbors.iter().any(|neighbor| {
         neighbor.address == "10.0.0.2"
-            && neighbor.remote_asn == 65001
+            && neighbor.remote_asn == crate::config::RemoteAsn::Asn(65001)
             && neighbor.route_reflector_client == Some(true)
             && neighbor.tcp_ao.is_some()
     }));
@@ -962,7 +965,7 @@ tcp_ao = { key = "new-secret", send_id = 2, recv_id = 2, algorithm = "hmac(sha25
         .iter()
         .find(|neighbor| neighbor.address == "10.0.0.2")
         .expect("pinned neighbor restored");
-    assert_eq!(neighbor.remote_asn, 65001);
+    assert_eq!(neighbor.remote_asn, crate::config::RemoteAsn::Asn(65001));
     assert_eq!(
         neighbor
             .tcp_ao
@@ -1099,7 +1102,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         min_hold_time: None,
         address: "10.0.0.3".into(),
         interface: None,
-        remote_asn: 65003,
+        remote_asn: 65003.into(),
         description: None,
         peer_group: Some("new-group".into()),
         hold_time: None,
@@ -1181,7 +1184,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         min_hold_time: None,
         address: "10.0.0.4".into(),
         interface: None,
-        remote_asn: 65004,
+        remote_asn: 65004.into(),
         description: None,
         peer_group: Some("new-group".into()),
         hold_time: None,
@@ -1272,7 +1275,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         min_hold_time: None,
         address: "10.0.0.3".into(),
         interface: None,
-        remote_asn: 65003,
+        remote_asn: 65003.into(),
         description: None,
         peer_group: None,
         hold_time: None,
@@ -1360,7 +1363,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
 fn describe_neighbor_changes_detects_field_diffs() {
     let old = test_neighbor("10.0.0.1", 65001);
     let mut new = old.clone();
-    new.remote_asn = 65099;
+    new.remote_asn = 65099.into();
     new.hold_time = Some(45);
     new.families = vec!["ipv4_unicast".into(), "ipv6_unicast".into()];
 
@@ -1531,7 +1534,7 @@ fn neighbor_change_hot_applicable_partitions_by_impact_class() {
 
     // remote_asn and peer_group edits are session resets, never hot.
     let mut asn = old.clone();
-    asn.remote_asn = 65003;
+    asn.remote_asn = 65003.into();
     assert!(!super::neighbor_change_hot_applicable(&old, &asn));
     let mut group = old.clone();
     group.peer_group = Some("ix".to_string());
@@ -1616,7 +1619,7 @@ fn config_diff_human_output_is_operator_grade() {
     // Mixed diff: one added, one changed (hot + session-reset fields),
     // one untouched neighbor.
     let mut old = parse(valid_toml()).unwrap();
-    old.neighbors = vec![
+    *old.neighbors = vec![
         test_neighbor("10.0.0.2", 65002),
         test_neighbor("10.0.0.9", 65009),
     ];
@@ -1655,7 +1658,7 @@ fn config_diff_human_output_is_operator_grade() {
 #[test]
 fn config_diff_json_changes_have_stable_field_shape() {
     let mut old = parse(valid_toml()).unwrap();
-    old.neighbors = vec![test_neighbor("10.0.0.2", 65002)];
+    *old.neighbors = vec![test_neighbor("10.0.0.2", 65002)];
     old.neighbors[0].hold_time = Some(90);
     let mut new = old.clone();
     new.neighbors[0].hold_time = Some(30);
@@ -1686,7 +1689,7 @@ fn config_diff_json_changes_have_stable_field_shape() {
 fn config_diff_summary_line_covers_restart_and_no_reset_cases() {
     // Hot-applied-only change: no session resets expected.
     let mut old = parse(valid_toml()).unwrap();
-    old.neighbors = vec![test_neighbor("10.0.0.2", 65002)];
+    *old.neighbors = vec![test_neighbor("10.0.0.2", 65002)];
     let mut new = old.clone();
     new.neighbors[0].description = Some("edge".to_string());
     let diff = super::diff_config(&old, &new);
@@ -1764,6 +1767,7 @@ remote_asn = 65003
     assert_eq!(diff.neighbors.added.len(), 1);
     assert_eq!(diff.neighbors.added[0].address, "10.0.0.3");
     assert_eq!(diff.neighbors.added[0].remote_asn, 65003);
+    assert_eq!(diff.neighbors.added[0].remote_asn_mode, "numeric");
     assert_eq!(diff.neighbors.removed.len(), 0);
     assert!(diff.neighbors.changed.is_empty());
 }

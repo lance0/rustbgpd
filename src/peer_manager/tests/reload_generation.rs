@@ -209,7 +209,7 @@ impl GenerationHarness {
     fn new(config: &Config) -> Self {
         let (_tx, rx) = mpsc::channel(16);
         let (rib_tx, rib) = spawn_generation_rib(false);
-        let mut mgr = PeerManager::new_with_config(
+        let mgr = PeerManager::new_with_config(
             rx,
             mpsc::channel(1).1,
             config.global.asn,
@@ -222,48 +222,75 @@ impl GenerationHarness {
             None,
             config.clone(),
         );
-        let mut counters = BTreeMap::new();
-        for (index, resolved) in config.resolved_neighbors().unwrap().into_iter().enumerate() {
+        let mut harness = Self {
+            mgr,
+            counters: BTreeMap::new(),
+            rib,
+        };
+        for resolved in config.resolved_neighbors().unwrap() {
             let addr = resolved.transport_config.remote_addr.ip();
-            let (handle, session_counters) = generation_session(addr);
-            counters.insert(addr, session_counters);
-            let session_id = u64::try_from(index).unwrap() + 1;
-            let peer_key = key(addr);
-            let tcp_ao_protected = resolved.transport_config.tcp_ao.is_some();
-            mgr.peers.insert(
-                peer_key.clone(),
-                ManagedPeer::new(
-                    handle,
-                    session_id,
-                    ManagedPeerState {
-                        admin_down: None,
-                        policy_known_down: false,
-                        remote_asn: resolved.transport_config.peer.remote_asn,
-                        description: resolved.label,
-                        peer_group: resolved.peer_group,
-                        enabled: true,
-                        hold_time: Some(resolved.transport_config.peer.hold_time),
-                        max_prefixes: resolved.transport_config.max_prefixes,
-                        max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
-                        transport_config: resolved.transport_config,
-                        import_policy: resolved.import_policy,
-                        export_policy: resolved.export_policy,
-                        pending_inbound: None,
-                        is_dynamic: false,
-                        rfc8212_external: resolved.rfc8212_external,
-                        tcp_ao_protected,
-                        tcp_ao_rotation: TcpAoRotationStatus::default(),
-                        accepted_dynamic_range: None,
-                        pending_refresh: false,
-                        pending_export_apply: false,
-                        advertise_graceful_shutdown: false,
-                    },
-                ),
-            );
-            mgr.register_session(session_id, &peer_key);
-            mgr.next_session_id = session_id + 1;
+            harness.install(&key(addr), resolved);
         }
-        Self { mgr, counters, rib }
+        harness
+    }
+
+    /// One fake Established session for `resolved`, keyed `peer_key`.
+    fn install(&mut self, peer_key: &PeerKey, resolved: crate::config::ResolvedNeighbor) {
+        let addr = peer_key.address;
+        let (handle, session_counters) = generation_session(addr);
+        self.counters.insert(addr, session_counters);
+        let session_id = self.mgr.next_session_id.max(1);
+        let tcp_ao_protected = resolved.transport_config.tcp_ao.is_some();
+        self.mgr.peers.insert(
+            peer_key.clone(),
+            ManagedPeer::new(
+                handle,
+                session_id,
+                ManagedPeerState {
+                    admin_down: None,
+                    policy_known_down: false,
+                    remote_asn: resolved.transport_config.peer.remote_asn,
+                    description: resolved.label,
+                    peer_group: resolved.peer_group,
+                    enabled: true,
+                    hold_time: Some(resolved.transport_config.peer.hold_time),
+                    max_prefixes: resolved.transport_config.max_prefixes,
+                    max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
+                    transport_config: resolved.transport_config,
+                    import_policy: resolved.import_policy,
+                    export_policy: resolved.export_policy,
+                    pending_inbound: None,
+                    is_dynamic: false,
+                    rfc8212_external: resolved.rfc8212_external,
+                    tcp_ao_protected,
+                    tcp_ao_rotation: TcpAoRotationStatus::default(),
+                    accepted_dynamic_range: None,
+                    pending_refresh: false,
+                    pending_export_apply: false,
+                    advertise_graceful_shutdown: false,
+                },
+            ),
+        );
+        self.mgr.register_session(session_id, peer_key);
+        self.mgr.next_session_id = session_id + 1;
+    }
+
+    /// The peer an interface-only neighbor on `interface` bound to
+    /// `address%ifindex`, installed as the unnumbered lifecycle installs it.
+    fn add_bound_interface_only(
+        &mut self,
+        interface: &str,
+        address: &str,
+        ifindex: u32,
+    ) -> PeerKey {
+        let config = self.mgr.current_config.clone();
+        let neighbor = config.neighbors.interface_only_on(interface).unwrap();
+        let resolved = config
+            .resolve_bound_interface_neighbor(neighbor, address.parse().unwrap(), ifindex)
+            .unwrap();
+        let peer_key = PeerKey::new(address.parse().unwrap(), Some(interface.to_owned()));
+        self.install(&peer_key, resolved);
+        peer_key
     }
 
     fn add_dynamic(&mut self, address: &str, group: &str, enabled: bool) -> PeerKey {
@@ -322,7 +349,11 @@ impl GenerationHarness {
     }
 
     fn export_med(&self, address: &str) -> Option<u32> {
-        let chain = self.mgr.peers[&key(address.parse().unwrap())]
+        self.export_med_of(&key(address.parse().unwrap()))
+    }
+
+    fn export_med_of(&self, peer: &PeerKey) -> Option<u32> {
+        let chain = self.mgr.peers[peer]
             .export_policy
             .as_ref()
             .expect("export chain installed");
@@ -1080,7 +1111,7 @@ async fn assert_generation_operator_read_boundaries(
             .inject_reconfigure_failures
             .insert(key("10.0.0.2".parse().unwrap()), 0);
         let (mut candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
-        candidate.neighbors[0].remote_asn = 65012;
+        candidate.neighbors[0].remote_asn = 65012.into();
         (candidate, prepared)
     } else {
         (
@@ -1465,6 +1496,52 @@ async fn compound_reshape_and_member_edit_replace_each_peer_exactly_once() {
     );
     // The replacement received the final `.rpol` export rule directly.
     assert_eq!(harness.export_med("10.0.0.2"), Some(20));
+    harness.shutdown().await;
+}
+
+/// A bound interface-only peer has no addressed `[[neighbors]]` record; its
+/// record is the interface-only neighbor with the learned address. Reloads
+/// that leave it alone must still apply, and its policy must follow them in
+/// place.
+#[tokio::test]
+async fn reload_keeps_a_bound_interface_only_peer_and_updates_its_policy_in_place() {
+    let fixture = RsFixture::new();
+    let with_swp1 = |toml: String| {
+        format!(
+            "{toml}\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+             export_policy_chain = [\"members-out\"]\n"
+        )
+    };
+    fixture.write_toml(&with_swp1(fixture.base_toml()));
+    let mut harness = GenerationHarness::new(&fixture.load());
+    let bound = harness.add_bound_interface_only("swp1", "fe80::2", 7);
+    let session = harness.mgr.peers[&bound].session_id();
+    assert_eq!(harness.export_med_of(&bound), Some(10));
+
+    // An unrelated numbered edit. Mutation-red: looking the bound peer up
+    // among addressed records only rejects this generation outright.
+    let edited = with_swp1(
+        fixture
+            .base_toml()
+            .replace("hold_time = 180", "hold_time = 150"),
+    );
+    fixture.write_toml(&edited);
+    let outcome = harness.apply(&fixture.load()).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+
+    // A policy edit reaches the bound session without replacing it.
+    std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+    fixture.write_toml(&edited);
+    let outcome = harness.apply(&fixture.load()).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.peers[&bound].session_id(), session, "no flap");
+    assert_eq!(harness.export_med_of(&bound), Some(20));
     harness.shutdown().await;
 }
 
@@ -4095,12 +4172,12 @@ async fn assert_slow_export_keeps_down_dependent_proof(slow_singleton: bool) {
 
 #[tokio::test(start_paused = true)]
 async fn dataset_generation_slow_batch_export_keeps_down_dependent_proof_budget() {
-    assert_slow_export_keeps_down_dependent_proof(false).await;
+    Box::pin(assert_slow_export_keeps_down_dependent_proof(false)).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn dataset_generation_slow_down_peer_export_keeps_its_proof_budget() {
-    assert_slow_export_keeps_down_dependent_proof(true).await;
+    Box::pin(assert_slow_export_keeps_down_dependent_proof(true)).await;
 }
 
 #[tokio::test]
@@ -5862,4 +5939,98 @@ async fn dataset_generation_long_export_keeps_clean_state_retry_window() {
     );
     harness.shutdown().await;
     proxy.await.unwrap();
+}
+
+/// Runtime `SetPeerGroup` on a group a bound interface-only peer uses: an
+/// edit that changes its session settings is refused before any effect, and
+/// a policy-only edit reaches the bound session in place.
+#[tokio::test]
+async fn set_peer_group_refuses_session_edits_and_applies_policy_to_a_bound_peer() {
+    let fixture = RsFixture::new();
+    fixture.write_toml(&format!(
+        "{}\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+         peer_group = \"members\"\n\n[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [[policy.definitions.alt.statements]]\naction = \"permit\"\n\
+         match_as_path_length_ge = 0\nset_med = 30\n",
+        fixture.base_toml()
+    ));
+    let mut harness = GenerationHarness::new(&fixture.load());
+    let bound = harness.add_bound_interface_only("swp1", "fe80::2", 7);
+    let session = harness.mgr.peers[&bound].session_id();
+    let group = crate::policy_admin::config_peer_group_to_api(
+        &harness.mgr.current_config.peer_groups["members"],
+    );
+    let before = harness.mgr.current_config.clone();
+
+    // Session knob and policy together. Mutation-red: without the refusal
+    // the group commits and the bound peer keeps its old settings.
+    let mut mixed = group.clone();
+    mixed.hold_time = Some(60);
+    mixed.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        harness
+            .mgr
+            .dispatch_command(PeerManagerCommand::SetPeerGroup {
+                name: "members".to_string(),
+                definition: mixed,
+                reply,
+            }),
+    )
+    .await;
+    let error = outcome.await.unwrap().expect_err("refused");
+    assert!(
+        matches!(error, CatalogMutationError::RestartRequired(_)),
+        "{error:?}"
+    );
+    assert!(harness.mgr.current_config == before, "no effect");
+    assert_eq!(harness.export_med_of(&bound), Some(10));
+
+    // The owned catalog path refuses it the same way.
+    let mut mixed = group.clone();
+    mixed.hold_time = Some(60);
+    mixed.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        harness
+            .mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: rustbgpd_api::peer_types::OwnedCatalogMutation::SetPeerGroup {
+                    name: "members".to_string(),
+                    definition: Box::new(mixed),
+                },
+                reply,
+            }),
+    )
+    .await;
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::RejectedNoEffect(
+                CatalogMutationError::RestartRequired(_)
+            )
+        ),
+        "{outcome:?}"
+    );
+    assert!(harness.mgr.current_config == before, "no effect");
+
+    // Policy only: applies to the bound peer live, without a flap.
+    let mut policy_only = group;
+    policy_only.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        harness
+            .mgr
+            .dispatch_command(PeerManagerCommand::SetPeerGroup {
+                name: "members".to_string(),
+                definition: policy_only,
+                reply,
+            }),
+    )
+    .await;
+    outcome.await.unwrap().expect("policy-only edit applies");
+    assert_eq!(harness.mgr.peers[&bound].session_id(), session, "no flap");
+    assert_eq!(harness.export_med_of(&bound), Some(30));
+    harness.shutdown().await;
 }

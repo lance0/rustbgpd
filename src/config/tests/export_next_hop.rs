@@ -260,3 +260,30 @@ remote_asn = 65002
     );
     assert!(error.contains("ipv4_labeled_unicast"), "{error}");
 }
+
+/// Interface-only neighbors (ADR-0142) carry no address, but the same chain
+/// on one is refused the same way. Mutation-red: validating addressed
+/// neighbors only, or parsing the empty address for families, accepts it.
+#[cfg(target_os = "linux")]
+#[test]
+fn set_next_hop_refused_on_an_interface_only_neighbor() {
+    let body = format!(
+        r#"{}
+[[neighbors]]
+interface = "swp1"
+remote_asn = "external"
+families = ["ipv6_unicast", "ipv6_labeled_unicast"]
+export_policy_chain = ["nh"]
+"#,
+        toml_set_next_hop("self")
+    );
+    let error = load(UNUSED_RPOL, &body)
+        .expect_err("labeled export set_next_hop must fail on an interface-only neighbor");
+    for needle in [
+        "ipv6_labeled_unicast",
+        "neighbor interface swp1",
+        "RFC 8277",
+    ] {
+        assert!(error.contains(needle), "missing {needle:?} in {error}");
+    }
+}

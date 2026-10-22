@@ -2148,8 +2148,11 @@ pub struct PeerManagerNeighborConfig {
     pub interface: Option<String>,
     /// Resolved interface index for scoped IPv6 link-local peers.
     pub scope_id: Option<u32>,
-    /// Remote autonomous system number.
+    /// Remote autonomous system number (0 with `remote_asn_external`).
     pub remote_asn: u32,
+    /// `remote_asn = "external"`: accept any ASN in OPEN except the local
+    /// one. `remote_asn` is 0 and not compared.
+    pub remote_asn_external: bool,
     /// Human-readable peer description.
     pub description: String,
     /// Optional peer-group reference used to derive defaults.

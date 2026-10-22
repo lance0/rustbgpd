@@ -211,6 +211,7 @@ pub(crate) fn build_peer_mgr_config(
         interface: tc.peer_interface.clone(),
         scope_id: tc.peer_scope_id,
         remote_asn: tc.peer.remote_asn,
+        remote_asn_external: tc.peer.remote_asn_external,
         description: resolved.label.clone(),
         peer_group: resolved.peer_group.clone(),
         admin_down: resolved.admin_down.clone(),
@@ -2009,6 +2010,13 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
     new_config.rpki.clone_from(&current.rpki);
     new_config.bmp.clone_from(&current.bmp);
     new_config.mrt.clone_from(&current.mrt);
+    // ADR-0142: Router Advertisement discovery starts once, at startup, for
+    // the interface-only neighbors and settings it was given.
+    new_config
+        .global
+        .unnumbered
+        .clone_from(&current.global.unnumbered);
+    new_config.neighbors.pin_interface_only(&current.neighbors);
 }
 
 #[cfg(test)]
@@ -2221,6 +2229,21 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // any external apply. The desired snapshot still carries the edited TOML
     // so restart intent is preserved and the same drift remains visible on
     // every reload.
+    for interface in config::interface_only_session_changes(current, &new_config) {
+        error!(
+            interface,
+            "the session settings of the interface-only neighbor on this interface changed \
+             (for example through its peer group): a bound peer takes them only when it \
+             binds. Restart rustbgpd to apply them; policy chains still follow this reload."
+        );
+    }
+    if config::interface_only_neighbors_changed(current, &new_config) {
+        error!(
+            "interface-only [[neighbors]] (interface with no address) or \
+             [global.unnumbered] changed — adding, removing or editing them requires a \
+             restart. The running set is kept for this reload."
+        );
+    }
     pin_unreconciled_daemon_runtime_fields(&mut new_config, current);
     if config::pin_tcp_mss_startup_only_runtime(&mut new_config, current) {
         error!(
@@ -3814,7 +3837,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             "reconciling neighbors after config reload"
         );
         for n in &diff.added {
-            info!(peer = %n.address, asn = n.remote_asn, "neighbor added");
+            info!(peer = %n.address, asn = %n.remote_asn, "neighbor added");
         }
         for addr in &diff.removed {
             info!(peer = %addr, "neighbor removed");
@@ -10967,7 +10990,7 @@ hold_time = 90
 
             let mut runtime_added = runtime.neighbors[0].clone();
             runtime_added.address = "10.0.0.3".to_string();
-            runtime_added.remote_asn = 65003;
+            runtime_added.remote_asn = 65003.into();
             let resolved = runtime
                 .resolve_neighbor(&runtime_added)
                 .expect("runtime-added peer must resolve from the pinned snapshot");
@@ -11194,6 +11217,92 @@ hold_time = 90
             assert!(tags.is_empty(), "no sequential mutation: {tags:?}");
             assert!(calls.is_empty(), "no generation mutation");
         }
+    }
+
+    /// ADR-0142: interface-only neighbors are pinned to the running set
+    /// before validation, so a candidate that is valid alone but invalid
+    /// against that set is refused before any runtime mutation.
+    #[tokio::test]
+    async fn reload_refuses_a_candidate_invalid_against_the_pinned_interface_only_set() {
+        let swp1 = "\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\npeer_group = \"fabric\"\n";
+        let group = "\n[peer_groups.fabric]\nhold_time = 9\n";
+        let initial = format!("{}{group}{swp1}", baseline_toml());
+        let cases = [
+            (
+                // swp1 becomes a static link-local neighbor on the same port.
+                format!(
+                    "{}{group}\n[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"swp1\"\nremote_asn = 65009\n",
+                    baseline_toml()
+                ),
+                "already has a static link-local neighbor",
+            ),
+            (
+                // The group the running interface-only neighbor uses is deleted.
+                baseline_toml().to_string(),
+                "fabric",
+            ),
+        ];
+        for (desired, expected) in cases {
+            // Mutation-red: pinning after validation lets both reach the
+            // generation apply.
+            let (outcome, tags, calls) =
+                drive_generation(&initial, &desired, GenerationReply::Applied).await;
+            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome
+            else {
+                panic!("{expected}: the reload must be refused");
+            };
+            assert!(
+                failure.error.to_string().contains(expected),
+                "{expected}: {}",
+                failure.error
+            );
+            assert!(tags.is_empty(), "no sequential mutation: {tags:?}");
+            assert!(calls.is_empty(), "no generation mutation");
+        }
+    }
+
+    #[test]
+    fn unnumbered_settings_and_interface_only_neighbors_are_restart_required() {
+        let current: Config = toml::from_str(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+interface = "swp1"
+remote_asn = "external"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#,
+        )
+        .unwrap();
+        let mut candidate = current.clone();
+        candidate.global.unnumbered = Some(config::UnnumberedConfig {
+            router_advertisements: Some(false),
+            ra_interval_secs: None,
+        });
+        let diff = config::diff_config(&current, &candidate);
+        assert!(diff.interface_only_neighbors_changed);
+        assert!(diff.has_restart_required_changes());
+        // Mutation-red: leaving [global.unnumbered] unpinned advances it.
+        pin_unreconciled_daemon_runtime_fields(&mut candidate, &current);
+        assert_eq!(candidate.global.unnumbered, None);
+
+        // The interface-only set is pinned too, in its running position.
+        let mut candidate: Config = toml::from_str(
+            &toml::to_string(&current)
+                .unwrap()
+                .replace("remote_asn = \"external\"", "remote_asn = 65009"),
+        )
+        .unwrap();
+        pin_unreconciled_daemon_runtime_fields(&mut candidate, &current);
+        assert_eq!(candidate, current);
     }
 
     #[tokio::test]
@@ -12814,6 +12923,7 @@ remote_asn = 65002
                     interface: None,
                     scope_id: None,
                     remote_asn: 65009,
+                    remote_asn_external: false,
                     description: "runtime peer".to_string(),
                     peer_group: None,
                     hold_time: Some(90),
@@ -12938,6 +13048,7 @@ remote_asn = 65002
                     interface: None,
                     scope_id: None,
                     remote_asn: 65009,
+                    remote_asn_external: false,
                     description: "runtime peer".to_string(),
                     peer_group: None,
                     hold_time: Some(90),

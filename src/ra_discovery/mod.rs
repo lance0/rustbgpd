@@ -17,7 +17,7 @@
 //! # Binding rules
 //!
 //! - A candidate lives for the RA's Router Lifetime, or
-//!   [`LIFETIME_ZERO_HOLD`] when that is 0.
+//!   `LIFETIME_ZERO_HOLD` when that is 0.
 //! - Until the session is Established, the binding stays on its candidate
 //!   while that candidate is live, and otherwise moves to the numerically
 //!   lowest live candidate.
@@ -33,22 +33,21 @@
 //!
 //! Reception needs a raw `ICMPv6` socket, so `CAP_NET_RAW`, whether or not
 //! sending is enabled. [`RaDiscovery::spawn`] fails with
-//! [`DiscoveryError::MissingCapNetRaw`] without it.
+//! `DiscoveryError::MissingCapNetRaw` without it.
 
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        unused_imports,
-        reason = "the engine is wired to interface-only neighbors in a later change"
+        reason = "drop counters, interface stop and the Unknown link state are wired with the \
+                  discovery metrics and live reload of interface-only neighbors"
     )
 )]
 #![cfg_attr(
     test,
     allow(
         dead_code,
-        unused_imports,
-        reason = "tests drive the engine directly; the full API is wired later"
+        reason = "tests drive the engine directly, including inputs only tests use"
     )
 )]
 
@@ -57,12 +56,11 @@ pub mod packet;
 #[cfg(target_os = "linux")]
 mod runtime;
 
-pub use engine::{
-    DiscoveryConfig, DiscoveryEvent, Endpoint, LIFETIME_ZERO_HOLD, LinkEvent, LinkState, RaTiming,
-};
-pub use packet::DropReason;
+pub use engine::{DiscoveryConfig, DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaTiming};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use runtime::Command;
 #[cfg(target_os = "linux")]
-pub use runtime::{DiscoveryError, RaDiscovery};
+pub use runtime::{RaDiscovery, probe_raw_socket};
 
 #[cfg(test)]
 mod tests;

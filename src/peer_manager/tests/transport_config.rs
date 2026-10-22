@@ -249,6 +249,7 @@ fn build_transport_config_reflects_every_transport_field() {
         interface: Some("test-if".to_string()),
         scope_id: Some(7),
         remote_asn: 65002,
+        remote_asn_external: true,
         description: "sentinel-description".to_string(),
         peer_group: Some("rr-clients".to_string()),
         hold_time: Some(240),
@@ -328,6 +329,7 @@ fn build_transport_config_reflects_every_transport_field() {
         interface,
         scope_id,
         remote_asn,
+        remote_asn_external,
         description: _description, // NON-TRANSPORT: operator label only.
         peer_group,
         admin_down: _admin_down, // NON-TRANSPORT: manager-owned admin state.
@@ -389,6 +391,10 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(t.peer_interface, *interface, "interface");
     assert_eq!(t.peer_scope_id, *scope_id, "scope_id");
     assert_eq!(t.peer.remote_asn, *remote_asn, "remote_asn");
+    assert_eq!(
+        t.peer.remote_asn_external, *remote_asn_external,
+        "remote_asn_external"
+    );
     assert_eq!(t.peer_group, *peer_group, "peer_group");
     assert_eq!(t.peer.hold_time, hold_time.unwrap(), "hold_time");
     assert_eq!(t.peer.min_hold_time, *min_hold_time, "min_hold_time");
@@ -653,7 +659,7 @@ async fn resolved_transport_config_matches_build_transport_config() {
     // Resolve against the manager's own config snapshot (same global
     // ASN/router-id/cluster-id), as the runtime-add path does.
     let mut config = mgr.current_config.clone();
-    config.neighbors = vec![neighbor.clone()];
+    *config.neighbors = vec![neighbor.clone()];
     let resolved = config
         .resolve_neighbor(&neighbor)
         .expect("neighbor resolves");

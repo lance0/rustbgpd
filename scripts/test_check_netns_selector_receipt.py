@@ -47,6 +47,7 @@ class ReceiptTest(unittest.TestCase):
                 "foreign_state_l2_dst",
                 "foreign_state_nhid",
                 "ra_discovery",
+                "interface_only_neighbors",
             ),
         )
         self.assertEqual(

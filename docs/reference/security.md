@@ -568,8 +568,10 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 ```
 
 This privilege scope is the minimum required for Linux EVPN VTEP
-mode; do not grant `CAP_NET_RAW` or `CAP_SYS_ADMIN` — neither is
-needed by rustbgpd.
+mode; do not grant `CAP_NET_RAW` or `CAP_SYS_ADMIN` for it — neither is
+needed. [Interface-only neighbors](configuration.md#interface-only-neighbors)
+are the exception: they need `CAP_NET_RAW` for Router Advertisement
+discovery, and the daemon refuses to start them without it.
 
 ## Deferred hardening
 
