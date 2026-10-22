@@ -7,15 +7,17 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::config::{AcceptedConfigSnapshot, Config};
+use crate::config::{AcceptedConfigSnapshot, Config, Neighbor};
 use crate::host_ipv6::{self, Finding};
 
 type Findings = BTreeMap<String, Vec<Finding>>;
 
 pub(crate) fn inspect(config: &Config) -> Findings {
-    let interfaces = config
-        .neighbors
-        .all()
+    inspect_neighbors(config.neighbors.all())
+}
+
+fn inspect_neighbors<'a>(neighbors: impl Iterator<Item = &'a Neighbor>) -> Findings {
+    let interfaces = neighbors
         .filter_map(|neighbor| {
             let interface = neighbor.interface.as_deref()?;
             Some((interface.to_owned(), neighbor.address.is_empty()))
@@ -52,6 +54,15 @@ pub(crate) fn check(config: &Config) -> usize {
 pub(crate) fn spawn(
     mut accepted: watch::Receiver<Arc<AcceptedConfigSnapshot>>,
 ) -> tokio_util::task::AbortOnDropHandle<()> {
+    // Discovery is startup-owned; reload publishes desired entries before restart.
+    let interface_only = Arc::new(
+        accepted
+            .borrow()
+            .config_ref()
+            .neighbors
+            .interface_only()
+            .to_vec(),
+    );
     tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let mut previous = Findings::new();
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -62,8 +73,17 @@ pub(crate) fn spawn(
                 changed = accepted.changed() => { if changed.is_err() { return; } }
             }
             let snapshot = Arc::clone(&accepted.borrow_and_update());
-            let Ok(current) =
-                tokio::task::spawn_blocking(move || inspect(snapshot.config_ref())).await
+            let interface_only = Arc::clone(&interface_only);
+            let Ok(current) = tokio::task::spawn_blocking(move || {
+                inspect_neighbors(
+                    snapshot
+                        .config_ref()
+                        .neighbors
+                        .iter()
+                        .chain(interface_only.iter()),
+                )
+            })
+            .await
             else {
                 warn!("host IPv6 prerequisite inspection task failed");
                 continue;

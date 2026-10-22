@@ -1547,7 +1547,7 @@ fn host_ipv6_is_local(connection: Option<&Connection>, daemon_address: &str) -> 
         return false;
     }
     let Some(connection) = connection else {
-        return true;
+        return false;
     };
     let Some(process) = connection.local_process() else {
         return false;
@@ -4482,7 +4482,10 @@ address = "192.0.2.1"
 "#,
         )
         .unwrap();
-        let checks = host_ipv6_checks(&config, false);
+        let checks = host_ipv6_checks(
+            &config,
+            host_ipv6_is_local(None, "unix:///run/rustbgpd.sock"),
+        );
         assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].name, "interface.swp1.ipv6_state_unavailable");
         assert_eq!(checks[1].name, "interface.swp2.ipv6_state_unavailable");
@@ -4491,7 +4494,7 @@ address = "192.0.2.1"
                 && check.detail.contains("network namespace"))
         );
         assert!(!host_ipv6_is_local(None, "http://127.0.0.1:50051"));
-        assert!(host_ipv6_is_local(None, "unix:///run/rustbgpd.sock"));
+        assert!(!host_ipv6_is_local(None, "unix:///run/rustbgpd.sock"));
     }
 
     #[test]

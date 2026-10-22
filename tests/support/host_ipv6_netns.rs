@@ -196,3 +196,77 @@ fn host_ipv6_preconditions_warn_check_and_doctor_in_netns() {
     sysctl(ns, "net.ipv6.conf.veth.accept_ra_defrtr=1");
     check_condition(ns, &mut daemon, dir.path(), "ra_default_route", 2);
 }
+
+#[test]
+fn host_ipv6_monitor_keeps_running_discovery_interfaces_after_reload() {
+    if !netns_enabled() {
+        return;
+    }
+    let namespaces = Namespaces::create();
+    let ns = &namespaces.a;
+    sysctl(ns, "net.ipv6.conf.veth.accept_ra=0");
+    let dir = private_tempdir();
+    let mut daemon = Daemon::start(ns, dir.path(), 65001, "10.0.0.1");
+    daemon.wait("control plane", Duration::from_secs(30), |daemon| {
+        daemon.veth_rows().is_some()
+    });
+    let config = dir.path().join("rustbgpd.toml");
+    let original = std::fs::read_to_string(&config).unwrap();
+    let mut previous_reload = serde_json::Value::Null;
+    for (index, candidate) in [
+        original.replace("interface = \"veth\"", "interface = \"future0\""),
+        original.split_once("\n[[neighbors]]").unwrap().0.to_owned(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        std::fs::write(&config, candidate).unwrap();
+        let out = Command::new("kill")
+            .args(["-HUP", &daemon.child.id().to_string()])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        // The completed receipt is published after the desired snapshot's
+        // bridge adoption, not merely after the runtime reload log line.
+        daemon.wait(
+            "accepted reload receipt",
+            Duration::from_secs(30),
+            |daemon| {
+                let out = daemon.rbgp(&["--json", "config", "last-reload"]);
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+                    return false;
+                };
+                let record = &value["record"];
+                if !out.status.success() || !record.is_object() || *record == previous_reload {
+                    return false;
+                }
+                assert_eq!(record["outcome"], "complete", "{value}");
+                previous_reload = record.clone();
+                true
+            },
+        );
+        let recoveries = daemon
+            .log()
+            .matches("host IPv6 prerequisites recovered")
+            .count();
+        sysctl(ns, "net.ipv6.conf.veth.disable_ipv6=1");
+        daemon.wait("running port warning", Duration::from_secs(10), |daemon| {
+            daemon
+                .log()
+                .matches("\"condition\":\"ipv6_disabled\"")
+                .count()
+                == index + 1
+        });
+        sysctl(ns, "net.ipv6.conf.veth.disable_ipv6=0");
+        link_local(ns, "fe80::a1");
+        // Two state observations after adoption rule out one stale in-flight
+        // inspection satisfying the regression by chance.
+        daemon.wait("running port recovery", Duration::from_secs(10), |daemon| {
+            daemon
+                .log()
+                .matches("host IPv6 prerequisites recovered")
+                .count()
+                > recoveries
+        });
+    }
+}

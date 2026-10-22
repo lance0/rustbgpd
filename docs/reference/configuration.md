@@ -1328,6 +1328,9 @@ without a restart. `rustbgpd --check` reports them as advisories; add `--strict`
 to fail a deployment check. `rbgp doctor` reports unusable addresses as failures
 when run through a local Unix socket in the daemon's network namespace. An absent
 interface-only port can still appear after startup.
+If the daemon is unavailable, doctor reports host IPv6 state as unavailable.
+Runtime monitoring retains the running interface-only ports across reloads;
+changing that neighbor set requires a restart.
 
 On dedicated interface-only fabric ports, disable kernel RA default-route learning
 with `net.ipv6.conf.<interface>.accept_ra=0` or
