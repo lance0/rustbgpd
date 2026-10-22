@@ -80,18 +80,24 @@ runs:
         # runner's signed apt index before it is installed as root.
         # --print-uris gives one line: 'URL' file size hash; the candidate's
         # SHA-256 comes from the same index entry.
-        uri=''
-        read -r uri _ < <(apt-get download --print-uris "$pkg" 2>/dev/null) || true
+        uri='' file=''
+        read -r uri file _ < <(apt-get download --print-uris "$pkg" 2>/dev/null) || true
         uri=${uri//\'/}
         sha256=$(apt-cache show --no-all-versions "$pkg" 2>/dev/null | awk '$1 == "SHA256:" {print $2; exit}')
         verify() { [ -f "$1" ] && echo "${sha256}  $1" | sha256sum --check --status; }
         apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-        # apt-get resolves the package's small dependencies (wireless-regdb)
-        # that a bare dpkg -i would not. The install is local work with its
-        # own bound, so a download finishing near the deadline is not killed
-        # mid-unpack.
-        install_deb() { sudo timeout 120 apt-get "${apt_opts[@]}" install -y "$deb" && sudo modprobe vrf; }
-        if [ -z "$uri" ] || [ -z "$sha256" ]; then
+        # Seed apt's own archive cache with the verified .deb, then install by
+        # name: apt reuses a cached archive that matches the index and fetches
+        # only the small dependencies (wireless-regdb). `apt-get install
+        # ./file.deb` re-downloaded the same 51 MB from the mirror on hosted
+        # runners. The install is local work with its own bound, so a download
+        # finishing near the deadline is not killed mid-unpack.
+        install_deb() {
+          sudo install -m 0644 "$deb" "/var/cache/apt/archives/${file}" \
+            && sudo timeout 120 apt-get "${apt_opts[@]}" install -y "$pkg" \
+            && sudo modprobe vrf
+        }
+        if [ -z "$uri" ] || [ -z "$file" ] || [ -z "$sha256" ]; then
           echo "::warning::${pkg} is not in the runner's apt index"
         elif verify "$deb" && install_deb; then
           echo "::notice::vrf loaded from the cached ${pkg} .deb"
