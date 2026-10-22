@@ -720,7 +720,6 @@ async fn shutdown_abandoned_before_the_cease_is_queued_aborts_the_writer() {
         })
         .is_ok()
     {}
-    let senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
     let session_task = tokio::spawn(async move { session.run().await });
     cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
     // Handshake: the session has taken the command off its channel.
@@ -728,9 +727,10 @@ async fn shutdown_abandoned_before_the_cease_is_queued_aborts_the_writer() {
         tokio::task::yield_now().await;
     }
     tokio::task::yield_now().await;
+    // The wire check below shows no NOTIFICATION was queued.
     assert!(
-        !session_task.is_finished() && senders_dropped.has_changed().is_ok(),
-        "the session must still be parked on RIB delivery, before the Cease"
+        !session_task.is_finished(),
+        "the session must still be parked on RIB delivery"
     );
     session_task.abort();
     assert!(session_task.await.unwrap_err().is_cancelled());
@@ -786,6 +786,145 @@ async fn dropping_the_handle_after_a_stop_still_flushes_the_cease() {
         "the stop's NOTIFICATION must reach the wire last"
     );
     assert_eq!(&last[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
+}
+
+/// An outbound update the RIB has queued for a session but the session has
+/// not yet taken off its channel when an administrative close arrives (for
+/// example the EVPN withdraws shutdown stages just before closing sessions)
+/// is admitted to the writer before the NOTIFICATION, so the peer sees the
+/// withdraw ahead of the Cease. The close is installed as the deferred
+/// command, so it runs before the run loop polls the outbound channel.
+#[tokio::test]
+async fn administrative_closes_drain_a_queued_withdraw_before_the_cease() {
+    let cases = [
+        (
+            "stop",
+            PeerCommand::Stop { reason: None },
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        ),
+        (
+            "shutdown",
+            PeerCommand::Shutdown,
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        ),
+        (
+            "administrative reset",
+            PeerCommand::AdministrativeReset { reason: None },
+            cease_subcode::ADMINISTRATIVE_RESET,
+        ),
+    ];
+    for (path, command, subcode) in cases {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        session.commands = cmd_rx;
+        let (client, mut peer) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let withdrawn = make_route(100).prefix;
+        session
+            .outbound_tx
+            .send(OutboundRouteUpdate {
+                exact_export_snapshot: Some(session.publish_export_profile()),
+                withdraw: vec![(withdrawn, 0)],
+                ..OutboundRouteUpdate::default()
+            })
+            .await
+            .unwrap();
+        session.deferred_command = Some(command);
+        let session_task = tokio::spawn(async move { session.run().await });
+
+        let mut wire = Vec::new();
+        tokio::time::timeout(Duration::from_secs(15), peer.read_to_end(&mut wire))
+            .await
+            .unwrap_or_else(|_| panic!("{path}: the close must end the connection"))
+            .unwrap();
+        let frames = parse_wire_frames(&wire);
+        let (last_type, last) = frames.last().expect("frames on the wire");
+        assert_eq!(
+            *last_type, 3,
+            "{path}: the NOTIFICATION must be the final frame"
+        );
+        assert_eq!(&last[19..21], &[6, subcode], "{path}: NOTIFICATION code");
+        assert!(
+            frames.iter().any(|(msg_type, frame)| *msg_type == 2
+                && u16::from_be_bytes([frame[19], frame[20]]) > 0),
+            "{path}: the queued withdraw must reach the wire before the Cease"
+        );
+
+        cmd_tx.send(PeerCommand::Shutdown).await.ok();
+        tokio::time::timeout(Duration::from_secs(15), session_task)
+            .await
+            .unwrap_or_else(|_| panic!("{path}: session task must finish"))
+            .expect("session task must not panic")
+            .expect("run() must return Ok");
+    }
+}
+
+/// The close drain shares the writer's flush budget instead of adding its
+/// own: with the writer's queue full behind a peer that is not reading, the
+/// drain cannot admit the queued withdraw, gives up at the budget, and the
+/// writer, whose budget started when the drain did, discards its backlog
+/// and still ends with the Cease.
+#[tokio::test(start_paused = true)]
+async fn close_drain_shares_the_flush_budget_with_the_writer() {
+    let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+    // Handshake: the writer has taken its first batch and is parked writing
+    // it, so it takes nothing more off the queue filled below.
+    while session
+        .metrics
+        .peer_outbound_queue_depth(&session.peer_label)
+        == 0
+    {
+        tokio::task::yield_now().await;
+    }
+    let bulk = session.writer_bulk_tx.clone().unwrap();
+    let mut end_of_rib = vec![0xffu8; 16];
+    end_of_rib.extend_from_slice(&[0, 23, 2, 0, 0, 0, 0]);
+    let end_of_rib = Bytes::from(end_of_rib);
+    let mut queued = WEDGED_BACKLOG;
+    while bulk.try_send(end_of_rib.clone()).is_ok() {
+        queued += 1;
+    }
+    drop(bulk);
+    session
+        .outbound_tx
+        .send(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            withdraw: vec![(make_route(100).prefix, 0)],
+            ..OutboundRouteUpdate::default()
+        })
+        .await
+        .unwrap();
+    session.deferred_command = Some(PeerCommand::Stop { reason: None });
+    let session_task = tokio::spawn(async move { session.run().await });
+    // Virtual time: this wakes only once every task is idle, after the drain
+    // has hit its deadline and queued the Cease. The peer reads only then.
+    tokio::time::sleep(writer::CLOSE_FLUSH_BUDGET + Duration::from_millis(1)).await;
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    let frames = parse_wire_frames(&wire);
+    let (last_type, last) = frames.last().expect("frames on the wire");
+    assert_eq!(*last_type, 3, "the NOTIFICATION must be the final frame");
+    assert_eq!(&last[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
+    let updates = frames.iter().filter(|(msg_type, _)| *msg_type == 2).count();
+    assert!(
+        updates < queued,
+        "the writer must discard its backlog at the shared budget, not flush all {queued} frames"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|(msg_type, frame)| *msg_type == 2
+                && u16::from_be_bytes([frame[19], frame[20]]) > 0),
+        "a withdraw that could not be admitted within the budget is not sent"
+    );
+
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    session_task
+        .await
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
 }
 
 /// The flush ahead of the Cease stays inside the per-peer shutdown bound: when

@@ -145,7 +145,9 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// spending at most half of that on the flush leaves the rest for the
 /// NOTIFICATION, so a peer that is reading, however slowly, still receives
 /// its Cease rather than a bare close. Error NOTIFICATIONs have no outer
-/// deadline and use the same budget.
+/// deadline and use the same budget. An administrative close also spends
+/// this budget, not a second one, draining the updates the RIB had queued
+/// for the session (`PeerSession::drain_outbound_before_close`).
 pub(super) const CLOSE_FLUSH_BUDGET: Duration = Duration::from_millis(250);
 
 /// Whether a queued frame is a BGP NOTIFICATION (type 3).

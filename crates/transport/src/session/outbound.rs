@@ -322,6 +322,56 @@ impl PeerSession {
         self.advance_pending_outbound();
     }
 
+    /// Before an administrative close's NOTIFICATION, admit the outbound
+    /// updates the RIB has already queued for this session, so that a
+    /// withdraw staged just before the close (shutdown drains EVPN withdraws
+    /// ahead of `PeerManagerCommand::Shutdown` for exactly this) reaches the
+    /// peer ahead of the Cease. A GR peer that receives Cease/2 rather than a
+    /// Hard Reset may otherwise keep the withdrawn route as stale.
+    ///
+    /// The drain shares the writer's close flush budget: dropping the
+    /// teardown sender starts the writer's [`super::writer::CLOSE_FLUSH_BUDGET`]
+    /// clock now, and this drain stops at the same deadline, so admitting
+    /// more updates can never push the Cease past that bound. Admission is
+    /// capacity-checked, so the drain waits for writer room rather than
+    /// tripping the saturation teardown. Cease/8 and fast-failover aborts
+    /// never come through here.
+    pub(super) async fn drain_outbound_before_close(&mut self) {
+        if self.fsm.state() != rustbgpd_fsm::SessionState::Established
+            || self.writer_bulk_tx.is_none()
+        {
+            return;
+        }
+        self.writer_teardown_tx = None;
+        let deadline = tokio::time::Instant::now() + super::writer::CLOSE_FLUSH_BUDGET;
+        let drain = async {
+            loop {
+                if let Some(pending) = self.pending_outbound.as_ref() {
+                    pending.ready(self.writer_bulk_tx.as_ref()).await;
+                    self.advance_pending_outbound();
+                    continue;
+                }
+                let replay_waiting = self
+                    .pending_replay
+                    .as_ref()
+                    .is_some_and(|pending| pending.target.is_some());
+                if replay_waiting || self.writer_bulk_tx.is_none() {
+                    break;
+                }
+                let Ok(update) = self.outbound_rx.try_recv() else {
+                    break;
+                };
+                self.handle_outbound_route_update(update).await;
+            }
+        };
+        if tokio::time::timeout_at(deadline, drain).await.is_err() {
+            debug!(
+                peer = %self.peer_label,
+                "close drain reached its budget; queued outbound updates are not sent"
+            );
+        }
+    }
+
     pub(super) fn expire_outbound_admission(&mut self) {
         self.outbound_admission_timer = None;
         if self
