@@ -50,7 +50,9 @@
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
+#![warn(missing_docs)]
 
+/// ASPA records and customer/provider lookup.
 pub mod aspa;
 pub mod aspa_verify;
 pub mod rtr_client;

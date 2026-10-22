@@ -219,7 +219,12 @@ pub enum RouteDistinguisherParseError {
     InvalidAssignedNumber(String),
     /// The assigned-number value exceeded the per-RD-type maximum
     /// (`u32::MAX` for type 0, `u16::MAX` for types 1 and 2).
-    AssignedNumberOutOfRange { value: u64, max: u64 },
+    AssignedNumberOutOfRange {
+        /// Parsed assigned-number value.
+        value: u64,
+        /// Largest value allowed for the inferred RD type.
+        max: u64,
+    },
 }
 
 impl fmt::Display for RouteDistinguisherParseError {

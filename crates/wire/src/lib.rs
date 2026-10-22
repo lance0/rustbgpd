@@ -55,6 +55,7 @@
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
+#![warn(missing_docs)]
 
 mod assigned_attributes;
 /// Path attribute types and codec (`ORIGIN`, `AS_PATH`, `NEXT_HOP`, etc.).
