@@ -39,7 +39,7 @@
     not(test),
     expect(
         dead_code,
-        reason = "drop counters, interface stop and the Unknown link state are wired with the \
+        reason = "discovery counters, interface stop and the Unknown link state are wired with the \
                   discovery metrics and live reload of interface-only neighbors"
     )
 )]

@@ -43,6 +43,10 @@ mod fib_runtime;
 mod fib_table_control;
 mod forwarding_state;
 mod gnmi_set_bridge;
+#[cfg(target_os = "linux")]
+mod host_ipv6;
+#[cfg(target_os = "linux")]
+mod host_ipv6_runtime;
 mod kernel_route_notify;
 #[cfg(target_os = "linux")]
 mod link_failover;
@@ -1935,6 +1939,10 @@ fn listener_mss_clamps(
 /// correct deployment unshippable.
 fn check_warnings(config: &Config, listeners: &[GrpcListenerConfig]) -> usize {
     let mut warnings = warn_unpoliced_ebgp(config) + check_tls_expiry_warnings(listeners);
+    #[cfg(target_os = "linux")]
+    {
+        warnings += host_ipv6_runtime::check(config);
+    }
     for advisory in config.advisories() {
         print_framed_warning(advisory.headline, &advisory.detail);
         warnings += 1;
@@ -5071,6 +5079,11 @@ async fn run<T>(
         .file_path
         .is_some()
         .then(|| watch::channel(Arc::clone(&accepted)));
+
+    #[cfg(target_os = "linux")]
+    let _host_ipv6_monitor = accepted_watch
+        .as_ref()
+        .map(|(_, rx)| host_ipv6_runtime::spawn(rx.clone()));
 
     let peer_mgr = PeerManager::new_with_config(
         peer_mgr_rx,
