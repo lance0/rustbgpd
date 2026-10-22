@@ -4,7 +4,8 @@ description: >-
   linux-modules-extra for the EXACT running kernel, so this installs that
   package when needed: from an actions/cache entry keyed on `uname -r`, or on
   a miss by downloading the .deb (configured apt mirror first, then
-  archive.ubuntu.com) and checking it against the apt index hash. A slow
+  archive.ubuntu.com). Cached and downloaded bytes are both checked against
+  the hash in the runner's apt index before install. A slow
   mirror must not hang a job, so the download is bounded: 240 s by default, a
   longer budget only for callers that declare VRF required (the local install
   has its own 120 s bound). The action never
@@ -37,11 +38,18 @@ runs:
           echo "loaded=false" >> "$GITHUB_OUTPUT"
         fi
         echo "kernel=$(uname -r)" >> "$GITHUB_OUTPUT"
+        # The budget starts here, so a slow cache restore spends it too.
+        echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
 
+    # A stalled restore would otherwise wait the action's default 10 min per
+    # segment; on timeout it is a miss and the remaining budget goes to the
+    # download.
     - name: Restore linux-modules-extra .deb cache
       id: cache
       if: steps.probe.outputs.loaded != 'true'
       uses: actions/cache/restore@v6
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
       with:
         path: ${{ runner.temp }}/vrf-module-cache
         key: linux-modules-extra-${{ steps.probe.outputs.kernel }}
@@ -51,6 +59,7 @@ runs:
       shell: bash
       env:
         LOADED: ${{ steps.probe.outputs.loaded }}
+        STARTED: ${{ steps.probe.outputs.started }}
         VRF_REQUIRED: ${{ inputs.vrf-required }}
       run: |
         set -uo pipefail
@@ -61,52 +70,53 @@ runs:
         fi
         budget=240
         [ "$VRF_REQUIRED" = true ] && budget=600
-        deadline=$((SECONDS + budget))
+        deadline=$((SECONDS + budget - ($(date +%s) - STARTED)))
         left() { echo $((deadline > SECONDS ? deadline - SECONDS : 1)); }
         pkg="linux-modules-extra-$(uname -r)"
         deb="$RUNNER_TEMP/vrf-module-cache/${pkg}.deb"
         mkdir -p "$(dirname "$deb")"
+        downloaded=false
+        # Every .deb, cached or downloaded, must match the hash in the
+        # runner's signed apt index before it is installed as root.
+        # One URI line: 'URL' file size ALGO:hash.
         uri='' hash=''
+        read -r uri _ _ hash < <(apt-get download --print-uris "$pkg" 2>/dev/null) || true
+        uri=${uri//\'/}
+        algo=${hash%%:*}
+        algo=${algo,,}
+        verify() { [ -f "$1" ] && echo "${hash#*:}  $1" | "${algo}sum" --check --status; }
         apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
         # apt-get resolves the package's small dependencies (wireless-regdb)
         # that a bare dpkg -i would not. The install is local work with its
         # own bound, so a download finishing near the deadline is not killed
         # mid-unpack.
         install_deb() { sudo timeout 120 apt-get "${apt_opts[@]}" install -y "$deb" && sudo modprobe vrf; }
-        downloaded=false
-        if [ -f "$deb" ] && install_deb; then
+        if [ -z "$uri" ] || ! command -v "${algo}sum" >/dev/null; then
+          echo "::warning::${pkg} is not in the runner's apt index"
+        elif verify "$deb" && install_deb; then
           echo "::notice::vrf loaded from the cached ${pkg} .deb"
         else
+          [ -f "$deb" ] && echo "::warning::discarding cached ${pkg} .deb (hash mismatch or install failure)"
           rm -f "$deb"
-          # One URI line: 'URL' file size ALGO:hash, from the runner's apt index.
-          read -r uri _ _ hash < <(apt-get download --print-uris "$pkg" 2>/dev/null) || true
-          uri=${uri//\'/}
-          algo=${hash%%:*}
-          algo=${algo,,}
-          if [ -z "$uri" ] || ! command -v "${algo}sum" >/dev/null; then
-            echo "::warning::${pkg} is not in the runner's apt index"
-          else
-            fallback=$(sed -E 's#^https?://[^/]+/ubuntu/#http://archive.ubuntu.com/ubuntu/#' <<<"$uri")
-            # Rotate mirror -> archive until one serves verified bytes or the
-            # budget runs out. --speed-limit drops a stalled transfer after
-            # 30 s below 100 KB/s so the next source gets the remaining time.
-            while [ "$downloaded" = false ] && [ "$SECONDS" -lt "$deadline" ]; do
-              for url in "$uri" "$fallback"; do
-                [ "$SECONDS" -lt "$deadline" ] || break
-                if curl -fsSL --connect-timeout 15 --speed-limit 102400 --speed-time 30 \
-                  --max-time "$(left)" "$url" -o "$deb.part" \
-                  && echo "${hash#*:}  $deb.part" | "${algo}sum" --check --status; then
-                  mv "$deb.part" "$deb"
-                  downloaded=true
-                  echo "fetched ${pkg} from ${url} (${SECONDS}s)"
-                  break
-                fi
-                echo "::warning::${pkg} fetch from ${url} failed or was too slow"
-              done
-              [ "$downloaded" = true ] || [ $((deadline - SECONDS)) -le 5 ] || sleep 5
+          fallback=$(sed -E 's#^https?://[^/]+/ubuntu/#http://archive.ubuntu.com/ubuntu/#' <<<"$uri")
+          # Rotate mirror -> archive until one serves verified bytes or the
+          # budget runs out. --speed-limit drops a stalled transfer after
+          # 30 s below 100 KB/s so the next source gets the remaining time.
+          while [ "$downloaded" = false ] && [ "$SECONDS" -lt "$deadline" ]; do
+            for url in "$uri" "$fallback"; do
+              [ "$SECONDS" -lt "$deadline" ] || break
+              if curl -fsSL --connect-timeout 15 --speed-limit 102400 --speed-time 30 \
+                --max-time "$(left)" "$url" -o "$deb.part" && verify "$deb.part"; then
+                mv "$deb.part" "$deb"
+                downloaded=true
+                echo "fetched ${pkg} from ${url}"
+                break
+              fi
+              echo "::warning::${pkg} fetch from ${url} failed or was too slow"
             done
-            rm -f "$deb.part"
-          fi
+            [ "$downloaded" = true ] || [ $((deadline - SECONDS)) -le 5 ] || sleep 5
+          done
+          rm -f "$deb.part"
           if [ "$downloaded" = true ] && ! install_deb; then
             echo "::warning::${pkg} downloaded but did not install or load vrf"
             downloaded=false
