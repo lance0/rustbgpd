@@ -1653,3 +1653,130 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
          must no-op cleanly, not resurrect stale pending state: {retry_after_delete:?}"
     );
 }
+
+/// LAN-2512: a cohort member's session goes down and its actor exits as it
+/// accepts the new export chain, so the real RIB sees its `PeerDown` before
+/// the cohort command. The cohort commits for the registered members instead
+/// of failing closed, and the member's bookkeeping holds the new chain: a
+/// replacement session is spawned from `managed.export_policy`
+/// (`notifications.rs`, `inbound.rs`), so it starts on the new policy.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the real-RIB registrations, the ending session and the cohort assertions form one interleaving"
+)]
+#[tokio::test]
+async fn cohort_commits_when_a_member_session_ends_after_accepting() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+    use rustbgpd_transport::PeerCommand;
+    use rustbgpd_wire::{Afi, Safi};
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let rib = tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, mpsc::channel(1).1, None, None, BgpMetrics::new())
+            .run(),
+    );
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let old = validation_policy_chain(ImportValidationDependency::Aspa);
+    let next = deny_policy_chain();
+    let peers: Vec<IpAddr> = (2..=4)
+        .map(|octet| IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)))
+        .collect();
+    let ending = peers[2];
+    let mut outbound = Vec::new();
+    for (session_id, &peer) in (1..).zip(&peers) {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        outbound.push(outbound_rx);
+        rib_tx
+            .send(RibUpdate::PeerUp {
+                peer: PeerId::from_addr(peer),
+                session_id,
+                peer_asn: 65002,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                outbound_tx,
+                export_policy: Some(old.clone()),
+                sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: Vec::new(),
+                add_path_send_max: 0,
+                negotiated_orf_recv: Vec::new(),
+                negotiated_llgr_families: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let handle = if peer == ending {
+            // Report Established to the cohort probe; on the export command,
+            // take the session down in the RIB, accept, and exit the actor.
+            let inner = acking_policy_handle(peer, SessionState::Established);
+            let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+            let down_tx = rib_tx.clone();
+            let task = tokio::spawn(async move {
+                let forward = inner.commands_sender();
+                while let Some(cmd) = session_rx.recv().await {
+                    let accepts_export = matches!(cmd, PeerCommand::UpdateExportPolicy { .. });
+                    if accepts_export {
+                        down_tx
+                            .send(RibUpdate::PeerDown {
+                                peer: PeerId::from_addr(peer),
+                                session_id,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    if forward.send(cmd).await.is_err() || accepts_export {
+                        break;
+                    }
+                }
+                drop(inner);
+                Ok(())
+            });
+            PeerHandle::from_parts(session_tx, task)
+        } else {
+            acking_policy_handle(peer, SessionState::Established)
+        };
+        insert_test_managed_peer(&mut mgr, peer, handle, false);
+        mgr.peers.get_mut(&key(peer)).unwrap().export_policy = Some(old.clone());
+    }
+
+    let result = mgr
+        .apply_resolved_policy_snapshot(
+            peers
+                .iter()
+                .map(|&address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: None,
+                    export_policy: Some(next.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    result.expect("a member that ended after accepting does not fail the cohort");
+    for &peer in &peers {
+        let managed = mgr.peers.get(&key(peer)).unwrap();
+        assert_eq!(
+            format!("{:?}", managed.export_policy),
+            format!("{:?}", Some(next.clone())),
+            "{peer}: bookkeeping (the replacement session's source) holds the new chain"
+        );
+        assert!(
+            !managed.pending_export_apply,
+            "{peer}: no export intent remains"
+        );
+    }
+    drop(outbound);
+    rib.abort();
+}
