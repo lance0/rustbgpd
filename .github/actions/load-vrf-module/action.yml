@@ -5,8 +5,9 @@ description: >-
   package when needed: from an actions/cache entry keyed on `uname -r`, or on
   a miss by downloading the .deb (configured apt mirror first, then
   archive.ubuntu.com) and checking it against the apt index hash. A slow
-  mirror must not hang a job, so the fetch is bounded: 240 s by default, a
-  longer budget only for callers that declare VRF required. The action never
+  mirror must not hang a job, so the download is bounded: 240 s by default, a
+  longer budget only for callers that declare VRF required (the local install
+  has its own 120 s bound). The action never
   fails on its own; callers gate on `vrf-available` (skip, or fail closed).
 inputs:
   vrf-required:
@@ -68,8 +69,10 @@ runs:
         uri='' hash=''
         apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
         # apt-get resolves the package's small dependencies (wireless-regdb)
-        # that a bare dpkg -i would not.
-        install_deb() { sudo timeout "$(left)" apt-get "${apt_opts[@]}" install -y "$deb" && sudo modprobe vrf; }
+        # that a bare dpkg -i would not. The install is local work with its
+        # own bound, so a download finishing near the deadline is not killed
+        # mid-unpack.
+        install_deb() { sudo timeout 120 apt-get "${apt_opts[@]}" install -y "$deb" && sudo modprobe vrf; }
         downloaded=false
         if [ -f "$deb" ] && install_deb; then
           echo "::notice::vrf loaded from the cached ${pkg} .deb"
@@ -100,7 +103,7 @@ runs:
                 fi
                 echo "::warning::${pkg} fetch from ${url} failed or was too slow"
               done
-              [ "$downloaded" = true ] || sleep 5
+              [ "$downloaded" = true ] || [ $((deadline - SECONDS)) -le 5 ] || sleep 5
             done
             rm -f "$deb.part"
           fi
