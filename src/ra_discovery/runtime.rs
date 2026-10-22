@@ -60,10 +60,53 @@ pub(crate) enum Command {
     SessionFailed(String),
 }
 
+/// Bounded errno classes for failed RA and RS sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendFailure {
+    AddressUnavailable,
+    NetworkUnavailable,
+    PermissionDenied,
+    WouldBlock,
+    Other,
+}
+
+impl SendFailure {
+    const ALL: [Self; 5] = [
+        Self::AddressUnavailable,
+        Self::NetworkUnavailable,
+        Self::PermissionDenied,
+        Self::WouldBlock,
+        Self::Other,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AddressUnavailable => "address_unavailable",
+            Self::NetworkUnavailable => "network_unavailable",
+            Self::PermissionDenied => "permission_denied",
+            Self::WouldBlock => "would_block",
+            Self::Other => "other",
+        }
+    }
+
+    fn classify(error: &io::Error) -> Self {
+        match error.raw_os_error() {
+            Some(libc::EADDRNOTAVAIL) => Self::AddressUnavailable,
+            Some(libc::ENETDOWN | libc::ENETUNREACH | libc::EHOSTUNREACH | libc::ENODEV) => {
+                Self::NetworkUnavailable
+            }
+            Some(libc::EACCES | libc::EPERM) => Self::PermissionDenied,
+            Some(libc::EAGAIN) => Self::WouldBlock,
+            _ => Self::Other,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Counters {
     drops: [AtomicU64; DropReason::ALL.len()],
     socket_open_failures: AtomicU64,
+    send_failures: [AtomicU64; SendFailure::ALL.len()],
 }
 
 impl Counters {
@@ -149,6 +192,16 @@ impl RaDiscovery {
     /// Failed per-interface socket opens (each is retried with backoff).
     pub fn socket_open_failures(&self) -> u64 {
         self.counters.socket_open_failures.load(Ordering::Relaxed)
+    }
+
+    /// Failed RA/RS sends, including retries, grouped by errno class.
+    pub fn send_failures(&self) -> [(&'static str, u64); 5] {
+        SendFailure::ALL.map(|reason| {
+            (
+                reason.as_str(),
+                self.counters.send_failures[reason as usize].load(Ordering::Relaxed),
+            )
+        })
     }
 
     /// Send final lifetime-0 RAs where advertising, close the sockets and
@@ -302,6 +355,7 @@ struct InterfaceSocket {
     generation: u64,
     socket: Arc<AsyncFd<Socket>>,
     _reader: AbortOnDropHandle<()>,
+    send_warned: bool,
 }
 
 struct Actor {
@@ -556,6 +610,7 @@ impl Actor {
                             generation,
                             socket,
                             _reader: reader,
+                            send_warned: false,
                         },
                     );
                 }
@@ -636,7 +691,7 @@ impl Actor {
             Transmit::RouterAdvertisement { ifindex, .. } => (ifindex, ALL_NODES),
             Transmit::RouterSolicitation { ifindex } => (ifindex, ALL_ROUTERS),
         };
-        let Some(socket) = self.sockets.values().find(|s| s.ifindex == ifindex) else {
+        let Some(socket) = self.sockets.values_mut().find(|s| s.ifindex == ifindex) else {
             return false;
         };
         let lladdr = link_layer_address(&socket.name);
@@ -651,7 +706,13 @@ impl Actor {
         match (self.sender)(socket.socket.get_ref(), &bytes, &to.into()) {
             Ok(_) => true,
             Err(error) => {
-                debug!(interface = %socket.name, %error, "router discovery send failed");
+                let reason = SendFailure::classify(&error);
+                self.counters.send_failures[reason as usize].fetch_add(1, Ordering::Relaxed);
+                if !socket.send_warned {
+                    warn!(interface = %socket.name, ifindex, generation = socket.generation,
+                        errno_class = reason.as_str(), %error, "router discovery send failed");
+                    socket.send_warned = true;
+                }
                 false
             }
         }
@@ -821,6 +882,82 @@ mod tests {
         // The tick also sends the first unsolicited RA (134).
         assert_eq!(*sent.lock().unwrap(), vec![134, 133], "RS resent");
         assert!(actor.pending_rs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_failures_count_every_attempt_and_warn_once_per_generation() {
+        use std::io::{Read, Seek};
+
+        let mut log = tempfile::tempfile().unwrap();
+        let writer = log.try_clone().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        let (mut actor, _) = flaky_actor(0, true);
+        actor.sender =
+            Box::new(|_, _, _| Err(std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL)));
+        let now = Instant::now();
+        actor.handle(Input::Command(Command::Start("x".into())), now);
+        actor.handle(link(LinkState::Up), now);
+        let first_generation = actor.sockets["x"].generation;
+        assert_eq!(
+            actor.counters.send_failures[super::SendFailure::AddressUnavailable as usize]
+                .load(Ordering::Relaxed),
+            1
+        );
+        actor.handle(Input::Wake, now + Duration::from_secs(1));
+        assert_eq!(
+            actor.counters.send_failures[super::SendFailure::AddressUnavailable as usize]
+                .load(Ordering::Relaxed),
+            3
+        );
+        actor.handle(link(LinkState::Down), now + Duration::from_secs(2));
+        actor.handle(link(LinkState::Up), now + Duration::from_secs(3));
+        let second_generation = actor.sockets["x"].generation;
+        assert_ne!(first_generation, second_generation);
+        log.rewind().unwrap();
+        let mut text = String::new();
+        log.read_to_string(&mut text).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["fields"]["message"] == "router discovery send failed")
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "one actual warning per link generation: {text}"
+        );
+        for (row, generation) in rows.iter().zip([first_generation, second_generation]) {
+            assert_eq!(row["level"], "WARN");
+            assert_eq!(row["fields"]["interface"], "x");
+            assert_eq!(row["fields"]["ifindex"], 9);
+            assert_eq!(row["fields"]["generation"], generation);
+            assert_eq!(row["fields"]["errno_class"], "address_unavailable");
+        }
+    }
+
+    #[test]
+    fn send_errno_classes_are_bounded() {
+        use super::SendFailure as S;
+        for (errno, expected) in [
+            (libc::EADDRNOTAVAIL, S::AddressUnavailable),
+            (libc::ENETDOWN, S::NetworkUnavailable),
+            (libc::ENETUNREACH, S::NetworkUnavailable),
+            (libc::ENODEV, S::NetworkUnavailable),
+            (libc::EPERM, S::PermissionDenied),
+            (libc::EACCES, S::PermissionDenied),
+            (libc::EAGAIN, S::WouldBlock),
+            (libc::EINVAL, S::Other),
+        ] {
+            assert_eq!(
+                S::classify(&std::io::Error::from_raw_os_error(errno)),
+                expected
+            );
+        }
     }
 
     #[test]

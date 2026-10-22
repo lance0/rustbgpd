@@ -41,6 +41,9 @@ const NOT_MIRRORED: &[&str] = &[
     "fib_runtime",
     "fib_table_control",
     "gnmi_set_bridge",
+    // Host diagnostics are main/CLI consumers, outside config's lib closure.
+    "host_ipv6",
+    "host_ipv6_runtime",
     "kernel_route_notify",
     "link_failover",
     "metrics_server",

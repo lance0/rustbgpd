@@ -3,6 +3,9 @@
 mod commands;
 mod connection;
 mod error;
+#[cfg(target_os = "linux")]
+#[path = "../../../src/host_ipv6.rs"]
+mod host_ipv6;
 mod output;
 mod pager;
 #[cfg(test)]

@@ -319,3 +319,6 @@ fn interface_only_neighbors_discover_each_other_and_follow_an_address_change() {
         "the move is logged as an address change"
     );
 }
+
+#[path = "support/host_ipv6_netns.rs"]
+mod host_ipv6_netns;

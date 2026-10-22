@@ -1540,6 +1540,78 @@ fn sweep_crash_reports(crash_dir: &Path, bundle: &mut Bundle) -> Vec<String> {
 // test-bind that is immediately released, statvfs/access, and /proc
 // reads. Each network touch is bounded by [`PROBE_TIMEOUT_SECS`].
 
+/// Host probes must inspect the daemon's network namespace, not a remote CLI's.
+#[cfg(target_os = "linux")]
+fn host_ipv6_is_local(connection: Option<&Connection>, daemon_address: &str) -> bool {
+    if !daemon_address.starts_with("unix://") {
+        return false;
+    }
+    let Some(connection) = connection else {
+        return true;
+    };
+    let Some(process) = connection.local_process() else {
+        return false;
+    };
+    let local = fs::read_link("/proc/self/ns/net");
+    let daemon = fs::read_link(format!("/proc/{}/ns/net", process.pid));
+    matches!((local, daemon), (Ok(local), Ok(daemon)) if local == daemon)
+        && connection.local_process() == Some(process)
+}
+
+#[cfg(target_os = "linux")]
+fn host_ipv6_checks(document: &toml::Value, local: bool) -> Vec<Check> {
+    let mut interfaces = BTreeMap::new();
+    for row in config_rows(document, &["neighbors"]) {
+        let Some(interface) = row.get("interface").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let address = row
+            .get("address")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        if address.is_empty()
+            || address
+                .parse::<std::net::Ipv6Addr>()
+                .is_ok_and(|a| a.is_unicast_link_local())
+        {
+            interfaces.insert(interface, address.is_empty());
+        }
+    }
+    if interfaces.is_empty() {
+        return Vec::new();
+    }
+    let inspector = local.then(crate::host_ipv6::Inspector::new);
+    let mut checks = Vec::new();
+    for (interface, interface_only) in interfaces {
+        let Some(inspector) = &inspector else {
+            checks.push(Check {
+                name: format!("interface.{interface}.ipv6_state_unavailable"),
+                status: CheckStatus::Warn,
+                detail: format!("interface {interface}: run doctor through a local Unix socket in the daemon's network namespace to inspect IPv6 prerequisites"),
+            });
+            continue;
+        };
+        let Some(findings) = inspector.inspect(interface, interface_only) else {
+            continue;
+        };
+        for finding in findings {
+            checks.push(Check {
+                name: format!("interface.{interface}.{}", finding.condition),
+                status: if finding.unusable {
+                    CheckStatus::Fail
+                } else {
+                    CheckStatus::Warn
+                },
+                detail: format!(
+                    "interface {interface}: {}: {}",
+                    finding.condition, finding.detail
+                ),
+            });
+        }
+    }
+    checks
+}
+
 /// Read a documented key path without projecting the daemon's config schema.
 /// The effective document is parsed once and shared by all doctor checks.
 fn config_value<'a>(document: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
@@ -4015,6 +4087,13 @@ async fn run_with_deadlines(
     match config_source {
         Some((_, source)) => {
             if let Some(document) = document {
+                #[cfg(target_os = "linux")]
+                for check in host_ipv6_checks(
+                    document,
+                    host_ipv6_is_local(local_connection.as_ref(), opts.daemon_address),
+                ) {
+                    reporter.record(check.name, check.status, check.detail)?;
+                }
                 if !daemon_reachable && let Some(port) = config_listen_port(document) {
                     let check = listener_bind_check(port);
                     reporter.record(check.name, check.status, check.detail)?;
@@ -4386,6 +4465,33 @@ ttl_security_hops = 3
             .map(gtsm_inventory);
         let admin_enabled = metrics.and_then(admin_enabled_inventory);
         gtsm_advisory_check(record, history, inventory.as_ref(), admin_enabled.as_ref())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_ipv6_doctor_scopes_findings_and_never_probes_a_remote_host() {
+        let config: toml::Value = toml::from_str(
+            r#"
+[[neighbors]]
+interface = "swp1"
+[[neighbors]]
+interface = "swp2"
+address = "fe80::1"
+[[neighbors]]
+address = "192.0.2.1"
+"#,
+        )
+        .unwrap();
+        let checks = host_ipv6_checks(&config, false);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "interface.swp1.ipv6_state_unavailable");
+        assert_eq!(checks[1].name, "interface.swp2.ipv6_state_unavailable");
+        assert!(
+            checks.iter().all(|check| check.status == CheckStatus::Warn
+                && check.detail.contains("network namespace"))
+        );
+        assert!(!host_ipv6_is_local(None, "http://127.0.0.1:50051"));
+        assert!(host_ipv6_is_local(None, "unix:///run/rustbgpd.sock"));
     }
 
     #[test]
