@@ -1015,3 +1015,21 @@ mod netns {
         });
     }
 }
+
+/// Carrier loss can retire a session whose queued Established report is
+/// delivered after the Down. With no binding it is ignored, so the next Up
+/// and RA bind again.
+#[test]
+fn a_late_established_report_after_carrier_loss_does_not_freeze_discovery() {
+    let t0 = Instant::now();
+    let mut e = engine(true, t0);
+    ra(&mut e, 2, 30, t0).unwrap();
+    assert_eq!(bindings(&mut e), [(None, Some(ep(2)))]);
+    e.on_link(&link(LinkState::Down, IDX), t0);
+    assert_eq!(bindings(&mut e), [(Some(ep(2)), None)]);
+    // Mutation-red: accepting it freezes reselection with nothing bound.
+    e.session_established(IF);
+    e.on_link(&link(LinkState::Up, IDX), t0);
+    ra(&mut e, 2, 30, t0).unwrap();
+    assert_eq!(bindings(&mut e), [(None, Some(ep(2)))], "rebinds after Up");
+}

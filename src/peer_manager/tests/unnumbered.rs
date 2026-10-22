@@ -243,6 +243,7 @@ async fn confirmed_carrier_loss_removes_the_peer_and_an_invalid_snapshot_does_no
         !h.mgr.peers.contains_key(&swp1_key(2)),
         "carrier loss purges"
     );
+    assert_eq!(h.drain(), [Command::SessionFailed("swp1".into())]);
 
     // The level is passed on once, not per publication.
     h.links_changed(snapshot(true, &[("swp1", 7, false)]));
@@ -682,5 +683,29 @@ async fn a_failed_bind_is_retried_without_a_new_event() {
     assert!(
         h.mgr.peers.contains_key(&swp1_key(2)),
         "recovered on the retry"
+    );
+}
+
+/// Carrier loss can win the race with a queued Established report: the
+/// report reaches discovery after the Down. Retirement then releases
+/// discovery last, so the neighbor can rebind.
+#[tokio::test]
+async fn a_late_established_report_is_released_by_retirement() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.drain();
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    // Drained while the retiring session is still registered.
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
+    h.reconcile().await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)));
+    // Mutation-red: without the release, Established is discovery's last word.
+    assert_eq!(
+        h.drain().last(),
+        Some(&Command::SessionFailed("swp1".into()))
     );
 }

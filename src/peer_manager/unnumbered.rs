@@ -461,6 +461,11 @@ impl PeerManager {
             port.bound = None;
             port.established = false;
             port.held = Some(held);
+            // The retired session's queued reports have been drained by
+            // now; an Established among them must not outlive it.
+            if let Some(unnumbered) = self.unnumbered.as_mut() {
+                unnumbered.discovery.session_failed(name);
+            }
         }
         if link_down {
             return;
