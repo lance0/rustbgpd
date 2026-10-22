@@ -11,16 +11,20 @@ inputs:
     description: "Build rustbgpd:dev (set 'false' for jobs that build their own)."
     required: false
     default: "true"
+  vrf-required:
+    description: >-
+      "true" for jobs that fail closed without VRF; gives the vrf module fetch
+      a longer budget (see load-vrf-module). VRF-optional jobs keep 240 s.
+    required: false
+    default: "false"
 outputs:
   vrf-available:
     description: >-
       "true" when the `vrf` kernel module is loaded (already present, or
       installed from linux-modules-extra for the exact running kernel);
-      "false" when the hosted runner kernel is ahead of the matching
-      modules-extra package in the apt mirror and vrf cannot be loaded.
-      VRF-dependent jobs gate on this so a transient runner-image / mirror
-      skew skips with a notice instead of failing.
-    value: ${{ steps.dataplane-modules.outputs.vrf-available }}
+      "false" when it could not be obtained within the fetch budget.
+      VRF-optional jobs skip on "false"; VRF-required jobs fail closed.
+    value: ${{ steps.vrf.outputs.vrf-available }}
 runs:
   using: "composite"
   steps:
@@ -44,40 +48,15 @@ runs:
           sudo apt-get install -y jq
         fi
 
-    - name: Load kernel dataplane modules (vrf / vxlan / bridge / bonding)
-      id: dataplane-modules
+    - name: Load vrf kernel module
+      id: vrf
+      uses: ./.github/actions/load-vrf-module
+      with:
+        vrf-required: ${{ inputs.vrf-required }}
+
+    - name: Load kernel dataplane modules (vxlan / bridge / bonding)
       shell: bash
-      run: |
-        set -uo pipefail
-        # vrf is absent from the slim hosted Azure kernel; it ships only via
-        # linux-modules-extra for the EXACT running kernel. The hosted kernel
-        # can roll ahead of that package in the apt mirror (actions/runner-images
-        # #7570 / #7587) — a transient skew we must NOT turn into a red build.
-        # Load best-effort and report availability so vrf-dependent jobs skip
-        # rather than fail when the module genuinely cannot be installed.
-        vrf_available=false
-        if sudo modprobe vrf 2>/dev/null; then
-          vrf_available=true
-        else
-          # Bounded fetch: a stalled mirror fails this fast (warning), never a
-          # ~30 min hang. apt retry / connection timeouts ride out a brief blip.
-          sudo timeout 240 apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            install -y "linux-modules-extra-$(uname -r)" \
-            || echo "::warning::linux-modules-extra-$(uname -r) unavailable or slow"
-          if sudo modprobe vrf 2>/dev/null; then
-            vrf_available=true
-          fi
-        fi
-        if [ "$vrf_available" = true ]; then
-          echo "::notice::vrf kernel module available; vrf-dependent dataplane jobs will run"
-        else
-          echo "::warning::vrf kernel module unavailable on this runner (kernel $(uname -r) likely ahead of linux-modules-extra in the apt mirror); vrf-dependent jobs will skip"
-        fi
-        echo "vrf-available=${vrf_available}" >> "$GITHUB_OUTPUT"
-        sudo modprobe vxlan bridge bonding || true
+      run: sudo modprobe vxlan bridge bonding || true
 
     # Consumers load locally from the primer's fixed scope but never write it;
     # a cache miss simply falls back to a normal source build.
