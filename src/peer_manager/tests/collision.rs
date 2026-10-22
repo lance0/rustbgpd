@@ -2350,10 +2350,20 @@ async fn candidate_dropping_claim_reply_keeps_primary() {
     let candidate_claims = claims.clone();
     let candidate_task = tokio::spawn(async move {
         while let Some(command) = candidate_rx.recv().await {
-            if let PeerCommand::ClaimCollisionPromotion { reply } = command {
-                candidate_claims.fetch_add(1, Ordering::SeqCst);
-                drop(reply);
-                break;
+            match command {
+                // The promotion sync precedes the claim.
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::UpdateGracefulShutdown { reply, .. }
+                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::ClaimCollisionPromotion { reply } => {
+                    candidate_claims.fetch_add(1, Ordering::SeqCst);
+                    drop(reply);
+                    break;
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -3062,4 +3072,94 @@ async fn promoted_candidate_imports_with_edit_made_while_pending() {
             }
         }
     }
+}
+
+/// LAN-2512: the candidate's hold timer expires between two of the promotion
+/// sync commands (modelled here when the export sync arrives). A real session
+/// still acknowledges policy commands in Idle, so only the claim, taken after
+/// the sync, can tell that the candidate died. The primary must keep
+/// ownership and the dead candidate must be cleaned up.
+#[tokio::test]
+async fn candidate_lost_during_promotion_sync_keeps_primary() {
+    use rustbgpd_transport::PeerCommand;
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Active, None, primary.clone()),
+        false,
+    );
+    let (candidate_tx, mut candidate_rx) = mpsc::channel::<PeerCommand>(8);
+    let activated = Arc::new(AtomicU32::new(0));
+    let cleaned_up = Arc::new(AtomicU32::new(0));
+    let (candidate_activated, candidate_cleaned_up) = (activated.clone(), cleaned_up.clone());
+    let candidate_task = tokio::spawn(async move {
+        let mut lost = false;
+        while let Some(command) = candidate_rx.recv().await {
+            match command {
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    // The hold timer fired after the import sync: the session
+                    // is Idle now, yet it still accepts the command.
+                    lost = true;
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateGracefulShutdown { reply, .. }
+                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::ClaimCollisionPromotion { reply } => {
+                    let _ = reply.send(!lost);
+                }
+                PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
+                    candidate_activated.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(());
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    candidate_cleaned_up.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        PeerHandle::from_parts(candidate_tx, candidate_task),
+        2,
+    );
+
+    assert!(
+        !mgr.promote_pending_inbound(&key(peer_addr), 0).await,
+        "a candidate lost during the sync is not promoted"
+    );
+    assert_eq!(primary.shutdown.load(Ordering::SeqCst), 0);
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+    assert_eq!(activated.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        cleaned_up.load(Ordering::SeqCst),
+        1,
+        "the dead candidate is retired"
+    );
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(managed.session_id(), 1, "the primary keeps ownership");
 }

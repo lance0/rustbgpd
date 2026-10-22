@@ -1113,27 +1113,35 @@ impl PeerManager {
     /// candidate that is Idle, exited, or unconfirmed is dropped and the
     /// primary is never retired for it. Returns what
     /// [`Self::finish_inbound_promotion`] takes.
+    ///
+    /// The candidate is synced from the managed peer BEFORE the claim. Its
+    /// session handles commands in order, so the claim reply is the last word
+    /// on whether it is still viable: a hold or verdict timer that expires
+    /// during the sync marks it lost, the claim answers `false`, and the
+    /// primary is kept. Claiming first would let a candidate that died during
+    /// the sync be promoted over a viable primary.
     async fn claim_pending_inbound(
         &mut self,
         peer_key: &PeerKey,
     ) -> Option<(PeerHandle, u64, u64)> {
         self.drain_before_candidate_promotion(peer_key).await;
-        let claim = self
-            .peers
-            .get(peer_key)?
-            .pending_inbound
-            .as_ref()?
-            .handle
-            .claim_collision_promotion_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-            .await;
+        let claim = match self.sync_promotion_candidate(peer_key).await {
+            Ok(()) => {
+                self.peers
+                    .get(peer_key)?
+                    .pending_inbound
+                    .as_ref()?
+                    .handle
+                    .claim_collision_promotion_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                    .await
+            }
+            Err(error) => {
+                warn!(peer = %peer_key.address, %error, "collision candidate did not accept the current session settings; keeping the primary");
+                Err(error)
+            }
+        };
         let collision_dump = match claim {
-            Ok(true) => match self.sync_claimed_candidate(peer_key).await {
-                Ok(()) => return self.promote_pending_inbound_handle(peer_key),
-                Err(error) => {
-                    warn!(peer = %peer_key.address, %error, "collision candidate did not accept the current session settings; keeping the primary");
-                    true
-                }
-            },
+            Ok(true) => return self.promote_pending_inbound_handle(peer_key),
             Ok(false) => {
                 info!(peer = %peer_key.address, "collision candidate fell to Idle before promotion; keeping the primary");
                 false
@@ -1161,12 +1169,12 @@ impl PeerManager {
     /// The candidate copied the managed policies and session knobs when it
     /// was spawned. A later edit (SIGHUP generation, gRPC policy or knob
     /// change, peer-group reshape, honor toggle, dataset) reached only the
-    /// primary. Reassert the current managed state on the claimed candidate
-    /// before it is promoted: a claimed candidate still holds its KEEPALIVE,
-    /// so these commands precede its `PeerUp` and its first export already
-    /// uses the current chain. Promotion is the one place a candidate becomes
+    /// primary. Reassert the current managed state on the candidate before it
+    /// is claimed and promoted: it holds its KEEPALIVE until activation, so
+    /// these commands precede its `PeerUp` and its first export already uses
+    /// the current chain. Promotion is the one place a candidate becomes
     /// the session, so this one sync covers every mutation path.
-    async fn sync_claimed_candidate(
+    async fn sync_promotion_candidate(
         &self,
         peer_key: &PeerKey,
     ) -> Result<(), rustbgpd_transport::PeerCommandError> {
