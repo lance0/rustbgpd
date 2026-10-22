@@ -18,7 +18,7 @@
 //! address and, for a scoped neighbor, the interface name. The selection
 //! tie-break, queries, MRT, BMP and metrics resolve the endpoint through it.
 //! Only the allocation sets an endpoint, and only the RIB changes one
-//! ([`RibUpdate::RebindPeer`](crate::update::RibUpdate::RebindPeer)), after it
+//! (a [`RebindPeer`](crate::update::RibUpdate::RebindPeer) message), after it
 //! has purged every route the neighbor's earlier session left behind, so a
 //! retained route always resolves to the endpoint of the session that learned
 //! it. A released slot keeps its endpoint until the slot is reused, so history
