@@ -628,3 +628,32 @@ async fn an_up_to_up_index_change_retires_the_old_scoped_peer() {
         Some(9)
     );
 }
+
+/// A peer rediscovered inside a planned restart's window advertises the
+/// Restart State bit like configured neighbors (RFC 4724), so helpers keep
+/// the routes they retained; after the window it does not.
+#[tokio::test]
+async fn a_rediscovered_peer_carries_the_restart_state_only_within_the_window() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.mgr.local_gr_restart_until = Some(std::time::Instant::now() + Duration::from_secs(60));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // Mutation-red: binding as not restart-eligible clears the deadline.
+    assert!(
+        h.mgr.peers[&swp1_key(2)]
+            .transport_config
+            .gr_restart_until
+            .is_some(),
+        "R=1 inside the window"
+    );
+
+    h.mgr.local_gr_restart_until = std::time::Instant::now().checked_sub(Duration::from_secs(1));
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(
+        h.mgr.peers[&swp1_key(3)].transport_config.gr_restart_until,
+        None,
+        "R=0 after the window"
+    );
+}

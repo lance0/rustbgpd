@@ -499,7 +499,10 @@ impl PeerManager {
             .current_config
             .resolve_bound_interface_neighbor(&neighbor, endpoint.address, endpoint.ifindex)
             .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
-        let config = Self::peer_manager_config_from_resolved(resolved, false);
+        // Restart-eligible like configured neighbors: during a planned
+        // restart's window the OPEN carries R=1, so helpers keep the routes
+        // they retained; after the window it carries R=0.
+        let config = Self::peer_manager_config_from_resolved(resolved, true);
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
         // Carry the previous endpoint's state: a disable stays, and a latch
         // keeps the new peer down until its restart deadline or an enable.
