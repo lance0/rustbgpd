@@ -2263,6 +2263,12 @@ impl RibManager {
         ]
     }
 
+    /// The neighbor whose route is best for `prefix`, if any.
+    #[must_use]
+    pub fn bench_best_peer(&self, prefix: Prefix) -> Option<PeerId> {
+        self.loc_rib.get(&prefix).map(|route| route.peer)
+    }
+
     /// Verify that a benchmark replacement reached both live unicast stores.
     ///
     /// # Panics

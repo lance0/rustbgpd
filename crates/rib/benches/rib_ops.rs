@@ -756,6 +756,99 @@ fn bench_attr_intern_manager_churn(c: &mut Criterion) {
     }
 }
 
+/// Manager-level contested-prefix selection: a challenger announces every
+/// prefix a holder already has, equal through every step above the peer
+/// tie-break, and wins on the lower peer address, so each prefix's best path
+/// changes. The timed interval is the announcement through the production
+/// `RoutesReceived` dispatcher, recompute and distribution; the withdrawal
+/// that restores the holder runs outside it. IPv6 pinned identities resolve
+/// through the peer table where `PeerId` is a handle.
+fn bench_contested_prefix_selection(c: &mut Criterion) {
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = c;
+    #[cfg(feature = "bench-internals")]
+    {
+        use std::time::Duration;
+
+        use rustbgpd_rib::RibManager;
+        use rustbgpd_telemetry::BgpMetrics;
+        use tokio::sync::mpsc;
+
+        let mut group = c.benchmark_group("contested_prefix_selection");
+        group.sample_size(10);
+        let holder = PeerId::from_addr("2001:db8::2".parse().unwrap());
+        let challenger = PeerId::from_addr("2001:db8::1".parse().unwrap());
+        for count in [1_000, 100_000] {
+            let prefixes = generate_prefixes(count);
+            let routes = |peer: PeerId| -> Vec<Route> {
+                prefixes
+                    .iter()
+                    .map(|prefix| {
+                        let mut route = make_route(*prefix, 1);
+                        route.peer = peer;
+                        route
+                    })
+                    .collect()
+            };
+            let withdrawn: Vec<(Prefix, u32)> = prefixes.iter().map(|p| (*p, 0)).collect();
+            let (_tx, rx) = mpsc::channel(8);
+            let (_query_tx, query_rx) = mpsc::channel(8);
+            let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+            manager.bench_seed_loc_rib(routes(holder));
+            group.bench_function(BenchmarkId::new("numbered_v6", count), |b| {
+                b.iter_custom(|iterations| {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let announced = routes(challenger);
+                        let start = std::time::Instant::now();
+                        manager.bench_seed_loc_rib(announced);
+                        elapsed += start.elapsed();
+                        manager.bench_withdraw_loc_rib(challenger, withdrawn.clone());
+                    }
+                    elapsed
+                });
+            });
+        }
+        group.finish();
+    }
+}
+
+/// Manager-level full-table load: one peer's million-route initial table
+/// through the production `RoutesReceived` dispatcher, recompute and
+/// distribution, into an empty RIB.
+fn bench_full_table_load(c: &mut Criterion) {
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = c;
+    #[cfg(feature = "bench-internals")]
+    {
+        use rustbgpd_rib::RibManager;
+        use rustbgpd_telemetry::BgpMetrics;
+        use tokio::sync::mpsc;
+
+        let mut group = c.benchmark_group("full_table_load");
+        group.sample_size(10);
+        let count = 1_000_000;
+        let prefixes = generate_prefixes(count);
+        let routes: Vec<Route> = prefixes.iter().map(|p| make_route(*p, 1)).collect();
+        group.bench_function(BenchmarkId::from_parameter(count), |b| {
+            b.iter_batched(
+                || {
+                    let (tx, rx) = mpsc::channel(8);
+                    let (query_tx, query_rx) = mpsc::channel(8);
+                    let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+                    (manager, routes.clone(), tx, query_tx)
+                },
+                |(mut manager, routes, tx, query_tx)| {
+                    manager.bench_seed_loc_rib(routes);
+                    (manager, tx, query_tx)
+                },
+                BatchSize::PerIteration,
+            );
+        });
+        group.finish();
+    }
+}
+
 fn bench_best_path_cmp(c: &mut Criterion) {
     let mut group = c.benchmark_group("best_path_cmp");
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
@@ -796,6 +889,22 @@ fn bench_best_path_cmp(c: &mut Criterion) {
         bench.iter(|| {
             for _ in 0..1000 {
                 std::hint::black_box(best_path_cmp(&a2, &b2));
+            }
+        });
+    });
+
+    // Peer-address tie-break: equal through every earlier step, including
+    // the BGP Identifier, so the peers' addresses decide. IPv6 pinned
+    // identities resolve through the peer table where `PeerId` is a handle.
+    let mut a_v6 = make_route(prefix, 1);
+    a_v6.peer = PeerId::from_addr("2001:db8::1".parse().unwrap());
+    let mut b_v6 = make_route(prefix, 1);
+    b_v6.peer = PeerId::from_addr("2001:db8::2".parse().unwrap());
+    assert_eq!(best_path_cmp(&a_v6, &b_v6), std::cmp::Ordering::Less);
+    group.bench_function("peer_tiebreak_v6", |bench| {
+        bench.iter(|| {
+            for _ in 0..1000 {
+                std::hint::black_box(best_path_cmp(&a_v6, &b_v6));
             }
         });
     });
@@ -1342,5 +1451,7 @@ criterion_group!(
     bench_announce_validation,
     bench_route_churn,
     bench_export_policy_eval,
+    bench_contested_prefix_selection,
+    bench_full_table_load,
 );
 criterion_main!(benches);
