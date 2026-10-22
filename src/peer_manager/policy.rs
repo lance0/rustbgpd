@@ -3162,7 +3162,6 @@ impl PeerManager {
             let outcome = self
                 .reevaluate_dataset_exports(
                     export_peers.clone(),
-                    false,
                     OperatorReadAdmission::Served,
                     None,
                 )
@@ -3334,8 +3333,9 @@ impl PeerManager {
         }
     }
 
-    /// The down-peer exception is only used for a singleton batch, so typed
-    /// `NotFound` proves that exact peer has no old outbound object to retain.
+    /// The RIB skips a target it has not registered (a down peer, or a
+    /// deferred `PeerUp`): it has no staged exports, and its registration
+    /// evaluates the current datasets.
     ///
     /// Only channel admission has a deadline: nothing has been dispatched
     /// before it, so expiry is a clean rejection. Once dispatched, the RIB
@@ -3349,7 +3349,6 @@ impl PeerManager {
     pub(super) async fn reevaluate_dataset_exports(
         &mut self,
         peers: Vec<IpAddr>,
-        known_down: bool,
         operator_reads: OperatorReadAdmission,
         swaps: Option<Vec<rustbgpd_rib::DatasetSwap>>,
     ) -> Result<(), DatasetRefreshFailure> {
@@ -3390,7 +3389,6 @@ impl PeerManager {
         });
         match self.await_with_readiness(response, operator_reads).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(RibCommandError::NotFound(_))) if known_down => Ok(()),
             Ok(Err(error @ RibCommandError::NotFound(_))) => Err(DatasetRefreshFailure::Rejected(
                 format!("dataset export re-evaluation: {error}"),
             )),
@@ -3462,7 +3460,6 @@ impl PeerManager {
                     let export_started = tokio::time::Instant::now();
                     self.reevaluate_dataset_exports(
                         vec![dependent.peer.address],
-                        true,
                         operator_reads,
                         None,
                     )
@@ -3489,7 +3486,7 @@ impl PeerManager {
             }
         }
         let refresh_started = tokio::time::Instant::now();
-        self.reevaluate_dataset_exports(exports, false, operator_reads, swaps)
+        self.reevaluate_dataset_exports(exports, operator_reads, swaps)
             .await?;
         for (dependent, is_established) in dependents.iter().zip(&established) {
             if dependent.import
