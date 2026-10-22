@@ -2192,17 +2192,25 @@ impl RibManager {
 
     /// [`RouteExportVersion::policy`]: the installed export chains' change
     /// version, the registered peers' export-settings generation, and the
-    /// summed generations of every dataset the registered peers' chains read
-    /// and of their sessions' exact export encoders. A dataset swap or a
-    /// session's encoder profile change is visible to the next explain
-    /// before the RIB hears of it, so those generations are read directly;
-    /// each only grows, so any change moves its sum.
+    /// summed generations of every dataset the registered peers' export
+    /// chains and attached conditional-advertisement `advertise_policy`
+    /// chains read, and of their sessions' exact export encoders. A
+    /// suppressing gate evaluates its `advertise_policy` live, so refreshing
+    /// a dataset only that policy reads changes no applied state. A dataset
+    /// swap or a session's encoder profile change is visible to the next
+    /// explain before the RIB hears of it, so those generations are read
+    /// directly; each only grows, so any change moves its sum.
     fn export_policy_version(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let peers = self.peer_sendable_families.keys();
         let datasets = peers
             .clone()
-            .filter_map(|&peer| self.export_chains.for_peer(peer))
+            .flat_map(|&peer| {
+                self.export_chains
+                    .for_peer(peer)
+                    .into_iter()
+                    .chain(self.attached_advertise_policies(peer))
+            })
             .flat_map(|chain| chain.compiled().referenced_datasets())
             .fold(0u64, |sum, slot| {
                 sum.wrapping_add(slot.handle.pin().generation)

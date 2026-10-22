@@ -2009,3 +2009,53 @@ fn unchanged_export_settings_leave_the_walk_resumable() {
     install_conditional(&mut manager, unrelated);
     assert_walk_resumes(&mut manager, &first);
 }
+
+/// [`walk_started`] where peer 10.0.0.2 has a conditional advertisement
+/// attached whose condition is absent, so the gate suppresses whatever its
+/// `advertise_policy` selects: the local route while the returned dataset,
+/// which no export chain reads, lists it.
+fn advertise_policy_dataset_walk_started() -> (
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    RouteExportPage,
+    Arc<rustbgpd_policy::datasets::DatasetHandle>,
+) {
+    let (advertise_policy, handle) = allowed_dataset_chain(
+        "policy p { term t { if route.prefix in allowed { accept } reject } }",
+        true,
+    );
+    let mut set = conditional_set(other_prefix(), None, &[PeerId::from_addr(v4(2))]);
+    set.definitions[0].advertise_policy = advertise_policy;
+    let (manager, receivers, first) = walk_started_with(0, |manager| {
+        install_conditional(manager, set);
+    });
+    assert_eq!(row(&first, PeerId::from_addr(v4(2))).reason, "export_rule");
+    (manager, receivers, first, handle)
+}
+
+/// A suppressing gate evaluates its `advertise_policy` live, so refreshing a
+/// dataset only that policy reads changes the attached peer's row with no
+/// change to the definition, its applied state or any export chain; the
+/// walk is invalidated. Red proof: leaving the attached `advertise_policy`
+/// chains out of the policy version's dataset generations fails this test.
+#[test]
+fn advertise_policy_dataset_swapped_mid_walk_invalidates_the_resumed_walk() {
+    let (mut manager, _receivers, first, handle) = advertise_policy_dataset_walk_started();
+    handle.refresh(allowed_dataset(false));
+    assert_walk_invalidated(&mut manager, &first);
+}
+
+/// The same refresh landing while a page's rows evaluate refuses that page.
+/// Red proof as above.
+#[test]
+fn advertise_policy_dataset_swapped_while_a_page_evaluates_invalidates_the_page() {
+    use crate::manager::queries::BEFORE_EXPORT_ROWS;
+
+    let (mut manager, _receivers, first, handle) = advertise_policy_dataset_walk_started();
+    BEFORE_EXPORT_ROWS.set(Some(Box::new(move || {
+        handle.refresh(allowed_dataset(false));
+    })));
+    assert_walk_invalidated(&mut manager, &first);
+    // Without a refresh in the window, a restarted walk is served.
+    assert!(query(&mut manager, v4_prefix(), 0, None, 2).is_ok());
+}

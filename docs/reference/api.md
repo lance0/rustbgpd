@@ -3396,7 +3396,8 @@ when any of these changed since the walk's first page:
 - The Established peer set: a peer joined or left. A flap, where the peer goes
   down and comes back, counts even though the set ends up the same.
 - The export policy of an Established peer, such as a reload that replaces it
-  without resetting the session, or the contents of a dataset that policy
+  without resetting the session, or the contents of a dataset that policy, or
+  the `advertise_policy` of a conditional advertisement attached to the peer,
   reads.
 - Another export setting of an Established peer that changes without a
   session reset: its outbound prefix limits, a conditional advertisement
@@ -3409,9 +3410,9 @@ when any of these changed since the walk's first page:
   removed. A managed peer becoming Established counts as a peer joining the
   Established set, so its `NOT_ESTABLISHED` row is never stale or repeated.
 
-Any page, including the first, also returns `ABORTED` when a dataset that
-policy reads is refreshed, or a session's outbound encoding profile changes,
-while the page's rows are being evaluated, so no page mixes either.
+Any page, including the first, also returns `ABORTED` when such a dataset
+is refreshed, or a session's outbound encoding profile changes, while the
+page's rows are being evaluated, so no page mixes either.
 
 On `ABORTED`, discard the rows already collected and restart the walk with an
 empty `page_token`. A restarted walk for a removed route returns `NOT_FOUND`,

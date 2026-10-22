@@ -1549,8 +1549,9 @@ pub struct RouteExportVersion {
     /// removing a route and restoring identical content leaves it unchanged.
     pub route: u64,
     /// Export-policy state of the registered peers: the installed chains'
-    /// change version, the generations of the datasets they read and of
-    /// their sessions' exact export encoders, and the generation of their
+    /// change version, the generations of the datasets they and the peers'
+    /// attached conditional-advertisement `advertise_policy` chains read and
+    /// of their sessions' exact export encoders, and the generation of their
     /// other export settings (outbound prefix limits, conditional
     /// advertisement, peer group, Add-Path send limits, sendable families
     /// and ORF state).
