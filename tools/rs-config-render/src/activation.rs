@@ -662,8 +662,10 @@ mod unix {
     }
 
     /// The child's output, or `None` unless it exited and both pipes reached
-    /// EOF by `deadline`. A descendant that inherited a pipe can hold it open
-    /// long after the child exits, so EOF is bounded by the same deadline.
+    /// EOF by `deadline` within [`MAX_OUTPUT_BYTES`]. A descendant that
+    /// inherited a pipe can hold it open long after the child exits, so EOF is
+    /// bounded by the same deadline; a capped read is not EOF, so over-limit
+    /// output is refused rather than parsed from its truncated prefix.
     fn wait_output(mut child: Child, deadline: Instant) -> Option<Output> {
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
@@ -682,6 +684,7 @@ mod unix {
             pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .ok()?
                 .ok()
+                .filter(|bytes| bytes.len() as u64 <= MAX_OUTPUT_BYTES)
         };
         Some(Output {
             status,
@@ -787,7 +790,7 @@ mod unix {
             .ok()?;
         let output = wait_output(child, deadline)?;
         let bytes = output.stdout;
-        if !output.status.success() || bytes.len() as u64 > MAX_OUTPUT_BYTES {
+        if !output.status.success() {
             return None;
         }
         let mut process_start = None;

@@ -1168,7 +1168,43 @@ fn every_activation_test_acquires_the_process_guard_first() {
             );
         })
         .count();
-    assert_eq!(tests, 20);
+    assert_eq!(tests, 21);
+}
+
+#[test]
+fn an_over_limit_health_answer_is_not_trusted_from_its_prefix() {
+    let _serial = activation_test_guard();
+    let rig = Rig::new();
+    let first = rig.candidate("candidate-a", 160);
+    rig.run(&first, true, &rig.activation).unwrap();
+    let prior = rig.current();
+    // A healthy answer padded past the 64 MiB output cap: the capped read
+    // ends at the limit, not at EOF, so its parseable prefix must not count.
+    let wrapper = rig.root.join("rbgp-padded.sh");
+    executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\n\"{}\" \"$@\"; rc=$?\ncase \"$*\" in *\" health\") head -c 67108880 /dev/zero | tr '\\0' ' ' ;; esac\nexit $rc\n",
+            rig.rbgp.display()
+        ),
+    );
+    let result = activate(&Options {
+        candidate: &rig.candidate("candidate-b", 161),
+        state_dir: &rig.state,
+        checker: &rig.checker,
+        rbgp: &wrapper,
+        rbgp_addr: rig.binding(&rig.state).rbgp_addr(),
+        settle: SETTLE,
+        initial: false,
+        activation_command: &rig.activation,
+        activation_args: &[],
+        binding: &rig.binding(&rig.state),
+    });
+    assert_eq!(
+        result,
+        Err(Error::Refused("current runtime is not known-good"))
+    );
+    assert_eq!(rig.current(), prior);
 }
 
 mod prune {
