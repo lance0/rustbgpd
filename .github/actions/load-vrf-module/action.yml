@@ -62,7 +62,10 @@ runs:
         STARTED: ${{ steps.probe.outputs.started }}
         VRF_REQUIRED: ${{ inputs.vrf-required }}
       run: |
-        set -uo pipefail
+        # Composite `shell: bash` runs with -e. This step reports
+        # availability instead of failing, so a missing package or a failed
+        # lookup must reach the vrf-available output.
+        set +e -uo pipefail
         if [ "$LOADED" = true ]; then
           echo "::notice::vrf kernel module already available"
           echo "vrf-available=true" >> "$GITHUB_OUTPUT"
