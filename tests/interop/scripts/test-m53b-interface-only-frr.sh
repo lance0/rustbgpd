@@ -59,7 +59,8 @@ assert_fabric_addresses() {
     LL1=$(link_local "$FRR1" eth1)
     LL2=$(link_local "$FRR2" eth1)
     LOCAL_LL=$(link_local "$RUSTBGPD" eth1)
-    if [ "$LL1" = "$LL2" ] || [ "$LOCAL_LL" = "$(link_local "$RUSTBGPD" eth2)" ]; then
+    LOCAL_LL2=$(link_local "$RUSTBGPD" eth2)
+    if [ "$LL1" = "$LL2" ] || [ "$LOCAL_LL" = "$LOCAL_LL2" ]; then
         fail "parallel fabric links generated duplicate link-local addresses"; return 1
     fi
     ok "fabric uses distinct kernel EUI-64 link-local addresses and no IPv4"
@@ -140,17 +141,18 @@ wait_kernel_route() {
 assert_outbound() {
     grpcurl_call -d "{\"prefix\":\"192.0.2.53\",\"prefix_length\":32,\"next_hop\":\"$LOCAL_LL\",\"origin\":0}" \
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath >/dev/null
-    for frr in "$FRR1" "$FRR2"; do
-        local found=0
+    for entry in "$FRR1 $LOCAL_LL" "$FRR2 $LOCAL_LL2"; do
+        local frr=${entry% *} next_hop=${entry#* } found=0
         for _ in $(seq 1 30); do
             if docker exec "$frr" vtysh -c "show bgp ipv4 unicast $INJECTED_PREFIX json" \
-                | jq -e 'tostring | contains("192.0.2.53") and contains("fe80:")' >/dev/null 2>&1; then
+                | jq -e --arg prefix "$INJECTED_PREFIX" --arg nh "$next_hop" \
+                    -f "$SCRIPT_DIR/m53b-next-hop.jq" >/dev/null 2>&1; then
                 found=1; break
             fi
             sleep 1
         done
         if [ "$found" != 1 ]; then
-            fail "$frr did not receive IPv4 over the link-local session"
+            fail "$frr did not receive IPv4 with next hop $next_hop"
             dump_state
             return 1
         fi

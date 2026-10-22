@@ -455,6 +455,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
         id: dataplane
+      - name: Check M53b next-hop JSON oracle
+        run: bash tests/interop/scripts/test-m53b-next-hop-json.sh
       - name: Run M53b (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
         with:
