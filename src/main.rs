@@ -1041,7 +1041,7 @@ fn grpc_principal_roles(config: &Config) -> BTreeMap<String, rustbgpd_api::authz
 fn raw_max_gr_restart_time_secs(config: &Config) -> Option<u64> {
     config
         .neighbors
-        .iter()
+        .all()
         .filter(|neighbor| neighbor.graceful_restart.unwrap_or(true))
         .map(|neighbor| u64::from(neighbor.gr_restart_time.unwrap_or(120)))
         .filter(|seconds| *seconds > 0)
@@ -1081,7 +1081,10 @@ fn eor_grace_config(
 }
 
 fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
-    match config.resolved_neighbors() {
+    match config.resolved_neighbors().and_then(|mut neighbors| {
+        neighbors.extend(config.interface_only_resolved_for_comparison()?);
+        Ok(neighbors)
+    }) {
         Ok(neighbors) => neighbors
             .iter()
             .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
@@ -4481,6 +4484,20 @@ async fn run<T>(
         );
     });
     let (min_v4_mss, min_v6_mss) = family_partitioned_listener_mss(&peer_configs);
+    // Interface-only neighbors are IPv6 and accept passively on the same
+    // listener once bound; their clamp joins the IPv6 minimum.
+    let min_v6_mss = [
+        min_v6_mss,
+        config
+            .interface_only_resolved_for_comparison()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|neighbor| neighbor.transport_config.tcp_mss)
+            .min(),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
     let listener_options =
         ListenerSocketOptions {
             tcp_ao_keys: peer_configs

@@ -627,16 +627,12 @@ impl PeerManager {
                 return Err(format!("peer {} has more than one action", action.key));
             }
         }
-        let record = |peer: &PeerKey| {
-            candidate.neighbors.iter().find(|neighbor| {
-                neighbor.address == peer.address.to_string() && neighbor.interface == peer.interface
-            })
-        };
+        let record = |peer: &PeerKey| candidate.neighbor_record(peer);
         let resolve = |peer: &PeerKey| -> Result<PeerManagerNeighborConfig, String> {
             let neighbor = record(peer)
                 .ok_or_else(|| format!("peer {peer} has no neighbor record in the candidate"))?;
             let resolved = candidate
-                .resolve_neighbor(neighbor)
+                .resolve_neighbor(&neighbor)
                 .map_err(|error| error.to_string())?;
             Ok(Self::peer_manager_config_from_resolved(resolved, false))
         };
@@ -675,7 +671,7 @@ impl PeerManager {
                             })?;
                             let next = candidate
                                 .resolve_neighbor_for_hot_update(
-                                    neighbor,
+                                    &neighbor,
                                     &managed.transport_config,
                                 )
                                 .map_err(|error| error.to_string())?;
@@ -739,7 +735,7 @@ impl PeerManager {
             }
             let managed = &self.peers[peer];
             let neighbor = match record(peer) {
-                Some(neighbor) => neighbor.clone(),
+                Some(neighbor) => neighbor.into_owned(),
                 None if managed.is_dynamic => {
                     Self::policy_resolution_neighbor(candidate, peer.address, managed)
                 }

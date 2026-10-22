@@ -16,6 +16,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_policy::sets::SetStore;
 
 use super::{Config, ConfigError, Neighbor, ResolvedNeighbor};
@@ -63,6 +64,16 @@ impl RemoteAsn {
     #[must_use]
     pub fn is_external(self) -> bool {
         self == Self::External
+    }
+
+    /// `numeric`, `external` or `internal`, as `--diff` and the API name it.
+    #[must_use]
+    pub fn mode(self) -> &'static str {
+        match self {
+            Self::Asn(_) => "numeric",
+            Self::External => "external",
+            Self::Internal => "internal",
+        }
     }
 
     /// The configured number, if this is the numeric form.
@@ -167,11 +178,23 @@ pub struct UnnumberedConfig {
 }
 
 /// `[[neighbors]]`, split into addressed neighbors (the `Vec` this derefs
-/// to) and interface-only neighbors. It serializes back as one array.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// to) and interface-only neighbors. It serializes back as one array, with
+/// each interface-only entry after the addressed entries that preceded it
+/// when it was loaded, so a runtime rewrite keeps the operator's order.
+#[derive(Debug, Clone, Default)]
 pub struct NeighborList {
     addressed: Vec<Neighbor>,
     interface_only: Vec<Neighbor>,
+    /// Per interface-only entry: how many addressed entries preceded it.
+    anchors: Vec<usize>,
+}
+
+/// Position is presentation, not configuration: two lists with the same
+/// entries are equal however they interleave.
+impl PartialEq for NeighborList {
+    fn eq(&self, other: &Self) -> bool {
+        self.addressed == other.addressed && self.interface_only == other.interface_only
+    }
 }
 
 impl NeighborList {
@@ -179,6 +202,17 @@ impl NeighborList {
     #[must_use]
     pub fn interface_only(&self) -> &[Neighbor] {
         &self.interface_only
+    }
+
+    /// Addressed neighbors, then interface-only ones: for inventories that
+    /// apply to every configured neighbor.
+    pub fn all(&self) -> impl Iterator<Item = &Neighbor> {
+        self.addressed.iter().chain(&self.interface_only)
+    }
+
+    /// Mutable [`Self::all`].
+    pub fn all_mut(&mut self) -> impl Iterator<Item = &mut Neighbor> {
+        self.addressed.iter_mut().chain(&mut self.interface_only)
     }
 
     /// The interface-only neighbor on `interface`.
@@ -189,20 +223,40 @@ impl NeighborList {
             .find(|neighbor| neighbor.interface.as_deref() == Some(interface))
     }
 
-    /// Replace the interface-only neighbors (reload pins them).
-    pub fn set_interface_only(&mut self, neighbors: Vec<Neighbor>) {
-        self.interface_only = neighbors;
+    /// Take `running`'s interface-only neighbors and their positions
+    /// (reload pins them).
+    pub fn pin_interface_only(&mut self, running: &Self) {
+        self.interface_only.clone_from(&running.interface_only);
+        self.anchors.clone_from(&running.anchors);
+    }
+
+    /// Every entry in configuration order.
+    fn in_order(&self) -> Vec<&Neighbor> {
+        let mut ordered = Vec::with_capacity(self.addressed.len() + self.interface_only.len());
+        let mut pending = self.anchors.iter().zip(&self.interface_only).peekable();
+        for (index, neighbor) in self.addressed.iter().enumerate() {
+            while let Some((_, interface_only)) = pending.next_if(|(anchor, _)| **anchor <= index) {
+                ordered.push(interface_only);
+            }
+            ordered.push(neighbor);
+        }
+        ordered.extend(pending.map(|(_, interface_only)| interface_only));
+        ordered
     }
 }
 
 impl From<Vec<Neighbor>> for NeighborList {
     fn from(neighbors: Vec<Neighbor>) -> Self {
-        let (interface_only, addressed) =
-            neighbors.into_iter().partition(Neighbor::is_interface_only);
-        Self {
-            addressed,
-            interface_only,
+        let mut list = Self::default();
+        for neighbor in neighbors {
+            if neighbor.is_interface_only() {
+                list.anchors.push(list.addressed.len());
+                list.interface_only.push(neighbor);
+            } else {
+                list.addressed.push(neighbor);
+            }
         }
+        list
     }
 }
 
@@ -246,7 +300,7 @@ impl<'a> IntoIterator for &'a mut NeighborList {
 
 impl Serialize for NeighborList {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(self.addressed.iter().chain(&self.interface_only))
+        serializer.collect_seq(self.in_order())
     }
 }
 
@@ -268,6 +322,21 @@ impl JsonSchema for NeighborList {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         Vec::<Neighbor>::json_schema(generator)
     }
+}
+
+/// Interface-only neighbors (compared by interface, so reordering is not a
+/// change) or `[global.unnumbered]` differ: restart-required.
+#[must_use]
+pub fn interface_only_neighbors_changed(old: &Config, new: &Config) -> bool {
+    fn by_interface(config: &Config) -> std::collections::BTreeMap<Option<&str>, &Neighbor> {
+        config
+            .neighbors
+            .interface_only()
+            .iter()
+            .map(|neighbor| (neighbor.interface.as_deref(), neighbor))
+            .collect()
+    }
+    old.global.unnumbered != new.global.unnumbered || by_interface(old) != by_interface(new)
 }
 
 fn invalid(neighbor: &Neighbor, field: &str, reason: &str) -> ConfigError {
@@ -371,15 +440,54 @@ impl Config {
                  have no TCP-layer authentication (ADR-0142)",
             ));
         }
-        if neighbor
-            .ttl_security_hops
-            .or_else(|| group.and_then(|group| group.ttl_security_hops))
-            .is_some_and(|hops| hops.get() > 1)
+        // Per-peer inventories built from configured addresses at startup and
+        // reload. A learned address is never in them, so these settings would
+        // be accepted and never applied; refuse them until they are wired to
+        // the binding.
+        if neighbor.max_prefixes_out_ipv4_unicast.is_some()
+            || neighbor.max_prefixes_out_ipv6_unicast.is_some()
         {
             return Err(invalid(
                 neighbor,
-                "ttl_security_hops",
-                "an interface-only neighbor is directly connected; ttl_security_hops must be 1",
+                "max_prefixes_out_ipv4_unicast",
+                "per-neighbor outbound prefix maxima are not supported on interface-only \
+                 neighbors yet; set them on the peer group",
+            ));
+        }
+        if !self
+            .effective_conditional_advertisements(neighbor)
+            .is_empty()
+        {
+            return Err(invalid(
+                neighbor,
+                "conditional_advertisements",
+                "conditional advertisements are not supported on interface-only neighbors yet",
+            ));
+        }
+        if neighbor
+            .log_level
+            .as_deref()
+            .or_else(|| group.and_then(|group| group.log_level.as_deref()))
+            .is_some()
+        {
+            return Err(invalid(
+                neighbor,
+                "log_level",
+                "a per-neighbor log_level is not supported on interface-only neighbors yet",
+            ));
+        }
+        // GTSM is enforced by the listener's per-peer IP_MINTTL selectors,
+        // built from configured addresses at startup and reload; a learned
+        // address is not in that inventory, so it would go unprotected.
+        if neighbor
+            .ttl_security
+            .or_else(|| group.and_then(|group| group.ttl_security))
+            .unwrap_or(false)
+        {
+            return Err(invalid(
+                neighbor,
+                "ttl_security",
+                "GTSM (ttl_security) is not supported on interface-only neighbors yet",
             ));
         }
         if neighbor
@@ -407,6 +515,51 @@ impl Config {
             ));
         }
         Ok(())
+    }
+
+    /// The configured record of a managed peer: its static `[[neighbors]]`
+    /// entry, or, for a peer an interface-only neighbor bound on
+    /// `peer.interface`, that neighbor with the learned address filled in.
+    /// Every peer-to-record lookup goes through this, so a bound peer is
+    /// never mistaken for a static neighbor whose record went missing.
+    #[must_use]
+    pub fn neighbor_record(&self, peer: &PeerKey) -> Option<Cow<'_, Neighbor>> {
+        let address = peer.address.to_string();
+        if let Some(neighbor) = self
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == address && neighbor.interface == peer.interface)
+        {
+            return Some(Cow::Borrowed(neighbor));
+        }
+        let IpAddr::V6(learned) = peer.address else {
+            return None;
+        };
+        if !learned.is_unicast_link_local() {
+            return None;
+        }
+        let mut bound = self
+            .neighbors
+            .interface_only_on(peer.interface.as_deref()?)?
+            .clone();
+        bound.address = address;
+        Some(Cow::Owned(bound))
+    }
+
+    /// Interface-only neighbors resolved with a placeholder link-local
+    /// address and no scope: for startup inventories that need only their
+    /// settings (listener MSS clamp, Graceful Restart timing), never for a
+    /// transport.
+    pub(crate) fn interface_only_resolved_for_comparison(
+        &self,
+    ) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
+        self.neighbors
+            .interface_only()
+            .iter()
+            .map(|neighbor| {
+                self.resolve_bound_interface_neighbor(neighbor, Ipv6Addr::UNSPECIFIED, 0)
+            })
+            .collect()
     }
 
     /// Resolve an interface-only neighbor bound to `address%ifindex`: the

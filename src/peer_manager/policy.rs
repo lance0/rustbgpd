@@ -3224,13 +3224,8 @@ impl PeerManager {
                 || candidate_conditional
                     .advertise_policy_references(PeerId::from_addr(peer.address), changed);
             let neighbor = candidate
-                .neighbors
-                .iter()
-                .find(|neighbor| {
-                    neighbor.address == peer.address.to_string()
-                        && neighbor.interface == peer.interface
-                })
-                .cloned()
+                .neighbor_record(peer)
+                .map(std::borrow::Cow::into_owned)
                 .or_else(|| {
                     managed
                         .is_dynamic
@@ -4434,11 +4429,8 @@ impl PeerManager {
             // never reach live dynamic sessions until they flap, and a
             // route server runs split-brain policy between sessions
             // accepted before and after the edit.
-            let record = next_config.neighbors.iter().find(|neighbor| {
-                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
-            });
-            let neighbor = match record {
-                Some(neighbor) => neighbor.clone(),
+            let neighbor = match next_config.neighbor_record(&peer_key) {
+                Some(neighbor) => neighbor.into_owned(),
                 None if is_dynamic => {
                     Self::policy_resolution_neighbor(&next_config, address, managed)
                 }
@@ -4539,89 +4531,89 @@ impl PeerManager {
         managed: &ManagedPeerState,
     ) -> crate::config::Neighbor {
         config
-            .neighbors
-            .iter()
-            .find(|neighbor| {
-                neighbor.address == address.to_string()
-                    && neighbor.interface == managed.transport_config.peer_interface
-            })
-            .cloned()
-            .unwrap_or_else(|| crate::config::Neighbor {
-                admin_down: None,
-                admin_down_reason: None,
-                tcp_mss: None,
-                min_hold_time: None,
-                address: address.to_string(),
-                interface: managed.transport_config.peer_interface.clone(),
-                remote_asn: if managed.transport_config.peer.remote_asn_external {
-                    crate::config::RemoteAsn::External
-                } else {
-                    managed.remote_asn.into()
+            .neighbor_record(&PeerKey::new(
+                address,
+                managed.transport_config.peer_interface.clone(),
+            ))
+            .map_or_else(
+                || crate::config::Neighbor {
+                    admin_down: None,
+                    admin_down_reason: None,
+                    tcp_mss: None,
+                    min_hold_time: None,
+                    address: address.to_string(),
+                    interface: managed.transport_config.peer_interface.clone(),
+                    remote_asn: if managed.transport_config.peer.remote_asn_external {
+                        crate::config::RemoteAsn::External
+                    } else {
+                        managed.remote_asn.into()
+                    },
+                    description: None,
+                    peer_group: managed.peer_group.clone(),
+                    hold_time: None,
+                    send_hold_time: None,
+                    slow_peer_threshold_pct: None,
+                    slow_peer_duration: None,
+                    slow_peer_isolation: None,
+                    fast_external_failover: None,
+                    max_prefixes: None,
+                    max_prefixes_ipv4_unicast: None,
+                    max_prefixes_ipv6_unicast: None,
+                    max_prefixes_received_ipv4_unicast: None,
+                    max_prefixes_received_ipv6_unicast: None,
+                    max_prefixes_l3vpn_ipv4_unicast: None,
+                    max_prefixes_l3vpn_ipv6_unicast: None,
+                    max_prefixes_ipv4_labeled_unicast: None,
+                    max_prefixes_ipv6_labeled_unicast: None,
+                    max_prefixes_l2vpn_evpn: None,
+                    max_prefixes_ipv4_flowspec: None,
+                    max_prefixes_ipv6_flowspec: None,
+                    max_prefixes_rtc: None,
+                    max_prefix_action: None,
+                    max_prefix_warning_percent: None,
+                    max_prefixes_out_ipv4_unicast: None,
+                    max_prefixes_out_ipv6_unicast: None,
+                    max_prefix_restart_seconds: None,
+                    md5_password: None,
+                    tcp_ao: None,
+                    bfd: None,
+                    ttl_security: None,
+                    ttl_security_hops: None,
+                    families: Vec::new(),
+                    required_families: Vec::new(),
+                    graceful_restart: None,
+                    gr_restart_time: None,
+                    gr_peer_restart_time_max: None,
+                    gr_stale_routes_time: None,
+                    gr_eor_grace_time: None,
+                    llgr_stale_time: None,
+                    local_ipv6_nexthop: None,
+                    route_reflector_client: None,
+                    orr_vantage: None,
+                    route_server_client: None,
+                    send_non_transitive_extended_communities: None,
+                    per_client_best: None,
+                    next_hop_ownership: None,
+                    interpret_rfc1997: None,
+                    rs_control_communities: None,
+                    role: None,
+                    strict_role: None,
+                    prefix_orf_receive: None,
+                    disable_ipv4_unicast: None,
+                    link_local_next_hop: None,
+                    remove_private_as: None,
+                    discard_path_attributes: None,
+                    add_path: None,
+                    log_level: None,
+                    import_policy: Vec::new(),
+                    export_policy: Vec::new(),
+                    import_policy_chain: Vec::new(),
+                    export_policy_chain: Vec::new(),
+                    conditional_advertisements: Vec::new(),
+                    route_flap_dampening: None,
                 },
-                description: None,
-                peer_group: managed.peer_group.clone(),
-                hold_time: None,
-                send_hold_time: None,
-                slow_peer_threshold_pct: None,
-                slow_peer_duration: None,
-                slow_peer_isolation: None,
-                fast_external_failover: None,
-                max_prefixes: None,
-                max_prefixes_ipv4_unicast: None,
-                max_prefixes_ipv6_unicast: None,
-                max_prefixes_received_ipv4_unicast: None,
-                max_prefixes_received_ipv6_unicast: None,
-                max_prefixes_l3vpn_ipv4_unicast: None,
-                max_prefixes_l3vpn_ipv6_unicast: None,
-                max_prefixes_ipv4_labeled_unicast: None,
-                max_prefixes_ipv6_labeled_unicast: None,
-                max_prefixes_l2vpn_evpn: None,
-                max_prefixes_ipv4_flowspec: None,
-                max_prefixes_ipv6_flowspec: None,
-                max_prefixes_rtc: None,
-                max_prefix_action: None,
-                max_prefix_warning_percent: None,
-                max_prefixes_out_ipv4_unicast: None,
-                max_prefixes_out_ipv6_unicast: None,
-                max_prefix_restart_seconds: None,
-                md5_password: None,
-                tcp_ao: None,
-                bfd: None,
-                ttl_security: None,
-                ttl_security_hops: None,
-                families: Vec::new(),
-                required_families: Vec::new(),
-                graceful_restart: None,
-                gr_restart_time: None,
-                gr_peer_restart_time_max: None,
-                gr_stale_routes_time: None,
-                gr_eor_grace_time: None,
-                llgr_stale_time: None,
-                local_ipv6_nexthop: None,
-                route_reflector_client: None,
-                orr_vantage: None,
-                route_server_client: None,
-                send_non_transitive_extended_communities: None,
-                per_client_best: None,
-                next_hop_ownership: None,
-                interpret_rfc1997: None,
-                rs_control_communities: None,
-                role: None,
-                strict_role: None,
-                prefix_orf_receive: None,
-                disable_ipv4_unicast: None,
-                link_local_next_hop: None,
-                remove_private_as: None,
-                discard_path_attributes: None,
-                add_path: None,
-                log_level: None,
-                import_policy: Vec::new(),
-                export_policy: Vec::new(),
-                import_policy_chain: Vec::new(),
-                export_policy_chain: Vec::new(),
-                conditional_advertisements: Vec::new(),
-                route_flap_dampening: None,
-            })
+                std::borrow::Cow::into_owned,
+            )
     }
 
     pub(super) async fn set_honor_graceful_shutdown(
@@ -5015,10 +5007,7 @@ impl PeerManager {
             {
                 continue;
             }
-            let address = peer_key.address;
-            let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
-                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
-            }) else {
+            let Some(neighbor) = next_config.neighbor_record(&peer_key) else {
                 // Peer-group events never remove `[[neighbors]]` records, so
                 // a static managed peer without one means the config snapshot
                 // and the managed-peer set disagree. The old per-member loop
@@ -5030,7 +5019,7 @@ impl PeerManager {
                 )));
             };
             let resolved = next_config
-                .resolve_neighbor(neighbor)
+                .resolve_neighbor(&neighbor)
                 .map_err(catalog_config_error)?;
             targets.push(Self::peer_manager_config_from_resolved(resolved, false));
         }
@@ -5166,10 +5155,7 @@ impl PeerManager {
             {
                 continue;
             }
-            let address = peer_key.address;
-            let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
-                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
-            }) else {
+            let Some(neighbor) = next_config.neighbor_record(&peer_key) else {
                 return OwnedCatalogMutationOutcome::RejectedNoEffect(
                     CatalogMutationError::internal(format!(
                         "static peer {peer_key} affected by the peer-group change has no neighbor \
@@ -5177,7 +5163,7 @@ impl PeerManager {
                     )),
                 );
             };
-            let resolved = match next_config.resolve_neighbor(neighbor) {
+            let resolved = match next_config.resolve_neighbor(&neighbor) {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     return OwnedCatalogMutationOutcome::RejectedNoEffect(catalog_config_error(
@@ -5359,10 +5345,7 @@ impl PeerManager {
             }
             seen.insert(peer_key.clone());
             let prior = Self::removed_peer_config(&peer_key, managed);
-            let address = peer_key.address;
-            let Some(neighbor) = next_config.neighbors.iter().find(|neighbor| {
-                neighbor.address == address.to_string() && neighbor.interface == peer_key.interface
-            }) else {
+            let Some(neighbor) = next_config.neighbor_record(&peer_key) else {
                 return Err(CatalogMutationError::internal(format!(
                     "static peer {peer_key} affected by the peer-group change has no neighbor \
                      record in the updated config; refusing to hot-apply against an inconsistent \
@@ -5370,7 +5353,7 @@ impl PeerManager {
                 )));
             };
             let resolved = next_config
-                .resolve_neighbor_for_hot_update(neighbor, &managed.transport_config)
+                .resolve_neighbor_for_hot_update(&neighbor, &managed.transport_config)
                 .map_err(catalog_config_error)?;
             cohort.push((
                 Self::peer_manager_config_from_resolved(resolved, false),

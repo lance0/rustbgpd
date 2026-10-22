@@ -194,30 +194,40 @@ hold_time = {HOLD_TIME_SECS}
             .expect("spawn rbgp")
     }
 
-    /// Neighbor rows on `veth`.
-    fn veth_rows(&mut self) -> Vec<serde_json::Value> {
+    /// Neighbor rows on `veth`; `None` when the query or its parse failed,
+    /// which is never the same as a successful empty list.
+    fn veth_rows(&mut self) -> Option<Vec<serde_json::Value>> {
         if let Ok(Some(status)) = self.child.try_wait() {
             panic!("rustbgpd exited: {status}\nlog:\n{}", self.log());
         }
         let out = self.rbgp(&["--json", "neighbor"]);
         if !out.status.success() {
-            return Vec::new();
+            return None;
         }
-        serde_json::from_slice::<serde_json::Value>(&out.stdout)
-            .ok()
-            .and_then(|rows| rows.as_array().cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|row| row["interface"].as_str() == Some("veth"))
-            .collect()
+        let rows = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .ok()?
+            .as_array()?
+            .clone();
+        Some(
+            rows.into_iter()
+                .filter(|row| row["interface"].as_str() == Some("veth"))
+                .collect(),
+        )
     }
 
-    /// Exactly one `veth` neighbor, Established with `address`.
+    /// Exactly one `veth` neighbor, Established with `address`. An
+    /// unavailable control plane is retried by the caller's poll.
     fn established_with(&mut self, address: &str) -> bool {
-        let rows = self.veth_rows();
-        rows.len() == 1
-            && rows[0]["address"].as_str() == Some(address)
-            && rows[0]["state"].as_str() == Some("Established")
+        self.veth_rows().is_some_and(|rows| {
+            rows.len() == 1
+                && rows[0]["address"].as_str() == Some(address)
+                && rows[0]["state"].as_str() == Some("Established")
+        })
+    }
+
+    /// A successful query that lists no `veth` neighbor.
+    fn no_veth_neighbor(&mut self) -> bool {
+        self.veth_rows().is_some_and(|rows| rows.is_empty())
     }
 
     fn wait(
@@ -278,7 +288,7 @@ fn interface_only_neighbors_discover_each_other_and_follow_an_address_change() {
     // down), and it comes back with the link.
     ip(&["-n", &ns.b, "link", "set", "veth", "down"]);
     let elapsed = a.wait("A's session gone after carrier loss", FAILOVER_BOUND, |a| {
-        a.veth_rows().is_empty()
+        a.no_veth_neighbor()
     });
     eprintln!("carrier-loss teardown took {elapsed:?} (hold time {HOLD_TIME_SECS}s)");
     ip(&["-n", &ns.b, "link", "set", "veth", "up"]);

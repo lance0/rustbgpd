@@ -945,6 +945,15 @@ impl PeerManager {
         peer: PeerKey,
         sync_config_snapshot: bool,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
+        // ADR-0142: discovery owns an interface-only neighbor's peer; deleting
+        // it here would only leave discovery bound to a session that is gone.
+        if let Some(interface) = self.unnumbered_owner_of(&peer) {
+            return Err(PeerLifecycleError::RestartRequired(format!(
+                "peer {peer} belongs to the interface-only neighbor on {interface}; remove its \
+                 `[[neighbors]] interface = \"{interface}\"` stanza from the configuration and \
+                 restart rustbgpd"
+            )));
+        }
         if self.peers.get(&peer).is_some_and(|managed| {
             managed.transport_config.md5_password.is_some()
                 || managed.transport_config.ttl_security_hops.is_some()

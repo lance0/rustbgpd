@@ -547,6 +547,13 @@ impl PeerManager {
         let restart_time_secs = self
             .current_config
             .resolved_neighbors_for_comparison()
+            .and_then(|mut neighbors| {
+                neighbors.extend(
+                    self.current_config
+                        .interface_only_resolved_for_comparison()?,
+                );
+                Ok(neighbors)
+            })
             .map_err(|error| {
                 format!("failed to resolve current neighbors for warm checkpoint: {error}")
             })?

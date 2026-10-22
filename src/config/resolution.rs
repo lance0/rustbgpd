@@ -91,7 +91,7 @@ impl Config {
         if let Some(ref cid) = self.global.cluster_id {
             return Some(cid.parse().expect("validated in Config::load"));
         }
-        let static_rr = self.neighbors.iter().any(|n| {
+        let static_rr = self.neighbors.all().any(|n| {
             n.route_reflector_client.unwrap_or_else(|| {
                 n.peer_group
                     .as_deref()
@@ -154,13 +154,13 @@ impl Config {
     #[must_use]
     pub fn unpoliced_ebgp_neighbors(&self) -> Vec<UnpolicedEbgpNeighbor> {
         self.neighbors
-            .iter()
+            .all()
             .filter_map(|neighbor| {
                 let resolved = self.effective_policy_for_neighbor(neighbor, false).ok()?;
                 (resolved.external && !(resolved.import_explicit && resolved.export_explicit)).then(
                     || UnpolicedEbgpNeighbor {
-                        address: neighbor.address.clone(),
-                        remote_asn: neighbor.remote_asn.resolve(self.global.asn),
+                        address: neighbor.label(),
+                        remote_asn: neighbor.remote_asn,
                         import_missing: !resolved.import_explicit,
                         export_missing: !resolved.export_explicit,
                     },
@@ -458,7 +458,7 @@ impl Config {
                 (&group.export_policy_chain, ChainDirection::Export),
             ]
         }))
-        .chain(self.neighbors.iter().flat_map(|neighbor| {
+        .chain(self.neighbors.all().flat_map(|neighbor| {
             [
                 (&neighbor.import_policy_chain, ChainDirection::Import),
                 (&neighbor.export_policy_chain, ChainDirection::Export),
@@ -506,10 +506,10 @@ impl Config {
         export_families: bool,
     ) -> Result<(), ConfigError> {
         let mut stores = ChunkedSetStore::default();
-        for neighbor in &self.neighbors {
+        for neighbor in self.neighbors.all() {
             let binding = || match &neighbor.peer_group {
-                Some(group) => format!("neighbor {} (peer_group {group:?})", neighbor.address),
-                None => format!("neighbor {}", neighbor.address),
+                Some(group) => format!("neighbor {} (peer_group {group:?})", neighbor.label()),
+                None => format!("neighbor {}", neighbor.label()),
             };
             self.validate_effective_chains_of(
                 neighbor,
@@ -557,7 +557,7 @@ impl Config {
         let (Some(binding), Some(export)) = (binding, chains.export.as_ref()) else {
             return Ok(());
         };
-        let Ok(peer_addr) = neighbor.address.parse::<IpAddr>() else {
+        let Ok(peer_addr) = neighbor.family_address() else {
             return Ok(());
         };
         let group = self.peer_group_for_neighbor(neighbor)?;
@@ -1654,8 +1654,9 @@ pub fn is_reserved_rfc8212_deny(chain: Option<&PolicyChain>, name: &str) -> bool
 /// direction. Produced by [`Config::unpoliced_ebgp_neighbors`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnpolicedEbgpNeighbor {
+    /// The address, or `interface <name>` for an interface-only neighbor.
     pub address: String,
-    pub remote_asn: u32,
+    pub remote_asn: super::RemoteAsn,
     pub import_missing: bool,
     pub export_missing: bool,
 }

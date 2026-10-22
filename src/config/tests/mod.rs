@@ -2516,6 +2516,7 @@ mod rpol;
 mod telemetry;
 mod transaction;
 mod transport_auth;
+#[cfg(target_os = "linux")]
 mod unnumbered;
 
 mod dampening;

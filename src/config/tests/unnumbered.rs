@@ -187,8 +187,8 @@ fn interface_only_rules_are_enforced() {
             "TCP-AO",
         ),
         (
-            &format!("{SWP1}ttl_security = true\nttl_security_hops = 2\n"),
-            "ttl_security_hops must be 1",
+            &format!("{SWP1}ttl_security = true\n"),
+            "GTSM (ttl_security)",
         ),
         (
             &format!("{SWP1}fast_external_failover = false\n"),
@@ -272,4 +272,136 @@ fn the_persisted_document_keeps_interface_only_neighbors() {
         );
         assert_eq!(reparsed.neighbors.len(), 1);
     }
+}
+
+#[test]
+fn neighbor_record_maps_a_bound_peer_to_its_interface_only_neighbor() {
+    let config = parse(&with(&format!(
+        "{SWP1}export_policy_chain = []\n\n[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\n"
+    )))
+    .unwrap();
+    let numbered = PeerKey::new("10.0.0.2".parse().unwrap(), None);
+    assert_eq!(
+        config.neighbor_record(&numbered).unwrap().address,
+        "10.0.0.2"
+    );
+
+    let bound = PeerKey::new("fe80::2".parse().unwrap(), Some("swp1".into()));
+    let record = config
+        .neighbor_record(&bound)
+        .expect("bound peer has a record");
+    assert_eq!(record.address, "fe80::2");
+    assert_eq!(record.interface.as_deref(), Some("swp1"));
+    assert_eq!(record.remote_asn, RemoteAsn::External);
+
+    // No interface-only neighbor there, or not a link-local address.
+    assert!(
+        config
+            .neighbor_record(&PeerKey::new(
+                "fe80::2".parse().unwrap(),
+                Some("swp2".into())
+            ))
+            .is_none()
+    );
+    assert!(
+        config
+            .neighbor_record(&PeerKey::new(
+                "2001:db8::2".parse().unwrap(),
+                Some("swp1".into())
+            ))
+            .is_none()
+    );
+}
+
+#[test]
+fn an_unpoliced_interface_only_neighbor_is_reported() {
+    // The ADR's example stanza carries no policy: --check and startup must
+    // say so. Mutation-red: walking addressed neighbors only reports nothing.
+    let config = parse(&with(SWP1)).unwrap();
+    let unpoliced = config.unpoliced_ebgp_neighbors();
+    assert_eq!(unpoliced.len(), 1);
+    assert_eq!(unpoliced[0].address, "interface swp1");
+    assert_eq!(unpoliced[0].remote_asn, RemoteAsn::External);
+}
+
+#[test]
+fn serialization_keeps_the_operator_order_of_neighbors() {
+    let numbered = |last: u8| {
+        format!("\n[[neighbors]]\naddress = \"10.0.0.{last}\"\nremote_asn = 6500{last}\n")
+    };
+    let mut config = parse(&with(&format!("{}{SWP1}{}", numbered(2), numbered(3)))).unwrap();
+    // A runtime add appends an addressed neighbor; the interface-only entry
+    // stays between the two it was loaded between.
+    let mut added = config.neighbors[0].clone();
+    added.address = "10.0.0.4".into();
+    config.neighbors.push(added);
+    let rendered = toml::to_string(&config).unwrap();
+    let positions: Vec<usize> = ["10.0.0.2", "swp1", "10.0.0.3", "10.0.0.4"]
+        .iter()
+        .map(|needle| rendered.find(needle).unwrap())
+        .collect();
+    // Mutation-red: chaining interface-only entries after the addressed ones
+    // moves swp1 to the end.
+    assert!(positions.is_sorted(), "{rendered}");
+}
+
+#[test]
+fn reordering_interface_only_neighbors_is_not_a_change() {
+    let swp2 = SWP1.replace("swp1", "swp2");
+    let old = parse(&with(&format!("{SWP1}{swp2}"))).unwrap();
+    let new = parse(&with(&format!("{swp2}{SWP1}"))).unwrap();
+    // Mutation-red: an order-sensitive comparison reports a restart.
+    assert!(!diff_config(&old, &new).interface_only_neighbors_changed);
+    assert!(!interface_only_neighbors_changed(&old, &new));
+}
+
+#[test]
+fn diff_json_keeps_remote_asn_an_integer_and_names_the_mode() {
+    let old = parse(&with("")).unwrap();
+    let new = parse(&with(
+        "\n[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = \"external\"\n",
+    ))
+    .unwrap();
+    let json = config_diff_json_value(&diff_config(&old, &new));
+    let added = &json["reload_applied"]["neighbors"]["added"][0];
+    assert_eq!(added["remote_asn"], 0);
+    assert_eq!(added["remote_asn_mode"], "external");
+}
+
+#[test]
+fn address_keyed_per_peer_settings_are_rejected_on_interface_only_neighbors() {
+    let conditional = "\n[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
+        [policy.definitions.transit-a]\ndefault_action = \"permit\"\n\n\
+        [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
+        advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\
+        condition_policy = \"transit-a\"\n";
+    // Mutation-red: each setting is otherwise accepted and never applied to
+    // the learned peer.
+    for (extra, expected) in [
+        (
+            format!("{conditional}{SWP1}conditional_advertisements = [\"backup\"]\n"),
+            "conditional advertisements",
+        ),
+        (format!("{SWP1}log_level = \"debug\"\n"), "log_level"),
+        (
+            format!("{SWP1}max_prefixes_out_ipv6_unicast = 10\n"),
+            "outbound prefix maxima",
+        ),
+    ] {
+        let error = rejected(&extra);
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+    // Peer-group outbound maxima reach a bound peer through its group.
+    parse(&with(&format!(
+        "\n[peer_groups.fabric]\nmax_prefixes_out_ipv6_unicast = 10\n{SWP1}peer_group = \"fabric\"\n"
+    )))
+    .unwrap();
+}
+
+#[test]
+fn policy_validation_covers_interface_only_neighbors() {
+    // A dangling named chain on an interface-only neighbor is caught like
+    // any other. Mutation-red: chain checks over addressed neighbors only.
+    let error = rejected(&format!("{SWP1}export_policy_chain = [\"missing\"]\n"));
+    assert!(error.contains("missing"), "{error}");
 }

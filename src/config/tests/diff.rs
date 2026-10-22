@@ -1766,10 +1766,8 @@ remote_asn = 65003
     assert!(diff.has_any_changes());
     assert_eq!(diff.neighbors.added.len(), 1);
     assert_eq!(diff.neighbors.added[0].address, "10.0.0.3");
-    assert_eq!(
-        diff.neighbors.added[0].remote_asn,
-        crate::config::RemoteAsn::Asn(65003)
-    );
+    assert_eq!(diff.neighbors.added[0].remote_asn, 65003);
+    assert_eq!(diff.neighbors.added[0].remote_asn_mode, "numeric");
     assert_eq!(diff.neighbors.removed.len(), 0);
     assert!(diff.neighbors.changed.is_empty());
 }

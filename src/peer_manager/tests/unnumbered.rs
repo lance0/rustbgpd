@@ -303,3 +303,159 @@ async fn learned_and_static_admission_refuse_each_other_duplicate_link_local_add
         [PeerKey::new(IpAddr::V6(ll(5)), Some("eth9".into()))]
     );
 }
+
+#[tokio::test]
+async fn operator_deletion_of_a_discovery_owned_peer_is_refused() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // Mutation-red: without the ownership check the RPC deletes the peer and
+    // discovery stays bound to nothing.
+    let Err(error) = h.mgr.delete_peer_runtime(swp1_key(2), true).await else {
+        panic!("deletion of a discovery-owned peer must be refused");
+    };
+    assert!(
+        matches!(
+            error,
+            rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(_)
+        ),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("interface = \"swp1\""),
+        "{error}"
+    );
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+}
+
+#[tokio::test]
+async fn a_bound_peer_already_gone_is_cleared_on_reconcile() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // The peer leaves the table without discovery's reconcile.
+    h.mgr.delete_peer(swp1_key(2), false).await.unwrap();
+    // Mutation-red: treating NotFound as a failed removal keeps `bound` set
+    // and the new address is never admitted.
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(3)));
+}
+
+#[tokio::test]
+async fn an_external_peers_identity_series_shows_the_open_asn() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = key(addr);
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        addr,
+        0,
+        fake_peer_handle(
+            addr,
+            SessionState::OpenSent,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    mgr.peers
+        .get_mut(&peer)
+        .unwrap()
+        .transport_config
+        .peer
+        .remote_asn_external = true;
+    mgr.publish_peer_info_metric(&peer);
+    let session_id = mgr.peers[&peer].session_id();
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
+    })
+    .await;
+
+    // Mutation-red: learning only for dynamic peers leaves the label at 0.
+    let label = mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_peer_info")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                let labels = metric.get_label();
+                labels
+                    .iter()
+                    .any(|l| l.name() == "peer" && l.value() == "10.0.0.2")
+                    .then(|| {
+                        labels
+                            .iter()
+                            .find(|l| l.name() == "remote_asn")
+                            .map(|l| l.value().to_string())
+                    })
+                    .flatten()
+            })
+        });
+    assert_eq!(label.as_deref(), Some("65002"));
+    // The configured mode is untouched: any other ASN still matches.
+    let transport = &mgr.peers[&peer].transport_config.peer;
+    assert!(transport.remote_asn_external);
+    assert_eq!(transport.remote_asn, 0);
+}
+
+/// The lossy `StateChanged` stream may drop Established→Idle. The lossless
+/// `BackToIdle` notification still releases discovery, so the port converges
+/// on the new address.
+#[tokio::test]
+async fn a_dropped_established_to_idle_transition_still_converges() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
+    h.drain();
+    // Established -> Idle is never delivered; only BackToIdle arrives.
+    let session_id = h.mgr.peers[&swp1_key(2)].session_id();
+    h.mgr
+        .handle_session_notification(SessionNotification::BackToIdle {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: IpAddr::V6(ll(2)),
+        })
+        .await;
+    // Mutation-red: without the BackToIdle hook discovery stays frozen and
+    // the bound session counts as Established forever.
+    assert_eq!(h.drain(), [Command::SessionFailed("swp1".into())]);
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(3)));
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)));
+}
+
+/// A dropped Idle→Established transition leaves the port believing the
+/// session is down. Reconciliation reads the session's state before
+/// replacing it, so a healthy session is never displaced.
+#[tokio::test]
+async fn a_dropped_transition_to_established_never_displaces_the_session() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.drain();
+    // The bound session is Established, but no transition said so.
+    insert_test_managed_peer_for_key(
+        &mut h.mgr,
+        &swp1_key(2),
+        0,
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    // Mutation-red: trusting the edge-event flag alone replaces it.
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept");
+    assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
+    assert_eq!(h.drain(), [Command::SessionEstablished("swp1".into())]);
+}

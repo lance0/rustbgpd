@@ -97,7 +97,11 @@ mod unnumbered {
         ) {
         }
         pub(super) fn note_peer_removed(&mut self) {}
+        pub(super) fn note_unnumbered_session_idle(&mut self, _: &PeerKey) {}
         pub(super) fn unnumbered_holder_of(&self, _: IpAddr, _: &PeerKey) -> Option<&str> {
+            None
+        }
+        pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
     }

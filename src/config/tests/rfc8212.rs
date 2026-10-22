@@ -664,7 +664,7 @@ fn unpoliced_ebgp_neighbors_names_the_missing_directions() {
     let both = unpoliced(&rfc8212_toml("", "", 65002, ""));
     assert_eq!(both.len(), 1);
     assert_eq!(both[0].address, "10.0.0.2");
-    assert_eq!(both[0].remote_asn, 65002);
+    assert_eq!(both[0].remote_asn, crate::config::RemoteAsn::Asn(65002));
     assert_eq!(
         both[0].missing_phrase(),
         "no import policy and no export policy"

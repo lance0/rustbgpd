@@ -35,6 +35,9 @@ use crate::ra_discovery::{DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaDisc
 
 use super::PeerManager;
 
+/// How long reconciliation waits for a bound session to report its state.
+const BOUND_STATE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The discovery actor, its events, and one entry per interface-only
 /// neighbor, by interface name.
 pub(crate) struct Unnumbered {
@@ -222,6 +225,46 @@ impl PeerManager {
         }
     }
 
+    /// The bound peer's primary session fell back to Idle. This arrives on
+    /// the lossless session-notification channel, so discovery is released
+    /// even when the lossy `StateChanged` transition was dropped.
+    pub(super) fn note_unnumbered_session_idle(&mut self, peer: &PeerKey) {
+        let Some(unnumbered) = self.unnumbered.as_mut() else {
+            return;
+        };
+        let Some((name, port)) = unnumbered
+            .ports
+            .iter_mut()
+            .find(|(_, port)| port.bound.as_ref() == Some(peer))
+        else {
+            return;
+        };
+        port.established = false;
+        unnumbered.discovery.session_failed(name);
+        unnumbered.reconcile_due = true;
+    }
+
+    /// Whether the bound peer's session is Established now, read from the
+    /// session itself: the decision to replace it never rests on an edge
+    /// event that may have been dropped. A session that does not answer in
+    /// time is taken to be Established, so it is never displaced on doubt.
+    async fn bound_session_established(&self, peer: &PeerKey) -> bool {
+        let Some(managed) = self.peers.get(peer) else {
+            return false;
+        };
+        match managed
+            .handle()
+            .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
+            .await
+        {
+            rustbgpd_transport::StateQueryOutcome::State(state) => {
+                state.fsm_state == SessionState::Established
+            }
+            rustbgpd_transport::StateQueryOutcome::TimedOut => true,
+            rustbgpd_transport::StateQueryOutcome::SessionGone => false,
+        }
+    }
+
     /// A peer left the table: a refused binding may now be admissible.
     pub(super) fn note_peer_removed(&mut self) {
         if let Some(unnumbered) = self.unnumbered.as_mut()
@@ -244,6 +287,15 @@ impl PeerManager {
                     .is_some_and(|bound| bound.address == address && bound != peer)
                     .then_some(name.as_str())
             })
+    }
+
+    /// The interface whose interface-only neighbor owns `peer`.
+    pub(super) fn unnumbered_owner_of(&self, peer: &PeerKey) -> Option<&str> {
+        self.unnumbered
+            .as_ref()?
+            .ports
+            .iter()
+            .find_map(|(name, port)| (port.bound.as_ref() == Some(peer)).then_some(name.as_str()))
     }
 
     /// Any neighbor already holding `address`: a peer in the table (bound
@@ -300,15 +352,27 @@ impl PeerManager {
             if keep {
                 return;
             }
+            // Level-triggered check of what the edge events claimed.
+            if !link_down && self.bound_session_established(&key).await {
+                if let Some(unnumbered) = self.unnumbered.as_mut() {
+                    unnumbered.discovery.session_established(name);
+                }
+                self.port_mut(name).established = true;
+                return;
+            }
             let reason = if link_down {
                 "link_down"
             } else {
                 "peer_address_changed"
             };
             info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
-            if let Err(error) = self.delete_peer(key.clone(), false).await {
-                warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound peer");
-                return;
+            match self.delete_peer(key.clone(), false).await {
+                // Already gone: nothing is left to clear.
+                Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
+                Err(error) => {
+                    warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound peer");
+                    return;
+                }
             }
             let port = self.port_mut(name);
             port.bound = None;

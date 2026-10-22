@@ -8,7 +8,7 @@ mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
 mod unnumbered;
-pub use unnumbered::{NeighborList, RemoteAsn, UnnumberedConfig};
+pub use unnumbered::{NeighborList, RemoteAsn, UnnumberedConfig, interface_only_neighbors_changed};
 mod validation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -2589,8 +2589,8 @@ pub struct ConfigDiff {
     /// they are created, so edits remain pinned to the startup snapshot until
     /// the daemon restarts.
     pub tcp_mss_changed: bool,
-    /// Interface-only `[[neighbors]]` (ADR-0142) added, removed or edited.
-    /// The running set is kept until restart.
+    /// Interface-only `[[neighbors]]` (ADR-0142) added, removed or edited, or
+    /// `[global.unnumbered]` changed. The running set is kept until restart.
     pub interface_only_neighbors_changed: bool,
     /// BFD profile definitions changed. Profiles remain startup-owned even
     /// when no running member currently references the changed profile.
@@ -2792,7 +2792,11 @@ pub struct NeighborDiffSummary {
 #[derive(Debug, serde::Serialize)]
 pub struct NeighborAddSummary {
     pub address: String,
-    pub remote_asn: RemoteAsn,
+    /// The resolved ASN: the number, `global.asn` for `internal`, 0 for
+    /// `external`. `remote_asn_mode` says which.
+    pub remote_asn: u32,
+    /// `numeric`, `external` or `internal`.
+    pub remote_asn_mode: &'static str,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3186,7 +3190,7 @@ impl Config {
     pub fn effective_redacted(&self) -> Config {
         let mut effective = self.clone();
 
-        for neighbor in &mut effective.neighbors {
+        for neighbor in effective.neighbors.all_mut() {
             // Runtime configs are validated, so referenced groups exist;
             // a dangling reference just skips inheritance here.
             let group = self.peer_group_for_neighbor(neighbor).unwrap_or(None);
@@ -3387,11 +3391,7 @@ impl Config {
                     neighbor.families.clone_from(group_families);
                 } else {
                     neighbor.families.push("ipv4_unicast".to_string());
-                    if neighbor
-                        .address
-                        .parse::<IpAddr>()
-                        .is_ok_and(|addr| addr.is_ipv6())
-                    {
+                    if neighbor.family_address().is_ok_and(|addr| addr.is_ipv6()) {
                         neighbor.families.push("ipv6_unicast".to_string());
                     }
                 }
@@ -3402,7 +3402,7 @@ impl Config {
         // neighbor/dynamic-range tcp_ao.key, neighbor md5_password,
         // peer-group md5_password, and RPKI cache-server md5_password /
         // tcp_ao.key.
-        for neighbor in &mut effective.neighbors {
+        for neighbor in effective.neighbors.all_mut() {
             if neighbor.md5_password.is_some() {
                 neighbor.md5_password = Some(REDACTED_SECRET.to_string());
             }
@@ -4255,7 +4255,7 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     if diff.interface_only_neighbors_changed {
         class
             .restart_required_sections
-            .push("[[neighbors]] interface-only".to_string());
+            .push("[[neighbors]] interface-only / [global.unnumbered]".to_string());
     }
     if diff.bfd_members_changed {
         class
@@ -4587,7 +4587,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 let _ = writeln!(
                     out,
                     "    {} {} (AS {})",
-                    style.add_marker, n.address, n.remote_asn
+                    style.add_marker,
+                    n.address,
+                    if n.remote_asn_mode == "external" {
+                        "external".to_string()
+                    } else {
+                        n.remote_asn.to_string()
+                    }
                 );
             }
             for addr in &diff.neighbors.removed {
@@ -4815,7 +4821,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         restart_sections.push("[[neighbors]] / [peer_groups.*].tcp_mss");
     }
     if diff.interface_only_neighbors_changed {
-        restart_sections.push("[[neighbors]] interface-only");
+        restart_sections.push("[[neighbors]] interface-only / [global.unnumbered]");
     }
     if diff.bfd_changed {
         restart_sections.push("[[bfd_profiles]]");
@@ -5006,7 +5012,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             .iter()
             .map(|n| NeighborAddSummary {
                 address: n.address.clone(),
-                remote_asn: n.remote_asn,
+                remote_asn: n.remote_asn.resolve(new.global.asn),
+                remote_asn_mode: n.remote_asn.mode(),
             })
             .collect(),
         removed: neighbor_diff
@@ -5105,8 +5112,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,
         tcp_mss_changed,
-        interface_only_neighbors_changed: old.neighbors.interface_only()
-            != new.neighbors.interface_only(),
+        interface_only_neighbors_changed: interface_only_neighbors_changed(old, new),
         bfd_changed,
         bfd_members_changed,
         policy_explain_changed: old.policy.explain != new.policy.explain,

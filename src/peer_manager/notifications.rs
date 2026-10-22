@@ -279,6 +279,7 @@ impl PeerManager {
                     debug!(peer = %peer_addr, session_id, ?role, "ignoring stale BackToIdle notification");
                     return;
                 }
+                self.note_unnumbered_session_idle(&peer_key);
                 // Auto-remove dynamic peers when they go idle (no reconnect).
                 if self.peers.get(&peer_key).is_some_and(|m| {
                     m.is_dynamic
@@ -659,15 +660,23 @@ impl PeerManager {
     }
 
     fn learn_dynamic_remote_asn(&mut self, peer_key: &PeerKey, peer_asn: u32) {
-        if peer_asn != 0
-            && let Some(managed) = self.peers.get_mut(peer_key)
-            && managed.is_dynamic
-            && managed.remote_asn == 0
-        {
+        let Some(managed) = self.peers.get_mut(peer_key).filter(|_| peer_asn != 0) else {
+            return;
+        };
+        if managed.is_dynamic && managed.remote_asn == 0 {
             managed.remote_asn = peer_asn;
             managed.transport_config.peer.remote_asn = peer_asn;
-            self.publish_peer_info_metric(peer_key);
+        } else if managed.transport_config.peer.remote_asn_external
+            && managed.remote_asn != peer_asn
+        {
+            // `remote_asn = "external"`: the session keeps matching any ASN
+            // but the local one (the transport config is untouched); the
+            // identity series shows the ASN this peer's OPEN carried.
+            managed.remote_asn = peer_asn;
+        } else {
+            return;
         }
+        self.publish_peer_info_metric(peer_key);
     }
 }
 

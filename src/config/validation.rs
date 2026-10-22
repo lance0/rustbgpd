@@ -823,7 +823,7 @@ impl Config {
 
         self.validate_interface_only_neighbors()?;
 
-        for neighbor in self.neighbors.iter().chain(self.neighbors.interface_only()) {
+        for neighbor in self.neighbors.all() {
             let remote_asn = neighbor.remote_asn.resolve(self.global.asn);
             if neighbor.remote_asn == super::RemoteAsn::Asn(0) {
                 return Err(ConfigError::InvalidNeighborConfig {
@@ -1740,7 +1740,7 @@ impl Config {
                 .iter()
                 .filter_map(|range| self.peer_groups.get(&range.peer_group))
         };
-        let any_vantage = self.neighbors.iter().any(|n| {
+        let any_vantage = self.neighbors.all().any(|n| {
             n.orr_vantage
                 .as_deref()
                 .or_else(|| group_of(n).and_then(|g| g.orr_vantage.as_deref()))
@@ -1749,7 +1749,7 @@ impl Config {
         if !any_vantage {
             return false;
         }
-        let static_linkstate = self.neighbors.iter().any(|n| {
+        let static_linkstate = self.neighbors.all().any(|n| {
             let own = &n.families;
             let effective: &[String] = if own.is_empty() {
                 group_of(n).map_or(&[], |g| g.families.as_slice())
@@ -1865,7 +1865,7 @@ impl Config {
     /// [`EOR_GRACE_ADVISORY_CEILING_SECS`], with that value.
     pub(crate) fn eor_grace_above_ceiling(&self) -> Vec<(String, u16)> {
         self.neighbors
-            .iter()
+            .all()
             .filter_map(|neighbor| {
                 let grace = neighbor.gr_eor_grace_time.or_else(|| {
                     neighbor
@@ -1874,7 +1874,7 @@ impl Config {
                         .and_then(|name| self.peer_groups.get(name))
                         .and_then(|group| group.gr_eor_grace_time)
                 })?;
-                (grace > EOR_GRACE_ADVISORY_CEILING_SECS).then(|| (neighbor.address.clone(), grace))
+                (grace > EOR_GRACE_ADVISORY_CEILING_SECS).then(|| (neighbor.label(), grace))
             })
             .collect()
     }
