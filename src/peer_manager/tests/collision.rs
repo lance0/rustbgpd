@@ -983,6 +983,10 @@ fn max_prefix_capacity_gauge(
 /// leaves the gauge absent after primary termination; moving activation before
 /// `quiesce_retiring_session` makes the primary's final reap erase the exact
 /// candidate value and sets `activated_before_termination`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the candidate fake answers the promotion sync, claim and activation in one ordered proof"
+)]
 #[tokio::test]
 async fn production_collision_promotion_transfers_capacity_after_primary_termination() {
     use rustbgpd_transport::PeerCommand;
@@ -1028,6 +1032,12 @@ async fn production_collision_promotion_transfers_capacity_after_primary_termina
             match command {
                 PeerCommand::ClaimCollisionPromotion { reply } => {
                     let _ = reply.send(true);
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::UpdateGracefulShutdown { reply, .. }
+                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(()));
                 }
                 PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
                     if !candidate_terminated.load(Ordering::SeqCst) {
@@ -2915,5 +2925,141 @@ async fn neighbor_counters_survive_a_hard_reset_and_replacement_session() {
             (prometheus - f64::from(u32::try_from(api).unwrap())).abs() < f64::EPSILON,
             "{family} {prometheus} agrees with the API value {api}"
         );
+    }
+}
+
+fn permit_all_chain() -> PolicyChain {
+    use rustbgpd_policy::{Policy, PolicyAction};
+    PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Permit,
+    }])
+}
+
+/// LAN-2512: accept a real inbound candidate while the primary has no
+/// connection, so the candidate copies the managed policies at spawn. A policy
+/// edit then lands while it is pending and reaches only the primary. The
+/// primary has no connection, so the candidate's OPEN promotes it. Returns
+/// the manager, the peer side of the promoted session, and the export chain
+/// its `PeerUp` registered.
+async fn promote_candidate_after_pending_edit(
+    import_policy: Option<PolicyChain>,
+    export_policy: Option<PolicyChain>,
+) -> (
+    PeerManager,
+    TcpStream,
+    mpsc::Receiver<RibUpdate>,
+    Option<PolicyChain>,
+) {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(256);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        acking_policy_handle(peer_addr, SessionState::Active),
+        false,
+    );
+    {
+        let managed = mgr.peers.get_mut(&key(peer_addr)).unwrap();
+        managed.import_policy = Some(permit_all_chain());
+        managed.export_policy = Some(deny_policy_chain());
+    }
+
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    let mut buf = BytesMut::with_capacity(4096);
+    let notification = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
+
+    mgr.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+        address: peer_addr,
+        interface: None,
+        import_policy,
+        export_policy,
+    }])
+    .await
+    .expect("the edit applies to the connectionless primary");
+
+    mgr.handle_session_notification(notification).await;
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
+    assert_ne!(session_id, 1, "the candidate was promoted");
+    let registered = loop {
+        let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
+            .await
+            .expect("the promoted session must establish")
+            .expect("RIB channel open");
+        if let RibUpdate::PeerUp {
+            session_id: id,
+            export_policy,
+            ..
+        } = update
+            && id == session_id
+        {
+            break export_policy;
+        }
+    };
+    (mgr, client, rib_rx, registered)
+}
+
+/// LAN-2512: an export edit that lands while an inbound candidate is pending
+/// reaches the promoted session before its `PeerUp`, so the RIB's first dump
+/// to it uses the NEW chain instead of the one copied at spawn.
+#[tokio::test]
+async fn promoted_candidate_registers_export_edit_made_while_pending() {
+    let (_mgr, _client, _rib_rx, registered) =
+        promote_candidate_after_pending_edit(Some(permit_all_chain()), Some(permit_all_chain()))
+            .await;
+    assert_eq!(
+        format!("{registered:?}"),
+        format!("{:?}", Some(permit_all_chain())),
+        "the promoted session registers the edited export chain"
+    );
+}
+
+/// LAN-2512: the same for an import edit. The promoted session filters the
+/// peer's first UPDATEs with the NEW chain, which denies 198.51.100.0/24.
+#[tokio::test]
+async fn promoted_candidate_imports_with_edit_made_while_pending() {
+    let (_mgr, mut client, mut rib_rx, _registered) = promote_candidate_after_pending_edit(
+        Some(deny_one_prefix_chain()),
+        Some(deny_policy_chain()),
+    )
+    .await;
+    send_bgp_message(&mut client, &peer_update([198, 51, 100, 0], None)).await;
+    send_bgp_message(&mut client, &peer_update([203, 0, 113, 0], None)).await;
+    let denied = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+        Ipv4Addr::new(198, 51, 100, 0),
+        24,
+    ));
+    let marker = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+        Ipv4Addr::new(203, 0, 113, 0),
+        24,
+    ));
+    loop {
+        let update = tokio::time::timeout(Duration::from_secs(5), rib_rx.recv())
+            .await
+            .expect("the promoted session must import the marker")
+            .expect("RIB channel open");
+        if let RibUpdate::RoutesReceived { announced, .. } = update {
+            assert!(
+                announced.iter().all(|route| route.prefix != denied),
+                "the edited import chain denies 198.51.100.0/24"
+            );
+            if announced.iter().any(|route| route.prefix == marker) {
+                break;
+            }
+        }
     }
 }

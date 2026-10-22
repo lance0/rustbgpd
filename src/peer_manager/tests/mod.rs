@@ -1127,6 +1127,14 @@ fn fake_peer_handle_with_route_refresh_reply(
                 PeerCommand::ClaimCollisionPromotion { reply } => {
                     let _ = reply.send(true);
                 }
+                // A claimed candidate is synced from the managed record
+                // before promotion (LAN-2512).
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. }
+                | PeerCommand::UpdateGracefulShutdown { reply, .. }
+                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
                 PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
                     counters
                         .activate_max_prefix_metrics
