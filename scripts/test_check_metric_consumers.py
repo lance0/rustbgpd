@@ -488,7 +488,7 @@ groups:
 
     def test_document_evidence_classification_is_pinned(self):
         self.assertNotIn("CHANGELOG.md", self.documents)
-        self.assertNotIn("docs/project/roadmap.md", self.documents)
+        self.assertIn("docs/project/roadmap.md", self.documents)
         self.assertNotIn("docs/project/roadmap-history.md", self.documents)
         self.assertNotIn("docs/project/changelog/older-releases.md", self.documents)
         self.assertEqual(
@@ -500,6 +500,7 @@ groups:
                     "docs/how-to/evpn-alpha-soak.md",
                     "docs/project/evpn-enablement.md",
                     "docs/project/milestones.md",
+                    "docs/project/roadmap.md",
                     "docs/project/upstream-findings.md",
                 }
             ),

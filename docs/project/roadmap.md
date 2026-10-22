@@ -238,7 +238,7 @@ uses consecutive failures and rejects missing observations; isolated breaches
 remain visible without automatically blocking a release whose agreed gates pass.
 
 - **Maintain the narrow v1 role contract.** The shipped machine-checked
-  inventory (#862; LAN-355) pins only the configuration and API used by
+  inventory (#862) pins only the configuration and API used by
   IPv4/IPv6 route servers and route reflectors, `.rpol`, RPKI/ASPA, Roles/OTC,
   transactions, BMP/MRT/events, and the already-proven RR/controller-feed
   families, plus the [scoped FlowSpec controller API](../reference/v1-stable-contract.md#flowspec-controller-boundary).
@@ -288,8 +288,8 @@ remain visible without automatically blocking a release whose agreed gates pass.
   remainder after its grouped cohort committed. [ADR-0111](../adr/0111-authoritative-policy-replacement-continuation.md)
   is Rejected after Gate 1 NO-GO, so the accepted
   [ADR-0105](../adr/0105-grouped-export-policy-transition.md) single cohort
-  plus sequential authoritative remainder remains intentional; the LAN-333
-  campaign remains canceled. Reopen only when a separate, controlled route-
+  plus sequential authoritative remainder remains intentional; the ADR-0111
+  continuation campaign remains canceled. Reopen only when a separate, controlled route-
   storage measurement proves a maintained all-family seek cursor pays for
   itself on the convergence hot path without regression
   ([feasibility receipt](../perf/authoritative-policy-replacement-cursor-feasibility-2026-07.md));
@@ -298,7 +298,7 @@ remain visible without automatically blocking a release whose agreed gates pass.
   established-peer update-group membership with exact fallback reasons,
   affected peers/families, shared/private totals, resync scope, and bounded
   receipt-envelope capacity classes. The shipped live comparison
-  ([#1041](https://github.com/lance0/rustbgpd/pull/1041), LAN-456) reports whether
+  ([#1041](https://github.com/lance0/rustbgpd/pull/1041)) reports whether
   two configured peers share, occupy separate groups, or use a private fallback,
   with ID-free membership and difference reasons.
   Predictive policy-lint and post-renegotiation projections were rejected as
@@ -318,14 +318,14 @@ remain visible without automatically blocking a release whose agreed gates pass.
   ([#1052](https://github.com/lance0/rustbgpd/pull/1052),
   [#1060](https://github.com/lance0/rustbgpd/pull/1060)). Remaining:
   design-blocked restart/persistence proof and a long-running folded-state
-  comparison (LAN-18), rather than relying only on bounded convergence receipts.
+  comparison, rather than relying only on bounded convergence receipts.
 - **Turn shipped shadow tooling into external evidence.** The canonical semantic
   diff engine, `rbgp diff`, incumbent snapshot adapters, and BMP Adj-RIB-Out
   importer are shipped, and the shadow-pilot cookbook
   ([docs/cookbook/route-server-shadow-pilot.md](../cookbook/route-server-shadow-pilot.md),
   #1331) now documents the standing non-authoritative deployment end to end —
   the tooling side is done. The remaining adoption track is ADR-0125 E1 (though
-  DR1 has been advisory since 2026-08-08 per LAN-244 rather than a hard blocking
+  DR1 has been advisory since [the 2026-08-08 ADR-0125 amendment](../adr/0125-v1-stability-contract.md) rather than a hard blocking
   tagging gate): one external pilot with two weekly checkpoints at its normal
   refresh cadence, then a final semantic diff and support bundle, tested
   rollback, and recorded incorporated feedback or explicit no-change finding.
@@ -359,8 +359,8 @@ remain visible without automatically blocking a release whose agreed gates pass.
   a real SLAT producer plus retained fixtures are available.
 - **Single-owner RIB actor ceiling: measured at 1M; sharding stays unjustified.**
   The named-workload number that gates ADR-0100 parallel-RibManager exists
-  ([the 1M actor-ceiling receipt](../perf/actor-ceiling-1m-2026-07.md),
-  LAN-433): at 500 route-server clients × 1M routes × 300 changed peers, the
+  ([the 1M actor-ceiling receipt](../perf/actor-ceiling-1m-2026-07.md)):
+  at 500 route-server clients × 1M routes × 300 changed peers, the
   worst policy-transition actor poll was 0.1–0.2 s — under the 200 ms readiness
   deadline. The depool observed there was driven by the un-chunked post-commit
   flush, fixed by cooperative `CommitMembers` batching (#935, at most eight
@@ -379,7 +379,7 @@ remain visible without automatically blocking a release whose agreed gates pass.
   rejection is now externally pinned by M87: a GoBGP 4.6 source drives a legal
   4,095-byte UPDATE through sink-only policy to a 4,107-byte candidate, and BIRD
   2.0.12 proves the stale prior advertisement is withdrawn while the session
-  stays up and later recovers (LAN-434). The proposed M88 GR selection-deferral
+  stays up and later recovers. The proposed M88 GR selection-deferral
   receipt remains explicitly deferred; add collision-failback coverage only
   when an incumbent exposes a deterministic trigger. Experimental Paths-Limit
   (IANA-assigned capability 76 from the expired
@@ -484,8 +484,8 @@ proof on the activated cell in hosted CI.
   [1,000-peer route-server receipt](../perf/route-server-1000-2026-07.md)
   now retains real-daemon 400k-route/reload/readiness evidence. The
   shadow-pilot cookbook (#1331) is shipped; remaining demand-shaped work is
-  the ADR-0125 E1 external pilot (advisory since 2026-08-08 under DR1 per
-  LAN-244): two weekly checkpoints, a final semantic diff and support bundle,
+  the ADR-0125 E1 external pilot (advisory under DR1 since
+  [the 2026-08-08 ADR-0125 amendment](../adr/0125-v1-stability-contract.md)): two weekly checkpoints, a final semantic diff and support bundle,
   tested rollback, and a recorded feedback or explicit no-change outcome.
 - **RFC 9857 SR Policy state in BGP-LS** (receive/reflect/API) — ADR-0116
   records a bounded fit for the controller-feed / RR niche, but feature code is
@@ -495,7 +495,7 @@ proof on the activated cell in hosted CI.
   consumer-shaped API remains a prerequisite for typed SAFI-71 support.
   Origination, PCEP / SRPM, TE computation, dataplane programming, Add-Path
   changes, and typed SAFI-72 claims remain out of scope.
-- ~~**ASPA/RTRv2 conformance refresh**~~ **Shipped (M84/#759, LAN-243):**
+- ~~**ASPA/RTRv2 conformance refresh**~~ **Shipped (M84/#759):**
   multi-cache RTR v1/v2 epoch, reconnect, replacement, withdrawal, and serial-
   regression behavior is retained in the interop receipt.
 **The route-server (IXP) track** — the core is shipped; remaining work is
@@ -506,7 +506,8 @@ is complete: filtered-route views from `PolicyService.ListRejectedRoutes`
 (reject reasons mapped to large communities under `64496:65520:*`) and
 noexport views from the export-explain surface (`64496:65521:*`). With the
 shadow-pilot cookbook shipped (#1331), the next useful work is executing that
-cookbook under ADR-0125 E1 (advisory since 2026-08-08 under DR1 per LAN-244):
+cookbook under ADR-0125 E1 (advisory under DR1 since
+[the 2026-08-08 ADR-0125 amendment](../adr/0125-v1-stability-contract.md)):
 an external pilot using the shipped `rbgp diff` against an incumbent's MRT/BMP
 feed for two weekly checkpoints at its normal refresh cadence, followed by the
 final semantic diff and support bundle, tested rollback, and a recorded
@@ -575,7 +576,7 @@ against the sealed
 [realistic-mix baseline](../perf/irr-reload-realistic-mix-2026-08.md).
 Optional global `listen_addresses` now gives each daemon one exact bind and
 active-open source per enabled family, including two route-server instances on
-one host (LAN-1107). Per-neighbor sources, multiple same-family LAN addresses,
+one host. Per-neighbor sources, multiple same-family LAN addresses,
 freebind, and fallback remain deferred; separate hosts remain the production
 redundancy recommendation.
 
@@ -631,7 +632,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   qualifies member IRB against pinned SR Linux 25.10.1-399 with
   operator-provisioned SVIs, VRF attachments and L3 VXLAN devices.
   [M119](../artifacts/interop/m119-evpn-bundle-vtep-20261010T124729Z/README.md)
-  qualifies SR Linux L2 import and forwarding in a two-VTEP fixture. **LAN-64 SVD /
+  qualifies SR Linux L2 import and forwarding in a two-VTEP fixture. **SVD /
   collect-metadata Ready/programming landed:** rustbgpd now detects
   `external` / `vnifilter` VXLAN devices, accepts an unambiguous
   `(bridge_vlan, tunnel_info id <VNI>)` mapping as a Ready VXLAN target,
@@ -704,8 +705,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   the resolving EAD-per-ES (single-active) / EAD-per-EVI, and rustbgpd holds
   it unresolved without the EADs, imports it into vrf1 once they arrive
   (kernel route via the PE VTEP), and re-fails-closed when the EAD-per-ES is
-  advertised without the Single-Active flag. **LAN-70's kernel
-  mechanism receipt landed:** the privileged `l3_multipath` netns selector
+  advertised without the Single-Active flag. **The all-active L3 multipath
+  kernel mechanism receipt landed:** the privileged `l3_multipath` netns selector
   proves that Linux accepts VRF-table route multipath over one L3VXLAN, that
   duplicate single-dst FDB rows for one Router MAC collapse to one destination,
   and that FDB nexthop groups work on the L3VXLAN device. That proves the
@@ -723,7 +724,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   cleanup. Restart adoption now reclaims crash-leftover all-active ECMP routes,
   every remote-VTEP neighbor, the Router-MAC L3VXLAN FDB-NHG row, and the
   existing L3 NHID member/group tree before desired state reclaims it or the
-  deferred reap deletes it. **LAN-76's same-host production-path proof landed:** the privileged
+  deferred reap deletes it. **The all-active writer's same-host production-path proof landed:** the privileged
   `l3_all_active_writer` netns selector drives a real
   `ReconcileActor<LinuxDataplane>` through the all-active writer and asserts the
   route, neighbor, FDB-NHG, cleanup, and restart-adoption state. **M72's real-peer proof landed:**
@@ -806,7 +807,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   `external` / `vnifilter`, probe accepts unambiguous bridge-VLAN tunnel
   mappings as Ready, single-dst and FDB-NHG rows program `NDA_SRC_VNI`, and
   `svd_fdb_vni` proves same-MAC two-VNI isolation plus scoped delete against a
-  real kernel. **LAN-78 netns receipt landed:** `macip_vlan_attribution`
+  real kernel. **The MAC/IP VLAN-attribution netns receipt landed:** `macip_vlan_attribution`
   proves same-MAC+IP VLAN10/VNI100 and VLAN20/VNI200 observations on real VLAN
   upper devices, while bridge-ifindex ARP/ND on a `vlan_filtering=1` bridge
   remains fail-closed unless a future FDB-correlation design proves freshness
@@ -1246,8 +1247,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     isolated attribution and repeat the full typical/rich/unique insert,
     bulk-load, and churn measurement matrix. Only a measurement GO may proceed
     to a prototype's collision and memory gates.
-  - Neighbor RIB snapshot coalescing — thin the memory-for-speed trade
-    (LAN-1050). The single-commit attribution campaign at 100 peers × 1,000
+  - Neighbor RIB snapshot coalescing — thin the memory-for-speed trade.
+    The single-commit attribution campaign at 100 peers × 1,000
     routes traced the whole settled-memory step introduced by the July 2026
     performance batch (all of it shipped in v0.61.0) to one change: #1189's
     coalesced neighbor RIB snapshots, taken deliberately to buy convergence at
@@ -1269,7 +1270,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     change does not necessarily trigger full RIB query + full kernel dump +
     full projection. Design-gated because drift recovery, ECMP siblings,
     peer-group allow-lists, and max-route freeze semantics are non-local.
-  - EVPN dataplane supervisor generation query (LAN-1055): **done**. The RIB
+  - EVPN dataplane supervisor generation query: **done**. The RIB
     actor owns a wrapping Type 1/2/5 equality token and exact relevant-row
     cardinality. Stable event and five-second poll passes now return an O(1)
     unchanged response without walking/materializing the EVPN table; relevant
@@ -1291,8 +1292,8 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
     `CachedPolicyContext`, deliberately narrower than a raw
     `Arc<Vec<PathAttribute>>` because explain does not need unrelated
     attributes. Further storage changes are measurement-gated.
-  - Wire codec body-NLRI allocation cleanup: LAN-679 measured the proposed
-    non-AddPath IPv4 decode/build rewrite and declined it because it did not
+  - Wire codec body-NLRI allocation cleanup: a measurement of the proposed
+    non-AddPath IPv4 decode/build rewrite declined it because it did not
     produce a meaningful win. Do not revisit without a new profile identifying
     this allocation as hot and a concrete, separately testable hypothesis.
   - Wire community storage: investigate `SmallVec` for standard / extended /
