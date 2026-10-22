@@ -573,6 +573,27 @@ needed. [Interface-only neighbors](configuration.md#interface-only-neighbors)
 are the exception: they need `CAP_NET_RAW` for Router Advertisement
 discovery, and the daemon refuses to start them without it.
 
+## Interface-only neighbors — `CAP_NET_RAW` requirement
+
+An [interface-only neighbor](configuration.md#interface-only-neighbors) has an
+`interface` and no `address`. Configuring even one requires `CAP_NET_RAW` for
+the raw ICMPv6 socket used for discovery. This applies with
+`[global.unnumbered] router_advertisements = false` too: disabling rustbgpd's
+advertisements and solicitations does not disable RA reception. `--check`,
+startup and a reload introducing the first interface-only neighbor report an error naming
+`CAP_NET_RAW` if that socket cannot be opened.
+
+Static link-local neighbors with an explicit `address` and `interface` do not
+use this discovery socket. RS/RR deployments without interface-only neighbors
+need no `CAP_NET_RAW` capability. Neither mode requires `CAP_SYS_ADMIN`.
+
+For the native systemd service, install the opt-in
+[`rustbgpd-unnumbered.conf`](../../examples/systemd/rustbgpd-unnumbered.conf)
+drop-in; see [deployment instructions](../how-to/deployment.md#interface-only-neighbors-opt-in-privilege-drop-in).
+It adds `CAP_NET_RAW` to both capability sets while keeping the base unit at
+`CAP_NET_BIND_SERVICE` only. If the same configuration programs the kernel,
+install the dataplane drop-in as well; the two capability additions compose.
+
 ## Deferred hardening
 
 The following security improvements are intentionally deferred and tracked in
