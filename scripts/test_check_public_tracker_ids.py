@@ -105,11 +105,11 @@ class PublicTrackerIdTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             historical = (
-                "docs/project/roadmap.md",
                 "docs/project/roadmap-history.md",
                 "docs/project/changelog/older-releases.md",
             )
             public = (
+                "docs/project/roadmap.md",
                 "docs/project/README.md",
                 "docs/project/changelog-notes.md",
                 "docs/explanation/architecture.md",
@@ -125,6 +125,26 @@ class PublicTrackerIdTests(unittest.TestCase):
             self.assertEqual(set(documents), set(public))
             for relative, text in documents.items():
                 self.assertTrue(guard.audit_document(relative, text))
+
+    def test_maintained_roadmap_tracker_id_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [
+                write_fixture(root, "README.md", "rustbgpd\n"),
+                write_fixture(root, "docs/project/roadmap.md", "Next: LAN-123\n"),
+            ]
+            with mock.patch.multiple(
+                guard,
+                ROOT=root,
+                tracked_files=lambda: paths,
+            ):
+                documents = guard.discover_documents()
+            self.assertIn("docs/project/roadmap.md", documents)
+            self.assertTrue(
+                guard.audit_document(
+                    "docs/project/roadmap.md", documents["docs/project/roadmap.md"]
+                )
+            )
 
     def test_every_citation_form_is_rejected(self) -> None:
         for line in CITATIONS:

@@ -86,6 +86,7 @@
 //! mechanism (FRR measures `SendQ` progress the same way), detection
 //! starts only once the kernel send buffer stops accepting bytes.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -145,7 +146,9 @@ const MAX_BATCH_BYTES: usize = 256 * 1024;
 /// spending at most half of that on the flush leaves the rest for the
 /// NOTIFICATION, so a peer that is reading, however slowly, still receives
 /// its Cease rather than a bare close. Error NOTIFICATIONs have no outer
-/// deadline and use the same budget.
+/// deadline and use the same budget. An administrative close also spends
+/// this budget, not a second one, draining the updates the RIB had queued
+/// for the session (`PeerSession::drain_outbound_before_close`).
 pub(super) const CLOSE_FLUSH_BUDGET: Duration = Duration::from_millis(250);
 
 /// Whether a queued frame is a BGP NOTIFICATION (type 3).
@@ -211,6 +214,12 @@ pub(super) struct WriterHandle {
     /// sender without signalling is the ordinary close path and keeps
     /// today's drain semantics.
     pub(super) teardown_tx: watch::Sender<bool>,
+    /// Set once by the session when an ordinary close begins, before any
+    /// pre-close drain. [`CLOSE_FLUSH_BUDGET`] runs from this instant, so a
+    /// drain or a batch already in flight counts against it. It is separate
+    /// from `teardown_tx`, which stays live until the close so a hard
+    /// teardown can still be signalled.
+    pub(super) close_started: CloseStarted,
     /// Resolves when the writer exits: `Ok(())` on clean shutdown,
     /// `Err(WriterExit)` on TCP write/flush failure or send-hold expiry.
     pub(super) join: WriterJoin,
@@ -276,6 +285,7 @@ pub(super) fn spawn(
     let (priority_tx, priority_rx) = mpsc::unbounded_channel::<Bytes>();
     let (keepalive_tx, keepalive_rx) = watch::channel(None);
     let (teardown_tx, teardown_rx) = watch::channel(false);
+    let close_started = CloseStarted::default();
     let task = WriterTask {
         write_half,
         bulk_rx,
@@ -283,7 +293,7 @@ pub(super) fn spawn(
         priority_rx,
         keepalive_rx,
         teardown_rx,
-        closed_at: None,
+        close_started: Arc::clone(&close_started),
         metrics,
         peer_label,
         send_hold_time,
@@ -297,9 +307,13 @@ pub(super) fn spawn(
         priority_tx,
         keepalive_tx,
         teardown_tx,
+        close_started,
         join,
     }
 }
+
+/// The start of an ordinary close, shared by the session and its writer.
+pub(super) type CloseStarted = Arc<std::sync::OnceLock<tokio::time::Instant>>;
 
 struct WriterTask {
     write_half: OwnedWriteHalf,
@@ -308,9 +322,7 @@ struct WriterTask {
     priority_rx: mpsc::UnboundedReceiver<Bytes>,
     keepalive_rx: watch::Receiver<Option<Duration>>,
     teardown_rx: watch::Receiver<bool>,
-    /// When the session dropped its senders without a hard teardown: the
-    /// start of an ordinary close, which [`CLOSE_FLUSH_BUDGET`] runs from.
-    closed_at: Option<tokio::time::Instant>,
+    close_started: CloseStarted,
     metrics: BgpMetrics,
     peer_label: String,
     send_hold_time: Option<Duration>,
@@ -333,16 +345,10 @@ impl Drop for WriterTask {
 /// Resolve once the session has signalled hard teardown. Pends forever
 /// otherwise — including when the sender is dropped *without*
 /// signalling, which is the ordinary (non-hard-teardown) close path and
-/// must keep the writer's drain-then-exit semantics. That drop is recorded
-/// in `closed_at`, so a write already in flight counts against the close's
-/// flush budget.
-async fn teardown_requested(
-    rx: &mut watch::Receiver<bool>,
-    closed_at: &mut Option<tokio::time::Instant>,
-) {
+/// must keep the writer's drain-then-exit semantics.
+async fn teardown_requested(rx: &mut watch::Receiver<bool>) {
     while !*rx.borrow_and_update() {
         if rx.changed().await.is_err() {
-            closed_at.get_or_insert_with(tokio::time::Instant::now);
             std::future::pending::<()>().await;
         }
     }
@@ -400,7 +406,6 @@ impl WriterTask {
                         // close path, keep drain semantics and never
                         // poll this arm again.
                         teardown_open = false;
-                        self.closed_at.get_or_insert_with(tokio::time::Instant::now);
                     }
                     continue;
                 }
@@ -496,8 +501,12 @@ impl WriterTask {
         // The budget runs from the close, so a batch that was already in
         // flight counts against it. One frame per write after that, so the
         // budget is overshot by at most one frame.
-        let deadline =
-            self.closed_at.unwrap_or_else(tokio::time::Instant::now) + CLOSE_FLUSH_BUDGET;
+        let deadline = self
+            .close_started
+            .get()
+            .copied()
+            .unwrap_or_else(tokio::time::Instant::now)
+            + CLOSE_FLUSH_BUDGET;
         while !*self.teardown_rx.borrow() && tokio::time::Instant::now() < deadline {
             let Ok(frame) = self.bulk_rx.try_recv() else {
                 break;
@@ -544,7 +553,6 @@ impl WriterTask {
         let Self {
             write_half,
             teardown_rx,
-            closed_at,
             send_hold_time,
             peer_label,
             #[cfg(all(target_os = "linux", feature = "bench-internals"))]
@@ -577,7 +585,7 @@ impl WriterTask {
             tokio::select! {
                 biased;
                 result = bounded_write => Some(result),
-                () = teardown_requested(teardown_rx, closed_at) => None,
+                () = teardown_requested(teardown_rx) => None,
             }
         };
         #[cfg(all(target_os = "linux", feature = "bench-internals"))]
@@ -886,12 +894,14 @@ mod tests {
             priority_tx,
             keepalive_tx,
             teardown_tx,
+            close_started,
             join,
             ..
         } = handle;
+        // The session's close starts the budget while the writer is still
+        // parked in a bulk write.
+        close_started.set(tokio::time::Instant::now()).unwrap();
         drop((bulk_tx, priority_tx, keepalive_tx, teardown_tx));
-        // The writer is parked in a bulk write; let it observe the close.
-        tokio::task::yield_now().await;
         tokio::time::advance(CLOSE_FLUSH_BUDGET + Duration::from_millis(1)).await;
         let types = read_frame_types(&mut peer, Duration::ZERO).await;
         assert!(join.await.unwrap().is_ok());

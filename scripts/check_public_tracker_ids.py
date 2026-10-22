@@ -43,10 +43,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 # Anything under `docs/`, plus the top-level files a first-time reader lands
-# on. The changelog, roadmap, and roadmap history remain out of scope after
-# moving their historical records under docs/project/: released and completed
-# sections are historical records that must not be rewritten. Current roadmap
-# work may have only a tracker item as its public name.
+# on. The roadmap history and the moved changelog sections under
+# docs/project/changelog/ remain out of scope: released and completed sections
+# are historical records that must not be rewritten. The maintained roadmap is
+# scanned like any other public page, so current work is named in plain words
+# or by a public link, never by a tracker ID alone.
 #
 # The rest of the tree — `bench/`, `examples/`, `scripts/`, crate sources —
 # is deliberately out of scope too: those files are read by people working
@@ -63,9 +64,7 @@ SCANNED_FILES = frozenset(
     }
 )
 
-HISTORICAL_FILES = frozenset(
-    {"docs/project/roadmap.md", "docs/project/roadmap-history.md"}
-)
+HISTORICAL_FILES = frozenset({"docs/project/roadmap-history.md"})
 
 # Binary blobs and compressed captures carry no reviewable prose.
 SKIPPED_SUFFIXES = frozenset({".gz", ".png", ".svg", ".zst", ".bin"})

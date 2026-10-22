@@ -720,7 +720,6 @@ async fn shutdown_abandoned_before_the_cease_is_queued_aborts_the_writer() {
         })
         .is_ok()
     {}
-    let senders_dropped = session.writer_teardown_tx.as_ref().unwrap().subscribe();
     let session_task = tokio::spawn(async move { session.run().await });
     cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
     // Handshake: the session has taken the command off its channel.
@@ -728,9 +727,10 @@ async fn shutdown_abandoned_before_the_cease_is_queued_aborts_the_writer() {
         tokio::task::yield_now().await;
     }
     tokio::task::yield_now().await;
+    // The wire check below shows no NOTIFICATION was queued.
     assert!(
-        !session_task.is_finished() && senders_dropped.has_changed().is_ok(),
-        "the session must still be parked on RIB delivery, before the Cease"
+        !session_task.is_finished(),
+        "the session must still be parked on RIB delivery"
     );
     session_task.abort();
     assert!(session_task.await.unwrap_err().is_cancelled());
@@ -786,6 +786,348 @@ async fn dropping_the_handle_after_a_stop_still_flushes_the_cease() {
         "the stop's NOTIFICATION must reach the wire last"
     );
     assert_eq!(&last[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
+}
+
+/// An outbound update the RIB has queued for a session but the session has
+/// not yet taken off its channel when an administrative close arrives (for
+/// example the EVPN withdraws shutdown stages just before closing sessions)
+/// is admitted to the writer before the NOTIFICATION, so the peer sees the
+/// withdraw ahead of the Cease. The close is installed as the deferred
+/// command, so it runs before the run loop polls the outbound channel.
+#[tokio::test]
+async fn administrative_closes_drain_a_queued_withdraw_before_the_cease() {
+    let cases = [
+        (
+            "stop",
+            PeerCommand::Stop { reason: None },
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        ),
+        (
+            "shutdown",
+            PeerCommand::Shutdown,
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        ),
+        (
+            "administrative reset",
+            PeerCommand::AdministrativeReset { reason: None },
+            cease_subcode::ADMINISTRATIVE_RESET,
+        ),
+    ];
+    for (path, command, subcode) in cases {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        session.commands = cmd_rx;
+        let (client, mut peer) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let withdrawn = make_route(100).prefix;
+        session
+            .outbound_tx
+            .send(OutboundRouteUpdate {
+                exact_export_snapshot: Some(session.publish_export_profile()),
+                withdraw: vec![(withdrawn, 0)],
+                ..OutboundRouteUpdate::default()
+            })
+            .await
+            .unwrap();
+        session.deferred_command = Some(command);
+        let session_task = tokio::spawn(async move { session.run().await });
+
+        let mut wire = Vec::new();
+        tokio::time::timeout(Duration::from_secs(15), peer.read_to_end(&mut wire))
+            .await
+            .unwrap_or_else(|_| panic!("{path}: the close must end the connection"))
+            .unwrap();
+        let frames = parse_wire_frames(&wire);
+        let (last_type, last) = frames.last().expect("frames on the wire");
+        assert_eq!(
+            *last_type, 3,
+            "{path}: the NOTIFICATION must be the final frame"
+        );
+        assert_eq!(&last[19..21], &[6, subcode], "{path}: NOTIFICATION code");
+        assert!(
+            frames.iter().any(|(msg_type, frame)| *msg_type == 2
+                && u16::from_be_bytes([frame[19], frame[20]]) > 0),
+            "{path}: the queued withdraw must reach the wire before the Cease"
+        );
+
+        cmd_tx.send(PeerCommand::Shutdown).await.ok();
+        tokio::time::timeout(Duration::from_secs(15), session_task)
+            .await
+            .unwrap_or_else(|_| panic!("{path}: session task must finish"))
+            .expect("session task must not panic")
+            .expect("run() must return Ok");
+    }
+}
+
+/// The close drain shares the writer's flush budget instead of adding its
+/// own: with the writer's queue full behind a peer that is not reading, the
+/// drain cannot admit the queued withdraw, gives up at the budget, and the
+/// writer, whose budget started when the drain did, discards its backlog
+/// and still ends with the Cease.
+#[tokio::test(start_paused = true)]
+async fn close_drain_shares_the_flush_budget_with_the_writer() {
+    let (mut session, cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+    // Handshake: the writer has taken its first batch and is parked writing
+    // it, so it takes nothing more off the queue filled below.
+    while session
+        .metrics
+        .peer_outbound_queue_depth(&session.peer_label)
+        == 0
+    {
+        tokio::task::yield_now().await;
+    }
+    let bulk = session.writer_bulk_tx.clone().unwrap();
+    let mut end_of_rib = vec![0xffu8; 16];
+    end_of_rib.extend_from_slice(&[0, 23, 2, 0, 0, 0, 0]);
+    let end_of_rib = Bytes::from(end_of_rib);
+    let mut queued = WEDGED_BACKLOG;
+    while bulk.try_send(end_of_rib.clone()).is_ok() {
+        queued += 1;
+    }
+    drop(bulk);
+    session
+        .outbound_tx
+        .send(OutboundRouteUpdate {
+            exact_export_snapshot: Some(session.publish_export_profile()),
+            withdraw: vec![(make_route(100).prefix, 0)],
+            ..OutboundRouteUpdate::default()
+        })
+        .await
+        .unwrap();
+    session.deferred_command = Some(PeerCommand::Stop { reason: None });
+    let session_task = tokio::spawn(async move { session.run().await });
+    // Virtual time: this wakes only once every task is idle, after the drain
+    // has hit its deadline and queued the Cease. The peer reads only then.
+    tokio::time::sleep(writer::CLOSE_FLUSH_BUDGET + Duration::from_millis(1)).await;
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.unwrap();
+    let frames = parse_wire_frames(&wire);
+    let (last_type, last) = frames.last().expect("frames on the wire");
+    assert_eq!(*last_type, 3, "the NOTIFICATION must be the final frame");
+    assert_eq!(&last[19..21], &[6, cease_subcode::ADMINISTRATIVE_SHUTDOWN]);
+    let updates = frames.iter().filter(|(msg_type, _)| *msg_type == 2).count();
+    assert!(
+        updates < queued,
+        "the writer must discard its backlog at the shared budget, not flush all {queued} frames"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|(msg_type, frame)| *msg_type == 2
+                && u16::from_be_bytes([frame[19], frame[20]]) > 0),
+        "a withdraw that could not be admitted within the budget is not sent"
+    );
+
+    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
+    session_task
+        .await
+        .expect("session task must not panic")
+        .expect("run() must return Ok");
+}
+
+/// The close drain keeps the hard-teardown path: when admitting a queued
+/// update fails during the drain (here a route-bearing envelope without its
+/// exact export snapshot), the session still raises Cease/8 with the writer's
+/// backlog discarded, rather than an ordinary flush of it.
+#[tokio::test]
+async fn admission_failure_during_the_close_drain_still_hard_tears_down() {
+    let (mut session, _cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+    session
+        .outbound_tx
+        .send(OutboundRouteUpdate {
+            announce: vec![make_route(100)].into(),
+            next_hop_override: vec![None].into(),
+            ..OutboundRouteUpdate::default()
+        })
+        .await
+        .unwrap();
+    session.deferred_command = Some(PeerCommand::Stop { reason: None });
+    let session_task = tokio::spawn(async move { session.run().await });
+
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), peer.read_to_end(&mut wire))
+        .await
+        .expect("the hard teardown must close the connection")
+        .unwrap();
+    let mut rest = wire.as_slice();
+    let (mut updates, mut notifications) = (0, Vec::new());
+    while rest.len() >= 19 {
+        let len = usize::from(u16::from_be_bytes([rest[16], rest[17]]));
+        updates += usize::from(rest[18] == 2);
+        if rest[18] == 3 {
+            notifications.push(rest[19..21].to_vec());
+        }
+        rest = &rest[len..];
+    }
+    assert!(
+        rest.is_empty(),
+        "the Cease/8 must be the final, whole frame"
+    );
+    assert_eq!(
+        notifications,
+        vec![vec![6, cease_subcode::OUT_OF_RESOURCES]],
+        "exactly one NOTIFICATION, the hard teardown's Cease/8"
+    );
+    assert!(
+        updates < WEDGED_BACKLOG,
+        "the hard teardown must discard the backlog, not flush all {updates} frames"
+    );
+    session_task.abort();
+}
+
+/// When the drain's Cease/8 has already closed the connection, the stop,
+/// shutdown or reset that asked for the close must not record a second
+/// NOTIFICATION it can no longer send: the counters, the BMP Peer Down
+/// reason and the lost session's teardown cause all describe the Cease/8
+/// that reached the wire, and the session still goes down.
+#[tokio::test]
+async fn admission_failure_during_the_close_drain_records_only_the_cease_8() {
+    let cases = [
+        ("stop", PeerCommand::Stop { reason: None }),
+        ("shutdown", PeerCommand::Shutdown),
+        (
+            "administrative reset",
+            PeerCommand::AdministrativeReset { reason: None },
+        ),
+    ];
+    for (path, command) in cases {
+        let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+        let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel(16);
+        session.session_lifecycle_tx = Some(lifecycle_tx);
+        let (client, mut peer) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let reader = tokio::spawn(async move {
+            let mut wire = Vec::new();
+            let _ = peer.read_to_end(&mut wire).await;
+            wire
+        });
+        session
+            .outbound_tx
+            .send(OutboundRouteUpdate {
+                announce: vec![make_route(100)].into(),
+                next_hop_override: vec![None].into(),
+                ..OutboundRouteUpdate::default()
+            })
+            .await
+            .unwrap();
+
+        let _ = session.handle_command(command).await;
+
+        assert_eq!(
+            session.fsm.state(),
+            SessionState::Idle,
+            "{path}: the session must go down"
+        );
+        assert_eq!(
+            session.config.neighbor_counters.notifications_sent(),
+            1,
+            "{path}: only the Cease/8 that reached the wire counts as sent"
+        );
+        let mut losses = Vec::new();
+        while let Ok(SessionLifecycleNotification::StateChanged {
+            old,
+            teardown_cause,
+            ..
+        }) = lifecycle_rx.try_recv()
+        {
+            if old == SessionState::Established {
+                losses.push(teardown_cause.unwrap_or_default());
+            }
+        }
+        assert_eq!(losses.len(), 1, "{path}: one Established loss");
+        assert!(
+            losses[0].starts_with("sent NOTIFICATION 6/8"),
+            "{path}: the teardown cause must be the Cease/8, got {:?}",
+            losses[0]
+        );
+        let mut peer_downs = Vec::new();
+        while let Ok(event) = bmp_rx.try_recv() {
+            if let BmpEvent::PeerDown { reason, .. } = event {
+                peer_downs.push(reason);
+            }
+        }
+        match peer_downs.as_slice() {
+            [PeerDownReason::LocalNotification(pdu)] => assert_eq!(
+                &pdu[19..21],
+                &[6, cease_subcode::OUT_OF_RESOURCES],
+                "{path}: BMP must report the Cease/8"
+            ),
+            other => panic!("{path}: expected one BMP Peer Down with the Cease/8, got {other:?}"),
+        }
+
+        drop(session);
+        let wire = reader.await.unwrap();
+        let frames = parse_wire_frames(&wire);
+        let notifications: Vec<_> = frames
+            .iter()
+            .filter(|(msg_type, _)| *msg_type == 3)
+            .map(|(_, frame)| frame[19..21].to_vec())
+            .collect();
+        assert_eq!(
+            notifications,
+            vec![vec![6, cease_subcode::OUT_OF_RESOURCES]],
+            "{path}: the wire carries only the Cease/8"
+        );
+    }
+}
+
+/// The close drain stops at its budget even when every admission step is
+/// ready immediately: it checks the deadline and yields after each step, so
+/// a long run of queued envelopes cannot finish in one uninterruptible
+/// poll. The paused clock advances only from a ticker task, which can run
+/// only when the drain yields.
+#[tokio::test(start_paused = true)]
+async fn close_drain_yields_and_stops_at_the_budget_with_ready_admission() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut peer) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let reader = tokio::spawn(async move {
+        let mut sink = vec![0u8; 64 * 1024];
+        while peer.read(&mut sink).await.is_ok_and(|n| n > 0) {}
+    });
+    let queued = 200;
+    for local_pref in 0..queued {
+        session
+            .outbound_tx
+            .try_send(OutboundRouteUpdate {
+                exact_export_snapshot: Some(session.publish_export_profile()),
+                announce: vec![make_route(local_pref)].into(),
+                next_hop_override: vec![None].into(),
+                ..OutboundRouteUpdate::default()
+            })
+            .unwrap();
+    }
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ticker = tokio::spawn({
+        let ticks = Arc::clone(&ticks);
+        async move {
+            loop {
+                tokio::time::advance(Duration::from_millis(10)).await;
+                ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+
+    let started = tokio::time::Instant::now();
+    assert!(!session.drain_outbound_before_close().await);
+    ticker.abort();
+    reader.abort();
+    assert!(
+        ticks.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the drain must yield between admission steps"
+    );
+    assert!(
+        started.elapsed() >= writer::CLOSE_FLUSH_BUDGET,
+        "the drain returned before its budget"
+    );
+    assert!(
+        !session.outbound_rx.is_empty(),
+        "the drain must stop at the budget, not admit all {queued} queued envelopes"
+    );
 }
 
 /// The flush ahead of the Cease stays inside the per-peer shutdown bound: when
