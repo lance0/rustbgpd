@@ -75,7 +75,8 @@ struct StatementExtraction<'a> {
 impl<'a> StatementExtraction<'a> {
     fn new(config: &'a mut Config) -> Self {
         let mut lanes = Vec::new();
-        for (index, neighbor) in config.neighbors.iter_mut().enumerate() {
+        // Addressed then interface-only neighbors, the order `lane_mut` indexes.
+        for (index, neighbor) in config.neighbors.all_mut().enumerate() {
             extract_lane(
                 &mut lanes,
                 LaneLocation::NeighborImport(index),
@@ -144,8 +145,20 @@ fn lane_mut<'a>(
     location: &LaneLocation,
 ) -> &'a mut Vec<PolicyStatementConfig> {
     match location {
-        LaneLocation::NeighborImport(index) => &mut config.neighbors[*index].import_policy,
-        LaneLocation::NeighborExport(index) => &mut config.neighbors[*index].export_policy,
+        LaneLocation::NeighborImport(index) => {
+            &mut config
+                .neighbors
+                .nth_of_all_mut(*index)
+                .expect("extracted neighbor")
+                .import_policy
+        }
+        LaneLocation::NeighborExport(index) => {
+            &mut config
+                .neighbors
+                .nth_of_all_mut(*index)
+                .expect("extracted neighbor")
+                .export_policy
+        }
         LaneLocation::PeerGroupImport(name) => {
             &mut config
                 .peer_groups

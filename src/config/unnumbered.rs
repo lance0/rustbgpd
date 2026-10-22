@@ -220,6 +220,21 @@ impl NeighborList {
         self.addressed.iter_mut().chain(&mut self.interface_only)
     }
 
+    /// Replace the interface-only entries in place (tests).
+    #[cfg(test)]
+    pub(crate) fn set_interface_only_for_test(&mut self, neighbors: Vec<Neighbor>) {
+        assert_eq!(neighbors.len(), self.interface_only.len());
+        self.interface_only = neighbors;
+    }
+
+    /// The `index`th entry of [`Self::all`], without walking the list.
+    pub fn nth_of_all_mut(&mut self, index: usize) -> Option<&mut Neighbor> {
+        match index.checked_sub(self.addressed.len()) {
+            None => self.addressed.get_mut(index),
+            Some(index) => self.interface_only.get_mut(index),
+        }
+    }
+
     /// The interface-only neighbor on `interface`.
     #[must_use]
     pub fn interface_only_on(&self, interface: &str) -> Option<&Neighbor> {

@@ -405,3 +405,42 @@ fn policy_validation_covers_interface_only_neighbors() {
     let error = rejected(&format!("{SWP1}export_policy_chain = [\"missing\"]\n"));
     assert!(error.contains("missing"), "{error}");
 }
+
+#[test]
+fn bounded_rendering_chunks_an_interface_only_neighbors_inline_policy() {
+    let mut statement = parse_schema_only(&format!(
+        "{}\n[policy.definitions.seed]\n[[policy.definitions.seed.statements]]\n\
+         action = \"permit\"\nprefix = \"2001:db8::/32\"\nge = 48\n",
+        valid_toml()
+    ))
+    .unwrap()
+    .policy
+    .definitions
+    .remove("seed")
+    .unwrap()
+    .statements
+    .remove(0);
+    statement.set_med = Some(7);
+    let mut config = parse(&with(&format!(
+        "\n[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\n{SWP1}"
+    )))
+    .unwrap();
+    let mut swp1 = config.neighbors.interface_only()[0].clone();
+    swp1.import_policy = vec![statement; 257];
+    config.neighbors.set_interface_only_for_test(vec![swp1]);
+
+    let original = config.clone();
+    let oracle = persisted_config_document(&config).unwrap();
+    let (bounded, stats) = super::canonical::render_document_bounded(&mut config).unwrap();
+    // Mutation-red: extracting addressed neighbors only leaves the 257
+    // statements in one serializer graph and reports no lane.
+    assert_eq!(stats.neighbor_import_lanes, 1);
+    assert_eq!(stats.statements, 257);
+    assert_eq!(stats.max_chunk_statements, 256);
+    assert_eq!(config, original, "every lane restored in place");
+    assert_eq!(
+        config.neighbors.interface_only()[0].import_policy.len(),
+        257
+    );
+    assert_eq!(bounded, oracle, "byte-identical to the unbounded render");
+}
