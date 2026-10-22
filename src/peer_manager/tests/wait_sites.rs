@@ -1579,7 +1579,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::ConditionalInstall => {
             let set = rustbgpd_rib::ConditionalAdvertisementSet {
                 definitions: Vec::new(),
-                attachments: BTreeMap::from([(PeerId::from_addr(peers[0]), vec![Arc::from("backup")])]),
+                attachments: BTreeMap::from([(peers[0], vec![Arc::from("backup")])]),
             };
             let prior = manager
                 .install_conditional_advertisements(set.clone(), &[])

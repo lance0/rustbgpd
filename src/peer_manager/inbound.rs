@@ -469,6 +469,9 @@ impl PeerManager {
                 let cfg = Self::peer_manager_config_from_resolved(resolved, false);
                 let mut transport = self.build_transport_config(&cfg);
                 transport.neighbor_counters = self.neighbor_counters_for(&dynamic_peer_key);
+                // A dynamic neighbor gets its RIB identity only once its
+                // OPEN validates: the session allocates it on first use.
+                transport.rib_peer = rustbgpd_transport::RibPeerSlot::allocate_after_open();
                 transport.accepted_dynamic_range = Some(accepted_dynamic_range.clone());
                 transport.dampening_admission = match self
                     .configured_owner_admission_for_dynamic(&accepted_dynamic_range, remote_asn)

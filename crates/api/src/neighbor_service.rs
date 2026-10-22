@@ -160,6 +160,20 @@ impl NeighborService {
 
     /// Name configured scoped candidates in selector errors.
     #[must_use]
+    /// The RIB identity of the managed neighbor `info` describes.
+    fn rib_peer(&self, info: &PeerInfo) -> PeerId {
+        crate::peer_selector::rib_peer(
+            self.roster.as_ref(),
+            info.address,
+            info.interface.as_deref(),
+        )
+    }
+
+    /// The RIB identity of the managed neighbor `key`.
+    fn rib_peer_for(&self, key: &PeerKey) -> PeerId {
+        crate::peer_selector::rib_peer(self.roster.as_ref(), key.address, key.interface.as_deref())
+    }
+
     pub(crate) fn with_peer_roster(
         mut self,
         roster: crate::import_roster::ImportRosterReader,
@@ -453,17 +467,16 @@ where
 async fn query_neighbor_rib_snapshots(
     rib_tx: &mpsc::Sender<RibUpdate>,
     summary_tx: Option<&mpsc::Sender<RibSummaryQuery>>,
-    peers: Vec<IpAddr>,
-    comparison: Option<(IpAddr, IpAddr)>,
+    peers: Vec<PeerId>,
+    comparison: Option<(PeerId, PeerId)>,
     include_retained: bool,
 ) -> Result<NeighborRibSnapshotResponse, Status> {
     tokio::time::timeout(
         RIB_SNAPSHOT_TIMEOUT,
         rib_summary_read(rib_tx, summary_tx, |reply| {
             RibSummaryQuery::NeighborRibSnapshots {
-                peers: peers.into_iter().map(PeerId::from_addr).collect(),
-                comparison: comparison
-                    .map(|(primary, other)| (PeerId::from_addr(primary), PeerId::from_addr(other))),
+                peers,
+                comparison,
                 include_retained,
                 reply,
             }
@@ -1371,7 +1384,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let snapshots = query_neighbor_rib_snapshots(
             &self.rib_tx,
             self.rib_summary_tx.as_ref(),
-            infos.iter().map(|info| info.address).collect(),
+            infos.iter().map(|info| self.rib_peer(info)).collect(),
             None,
             // Down dynamic neighbors whose routes are still retained.
             true,
@@ -1385,7 +1398,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let mut neighbors = Vec::with_capacity(infos.len());
         for (info, snapshot) in infos.iter().zip(snapshots.snapshots) {
-            if snapshot.peer != PeerId::from_addr(info.address) {
+            if snapshot.peer != self.rib_peer(info) {
                 return Err(Status::internal(
                     "RIB snapshot did not preserve requested neighbor order",
                 ));
@@ -1465,20 +1478,20 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             if initial_roster_pending || peer.interface.is_some() || compare_peer.is_some() {
                 return Err(missing_peer(&peer));
             }
+            // It has left the roster too, so find it among the RIB's
+            // retained neighbors by address.
             let snapshot = query_neighbor_rib_snapshots(
                 &self.rib_tx,
                 self.rib_summary_tx.as_ref(),
-                vec![peer.address],
+                Vec::new(),
                 None,
-                false,
+                true,
             )
             .await?
-            .snapshots
+            .retained
             .into_iter()
-            .next()
-            .filter(|snapshot| {
-                snapshot.peer == PeerId::from_addr(peer.address)
-                    && !snapshot.gr_retention.is_empty()
+            .find(|snapshot| {
+                snapshot.peer.addr() == peer.address && !snapshot.gr_retention.is_empty()
             })
             .ok_or_else(|| missing_peer(&peer))?;
             return Ok(Response::new(retention_only_neighbor(&snapshot)));
@@ -1497,11 +1510,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let comparison_pair = compare_peer
             .as_ref()
-            .map(|compare_peer| (info.address, compare_peer.address));
+            .map(|compare_peer| (self.rib_peer(&info), self.rib_peer_for(compare_peer)));
         let snapshots = query_neighbor_rib_snapshots(
             &self.rib_tx,
             self.rib_summary_tx.as_ref(),
-            vec![info.address],
+            vec![self.rib_peer(&info)],
             comparison_pair,
             false,
         )
@@ -1515,7 +1528,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .snapshots
             .into_iter()
             .next()
-            .filter(|snapshot| snapshot.peer == PeerId::from_addr(info.address))
+            .filter(|snapshot| snapshot.peer == self.rib_peer(&info))
             .ok_or_else(|| Status::internal("RIB snapshot did not include requested neighbor"))?;
         let mut state = peer_info_to_proto(&info);
         apply_rib_snapshot(&mut state, &snapshot);

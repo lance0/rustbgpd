@@ -3,6 +3,7 @@
 //! an [`EvpnRouteEvent`] carries the full new and previous best route.
 
 use crate::PeerId;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -77,13 +78,16 @@ impl RouteEvent {
         self.target_peer_scope.peer_interface()
     }
 
-    /// Whether this event names the neighbor (`peer`, `interface`) as its
-    /// current, previous or target peer. A scoped neighbor matches only on
-    /// the interface the event recorded; a numbered one has none.
+    /// Whether this event names the neighbor (`address`, `interface`) as
+    /// its current, previous or target peer. A scoped neighbor matches only
+    /// on the interface the event recorded; a numbered one has none. By
+    /// address, so history keeps matching a neighbor deleted or re-added
+    /// since the event.
     #[must_use]
-    pub fn involves(&self, peer: PeerId, interface: Option<&str>) -> bool {
-        let named = |address: Option<PeerId>, scope: AspaContextId| {
-            address == Some(peer) && scope.peer_interface().as_deref() == interface
+    pub fn involves(&self, address: IpAddr, interface: Option<&str>) -> bool {
+        let named = |peer: Option<PeerId>, scope: AspaContextId| {
+            peer.is_some_and(|peer| peer.addr() == address)
+                && scope.peer_interface().as_deref() == interface
         };
         named(self.peer, self.peer_scope)
             || named(self.previous_peer, self.previous_peer_scope)
@@ -98,7 +102,7 @@ impl RouteEvent {
 /// daemon's local-MAC originator — need the full new best to build a
 /// `RemoteMacView` without a follow-up RIB query. Carrying the full
 /// [`EvpnRibRoute`] on the event side keeps the consumer's hot path
-/// allocation-free: the 416 B event is allocated once, then the
+/// allocation-free: the 384 B event is allocated once, then the
 /// history and live broadcast share that allocation through `Arc`.
 /// Each subscriber clone copies one `Arc`; nested path attributes
 /// remain shared, and the hot path still avoids a follow-up query.

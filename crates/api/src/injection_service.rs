@@ -2760,6 +2760,7 @@ mod tests {
                 ),
                 session_id: u64::from(octet),
                 publication: tokio::sync::watch::channel(None).1,
+                rib_peer: rustbgpd_transport::RibPeerSlot::default(),
             })
             .collect();
         publisher.publish(peers, Arc::new([]));

@@ -1471,7 +1471,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         })?;
         let query_scope = if import {
             RouteQueryScope::Received {
-                peer: peer_filter.map(PeerId::from_addr),
+                peer: peer_key.as_ref().map(|key| {
+                    crate::peer_selector::rib_peer(
+                        self.import_roster.as_ref(),
+                        key.address,
+                        key.interface.as_deref(),
+                    )
+                }),
             }
         } else {
             RouteQueryScope::Best
@@ -1581,7 +1587,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "",
             self.import_roster.as_ref(),
         )?;
-        let target = PeerId::from_addr(target_key.address);
+        let target = crate::peer_selector::rib_peer(
+            self.import_roster.as_ref(),
+            target_key.address,
+            target_key.interface.as_deref(),
+        );
 
         let file = match RpolFile::parse(&req.rpol_source) {
             Ok(file) => file,
@@ -1803,7 +1813,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "",
             roster.as_deref(),
         )?;
-        let peer = key.as_ref().map(|key| key.address);
+        let rib_peer = key.as_ref().map(|key| {
+            roster.as_deref().map_or_else(
+                || PeerId::from_addr(key.address),
+                |roster| roster.rib_peer(key.address, key.interface.as_deref()),
+            )
+        });
         let unavailable =
             || Status::failed_precondition("policy stats runtime unavailable on this listener");
         let roster_cell = self.import_roster.as_ref().ok_or_else(unavailable)?;
@@ -1851,7 +1866,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             // The RIB's published export roster, held across the awaits below.
             let export_roster = export_cell.load();
             let chains = policy_stats_request(deadline, "export", audit.as_ref(), async {
-                capture_export(&export_roster, peer.map(PeerId::from_addr), deadline)
+                capture_export(&export_roster, rib_peer, deadline)
                     .await
                     .map_err(|error| match error {
                         ExportCaptureError::TimedOut => {
@@ -2249,17 +2264,12 @@ fn run_test_policy_page(
         .take(remaining)
     {
         let ctx_peer = if scope.import {
-            Some(route.peer)
+            Some(route.peer.addr())
         } else {
-            scope.target_peer.map(PeerId::from_addr)
+            scope.target_peer
         };
         let as_path_str = dry_run_as_path_string(route, needs_as_path_string);
-        let ctx = dry_run_route_context(
-            route,
-            &as_path_str,
-            ctx_peer.map(PeerId::addr),
-            peer_context,
-        );
+        let ctx = dry_run_route_context(route, &as_path_str, ctx_peer, peer_context);
         response.routes_evaluated += 1;
         let result = chain.evaluate_recording_hits(&ctx, hits);
         if result.action == PolicyAction::Permit {
@@ -4248,10 +4258,7 @@ policy customer-in(peer_lp: u32) {
             settle_time: Duration::from_secs(5),
             settle_remaining: Some(Duration::from_millis(3_750)),
             selection_deferred: false,
-            attached_peers: vec![
-                PeerId::from_addr("192.0.2.1".parse().unwrap()),
-                PeerId::from_addr("2001:db8::2".parse().unwrap()),
-            ],
+            attached_peers: vec!["192.0.2.1".parse().unwrap(), "2001:db8::2".parse().unwrap()],
         }
     }
 
@@ -6934,6 +6941,7 @@ policy client-x {
                 key: eth0_key(),
                 session_id: 1,
                 publication: tokio::sync::watch::channel(None).1,
+                rib_peer: rustbgpd_transport::RibPeerSlot::default(),
             }],
             Vec::new(),
         );
@@ -7171,6 +7179,7 @@ policy client-x {
                     key: eth0_key(),
                     session_id: 1,
                     publication: scoped_rx,
+                    rib_peer: rustbgpd_transport::RibPeerSlot::default(),
                 },
                 roster_support::peer("10.0.0.2", numbered_rx),
             ],
@@ -7235,6 +7244,7 @@ policy client-x {
                 key: PeerKey::new(address.parse().unwrap(), interface.map(str::to_string)),
                 session_id: 1,
                 publication: tokio::sync::watch::channel(None).1,
+                rib_peer: rustbgpd_transport::RibPeerSlot::default(),
             };
         let publisher = crate::import_roster::test_support::publisher(
             vec![peer(LINK_LOCAL, Some("eth1")), peer("192.0.2.1", None)],

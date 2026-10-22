@@ -861,7 +861,7 @@ fn limit_config(
     OutboundPrefixLimitConfig {
         neighbors: neighbors
             .iter()
-            .map(|(peer, ipv4, ipv6)| (*peer, pair(*ipv4, *ipv6)))
+            .map(|(peer, ipv4, ipv6)| (peer.addr(), pair(*ipv4, *ipv6)))
             .collect(),
         groups: groups
             .iter()

@@ -5,6 +5,7 @@
 use std::net::Ipv6Addr;
 
 use rustbgpd_fsm::SessionState;
+use rustbgpd_rib::PeerId;
 use rustbgpd_transport::{LinkSnapshot, LinkState as KernelLink};
 use tokio::sync::watch;
 
@@ -40,7 +41,7 @@ struct Harness {
     mgr: PeerManager,
     commands: mpsc::UnboundedReceiver<Command>,
     links: watch::Sender<Arc<LinkSnapshot>>,
-    _rib_rx: mpsc::Receiver<RibUpdate>,
+    rib_rx: mpsc::Receiver<RibUpdate>,
 }
 
 /// A manager with one interface-only neighbor per name in `interfaces`
@@ -84,7 +85,7 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
         mgr,
         commands,
         links: links_tx,
-        _rib_rx: rib_rx,
+        rib_rx,
     }
 }
 
@@ -204,6 +205,53 @@ async fn an_address_change_replaces_the_peer_only_once_the_session_is_down() {
         h.mgr.peers.contains_key(&swp1_key(3)),
         "same neighbor, new endpoint"
     );
+}
+
+/// An address change is a session down then up under the same RIB
+/// identity: the old endpoint's peer is deleted without releasing the
+/// handle, and the RIB moves the handle to the new endpoint before the new
+/// session starts.
+#[tokio::test]
+async fn an_address_change_keeps_the_neighbors_rib_identity() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let first = h.mgr.rib_peer_of(&swp1_key(2));
+    assert_ne!(
+        first,
+        PeerId::from_addr(IpAddr::V6(ll(2))),
+        "an allocated handle"
+    );
+    assert_eq!(first.interface().as_deref(), Some("swp1"));
+    while h.rib_rx.try_recv().is_ok() {}
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(3)));
+    assert_eq!(
+        h.mgr.rib_peer_of(&swp1_key(3)),
+        first,
+        "same neighbor, same handle"
+    );
+    let sent: Vec<RibUpdate> = std::iter::from_fn(|| h.rib_rx.try_recv().ok()).collect();
+    let deleted = sent
+        .iter()
+        .position(|update| matches!(update, RibUpdate::PeerDeleted { peer, .. } if *peer == first))
+        .expect("the old endpoint's state is deleted");
+    let rebound = sent
+        .iter()
+        .position(|update| {
+            matches!(update, RibUpdate::RebindPeer { peer, endpoint }
+                if *peer == first && endpoint.addr == IpAddr::V6(ll(3))
+                    && endpoint.interface.as_deref() == Some("swp1"))
+        })
+        .expect("the handle moves to the new endpoint");
+    assert!(deleted < rebound);
+    assert!(
+        !sent
+            .iter()
+            .any(|update| matches!(update, RibUpdate::ReleasePeer { .. })),
+        "the handle is never released"
+    );
+    assert!(first.is_live());
 }
 
 #[tokio::test]

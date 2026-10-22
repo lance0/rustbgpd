@@ -130,6 +130,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         fast_external_failover: true,
         link_state: rustbgpd_transport::LinkStateFeed::default(),
         neighbor_counters: rustbgpd_transport::NeighborCounters::default(),
+        rib_peer: rustbgpd_transport::RibPeerSlot::default(),
     }
 }
 

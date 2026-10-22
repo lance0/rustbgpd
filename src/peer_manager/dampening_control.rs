@@ -1,6 +1,5 @@
 //! Manager-owned source-capacity disable and explicit recovery.
 
-use rustbgpd_rib::PeerId;
 use std::sync::Arc;
 
 use rustbgpd_api::peer_types::{
@@ -62,10 +61,12 @@ impl PeerManager {
         retired_sessions: &[u64],
     ) -> Result<(), PeerLifecycleError> {
         let (reply, response) = oneshot::channel();
+        // The retiring neighbor has left the table; its slot is still retained.
+        let rib_peer = self.rib_peer_at(peer);
         let commands = retired_sessions
             .iter()
             .map(|&session_id| RibUpdate::PeerDown {
-                peer: PeerId::from_addr(peer),
+                peer: rib_peer,
                 session_id,
             })
             .chain([RibUpdate::QueryLocRibCount { reply }])
@@ -118,7 +119,7 @@ impl PeerManager {
             if self
                 .send_rib_update(
                     RibUpdate::PeerDown {
-                        peer: PeerId::from_addr(peer.address),
+                        peer: self.rib_peer_of(&peer),
                         session_id,
                     },
                     OperatorReadAdmission::Fenced {
@@ -183,7 +184,7 @@ impl PeerManager {
             ));
         }
         let source = ReceivedRouteSource {
-            peer: PeerId::from_addr(peer.address),
+            peer: self.rib_peer_of(&peer),
             session_id: managed.session_id(),
             peer_asn: Some(asn),
             context: Some(Arc::new(PeerSourceContext {

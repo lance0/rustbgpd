@@ -63,8 +63,8 @@ fn snapshot_peer_order_key_is_fixed_stack_storage() {
         value
     }
 
-    let v4: [u8; 17] = snapshot_peer_order_key(&peer_v4(Ipv4Addr::new(192, 0, 2, 7)));
-    let v6: [u8; 17] = snapshot_peer_order_key(&PeerId::from_addr(IpAddr::V6(Ipv6Addr::new(
+    let v4: [u8; 17] = snapshot_peer_order_key(peer_v4(Ipv4Addr::new(192, 0, 2, 7)));
+    let v6: [u8; 17] = snapshot_peer_order_key(PeerId::from_addr(IpAddr::V6(Ipv6Addr::new(
         0x2001, 0xdb8, 1, 2, 3, 4, 5, 6,
     ))));
     assert_eq!(v4, [0, 192, 0, 2, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -1212,9 +1212,10 @@ fn pcb_winner_label_is_captured_at_its_permit_point() {
     reason = "the exhaustive lane/source-flip matrix enumerates every cell inline"
 )]
 fn pcb_lane_transition_matrix_exhaustive() {
-    const A: IpAddr = OTHER1.addr();
-    const B: IpAddr = OTHER2.addr();
-    const C: IpAddr = MEMBER.addr();
+    // `PeerId::addr` reads the peer table, so spell the fixtures' addresses.
+    const A: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 2));
+    const B: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 3));
+    const C: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1));
     struct Case {
         name: &'static str,
         initial: &'static [(IpAddr, u32)],

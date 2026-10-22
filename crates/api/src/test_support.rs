@@ -225,9 +225,10 @@ pub(crate) fn spawn_fake_rib_with_evpn_history(
                             event_types.is_empty() || event_types.contains(&event.event_type)
                         })
                         .filter(|event| match peer {
-                            Some(peer) => {
-                                event.peer == Some(peer) || event.previous_peer == Some(peer)
-                            }
+                            Some(peer) => [event.peer, event.previous_peer]
+                                .into_iter()
+                                .flatten()
+                                .any(|named| named.addr() == peer),
                             None => true,
                         })
                         .take(limit)

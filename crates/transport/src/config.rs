@@ -697,6 +697,85 @@ impl PartialEq for NeighborCounters {
 
 impl Eq for NeighborCounters {}
 
+/// A session's neighbor identity in the RIB, shared by every session of the
+/// neighbor (a collision's two candidates and each replacement).
+///
+/// The peer manager assigns a configured neighbor its allocated handle
+/// before any session starts. A dynamic neighbor's slot starts empty and its
+/// session allocates the handle the first time it talks to the RIB, which is
+/// only after its OPEN validates. A standalone session (tests, benches) that
+/// nobody assigned uses the pinned handle of its address.
+/// It is runtime state, not configuration: two configs compare equal on it.
+#[derive(Clone, Debug, Default)]
+pub struct RibPeerSlot {
+    cell: Arc<std::sync::OnceLock<rustbgpd_rib::PeerId>>,
+    allocate: bool,
+}
+
+impl RibPeerSlot {
+    /// A slot holding the peer manager's handle for the neighbor.
+    #[must_use]
+    pub fn assigned(peer: rustbgpd_rib::PeerId) -> Self {
+        Self {
+            cell: Arc::new(std::sync::OnceLock::from(peer)),
+            allocate: false,
+        }
+    }
+
+    /// An empty slot whose session allocates a new handle on first use.
+    #[must_use]
+    pub fn allocate_after_open() -> Self {
+        Self {
+            cell: Arc::default(),
+            allocate: true,
+        }
+    }
+
+    /// The handle, once assigned or allocated.
+    #[must_use]
+    pub fn get(&self) -> Option<rustbgpd_rib::PeerId> {
+        self.cell.get().copied()
+    }
+
+    /// The handle a reader outside the session uses for a neighbor at
+    /// `addr`, without allocating: the assigned or allocated handle,
+    /// [`PeerId::UNASSIGNED`](rustbgpd_rib::PeerId::UNASSIGNED) while a
+    /// dynamic neighbor has none, and the address's pinned handle for an
+    /// unassigned standalone slot, as its session would use.
+    #[must_use]
+    pub fn current(&self, addr: std::net::IpAddr) -> rustbgpd_rib::PeerId {
+        match self.get() {
+            Some(peer) => peer,
+            None if self.allocate => rustbgpd_rib::PeerId::UNASSIGNED,
+            None => rustbgpd_rib::PeerId::from_addr(addr),
+        }
+    }
+
+    /// The handle, allocating (or, for an unassigned standalone slot,
+    /// pinning) it for `endpoint` on first use.
+    pub(crate) fn resolve(
+        &self,
+        endpoint: impl FnOnce() -> rustbgpd_rib::PeerEndpoint,
+    ) -> rustbgpd_rib::PeerId {
+        *self.cell.get_or_init(|| {
+            let endpoint = endpoint();
+            if self.allocate {
+                rustbgpd_rib::PeerId::allocate(endpoint)
+            } else {
+                rustbgpd_rib::PeerId::from_addr(endpoint.addr)
+            }
+        })
+    }
+}
+
+impl PartialEq for RibPeerSlot {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for RibPeerSlot {}
+
 /// Transport-layer configuration for a single BGP peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(
@@ -897,6 +976,10 @@ pub struct TransportConfig {
     /// starts a standalone one; the peer manager installs the block it owns
     /// for the neighbor before spawning any session.
     pub neighbor_counters: NeighborCounters,
+    /// The neighbor's RIB identity. [`TransportConfig::new`] leaves it
+    /// unassigned; the peer manager installs the neighbor's slot before
+    /// spawning any session.
+    pub rib_peer: RibPeerSlot,
 }
 
 /// Default slow-peer backlog threshold: half the writer's outbound
@@ -1015,6 +1098,7 @@ impl TransportConfig {
             fast_external_failover: true,
             link_state: crate::link::LinkStateFeed::default(),
             neighbor_counters: NeighborCounters::default(),
+            rib_peer: RibPeerSlot::default(),
         }
     }
 }

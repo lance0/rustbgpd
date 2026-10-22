@@ -2247,7 +2247,7 @@ fn review2_conditional_attachment_removal_preserves_complete_sparse_handoff() {
     let _ = manager.handle_install_conditional_advertisements(
         crate::ConditionalAdvertisementSet {
             definitions: vec![definition.clone()],
-            attachments: [(peer, vec![Arc::from("conditional")])]
+            attachments: [(peer.addr(), vec![Arc::from("conditional")])]
                 .into_iter()
                 .collect(),
         },

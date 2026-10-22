@@ -9563,7 +9563,7 @@ fn candidate_state_for_peer(
     let mut states = impact
         .entries
         .iter()
-        .filter(|row| row.peer == PeerId::from_addr(peer))
+        .filter(|row| row.peer == peer)
         .map(|row| &row.candidate);
     let first = states
         .next()
@@ -9583,7 +9583,7 @@ fn planned_families(
     impact
         .entries
         .iter()
-        .filter(|row| row.peer == PeerId::from_addr(peer))
+        .filter(|row| row.peer == peer)
         .map(|row| (row.afi, row.safi))
         .collect()
 }
@@ -9737,7 +9737,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
             .update_group_impact
             .entries
             .iter()
-            .filter(|row| row.peer == PeerId::from_addr(peer))
+            .filter(|row| row.peer == peer)
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.transition == expected));
@@ -10078,7 +10078,7 @@ async fn config_transaction_plan_matches_real_post_apply_heterogeneous_update_gr
         let rows = impact
             .entries
             .iter()
-            .filter(|row| row.peer == PeerId::from_addr(*peer))
+            .filter(|row| row.peer == *peer)
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].afi, rows[0].safi), (1, 1));

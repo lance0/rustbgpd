@@ -3290,6 +3290,7 @@ impl RibManager {
             | RibUpdate::ReplayPeerOutbound { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
             | RibUpdate::PeerDeleted { .. }
+            | RibUpdate::RebindPeer { .. }
             | RibUpdate::InjectRoute { .. }
             | RibUpdate::InjectLeasedRoute { .. }
             | RibUpdate::WithdrawInjected { .. }
@@ -3797,6 +3798,15 @@ impl RibManager {
     /// entry, the timer sweeps, End-of-RIB and teardown publish at their
     /// own sites.
     fn handle_update(&mut self, update: RibUpdate) {
+        if let Some(peer) = update.session_peer()
+            && !peer.is_live()
+        {
+            debug!(
+                %peer,
+                "discarding a session message that names a deleted neighbor's handle"
+            );
+            return;
+        }
         let receipt_peer = match &update {
             RibUpdate::BgpLsRoutesReceived { peer, .. }
             | RibUpdate::VpnRoutesReceived { peer, .. }
@@ -3972,6 +3982,12 @@ impl RibManager {
                 }
             }
             RibUpdate::PeerDeleted { peer, label } => self.handle_peer_deleted(peer, label),
+            RibUpdate::ReleasePeer { peer } => {
+                if !peer.release() {
+                    debug!(%peer, "release of a handle that was not live");
+                }
+            }
+            RibUpdate::RebindPeer { peer, endpoint } => self.handle_rebind_peer(peer, endpoint),
             RibUpdate::PeerUp {
                 peer,
                 session_id,

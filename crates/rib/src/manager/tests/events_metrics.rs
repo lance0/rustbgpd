@@ -8,11 +8,13 @@ use crate::test_support::peer_v4;
 fn event_storage_layout_and_lazy_history_capacity_are_pinned() {
     use std::mem::size_of;
 
-    assert_eq!(size_of::<crate::event::RouteEvent>(), 120);
+    // Three 8-byte peer handles in place of 17-byte addresses.
+    assert_eq!(size_of::<crate::event::RouteEvent>(), 96);
     // SMET widens the Copy key from 36 to 64 B while the full route stays
-    // 68 B; the millisecond `i64` event time replaced a 24 B `String`.
+    // 68 B; the millisecond `i64` event time replaced a 24 B `String`; the
+    // two routes' peer handles are 8 B where addresses were 17 B.
     // Neither Arc slots nor the lazy history's initial capacity grow.
-    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 416);
+    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 384);
     assert_eq!(size_of::<Arc<crate::event::RouteEvent>>(), 8);
     assert_eq!(size_of::<Arc<crate::event::EvpnRouteEvent>>(), 8);
 
@@ -1826,7 +1828,7 @@ async fn route_events_keep_the_scope_their_routes_were_learned_on() {
         async move {
             let (reply, response) = oneshot::channel();
             tx.send(RibUpdate::QueryRouteEventHistory {
-                peer,
+                peer: peer.map(PeerId::addr),
                 peer_interface: interface,
                 afi: None,
                 prefix: None,

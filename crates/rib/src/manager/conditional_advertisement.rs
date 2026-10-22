@@ -17,7 +17,7 @@
 //! before the export chain in every unicast export body.
 
 use crate::PeerId;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -151,7 +151,7 @@ pub struct ConditionalAdvertisementStatus {
     /// RFC 4724 selection deferral holds a condition family.
     pub selection_deferred: bool,
     /// Static neighbors with this definition attached.
-    pub attached_peers: Vec<PeerId>,
+    pub attached_peers: Vec<IpAddr>,
 }
 
 /// One complete conditional-advertisement install (ADR-0137): every
@@ -162,15 +162,17 @@ pub struct ConditionalAdvertisementStatus {
 pub struct ConditionalAdvertisementSet {
     /// Resolved definitions referenced by at least one attachment.
     pub definitions: Vec<ConditionalAdvertisement>,
-    /// Attached definition names per static neighbor address.
-    pub attachments: BTreeMap<PeerId, Vec<Arc<str>>>,
+    /// Attached definition names per static neighbor address. Keyed by the
+    /// configured address, not a [`PeerId`]: configuration compares equal
+    /// across reloads, and handles are runtime state.
+    pub attachments: BTreeMap<IpAddr, Vec<Arc<str>>>,
 }
 
 impl ConditionalAdvertisementSet {
     /// Whether an `advertise_policy` attached to `peer` references any of
     /// `datasets` (the dataset-refresh export dependency).
     #[must_use]
-    pub fn advertise_policy_references(&self, peer: PeerId, datasets: &[String]) -> bool {
+    pub fn advertise_policy_references(&self, peer: IpAddr, datasets: &[String]) -> bool {
         self.attachments.get(&peer).is_some_and(|names| {
             self.definitions.iter().any(|definition| {
                 names.contains(&definition.name)
@@ -290,7 +292,7 @@ pub(super) struct ConditionalAdvertisementTracker {
     definitions: BTreeMap<Arc<str>, DefinitionState>,
     /// Attached definition names per static neighbor address. Installed
     /// together with `definitions`; the only attachment state the gate reads.
-    attachments: BTreeMap<PeerId, Vec<Arc<str>>>,
+    attachments: BTreeMap<IpAddr, Vec<Arc<str>>>,
     /// Condition entries by base prefix, for the per-change cover walk.
     by_prefix: FamilyPrefixMap<Vec<(Arc<str>, PrefixSetEntry)>>,
     installed: bool,
@@ -307,7 +309,7 @@ pub(super) struct ConditionalAdvertisementTracker {
 #[derive(Clone, Debug)]
 pub struct ConditionalAdvertisementCapture {
     definitions: BTreeMap<Arc<str>, DefinitionState>,
-    attachments: BTreeMap<PeerId, Vec<Arc<str>>>,
+    attachments: BTreeMap<IpAddr, Vec<Arc<str>>>,
     installed: bool,
 }
 
@@ -1093,7 +1095,7 @@ impl RibManager {
     /// applied state.
     fn settle_conditional_advertisement_change(
         &mut self,
-        prior_attachments: &BTreeMap<PeerId, Vec<Arc<str>>>,
+        prior_attachments: &BTreeMap<IpAddr, Vec<Arc<str>>>,
         prior_definitions: &BTreeMap<Arc<str>, Arc<ConditionalAdvertisement>>,
         transitions: &[Arc<str>],
     ) {
@@ -1107,11 +1109,18 @@ impl RibManager {
         let attachments = &self.conditional_advertisements.attachments;
         let mut regroup = Vec::new();
         let mut dirty = BTreeSet::new();
-        for peer in prior_attachments.keys().chain(attachments.keys()) {
-            let before = prior_attachments.get(peer);
-            let after = attachments.get(peer);
+        // Attachments are keyed by configured address; the registered
+        // sessions at each address are the peers they apply to.
+        let mut registered: HashMap<IpAddr, Vec<PeerId>> = HashMap::new();
+        for &peer in self.outbound_peers.keys() {
+            registered.entry(peer.addr()).or_default().push(peer);
+        }
+        for address in prior_attachments.keys().chain(attachments.keys()) {
+            let before = prior_attachments.get(address);
+            let after = attachments.get(address);
+            let peers = registered.get(address).map_or(&[][..], Vec::as_slice);
             if before.is_some() != after.is_some() {
-                regroup.push(*peer);
+                regroup.extend_from_slice(peers);
             }
             if before != after
                 || before
@@ -1120,10 +1129,9 @@ impl RibManager {
                     .flatten()
                     .any(|name| changed.contains(name))
             {
-                dirty.insert(*peer);
+                dirty.extend(peers.iter().copied());
             }
         }
-        dirty.retain(|peer| self.outbound_peers.contains_key(peer));
         if dirty.is_empty() {
             return;
         }
@@ -1157,16 +1165,20 @@ impl RibManager {
         if names.is_empty() {
             return;
         }
-        let peers: Vec<PeerId> = self
+        let attached: BTreeSet<IpAddr> = self
             .conditional_advertisements
             .attachments
             .iter()
-            .filter(|(peer, attached)| {
-                self.outbound_peers.contains_key(*peer)
-                    && attached.iter().any(|name| names.contains(name))
-            })
-            .map(|(peer, _)| *peer)
+            .filter(|(_, attached)| attached.iter().any(|name| names.contains(name)))
+            .map(|(address, _)| *address)
             .collect();
+        let mut peers: Vec<PeerId> = self
+            .outbound_peers
+            .keys()
+            .copied()
+            .filter(|peer| attached.contains(&peer.addr()))
+            .collect();
+        peers.sort_by_key(|peer| peer.addr());
         if !peers.is_empty() {
             self.advance_export_settings();
         }
@@ -1184,7 +1196,7 @@ impl RibManager {
     pub(super) fn peer_has_conditional_advertisements(&self, peer: PeerId) -> bool {
         self.conditional_advertisements
             .attachments
-            .contains_key(&peer)
+            .contains_key(&peer.addr())
     }
 
     /// The `advertise_policy` of every installed definition attached to
@@ -1195,7 +1207,7 @@ impl RibManager {
     ) -> impl Iterator<Item = &PolicyChain> {
         self.conditional_advertisements
             .attachments
-            .get(&peer)
+            .get(&peer.addr())
             .into_iter()
             .flatten()
             .filter_map(|name| self.conditional_advertisements.definitions.get(name))
@@ -1207,7 +1219,10 @@ impl RibManager {
     /// steady state evaluates no predicate. Explain always gets the attached
     /// entries, with their condition rendered.
     pub(super) fn conditional_gate(&self, peer: PeerId, explain: bool) -> Option<ConditionalGate> {
-        let names = self.conditional_advertisements.attachments.get(&peer)?;
+        let names = self
+            .conditional_advertisements
+            .attachments
+            .get(&peer.addr())?;
         let entries: Vec<GateEntry> = names
             .iter()
             .map(|name| {
@@ -1343,7 +1358,7 @@ impl RibManager {
         let now = Instant::now();
         let tracker = &self.conditional_advertisements;
         // One pass over the attachments; peers come out in address order.
-        let mut attached: BTreeMap<&Arc<str>, Vec<PeerId>> = BTreeMap::new();
+        let mut attached: BTreeMap<&Arc<str>, Vec<IpAddr>> = BTreeMap::new();
         for (peer, names) in &tracker.attachments {
             for name in names {
                 attached.entry(name).or_default().push(*peer);

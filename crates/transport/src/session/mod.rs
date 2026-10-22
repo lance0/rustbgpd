@@ -1007,7 +1007,9 @@ struct AcceptedTransport {
 impl PeerSession {
     /// This session's neighbor identity in the RIB.
     pub(super) fn rib_peer(&self) -> PeerId {
-        PeerId::from_addr(self.peer_ip)
+        self.config.rib_peer.resolve(|| {
+            rustbgpd_rib::PeerEndpoint::new(self.peer_ip, self.config.peer_interface.as_deref())
+        })
     }
 
     fn path_receive_admission(&self) -> Option<PathReceiveAdmission> {

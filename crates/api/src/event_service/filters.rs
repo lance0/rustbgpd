@@ -41,7 +41,7 @@ impl WatchEventsFilter {
         }
 
         if let Some(peer) = &self.peer
-            && !event.involves(PeerId::from_addr(peer.address), peer.interface.as_deref())
+            && !event.involves(peer.address, peer.interface.as_deref())
         {
             return false;
         }
@@ -255,8 +255,10 @@ impl WatchEventsFilter {
 
         // EVPN events carry bare addresses; see the dataplane note above.
         if let Some(peer) = &self.peer {
-            let matches_current = event.peer == Some(PeerId::from_addr(peer.address));
-            let matches_previous = event.previous_peer == Some(PeerId::from_addr(peer.address));
+            let named =
+                |named: Option<PeerId>| named.is_some_and(|named| named.addr() == peer.address);
+            let matches_current = named(event.peer);
+            let matches_previous = named(event.previous_peer);
             if !matches_current && !matches_previous {
                 return false;
             }

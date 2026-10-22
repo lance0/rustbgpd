@@ -1266,8 +1266,8 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
         crate::ConditionalAdvertisementSet {
             definitions: vec![core, absent_if(SETTLE)],
             attachments: [
-                (peer(1), vec![Arc::from(NAME)]),
-                (peer(2), vec![Arc::from(NAME), Arc::from("core")]),
+                (peer(1).addr(), vec![Arc::from(NAME)]),
+                (peer(2).addr(), vec![Arc::from(NAME), Arc::from("core")]),
             ]
             .into_iter()
             .collect(),
@@ -1292,12 +1292,12 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
     assert_eq!(backup.settle_time, SETTLE);
     assert_eq!(backup.settle_remaining, Some(SETTLE));
     assert!(!backup.selection_deferred);
-    assert_eq!(backup.attached_peers, [peer(1), peer(2)]);
+    assert_eq!(backup.attached_peers, [peer(1).addr(), peer(2).addr()]);
     // settle_time 0 applies at install: settled, nothing armed.
     let core = status(&manager, "core");
     assert_eq!((core.observed, core.applied), ("absent", "suppress"));
     assert_eq!(core.settle_remaining, None);
-    assert_eq!(core.attached_peers, [peer(2)]);
+    assert_eq!(core.attached_peers, [peer(2).addr()]);
 
     // A changed observation restarts the timer; time shows on both clocks.
     advance(Duration::from_secs(2)).await;
@@ -1352,7 +1352,9 @@ async fn status_query_is_served_by_the_running_actor() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_conditional_advertisements(crate::ConditionalAdvertisementSet {
             definitions: vec![absent_if(SETTLE)],
-            attachments: [(peer(1), vec![Arc::from(NAME)])].into_iter().collect(),
+            attachments: [(peer(1).addr(), vec![Arc::from(NAME)])]
+                .into_iter()
+                .collect(),
         });
     let actor = tokio::spawn(manager.run());
     let (reply, response) = oneshot::channel();
@@ -1362,7 +1364,7 @@ async fn status_query_is_served_by_the_running_actor() {
     let statuses = response.await.unwrap();
     assert_eq!(statuses.len(), 1);
     assert_eq!(&*statuses[0].name, NAME);
-    assert_eq!(statuses[0].attached_peers, [peer(1)]);
+    assert_eq!(statuses[0].attached_peers, [peer(1).addr()]);
     drop(tx);
     actor.await.unwrap();
 }

@@ -3,6 +3,7 @@
 //! and the query, explain, paging and update-group planning types they carry.
 
 use crate::PeerId;
+use crate::peer_id::PeerEndpoint;
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -351,7 +352,7 @@ impl PlannedGroupability {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateGroupFamilyImpact {
-    pub peer: PeerId,
+    pub peer: IpAddr,
     pub afi: u16,
     pub safi: u8,
     pub current: PlannedGroupability,
@@ -2313,8 +2314,9 @@ impl OutboundPrefixLimitPair {
 /// without the caller enumerating live sessions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutboundPrefixLimitConfig {
-    /// Per-neighbor overrides, keyed by neighbor address.
-    pub neighbors: HashMap<PeerId, OutboundPrefixLimitPair>,
+    /// Per-neighbor overrides, keyed by the configured neighbor address
+    /// (configuration compares equal across reloads; handles are runtime).
+    pub neighbors: HashMap<IpAddr, OutboundPrefixLimitPair>,
     /// Peer-group defaults, keyed by group name.
     pub groups: HashMap<String, OutboundPrefixLimitPair>,
 }
@@ -2596,6 +2598,26 @@ pub enum RibUpdate {
         /// on another interface may already own. `None` reaps the bare
         /// address.
         label: Option<Arc<str>>,
+    },
+    /// Return a deleted neighbor's handle to the peer table, after the
+    /// `PeerDeleted` that cleaned up its state. The peer manager sends it
+    /// once the neighbor is gone for good (not across a reconfigure), so
+    /// every message its sessions queued earlier is still processed and any
+    /// later one carrying the handle is dropped.
+    ReleasePeer {
+        /// The deleted neighbor.
+        peer: PeerId,
+    },
+    /// Move a live neighbor to a new endpoint: an interface-only neighbor
+    /// whose learned address changed. Sent before the new endpoint's session
+    /// starts. Routes still retained from the previous endpoint's session
+    /// are purged first, so no route ever resolves to an endpoint other than
+    /// the one it was learned on.
+    RebindPeer {
+        /// The neighbor, keeping its handle.
+        peer: PeerId,
+        /// Its new endpoint.
+        endpoint: PeerEndpoint,
     },
     /// Peer session established — register for outbound updates.
     PeerUp {
@@ -3135,8 +3157,9 @@ pub enum RibUpdate {
     QueryRouteEventHistory {
         /// Optional peer filter. Matches both the current and previous
         /// best-path peer so peer-scoped queries include withdraws and
-        /// best-path moves away from the peer.
-        peer: Option<PeerId>,
+        /// best-path moves away from the peer. An address, not a handle:
+        /// history also names neighbors since deleted or re-added.
+        peer: Option<IpAddr>,
         /// Interface of a scoped `peer`, matched against the interface each
         /// event recorded. `None` selects a numbered peer.
         peer_interface: Option<Arc<str>>,
@@ -3163,7 +3186,9 @@ pub enum RibUpdate {
     /// Query recent EVPN best-path change events from the bounded in-memory history.
     QueryEvpnRouteEventHistory {
         /// Optional peer filter. Matches both the current and previous best-path peer.
-        peer: Option<PeerId>,
+        /// An address, not a handle: history also names neighbors since
+        /// deleted or re-added.
+        peer: Option<IpAddr>,
         /// Optional EVPN route type filter. `None` = all route types.
         route_type: Option<u8>,
         /// Optional Route Distinguisher filter. `None` = all RDs.
@@ -3973,6 +3998,45 @@ pub enum RibUpdate {
         /// Response channel: `(afi, safi, count)` per family.
         reply: oneshot::Sender<Vec<(u16, u8, u64)>>,
     },
+}
+
+impl RibUpdate {
+    /// The neighbor a session-sourced message belongs to. The RIB drops such
+    /// a message when that handle is no longer live: its neighbor was deleted
+    /// (and perhaps re-added under a new handle) after the message was sent.
+    #[must_use]
+    pub fn session_peer(&self) -> Option<PeerId> {
+        match self {
+            Self::WireRoutesReceived(received) => Some(received.peer),
+            Self::RoutesReceived { peer, .. }
+            | Self::BgpLsRoutesReceived { peer, .. }
+            | Self::VpnRoutesReceived { peer, .. }
+            | Self::LabeledRoutesReceived { peer, .. }
+            | Self::RtcRoutesReceived { peer, .. }
+            | Self::PeerDown { peer, .. }
+            | Self::PeerUp { peer, .. }
+            | Self::PeerAddPathLimits { peer, .. }
+            | Self::PeerFamilySendable { peer, .. }
+            | Self::PeerOrfUpdate { peer, .. }
+            | Self::PeerSlowState { peer, .. }
+            | Self::SetPeerSessionExportPolicy { peer, .. }
+            | Self::SetPeerSourceContext { peer, .. }
+            | Self::SetPeerPolicyContext { peer, .. }
+            | Self::SetPeerExportPolicyCounters { peer, .. }
+            | Self::SetPeerExportContext { peer, .. }
+            | Self::SetPeerWithheldFamilies { peer, .. }
+            | Self::SetPeerRsControl { peer, .. }
+            | Self::SetPeerExportEncoder { peer, .. }
+            | Self::SetPeerGracefulRestartContext { peer, .. }
+            | Self::EndOfRib { peer, .. }
+            | Self::PeerGracefulRestart { peer, .. }
+            | Self::RouteRefreshRequest { peer, .. }
+            | Self::BeginRouteRefresh { peer, .. }
+            | Self::EndRouteRefresh { peer, .. }
+            | Self::RouteRefreshTimeout { peer, .. } => Some(*peer),
+            _ => None,
+        }
+    }
 }
 
 /// Actor-atomic response for the internal EVPN dataplane snapshot query.

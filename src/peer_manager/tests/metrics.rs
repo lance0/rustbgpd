@@ -497,6 +497,7 @@ async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
     replacement.interface = Some(interface.to_string());
     replacement.scope_id = None;
     replacement.hold_time = Some(30);
+    let rib_peer = mgr.rib_peer_of(&scoped_key(addr.addr(), interface));
 
     let result = mgr
         .reconcile_peers(Vec::new(), Vec::new(), vec![replacement])
@@ -521,7 +522,11 @@ async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
     assert_eq!(peer_metric_series_count(&metrics_view, peer_label), 0);
     // The ordered RIB-side reap marker was queued
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
-    assert!(matches!(update, RibUpdate::PeerDeleted { peer, .. } if peer == addr));
+    assert!(matches!(update, RibUpdate::PeerDeleted { peer, .. } if peer == rib_peer));
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::ReleasePeer { peer }) if peer == rib_peer
+    ));
 }
 
 #[tokio::test]
@@ -557,6 +562,9 @@ async fn reconcile_changed_peer_failed_replacement_preserves_scoped_sibling() {
     let mut replacement = make_config(addr, 65002);
     replacement.interface = Some("rustbgpd-test-missing0".to_string());
     replacement.scope_id = None;
+    let failed = mgr.rib_peer_of(&scoped_key(addr, "rustbgpd-test-missing0"));
+    let sibling = mgr.rib_peer_of(&scoped_key(addr, "eth0"));
+    assert_ne!(failed, sibling);
 
     let result = mgr
         .reconcile_peers(Vec::new(), Vec::new(), vec![replacement])
@@ -593,10 +601,16 @@ async fn reconcile_changed_peer_failed_replacement_preserves_scoped_sibling() {
         ),
         6
     );
-    assert!(
-        rib_rx.try_recv().is_err(),
-        "surviving sibling owns bare address so RIB delete is not queued"
-    );
+    // Each neighbor owns its RIB handle: only the failed one is deleted.
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::PeerDeleted { peer, .. }) if peer == failed
+    ));
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::ReleasePeer { peer }) if peer == failed
+    ));
+    assert!(rib_rx.try_recv().is_err());
 }
 
 #[tokio::test(start_paused = true)]
@@ -678,7 +692,7 @@ async fn peer_presence_rollback_reap_after_shutdown_preserves_scoped_sibling() {
 }
 
 #[tokio::test]
-async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last() {
+async fn peer_presence_scoped_siblings_remove_exactly_with_their_own_rib_handles() {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -702,6 +716,8 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
             .await
             .unwrap();
     }
+    let (first_rib_peer, last_rib_peer) = (mgr.rib_peer_of(&first), mgr.rib_peer_of(&last));
+    assert_ne!(first_rib_peer, last_rib_peer);
 
     mgr.delete_peer(first, false).await.unwrap();
     assert_eq!(
@@ -731,11 +747,15 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
         ),
         6
     );
-    assert!(
-        rib_rx.try_recv().is_err(),
-        "surviving sibling owns bare address"
-    );
+    // Each neighbor owns its RIB handle; the survivor's is untouched.
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::PeerDeleted { peer, .. }) if peer == first_rib_peer
+    ));
     mgr.delete_peer(last, false).await.unwrap();
+    assert!(
+        matches!(rib_rx.try_recv(), Ok(RibUpdate::ReleasePeer { peer }) if peer == first_rib_peer)
+    );
     assert_eq!(
         peer_identity_series_count(
             &mgr.metrics,
@@ -756,7 +776,7 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
     );
     assert!(matches!(
         rib_rx.try_recv(),
-        Ok(RibUpdate::PeerDeleted { peer, .. }) if peer == address
+        Ok(RibUpdate::PeerDeleted { peer, .. }) if peer == last_rib_peer
     ));
     let removed = query_session_event_history(
         &mgr,
@@ -1019,7 +1039,7 @@ fn peer_presence_source_ordering_contracts() {
         .split_once("reap_deleted_peer_metric_series_for_key")
         .unwrap()
         .1;
-    assert!(reap.find("PeerRemoved").unwrap() < reap.find("peer_keys_for_address").unwrap());
+    assert!(reap.find("PeerRemoved").unwrap() < reap.find("RibUpdate::PeerDeleted").unwrap());
     let deletion = lifecycle
         .split_once("pub(super) async fn delete_peer_checked")
         .unwrap()
@@ -1379,7 +1399,11 @@ fn rfc9972_rpki_counts_remain_exact_under_add_path_and_project_zero_rows() {
         )],
     );
     assert_eq!(
-        super::super::snapshot::rfc9972_rpki_validation_counts(addr, &state, Some(&rpki)),
+        super::super::snapshot::rfc9972_rpki_validation_counts(
+            PeerId::from_addr(addr),
+            &state,
+            Some(&rpki)
+        ),
         Some(vec![
             (
                 1,
@@ -1395,7 +1419,11 @@ fn rfc9972_rpki_counts_remain_exact_under_add_path_and_project_zero_rows() {
         "path-aware RIB counters remain exact under Add-Path and project negotiated zero rows"
     );
     assert_eq!(
-        super::super::snapshot::rfc9972_rpki_validation_counts(addr, &state, None),
+        super::super::snapshot::rfc9972_rpki_validation_counts(
+            PeerId::from_addr(addr),
+            &state,
+            None
+        ),
         None,
         "missing VRP authority omits types 35/36/37"
     );

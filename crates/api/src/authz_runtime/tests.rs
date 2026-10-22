@@ -1,4 +1,3 @@
-use rustbgpd_rib::PeerId;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -1056,7 +1055,7 @@ fn spawn_conditional_status_rib(
                 settle_time: std::time::Duration::from_secs(5),
                 settle_remaining: None,
                 selection_deferred: false,
-                attached_peers: vec![PeerId::from_addr("192.0.2.1".parse().unwrap())],
+                attached_peers: vec!["192.0.2.1".parse().unwrap()],
             }]);
         }
         served

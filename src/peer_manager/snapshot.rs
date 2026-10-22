@@ -92,13 +92,13 @@ pub(super) fn rfc9972_policy_reject_counts(
 }
 
 pub(super) fn rfc9972_rpki_validation_counts(
-    peer: IpAddr,
+    peer: PeerId,
     state: &PeerSessionState,
     counts: Option<&rustbgpd_rib::AdjRibInRpkiCounts>,
 ) -> Option<Vec<(u16, u8, rustbgpd_bmp::BmpRpkiValidationCounts)>> {
     let session = state.negotiated_session.as_ref()?;
     let counts = counts?;
-    let peer_counts = counts.get(&PeerId::from_addr(peer));
+    let peer_counts = counts.get(&peer);
     let mut projected = Vec::with_capacity(2);
     for (afi, safi) in [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)] {
         if !session.families.contains(&(afi, safi)) {
@@ -631,6 +631,7 @@ impl PeerManager {
                     format!("Established peer {peer} has no negotiated BGP identifier")
                 })?;
             sessions.push(WarmCheckpointSession {
+                rib_peer: self.rib_peer_of(&peer),
                 peer,
                 session_id,
                 peer_asn,
@@ -905,6 +906,7 @@ impl PeerManager {
         }
         for (peer, managed) in &self.peers {
             let peer_addr = peer.address;
+            let rib_peer = self.rib_peer_of(peer);
             let state = match states.get(peer) {
                 Some(StateQueryOutcome::State(state)) => state,
                 Some(StateQueryOutcome::TimedOut) => {
@@ -927,7 +929,7 @@ impl PeerManager {
             let rfc9972_adj_rib_in_post = rfc9972_adj_rib_in_counts(state);
             let rfc9972_policy_rejects = rfc9972_policy_reject_counts(state);
             let rfc9972_rpki_adj_rib_in_post = rfc9972_rpki_validation_counts(
-                peer_addr,
+                rib_peer,
                 state,
                 bmp_peer_stats
                     .as_ref()
@@ -940,7 +942,7 @@ impl PeerManager {
             let adj_rib_out_post = bmp_peer_stats.as_ref().map(|stats| {
                 stats
                     .adj_rib_out_post
-                    .get(&PeerId::from_addr(peer_addr))
+                    .get(&rib_peer)
                     .map(|families| {
                         families
                             .iter()

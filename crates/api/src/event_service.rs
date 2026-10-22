@@ -1,6 +1,5 @@
 //! Unified live event stream service.
 
-use rustbgpd_rib::PeerId;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -505,7 +504,7 @@ impl proto::event_service_server::EventService for EventService {
         let filter = parse_list_evpn_events_filter(&request.into_inner(), self.roster.as_ref())?;
         let events = rib_manager_read(&self.rib_tx, |reply| {
             RibUpdate::QueryEvpnRouteEventHistory {
-                peer: filter.peer.map(PeerId::from_addr),
+                peer: filter.peer,
                 route_type: filter.route_type,
                 rd: filter.rd,
                 event_types: filter.event_types,

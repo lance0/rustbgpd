@@ -1422,7 +1422,7 @@ impl RibManager {
         siblings.sort_by(|a, b| {
             a.next_hop
                 .cmp(&b.next_hop)
-                .then(a.peer.addr().cmp(&b.peer.addr()))
+                .then(a.peer.cmp_selection(b.peer))
                 .then(a.path_id.cmp(&b.path_id))
         });
         let mut next_hops = Vec::new();
@@ -2041,7 +2041,11 @@ impl RibManager {
         let mut resumed = after.map(|(peer, scope)| {
             smallest_keys_after(
                 self.export_candidates(&managed),
-                Some(&(peer, scope, true)),
+                Some(&ExportCandidate {
+                    addr: peer,
+                    scope,
+                    peer: Some(PeerId::LOCAL),
+                }),
                 budget + 1,
             )
         });
@@ -2088,20 +2092,22 @@ impl RibManager {
             budget -= take.max(1);
             entry.peers = remaining[..take]
                 .iter()
-                .map(|(peer, scope, registered)| {
-                    if *registered {
-                        export(self, PeerId::from_addr(*peer), route)
-                    } else {
-                        not_established_export(PeerId::from_addr(*peer), scope.clone())
-                    }
+                .map(|candidate| match candidate.peer {
+                    Some(peer) => export(self, peer, route),
+                    // ponytail: a row label only, pinned once per address; S3
+                    // gives export rows the managed neighbor's own handle.
+                    None => not_established_export(
+                        PeerId::from_addr(candidate.addr),
+                        candidate.scope.clone(),
+                    ),
                 })
                 .collect();
             listed.push(entry);
             if take < remaining.len() {
-                let (peer, scope, _) = &remaining[take - 1];
+                let last = &remaining[take - 1];
                 next = Some(RouteExportCursor {
                     key: index,
-                    after: Some((*peer, scope.clone())),
+                    after: Some((last.addr, last.scope.clone())),
                 });
                 break;
             }
@@ -2172,22 +2178,28 @@ impl RibManager {
         &'a self,
         managed: &'a [ExportDestination],
     ) -> impl Iterator<Item = ExportCandidate> + 'a {
-        let registered = self.peer_sendable_families.keys().map(|&peer| {
-            (
-                peer.addr(),
-                self.session_peer_scope(peer).peer_interface(),
-                true,
-            )
-        });
+        let registered: Vec<ExportCandidate> = self
+            .peer_sendable_families
+            .keys()
+            .map(|&peer| ExportCandidate {
+                addr: peer.addr(),
+                scope: self.session_peer_scope(peer).peer_interface(),
+                peer: Some(peer),
+            })
+            .collect();
+        let destinations: HashSet<(IpAddr, Option<Arc<str>>)> = registered
+            .iter()
+            .map(|candidate| (candidate.addr, candidate.scope.clone()))
+            .collect();
         let unregistered = managed
             .iter()
-            .filter(|(peer, scope)| {
-                let peer = PeerId::from_addr(*peer);
-                !(self.peer_sendable_families.contains_key(&peer)
-                    && self.session_peer_scope(peer).peer_interface() == *scope)
-            })
-            .map(|(peer, scope)| (*peer, scope.clone(), false));
-        registered.chain(unregistered)
+            .filter(move |destination| !destinations.contains(*destination))
+            .map(|(addr, scope)| ExportCandidate {
+                addr: *addr,
+                scope: scope.clone(),
+                peer: None,
+            });
+        registered.into_iter().chain(unregistered)
     }
 
     /// [`RouteExportVersion::policy`]: the installed export chains' change
@@ -3714,7 +3726,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_route_event_history(
         &mut self,
-        peer: Option<(PeerId, Option<&str>)>,
+        peer: Option<(IpAddr, Option<&str>)>,
         afi: Option<Afi>,
         prefix: Option<Prefix>,
         limit: usize,
@@ -3759,7 +3771,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_evpn_route_event_history(
         &mut self,
-        peer: Option<PeerId>,
+        peer: Option<IpAddr>,
         route_type: Option<u8>,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
         event_types: &std::collections::BTreeSet<RouteEventType>,
@@ -3782,7 +3794,10 @@ impl RibManager {
             .filter(|event| rd.is_none_or(|rd| crate::event::evpn_key_rd(&event.key) == Some(rd)))
             .filter(|event| event_types.is_empty() || event_types.contains(&event.event_type))
             .filter(|event| match peer {
-                Some(peer) => event.peer == Some(peer) || event.previous_peer == Some(peer),
+                Some(peer) => [event.peer, event.previous_peer]
+                    .into_iter()
+                    .flatten()
+                    .any(|named| named.addr() == peer),
                 None => true,
             })
             .take(limit)
@@ -4231,7 +4246,41 @@ impl RibManager {
 /// updates. Each destination is listed once, so the order is the
 /// destination order; a cursor compares with the flag set, which skips its
 /// destination either way.
-type ExportCandidate = (IpAddr, Option<Arc<str>>, bool);
+/// A destination of an export walk: the address, the scope of a scoped
+/// neighbor, and the neighbor when a session is registered for it. Walks
+/// order by address, then scope, then unregistered before registered.
+#[derive(Debug, Clone)]
+struct ExportCandidate {
+    addr: IpAddr,
+    scope: Option<Arc<str>>,
+    peer: Option<PeerId>,
+}
+
+impl ExportCandidate {
+    fn order_key(&self) -> (IpAddr, Option<&str>, bool) {
+        (self.addr, self.scope.as_deref(), self.peer.is_some())
+    }
+}
+
+impl PartialEq for ExportCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.order_key() == other.order_key()
+    }
+}
+
+impl Eq for ExportCandidate {}
+
+impl PartialOrd for ExportCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ExportCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.order_key().cmp(&other.order_key())
+    }
+}
 
 /// Fingerprint of the local route state that export reads for every
 /// queried key, absent routes included, for [`RouteExportVersion::route`].

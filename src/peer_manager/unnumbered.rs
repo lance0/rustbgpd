@@ -65,6 +65,11 @@ struct Port {
     refused: Option<Ipv6Addr>,
     /// Operator and safety state carried from a retired endpoint to the next.
     held: Option<HeldState>,
+    /// The neighbor's RIB identity, allocated at its first binding and kept
+    /// across every later endpoint: an address change is a session down and
+    /// up under the same `PeerId`. Never released; the stanza lives until
+    /// restart.
+    rib_peer: Option<rustbgpd_rib::PeerId>,
 }
 
 /// State of an interface-only neighbor that belongs to the neighbor, not to
@@ -336,6 +341,16 @@ impl PeerManager {
     }
 
     /// The interface whose interface-only neighbor owns `peer`.
+    /// Whether an interface-only neighbor keeps `peer` as its RIB identity.
+    pub(super) fn unnumbered_holds(&self, peer: rustbgpd_rib::PeerId) -> bool {
+        self.unnumbered.as_ref().is_some_and(|unnumbered| {
+            unnumbered
+                .ports
+                .values()
+                .any(|port| port.rib_peer == Some(peer))
+        })
+    }
+
     pub(super) fn unnumbered_owner_of(&self, peer: &PeerKey) -> Option<&str> {
         self.unnumbered
             .as_ref()?
@@ -532,15 +547,52 @@ impl PeerManager {
             self.recompute_next_max_prefix_restart_deadline();
             carried_latch = true;
         }
+        // The neighbor keeps its RIB identity across endpoints. The RIB moves
+        // it to the new endpoint, in order after the previous binding's
+        // deletion and before the new session's first message.
+        let rib_peer = self.port_mut(name).rib_peer;
+        if let Some(rib_peer) = rib_peer {
+            self.rib_peers.insert(
+                key.clone(),
+                rustbgpd_transport::RibPeerSlot::assigned(rib_peer),
+            );
+            let next = rustbgpd_rib::PeerEndpoint::new(IpAddr::V6(endpoint.address), Some(name));
+            if rib_peer.endpoint().as_ref() != Some(&next)
+                && self
+                    .send_rib_update(
+                        rustbgpd_rib::RibUpdate::RebindPeer {
+                            peer: rib_peer,
+                            endpoint: next,
+                        },
+                        super::OperatorReadAdmission::Fenced {
+                            reason: "an interface-only neighbor is changing endpoint",
+                        },
+                    )
+                    .await
+                    .is_err()
+            {
+                self.rib_peers.remove(&key);
+                self.port_mut(name).held = held;
+                return Err(PeerLifecycleError::Internal(
+                    "RIB channel closed while rebinding the neighbor".into(),
+                ));
+            }
+        }
         if let Err(error) = self.add_peer_impl(config, false, enabled, true).await {
             if carried_latch {
                 self.remove_max_prefix_latch(&key);
+            }
+            if rib_peer.is_some() {
+                self.rib_peers.remove(&key);
             }
             self.port_mut(name).held = held;
             return Err(error);
         }
         info!(interface = %name, peer = %key, enabled, "unnumbered: bound peer added");
-        self.port_mut(name).bound = Some(key);
+        let rib_peer = self.rib_peer_of(&key);
+        let port = self.port_mut(name);
+        port.rib_peer = port.rib_peer.or(Some(rib_peer));
+        port.bound = Some(key);
         Ok(())
     }
 }

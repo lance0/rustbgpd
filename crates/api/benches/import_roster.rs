@@ -108,6 +108,7 @@ fn bench_publish(c: &mut Criterion) {
                         key: key.clone(),
                         session_id: *session_id,
                         publication: publication.clone(),
+                        rib_peer: rustbgpd_transport::RibPeerSlot::default(),
                     })
                     .collect();
                 publisher.publish(rows, Arc::clone(&datasets));
@@ -138,6 +139,7 @@ fn bench_capture(c: &mut Criterion) {
                     key: key.clone(),
                     session_id: 1,
                     publication: receiver.clone(),
+                    rib_peer: rustbgpd_transport::RibPeerSlot::default(),
                 })
                 .collect(),
             Vec::new().into(),
@@ -191,6 +193,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
                     key: key.clone(),
                     session_id: *session_id,
                     publication: publication.clone(),
+                    rib_peer: rustbgpd_transport::RibPeerSlot::default(),
                 })
                 .collect();
             publisher.publish(rows, Arc::clone(&datasets));

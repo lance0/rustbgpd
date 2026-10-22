@@ -3,7 +3,6 @@
 //! Stores the single best route per prefix, selected via `best_path_cmp`.
 
 use std::cmp::Ordering;
-use std::net::IpAddr;
 use std::time::SystemTime;
 
 use rustbgpd_wire::{Afi, AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
@@ -1049,7 +1048,7 @@ pub(crate) fn evpn_cmp_with_reason(
         other => return (other, R::ShorterClusterList),
     }
     // 8. Final tiebreak: lower peer address wins (deterministic).
-    (a.peer.addr().cmp(&b.peer.addr()), R::LowerPeerAddress)
+    (a.peer.cmp_selection(b.peer), R::LowerPeerAddress)
 }
 
 /// Values for the decisive EVPN comparator step, in winner / comparison order.
@@ -1194,7 +1193,7 @@ fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
     //    zero today: FlowSpec does not negotiate Add-Path). The identifier
     //    has no preference semantics (RFC 7911 §2); it only makes distinct
     //    same-peer routes a total order.
-    cmp_ipaddr(&a.peer.addr(), &b.peer.addr()).then_with(|| a.path_id.cmp(&b.path_id))
+    crate::best_path::peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
 }
 
 fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
@@ -1245,7 +1244,7 @@ fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
         return cmp;
     }
 
-    cmp_ipaddr(&a.peer.addr(), &b.peer.addr())
+    crate::best_path::peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
 }
 
 fn bgpls_stale_rank(route: &BgpLsRibRoute) -> u8 {
@@ -1379,7 +1378,7 @@ fn vpn_cmp_chain(
     // negotiates Add-Path, so one peer can hold several otherwise-tied
     // routes. The identifier has no preference semantics (RFC 7911 §2);
     // it only makes the order total, independent of candidate order.
-    cmp_ipaddr(&a.peer.addr(), &b.peer.addr()).then_with(|| a.path_id.cmp(&b.path_id))
+    crate::best_path::peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
 }
 
 pub(crate) fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
@@ -1514,7 +1513,7 @@ fn labeled_cmp_chain(
     // negotiates Add-Path, so one peer can hold several otherwise-tied
     // routes. The identifier has no preference semantics (RFC 7911 §2);
     // it only makes the order total, independent of candidate order.
-    cmp_ipaddr(&a.peer.addr(), &b.peer.addr()).then_with(|| a.path_id.cmp(&b.path_id))
+    crate::best_path::peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
 }
 
 fn labeled_stale_rank(route: &LabeledRibRoute) -> u8 {
@@ -1600,7 +1599,7 @@ fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
         return cmp;
     }
 
-    cmp_ipaddr(&a.peer.addr(), &b.peer.addr())
+    crate::best_path::peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
 }
 
 fn rtc_stale_rank(route: &RtcRibRoute) -> u8 {
@@ -1636,16 +1635,6 @@ fn rtc_originator_id(route: &RtcRibRoute) -> Option<std::net::Ipv4Addr> {
         PathAttribute::OriginatorId(id) => Some(*id),
         _ => None,
     })
-}
-
-/// Compare two `IpAddr` values, treating V4 < V6.
-fn cmp_ipaddr(a: &IpAddr, b: &IpAddr) -> std::cmp::Ordering {
-    match (a, b) {
-        (IpAddr::V4(a4), IpAddr::V4(b4)) => a4.cmp(b4),
-        (IpAddr::V6(a6), IpAddr::V6(b6)) => a6.cmp(b6),
-        (IpAddr::V4(_), IpAddr::V6(_)) => std::cmp::Ordering::Less,
-        (IpAddr::V6(_), IpAddr::V4(_)) => std::cmp::Ordering::Greater,
-    }
 }
 
 impl Default for LocRib {
@@ -3358,6 +3347,41 @@ mod tests {
         assert!(loc.evpn_es_keys.is_empty());
         assert_eq!(loc.iter_evpn_es().count(), 0);
         assert_eq!(loc.evpn_len(), 2_000);
+    }
+
+    #[test]
+    fn family_comparators_order_same_address_neighbors_by_interface_name() {
+        use crate::best_path::BestPathReason as R;
+        let scoped = |name: &str| {
+            PeerId::allocate(crate::PeerEndpoint::new(
+                "fe80::1".parse().unwrap(),
+                Some(name),
+            ))
+        };
+        // Allocated in reverse, so handle order disagrees with the winner.
+        let (eth1, eth0) = (scoped("eth1"), scoped("eth0"));
+        let mut evpn = [make_evpn_type2(1, vec![]), make_evpn_type2(1, vec![])];
+        evpn[0].peer = eth0;
+        evpn[1].peer = eth1;
+        assert_eq!(
+            evpn_cmp_with_reason(&evpn[0], &evpn[1]),
+            (Ordering::Less, R::LowerPeerAddress)
+        );
+        assert_eq!(evpn_tiebreak_simple(&evpn[1], &evpn[0]), Ordering::Greater);
+        let nlri = vpn_nlri([10, 1, 0, 0], 24, 100);
+        let mut vpn = [
+            make_vpn_route(nlri.clone(), 1, 100),
+            make_vpn_route(nlri, 1, 100),
+        ];
+        vpn[0].peer = eth0;
+        vpn[1].peer = eth1;
+        assert_eq!(vpn_tiebreak(&vpn[0], &vpn[1]), Ordering::Less);
+        assert_eq!(
+            vpn_tiebreak_orr(&vpn[1], &vpn[0], Some(5), Some(5)),
+            Ordering::Greater
+        );
+        assert!(eth0.release());
+        assert!(eth1.release());
     }
 
     #[test]

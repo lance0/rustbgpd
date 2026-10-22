@@ -687,11 +687,12 @@ async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
     let mut updated = make_config(addr.addr(), 65002);
     updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
     mgr.hot_update_peer(updated).await.unwrap();
+    // The neighbor's allocated RIB handle, not one derived from its address.
     assert_eq!(
         seen_rx
             .try_recv()
             .expect("hot-applying local_ipv6_nexthop must force an outbound refresh"),
-        addr
+        mgr.rib_peer_of(&PeerKey::new(addr.addr(), None))
     );
 
     // `remove_private_as` changes already-advertised AS_PATHs.
@@ -703,7 +704,7 @@ async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
         seen_rx
             .try_recv()
             .expect("hot-applying remove_private_as must force an outbound refresh"),
-        addr
+        mgr.rib_peer_of(&PeerKey::new(addr.addr(), None))
     );
 }
 
@@ -1833,4 +1834,63 @@ async fn neighbor_policy_reads_with_a_stale_scope_are_not_found() {
         .await;
         assert_eq!(response.await.unwrap().is_some(), managed, "{key}");
     }
+}
+
+/// Acceptance (peer manager side of the generational `PeerId`): a configured
+/// neighbor's sessions use an allocated handle, not one derived from its
+/// address; a reconfigure keeps it; a deletion releases it through the RIB,
+/// so the RIB drops anything that still names it, and a re-add gets a new one.
+#[tokio::test]
+async fn a_neighbor_keeps_its_rib_identity_across_reconfigure_and_loses_it_on_delete() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let (_query_tx, query_rx) = mpsc::channel(1);
+    let rib = tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 77));
+    let peer = key(addr);
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    let first = mgr.rib_peer_of(&peer);
+    assert_ne!(first, PeerId::from_addr(addr), "an allocated handle");
+    assert_eq!(first.addr(), addr);
+    assert_eq!(
+        mgr.peers[&peer].transport_config.rib_peer.get(),
+        Some(first)
+    );
+
+    let mut changed = make_config(addr, 65002);
+    changed.hold_time = Some(30);
+    mgr.reconfigure_peer(changed).await.unwrap();
+    assert_eq!(mgr.rib_peer_of(&peer), first, "stable across a reconfigure");
+
+    mgr.delete_peer(peer.clone(), false).await.unwrap();
+    // A RIB round trip: the release is processed in the RIB's order.
+    let (reply, response) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    response.await.unwrap();
+    assert!(!first.is_live(), "deletion released the handle");
+
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    let second = mgr.rib_peer_of(&peer);
+    assert_ne!(second, first, "a re-added neighbor gets a new handle");
+    assert!(second.is_live());
+
+    mgr.delete_peer(peer, false).await.unwrap();
+    drop(mgr);
+    drop(rib_tx);
+    rib.await.unwrap();
 }

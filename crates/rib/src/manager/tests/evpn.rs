@@ -3280,7 +3280,7 @@ async fn query_evpn_event_history(
 ) -> Vec<crate::event::EvpnRouteEvent> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryEvpnRouteEventHistory {
-        peer,
+        peer: peer.map(PeerId::addr),
         route_type,
         rd,
         event_types,
