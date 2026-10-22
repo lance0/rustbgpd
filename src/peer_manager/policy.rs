@@ -483,6 +483,40 @@ fn record_import_validation_refresh_metrics(
 }
 
 impl PeerManager {
+    /// ADR-0142: a bound interface-only peer takes its session settings only
+    /// when it binds. A runtime catalog edit that would change them (a
+    /// peer-group transport knob, `admin_down`, max-prefix restart) cannot
+    /// reach its running session, so it is refused before any effect rather
+    /// than applied to every other member and silently skipped for it.
+    /// Policy-only edits never reach here: they apply to bound peers live.
+    pub(super) fn refuse_interface_only_session_change(
+        &self,
+        event: &ConfigEvent,
+    ) -> Result<(), CatalogMutationError> {
+        if self.current_config.neighbors.interface_only().is_empty() {
+            return Ok(());
+        }
+        let mut candidate = self.current_config.clone();
+        // An event that does not apply is reported by the change path itself.
+        if apply_config_event(&mut candidate, event).is_err() {
+            return Ok(());
+        }
+        let changed =
+            crate::config::interface_only_session_changes(&self.current_config, &candidate);
+        if changed.is_empty() {
+            Ok(())
+        } else {
+            Err(CatalogMutationError::RestartRequired(format!(
+                "this change alters the session settings of the interface-only neighbor on {}, \
+                 which a bound peer takes only when it binds; make it in the configuration file \
+                 and restart rustbgpd",
+                changed.join(", ")
+            )))
+        }
+    }
+}
+
+impl PeerManager {
     pub(super) fn installed_policy_routes_reachability(&self) -> InstalledPolicyRoutesReachability {
         let mut snapshot = InstalledPolicyRoutesReachability::default();
         for (peer, managed) in &self.peers {

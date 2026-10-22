@@ -1380,7 +1380,10 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   running set, logs an error, and is refused if the rest of the new
   configuration is invalid against that running set (for example a static
   link-local neighbor on the same interface, or a deleted peer group the
-  neighbor uses). Inbound sessions are accepted only from the learned address.
+  neighbor uses). A runtime `SetPeerGroup` that would change such a
+  neighbor's session settings is refused with `FAILED_PRECONDITION`; a
+  policy-only group edit applies to it live. Inbound sessions are accepted
+  only from the learned address.
 - **Operator removal.** The session belongs to the neighbor's configuration:
   `rbgp neighbor <address> delete` and `DeleteNeighbor` refuse it with
   `FAILED_PRECONDITION`. Remove the `interface` stanza and restart instead.

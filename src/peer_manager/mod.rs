@@ -1687,6 +1687,9 @@ impl PeerManager {
                         };
                         if self.peer_group_policy_only_update(&name, &definition) {
                             self.apply_policy_change_owned(event, None).await
+                        } else if let Err(error) = self.refuse_interface_only_session_change(&event)
+                        {
+                            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
                         } else {
                             let affected: Vec<IpAddr> = self
                                 .current_config
@@ -2412,6 +2415,8 @@ impl PeerManager {
                 };
                 let result = if self.peer_group_policy_only_update(&name, &definition) {
                     self.apply_policy_change(event, None).await
+                } else if let Err(error) = self.refuse_interface_only_session_change(&event) {
+                    Err(error)
                 } else {
                     let affected: Vec<IpAddr> = self
                         .current_config
