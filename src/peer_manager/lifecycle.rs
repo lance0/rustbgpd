@@ -496,6 +496,7 @@ impl PeerManager {
             interface: peer.interface.clone(),
             scope_id: tc.peer_scope_id,
             remote_asn: managed.remote_asn,
+            remote_asn_external: managed.transport_config.peer.remote_asn_external,
             description: managed.description.clone(),
             peer_group: managed.peer_group.clone(),
             admin_down: managed.admin_down.clone(),
@@ -704,6 +705,15 @@ impl PeerManager {
         }
         if self.peers.contains_key(&peer_key) {
             return Err(PeerLifecycleError::AlreadyExists(peer_key));
+        }
+        // ADR-0142 admission: until the RIB keys peers by scope, a link-local
+        // address an interface-only neighbor holds is refused to any other.
+        if let Some(holder) = self.unnumbered_holder_of(config.address, &peer_key) {
+            return Err(PeerLifecycleError::Invalid(format!(
+                "duplicate_link_local_address: peer {peer_key} uses {}, which the \
+                 interface-only neighbor on {holder} holds",
+                config.address
+            )));
         }
         if let Some(interface) = &config.interface
             && config.scope_id.is_none()
@@ -2023,6 +2033,7 @@ impl PeerManager {
             self.reap_deleted_peer_metric_series_for_key(&peer_for_reap)
                 .await;
         }
+        self.note_peer_removed();
         Ok(removed_config)
     }
 

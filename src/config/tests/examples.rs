@@ -750,7 +750,11 @@ fn m52_interop_config_enables_multipath_relax_with_mixed_asns() {
     .unwrap();
     assert!(config.global.multipath_relax);
     assert_eq!(config.fib_tables[0].maximum_paths, Some(2));
-    let asns: Vec<u32> = config.neighbors.iter().map(|n| n.remote_asn).collect();
+    let asns: Vec<u32> = config
+        .neighbors
+        .iter()
+        .map(|n| n.remote_asn.resolve(config.global.asn))
+        .collect();
     assert_eq!(asns, vec![65002, 65003], "peers must be in different ASes");
 }
 
@@ -769,7 +773,7 @@ fn m55_interop_config_pins_role_matrix_and_strict_neighbor() {
         .map(|n| {
             (
                 n.address.clone(),
-                n.remote_asn,
+                n.remote_asn.resolve(config.global.asn),
                 n.role.map(BgpRoleConfig::to_wire),
                 n.strict_role,
             )

@@ -946,9 +946,9 @@ complete atomic block. There is no probe or automatic legacy fallback.
 
 | Field                  | Type     | Required | Default | Description                                      |
 |------------------------|----------|----------|---------|--------------------------------------------------|
-| `address`              | string   | yes      | --      | Peer IP address (IPv4 or IPv6)                   |
+| `address`              | string   | yes, unless interface-only | -- | Peer IP address (IPv4 or IPv6). Omit it only together with `interface` for an [interface-only neighbor](#interface-only-neighbors) |
 | `interface`            | string   | IPv6 link-local only | -- | Interface name for `fe80::/10` / unnumbered peers |
-| `remote_asn`           | u32      | yes      | --      | Peer's autonomous system number                  |
+| `remote_asn`           | u32 or string | yes | --      | Peer's autonomous system number, or `"external"` (any ASN except `global.asn`) or `"internal"` (`global.asn`). Both string forms are checked against the ASN in the peer's OPEN |
 | `description`          | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
 | `peer_group`           | string   | no       | --      | Named peer-group to inherit transport and policy defaults from      |
 | `admin_down`           | bool     | no       | false   | Keep the configured neighbor administratively down: added disabled at startup, no connection attempts, inbound connections refused, still listed in `rbgp neighbor` and metrics. Inherits from the peer group. See [Administrative down](#administrative-down-admin_down) |
@@ -1312,6 +1312,65 @@ observation-gate predecessor deprecation in the same immutable generation.
 A still-later SIGHUP can delete deprecated MKTs that are not selected, provided
 the owner set, survivor order, and key definitions are unchanged; deleting a
 non-deprecated or selected key remains restart-required.
+
+### Interface-only neighbors
+
+An interface-only neighbor names a port and no address, as FRR's
+`neighbor swp1 interface remote-as external` does
+([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)). rustbgpd learns
+the peer's IPv6 link-local address from the Router Advertisements it sends on
+that link and opens an ordinary scoped link-local session to it.
+
+```toml
+[global.unnumbered]            # optional
+router_advertisements = true   # default
+ra_interval_secs = 10          # default; 4..=1800
+
+[[neighbors]]
+interface = "swp1"
+remote_asn = "external"
+families = ["ipv4_unicast", "ipv6_unicast"]
+```
+
+- **Privilege.** Router Advertisements are received on a raw ICMPv6 socket, so
+  the daemon needs `CAP_NET_RAW` whenever an interface-only neighbor is
+  configured. `rustbgpd --check` and startup fail with an error naming
+  `CAP_NET_RAW` when it is missing; the daemon never runs such a neighbor
+  without discovery. Linux only.
+- **Sending.** The daemon advertises itself on these interfaces, and only
+  these, so the peer can discover it, and sends one Router Solicitation when
+  the link comes up. `ra_interval_secs` is RFC 4861 `MaxRtrAdvInterval`; the
+  advertised Router Lifetime is three times it (30 s by default). **A non-zero
+  Router Lifetime advertises this router as eligible to be an IPv6 default
+  router (RFC 4861), even though the advertisement carries no prefix.** That
+  is intended for dedicated fabric links. `router_advertisements = false`
+  stops sending (RAs and the link-up RS); reception stays on, so `CAP_NET_RAW`
+  is still required.
+- **Binding.** The neighbor binds one learned address at a time and keeps it
+  while it stays live. Discovery never ends an Established session: an
+  address change takes effect only after the session fails (hold timer, BFD,
+  NOTIFICATION or TCP close), and the peer then moves to the new address,
+  purging the routes learned from the old one.
+- **Carrier.** Confirmed carrier loss, admin down or removal of the interface
+  ends the session at once and purges its routes; there is no Graceful
+  Restart retention for them. The interface need not exist when the
+  configuration loads.
+- **One per interface.** Each interface has at most one interface-only
+  neighbor, and none if it already has a static link-local neighbor.
+- **Rejected** on an interface-only neighbor: `md5_password` and `tcp_ao`
+  (there is no TCP-layer authentication on these sessions yet; the link
+  itself, OPEN validation against `remote_asn`, and optional GTSM protect
+  them), `ttl_security_hops` above 1, BFD, `fast_external_failover = false`,
+  and explicit `[global] listen_addresses`.
+- **Same address on two links.** Until the RIB keys neighbors by scope, a
+  learned address that another neighbor already holds is refused with
+  `duplicate_link_local_address`. Parallel links to one device that reuse a
+  router MAC on every port, or `fe80::1` on every port, therefore bring up
+  only the first link admitted.
+- **Restart-required.** Adding, removing or editing an interface-only
+  neighbor, or `[global.unnumbered]`, takes a restart; a reload keeps the
+  running set and logs an error. Inbound sessions are accepted only from the
+  learned address.
 
 ### Administrative down (`admin_down`)
 

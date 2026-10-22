@@ -108,7 +108,10 @@ fn valid_config_parses() {
     let config = parse(valid_toml()).unwrap();
     assert_eq!(config.global.asn, 65001);
     assert_eq!(config.neighbors.len(), 1);
-    assert_eq!(config.neighbors[0].remote_asn, 65002);
+    assert_eq!(
+        config.neighbors[0].remote_asn,
+        crate::config::RemoteAsn::Asn(65002)
+    );
 }
 
 #[test]
@@ -887,7 +890,7 @@ fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
         min_hold_time: None,
         address: addr.to_string(),
         interface: None,
-        remote_asn: asn,
+        remote_asn: asn.into(),
         description: None,
         peer_group: None,
         hold_time: None,
@@ -2513,5 +2516,6 @@ mod rpol;
 mod telemetry;
 mod transaction;
 mod transport_auth;
+mod unnumbered;
 
 mod dampening;

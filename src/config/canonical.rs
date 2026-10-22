@@ -6,8 +6,8 @@ use serde::{Serialize, Serializer};
 use super::{
     BfdProfileConfig, BmpConfig, Config, ConfigEpoch, DynamicNeighborConfig, EthernetSegmentConfig,
     EvpnCoreIsolationConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig, FlowSpecConfig,
-    Global, GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
-    PeerGroupConfig, PolicyConfig, PolicyExplainConfig, PolicyRejectRetentionConfig,
+    Global, GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig,
+    NeighborList, PeerGroupConfig, PolicyConfig, PolicyExplainConfig, PolicyRejectRetentionConfig,
     PolicyStatementConfig, RpkiConfig, SecurityConfig,
 };
 
@@ -418,7 +418,7 @@ struct CanonicalConfig<'a> {
     global: Global,
     #[serde(skip_serializing_if = "Option::is_none")]
     security: Option<&'a SecurityConfig>,
-    neighbors: &'a [Neighbor],
+    neighbors: &'a NeighborList,
     #[serde(serialize_with = "super::schema::serialize_sorted_hash_map")]
     peer_groups: &'a std::collections::HashMap<String, PeerGroupConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -648,6 +648,7 @@ impl PeerManager {
         if let Some(peer_asn) = *peer_asn {
             self.learn_dynamic_remote_asn(&peer_key, peer_asn);
         }
+        self.note_unnumbered_session_state(&peer_key, *old, *new);
         self.publish_state_lifecycle_event(&peer_key, role, *old, *new, teardown_cause.as_deref());
     }
 

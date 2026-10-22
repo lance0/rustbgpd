@@ -2145,11 +2145,26 @@ fn zero_static_peer_summary(dynamic_range_count: usize) -> String {
     }
 }
 
+/// `[global.unnumbered]` as the discovery engine takes it; validation has
+/// already bounded `ra_interval_secs`.
+#[cfg(target_os = "linux")]
+fn unnumbered_discovery_config(config: &Config) -> ra_discovery::DiscoveryConfig {
+    let unnumbered = config.global.unnumbered.clone().unwrap_or_default();
+    ra_discovery::DiscoveryConfig {
+        send: unnumbered.router_advertisements.unwrap_or(true),
+        timing: unnumbered
+            .ra_interval_secs
+            .map_or_else(ra_discovery::RaTiming::default, |secs| {
+                ra_discovery::RaTiming::new(secs).expect("validated in Config::load")
+            }),
+    }
+}
+
 fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
     let ebgp = config
         .neighbors
         .iter()
-        .filter(|n| n.remote_asn != config.global.asn)
+        .filter(|n| n.remote_asn.resolve(config.global.asn) != config.global.asn)
         .count();
     let ibgp = config.neighbors.len() - ebgp;
     let peer_groups = config.peer_groups.len();
@@ -2894,6 +2909,18 @@ fn main() -> ExitCode {
              the core-isolation stop hook and the daemon must use the same directory",
             config.runtime_state_dir().display()
         );
+        process::exit(1);
+    }
+
+    // ADR-0142: interface-only neighbors receive Router Advertisements on a
+    // raw ICMPv6 socket. Without CAP_NET_RAW, `--check` and startup fail
+    // here instead of running without discovery.
+    #[cfg(target_os = "linux")]
+    if diff_path.is_none()
+        && !config.neighbors.interface_only().is_empty()
+        && let Err(error) = ra_discovery::probe_raw_socket()
+    {
+        eprintln!("error: {error}");
         process::exit(1);
     }
 
@@ -5061,9 +5088,30 @@ async fn run<T>(
     // Fast external failover: confirmed interface-down events. Without the
     // monitor, sessions keep relying on the hold timer and BFD.
     #[cfg(target_os = "linux")]
-    let peer_mgr = match link_failover::spawn(metrics.clone()).await {
-        Some(events) => peer_mgr.with_link_failover(events),
-        None => peer_mgr,
+    let (peer_mgr, link_monitor) = match link_failover::spawn(metrics.clone()).await {
+        Some(events) => (peer_mgr.with_link_failover(events), true),
+        None => (peer_mgr, false),
+    };
+    // ADR-0142: interface-only neighbors learn their peer from Router
+    // Advertisements and follow carrier through the link monitor; without
+    // either, refuse to start rather than run them blind.
+    #[cfg(target_os = "linux")]
+    let peer_mgr = if config.neighbors.interface_only().is_empty() {
+        peer_mgr
+    } else {
+        if !link_monitor {
+            error!("interface-only neighbors need the netlink link monitor, which did not start");
+            process::exit(1);
+        }
+        match ra_discovery::RaDiscovery::spawn(unnumbered_discovery_config(&config)) {
+            Ok((discovery, events)) => {
+                peer_mgr.with_unnumbered(peer_manager::Unnumbered::new(discovery, events))
+            }
+            Err(error) => {
+                error!(%error, "interface-only neighbor discovery could not start");
+                process::exit(1);
+            }
+        }
     };
     // Retained: supervised by the shutdown `select!` below and joined by the
     // coordinated teardown after it.
@@ -6176,6 +6224,7 @@ async fn run<T>(
             interface: transport_config.peer_interface.clone(),
             scope_id: transport_config.peer_scope_id,
             remote_asn: transport_config.peer.remote_asn,
+            remote_asn_external: transport_config.peer.remote_asn_external,
             description: label.clone(),
             peer_group,
             admin_down: neighbor.admin_down,
@@ -10972,6 +11021,7 @@ peer_group = "plain"
                 listen_addresses: None,
                 cluster_id: None,
                 runtime_state_dir: "/tmp".to_string(),
+                unnumbered: None,
                 telemetry: crate::config::TelemetryConfig {
                     prometheus_addr: Some("127.0.0.1:9179".to_string()),
                     dataplane_readiness: false,
@@ -11005,7 +11055,7 @@ peer_group = "plain"
                     min_hold_time: None,
                     address: "10.0.0.2".to_string(),
                     interface: None,
-                    remote_asn: 65002,
+                    remote_asn: 65002.into(),
                     description: None,
                     peer_group: None,
                     hold_time: None,
@@ -11077,7 +11127,7 @@ peer_group = "plain"
                     min_hold_time: None,
                     address: "10.0.0.3".to_string(),
                     interface: None,
-                    remote_asn: 65003,
+                    remote_asn: 65003.into(),
                     description: None,
                     peer_group: None,
                     hold_time: None,
@@ -11149,7 +11199,7 @@ peer_group = "plain"
                     min_hold_time: None,
                     address: "10.0.0.4".to_string(),
                     interface: None,
-                    remote_asn: 65004,
+                    remote_asn: 65004.into(),
                     description: None,
                     peer_group: None,
                     hold_time: None,
@@ -11214,7 +11264,8 @@ peer_group = "plain"
                     route_flap_dampening: None,
                     log_level: None,
                 },
-            ],
+            ]
+            .into(),
             peer_groups: std::collections::HashMap::new(),
             policy: crate::config::PolicyConfig::default(),
             flowspec: crate::config::FlowSpecConfig::default(),

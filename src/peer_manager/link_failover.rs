@@ -104,6 +104,7 @@ impl PeerManager {
     /// its single pending flag. Link-local BFD scopes are reconciled
     /// afterwards, as their own run-loop step.
     pub(super) fn handle_links_changed(&mut self) {
+        self.feed_unnumbered_links();
         self.link_check.bfd_refresh_due = true;
         let targets = self.link_check_targets();
         debug!(

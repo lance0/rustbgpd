@@ -51,7 +51,8 @@ pub struct RaDiscovery {
     task: tokio::task::JoinHandle<()>,
 }
 
-enum Command {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Command {
     Start(String),
     Stop(String),
     Link(LinkEvent),
@@ -101,6 +102,19 @@ impl RaDiscovery {
         ))
     }
 
+    /// A handle whose inputs are recorded instead of driving an actor, for
+    /// tests of the neighbor owner.
+    #[cfg(test)]
+    pub(crate) fn recording() -> (Self, mpsc::UnboundedReceiver<Command>) {
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let handle = Self {
+            commands,
+            counters: Arc::default(),
+            task: tokio::spawn(async {}),
+        };
+        (handle, command_rx)
+    }
+
     pub fn start(&self, interface: &str) {
         let _ = self.commands.send(Command::Start(interface.to_owned()));
     }
@@ -147,6 +161,12 @@ impl RaDiscovery {
             Err(_) => warn!("RA discovery actor shutdown timed out"),
         }
     }
+}
+
+/// Open and close a raw `ICMPv6` socket: `--check` and startup refuse an
+/// interface-only configuration with [`DiscoveryError::MissingCapNetRaw`].
+pub fn probe_raw_socket() -> Result<(), DiscoveryError> {
+    raw_socket().map(drop)
 }
 
 fn raw_socket() -> Result<Socket, DiscoveryError> {

@@ -234,7 +234,7 @@ async fn apply_policy_change_fans_out_to_scoped_peers() {
     n0.interface = Some("eth0".to_string());
     let mut n1 = config_neighbor(peer1, 65002);
     n1.interface = Some("eth1".to_string());
-    mgr.current_config.neighbors = vec![n0, n1];
+    *mgr.current_config.neighbors = vec![n0, n1];
 
     mgr.apply_policy_change(
         ConfigEvent::SetNeighborSet {
@@ -308,7 +308,7 @@ async fn sync_rpol_policies_reresolves_chains_and_rejects_shadowing() {
     );
     let mut neighbor = config_neighbor(peer, 65002);
     neighbor.import_policy_chain = vec!["edge-in".to_string()];
-    mgr.current_config.neighbors = vec![neighbor];
+    *mgr.current_config.neighbors = vec![neighbor];
     mgr.current_config.policy.rpol =
         registry("policy edge-in { term all { set local-pref 150; accept } }");
 
@@ -424,7 +424,7 @@ async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessio
     );
     let mut neighbor = config_neighbor(peer, 65002);
     neighbor.import_policy_chain = vec!["edge-in".to_string()];
-    mgr.current_config.neighbors = vec![neighbor];
+    *mgr.current_config.neighbors = vec![neighbor];
     mgr.current_config.policy.rpol = registry(
         "edge-in",
         "policy edge-in { term all { set local-pref 150; accept } }",
@@ -616,7 +616,7 @@ async fn rejected_rpol_sync_freezes_policy_generation_timestamp() {
     );
     let mut neighbor = config_neighbor(peer, 65002);
     neighbor.import_policy_chain = vec!["edge-in".to_string()];
-    mgr.current_config.neighbors = vec![neighbor];
+    *mgr.current_config.neighbors = vec![neighbor];
     mgr.current_config.policy.rpol = registry(
         "edge-in",
         "policy edge-in { term all { set local-pref 150; accept } }",
@@ -1434,7 +1434,7 @@ async fn owned_rpol_sync_reports_ambiguous_failed_session() {
     insert_test_managed_peer(&mut mgr, peer, closed_peer_handle(), false);
     let mut neighbor = config_neighbor(peer, 65002);
     neighbor.import_policy_chain = vec!["edge-in".to_string()];
-    mgr.current_config.neighbors = vec![neighbor];
+    *mgr.current_config.neighbors = vec![neighbor];
 
     let file =
         Arc::new(RpolFile::parse("policy edge-in { term all { accept } }").expect("clean rpol"));
@@ -1509,7 +1509,7 @@ async fn owned_policy_failure_diagnostic_never_carries_session_secret_text() {
     );
     let mut neighbor = config_neighbor(peer, 65002);
     neighbor.import_policy_chain = vec!["edge-import".to_string()];
-    mgr.current_config.neighbors = vec![neighbor];
+    *mgr.current_config.neighbors = vec![neighbor];
 
     let outcome = mgr
         .apply_policy_change_owned(
@@ -1562,7 +1562,7 @@ async fn owned_policy_failure_diagnostic_never_carries_rib_secret_text() {
     );
     let mut neighbor = config_neighbor(peer.addr(), 65002);
     neighbor.export_policy_chain = vec!["edge-export".to_string()];
-    mgr.current_config.neighbors = vec![neighbor];
+    *mgr.current_config.neighbors = vec![neighbor];
 
     let apply = mgr.apply_policy_change_owned(
         ConfigEvent::SetPolicy {
@@ -2309,7 +2309,7 @@ async fn chain_node_budget_rejects_api_and_reload_without_effect() {
     let peer: IpAddr = "192.0.2.9".parse().unwrap();
     let mut neighbor = config_neighbor(peer, 65002);
     neighbor.import_policy_chain = vec!["small".to_string(); 100];
-    mgr.current_config.neighbors = vec![neighbor];
+    *mgr.current_config.neighbors = vec![neighbor];
     let counters = Arc::new(FakePeerCounters::default());
     insert_test_managed_peer(
         &mut mgr,

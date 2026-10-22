@@ -99,7 +99,7 @@ pub(crate) fn apply_transaction_to_config(
     mut config: Config,
     transaction: &GnmiSetTransaction,
 ) -> Result<Config, GnmiSetError> {
-    let mut drafts = std::mem::take(&mut config.neighbors)
+    let mut drafts = std::mem::take(&mut *config.neighbors)
         .into_iter()
         .map(|neighbor| NeighborDraft {
             neighbor,
@@ -126,7 +126,7 @@ pub(crate) fn apply_transaction_to_config(
         }
     }
 
-    config.neighbors = finalize_neighbors(drafts)?;
+    *config.neighbors = finalize_neighbors(drafts)?;
     config.peer_groups = peer_groups;
     config.dynamic_neighbors = finalize_dynamic_neighbors(dynamic_drafts)?;
     Ok(config)
@@ -218,7 +218,7 @@ fn apply_neighbor_leaf(
             }
         }
         NeighborConfigLeaf::PeerAs => {
-            draft.neighbor.remote_asn = parse_u32_value(value, "peer-as")?;
+            draft.neighbor.remote_asn = parse_u32_value(value, "peer-as")?.into();
             draft.has_remote_asn = true;
         }
         NeighborConfigLeaf::Description => {
@@ -445,7 +445,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         tcp_mss: None,
         address: address.to_string(),
         interface: None,
-        remote_asn: 0,
+        remote_asn: crate::config::RemoteAsn::Asn(0),
         description: None,
         peer_group: None,
         hold_time: None,
@@ -1263,7 +1263,7 @@ description = "old"
             .iter()
             .find(|neighbor| neighbor.address == "192.0.2.2")
             .unwrap();
-        assert_eq!(neighbor.remote_asn, 65003);
+        assert_eq!(neighbor.remote_asn, crate::config::RemoteAsn::Asn(65003));
     }
 
     #[test]

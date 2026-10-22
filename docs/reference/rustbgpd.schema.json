@@ -145,7 +145,7 @@
       "default": null
     },
     "neighbors": {
-      "description": "Statically configured BGP neighbors.",
+      "description": "Statically configured BGP neighbors, including interface-only\nneighbors (an `interface` and no `address`).",
       "type": "array",
       "default": [],
       "items": {
@@ -1353,6 +1353,17 @@
           "description": "Telemetry and control-plane listeners (Prometheus, gRPC,\nlooking glass) plus logging format.",
           "$ref": "#/$defs/TelemetryConfig"
         },
+        "unnumbered": {
+          "description": "Router Advertisement settings for interface-only unnumbered\nneighbors (ADR-0142). Restart-required.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnnumberedConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "warm_cache_checkpoint_on_shutdown": {
           "description": "Publish one durable, daemon-private MRT warm-cache checkpoint during\ncoordinated shutdown. Off by default. This tranche only publishes the\ncheckpoint and a generation-bound restart marker; boot never loads or\nserves routes from the cache.\n\nThe checkpoint directory is fixed at\n`<runtime_state_dir>/warm-bundle-v1`. The setting is read at startup;\nchanging it requires a daemon restart.",
           "type": "boolean",
@@ -2067,7 +2078,7 @@
           ]
         },
         "address": {
-          "description": "Peer IP address (IPv4 or IPv6).",
+          "description": "Peer IP address (IPv4 or IPv6). Omit it, and name only the\n`interface`, for an interface-only unnumbered neighbor whose\nIPv6 link-local address is discovered (ADR-0142).",
           "type": "string"
         },
         "admin_down": {
@@ -2556,10 +2567,21 @@
           ]
         },
         "remote_asn": {
-          "description": "Peer autonomous system number. Equal to `global.asn` for iBGP.",
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
+          "description": "Peer autonomous system number, or `\"external\"` (any ASN except\n`global.asn`) or `\"internal\"` (`global.asn`). Equal to\n`global.asn` for iBGP.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "enum": [
+                "external",
+                "internal"
+              ]
+            }
+          ]
         },
         "remove_private_as": {
           "description": "Remove private ASNs from `AS_PATH` before eBGP advertisement.\n\n- `\"remove\"` — only if the entire path consists of private ASNs\n- `\"all\"` — unconditionally remove all private ASNs\n- `\"replace\"` — replace each private ASN with the local ASN\n\nOnly valid for eBGP neighbors.",
@@ -2705,7 +2727,6 @@
       },
       "additionalProperties": false,
       "required": [
-        "address",
         "remote_asn"
       ]
     },
@@ -3925,6 +3946,30 @@
       "required": [
         "log_format"
       ]
+    },
+    "UnnumberedConfig": {
+      "description": "`[global.unnumbered]`: Router Advertisement settings for interface-only\nneighbors. Restart-required.",
+      "type": "object",
+      "properties": {
+        "ra_interval_secs": {
+          "description": "RFC 4861 `MaxRtrAdvInterval` in seconds, 4..=1800. The advertised\nRouter Lifetime is three times this value. Default: 10.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "router_advertisements": {
+          "description": "Send Router Advertisements and the link-up Router Solicitation on\ninterface-only neighbors' interfaces. `false` disables sending only;\nreception stays on, so `CAP_NET_RAW` is still required. Default: true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

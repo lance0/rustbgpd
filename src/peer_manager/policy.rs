@@ -4553,7 +4553,11 @@ impl PeerManager {
                 min_hold_time: None,
                 address: address.to_string(),
                 interface: managed.transport_config.peer_interface.clone(),
-                remote_asn: managed.remote_asn,
+                remote_asn: if managed.transport_config.peer.remote_asn_external {
+                    crate::config::RemoteAsn::External
+                } else {
+                    managed.remote_asn.into()
+                },
                 description: None,
                 peer_group: managed.peer_group.clone(),
                 hold_time: None,
@@ -4837,6 +4841,7 @@ impl PeerManager {
             interface: tc.peer_interface.clone(),
             scope_id: tc.peer_scope_id,
             remote_asn: tc.peer.remote_asn,
+            remote_asn_external: tc.peer.remote_asn_external,
             description: resolved.label,
             peer_group: resolved.peer_group,
             admin_down: resolved.admin_down,

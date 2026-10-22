@@ -70,6 +70,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         interface: None,
         scope_id: None,
         remote_asn: asn,
+        remote_asn_external: false,
         description: format!("test-peer-{addr}"),
         peer_group: None,
         hold_time: None,
@@ -235,6 +236,7 @@ fn make_dynamic_manager_config() -> Config {
             listen_addresses: None,
             cluster_id: None,
             runtime_state_dir: "/tmp/rustbgpd-tests".to_string(),
+            unnumbered: None,
             telemetry: crate::config::TelemetryConfig {
                 prometheus_addr: Some("127.0.0.1:9179".to_string()),
                 dataplane_readiness: false,
@@ -276,7 +278,7 @@ fn make_dynamic_manager_config() -> Config {
                 )]),
             },
         },
-        neighbors: Vec::new(),
+        neighbors: Vec::new().into(),
         peer_groups,
         policy: crate::config::PolicyConfig::default(),
         dynamic_neighbors: vec![crate::config::DynamicNeighborConfig {
@@ -1242,7 +1244,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         min_hold_time: None,
         address: addr.to_string(),
         interface: None,
-        remote_asn,
+        remote_asn: remote_asn.into(),
         description: None,
         peer_group: None,
         hold_time: None,
@@ -1786,4 +1788,6 @@ mod reload_generation;
 mod rfc8212;
 mod snapshots;
 mod transport_config;
+#[cfg(target_os = "linux")]
+mod unnumbered;
 mod wait_sites;

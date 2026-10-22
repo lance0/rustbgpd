@@ -89,9 +89,15 @@ pub fn validate_open(
         ));
     }
 
-    // Verify peer ASN matches our configuration.
-    // remote_asn == 0 is the dynamic-neighbor sentinel: accept any ASN from OPEN.
-    if config.remote_asn != 0 && peer_asn != config.remote_asn {
+    // Verify peer ASN matches our configuration. `remote_asn = "external"`
+    // accepts any ASN except our own; otherwise remote_asn == 0 is the
+    // dynamic-neighbor sentinel and accepts any ASN from OPEN.
+    let asn_mismatch = if config.remote_asn_external {
+        peer_asn == config.local_asn
+    } else {
+        config.remote_asn != 0 && peer_asn != config.remote_asn
+    };
+    if asn_mismatch {
         return Err(NotificationMessage::new(
             NotificationCode::OpenMessage,
             open_subcode::BAD_PEER_AS,
@@ -773,6 +779,25 @@ mod tests {
         open.capabilities = vec![Capability::FourOctetAs { asn: 65099 }];
         let neg = validate_open(&open, &cfg).unwrap();
         assert_eq!(neg.peer_asn, 65099);
+    }
+
+    #[test]
+    fn external_mode_accepts_any_other_asn_and_refuses_the_local_asn() {
+        // Mutation-red: dropping the external branch (falling back to the
+        // `0` wildcard) negotiates the iBGP OPEN below.
+        let mut cfg = test_config();
+        cfg.remote_asn = 0;
+        cfg.remote_asn_external = true;
+        let mut open = peer_open();
+        open.my_as = 65099;
+        open.capabilities = vec![Capability::FourOctetAs { asn: 65099 }];
+        assert_eq!(validate_open(&open, &cfg).unwrap().peer_asn, 65099);
+
+        open.my_as = u16::try_from(cfg.local_asn).unwrap();
+        open.capabilities = vec![Capability::FourOctetAs { asn: cfg.local_asn }];
+        let err = validate_open(&open, &cfg).unwrap_err();
+        assert_eq!(err.code, NotificationCode::OpenMessage);
+        assert_eq!(err.subcode, open_subcode::BAD_PEER_AS);
     }
 
     #[test]

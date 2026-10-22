@@ -172,7 +172,7 @@ async fn configured_owner_committed_delete_readd_and_asn_change_allocate_fresh_t
     );
 
     let changed = begin(&mut manager).await;
-    manager.current_config.neighbors[0].remote_asn = 65003;
+    manager.current_config.neighbors[0].remote_asn = 65003.into();
     let third = static_owner(&mut manager, 65003).unwrap();
     assert_ne!(third, second);
     publish(&mut manager, &mut rib_rx, changed).await;

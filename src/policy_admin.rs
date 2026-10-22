@@ -506,7 +506,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         tcp_mss: None,
         address: raw.address.to_string(),
         interface: raw.interface.clone(),
-        remote_asn: raw.remote_asn,
+        remote_asn: raw.remote_asn.into(),
         description: raw.description.clone(),
         peer_group: raw.peer_group.clone(),
         // Runtime neighbor creation has no admin-state field; the peer
@@ -619,7 +619,11 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     tcp_mss: cfg.tcp_mss,
                     address: cfg.address.to_string(),
                     interface: cfg.interface.clone(),
-                    remote_asn: cfg.remote_asn,
+                    remote_asn: if cfg.remote_asn_external {
+                        crate::config::RemoteAsn::External
+                    } else {
+                        cfg.remote_asn.into()
+                    },
                     description: Some(cfg.description.clone()),
                     peer_group: cfg.peer_group.clone(),
                     admin_down: cfg.admin_down.is_some().then_some(true),
@@ -1485,6 +1489,7 @@ peer_group = "fabric"
             interface: None,
             scope_id: None,
             remote_asn: 65003,
+            remote_asn_external: false,
             description: "protected".to_string(),
             peer_group: None,
             hold_time: None,

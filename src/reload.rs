@@ -211,6 +211,7 @@ pub(crate) fn build_peer_mgr_config(
         interface: tc.peer_interface.clone(),
         scope_id: tc.peer_scope_id,
         remote_asn: tc.peer.remote_asn,
+        remote_asn_external: tc.peer.remote_asn_external,
         description: resolved.label.clone(),
         peer_group: resolved.peer_group.clone(),
         admin_down: resolved.admin_down.clone(),
@@ -2433,6 +2434,18 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         );
     }
 
+    // ADR-0142: interface-only neighbors start discovery once, at startup.
+    if new_config.neighbors.interface_only() != current.neighbors.interface_only() {
+        error!(
+            "interface-only [[neighbors]] (interface with no address) changed — adding, \
+             removing or editing them requires a restart. The running set is kept for \
+             this reload."
+        );
+        new_config
+            .neighbors
+            .set_interface_only(current.neighbors.interface_only().to_vec());
+    }
+
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
     let peer_group_diff = config::diff_peer_groups(&current.peer_groups, &new_config.peer_groups);
     let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
@@ -3814,7 +3827,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             "reconciling neighbors after config reload"
         );
         for n in &diff.added {
-            info!(peer = %n.address, asn = n.remote_asn, "neighbor added");
+            info!(peer = %n.address, asn = %n.remote_asn, "neighbor added");
         }
         for addr in &diff.removed {
             info!(peer = %addr, "neighbor removed");
@@ -10967,7 +10980,7 @@ hold_time = 90
 
             let mut runtime_added = runtime.neighbors[0].clone();
             runtime_added.address = "10.0.0.3".to_string();
-            runtime_added.remote_asn = 65003;
+            runtime_added.remote_asn = 65003.into();
             let resolved = runtime
                 .resolve_neighbor(&runtime_added)
                 .expect("runtime-added peer must resolve from the pinned snapshot");
@@ -12814,6 +12827,7 @@ remote_asn = 65002
                     interface: None,
                     scope_id: None,
                     remote_asn: 65009,
+                    remote_asn_external: false,
                     description: "runtime peer".to_string(),
                     peer_group: None,
                     hold_time: Some(90),
@@ -12938,6 +12952,7 @@ remote_asn = 65002
                     interface: None,
                     scope_id: None,
                     remote_asn: 65009,
+                    remote_asn_external: false,
                     description: "runtime peer".to_string(),
                     peer_group: None,
                     hold_time: Some(90),

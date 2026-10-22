@@ -388,8 +388,11 @@ mod tests {
             .zip([("198.51.100.2", 64_501), ("198.51.100.3", 64_502)])
         {
             assert_eq!(neighbor.address, address);
-            assert_eq!(neighbor.remote_asn, remote_asn);
-            assert_ne!(neighbor.remote_asn, config.global.asn);
+            assert_eq!(neighbor.remote_asn, remote_asn.into());
+            assert_ne!(
+                neighbor.remote_asn.resolve(config.global.asn),
+                config.global.asn
+            );
             assert_eq!(neighbor.families, ["ipv4_unicast"]);
             assert_eq!(neighbor.route_server_client, Some(true));
             assert_eq!(neighbor.role, Some(BgpRoleConfig::RouteServer));

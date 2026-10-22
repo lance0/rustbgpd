@@ -1080,7 +1080,7 @@ async fn assert_generation_operator_read_boundaries(
             .inject_reconfigure_failures
             .insert(key("10.0.0.2".parse().unwrap()), 0);
         let (mut candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
-        candidate.neighbors[0].remote_asn = 65012;
+        candidate.neighbors[0].remote_asn = 65012.into();
         (candidate, prepared)
     } else {
         (
