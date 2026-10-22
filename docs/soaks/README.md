@@ -23,6 +23,7 @@ the run they describe.
 | [Gate 8b MAC-churn 1-hour soak](soak-gate8b-mac-churn-1h.md) | Dry run for the longer MAC-churn gate |
 | [Gate 8b MAC-churn 24-hour soak](soak-gate8b-mac-churn-24h.md) | Sustained MAC churn and DF role flips |
 | [Gate 9 slice 6 24-hour symmetric IRB soak](soak-gate9-slice6-24h-symmetric-irb.md) | Interface-less symmetric IRB under churn |
+| [Inject-churn with owner leases 24-hour soak, 2026-10-21 (PASS)](soak-inject-churn-lease-24h-2026-10-21.md) | Run on unreleased `536b53867`; 4 owners × 512 leased keys under unowned injection churn; all 125 lease flaps expire inside the deadline bound, all 250 stale renewals refused, every `/readyz` probe 200; flat RSS |
 | [M33 50k-route EVPN scale soak](soak-m33-evpn-scale-10h-leak.md) | Attribute-intern behavior at 50,000 EVPN routes under churn |
 | [M37 local-origination MAC-churn 24-hour soak](soak-m37-local-origination-churn-24h.md) | Local MAC origination under bounded bridge-FDB churn |
 | [M67 link-drain churn 24-hour soak](soak-m67-link-drain-24h-evpn-leak.md) | Attribute-intern behavior under link drain and MAC mobility |

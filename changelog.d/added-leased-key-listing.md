@@ -8,5 +8,5 @@
   delete the rest. Each page names the owner's live generation, absent when
   it has no live lease, and a walk that crosses a daemon restart or a new
   generation returns `ABORTED` instead of finishing early. It is a
-  `sensitive_read` and outside the v1 inventory for now. See
-  [reconcile an owner's keys](../docs/reference/api.md#reconcile-an-owners-keys).
+  `sensitive_read` in the v1 inventory with the rest of the lease
+  lifecycle. See [reconcile an owner's keys](../docs/reference/api.md#reconcile-an-owners-keys).

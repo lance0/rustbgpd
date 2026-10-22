@@ -143,11 +143,12 @@ preparation advances that chain normally.
 The owner-scoped leases of
 [ADR-0141](../adr/0141-injection-owner-lease.md) are inventoried as one
 lifecycle in the stable `InjectionService` set: `AddLeasedPath`,
-`AddLeasedFlowSpec`, `RenewLease` and `ListInjectionLeases`; the
-owner-aware delete fields `owner` and `override_owner` on `DeletePath` and
-`DeleteFlowSpec`; and the `injection_owner`, `lease_generation` and
-`lease_remaining_ms` read-back on `Route` and `FlowSpecRouteEntry`. The
-following semantics are part of the promise:
+`AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases` and the per-owner
+key listing `ListLeasedKeys`; the owner-aware delete fields `owner` and
+`override_owner` on `DeletePath` and `DeleteFlowSpec`; and the
+`injection_owner`, `lease_generation` and `lease_remaining_ms` read-back on
+`Route` and `FlowSpecRouteEntry`. The following semantics are part of the
+promise:
 
 | Semantics | Pinned by |
 |---|---|
@@ -156,6 +157,7 @@ following semantics are part of the promise:
 | Expiry removes the expired owner's local intent and nothing else; other owners' and unowned entries stay. | `expiry_withdraws_both_families_and_reaches_the_peer`, `expiry_spares_other_owners_and_unowned_intent` |
 | A leased add creates leased state or none. It never becomes a permanent add, and a server without the leased RPCs answers `UNIMPLEMENTED`. | `leased_adds_never_fall_back_to_permanent_injection` |
 | Every ownership or generation refusal is `FAILED_PRECONDITION` with one `google.rpc.ErrorInfo` (`domain: "rustbgpd"`) whose `reason` tells the cases apart: `OWNER_MISMATCH` (held by another owner), `KEY_UNOWNED` (held by no owner) or `GENERATION_NOT_LIVE` (a refused renewal). The reason is contract; the message text is not. | `lease_conflicts_carry_a_machine_readable_reason`, `ownership_mismatches_are_failed_precondition_and_change_nothing` |
+| `ListLeasedKeys` lists only that owner's keys, in the form `DeletePath` and `DeleteFlowSpec` take, paged in a fixed key order. Each page carries the owner's live generation the walk is bound to, absent when it has no live lease. A later page after a daemon restart, an expiry or a new generation returns `ABORTED` with `ErrorInfo` reason `WALK_INVALIDATED`, never an empty `OK` page; another owner's token returns `INVALID_ARGUMENT`. | `leased_keys_list_only_the_owners_keys_in_order`, `leased_key_pages_report_the_walks_generation`, `a_leased_key_walk_refuses_a_restarted_daemon`, `a_leased_key_walk_refuses_a_new_generation`, `a_leased_key_walk_refuses_a_generation_that_came_and_went`, `a_leased_key_token_from_a_previous_process_is_aborted`, `list_leased_keys_returns_delete_keys_and_resumes_by_token` |
 
 A leased add with an unknown outcome may be retried as the same leased add.
 `ListInjectionLeases` lists an owner past its deadline with

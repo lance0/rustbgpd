@@ -60,10 +60,10 @@ In particular:
   outbound admission to a peer's Adj-RIB-Out, not remote receipt, and new
   bounded reason codes are additive
   ([export read-back](api.md#export-read-back)).
-- Injection leases (ADR-0141) are inventoried as a whole lifecycle: the four
-  lease RPCs, the owner-aware delete fields and the ownership and generation
-  read-back. Remote withdrawal timing and dataplane enforcement after expiry
-  stay outside the promise
+- Injection leases (ADR-0141) are inventoried as a whole lifecycle: the five
+  lease RPCs, including the per-owner key listing, the owner-aware delete
+  fields and the ownership and generation read-back. Remote withdrawal timing
+  and dataplane enforcement after expiry stay outside the promise
   ([lease lifecycle](v1-stable-contract.md#injection-lease-lifecycle)).
 - Files under `runtime_state_dir` remain outside the inventory; the
   contract's [on-disk runtime state](v1-stable-contract.md#on-disk-runtime-state)
