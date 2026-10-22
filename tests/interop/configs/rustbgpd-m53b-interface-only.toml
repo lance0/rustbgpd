@@ -1,0 +1,43 @@
+[global]
+asn = 65001
+router_id = "10.53.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast", "ipv6_unicast"]
+maximum_paths = 2
+
+# Interface-only peers discover the FRR link-local endpoints from RAs.
+[[neighbors]]
+interface = "eth1"
+remote_asn = "external"
+description = "frr1-interface-only"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+link_local_next_hop = true
+
+[[neighbors]]
+interface = "eth2"
+remote_asn = "external"
+description = "frr2-interface-only"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+link_local_next_hop = true
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

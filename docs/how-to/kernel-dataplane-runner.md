@@ -83,6 +83,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M52: ADR-0066 multipath-relax against two FRR peers in different ASes.
 - M53: ADR-0069 BGP unnumbered / IPv6 link-local peering with scoped FIB ECMP
   against two FRR peers over unnumbered links.
+- M53b: ADR-0142 interface-only neighbor discovery and carrier recovery with
+  two FRR peers and kernel-generated link-local addresses.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
 - M108: RFC 5883 multihop BFD + RFC 5882 coupling against FRR `bfdd` over
   routed /32 loopbacks.
