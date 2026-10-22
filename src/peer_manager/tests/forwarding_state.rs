@@ -340,33 +340,24 @@ async fn forwarding_state_poisoned_writer_fails_closed_through_settlement_fence(
     if std::env::var_os(CHILD_ENV).is_some() {
         assert_poisoned_writer_fails_closed().await;
         println!("{MARKER}");
-        // The real watchdog ends this process after the fence grace.
+        // The real watchdog ends this process once the parent releases it.
         std::future::pending::<()>().await;
     }
-    let output = tokio::time::timeout(
-        Duration::from_secs(60),
-        tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "peer_manager::tests::forwarding_state::forwarding_state_poisoned_writer_fails_closed_through_settlement_fence",
-                "--nocapture",
-            ])
-            .env(CHILD_ENV, "1")
-            .kill_on_drop(true)
-            .output(),
+    let child = crate::test_support::run_fail_stop_child(
+        "peer_manager::tests::forwarding_state::forwarding_state_poisoned_writer_fails_closed_through_settlement_fence",
+        CHILD_ENV,
+        MARKER,
     )
-    .await
-    .expect("poison fence subprocess timed out")
-    .expect("poison fence subprocess failed to start");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    .await;
     assert!(
-        stdout.contains(MARKER),
-        "subprocess must complete the selected proof: {}\n{stdout}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr),
+        child.stdout.contains(MARKER),
+        "subprocess must complete the selected proof: {}\n{}\n{}",
+        child.status,
+        child.stdout,
+        child.stderr,
     );
     assert_eq!(
-        output.status.code(),
+        child.status.code(),
         Some(rustbgpd_api::runtime_config_settlement::AMBIGUOUS_CONFIG_EXIT_STATUS),
         "the fenced owner must fail-stop the process"
     );

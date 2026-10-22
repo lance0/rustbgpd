@@ -396,3 +396,99 @@ impl ScriptedRib {
         self.withdraws.lock().unwrap().len()
     }
 }
+
+/// Exit status and output of a child test that fail-stops through the real
+/// settlement watchdog.
+pub(crate) struct FailStopChild {
+    pub(crate) status: std::process::ExitStatus,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
+/// Run one exact test of this binary in a child process with `child_env` set,
+/// holding its real settlement fail-stop until it prints `marker`.
+///
+/// The debug-build `RUSTBGPD_TEST_FAIL_STOP_HOLD` seam makes the watchdog ask
+/// this parent before starting the fence grace and again before its exit.
+/// The first is released at once; the second only after the child's proof
+/// line, so the child's checks never race the grace clock.
+pub(crate) async fn run_fail_stop_child(
+    test: &str,
+    child_env: &str,
+    marker: &str,
+) -> FailStopChild {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let hold = dir.path().join("fail-stop.sock");
+    let listener = tokio::net::UnixListener::bind(&hold).unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(child_env, "1")
+        .env("RUSTBGPD_TEST_FAIL_STOP_HOLD", &hold)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (proved, proof) = tokio::sync::oneshot::channel::<()>();
+    let holds_seen = Arc::new(AtomicU8::new(0));
+    let seen = holds_seen.clone();
+    let holds = tokio::spawn(async move {
+        let mut proof = Some(proof);
+        for expected in [0, 1] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Marker byte, then the u128 grace-elapsed nanoseconds.
+            let mut frame = [0u8; 17];
+            stream.read_exact(&mut frame).await.unwrap();
+            assert_eq!(frame[0], expected, "fail-stop hold order");
+            if expected == 1
+                && let Some(proof) = proof.take()
+            {
+                let _ = proof.await;
+            }
+            seen.fetch_add(1, Ordering::SeqCst);
+            stream.write_all(&[1]).await.unwrap();
+        }
+    });
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr = tokio::spawn(async move {
+        let mut output = String::new();
+        let _ = stderr.read_to_string(&mut output).await;
+        output
+    });
+    let run = async {
+        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut stdout = String::new();
+        let mut proved = Some(proved);
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if line.contains(marker)
+                && let Some(proved) = proved.take()
+            {
+                let _ = proved.send(());
+            }
+            stdout.push_str(&line);
+            stdout.push('\n');
+        }
+        (child.wait().await.unwrap(), stdout)
+    };
+    // Bounds only a hung child; the proof itself has no deadline.
+    let (status, stdout) = tokio::time::timeout(std::time::Duration::from_secs(300), run)
+        .await
+        .expect("fail-stop child timed out");
+    holds.abort();
+    let child = FailStopChild {
+        status,
+        stdout,
+        stderr: stderr.await.unwrap(),
+    };
+    if child.stdout.contains(marker) {
+        assert_eq!(
+            holds_seen.load(Ordering::SeqCst),
+            2,
+            "the fence grace and fail-stop exit must both pass through the hold"
+        );
+    }
+    child
+}
