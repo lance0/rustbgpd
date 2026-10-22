@@ -927,6 +927,112 @@ async fn close_drain_shares_the_flush_budget_with_the_writer() {
         .expect("run() must return Ok");
 }
 
+/// The close drain keeps the hard-teardown path: when admitting a queued
+/// update fails during the drain (here a route-bearing envelope without its
+/// exact export snapshot), the session still raises Cease/8 with the writer's
+/// backlog discarded, rather than an ordinary flush of it.
+#[tokio::test]
+async fn admission_failure_during_the_close_drain_still_hard_tears_down() {
+    let (mut session, _cmd_tx, _rib_rx, mut peer) = wedged_session_with_backlog().await;
+    session
+        .outbound_tx
+        .send(OutboundRouteUpdate {
+            announce: vec![make_route(100)].into(),
+            next_hop_override: vec![None].into(),
+            ..OutboundRouteUpdate::default()
+        })
+        .await
+        .unwrap();
+    session.deferred_command = Some(PeerCommand::Stop { reason: None });
+    let session_task = tokio::spawn(async move { session.run().await });
+
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), peer.read_to_end(&mut wire))
+        .await
+        .expect("the hard teardown must close the connection")
+        .unwrap();
+    let mut rest = wire.as_slice();
+    let (mut updates, mut notifications) = (0, Vec::new());
+    while rest.len() >= 19 {
+        let len = usize::from(u16::from_be_bytes([rest[16], rest[17]]));
+        updates += usize::from(rest[18] == 2);
+        if rest[18] == 3 {
+            notifications.push(rest[19..21].to_vec());
+        }
+        rest = &rest[len..];
+    }
+    assert!(
+        rest.is_empty(),
+        "the Cease/8 must be the final, whole frame"
+    );
+    assert_eq!(
+        notifications,
+        vec![vec![6, cease_subcode::OUT_OF_RESOURCES]],
+        "exactly one NOTIFICATION, the hard teardown's Cease/8"
+    );
+    assert!(
+        updates < WEDGED_BACKLOG,
+        "the hard teardown must discard the backlog, not flush all {updates} frames"
+    );
+    session_task.abort();
+}
+
+/// The close drain stops at its budget even when every admission step is
+/// ready immediately: it checks the deadline and yields after each step, so
+/// a long run of queued envelopes cannot finish in one uninterruptible
+/// poll. The paused clock advances only from a ticker task, which can run
+/// only when the drain yields.
+#[tokio::test(start_paused = true)]
+async fn close_drain_yields_and_stops_at_the_budget_with_ready_admission() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut peer) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    let reader = tokio::spawn(async move {
+        let mut sink = vec![0u8; 64 * 1024];
+        while peer.read(&mut sink).await.is_ok_and(|n| n > 0) {}
+    });
+    let queued = 200;
+    for local_pref in 0..queued {
+        session
+            .outbound_tx
+            .try_send(OutboundRouteUpdate {
+                exact_export_snapshot: Some(session.publish_export_profile()),
+                announce: vec![make_route(local_pref)].into(),
+                next_hop_override: vec![None].into(),
+                ..OutboundRouteUpdate::default()
+            })
+            .unwrap();
+    }
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ticker = tokio::spawn({
+        let ticks = Arc::clone(&ticks);
+        async move {
+            loop {
+                tokio::time::advance(Duration::from_millis(10)).await;
+                ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+
+    let started = tokio::time::Instant::now();
+    session.drain_outbound_before_close().await;
+    ticker.abort();
+    reader.abort();
+    assert!(
+        ticks.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the drain must yield between admission steps"
+    );
+    assert!(
+        started.elapsed() >= writer::CLOSE_FLUSH_BUDGET,
+        "the drain returned before its budget"
+    );
+    assert!(
+        !session.outbound_rx.is_empty(),
+        "the drain must stop at the budget, not admit all {queued} queued envelopes"
+    );
+}
+
 /// The flush ahead of the Cease stays inside the per-peer shutdown bound: when
 /// the owner gives up on a session whose peer stopped reading (as
 /// `PeerHandle::shutdown_timeout` does by aborting the task), the writer is

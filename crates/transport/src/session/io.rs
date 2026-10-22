@@ -580,6 +580,11 @@ impl PeerSession {
         if self.read_half.take().is_some() {
             debug!(peer = %self.peer_label, "TCP connection closed");
         }
+        // An ordinary close starts the writer's flush budget here, unless a
+        // pre-close drain already started it.
+        if let Some(close_started) = self.writer_close_started.take() {
+            let _ = close_started.set(tokio::time::Instant::now());
+        }
         // Dropping these signals the writer task to exit. The
         // JoinHandle is intentionally not cleared here — the session's
         // writer-exit select arm needs it to observe the exit.
@@ -636,6 +641,7 @@ impl PeerSession {
         self.writer_priority_tx = None;
         self.writer_keepalive_tx = None;
         self.writer_teardown_tx = None;
+        self.writer_close_started = None;
         self.read_buf.reset_storage();
         self.tcp_ao_info = None;
         self.tcp_ao_stream_was_accepted = false;

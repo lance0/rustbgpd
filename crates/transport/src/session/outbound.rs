@@ -329,26 +329,34 @@ impl PeerSession {
     /// peer ahead of the Cease. A GR peer that receives Cease/2 rather than a
     /// Hard Reset may otherwise keep the withdrawn route as stale.
     ///
-    /// The drain shares the writer's close flush budget: dropping the
-    /// teardown sender starts the writer's [`super::writer::CLOSE_FLUSH_BUDGET`]
-    /// clock now, and this drain stops at the same deadline, so admitting
-    /// more updates can never push the Cease past that bound. Admission is
-    /// capacity-checked, so the drain waits for writer room rather than
-    /// tripping the saturation teardown. Cease/8 and fast-failover aborts
-    /// never come through here.
+    /// The drain shares the writer's close flush budget: it marks the close
+    /// as started, which starts the writer's
+    /// [`super::writer::CLOSE_FLUSH_BUDGET`] clock now, and it stops at the
+    /// same deadline, so admitting more updates can never push the Cease
+    /// past that bound. It checks the deadline and yields after every bounded
+    /// admission step, as the run loop does, so a long envelope cannot run
+    /// past the budget in one poll. Admission is capacity-checked, so the
+    /// drain waits for writer room rather than tripping the saturation
+    /// teardown; the hard-teardown signal stays live, so a Cease/8 raised
+    /// during the drain still discards the backlog. Cease/8 and
+    /// fast-failover aborts never come through here.
     pub(super) async fn drain_outbound_before_close(&mut self) {
         if self.fsm.state() != rustbgpd_fsm::SessionState::Established
             || self.writer_bulk_tx.is_none()
         {
             return;
         }
-        self.writer_teardown_tx = None;
-        let deadline = tokio::time::Instant::now() + super::writer::CLOSE_FLUSH_BUDGET;
+        let started = tokio::time::Instant::now();
+        if let Some(close_started) = &self.writer_close_started {
+            let _ = close_started.set(started);
+        }
+        let deadline = started + super::writer::CLOSE_FLUSH_BUDGET;
         let drain = async {
-            loop {
+            while tokio::time::Instant::now() < deadline {
                 if let Some(pending) = self.pending_outbound.as_ref() {
                     pending.ready(self.writer_bulk_tx.as_ref()).await;
                     self.advance_pending_outbound();
+                    tokio::task::yield_now().await;
                     continue;
                 }
                 let replay_waiting = self
@@ -362,6 +370,7 @@ impl PeerSession {
                     break;
                 };
                 self.handle_outbound_route_update(update).await;
+                tokio::task::yield_now().await;
             }
         };
         if tokio::time::timeout_at(deadline, drain).await.is_err() {
