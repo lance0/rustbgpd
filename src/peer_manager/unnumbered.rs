@@ -63,6 +63,18 @@ struct Port {
     established: bool,
     /// The address last refused, so the refusal is logged once.
     refused: Option<Ipv6Addr>,
+    /// Operator and safety state carried from a retired endpoint to the next.
+    held: Option<HeldState>,
+}
+
+/// State of an interface-only neighbor that belongs to the neighbor, not to
+/// one learned endpoint: an operator disable and a max-prefix shutdown latch
+/// (with its restart deadline) survive carrier loss, interface recreation
+/// and a change of learned address.
+#[derive(Debug)]
+struct HeldState {
+    enabled: bool,
+    latch: Option<super::MaxPrefixLatch>,
 }
 
 impl Unnumbered {
@@ -153,14 +165,18 @@ impl PeerManager {
             if port.link == Some(current) {
                 continue;
             }
-            port.link = Some(current);
+            let previous = port.link.replace(current);
             debug!(interface = %name, ifindex = current.0, state = ?current.1, "unnumbered: link state");
             unnumbered.discovery.link_event(LinkEvent {
                 ifindex: current.0,
                 name: name.clone(),
                 state: current.1,
             });
-            if current.1 != LinkState::Up {
+            // Down, removal, or an Up on a new index (a recreation the
+            // monitor reported without a Down in between).
+            if current.1 != LinkState::Up
+                || previous.is_some_and(|(ifindex, _)| ifindex != current.0)
+            {
                 unnumbered.reconcile_due = true;
             }
         }
@@ -357,23 +373,35 @@ impl PeerManager {
     async fn reconcile_port(&mut self, name: &str) {
         let port = self.port_mut(name);
         let link_down = matches!(port.link, Some((_, LinkState::Down | LinkState::Removed)));
-        let (desired, bound, established) = (port.desired, port.bound.clone(), port.established);
+        let current_ifindex = port.link.map(|(ifindex, _)| ifindex);
+        let (bound, established) = (port.bound.clone(), port.established);
+        // A binding learned on an older index of a recreated interface is
+        // stale: the link monitor may report the recreation as Up then Up.
+        let desired = port
+            .desired
+            .filter(|endpoint| current_ifindex.is_none_or(|ifindex| ifindex == endpoint.ifindex));
 
         if let Some(key) = bound {
+            let bound_scope = self
+                .peers
+                .get(&key)
+                .and_then(|managed| managed.transport_config.peer_scope_id);
+            // Level-triggered: the bound peer's scope against the interface's
+            // index now. A mismatch means the interface it ran on is gone.
+            let recreated = current_ifindex.is_some_and(|ifindex| bound_scope != Some(ifindex));
             let same_endpoint = desired.is_some_and(|endpoint| {
-                key.address == IpAddr::V6(endpoint.address)
-                    && self.peers.get(&key).is_some_and(|managed| {
-                        managed.transport_config.peer_scope_id == Some(endpoint.ifindex)
-                    })
+                key.address == IpAddr::V6(endpoint.address) && bound_scope == Some(endpoint.ifindex)
             });
             // A lost binding keeps the peer; a new one never displaces an
-            // Established session; confirmed carrier loss always ends it.
-            let keep = !link_down && (desired.is_none() || same_endpoint || established);
+            // Established session; confirmed carrier loss or interface
+            // recreation always ends it.
+            let gone = link_down || recreated;
+            let keep = !gone && (desired.is_none() || same_endpoint || established);
             if keep {
                 return;
             }
             // Level-triggered check of what the edge events claimed.
-            if !link_down {
+            if !gone {
                 match self.bound_session_established(&key).await {
                     Some(true) => {
                         if let Some(unnumbered) = self.unnumbered.as_mut() {
@@ -397,21 +425,36 @@ impl PeerManager {
             }
             let reason = if link_down {
                 "link_down"
+            } else if recreated {
+                "interface_recreated"
             } else {
                 "peer_address_changed"
             };
             info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
+            // The neighbor's operator and safety state outlives the endpoint.
+            let held = HeldState {
+                enabled: self.peers.get(&key).is_none_or(|managed| managed.enabled),
+                latch: self.max_prefix_latches.remove(&key),
+            };
             match self.delete_peer(key.clone(), false).await {
                 // Already gone: nothing is left to clear.
                 Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
                 Err(error) => {
+                    if let Some(latch) = held.latch {
+                        self.max_prefix_latches.insert(key.clone(), latch);
+                    }
                     warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound peer");
                     return;
                 }
             }
+            if held.latch.is_some() {
+                self.publish_max_prefix_latched_metric(&key, false);
+                self.recompute_next_max_prefix_restart_deadline();
+            }
             let port = self.port_mut(name);
             port.bound = None;
             port.established = false;
+            port.held = Some(held);
         }
         if link_down {
             return;
@@ -458,8 +501,28 @@ impl PeerManager {
             .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
         let config = Self::peer_manager_config_from_resolved(resolved, false);
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
-        self.add_peer(config, false).await?;
-        info!(interface = %name, peer = %key, "unnumbered: bound peer added");
+        // Carry the previous endpoint's state: a disable stays, and a latch
+        // keeps the new peer down until its restart deadline or an enable.
+        let held = self.port_mut(name).held.take();
+        let mut enabled = config.admin_down.is_none();
+        let mut carried_latch = false;
+        if let Some(held) = &held {
+            enabled &= held.enabled;
+        }
+        if let Some(latch) = held.as_ref().and_then(|held| held.latch.clone()) {
+            self.max_prefix_latches.insert(key.clone(), latch);
+            self.publish_max_prefix_latched_metric(&key, true);
+            self.recompute_next_max_prefix_restart_deadline();
+            carried_latch = true;
+        }
+        if let Err(error) = self.add_peer_impl(config, false, enabled, true).await {
+            if carried_latch {
+                self.remove_max_prefix_latch(&key);
+            }
+            self.port_mut(name).held = held;
+            return Err(error);
+        }
+        info!(interface = %name, peer = %key, enabled, "unnumbered: bound peer added");
         self.port_mut(name).bound = Some(key);
         Ok(())
     }

@@ -68,7 +68,7 @@ impl PeerManager {
     /// while the peer is absent (a retiring session during delete or
     /// reconfigure) publishes nothing: the delete-path reap owns that
     /// identity, and a re-added peer is seeded from the latch map.
-    fn publish_max_prefix_latched_metric(&self, peer: &PeerKey, latched: bool) {
+    pub(super) fn publish_max_prefix_latched_metric(&self, peer: &PeerKey, latched: bool) {
         if self.peers.contains_key(peer) {
             self.metrics.set_max_prefix_latched(
                 &peer.label(),
@@ -680,7 +680,7 @@ impl PeerManager {
         clippy::too_many_lines,
         reason = "peer add wires transport, policy, BFD desired state, persistence, and events"
     )]
-    async fn add_peer_impl(
+    pub(super) async fn add_peer_impl(
         &mut self,
         config: PeerManagerNeighborConfig,
         sync_config_snapshot: bool,

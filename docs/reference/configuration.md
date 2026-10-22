@@ -1354,7 +1354,10 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 - **Carrier.** Confirmed carrier loss, admin down or removal of the interface
   ends the session at once and purges its routes; there is no Graceful
   Restart retention for them. The interface need not exist when the
-  configuration loads.
+  configuration loads. An operator disable and a max-prefix shutdown belong
+  to the neighbor, not to one learned address: they stay in force across
+  carrier loss, interface recreation and a change of address, until the
+  restart hold-down expires or the neighbor is enabled.
 - **One per interface.** Each interface has at most one interface-only
   neighbor, and none if it already has a static link-local neighbor.
 - **Rejected** on an interface-only neighbor, directly or through its peer

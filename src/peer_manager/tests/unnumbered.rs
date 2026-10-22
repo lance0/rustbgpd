@@ -114,6 +114,18 @@ impl Harness {
         self.mgr.handle_links_changed();
     }
 
+    /// Swap the bound peer's session for `handle`, keeping its scope.
+    fn replace_session(&mut self, key: &PeerKey, handle: PeerHandle) {
+        let scope = self.mgr.peers[key].transport_config.peer_scope_id;
+        insert_test_managed_peer_for_key(&mut self.mgr, key, 0, handle, false);
+        self.mgr
+            .peers
+            .get_mut(key)
+            .unwrap()
+            .transport_config
+            .set_link_local_scope(scope.unwrap());
+    }
+
     fn peers_at(&self, address: Ipv6Addr) -> Vec<PeerKey> {
         self.mgr.peer_keys_for_address(IpAddr::V6(address))
     }
@@ -441,17 +453,14 @@ async fn a_dropped_transition_to_established_never_displaces_the_session() {
     h.bind("swp1", Some(endpoint(2, 7))).await;
     h.drain();
     // The bound session is Established, but no transition said so.
-    insert_test_managed_peer_for_key(
-        &mut h.mgr,
+    h.replace_session(
         &swp1_key(2),
-        0,
         fake_peer_handle(
             IpAddr::V6(ll(2)),
             SessionState::Established,
             None,
             Arc::new(FakePeerCounters::default()),
         ),
-        false,
     );
     // Mutation-red: trusting the edge-event flag alone replaces it.
     h.bind("swp1", Some(endpoint(3, 7))).await;
@@ -470,7 +479,7 @@ async fn an_unanswered_state_query_keeps_the_session_and_retries() {
     // A session task that never answers.
     let (commands, _held) = mpsc::channel(8);
     let silent = PeerHandle::from_parts(commands, tokio::spawn(async { Ok(()) }));
-    insert_test_managed_peer_for_key(&mut h.mgr, &swp1_key(2), 0, silent, false);
+    h.replace_session(&swp1_key(2), silent);
 
     h.bind("swp1", Some(endpoint(3, 7))).await;
     assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept on doubt");
@@ -509,5 +518,90 @@ fn a_group_session_edit_is_restart_required_for_its_interface_only_neighbor() {
     assert_eq!(
         crate::config::interface_only_session_changes(&old, &unrelated),
         Vec::<&str>::new()
+    );
+}
+
+/// A max-prefix shutdown and an operator disable belong to the neighbor:
+/// carrier loss and a new learned address do not lift them.
+#[tokio::test(start_paused = true)]
+async fn operator_and_max_prefix_state_survive_endpoint_retirement() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let old = swp1_key(2);
+    let session = h.mgr.peers[&old].session_id();
+    h.mgr
+        .install_max_prefix_latch(old.clone(), session, "max-prefix".into(), Some(60));
+    if let Some(managed) = h.mgr.peers.get_mut(&old) {
+        managed.enabled = false;
+    }
+    let deadline = h.mgr.max_prefix_latches[&old].deadline;
+
+    // Carrier flap, then the same address again.
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(!h.mgr.peers.contains_key(&old));
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // Mutation-red: a fresh peer comes back enabled with no latch.
+    assert!(!h.mgr.peers[&old].enabled, "still disabled");
+    assert_eq!(
+        h.mgr.max_prefix_latches[&old].deadline, deadline,
+        "same deadline"
+    );
+
+    // A new learned address: the latch and its deadline migrate.
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    let new = swp1_key(3);
+    assert!(!h.mgr.peers[&new].enabled);
+    assert_eq!(h.mgr.max_prefix_latches[&new].deadline, deadline);
+    assert!(!h.mgr.max_prefix_latches.contains_key(&old));
+
+    // An explicit enable still lifts it.
+    h.mgr.enable_peer(new.clone()).await.unwrap();
+    assert!(h.mgr.peers[&new].enabled);
+    assert!(!h.mgr.max_prefix_latches.contains_key(&new));
+}
+
+/// An operator disable alone (no latch) also survives a carrier flap.
+#[tokio::test]
+async fn an_operator_disable_survives_a_carrier_flap() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.disable_peer(swp1_key(2), None).await.unwrap();
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // Mutation-red: re-adding with the config's default enables it.
+    assert!(!h.mgr.peers[&swp1_key(2)].enabled);
+}
+
+/// The monitor may report a same-name recreation as Up on the old index,
+/// then Up on the new one, with no Down between them. The old scoped peer
+/// is retired at once even though discovery never cleared its binding.
+#[tokio::test]
+async fn an_up_to_up_index_change_retires_the_old_scoped_peer() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
+    h.links_changed(snapshot(true, &[("swp1", 9, true)]));
+    h.reconcile().await;
+    // Mutation-red: judging only Up/Down keeps the peer on the dead index.
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "old index retired");
+    // A late binding event for the old index is stale and binds nothing.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)));
+    // The binding on the new index is taken.
+    h.bind("swp1", Some(endpoint(2, 9))).await;
+    assert_eq!(
+        h.mgr.peers[&swp1_key(2)].transport_config.peer_scope_id,
+        Some(9)
     );
 }

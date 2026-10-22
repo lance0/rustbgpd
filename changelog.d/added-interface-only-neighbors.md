@@ -9,7 +9,8 @@
   never ends an Established session: a changed address is taken up only after
   the session fails, and the move purges the routes learned from the old
   address. Confirmed carrier loss, admin down or removal of the interface ends
-  the session at once without Graceful Restart retention. A learned address
+  the session at once without Graceful Restart retention; an operator disable
+  or a max-prefix shutdown stays in force across it. A learned address
   that another neighbor already holds is refused with
   `duplicate_link_local_address`. `[global.unnumbered]` sets
   `ra_interval_secs` (default 10 s; Router Lifetime is three times it) and
