@@ -1,0 +1,20 @@
+{
+  "run_id": "20261021T011741Z",
+  "git_head": "536b538675404b0ca6e38c69a7f726fd97ade17d",
+  "soak_seconds": 86400,
+  "sample_interval_sec": 60,
+  "churn_interval_sec": 5,
+  "churn_batch": 25,
+  "prefix_pool_size": 4096,
+  "live_target_prefixes": 1024,
+  "warmup_sec": 120,
+  "lease_mode": 1,
+  "lease_owners": 4,
+  "lease_keys_per_owner": 512,
+  "lease_seconds": 30,
+  "lease_renew_sec": 10,
+  "lease_flap_interval_sec": 600,
+  "rustbgpd_container": "clab-soak-inject-churn-rustbgpd",
+  "frr_container": "clab-soak-inject-churn-frr",
+  "topology": "<repo>/tests/soak/soak-inject-churn.clab.yml"
+}
