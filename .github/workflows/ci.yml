@@ -106,6 +106,12 @@ jobs:
           bash -n .github/scripts/install-grpcurl.sh
           shellcheck .github/scripts/install-grpcurl.sh
           bash .github/scripts/install-grpcurl.sh --self-test
+      - name: Check bounded apt installer contract
+        shell: bash
+        run: |
+          bash -n .github/scripts/apt-install.sh
+          shellcheck .github/scripts/apt-install.sh
+          bash .github/scripts/apt-install.sh --self-test
       - name: Prove CI image-primer contract
         run: |
           bash -n .github/scripts/retry-docker-image.sh
@@ -170,8 +176,7 @@ jobs:
           python3 -m unittest -v scripts/test_fuzz_corpus_cache.py
       - name: Install receipt-tool dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
+          .github/scripts/apt-install.sh --command rg ripgrep
       - run: cargo fmt --check
       # Each fuzz crate is its own workspace, so the root check skips it.
       - run: rustfmt --check --edition 2024 crates/*/fuzz/fuzz_targets/*.rs
@@ -516,8 +521,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install receipt-tool dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
+          .github/scripts/apt-install.sh --command rg ripgrep
       - name: Check scale harnesses and receipt classifiers
         run: |
           set -euo pipefail
