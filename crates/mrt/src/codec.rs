@@ -3254,4 +3254,60 @@ mod tests {
             ));
         }
     }
+
+    /// Compatibility pin: a snapshot of ordinary (one neighbor per address)
+    /// peers encodes to exactly the bytes main produced before the peer index
+    /// was keyed by neighbor identity. Covers explicit IPv4 and IPv6 peers, a
+    /// peer known only from its routes, an Add-Path entry, a shared prefix
+    /// and EVPN. Regenerate with `BLESS=1` only for an intended format change.
+    #[test]
+    fn ordinary_peer_snapshot_bytes_are_unchanged() {
+        let v4_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let v4_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let v6 = IpAddr::V6("2001:db8::7".parse().unwrap());
+        let implicit = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+        let shared = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+        let nh = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let mut add_path = make_route(shared, v4_b, nh);
+        add_path.path_id = 7;
+        let routes = vec![
+            make_route(shared, v4_a, nh),
+            add_path,
+            make_route(shared, implicit, nh),
+            make_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+                v4_b,
+                nh,
+            ),
+            make_route(
+                Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
+                v6,
+                IpAddr::V6("2001:db8::7".parse().unwrap()),
+            ),
+        ];
+        let evpn = vec![make_evpn_macip(v4_a, nh), make_evpn_ipprefix(implicit, nh)];
+        let peers = [
+            make_peer(v6, 65003),
+            make_peer(v4_a, 65002),
+            make_peer(v4_b, 65001),
+        ];
+        let (bytes, _) = encode_snapshot_with_allocation_diagnostics(
+            Ipv4Addr::new(10, 255, 0, 1),
+            &peers,
+            &routes,
+            &evpn,
+            1_700_000_000,
+            1_699_999_000,
+        )
+        .unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ordinary_peer_snapshot.mrt"
+        );
+        if std::env::var_os("BLESS").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(fixture).parent().unwrap()).unwrap();
+            std::fs::write(fixture, &bytes).unwrap();
+        }
+        assert_eq!(bytes, std::fs::read(fixture).unwrap());
+    }
 }
