@@ -358,3 +358,49 @@ async fn explain_names_the_scope_when_the_interface_breaks_the_tie() {
     drop(tx);
     actor.await.unwrap();
 }
+
+/// Acceptance: a paged all-neighbor received listing whose page boundary
+/// falls between two same-address neighbors' routes for one prefix and path
+/// id returns every row exactly once. Keyed by address, both rows share one
+/// cursor key and the second page skips the second neighbor.
+#[tokio::test]
+async fn a_page_boundary_between_same_address_neighbors_skips_no_row() {
+    let (tx, actor) = spawn_manager();
+    let (eth0, eth1) = (scoped("fe80::1", "eth0"), scoped("fe80::1", "eth1"));
+    announce(&tx, eth0, 1).await;
+    announce(&tx, eth1, 2).await;
+    let page = |after, expected_version| {
+        let tx = tx.clone();
+        async move {
+            let (reply, rx) = oneshot::channel();
+            tx.send(RibUpdate::QueryRoutesPage {
+                scope: RouteQueryScope::Received { peer: None },
+                filter: None,
+                after,
+                expected_version,
+                page_size: 1,
+                reply,
+            })
+            .await
+            .unwrap();
+            rx.await.unwrap().unwrap()
+        }
+    };
+    let mut seen = Vec::new();
+    let mut current = page(None, None).await;
+    loop {
+        seen.extend(current.routes.iter().map(|route| route.peer));
+        if !current.has_more {
+            break;
+        }
+        let after = current.routes.last().map(crate::update::route_query_key);
+        current = page(after, Some(current.version)).await;
+    }
+    seen.sort_unstable();
+    let mut expected = vec![eth0, eth1];
+    expected.sort_unstable();
+    assert_eq!(seen, expected);
+
+    drop(tx);
+    actor.await.unwrap();
+}

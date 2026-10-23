@@ -89,7 +89,17 @@ async fn a_route_page_held_across_a_rebind_keeps_its_endpoint_and_cursor() {
     assert_eq!(response.routes[0].peer_address, "fe80::1");
     assert_eq!(response.routes[0].peer_interface, "");
     let cursor = decode_route_page_token(&response.next_page_token).unwrap();
-    assert_eq!(cursor.after, (prefix, "fe80::1".parse().unwrap(), 0));
+    assert_eq!(
+        cursor.after,
+        (
+            prefix,
+            PageSource {
+                addr: "fe80::1".parse().unwrap(),
+                peer: moving
+            },
+            0
+        )
+    );
     assert!(matches!(
         received_page(&tx, Some(cursor.after), Some(cursor.version)).await,
         Err(RoutePageError::Invalidated)
@@ -136,7 +146,7 @@ fn family_page_rows_and_cursors_keep_the_endpoint_of_their_page() {
     let token =
         encode_evpn_page_token(RouteQueryScope::Best, "0:", &evpn, &peers, version).unwrap();
     let cursor = decode_evpn_page_token(&token).unwrap();
-    assert_eq!(cursor.after.1, "fe80::1".parse::<IpAddr>().unwrap());
+    assert_eq!(cursor.after.1.addr, "fe80::1".parse::<IpAddr>().unwrap());
     assert!(moving.release());
 }
 

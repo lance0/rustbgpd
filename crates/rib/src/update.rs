@@ -1828,23 +1828,82 @@ pub enum RouteQueryScope {
     },
 }
 
+/// A route source's position in a paged listing: its address, then the
+/// neighbor's handle. Two neighbors on one link-local address share the
+/// address but never the handle, so their rows never share a cursor key.
+/// The handle order carries no routing meaning; it only cuts ties. Page
+/// tokens carry it as `address@handle`, the handle in hex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageSource {
+    /// The source's address.
+    pub addr: IpAddr,
+    /// The source neighbor.
+    pub peer: PeerId,
+}
+
+impl PageSource {
+    /// `peer`'s position, with its address as the peer table has it now.
+    #[must_use]
+    pub fn of(peer: PeerId) -> Self {
+        Self {
+            addr: peer.addr(),
+            peer,
+        }
+    }
+
+    /// `peer`'s position, with the address `peer_scope` recorded.
+    #[must_use]
+    pub fn in_scope(peer: PeerId, peer_scope: &PeerScope) -> Self {
+        Self {
+            addr: peer_scope.addr(peer),
+            peer,
+        }
+    }
+}
+
+impl std::fmt::Display for PageSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{:x}", self.addr, self.peer.to_raw())
+    }
+}
+
+impl std::str::FromStr for PageSource {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        const INVALID: &str = "a page source is `address@handle`";
+        let (addr, peer) = value.split_once('@').ok_or(INVALID)?;
+        Ok(Self {
+            addr: addr.parse().map_err(|_| INVALID)?,
+            peer: u64::from_str_radix(peer, 16)
+                .ok()
+                .and_then(PeerId::from_raw)
+                .ok_or(INVALID)?,
+        })
+    }
+}
+
 /// Resume cursor for a paged route query: the identity key of the last
 /// route on the previous page. The tuple's derived total order carries
 /// no routing meaning; it exists so stable cursors can be cut through
 /// the unordered route tables (see the `Ord` note on [`Prefix`]).
-pub type RouteQueryKey = (Prefix, IpAddr, u32);
+pub type RouteQueryKey = (Prefix, PageSource, u32);
 
 /// Identity key of a route within a paged-query scope.
 #[must_use]
 pub fn route_query_key(route: &Route) -> RouteQueryKey {
-    (route.prefix, route.peer.addr(), route.path_id)
+    (route.prefix, PageSource::of(route.peer), route.path_id)
 }
 
 /// [`route_query_key`] with the source address `peer_scope` recorded, for a
 /// cursor built from a page after the RIB has moved on.
 #[must_use]
 pub fn route_query_key_in(route: &Route, peer_scope: &PeerScope) -> RouteQueryKey {
-    (route.prefix, peer_scope.addr(route.peer), route.path_id)
+    (
+        route.prefix,
+        PageSource::in_scope(route.peer, peer_scope),
+        route.path_id,
+    )
 }
 
 /// Row filter evaluated inside the RIB task during a paged route query.
@@ -2038,11 +2097,11 @@ pub struct RibRowsPage<T> {
 }
 
 /// VPN page identity, excluding mutable labels.
-pub type VpnRouteQueryKey = (rustbgpd_wire::VpnRouteKey, IpAddr, u32);
+pub type VpnRouteQueryKey = (rustbgpd_wire::VpnRouteKey, PageSource, u32);
 /// Labeled-unicast page identity, excluding mutable labels.
-pub type LabeledRouteQueryKey = (Prefix, IpAddr, u32);
+pub type LabeledRouteQueryKey = (Prefix, PageSource, u32);
 /// RTC page identity, including partial membership prefixes.
-pub type RtcRouteQueryKey = (rustbgpd_wire::RtcNlri, IpAddr, u32);
+pub type RtcRouteQueryKey = (rustbgpd_wire::RtcNlri, PageSource, u32);
 /// BGP-LS page identity: family, raw NLRI type, optional RD and opaque
 /// payload, then source and path.
 pub type BgpLsRouteQueryKey = (
@@ -2050,7 +2109,7 @@ pub type BgpLsRouteQueryKey = (
     u16,
     Option<[u8; 8]>,
     bytes::Bytes,
-    IpAddr,
+    PageSource,
     u32,
 );
 
@@ -2062,7 +2121,7 @@ pub type OrrNodeQueryKey = Vec<u8>;
 pub type OrrLinkQueryKey = (Vec<u8>, Vec<u8>, Option<[u8; 8]>, bytes::Bytes);
 
 /// Identity ordering for EVPN pages, including the source peer for all-peer queries.
-pub type EvpnRouteQueryKey = (EvpnRouteKey, IpAddr);
+pub type EvpnRouteQueryKey = (EvpnRouteKey, PageSource);
 
 /// One bounded page of accepted or committed EVPN routes.
 #[derive(Debug, Clone, Default)]

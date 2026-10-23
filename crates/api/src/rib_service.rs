@@ -1,6 +1,6 @@
 //! gRPC RIB service — route listing, filtering, and bounded event history.
 
-use rustbgpd_rib::{PeerId, PeerScope};
+use rustbgpd_rib::{PageSource, PeerId, PeerScope};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -1357,7 +1357,7 @@ fn encode_family_page_token(
     version: RoutePageVersion,
 ) -> String {
     let payload = format!(
-        "fp1|{:016x}|{:016x}|{}|{identity}|{after}",
+        "fp2|{:016x}|{:016x}|{}|{identity}|{after}",
         version.epoch,
         version.generation,
         route_page_scope_token(scope)
@@ -1387,7 +1387,7 @@ fn decode_family_page_token(token: &str, max_len: usize) -> Result<FamilyPageCur
         return Err(invalid());
     }
     let parts: Vec<_> = payload.split('|').collect();
-    let ["fp1", epoch, generation, scope, identity, after] = parts.as_slice() else {
+    let ["fp2", epoch, generation, scope, identity, after] = parts.as_slice() else {
         return Err(invalid());
     };
     Ok(FamilyPageCursor {
@@ -1534,7 +1534,7 @@ fn encode_bgpls_page_key(route: &BgpLsRibRoute, peers: &PeerScope) -> String {
             .route_distinguisher
             .map_or_else(|| "-".to_string(), |rd| hex_octets(&rd)),
         hex_octets(&route.nlri.payload),
-        peers.display(route.peer),
+        PageSource::in_scope(route.peer, peers),
         route.path_id
     )
 }
@@ -1776,11 +1776,11 @@ fn encode_evpn_page_token(
         let _ = write!(hex, "{byte:02x}");
     }
     let payload = format!(
-        "ep1|{:016x}|{:016x}|{}|{identity}|{hex}|{}",
+        "ep2|{:016x}|{:016x}|{}|{identity}|{hex}|{}",
         version.epoch,
         version.generation,
         route_page_scope_token(scope),
-        peers.display(route.peer)
+        PageSource::in_scope(route.peer, peers)
     );
     Ok(format!(
         "{payload}|{}",
@@ -1807,7 +1807,7 @@ fn decode_evpn_page_token(token: &str) -> Result<EvpnPageCursor, Status> {
         return Err(invalid());
     }
     let parts: Vec<_> = payload.split('|').collect();
-    let ["ep1", epoch, generation, scope, identity, hex, peer] = parts.as_slice() else {
+    let ["ep2", epoch, generation, scope, identity, hex, peer] = parts.as_slice() else {
         return Err(invalid());
     };
     if hex.len() % 2 != 0 || !hex.is_ascii() {
@@ -1884,7 +1884,7 @@ fn encode_route_page_token(
     let (prefix, peer, path_id) = key;
     let (addr, len) = prefix_parts(*prefix);
     let payload = format!(
-        "rp5|{:016x}|{:016x}|{total}|{}|{query_identity}|{addr}/{len}|{peer}|{path_id}",
+        "rp6|{:016x}|{:016x}|{total}|{}|{query_identity}|{addr}/{len}|{peer}|{path_id}",
         version.epoch,
         version.generation,
         route_page_scope_token(scope)
@@ -1910,7 +1910,7 @@ fn decode_route_page_token(token: &str) -> Result<RoutePageCursor, Status> {
     }
     let mut parts = payload.split('|');
     let (
-        Some("rp5"),
+        Some("rp6"),
         Some(epoch),
         Some(generation),
         Some(total),
@@ -1949,7 +1949,7 @@ fn decode_route_page_token(token: &str) -> Result<RoutePageCursor, Status> {
     let (addr, len) = prefix.split_once('/').ok_or_else(invalid)?;
     let len: u32 = len.parse().map_err(|_| invalid())?;
     let prefix = parse_prefix_request(addr, len).map_err(|_| invalid())?;
-    let peer: IpAddr = peer.parse().map_err(|_| invalid())?;
+    let peer: PageSource = peer.parse().map_err(|_| invalid())?;
     let path_id: u32 = path_id.parse().map_err(|_| invalid())?;
     Ok(RoutePageCursor {
         scope,
@@ -3464,7 +3464,7 @@ impl proto::rib_service_server::RibService for RibService {
                             "{:016x}~{}~{}~{}",
                             u64::from_be_bytes(r.nlri.route_distinguisher.0),
                             r.nlri.prefix,
-                            page.peer_scope.display(r.peer),
+                            PageSource::in_scope(r.peer, &page.peer_scope),
                             r.path_id
                         ),
                         page.version,
@@ -3547,7 +3547,7 @@ impl proto::rib_service_server::RibService for RibService {
                         &format!(
                             "{}~{}~{}",
                             r.nlri.prefix,
-                            page.peer_scope.display(r.peer),
+                            PageSource::in_scope(r.peer, &page.peer_scope),
                             r.path_id
                         ),
                         page.version,
@@ -3636,7 +3636,7 @@ impl proto::rib_service_server::RibService for RibService {
                             r.nlri.origin_as,
                             r.nlri.route_target_bits,
                             r.nlri.prefix_len,
-                            page.peer_scope.display(r.peer),
+                            PageSource::in_scope(r.peer, &page.peer_scope),
                             r.path_id
                         ),
                         page.version,
@@ -6143,7 +6143,7 @@ mod tests {
         let token =
             encode_evpn_page_token(scope, "6:65000:100", &route, &PeerScope::default(), version)
                 .unwrap();
-        assert!(token.starts_with("ep1|"));
+        assert!(token.starts_with("ep2|"));
         let before = decode_evpn_page_token(&token).unwrap();
         route.route = EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
             flags: 0xfa,
@@ -6153,7 +6153,7 @@ mod tests {
             encode_evpn_page_token(scope, "6:65000:100", &route, &PeerScope::default(), version)
                 .unwrap();
         assert_eq!(decode_evpn_page_token(&token).unwrap().after, before.after);
-        assert_eq!(before.after, (route.key(), peer.addr()));
+        assert_eq!(before.after, (route.key(), PageSource::of(peer)));
         assert!(token.len() <= 1024);
     }
 
@@ -6247,7 +6247,7 @@ mod tests {
                 decode_evpn_page_token(&response.next_page_token)
                     .unwrap()
                     .after,
-                (expected_key, peer.addr())
+                (expected_key, PageSource::of(peer))
             );
         }
         actor.await.unwrap();
@@ -7097,7 +7097,7 @@ mod tests {
             let token = encode_evpn_page_token(scope, "0:", &route, &PeerScope::default(), version)
                 .unwrap();
             let cursor = decode_evpn_page_token(&token).unwrap();
-            assert_eq!(cursor.after, (route.key(), peer.addr()));
+            assert_eq!(cursor.after, (route.key(), PageSource::of(peer)));
             assert_eq!(cursor.scope, scope);
             assert_eq!(cursor.version, version);
             assert!(token.len() < 1024);
@@ -7176,7 +7176,7 @@ mod tests {
                 panic!("expected EVPN page");
             };
             assert_eq!(scope, RouteQueryScope::Received { peer: Some(peer) });
-            assert_eq!(after, Some((route.key(), peer.addr())));
+            assert_eq!(after, Some((route.key(), PageSource::of(peer))));
             assert_eq!(expected_version, Some(version));
             assert_eq!(page_size, 1);
             assert!(filter.as_ref().unwrap()(&route));
@@ -7287,7 +7287,10 @@ mod tests {
         assert_eq!(response.total_count, 2);
         assert_eq!(response.page_version.unwrap().generation, 8);
         let cursor = decode_evpn_page_token(&response.next_page_token).unwrap();
-        assert_eq!(cursor.after, (expected_key, source));
+        assert_eq!(
+            cursor.after,
+            (expected_key, PageSource::of(PeerId::from_addr(source)))
+        );
         assert_eq!(
             cursor.scope,
             RouteQueryScope::Advertised { peer: destination }
@@ -7773,7 +7776,7 @@ mod tests {
         let response = route_page_to_response(&page, scope, &"0".repeat(64), false, None);
         assert_eq!(response.routes[0].peer_address, "192.0.2.77");
         let cursor = decode_route_page_token(&response.next_page_token).unwrap();
-        assert_eq!(cursor.after.1, address);
+        assert_eq!(cursor.after.1.addr, address);
     }
 
     /// `rbgp rib received` showed stale routes as normal during a
@@ -10239,12 +10242,12 @@ mod tests {
         for key in [
             (
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
-                "192.0.2.1".parse::<IpAddr>().unwrap(),
+                PageSource::of(PeerId::from_addr("192.0.2.1".parse().unwrap())),
                 0u32,
             ),
             (
                 Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
-                "2001:db8::1".parse::<IpAddr>().unwrap(),
+                PageSource::of(PeerId::from_addr("2001:db8::1".parse().unwrap())),
                 7u32,
             ),
         ] {
