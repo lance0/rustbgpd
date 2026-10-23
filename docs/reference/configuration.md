@@ -1099,10 +1099,39 @@ be made without rebuilding its sessions.
 IPv6 link-local neighbors (`fe80::/10`) must set `interface`, because a
 link-local address is not globally unique (RFC 4007). Numbered IPv4 / IPv6
 neighbors must not set `interface`. Duplicate numbered peers are rejected by
-address. In this release each link-local address must also be unique across
-neighbors: the same link-local address may not be bound to more than one
-interface, because the RIB still keys peers by address. Scoped multi-interface
-link-local peering is deferred (see ADR-0069).
+address, and link-local peers by `(address, interface)`.
+
+One link-local address may name a neighbor on each of several interfaces, for
+example parallel links to a router that uses the same MAC, and so the same
+EUI-64 link-local address, on every port:
+
+```toml
+[[neighbors]]
+address = "fe80::1"
+interface = "eth0"
+remote_asn = 65101
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth1"
+remote_asn = 65101
+```
+
+Each is its own neighbor: its own routes, which survive the other's session
+going down, route refresh, Graceful Restart and deletion; its own metrics
+series (`peer="fe80::1%eth0"`); its own entries in MRT dumps. When the two
+advertise an equal route, the interface name breaks the tie, compared
+bytewise, so the same one wins whatever the configuration or connection
+order. Some features still key their state by the bare address and are
+refused on neighbors that share one:
+
+- BMP: any `[bmp]` collector is refused while such a pair exists, because a
+  collector cannot tell the two sessions apart;
+- BFD (`bfd`, directly or inherited);
+- TCP MD5 (`md5_password`) and TCP-AO (`tcp_ao`), which the passive listener
+  keys by peer address;
+- a `log_level` that differs between them, because the per-neighbor log
+  directive matches the bare address.
 
 ```toml
 [[neighbors]]
@@ -5855,7 +5884,7 @@ quoting it:
 | Each `address` in `[[neighbors]]` must be a valid IP address (IPv4 or IPv6) | `invalid neighbor address` |
 | IPv6 link-local `[[neighbors]]` must set `interface`; numbered neighbors must not | `invalid neighbor config` |
 | `[[neighbors]]` identity must be unique by address for numbered peers and by `(address, interface)` for IPv6 link-local peers | `duplicate neighbor address/interface` |
-| An IPv6 link-local address may not be bound to more than one interface in this release (the RIB keys peers by address; deferred per ADR-0069) | `not supported in this release` |
+| Neighbors that share one IPv6 link-local address on different interfaces may not be combined with a `[bmp]` collector, and may not use BFD, `md5_password`, `tcp_ao`, or differing `log_level` values; the error names both neighbors | `invalid neighbor config` |
 | `prometheus_addr` must be a valid `ip:port` | `invalid prometheus_addr` |
 | `grpc_tcp.address` must be a valid `ip:port` when `grpc_tcp` is enabled | `invalid gRPC config` |
 | `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |
