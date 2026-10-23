@@ -67,6 +67,14 @@ pub(super) struct InstalledPolicyRoutesReachability {
     scopes: BTreeMap<(String, String), InstalledPolicyRoutesScope>,
 }
 
+#[cfg(test)]
+impl InstalledPolicyRoutesReachability {
+    /// The `peer` values the scopes name.
+    pub(super) fn peers(&self) -> std::collections::BTreeSet<String> {
+        self.scopes.keys().map(|(peer, _)| peer.clone()).collect()
+    }
+}
+
 fn reject_peer_group_tcp_mss_change(
     current: &crate::config::Config,
     next: &crate::config::Config,
@@ -520,9 +528,8 @@ impl PeerManager {
     pub(super) fn installed_policy_routes_reachability(&self) -> InstalledPolicyRoutesReachability {
         let mut snapshot = InstalledPolicyRoutesReachability::default();
         for (peer, managed) in &self.peers {
-            // Bare, like the transport and RIB emitters: the metrics bridge
-            // maps it to a link-local neighbor's scoped value.
-            let peer_label = rustbgpd_telemetry::peer_label(peer.address);
+            // The neighbor's own value, as the transport and RIB emit it.
+            let peer_label = peer.label();
             for (direction, chain, clean) in [
                 (
                     "import",

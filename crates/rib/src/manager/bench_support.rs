@@ -2723,7 +2723,7 @@ impl RibManager {
             &crate::manager::helpers::LABELED_FAMILIES,
             &["rtc"],
         ];
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         let gathered = self.metrics.registry().gather();
         let Some(gauge) = gathered
             .iter()

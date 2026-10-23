@@ -138,7 +138,7 @@ impl RibManager {
     /// table. A partial-GR peer holds both kinds at once, so both count.
     pub(super) fn publish_gr_stale_routes(&self, peer: PeerId) {
         self.metrics.set_gr_stale_routes(
-            &peer.to_string(),
+            &peer.label(),
             i64::try_from(self.retained_stale_count(peer)).unwrap_or(i64::MAX),
         );
     }
@@ -498,21 +498,18 @@ impl RibManager {
             }
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
-                &peer.to_string(),
+                &peer.label(),
                 crate::manager::helpers::UNICAST_FAMILIES,
                 rib.unicast_lens(),
             );
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
-                &peer.to_string(),
+                &peer.label(),
                 crate::manager::helpers::FLOWSPEC_FAMILIES,
                 rib.flowspec_lens(),
             );
-            self.metrics.set_rib_prefixes(
-                &peer.to_string(),
-                "l2vpn_evpn",
-                gauge_val(rib.evpn_len()),
-            );
+            self.metrics
+                .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(rib.evpn_len()));
         }
 
         let changed = self.recompute_best(&affected);
@@ -590,7 +587,7 @@ impl RibManager {
             self.llgr_peer_config.insert(peer, llgr_config);
         }
 
-        self.metrics.set_gr_active(&peer.to_string(), true);
+        self.metrics.set_gr_active(&peer.label(), true);
         self.publish_gr_stale_routes(peer);
         true
     }
@@ -769,7 +766,7 @@ impl RibManager {
             .collect();
         self.gr_stale_deadlines.remove(&peer);
         self.gr_stale_routes_time.remove(&peer);
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         self.metrics.record_gr_timer_expired(&peer_label);
 
         // Check if LLGR applies. Read — don't consume — the config: the
@@ -930,7 +927,7 @@ impl RibManager {
         families: &[(Afi, Safi)],
         llgr_config: &LlgrPeerConfig,
     ) {
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         // Only promote families that are in the LLGR capability with a
         // non-zero Long-Lived Stale Time; purge the rest. A zero LLST means
         // no LLGR period for the family (RFC 9494 §4.2), so its routes end
@@ -1152,7 +1149,7 @@ impl RibManager {
             self.advance_all_route_pages();
         }
         info!(%peer, ?families, "LLGR timer expired — sweeping LLGR-stale routes");
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
 
         let mut swept = Vec::new();
         let mut fs_swept = Vec::new();

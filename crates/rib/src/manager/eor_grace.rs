@@ -266,7 +266,7 @@ impl RibManager {
         held.sort_unstable();
         let held = held.join(",");
         self.metrics
-            .record_gr_eor_grace_released(&peer.to_string(), reason);
+            .record_gr_eor_grace_released(&peer.label(), reason);
         if !self.dirty_peers.contains(&peer) {
             self.flush_pending_eor(peer);
         }

@@ -919,7 +919,13 @@ impl PeerManager {
             // still exists (`peer_keys_for_address` non-empty) and keeps
             // its series.
             if self.peer_keys_for_address(peer).is_empty() {
-                self.metrics.reap_peer_series(&peer.to_string());
+                // The session's own value: scoped for a link-local neighbor.
+                let label = self
+                    .bfd_coupling
+                    .as_ref()
+                    .and_then(|c| c.configured.get(&peer))
+                    .map_or_else(|| peer.to_string(), |params| params.peer_label.clone());
+                self.metrics.reap_peer_series(&label);
             }
             return;
         }

@@ -436,6 +436,21 @@ impl PeerId {
         })
     }
 
+    /// The neighbor's `peer` metric label: its address, scoped to its
+    /// interface for a link-local neighbor (`fe80::1%eth0`), the value the
+    /// peer manager and the neighbor's session emit, so two neighbors on one
+    /// link-local address never share a series. A handle whose slot was
+    /// reused labels as its [`Display`](fmt::Display) form.
+    #[must_use]
+    pub fn label(self) -> String {
+        self.with_endpoint(|endpoint| match endpoint {
+            Some(endpoint) => {
+                rustbgpd_telemetry::scoped_peer_label(endpoint.addr, endpoint.interface.as_deref())
+            }
+            None => format!("peer#{}.{}", self.index, self.generation),
+        })
+    }
+
     /// The interface of a scoped neighbor; `None` for a numbered one.
     #[must_use]
     pub fn interface(self) -> Option<Arc<str>> {

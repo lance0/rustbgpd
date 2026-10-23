@@ -201,7 +201,7 @@ impl RibManager {
                  the registered session's state is untouched"
             );
             self.metrics
-                .record_rib_stale_peer_down_ignored(&peer.to_string());
+                .record_rib_stale_peer_down_ignored(&peer.label());
             return SessionTeardownDisposition::DiscardStale;
         }
         // The active session went down. Prune it; if another live session
@@ -274,7 +274,7 @@ impl RibManager {
              the registered session's state is untouched"
         );
         self.metrics
-            .record_rib_stale_session_message_ignored(&peer.to_string(), kind);
+            .record_rib_stale_session_message_ignored(&peer.label(), kind);
         true
     }
 
@@ -319,7 +319,7 @@ impl RibManager {
              failing the outbound registration over to the survivor"
         );
         self.metrics
-            .record_rib_outbound_registration_failover(&peer.to_string());
+            .record_rib_outbound_registration_failover(&peer.label());
         // Same reset shape as the replacement-PeerUp: the dead session's
         // received routes go, GR/LLGR-retained routes stay (deadline-
         // bounded, swept on End-of-RIB or expiry).
@@ -376,7 +376,7 @@ impl RibManager {
                     "outbound channel closed — collision-failback inbound \
                      ROUTE-REFRESH request cannot be delivered"
                 );
-                self.metrics.record_outbound_route_drop(&peer.to_string());
+                self.metrics.record_outbound_route_drop(&peer.label());
             }
         }
         if self.pending_inbound_refresh.is_empty() {
@@ -450,7 +450,7 @@ impl RibManager {
                         "outbound channel closed while retrying collision-failback \
                          inbound ROUTE-REFRESH request"
                     );
-                    self.metrics.record_outbound_route_drop(&peer.to_string());
+                    self.metrics.record_outbound_route_drop(&peer.label());
                 }
             }
         }
@@ -479,7 +479,7 @@ impl RibManager {
             self.gr_stale_routes_time.remove(&peer);
             self.llgr_peer_config.remove(&peer);
             info!(%peer, "peer down during graceful restart — aborting GR");
-            let peer_label = peer.to_string();
+            let peer_label = peer.label();
             self.metrics.set_gr_active(&peer_label, false);
             self.metrics.set_gr_stale_routes(&peer_label, 0);
         }
@@ -491,7 +491,7 @@ impl RibManager {
             // promoted out of gr_peers.
             self.llgr_peer_config.remove(&peer);
             info!(%peer, "peer down during LLGR — aborting LLGR");
-            let peer_label = peer.to_string();
+            let peer_label = peer.label();
             self.metrics.set_gr_active(&peer_label, false);
             self.metrics.set_gr_stale_routes(&peer_label, 0);
         }
@@ -501,7 +501,7 @@ impl RibManager {
         // series those deadlines kept active.
         if self.llgr_stale_deadlines.keys().any(|&(p, _, _)| p == peer) {
             self.llgr_stale_deadlines.retain(|&(p, _, _)| p != peer);
-            let peer_label = peer.to_string();
+            let peer_label = peer.label();
             self.metrics.set_gr_active(&peer_label, false);
             self.metrics.set_gr_stale_routes(&peer_label, 0);
         }
@@ -593,16 +593,16 @@ impl RibManager {
             debug!(%peer, cleared = count, "peer adj-rib-in cleared");
             crate::manager::helpers::set_rib_prefixes(
                 &manager.metrics,
-                &peer.to_string(),
+                &peer.label(),
                 crate::manager::helpers::UNICAST_FAMILIES,
                 [0, 0],
             );
             manager
                 .metrics
-                .set_rib_prefixes(&peer.to_string(), "l2vpn_evpn", 0);
+                .set_rib_prefixes(&peer.label(), "l2vpn_evpn", 0);
             crate::manager::helpers::set_rib_prefixes(
                 &manager.metrics,
-                &peer.to_string(),
+                &peer.label(),
                 crate::manager::helpers::FLOWSPEC_FAMILIES,
                 [0, 0],
             );
@@ -780,9 +780,8 @@ impl RibManager {
                 selection.peer_deleted(peer, &self.metrics)
             });
         self.apply_selection_deferral_transitions(transitions, "peer deleted from configuration");
-        self.metrics.reap_exact_peer_series(
-            &label.map_or_else(|| peer.to_string(), |label| label.to_string()),
-        );
+        self.metrics
+            .reap_peer_series(&label.map_or_else(|| peer.label(), |label| label.to_string()));
     }
 
     /// Move a live neighbor to a new endpoint. Whatever its previous
@@ -900,7 +899,7 @@ impl RibManager {
         // and `bgp_gr_stale_routes` carry the "expected back" signal for
         // the hold window; this series carries what we would actually
         // re-advertise, which is nothing until the peer returns.
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         for &(family, ..) in rustbgpd_wire::CONFIGURED_FAMILIES {
             self.metrics
                 .set_adj_rib_out_prefixes(&peer_label, family, 0);
@@ -912,8 +911,7 @@ impl RibManager {
         // consume a new generation's capacity nor clear its episode.
         self.outbound_prefix_limits.remove(&peer);
         self.outbound_limit_control.reap_peer(peer);
-        self.metrics
-            .reap_outbound_prefix_capacity(&peer.to_string());
+        self.metrics.reap_outbound_prefix_capacity(&peer.label());
         self.export_chains.remove(&peer);
         if self.peer_sendable_families.remove(&peer).is_some() {
             self.outbound_roster_generation = self.outbound_roster_generation.wrapping_add(1);
@@ -1089,7 +1087,7 @@ impl RibManager {
                  will be matched by session id"
             );
             self.metrics
-                .record_rib_outbound_registration_replaced(&peer.to_string());
+                .record_rib_outbound_registration_replaced(&peer.label());
             if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
                 self.clear_policy_filtered_routes_for_peer(peer);
                 self.clear_peer_adj_rib_in(peer);
@@ -1635,7 +1633,7 @@ impl RibManager {
             // charged owner while its channel/session maps still identify it.
             self.retire_evpn_recovery(peer);
         }
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         let unicast = crate::manager::helpers::UNICAST_FAMILIES;
         crate::manager::helpers::set_rib_prefixes(&self.metrics, &peer_label, unicast, [0, 0]);
         // Selective steady-state refresh relies on every family series already
@@ -2211,7 +2209,7 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let target_peer_label = peer.to_string();
+        let target_peer_label = peer.label();
         let metrics = self.metrics.clone();
 
         let owned_evpn = self.evpn_grouped_member_of(peer);
@@ -3027,7 +3025,7 @@ impl RibManager {
             };
             if tx.try_send(eor).is_err() {
                 warn!(%peer, "outbound channel full — `EoR` deferred");
-                self.metrics.record_outbound_eor_deferral(&peer.to_string());
+                self.metrics.record_outbound_eor_deferral(&peer.label());
                 for f in &eor_families {
                     self.pending_eor.entry(peer).or_default().insert(*f);
                 }

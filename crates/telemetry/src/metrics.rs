@@ -1,11 +1,10 @@
 //! Prometheus metrics for session, RIB, policy, EVPN, GR, and RPKI counters/gauges.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use prometheus::{
@@ -149,9 +148,9 @@ pub fn scrub_info_label(value: &str) -> String {
 /// per neighbor — `"192.0.2.1"`, `"2001:db8::1"` — so that `by (peer)`
 /// aggregations return one series per peer and joins across metric
 /// families (session ⇄ RIB ⇄ policy) match. An IPv6 link-local
-/// neighbor's value is scoped instead, `"fe80::1%eth0"`: callers that
-/// know only the bare address pass it unchanged, and
-/// [`BgpMetrics::register_scoped_peer`] maps it to the scoped value.
+/// neighbor's value is scoped instead, `"fe80::1%eth0"`, built by
+/// [`scoped_peer_label`]: every emitter passes its neighbor's own value,
+/// so two neighbors sharing one link-local address never share a series.
 /// Producing the label any other way, in particular stringifying a
 /// `SocketAddr` and picking up the `:179` endpoint port, splits every
 /// such query silently:
@@ -164,6 +163,17 @@ pub fn scrub_info_label(value: &str) -> String {
 #[must_use]
 pub fn peer_label(addr: IpAddr) -> String {
     addr.to_string()
+}
+
+/// Canonical `peer` label value of a neighbor at `addr`, scoped to
+/// `interface` when it has one (an IPv6 link-local neighbor):
+/// `"fe80::1%eth0"`. A numbered neighbor's value is [`peer_label`].
+#[must_use]
+pub fn scoped_peer_label(addr: IpAddr, interface: Option<&str>) -> String {
+    match interface {
+        Some(interface) => format!("{addr}%{interface}"),
+        None => peer_label(addr),
+    }
 }
 
 /// Every `peer` label value in `registry` that is neither the canonical
@@ -543,9 +553,6 @@ struct BgpMetricsInner {
     // Exact last-published labels, owned with the family across peer replacements.
     // Always lock this map before modifying peer_info; no family scans under the lock.
     peer_info_labels: Mutex<BTreeMap<(String, String), [String; 3]>>,
-    /// Bare link-local address → scoped `peer` value, for emitters (RIB,
-    /// BFD, transport) that know only the bare address.
-    scoped_peers: RwLock<HashMap<String, String>>,
     session_down: IntCounterVec,
     stale_timer_events: IntCounterVec,
     session_notification_outstanding_value: Arc<AtomicI64>,
@@ -826,13 +833,12 @@ struct BgpMetricsInner {
 /// `"keepalive"`, etc.
 ///
 /// The `peer` label is the one exception: it has a single canonical
-/// form, produced by [`peer_label`] (scoped through
-/// [`Self::register_scoped_peer`] for a link-local neighbor) and enforced
-/// by [`non_canonical_peer_labels`]. Never stringify a `SocketAddr` into
-/// it.
+/// form per neighbor, produced by [`peer_label`] or, for a link-local
+/// neighbor, [`scoped_peer_label`], and enforced by
+/// [`non_canonical_peer_labels`]. Never stringify a `SocketAddr` into it.
 ///
 /// **Adding a `peer`-labeled Vec metric?** Add it to the reap list in
-/// [`Self::reap_exact_peer_series`] too, so the series are removed when the
+/// [`Self::reap_peer_series`] too, so the series are removed when the
 /// peer is deleted. Families without a `peer` label are process-global
 /// (or keyed by another identity such as VNI or VRF) and are
 /// intentionally not reaped — except `collector`-labeled BMP families,
@@ -3636,7 +3642,6 @@ impl BgpMetrics {
             peer_session_state,
             peer_info,
             peer_info_labels: Mutex::new(BTreeMap::new()),
-            scoped_peers: RwLock::new(HashMap::new()),
             session_down,
             stale_timer_events,
             dynamic_neighbor_slots_used,
@@ -3921,51 +3926,6 @@ impl BgpMetrics {
 
     // ── Per-peer series reaping ────────────────────────────────────
 
-    /// Record the scoped `peer` value of the configured neighbor that owns
-    /// `address`, so every later emission, read and reap that passes the
-    /// bare address uses `label` instead. A later registration for the same
-    /// address replaces the earlier one (an interface change re-adds the
-    /// neighbor). A `label` equal to the bare address registers nothing.
-    ///
-    /// Call before the neighbor's first emission, and never unregister: an
-    /// emitter's teardown writes after a delete must still resolve to the
-    /// deleted neighbor's value. A final reap that must not follow a later
-    /// re-registration names the exact value through
-    /// [`Self::reap_exact_peer_series`].
-    // ponytail: one value per bare address holds only while configuration
-    // rejects the same link-local address on two interfaces. After an
-    // interface move re-registers the address, the old neighbor's RIB
-    // writes queued before its delete resolve to the new value; they are
-    // gauges the new session republishes, so the error is transient. (BFD
-    // labels its series exactly and does not use this map.) RIB emitters
-    // carrying full neighbor identity replace this map.
-    pub fn register_scoped_peer(&self, address: IpAddr, label: &str) {
-        let bare = peer_label(address);
-        if label == bare {
-            return;
-        }
-        self.0
-            .scoped_peers
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(bare, label.to_owned());
-    }
-
-    /// The `peer` value series use for `peer`: the registered scoped value
-    /// of a bare link-local address, otherwise `peer` unchanged.
-    fn scoped_peer<'a>(&self, peer: &'a str) -> Cow<'a, str> {
-        // Only IPv6 link-local (`fe80::/10`) addresses are registered.
-        if !peer.starts_with("fe") {
-            return Cow::Borrowed(peer);
-        }
-        self.0
-            .scoped_peers
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(peer)
-            .map_or(Cow::Borrowed(peer), |label| Cow::Owned(label.clone()))
-    }
-
     /// Remove every series whose `peer` label equals `peer`, across all
     /// peer-labeled metric families (gauges and counters alike).
     ///
@@ -3977,23 +3937,15 @@ impl BgpMetrics {
     /// `increase()` handle as an ordinary counter reset.
     ///
     /// Matching is exact on the label string, so `peer` must be the
-    /// canonical [`peer_label`] form — the same one every emission site
-    /// uses. One call reaps the peer everywhere.
-    ///
-    /// Reaping a peer with no live series is a no-op.
-    pub fn reap_peer_series(&self, peer: &str) {
-        self.reap_exact_peer_series(&self.scoped_peer(peer));
-    }
-
-    /// [`Self::reap_peer_series`] for the exact `peer` value, without
-    /// mapping a bare link-local address to its registered scoped value.
-    /// The RIB's final reap after a delete uses this with the deleted
-    /// neighbor's value, so a replacement registered meanwhile keeps its
-    /// series.
+    /// neighbor's canonical value ([`peer_label`] or
+    /// [`scoped_peer_label`]) — the same one every emission site uses. A
+    /// neighbor sharing a link-local address keeps its own series. One
+    /// call reaps the peer everywhere; a peer with no live series is a
+    /// no-op.
     ///
     /// REAP LIST — keep in sync with the `peer`-labeled Vec fields on
     /// [`BgpMetrics`] (see the struct doc comment).
-    pub fn reap_exact_peer_series(&self, peer: &str) {
+    pub fn reap_peer_series(&self, peer: &str) {
         Self::reap_peer_series_from_vec(&self.0.state_transitions, peer);
         Self::reap_peer_series_from_vec(&self.0.session_flaps, peer);
         Self::reap_peer_series_from_vec(&self.0.session_established, peer);
@@ -4110,16 +4062,9 @@ impl BgpMetrics {
     pub fn reap_unreachable_policy_routes(&self, reachable: &PolicyRoutesReachability) -> usize {
         use prometheus::core::Collector;
 
-        // Scopes name the bare address, as emitters do; series carry the
-        // mapped value.
         let reachable: BTreeMap<_, _> = reachable
             .iter()
-            .map(|((peer, direction), set)| {
-                (
-                    (self.scoped_peer(peer).into_owned(), direction.clone()),
-                    set,
-                )
-            })
+            .map(|((peer, direction), set)| ((peer.clone(), direction.clone()), set))
             .collect();
         let mut retired = Vec::new();
         for family in self.0.policy_routes.collect() {
@@ -4172,7 +4117,6 @@ impl BgpMetrics {
     /// Unlike [`Self::reap_peer_series`], this preserves a scoped sibling
     /// with the same link-local address on another interface.
     pub fn reap_peer_identity_series(&self, peer: &str, interface: &str) {
-        let peer = &*self.scoped_peer(peer);
         let labels = &[peer, interface];
         let _ = self.0.peer_admin_enabled.remove_label_values(labels);
         let _ = self.0.max_prefix_latched.remove_label_values(labels);
@@ -4283,7 +4227,6 @@ impl BgpMetrics {
     /// Automatically increments the flap counter when leaving
     /// `"established"` and the established counter when entering it.
     pub fn record_state_transition(&self, peer: &str, from: &str, to: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .state_transitions
             .with_label_values(&[peer, from, to])
@@ -4300,7 +4243,6 @@ impl BgpMetrics {
     /// Publish the effective administrative state: 0 covers both an operator
     /// disable and a max-prefix shutdown latch.
     pub fn set_peer_admin_enabled(&self, peer: &str, interface: &str, enabled: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .peer_admin_enabled
             .with_label_values(&[peer, interface])
@@ -4309,7 +4251,6 @@ impl BgpMetrics {
 
     /// Publish whether a max-prefix shutdown latch holds this exact peer off.
     pub fn set_max_prefix_latched(&self, peer: &str, interface: &str, latched: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .max_prefix_latched
             .with_label_values(&[peer, interface])
@@ -4334,7 +4275,6 @@ impl BgpMetrics {
         description: &str,
         peer_group: &str,
     ) {
-        let peer = &*self.scoped_peer(peer);
         let labels = [
             remote_asn.to_string(),
             scrub_info_label(description),
@@ -4367,7 +4307,6 @@ impl BgpMetrics {
 
     /// Publish whether the active-primary session is Established.
     pub fn set_peer_session_established(&self, peer: &str, interface: &str, established: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .peer_session_established
             .with_label_values(&[peer, interface])
@@ -4387,7 +4326,6 @@ impl BgpMetrics {
     /// An unknown state is rejected without changing the last valid vector;
     /// accepting it would publish an invalid all-zero vector.
     pub fn set_peer_session_state(&self, peer: &str, interface: &str, current: &str) {
-        let peer = &*self.scoped_peer(peer);
         debug_assert!(
             SESSION_STATES.contains(&current),
             "session state must use the exact bounded FSM vocabulary"
@@ -4428,7 +4366,6 @@ impl BgpMetrics {
         interface: &str,
         reason: crate::reason_labels::SessionDownReason,
     ) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .session_down
             .with_label_values(&[peer, interface, reason.as_str()])
@@ -4509,7 +4446,6 @@ impl BgpMetrics {
     /// Remove BFD series when an attachment is removed, preserving the peer's
     /// BGP history. Do not call for a session flap or neighbor admin disable.
     pub fn reap_bfd_series(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         Self::reap_peer_series_from_vec(&self.0.bfd_session_up, peer);
         Self::reap_peer_series_from_vec(&self.0.bfd_session_flaps_total, peer);
     }
@@ -4517,7 +4453,6 @@ impl BgpMetrics {
     /// Record a BFD session state change: set the per-peer up gauge and count a
     /// flap on any transition out of Up.
     pub fn record_bfd_state(&self, peer: &str, is_up: bool, was_up: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .bfd_session_up
             .with_label_values(&[peer])
@@ -4535,7 +4470,6 @@ impl BgpMetrics {
     /// these rather than tearing the session down; the counter exists
     /// so they don't disappear silently.
     pub fn record_stale_timer_event(&self, peer: &str, state: &str, timer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .stale_timer_events
             .with_label_values(&[peer, state, timer])
@@ -4544,7 +4478,6 @@ impl BgpMetrics {
 
     /// Record a NOTIFICATION sent to a peer.
     pub fn record_notification_sent(&self, peer: &str, code: &str, subcode: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .notifications_sent
             .with_label_values(&[peer, code, subcode])
@@ -4553,7 +4486,6 @@ impl BgpMetrics {
 
     /// Record a NOTIFICATION received from a peer.
     pub fn record_notification_received(&self, peer: &str, code: &str, subcode: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .notifications_received
             .with_label_values(&[peer, code, subcode])
@@ -4562,7 +4494,6 @@ impl BgpMetrics {
 
     /// Record a BGP message sent to a peer.
     pub fn record_message_sent(&self, peer: &str, msg_type: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .messages_sent
             .with_label_values(&[peer, msg_type])
@@ -4571,7 +4502,6 @@ impl BgpMetrics {
 
     /// Record a BGP message received from a peer.
     pub fn record_message_received(&self, peer: &str, msg_type: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .messages_received
             .with_label_values(&[peer, msg_type])
@@ -4597,7 +4527,6 @@ impl BgpMetrics {
             "notification",
             "route_refresh",
         ];
-        let peer = &*self.scoped_peer(peer);
         let sum = |vec: &IntCounterVec| -> u64 {
             MESSAGE_TYPES
                 .iter()
@@ -4609,7 +4538,6 @@ impl BgpMetrics {
 
     /// Set the number of prefixes in Adj-RIB-In for a peer/AFI-SAFI.
     pub fn set_rib_prefixes(&self, peer: &str, family: &str, count: i64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rib_prefixes
             .with_label_values(&[peer, family])
@@ -4618,7 +4546,6 @@ impl BgpMetrics {
 
     /// Set the number of prefixes in Adj-RIB-Out for a peer/AFI-SAFI.
     pub fn set_adj_rib_out_prefixes(&self, peer: &str, family: &str, count: i64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rib_adj_out_prefixes
             .with_label_values(&[peer, family])
@@ -4629,7 +4556,6 @@ impl BgpMetrics {
     /// writer. Sampled at batch granularity — once per enqueue batch and
     /// once per writer drain pass — never per BGP message.
     pub fn set_peer_outbound_queue_depth(&self, peer: &str, depth: i64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .peer_outbound_queue_depth
             .with_label_values(&[peer])
@@ -4639,7 +4565,6 @@ impl BgpMetrics {
     /// Read a peer's outbound-queue-depth gauge. Test/diagnostic helper.
     #[must_use]
     pub fn peer_outbound_queue_depth(&self, peer: &str) -> i64 {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .peer_outbound_queue_depth
             .with_label_values(&[peer])
@@ -4651,7 +4576,6 @@ impl BgpMetrics {
     /// (into slow and out of slow) and on session teardown, so the flag
     /// can never stay latched for a peer that recovered.
     pub fn set_peer_slow(&self, peer: &str, slow: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .peer_slow
             .with_label_values(&[peer])
@@ -4661,13 +4585,11 @@ impl BgpMetrics {
     /// Read a peer's slow-peer flag gauge. Test/diagnostic helper.
     #[must_use]
     pub fn peer_slow(&self, peer: &str) -> i64 {
-        let peer = &*self.scoped_peer(peer);
         self.0.peer_slow.with_label_values(&[peer]).get()
     }
 
     /// Publish whether a peer's BMP stream is awaiting divergence repair.
     pub fn set_bmp_stream_diverged(&self, peer: &str, diverged: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .bmp_stream_diverged
             .with_label_values(&[peer])
@@ -4677,7 +4599,6 @@ impl BgpMetrics {
     /// Read a peer's BMP divergence latch. Test/diagnostic helper.
     #[must_use]
     pub fn bmp_stream_diverged(&self, peer: &str) -> i64 {
-        let peer = &*self.scoped_peer(peer);
         self.0.bmp_stream_diverged.with_label_values(&[peer]).get()
     }
 
@@ -4687,7 +4608,6 @@ impl BgpMetrics {
     /// and the session-reset clear — so the gauge tracks the store in
     /// both directions and can never stay latched.
     pub fn set_rejected_routes_retained(&self, peer: &str, count: usize) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rejected_routes_retained
             .with_label_values(&[peer])
@@ -4698,7 +4618,6 @@ impl BgpMetrics {
     /// helper.
     #[must_use]
     pub fn rejected_routes_retained(&self, peer: &str) -> i64 {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rejected_routes_retained
             .with_label_values(&[peer])
@@ -4707,7 +4626,6 @@ impl BgpMetrics {
 
     /// Record one genuine displacement from a peer's retained-reject LRU.
     pub fn record_rejected_route_eviction(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rejected_route_retention_evictions
             .with_label_values(&[peer])
@@ -4717,7 +4635,6 @@ impl BgpMetrics {
     /// Read a peer's cumulative retained-reject eviction counter.
     #[must_use]
     pub fn rejected_route_retention_evictions(&self, peer: &str) -> u64 {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rejected_route_retention_evictions
             .with_label_values(&[peer])
@@ -4726,7 +4643,6 @@ impl BgpMetrics {
 
     /// Record `count` decisions evicted from a peer's import explain cache.
     pub fn record_import_explain_cache_evictions(&self, peer: &str, count: u64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .import_explain_cache_evictions
             .with_label_values(&[peer])
@@ -4736,7 +4652,6 @@ impl BgpMetrics {
     /// Read a peer's cumulative import explain cache eviction counter.
     #[must_use]
     pub fn import_explain_cache_evictions(&self, peer: &str) -> u64 {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .import_explain_cache_evictions
             .with_label_values(&[peer])
@@ -4750,7 +4665,6 @@ impl BgpMetrics {
     /// that refreshes one direction and leaves the other latched at a stale
     /// value.
     pub fn set_rfc8212_missing_policy(&self, peer: &str, import: bool, export: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rfc8212_missing_import_policy
             .with_label_values(&[peer])
@@ -4764,7 +4678,6 @@ impl BgpMetrics {
     /// Read a peer's RFC 8212 missing-import gauge. Test/diagnostic helper.
     #[must_use]
     pub fn rfc8212_missing_import_policy(&self, peer: &str) -> i64 {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rfc8212_missing_import_policy
             .with_label_values(&[peer])
@@ -4774,7 +4687,6 @@ impl BgpMetrics {
     /// Read a peer's RFC 8212 missing-export gauge. Test/diagnostic helper.
     #[must_use]
     pub fn rfc8212_missing_export_policy(&self, peer: &str) -> i64 {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rfc8212_missing_export_policy
             .with_label_values(&[peer])
@@ -5004,14 +4916,12 @@ impl BgpMetrics {
 
     /// Record a max-prefix-exceeded event for a peer.
     pub fn record_max_prefix_exceeded(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0.max_prefix_exceeded.with_label_values(&[peer]).inc();
     }
 
     /// Count one net-new Add-Path ID attempted beyond the cap. Repeated
     /// withheld IDs count again; an admitted-ID replacement does not.
     pub fn record_add_path_receive_limit_attempt(&self, peer: &str, family: &str, action: &str) {
-        let peer = &*self.scoped_peer(peer);
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
         debug_assert!(matches!(action, "shutdown" | "block" | "warning"));
         self.0
@@ -5035,7 +4945,6 @@ impl BgpMetrics {
         usage: usize,
         limit: Option<u32>,
     ) {
-        let peer = &*self.scoped_peer(peer);
         debug_assert!(matches!(
             (family, stage),
             ("ipv4_unicast" | "ipv6_unicast", "accepted" | "received")
@@ -5080,7 +4989,6 @@ impl BgpMetrics {
     /// received bounds use this while unset: without one the session does
     /// not track rejected identities, so no usage is published.
     pub fn remove_max_prefix_capacity(&self, peer: &str, family: &str, stage: &str) {
-        let peer = &*self.scoped_peer(peer);
         let labels = max_prefix_label_values(peer, family, stage);
         let _ = self.0.max_prefix_usage.remove_label_values(&labels);
         let _ = self.0.max_prefix_limit.remove_label_values(&labels);
@@ -5090,7 +4998,6 @@ impl BgpMetrics {
 
     /// Publish whether an inbound `block` episode is open for one bound.
     pub fn set_max_prefix_blocking(&self, peer: &str, family: &str, stage: &str, blocking: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .max_prefix_blocking
             .with_label_values(&max_prefix_label_values(peer, family, stage))
@@ -5101,7 +5008,6 @@ impl BgpMetrics {
     /// Carries no prefix label: the withheld set is the unbounded quantity
     /// the limit exists to contain.
     pub fn record_max_prefix_blocked(&self, peer: &str, family: &str, stage: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .max_prefix_blocked
             .with_label_values(&max_prefix_label_values(peer, family, stage))
@@ -5110,7 +5016,6 @@ impl BgpMetrics {
 
     /// Count one warning-threshold crossing for a bound.
     pub fn record_max_prefix_warning(&self, peer: &str, family: &str, stage: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .max_prefix_warning
             .with_label_values(&max_prefix_label_values(peer, family, stage))
@@ -5122,7 +5027,6 @@ impl BgpMetrics {
     /// This is narrower than [`Self::reap_peer_series`]: session teardown
     /// must not erase durable peer counters such as max-prefix exceed events.
     pub fn reap_max_prefix_capacity(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_usage, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_headroom, peer);
@@ -5141,7 +5045,6 @@ impl BgpMetrics {
         limit: Option<u32>,
         blocking: bool,
     ) {
-        let peer = &*self.scoped_peer(peer);
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
         let labels = [peer, family];
         let usage = i64::try_from(usage).unwrap_or(i64::MAX);
@@ -5174,7 +5077,6 @@ impl BgpMetrics {
     /// Deliberately carries no prefix label: the blocked set is exactly the
     /// unbounded quantity ADR-0113 refuses to inventory.
     pub fn record_outbound_prefix_blocked(&self, peer: &str, family: &str, blocked: u64) {
-        let peer = &*self.scoped_peer(peer);
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
         self.0
             .outbound_prefix_blocked
@@ -5186,7 +5088,6 @@ impl BgpMetrics {
     /// The blocked-attempt counter is durable peer history and survives, as
     /// `max_prefix_exceeded` does across an inbound teardown.
     pub fn reap_outbound_prefix_capacity(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_usage, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
@@ -5195,7 +5096,6 @@ impl BgpMetrics {
 
     /// Record a rejected ORF update, preserving the installed family filter.
     pub fn record_orf_capacity_rejection(&self, peer: &str, family: &str) {
-        let peer = &*self.scoped_peer(peer);
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
         self.0
             .orf_capacity_rejections
@@ -5206,14 +5106,12 @@ impl BgpMetrics {
     /// Record outbound work of any family that the peer writer channel did
     /// not accept (full or closed).
     pub fn record_outbound_route_drop(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0.outbound_route_drops.with_label_values(&[peer]).inc();
     }
 
     /// Record an End-of-RIB marker the peer writer channel did not accept.
     /// An End-of-RIB is not route work, so it is not counted as a route drop.
     pub fn record_outbound_eor_deferral(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .outbound_eor_deferrals
             .with_label_values(&[peer])
@@ -5226,7 +5124,6 @@ impl BgpMetrics {
         peer: &str,
         reason: crate::reason_labels::OutboundCommitRefusal,
     ) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .outbound_commit_refusals
             .with_label_values(&[peer, reason.as_str()])
@@ -5236,7 +5133,6 @@ impl BgpMetrics {
     /// Record an inbound route batch that blocked on a full RIB channel
     /// (ADR-0078: the session parks instead of dropping).
     pub fn record_inbound_rib_backpressure(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .inbound_rib_backpressure
             .with_label_values(&[peer])
@@ -5246,7 +5142,6 @@ impl BgpMetrics {
     /// Record a hold-timer expiry converted to a re-arm because
     /// unprocessed peer input was pending (ADR-0078).
     pub fn record_hold_timer_rearmed_pending_input(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .hold_timer_rearmed_pending_input
             .with_label_values(&[peer])
@@ -5256,7 +5151,6 @@ impl BgpMetrics {
     /// Record a session teardown caused by an RFC 9687 send-hold-timer
     /// expiry (peer stopped draining its TCP socket).
     pub fn record_send_hold_expiration(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .send_hold_expirations
             .with_label_values(&[peer])
@@ -5298,7 +5192,6 @@ impl BgpMetrics {
     /// [`Self::set_update_group_members`]) or [`Self::UPDATE_GROUP_UNGROUPED`]
     /// for a fallback/ungrouped peer.
     pub fn set_peer_update_group(&self, peer: &str, group_id: i64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .peer_update_group
             .with_label_values(&[peer])
@@ -5307,14 +5200,12 @@ impl BgpMetrics {
 
     /// Remove a peer's update-group series when its outbound membership ends.
     pub fn remove_peer_update_group(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         let _ = self.0.peer_update_group.remove_label_values(&[peer]);
     }
 
     /// Read a peer's update-group-id gauge. Test/diagnostic helper.
     #[must_use]
     pub fn peer_update_group(&self, peer: &str) -> i64 {
-        let peer = &*self.scoped_peer(peer);
         self.0.peer_update_group.with_label_values(&[peer]).get()
     }
 
@@ -5397,7 +5288,6 @@ impl BgpMetrics {
         family: &str,
         reason: crate::reason_labels::ExactExportReason,
     ) {
-        let peer = &*self.scoped_peer(peer);
         let family = Self::exact_export_family_label(family);
         let reason = reason.as_str();
         self.0
@@ -5418,7 +5308,6 @@ impl BgpMetrics {
         family: &str,
         reason: crate::reason_labels::ExactExportReason,
     ) {
-        let peer = &*self.scoped_peer(peer);
         // Callers pass a canonical family literal; the v1 checker traces it.
         debug_assert_eq!(Self::exact_export_family_label(family), family);
         self.0
@@ -5435,7 +5324,6 @@ impl BgpMetrics {
         family: &str,
         reason: crate::reason_labels::ExactExportReason,
     ) {
-        let peer = &*self.scoped_peer(peer);
         // Callers pass a canonical family literal; the v1 checker traces it.
         debug_assert_eq!(Self::exact_export_family_label(family), family);
         self.0
@@ -5474,7 +5362,6 @@ impl BgpMetrics {
         families: impl IntoIterator<Item = &'a str>,
     ) {
         use crate::reason_labels::ExactExportReason;
-        let peer = &*self.scoped_peer(peer);
         for family in families {
             let family = Self::exact_export_family_label(family);
             let label_stack_family = matches!(
@@ -5502,7 +5389,6 @@ impl BgpMetrics {
     /// for the same peer address (two sessions overlapped — collision
     /// window).
     pub fn record_rib_outbound_registration_replaced(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rib_outbound_registration_replaced
             .with_label_values(&[peer])
@@ -5513,7 +5399,6 @@ impl BgpMetrics {
     /// session id did not match the registered session for the peer (a
     /// stale teardown from a superseded session).
     pub fn record_rib_stale_peer_down_ignored(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rib_stale_peer_down_ignored
             .with_label_values(&[peer])
@@ -5532,7 +5417,6 @@ impl BgpMetrics {
         peer: &str,
         kind: StaleSessionMessageKind,
     ) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rib_stale_session_message_ignored
             .with_label_values(&[peer, kind.as_str()])
@@ -5545,7 +5429,6 @@ impl BgpMetrics {
     /// instead of being torn down (collision-window interleaving where the
     /// loser's `PeerUp` replaced the winner's registration).
     pub fn record_rib_outbound_registration_failover(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .rib_outbound_registration_failover
             .with_label_values(&[peer])
@@ -5755,7 +5638,6 @@ impl BgpMetrics {
     /// Record `AS_PATH` loop detection: increment by the number of rejected
     /// announced NLRI, across every address family.
     pub fn record_as_path_loop_detected(&self, peer: &str, count: u64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .as_path_loop_detected
             .with_label_values(&[peer])
@@ -5767,7 +5649,6 @@ impl BgpMetrics {
     /// two loop signals via
     /// [`crate::reason_labels::RrLoopReason`].
     pub fn record_rr_loop_detected(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0.rr_loop_detected.with_label_values(&[peer]).inc();
     }
 
@@ -5775,7 +5656,6 @@ impl BgpMetrics {
     /// number of known NLRIs dropped for out-of-order descriptor TLVs while
     /// the session was preserved.
     pub fn record_bgpls_nlri_discarded(&self, peer: &str, count: u64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .bgpls_nlri_discarded
             .with_label_values(&[peer])
@@ -5785,7 +5665,6 @@ impl BgpMetrics {
     /// Record inbound path-attribute discards by wire type code: the
     /// configured list, and RFC 7606 §7.9/§7.10 external-neighbor removals.
     pub fn record_path_attribute_discarded(&self, peer: &str, type_code: u8, count: u64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .path_attribute_discarded
             .with_label_values(&[peer, &type_code.to_string()])
@@ -5795,7 +5674,6 @@ impl BgpMetrics {
     /// Record EVPN typed NLRIs discarded under RFC 7606 §5.4 while the
     /// session and supported NLRIs in the same attribute remain usable.
     pub fn record_evpn_nlri_discarded(&self, peer: &str, count: u64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .evpn_nlri_discarded
             .with_label_values(&[peer])
@@ -5805,7 +5683,6 @@ impl BgpMetrics {
     /// Record EVPN discards in both the peer aggregate and per-type counter.
     /// The route-type label is bounded by the one-octet wire field.
     pub fn record_evpn_nlri_discarded_by_type(&self, peer: &str, route_type: u8, count: u64) {
-        let peer = &*self.scoped_peer(peer);
         self.record_evpn_nlri_discarded(peer, count);
         self.0
             .evpn_nlri_discarded_by_type
@@ -5838,7 +5715,6 @@ impl BgpMetrics {
         peer: &str,
         disposition: crate::reason_labels::MalformedUpdateDisposition,
     ) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .update_malformed
             .with_label_values(&[peer, disposition.as_str()])
@@ -5857,7 +5733,6 @@ impl BgpMetrics {
         reason: crate::reason_labels::MalformedUpdateReason,
         disposition: crate::reason_labels::MalformedUpdateDisposition,
     ) {
-        let peer = &*self.scoped_peer(peer);
         let type_code = type_code.map_or_else(|| "none".to_owned(), |code| code.to_string());
         self.0
             .update_malformed_causes
@@ -5868,7 +5743,6 @@ impl BgpMetrics {
     /// Materialize zero-valued malformed-UPDATE children for every canonical
     /// RFC 7606 disposition for one peer.
     pub fn initialize_update_malformed_series(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         for disposition in crate::reason_labels::MalformedUpdateDisposition::ALL {
             self.0
                 .update_malformed
@@ -5887,7 +5761,6 @@ impl BgpMetrics {
         reason: crate::reason_labels::OtcBlockReason,
         count: u64,
     ) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .otc_routes_blocked
             .with_label_values(&[peer, reason.as_str()])
@@ -5901,7 +5774,6 @@ impl BgpMetrics {
     /// The label cardinality is fixed at 6×6 = 36 per peer; absent roles
     /// (peer didn't advertise, or we didn't configure) become `"none"`.
     pub fn record_role_mismatch(&self, peer: &str, local_role: &str, remote_role: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .role_mismatch
             .with_label_values(&[peer, local_role, remote_role])
@@ -5924,7 +5796,6 @@ impl BgpMetrics {
     /// labels — see `PolicyRoutesMemo`. Totals and label sets are
     /// identical to unmemoized `with_label_values(..).inc()`.
     pub fn record_policy_routes(&self, peer: &str, policy: &str, direction: &str, action: &str) {
-        let peer = &*self.scoped_peer(peer);
         let reap_epoch = POLICY_ROUTES_REAP_EPOCH.load(Ordering::Acquire);
         POLICY_ROUTES_MEMO.with_borrow_mut(|memo| {
             if let Some(m) = memo
@@ -5969,7 +5840,6 @@ impl BgpMetrics {
         action: &str,
         n: u64,
     ) {
-        let peer = &*self.scoped_peer(peer);
         if n == 0 {
             return;
         }
@@ -5981,7 +5851,6 @@ impl BgpMetrics {
 
     /// Set the GR active flag for a peer (1 = in GR, 0 = not).
     pub fn set_gr_active(&self, peer: &str, active: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .gr_active_peers
             .with_label_values(&[peer])
@@ -5990,13 +5859,11 @@ impl BgpMetrics {
 
     /// Set the number of stale routes for a GR peer.
     pub fn set_gr_stale_routes(&self, peer: &str, count: i64) {
-        let peer = &*self.scoped_peer(peer);
         self.0.gr_stale_routes.with_label_values(&[peer]).set(count);
     }
 
     /// Record a GR timer expiration for a peer.
     pub fn record_gr_timer_expired(&self, peer: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0.gr_timer_expired.with_label_values(&[peer]).inc();
     }
 
@@ -6006,7 +5873,6 @@ impl BgpMetrics {
         peer: &str,
         reason: crate::reason_labels::GrEorGraceReleaseReason,
     ) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .gr_eor_grace_released
             .with_label_values(&[peer, reason.as_str()])
@@ -6280,7 +6146,6 @@ impl BgpMetrics {
     /// `family` is expected to be a bounded family label such as
     /// `"ipv4_unicast"`, `"ipv6_flowspec"`, or `"l2vpn_evpn"`.
     pub fn set_route_refresh_in_progress(&self, peer: &str, family: &str, active: bool) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .route_refresh_in_progress
             .with_label_values(&[peer, family])
@@ -6402,7 +6267,6 @@ impl BgpMetrics {
     /// Set how many entries are still awaiting replacement in an inbound
     /// Enhanced Route Refresh window.
     pub fn set_route_refresh_stale_entries(&self, peer: &str, family: &str, count: i64) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .route_refresh_stale_entries
             .with_label_values(&[peer, family])
@@ -6974,7 +6838,6 @@ impl BgpMetrics {
     /// Record a per-peer BMP event or periodic report dropped before it reaches
     /// `BmpManager`.
     pub fn record_bmp_source_drop(&self, peer: &str, reason: &str) {
-        let peer = &*self.scoped_peer(peer);
         self.0
             .bmp_source_drops
             .with_label_values(&[peer, reason])
@@ -10770,94 +10633,47 @@ mod tests {
             .collect()
     }
 
+    /// Two neighbors on one link-local address, each emitting under its own
+    /// scoped value, keep separate series in every peer-labeled family:
+    /// message totals stay per neighbor, and deleting one reaps only its
+    /// series. Nothing maps a bare address to a scoped value, so neither
+    /// can take over the other's series.
     #[test]
-    fn registered_link_local_neighbor_has_one_scoped_peer_value_in_every_family() {
+    fn same_address_neighbors_keep_separate_series_in_every_family() {
         let m = BgpMetrics::with_registry(Registry::new());
         let address: IpAddr = "fe80::1".parse().unwrap();
-        m.register_scoped_peer(address, "fe80::1%eth0");
-        // Emitters that know only the bare address (RIB, BFD, transport)
-        // and emitters that pass the scoped value (peer manager) must land
-        // on the same series.
-        populate_all_peer_families(&m, &peer_label(address));
-        populate_all_peer_families(&m, "fe80::1%eth0");
+        let eth0 = scoped_peer_label(address, Some("eth0"));
+        let eth1 = scoped_peer_label(address, Some("eth1"));
+        assert_eq!(
+            (eth0.as_str(), eth1.as_str()),
+            ("fe80::1%eth0", "fe80::1%eth1")
+        );
+        populate_all_peer_families(&m, &eth0);
+        populate_all_peer_families(&m, &eth1);
+        m.record_message_sent(&eth1, "update");
 
         assert_eq!(peer_labeled_families(&m), PEER_LABELED_FAMILIES);
         assert_eq!(
             peer_label_values(&m),
-            BTreeSet::from(["fe80::1%eth0".to_owned()]),
-            "every peer-labeled family must carry the one scoped value"
+            BTreeSet::from([eth0.clone(), eth1.clone()]),
         );
         assert_eq!(
             non_canonical_peer_labels(m.registry()),
             Vec::<(String, String)>::new()
         );
-        // Reads by the bare address see the scoped series.
-        assert_eq!(m.peer_message_totals("fe80::1"), (2, 2));
-        assert_eq!(m.peer_outbound_queue_depth("fe80::1"), 3);
+        assert_eq!(m.peer_message_totals(&eth0), (1, 1));
+        assert_eq!(m.peer_message_totals(&eth1), (1, 2));
 
-        // One bare-address reap (the RIB's final reap) removes everything.
-        m.reap_peer_series("fe80::1");
-        assert!(peer_label_values(&m).is_empty());
+        m.reap_peer_series(&eth0);
+        assert_eq!(peer_label_values(&m), BTreeSet::from([eth1.clone()]));
+        assert_eq!(m.peer_message_totals(&eth1), (1, 2));
     }
 
+    /// Numbered neighbors keep the bare address.
     #[test]
-    fn scoped_peer_registration_leaves_numbered_and_unregistered_peers_bare() {
-        let m = BgpMetrics::with_registry(Registry::new());
+    fn scoped_peer_label_is_bare_without_an_interface() {
         let numbered: IpAddr = "2001:db8::1".parse().unwrap();
-        m.register_scoped_peer(numbered, &peer_label(numbered));
-        m.register_scoped_peer("fe80::1".parse().unwrap(), "fe80::1%eth0");
-        // A re-add on another interface replaces the value.
-        m.register_scoped_peer("fe80::1".parse().unwrap(), "fe80::1%eth1");
-        for peer in ["192.0.2.1", "2001:db8::1", "fe80::2", "fe80::1"] {
-            m.record_message_sent(peer, "keepalive");
-        }
-        assert_eq!(
-            peer_label_values(&m),
-            BTreeSet::from(
-                ["192.0.2.1", "2001:db8::1", "fe80::1%eth1", "fe80::2"].map(str::to_owned)
-            )
-        );
-    }
-
-    #[test]
-    fn interface_move_final_reap_removes_old_value_and_keeps_replacement() {
-        let m = BgpMetrics::with_registry(Registry::new());
-        let address: IpAddr = "fe80::1".parse().unwrap();
-        m.register_scoped_peer(address, "fe80::1%eth0");
-        m.set_rib_prefixes("fe80::1", "ipv4_unicast", 5);
-        // The manager deletes the eth0 neighbor and queues the RIB's reap.
-        m.reap_peer_series("fe80::1%eth0");
-        // The RIB's late teardown write lands on the old scoped value...
-        m.set_rib_prefixes("fe80::1", "ipv4_unicast", 3);
-        // ...and the eth1 replacement registers and publishes before the
-        // RIB handles the queued delete.
-        m.register_scoped_peer(address, "fe80::1%eth1");
-        m.set_peer_admin_enabled("fe80::1%eth1", "eth1", true);
-        m.set_peer_session_state("fe80::1%eth1", "eth1", "idle");
-        m.record_message_sent("fe80::1", "open");
-        // The RIB's final reap names the deleted neighbor's exact value.
-        m.reap_exact_peer_series("fe80::1%eth0");
-
-        assert!(
-            !peer_label_values(&m).contains("fe80::1%eth0"),
-            "no fe80::1%eth0 series may outlive the final reap"
-        );
-        assert_eq!(
-            m.0.peer_admin_enabled
-                .with_label_values(&["fe80::1%eth1", "eth1"])
-                .get(),
-            1,
-            "the replacement's admin gauge must survive"
-        );
-        assert_eq!(
-            m.0.peer_session_state
-                .with_label_values(&["fe80::1%eth1", "eth1", "idle"])
-                .get(),
-            1,
-            "the replacement's session-state gauge must survive"
-        );
-        // (received, sent): the replacement's OPEN counter survives.
-        assert_eq!(m.peer_message_totals("fe80::1"), (0, 1));
+        assert_eq!(scoped_peer_label(numbered, None), peer_label(numbered));
     }
 
     #[test]

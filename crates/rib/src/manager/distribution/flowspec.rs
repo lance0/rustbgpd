@@ -59,7 +59,7 @@ impl RibManager {
             (rib.unicast_lens(), rib.flowspec_lens())
         };
 
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         crate::manager::helpers::set_rib_prefixes(
             &self.metrics,
             &peer_label,
@@ -119,7 +119,7 @@ impl RibManager {
             (rib.unicast_lens(), rib.flowspec_lens())
         };
 
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         crate::manager::helpers::set_rib_prefixes(
             &self.metrics,
             &peer_label,
@@ -622,7 +622,7 @@ impl RibManager {
             let export_pol = self
                 .export_policy_for(peer)
                 .map(rustbgpd_policy::PolicyChain::share);
-            let target_peer_label = peer.to_string();
+            let target_peer_label = peer.label();
             let metrics = self.metrics.clone();
 
             let loc_rib_len = self.loc_rib.len();
