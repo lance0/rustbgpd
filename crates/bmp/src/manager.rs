@@ -4267,4 +4267,133 @@ mod tests {
         // shutdown does not depend on event channel closure.
         drop(event_tx);
     }
+
+    async fn send_peer_up(event_tx: &mpsc::Sender<BmpEvent>, peer_info: BmpPeerInfo) {
+        let local_addr = if peer_info.is_ipv6 {
+            "2001:db8::1".parse().unwrap()
+        } else {
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        };
+        event_tx
+            .send(BmpEvent::PeerUp {
+                peer_info,
+                local_open: Bytes::from_static(&[0xFF; 29]),
+                remote_open: Bytes::from_static(&[0xFE; 29]),
+                local_addr,
+                local_port: 179,
+                remote_port: 54321,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Compatibility pin: the Peer Up bootstrap and live stream for ordinary
+    /// (one neighbor per address) peers stay byte-identical to main's output
+    /// from before the caches were keyed by neighbor identity, for both BMP
+    /// versions. Regenerate with `BLESS=1` only for an intended format change.
+    #[tokio::test]
+    async fn ordinary_peer_stream_bytes_are_unchanged() {
+        fn info(addr: &str, asn: u32) -> BmpPeerInfo {
+            let peer_addr: IpAddr = addr.parse().unwrap();
+            BmpPeerInfo {
+                peer_addr,
+                peer_asn: asn,
+                peer_bgp_id: Ipv4Addr::new(10, 9, 0, u8::try_from(asn % 200).unwrap()),
+                is_ipv6: peer_addr.is_ipv6(),
+                ..sample_peer_info()
+            }
+        }
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![
+                (
+                    collector_addr(0),
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
+                (
+                    collector_addr(1),
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V4,
+                ),
+            ],
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(mgr.run());
+        let (a, b, v6) = (
+            info("10.0.0.2", 65002),
+            info("10.0.0.3", 65003),
+            info("2001:db8::2", 65006),
+        );
+        for peer_info in [&b, &v6, &a] {
+            send_peer_up(&event_tx, peer_info.clone()).await;
+        }
+        wait_until_received(&event_tx, 16).await;
+
+        let mut out = Vec::new();
+        let mut record = |message: &Bytes| {
+            out.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
+            out.extend_from_slice(message);
+        };
+        let mut live = Vec::new();
+        for (id, port) in [(0, 0), (1, 1)] {
+            let (bootstrap, rx) =
+                connect_collector(&control_tx, id, collector_addr(port), 16).await;
+            bootstrap.messages.iter().for_each(&mut record);
+            complete_bootstrap(&control_tx, id, bootstrap.generation).await;
+            live.push(rx);
+        }
+        event_tx
+            .send(BmpEvent::RouteMonitoring {
+                peer_info: a.clone(),
+                update_pdu: Bytes::from_static(&[0xAA; 23]),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(BmpEvent::StatsReport {
+                peer_info: b.clone(),
+                adj_rib_in_routes: 42,
+                rfc9972_adj_rib_in_post: Some(vec![(1, 1, 40)]),
+                rfc9972_policy_rejects: None,
+                rfc9972_rpki_adj_rib_in_post: None,
+                adj_rib_out_post: Some(vec![(1, 1, 7)]),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(BmpEvent::PeerDown {
+                peer_info: a,
+                reason: PeerDownReason::RemoteNoNotification,
+            })
+            .await
+            .unwrap();
+        for rx in &mut live {
+            for _ in 0..3 {
+                record(&rx.recv().await.unwrap());
+            }
+        }
+        // The cache now holds `b` and `v6` only, replayed in address order.
+        let (bootstrap, _rx) = connect_collector(&control_tx, 0, collector_addr(0), 16).await;
+        assert_eq!(bootstrap.messages.len(), 2);
+        bootstrap.messages.iter().for_each(&mut record);
+
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ordinary_peer_stream.bin"
+        );
+        if std::env::var_os("BLESS").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(fixture).parent().unwrap()).unwrap();
+            std::fs::write(fixture, &out).unwrap();
+        }
+        assert_eq!(out, std::fs::read(fixture).unwrap());
+
+        drop(live);
+        control_tx.send(BmpControlEvent::Shutdown).await.unwrap();
+        handle.await.unwrap();
+        drop(event_tx);
+    }
 }
