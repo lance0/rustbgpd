@@ -31,13 +31,16 @@
 //! the index, under a reserved generation), so it needs no table slot and
 //! can be built in a `const`.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
-use std::sync::{Arc, LazyLock, PoisonError, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+
+use arc_swap::{ArcSwap, Cache};
 
 /// Opaque identity of one RIB neighbor: 8 bytes, `Copy`, cheap to hash.
 ///
@@ -112,7 +115,7 @@ enum SlotState {
     Retired,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Slot {
     generation: NonZeroU32,
     state: SlotState,
@@ -132,10 +135,9 @@ struct Slots {
 }
 
 impl Slots {
+    #[cfg(test)]
     fn slot(&self, peer: PeerId) -> Option<&Slot> {
-        self.entries
-            .get(peer.index as usize)
-            .filter(|slot| slot.generation == peer.generation)
+        slot_of(&self.entries, peer)
     }
 
     fn allocate(&mut self, endpoint: PeerEndpoint, state: SlotState) -> PeerId {
@@ -210,14 +212,98 @@ impl Slots {
     }
 }
 
-static TABLE: LazyLock<RwLock<Slots>> = LazyLock::new(RwLock::default);
+/// The slot a handle names, `None` once its generation has moved on.
+fn slot_of(entries: &[Slot], peer: PeerId) -> Option<&Slot> {
+    entries
+        .get(peer.index as usize)
+        .filter(|slot| slot.generation == peer.generation)
+}
 
-fn read<T>(f: impl FnOnce(&Slots) -> T) -> T {
-    f(&TABLE.read().unwrap_or_else(PoisonError::into_inner))
+/// What readers resolve handles through: a copy of every slot, plus each
+/// slot's generation and endpoint rank in [`PeerEndpoint::cmp_selection`]
+/// order (equal endpoints share a rank), so the tie-break compares two
+/// integers.
+#[derive(Default)]
+struct Snapshot {
+    entries: Vec<Slot>,
+    keys: Vec<(NonZeroU32, u32)>,
+}
+
+impl Snapshot {
+    fn of(entries: &[Slot]) -> Self {
+        let order_of = |a: usize, b: usize| entries[a].endpoint.cmp_selection(&entries[b].endpoint);
+        let mut order: Vec<usize> = (0..entries.len()).collect();
+        order.sort_unstable_by(|&a, &b| order_of(a, b));
+        let mut keys: Vec<_> = entries.iter().map(|slot| (slot.generation, 0)).collect();
+        let mut rank = 0;
+        for pair in order.windows(2) {
+            if order_of(pair[0], pair[1]) != Ordering::Equal {
+                rank += 1;
+            }
+            keys[pair[1]].1 = rank;
+        }
+        Self {
+            entries: entries.to_vec(),
+            keys,
+        }
+    }
+
+    /// The handle's endpoint rank, `None` once its generation has moved on.
+    fn rank(&self, peer: PeerId) -> Option<u32> {
+        self.keys
+            .get(peer.index as usize)
+            .filter(|(generation, _)| *generation == peer.generation)
+            .map(|&(_, rank)| rank)
+    }
+}
+
+/// Writers serialize on `slots`; readers go through `published`, rebuilt
+/// after every change, so the selection tie-break never waits on a lock.
+struct Table {
+    slots: Mutex<Slots>,
+    published: ArcSwap<Snapshot>,
+}
+
+static TABLE: LazyLock<Table> = LazyLock::new(|| Table {
+    slots: Mutex::default(),
+    published: ArcSwap::from_pointee(Snapshot::default()),
+});
+
+thread_local! {
+    /// This thread's handle on the published snapshot: one relaxed pointer
+    /// check per read while the table is unchanged.
+    static SNAPSHOT: RefCell<Cache<&'static ArcSwap<Snapshot>, Arc<Snapshot>>> =
+        RefCell::new(Cache::new(&TABLE.published));
+}
+
+fn read<T>(f: impl FnOnce(&Snapshot) -> T) -> T {
+    let mut f = Some(f);
+    let cached = SNAPSHOT.try_with(|cache| {
+        let mut cache = cache.try_borrow_mut().ok()?;
+        f.take().map(|f| f(cache.load()))
+    });
+    match (cached, f) {
+        (Ok(Some(out)), _) => out,
+        // A read nested in another, or during thread teardown.
+        (_, Some(f)) => f(&TABLE.published.load()),
+        (_, None) => unreachable!("the cached read consumed the closure and returned"),
+    }
+}
+
+fn lock() -> MutexGuard<'static, Slots> {
+    TABLE.slots.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn write<T>(f: impl FnOnce(&mut Slots) -> T) -> T {
-    f(&mut TABLE.write().unwrap_or_else(PoisonError::into_inner))
+    let mut slots = lock();
+    let out = f(&mut slots);
+    // ponytail: copies and re-sorts every slot on each allocate, release or
+    // rebind, so N neighbor changes cost O(N * slots log slots); neighbors
+    // change rarely. Per-slot cells if bulk churn at large peer counts shows.
+    TABLE
+        .published
+        .store(Arc::new(Snapshot::of(&slots.entries)));
+    out
 }
 
 impl PeerId {
@@ -267,12 +353,13 @@ impl PeerId {
         match addr {
             IpAddr::V4(addr) => Self::from_ipv4(addr),
             IpAddr::V6(addr) => {
-                let pinned = read(|slots| {
+                let pinned = {
+                    let slots = lock();
                     slots.pinned.get(&addr).map(|&index| Self {
                         index,
                         generation: slots.entries[index as usize].generation,
                     })
-                });
+                };
                 pinned.unwrap_or_else(|| write(|slots| slots.pin(addr)))
             }
         }
@@ -299,7 +386,7 @@ impl PeerId {
                 addr: IpAddr::V4(addr),
                 interface: None,
             })),
-            None => read(|slots| f(slots.slot(self).map(|slot| &slot.endpoint))),
+            None => read(|table| f(slot_of(&table.entries, self).map(|slot| &slot.endpoint))),
         }
     }
 
@@ -308,9 +395,8 @@ impl PeerId {
     #[must_use]
     pub fn is_live(self) -> bool {
         self.pinned_v4().is_some()
-            || read(|slots| {
-                slots
-                    .slot(self)
+            || read(|table| {
+                slot_of(&table.entries, self)
                     .is_some_and(|slot| matches!(slot.state, SlotState::Live | SlotState::Pinned))
             })
     }
@@ -355,12 +441,25 @@ impl PeerId {
     }
 
     /// The table half of [`Self::cmp_selection`], kept out of line so the
-    /// comparators that inline it stay small, under one read lock.
+    /// comparators that inline it stay small; both endpoints come from one
+    /// published snapshot.
     #[inline(never)]
     fn cmp_resolved(self, other: Self) -> Ordering {
+        fn resolved<T>(a: Option<T>, b: Option<T>, cmp: impl FnOnce(T, T) -> Ordering) -> Ordering {
+            match (a, b) {
+                (Some(a), Some(b)) => cmp(a, b),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            }
+        }
         if self == other {
             return Ordering::Equal;
         }
+        if self.generation != PINNED_V4 && other.generation != PINNED_V4 {
+            return read(|table| resolved(table.rank(self), table.rank(other), |a, b| a.cmp(&b)));
+        }
+        // A pinned IPv4 identity against a table handle (MRT and fixtures).
         let pinned = |peer: Self| {
             peer.pinned_v4().map(|addr| PeerEndpoint {
                 addr: IpAddr::V4(addr),
@@ -368,19 +467,14 @@ impl PeerId {
             })
         };
         let (pinned_a, pinned_b) = (pinned(self), pinned(other));
-        read(|slots| {
+        read(|table| {
             let a = pinned_a
                 .as_ref()
-                .or_else(|| slots.slot(self).map(|s| &s.endpoint));
+                .or_else(|| slot_of(&table.entries, self).map(|s| &s.endpoint));
             let b = pinned_b
                 .as_ref()
-                .or_else(|| slots.slot(other).map(|s| &s.endpoint));
-            match (a, b) {
-                (Some(a), Some(b)) => a.cmp_selection(b),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            }
+                .or_else(|| slot_of(&table.entries, other).map(|s| &s.endpoint));
+            resolved(a, b, PeerEndpoint::cmp_selection)
         })
     }
 
@@ -491,7 +585,7 @@ mod tests {
         assert!(last.release());
         assert!(!last.is_live());
         assert!(!last.release(), "release is idempotent");
-        assert!(read(|slots| !slots.free.contains(&last.index)));
+        assert!(!lock().free.contains(&last.index));
         assert_eq!(last.addr(), "198.51.100.250".parse::<IpAddr>().unwrap());
     }
 
@@ -606,6 +700,33 @@ mod tests {
             Ordering::Less
         );
         for peer in [low, high, v6] {
+            assert!(peer.release());
+        }
+    }
+
+    /// Selection reads the published snapshot: equal endpoints tie, a rebind
+    /// moves the handle's place, and a handle whose generation is not the
+    /// slot's sorts after every resolvable one instead of taking the
+    /// owner's place.
+    #[test]
+    fn selection_follows_the_published_snapshot() {
+        let a = PeerId::allocate(endpoint("fe80::5", Some("swp1")));
+        let twin = PeerId::allocate(endpoint("fe80::5", Some("swp1")));
+        let b = PeerId::allocate(endpoint("fe80::3", Some("swp1")));
+        assert_eq!(a.cmp_selection(twin), Ordering::Equal);
+        assert_eq!(a.cmp_selection(b), Ordering::Greater);
+        assert!(a.rebind(endpoint("fe80::1", Some("swp1"))));
+        assert_eq!(a.cmp_selection(b), Ordering::Less);
+        assert_eq!(a.cmp_selection(twin), Ordering::Less);
+        let stale = PeerId {
+            index: b.index,
+            generation: b.generation.checked_add(1).unwrap(),
+        };
+        assert_eq!(stale.cmp_selection(b), Ordering::Greater);
+        assert_eq!(b.cmp_selection(stale), Ordering::Less);
+        // A read nested in another still sees the table.
+        assert_eq!(read(|_| b.addr()), "fe80::3".parse::<IpAddr>().unwrap());
+        for peer in [a, twin, b] {
             assert!(peer.release());
         }
     }
