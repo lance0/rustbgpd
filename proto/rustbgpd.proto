@@ -658,7 +658,7 @@ message NeighborConfig {
   RemoteAsnMode remote_asn_mode = 23;
 }
 
-// A neighbor's remote ASN matching mode (TOML remote_asn = <number>,
+// A neighbor's remote ASN matching mode (TOML remote_asn = a number,
 // "external" or "internal").
 enum RemoteAsnMode {
   // NUMERIC, the behavior before this field existed.
