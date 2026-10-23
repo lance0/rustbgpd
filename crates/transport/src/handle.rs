@@ -672,6 +672,15 @@ pub enum PeerCommand {
         /// Whether the candidate was reserved.
         reply: oneshot::Sender<bool>,
     },
+    /// Shut the task down unless its session is Established, deciding in one
+    /// actor turn so no KEEPALIVE can land between the check and the
+    /// shutdown. Replies `false` and keeps running when Established;
+    /// otherwise replies `true` and ends exactly as [`Self::Shutdown`] would
+    /// for a session that is not Established, so it can never establish.
+    ShutdownUnlessEstablished {
+        /// Whether the task was shut down.
+        reply: oneshot::Sender<bool>,
+    },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
     /// ADR-0073: query this session's import-decision cache. Read-only
@@ -1940,6 +1949,41 @@ impl PeerHandle {
             Ok(result) => result,
             Err(_elapsed) => Err(PeerCommandError::TimedOut {
                 operation: "claim_collision_promotion",
+                deadline,
+            }),
+        }
+    }
+
+    /// Shut the session down unless it is Established
+    /// ([`PeerCommand::ShutdownUnlessEstablished`]).
+    ///
+    /// `Ok(false)` means the session is Established and keeps running;
+    /// `Ok(true)` means it was shut down and can no longer establish. On a
+    /// timeout the outcome is unknown: the command may still be handled
+    /// later, so the caller must re-check rather than assume either.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, drops the reply, or
+    /// does not answer within `deadline`.
+    pub async fn shutdown_unless_established_timeout(
+        &self,
+        deadline: Duration,
+    ) -> Result<bool, PeerCommandError> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply, shut_down) = oneshot::channel();
+            commands
+                .send(PeerCommand::ShutdownUnlessEstablished { reply })
+                .await
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            shut_down.await.map_err(|_| PeerCommandError::ReplyDropped)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+                operation: "shutdown_unless_established",
                 deadline,
             }),
         }

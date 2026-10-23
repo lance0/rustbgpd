@@ -1857,7 +1857,7 @@ async fn next_candidate_open_received(mgr: &mut PeerManager) -> SessionNotificat
 
 /// Send the peer's OPEN and its KEEPALIVE together, as a peer that already
 /// has our OPEN does, and wait until the candidate has reported the OPEN.
-async fn candidate_open_exchange(
+pub(super) async fn candidate_open_exchange(
     mgr: &mut PeerManager,
     client: &mut TcpStream,
     buf: &mut BytesMut,

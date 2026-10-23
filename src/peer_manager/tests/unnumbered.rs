@@ -1165,3 +1165,334 @@ async fn listed_rows_report_discovery_state_learned_address_and_mode() {
         NeighborDiscoveryState::AwaitingDiscovery
     );
 }
+
+/// A bound session that answers its state query with `reported`, and then,
+/// before it handles its next command, processes a KEEPALIVE and becomes
+/// Established: the actor's own command order pins the race between the
+/// manager's state read and its retirement.
+fn establishes_after_its_state_query(
+    peer_addr: IpAddr,
+    reported: SessionState,
+    shutdowns: Arc<std::sync::atomic::AtomicU32>,
+) -> PeerHandle {
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        let mut state = reported;
+        while let Some(command) = rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(peer_addr, state));
+                    state = SessionState::Established;
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                    let shut_down = state != SessionState::Established;
+                    let _ = reply.send(shut_down);
+                    if shut_down {
+                        shutdowns.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                }
+                PeerCommand::Shutdown => {
+                    shutdowns.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(tx, task)
+}
+
+/// An address change read the bound session as `OpenConfirm`, and the
+/// session reached Established before the retirement: the Established
+/// session survives and discovery is told it is Established.
+#[tokio::test]
+async fn an_address_change_never_retires_a_session_established_after_the_state_read() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let shutdowns = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    h.replace_session(
+        &swp1_key(2),
+        establishes_after_its_state_query(
+            IpAddr::V6(ll(2)),
+            SessionState::OpenConfirm,
+            shutdowns.clone(),
+        ),
+    );
+    h.drain();
+
+    // Mutation-red: retiring on the state read alone shuts it down.
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(shutdowns.load(Ordering::SeqCst), 0, "never shut down");
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "Established session kept");
+    assert_eq!(h.peers_at(ll(3)), []);
+    assert_eq!(h.drain(), [Command::SessionEstablished("swp1".into())]);
+}
+
+/// The same guarantee on the inbound-learning path, which retires a bound
+/// session it read as down for a connection from a new address.
+#[tokio::test]
+async fn an_inbound_address_change_never_retires_a_session_established_after_the_state_read() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 2, 7).await;
+    let shutdowns = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    h.replace_session(
+        &swp1_key(2),
+        establishes_after_its_state_query(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            shutdowns.clone(),
+        ),
+    );
+
+    // Mutation-red: retiring on the state read alone shuts it down.
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(shutdowns.load(Ordering::SeqCst), 0, "never shut down");
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "Established session kept");
+    assert_eq!(h.peers_at(ll(3)), []);
+    assert_eq!(dropped(&h, "unconfigured"), 1.0, "the refusal is counted");
+}
+
+/// Confirmed carrier loss and interface recreation stay unconditional: an
+/// Established session on the lost link is retired.
+#[tokio::test]
+async fn carrier_loss_and_recreation_retire_an_established_session() {
+    for recreated in [false, true] {
+        let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+        h.bind("swp1", Some(endpoint(2, 7))).await;
+        h.replace_session(
+            &swp1_key(2),
+            fake_peer_handle(
+                IpAddr::V6(ll(2)),
+                SessionState::Established,
+                None,
+                Arc::new(FakePeerCounters::default()),
+            ),
+        );
+        // Mutation-red: making these retirements conditional keeps the
+        // session on a link that is gone.
+        let links = if recreated {
+            [("swp1", 9, true)]
+        } else {
+            [("swp1", 7, false)]
+        };
+        h.links_changed(snapshot(true, &links));
+        h.reconcile().await;
+        assert_eq!(h.peers_at(ll(2)), [], "retired (recreated: {recreated})");
+    }
+}
+
+/// A bound session that reports Active, then admits a conditional retirement
+/// and holds its answer until `release`: the manager's wait times out with
+/// the command admitted. Released, it shuts down as the real session would,
+/// reporting nothing, and closes its command channel before `exited`.
+fn retirement_answered_after_release(
+    peer_addr: IpAddr,
+    release: oneshot::Receiver<()>,
+    exited: oneshot::Sender<()>,
+) -> PeerHandle {
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        let mut release = Some(release);
+        while let Some(command) = rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(peer_addr, SessionState::Active));
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                    if let Some(release) = release.take() {
+                        let _ = release.await;
+                    }
+                    let _ = reply.send(true);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(rx);
+        let _ = exited.send(());
+        Ok(())
+    });
+    PeerHandle::from_parts(tx, task)
+}
+
+/// An admitted retirement whose answer came too late ended the session
+/// afterwards. Whether discovery then expires the new address or reverts to
+/// the old one, the binding is not trusted on its face: the session is read,
+/// found gone, and recreated at the endpoint the neighbor keeps.
+async fn settle_an_unanswered_retirement(reverted: bool) {
+    {
+        let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+        h.bind("swp1", Some(endpoint(2, 7))).await;
+        let (release, released) = oneshot::channel();
+        let (exited_tx, exited) = oneshot::channel();
+        h.replace_session(
+            &swp1_key(2),
+            retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+        );
+        h.bind("swp1", Some(endpoint(3, 7))).await;
+        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "kept on doubt");
+        assert!(h.mgr.unnumbered_retry_at().is_some(), "retry armed");
+
+        // The late command ends the session.
+        release.send(()).unwrap();
+        exited.await.unwrap();
+
+        // Mutation-red: trusting the keep shortcut leaves the binding on an
+        // exited session that never reconnects.
+        let back = reverted.then(|| endpoint(2, 7));
+        h.bind("swp1", back).await;
+        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "reverted: {reverted}");
+        assert!(
+            matches!(
+                h.mgr.peers[&swp1_key(2)]
+                    .handle()
+                    .query_state_outcome(Duration::from_secs(1))
+                    .await,
+                rustbgpd_transport::StateQueryOutcome::State(_)
+            ),
+            "a live session replaces the exited one (reverted: {reverted})"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_retirement_then_an_expired_endpoint_recreates_the_session() {
+    settle_an_unanswered_retirement(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_retirement_then_a_reverted_endpoint_recreates_the_session() {
+    settle_an_unanswered_retirement(true).await;
+}
+
+/// A pending inbound connection from the bound address has reported its OPEN
+/// and holds the peer's KEEPALIVE. Retiring the primary would let the
+/// retirement's own notification drain promote that candidate, which then
+/// establishes only to be deleted: the binding is kept instead.
+#[tokio::test]
+async fn an_address_change_never_promotes_a_pending_candidate_into_a_retired_peer() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let primary = Arc::new(FakePeerCounters::default());
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            None,
+            primary.clone(),
+        ),
+    );
+    let mut client = inbound(&mut h, 2, 7).await;
+    assert!(h.mgr.peers[&swp1_key(2)].pending_inbound.is_some());
+    let mut buf = BytesMut::with_capacity(4096);
+    // The candidate has the peer's OPEN and KEEPALIVE and reported the OPEN;
+    // it stays queued for the next drain.
+    let open_received =
+        super::collision::candidate_open_exchange(&mut h.mgr, &mut client, &mut buf).await;
+    h.mgr.session_notify_tx.send(open_received).unwrap();
+
+    // Mutation-red: retiring with a candidate pending shuts the primary down,
+    // and the drain promotes the candidate before the deletion.
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(primary.shutdown.load(Ordering::SeqCst), 0, "primary kept");
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    assert!(
+        h.mgr.peers[&swp1_key(2)].pending_inbound.is_some(),
+        "candidate still pending"
+    );
+    assert_eq!(h.peers_at(ll(3)), []);
+}
+
+/// Confirmed carrier loss and interface recreation stay unconditional while
+/// a retirement is unsettled: the unresponsive session is not read first,
+/// and a session that has exited is not rebound at the vanished index.
+async fn a_lost_link_overrides_an_unsettled_retirement(recreated: bool, exits: bool) {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let (release, released) = oneshot::channel();
+    let (exited_tx, exited) = oneshot::channel();
+    h.replace_session(
+        &swp1_key(2),
+        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+    );
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "unsettled");
+    // Unreleased, the session answers nothing more.
+    let _held = if exits {
+        release.send(()).unwrap();
+        exited.await.unwrap();
+        None
+    } else {
+        Some(release)
+    };
+
+    let links = if recreated {
+        [("swp1", 9, true)]
+    } else {
+        [("swp1", 7, false)]
+    };
+    // Mutation-red: settling first blocks on the unresponsive session, or
+    // rebinds an exited one at the old index.
+    h.links_changed(snapshot(true, &links));
+    h.reconcile().await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [],
+        "retired (recreated: {recreated}, exits: {exits})"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn carrier_loss_retires_an_unresponsive_session_with_an_unsettled_retirement() {
+    a_lost_link_overrides_an_unsettled_retirement(false, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn recreation_retires_an_unresponsive_session_with_an_unsettled_retirement() {
+    a_lost_link_overrides_an_unsettled_retirement(true, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn recreation_never_rebinds_an_exited_session_at_the_old_index() {
+    a_lost_link_overrides_an_unsettled_retirement(true, true).await;
+}
+
+/// The endpoint recovered for an exited session outlives a rebind that a
+/// staged transaction defers: the next pass, with no discovery binding,
+/// still recreates the session there.
+#[tokio::test(start_paused = true)]
+async fn a_recovered_endpoint_survives_a_deferred_rebind() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let (release, released) = oneshot::channel();
+    let (exited_tx, exited) = oneshot::channel();
+    h.replace_session(
+        &swp1_key(2),
+        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+    );
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    release.send(()).unwrap();
+    exited.await.unwrap();
+
+    h.mgr.config_snapshot_staged = true;
+    h.bind("swp1", None).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [],
+        "exited peer retired; rebind deferred"
+    );
+    h.mgr.config_snapshot_staged = false;
+    // Mutation-red: a recovery endpoint held only for one pass is gone.
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "recreated on retry");
+    assert!(matches!(
+        h.mgr.peers[&swp1_key(2)]
+            .handle()
+            .query_state_outcome(Duration::from_secs(1))
+            .await,
+        rustbgpd_transport::StateQueryOutcome::State(_)
+    ));
+}
