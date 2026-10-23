@@ -242,7 +242,7 @@ class EvpnRrAnalyzerContracts(unittest.TestCase):
         self.assertEqual(set(payload["gates"]), {
             "min_samples", "msgs_sent_monotone", "readyz", "rss_peak_mb",
             "rss_late_slope_per_hour", "intern_late_slope_per_hour", "no_abort",
-            "reload_accounting", "session_floor", "flap_accounting", "flap_budget",
+            "outbound_registration_wait", "reload_accounting", "session_floor", "flap_accounting", "flap_budget",
             "max_prefix_flat", "evpn_convergence", "evpn_terminal_receipt",
             "evpn_sessions_not_lost", "sent_counters_monotone",
             "evpn_deferral_recovery", "daemon_log",
@@ -299,6 +299,20 @@ class EvpnRrAnalyzerContracts(unittest.TestCase):
         rows[4]["rss_mb"] = 4096.0
         gate = self.assert_only_failure("rss_peak_mb", rows=rows)
         self.assertEqual(gate["limit"], 4096.0)
+
+    def test_registration_wait_above_the_bound_fails(self):
+        rows = smoke_rows()
+        rows[3]["registration_pending_oldest_sec"] = 300
+        result, payload = run_analyzer(rows=rows)
+        gate = payload["gates"]["outbound_registration_wait"]
+        self.assertEqual(result.returncode, 0, gate)
+        self.assertEqual(gate["value"]["max_seconds"], 300)
+        # Seeded: a lost registration keeps ageing past the bound.
+        for index, wait in ((6, 240), (7, 270), (8, 301)):
+            rows[index]["registration_pending_oldest_sec"] = wait
+        gate = self.assert_only_failure("outbound_registration_wait", rows=rows)
+        self.assertEqual(gate["limit"], 300)
+        self.assertEqual(gate["value"]["max_seconds"], 301)
 
     def test_spurious_max_prefix_latch_fails(self):
         rows = smoke_rows()

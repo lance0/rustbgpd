@@ -7,8 +7,9 @@ run-soak-evpn-rr.sh and emits a JSON verdict against the precommitted gates
 in docs/soaks/soak-acceptance-gates.md (scenario 12).
 
 Reused unchanged from the route-server flagship analyzer: minimum sample
-count, aggregate sent-counter monotonicity, readyz availability, late-window
-RSS/intern slopes, no ABORT record, the daemon-log gate and every
+count, aggregate sent-counter monotonicity, readyz availability, the
+outbound registration wait bound (max sampled oldest wait <= 300 s),
+late-window RSS/intern slopes, no ABORT record, the daemon-log gate and every
 management-plane gate (with the EVPN operation set). Scenario-specific:
 
   - RSS peak below this scenario's own ceiling (EVPN_RSS_PEAK_LIMIT_MB)
@@ -73,6 +74,7 @@ EVPN_RSS_PEAK_LIMIT_MB = 4096.0
 REUSED_GATES = (
     "min_samples", "msgs_sent_monotone", "readyz",
     "rss_late_slope_per_hour", "intern_late_slope_per_hour", "no_abort",
+    "outbound_registration_wait",
 )
 META_INTS = (
     "peers", "type2_per_client", "type5_per_client", "shift2_per_epoch",

@@ -8,7 +8,7 @@
   lost inside the RIB stays visible and keeps ageing.
   **Operator-visible:** `rbgp doctor`'s `peer.<addr>.outbound` advisory
   reports the RIB's count and oldest wait instead of an unknown duration when
-  its metrics scrape includes them; it remains a warning. The route-server and
-  route-reflector flagship soak analyzers record the maximum sampled age and
-  fail a run above 300 seconds. Readiness does not use the age. See
+  its metrics scrape includes them; it remains a warning. The route-server,
+  route-reflector and EVPN route-reflector soak analyzers record the maximum
+  sampled age and fail a run above 300 seconds. Readiness does not use the age. See
   [delayed outbound registration](../docs/reference/operations.md#delayed-outbound-registration).

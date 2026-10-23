@@ -2242,7 +2242,8 @@ imports drain. A steadily rising age while the import backlog
 (`bgp_rib_ingest_channel_depth`) is empty points at a registration that will
 not complete on its own. The age is an investigation signal like the alert:
 readiness does not use it and no release gate depends on it. The flagship
-soaks fail a run whose maximum sampled age exceeds 300 seconds.
+soaks and the EVPN route-reflector soak fail a run whose maximum sampled
+age exceeds 300 seconds.
 
 `rbgp doctor` adds a yellow `peer.<addr>.outbound` check when a successful,
 non-stale neighbor/RIB snapshot shows an Established session older than five

@@ -553,6 +553,7 @@ the slope gates catch slower growth.
 | Peak RSS | < 4096 MB (rationale above) | CSV `rss_mb` | Full-table dumps at start and after every flap; route identities rotate every epoch. |
 | RSS slope / intern slope | scenario 10 bounds (< 10 MB/h and < 100 entries/h over the final 25 %, evaluated when that window ≥ 1 h) | CSV `rss_mb`, `intern_size` | Route identities rotate every epoch. |
 | readyz availability | scenario 10 rule (fewer than 3 consecutive misses of 200 within 250 ms; no dropped scrape or observation gap) | CSV `readyz_code`, `readyz_ms` | Probed every sample under churn, flaps and reloads. |
+| Outbound registration wait | scenario 10 rule (the run's maximum sampled oldest registration wait is recorded and must not exceed 300 s); client flaps re-register, and a deferred registration clears within seconds once queued imports drain | `bgp_rib_outbound_registration_pending_oldest_seconds` → CSV `registration_pending_oldest_sec` | Sampled every row under churn, flaps and reloads. |
 | Management plane | scenario 10's management gates with the EVPN operation set and identity `evpn_peer == 127.1.0.1`; EVPN view rows must be Type 2 or 5, sourced from client 0 (received) or never from client 0 (advertised) | `management-plane-load.jsonl` | Bounded reads throughout the measured window. |
 | Minimum sample count / no abort / daemon log | scenario 10 rules | CSV, `cycles.log`, `rustbgpd.log` | As scenario 10. |
 
