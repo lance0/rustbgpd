@@ -1224,7 +1224,8 @@ message ListNeighborsRequest {}
 
 message ListNeighborsResponse {
   // Ordered numerically by IP (IPv4 before IPv6), then lexicographically by
-  // interface (absent before present).
+  // interface (absent before present). Interface-only neighbors with no bound
+  // address follow, ordered by interface.
   repeated NeighborState neighbors = 1;
 }
 
