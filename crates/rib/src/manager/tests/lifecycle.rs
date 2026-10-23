@@ -2066,6 +2066,162 @@ async fn deferred_registration_dropped_when_session_dies_first() {
     assert!(!manager.outbound_peers.contains_key(&restarter));
 }
 
+/// Sample the registration-wait gauges now: (pending sessions, oldest age s).
+fn registration_wait(manager: &mut RibManager) -> (f64, f64) {
+    manager.sample_outbound_registration_wait();
+    registration_wait_gauges(&manager.metrics)
+}
+
+fn registration_wait_gauges(metrics: &BgpMetrics) -> (f64, f64) {
+    (
+        gauge_metric_value(metrics, "bgp_rib_outbound_registration_pending_peers", &[]),
+        gauge_metric_value(
+            metrics,
+            "bgp_rib_outbound_registration_pending_oldest_seconds",
+            &[],
+        ),
+    )
+}
+
+/// A deferred registration is counted and ages from its `PeerUp`; completing
+/// it, or the session going down while deferred, clears both gauges.
+#[tokio::test(start_paused = true)]
+async fn registration_wait_tracks_deferral_completion_and_peer_down() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.initial_dump_defer_min_routes = 0;
+
+    let survivor = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let restarter = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let departing = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+
+    // A quiet-actor PeerUp registers inline: nothing waits.
+    let (survivor_tx, _survivor_rx) = mpsc::channel(16);
+    manager.handle_update(test_peer_up(survivor, 1, survivor_tx));
+    assert_eq!(registration_wait(&mut manager), (0.0, 0.0));
+
+    // Queued actor work defers the next PeerUp's registration.
+    tx.try_send(test_routes_received(survivor, vec![])).unwrap();
+    let (restarter_tx, _restarter_rx) = mpsc::channel(16);
+    manager.handle_update(test_peer_up(restarter, 2, restarter_tx));
+    assert_eq!(manager.pending_initial_registrations.len(), 1);
+    assert_eq!(registration_wait(&mut manager), (1.0, 0.0));
+    tokio::time::advance(Duration::from_secs(7)).await;
+    assert_eq!(registration_wait(&mut manager), (1.0, 7.0));
+
+    // Completion clears the count and the age.
+    manager.advance_pending_initial_registration();
+    assert!(manager.outbound_peers.contains_key(&restarter));
+    assert_eq!(registration_wait(&mut manager), (0.0, 0.0));
+
+    // A PeerDown while deferred clears them too, and nothing resumes ageing.
+    let (departing_tx, _departing_rx) = mpsc::channel(16);
+    manager.handle_update(test_peer_up(departing, 3, departing_tx));
+    assert_eq!(manager.pending_initial_registrations.len(), 1);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert_eq!(registration_wait(&mut manager), (1.0, 5.0));
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: departing,
+        session_id: 3,
+    });
+    assert_eq!(registration_wait(&mut manager), (0.0, 0.0));
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert_eq!(registration_wait(&mut manager), (0.0, 0.0));
+}
+
+/// A collision failback that re-registers an earlier-registered survivor
+/// starts a new wait at the failback, not at the survivor's original
+/// `PeerUp`, and the completed re-registration settles the gauges.
+#[tokio::test(start_paused = true)]
+async fn registration_wait_settles_after_collision_failback() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.initial_dump_defer_min_routes = 0;
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Winner W registers first, then loser L replaces its registration; both
+    // complete inline on a quiet actor.
+    let (winner_tx, _winner_rx) = mpsc::channel(64);
+    manager.handle_update(test_peer_up(peer, 1, winner_tx));
+    tokio::time::advance(Duration::from_secs(100)).await;
+    let (loser_tx, _loser_rx) = mpsc::channel(64);
+    manager.handle_update(test_peer_up(peer, 2, loser_tx));
+    assert_eq!(manager.outbound_session_ids.get(&peer), Some(&2));
+    assert_eq!(registration_wait(&mut manager), (0.0, 0.0));
+
+    // L goes down behind queued work: the registration fails over to W and
+    // defers.
+    tx.try_send(test_routes_received(peer, vec![])).unwrap();
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    });
+    assert!(!manager.outbound_peers.contains_key(&peer));
+    assert_eq!(manager.pending_initial_registrations.len(), 1);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert_eq!(registration_wait(&mut manager), (1.0, 30.0));
+
+    manager.advance_pending_initial_registration();
+    assert_eq!(manager.outbound_session_ids.get(&peer), Some(&1));
+    assert_eq!(registration_wait(&mut manager), (0.0, 0.0));
+}
+
+/// Through the run loop: a deferred registration completes and the gauges
+/// settle. With the queued entry dropped (the seeded defect) the session
+/// stays Established and unregistered; the count stays at one and the age
+/// keeps rising past the soak bound even though the actor is otherwise idle.
+async fn run_deferred_registration(drop_queued_entry: bool) -> [(f64, f64); 2] {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    manager.initial_dump_defer_min_routes = 0;
+    let survivor = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let restarter = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let (survivor_tx, _survivor_rx) = mpsc::channel(64);
+    manager.handle_update(test_peer_up(survivor, 1, survivor_tx));
+    tx.try_send(test_routes_received(survivor, vec![])).unwrap();
+    let (restarter_tx, mut restarter_rx) = mpsc::channel(64);
+    manager.handle_update(test_peer_up(restarter, 2, restarter_tx));
+    assert_eq!(manager.pending_initial_registrations.len(), 1);
+    if drop_queued_entry {
+        manager.pending_initial_registrations.clear();
+    }
+    let handle = tokio::spawn(manager.run());
+
+    let mut samples = [(0.0, 0.0); 2];
+    for sample in &mut samples {
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        *sample = registration_wait_gauges(&metrics);
+    }
+    let mut saw_eor = false;
+    while let Ok(update) = restarter_rx.try_recv() {
+        saw_eor |= !update.end_of_rib.is_empty();
+    }
+    assert_eq!(saw_eor, !drop_queued_entry, "initial dump delivery");
+    drop(tx);
+    handle.await.unwrap();
+    samples
+}
+
+#[tokio::test(start_paused = true)]
+async fn registration_wait_settles_when_the_run_loop_completes_it() {
+    assert_eq!(
+        run_deferred_registration(false).await,
+        [(0.0, 0.0), (0.0, 0.0)]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn registration_wait_exposes_a_lost_queued_registration() {
+    let [(pending_at_300, age_at_300), (pending_at_600, age_at_600)] =
+        run_deferred_registration(true).await;
+    assert_eq!((pending_at_300, pending_at_600), (1.0, 1.0));
+    assert!(
+        age_at_300 >= 299.0 && age_at_600 >= 599.0,
+        "age must keep rising while the registration is lost: {age_at_300}s then {age_at_600}s"
+    );
+}
+
 fn policy_chain(action: rustbgpd_policy::PolicyAction) -> rustbgpd_policy::PolicyChain {
     rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
         entries: vec![],
