@@ -873,11 +873,6 @@ fn ansi_overhead(colored: &str, plain_len: usize) -> usize {
     colored.len().saturating_sub(plain_len)
 }
 
-/// Print neighbor table with dynamic column widths and colored state.
-/// `wide` appends the captured peer source, classic operator columns
-/// (MsgRcvd, MsgSent, Flaps, RRC), a compact slow-peer marker, and the overloaded
-/// `State/PfxRcd` — prefixes-received count when Established, state name
-/// otherwise — as the last column.
 /// `remote_asn` as configured: the number, `external` or `internal`.
 pub(crate) fn remote_asn_label(config: &proto::NeighborConfig) -> String {
     match proto::RemoteAsnMode::try_from(config.remote_asn_mode) {
@@ -930,6 +925,11 @@ pub(crate) fn neighbor_identity(n: &proto::NeighborState) -> String {
     }
 }
 
+/// Print neighbor table with dynamic column widths and colored state.
+/// `wide` appends the captured peer source, classic operator columns
+/// (MsgRcvd, MsgSent, Flaps, RRC), a compact slow-peer marker, and the overloaded
+/// `State/PfxRcd` — prefixes-received count when Established, state name
+/// otherwise — as the last column.
 pub(crate) fn write_neighbor_table<W: Write + ?Sized>(
     writer: &mut W,
     neighbors: &[proto::NeighborState],
