@@ -4639,7 +4639,8 @@ private resync, and no-op transitions. Deleted peers have an explicit `absent`
 candidate state and do not count toward the projected topology or local resyncs.
 New, down, or session-reshaped peers are reported as
 `indeterminate_session_negotiation`; the planner never guesses future
-capabilities. `local_resync` describes local outbound
+capabilities. Each row's `peer` is the neighbor address, scoped to its
+interface for a link-local neighbor (`fe80::1%eth0`). `local_resync` describes local outbound
 re-evaluation, while `remote_route_refresh` is separate and remains false for
 this outbound-only projection. Capacity is a receipt-envelope class
 (`fully_shared`, `within_uniform`, `within_mixed`, `outside_measured`, or
