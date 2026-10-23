@@ -3,8 +3,8 @@
 //! an [`EvpnRouteEvent`] carries the full new and previous best route.
 //!
 //! Events name peers by the address each had when the event was built, not
-//! by [`PeerId`](crate::PeerId): a handle can move to a new endpoint or, once
-//! released, to nothing, and history must keep the endpoint it recorded.
+//! by [`PeerId`]: a handle can move to a new endpoint or, once released, to
+//! nothing, and history must keep the endpoint it recorded.
 
 use std::net::IpAddr;
 use std::sync::Arc;
