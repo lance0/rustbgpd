@@ -2226,6 +2226,7 @@ async fn owned_neighbor_chain_validation_rejects_before_runtime_effect() {
         .apply_policy_change_owned(
             rustbgpd_api::peer_types::ConfigEvent::SetNeighborImportChain {
                 address,
+                interface: None,
                 policy_names: Vec::new(),
                 ack: None,
             },
@@ -2332,6 +2333,7 @@ async fn chain_node_budget_rejects_api_and_reload_without_effect() {
         .apply_policy_change_owned(
             ConfigEvent::SetNeighborImportChain {
                 address: peer,
+                interface: None,
                 policy_names: vec!["bulk".to_string(); 100],
                 ack: None,
             },

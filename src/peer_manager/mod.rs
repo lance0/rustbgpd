@@ -1735,12 +1735,13 @@ impl PeerManager {
                     }
                     OwnedCatalogMutation::SetNeighborPeerGroup {
                         address,
+                        interface,
                         peer_group,
-                        ..
                     } => {
                         self.apply_peer_group_change_owned(
                             ConfigEvent::SetNeighborPeerGroup {
                                 address,
+                                interface,
                                 peer_group,
                                 ack: None,
                             },
@@ -1748,9 +1749,13 @@ impl PeerManager {
                         )
                         .await
                     }
-                    OwnedCatalogMutation::ClearNeighborPeerGroup { address, .. } => {
+                    OwnedCatalogMutation::ClearNeighborPeerGroup { address, interface } => {
                         self.apply_peer_group_change_owned(
-                            ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
+                            ConfigEvent::ClearNeighborPeerGroup {
+                                address,
+                                interface,
+                                ack: None,
+                            },
                             vec![address],
                         )
                         .await
@@ -1827,12 +1832,13 @@ impl PeerManager {
                     }
                     OwnedCatalogMutation::SetNeighborImportChain {
                         address,
+                        interface,
                         policy_names,
-                        ..
                     } => {
                         self.apply_policy_change_owned(
                             ConfigEvent::SetNeighborImportChain {
                                 address,
+                                interface,
                                 policy_names,
                                 ack: None,
                             },
@@ -1842,12 +1848,13 @@ impl PeerManager {
                     }
                     OwnedCatalogMutation::SetNeighborExportChain {
                         address,
+                        interface,
                         policy_names,
-                        ..
                     } => {
                         self.apply_policy_change_owned(
                             ConfigEvent::SetNeighborExportChain {
                                 address,
+                                interface,
                                 policy_names,
                                 ack: None,
                             },
@@ -1855,16 +1862,24 @@ impl PeerManager {
                         )
                         .await
                     }
-                    OwnedCatalogMutation::ClearNeighborImportChain { address, .. } => {
+                    OwnedCatalogMutation::ClearNeighborImportChain { address, interface } => {
                         self.apply_policy_change_owned(
-                            ConfigEvent::ClearNeighborImportChain { address, ack: None },
+                            ConfigEvent::ClearNeighborImportChain {
+                                address,
+                                interface,
+                                ack: None,
+                            },
                             Some(vec![address]),
                         )
                         .await
                     }
-                    OwnedCatalogMutation::ClearNeighborExportChain { address, .. } => {
+                    OwnedCatalogMutation::ClearNeighborExportChain { address, interface } => {
                         self.apply_policy_change_owned(
-                            ConfigEvent::ClearNeighborExportChain { address, ack: None },
+                            ConfigEvent::ClearNeighborExportChain {
+                                address,
+                                interface,
+                                ack: None,
+                            },
                             Some(vec![address]),
                         )
                         .await
@@ -2369,6 +2384,7 @@ impl PeerManager {
                     .apply_policy_change(
                         ConfigEvent::SetNeighborImportChain {
                             address,
+                            interface: None,
                             policy_names,
                             ack: None,
                         },
@@ -2386,6 +2402,7 @@ impl PeerManager {
                     .apply_policy_change(
                         ConfigEvent::SetNeighborExportChain {
                             address,
+                            interface: None,
                             policy_names,
                             ack: None,
                         },
@@ -2397,7 +2414,11 @@ impl PeerManager {
             PeerManagerCommand::ClearNeighborImportChain { address, reply } => {
                 let result = self
                     .apply_policy_change(
-                        ConfigEvent::ClearNeighborImportChain { address, ack: None },
+                        ConfigEvent::ClearNeighborImportChain {
+                            address,
+                            interface: None,
+                            ack: None,
+                        },
                         Some(vec![address]),
                     )
                     .await;
@@ -2406,7 +2427,11 @@ impl PeerManager {
             PeerManagerCommand::ClearNeighborExportChain { address, reply } => {
                 let result = self
                     .apply_policy_change(
-                        ConfigEvent::ClearNeighborExportChain { address, ack: None },
+                        ConfigEvent::ClearNeighborExportChain {
+                            address,
+                            interface: None,
+                            ack: None,
+                        },
                         Some(vec![address]),
                     )
                     .await;
@@ -2462,6 +2487,7 @@ impl PeerManager {
                     .apply_peer_group_change(
                         ConfigEvent::SetNeighborPeerGroup {
                             address,
+                            interface: None,
                             peer_group,
                             ack: None,
                         },
@@ -2473,7 +2499,11 @@ impl PeerManager {
             PeerManagerCommand::ClearNeighborPeerGroup { address, reply } => {
                 let result = self
                     .apply_peer_group_change(
-                        ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
+                        ConfigEvent::ClearNeighborPeerGroup {
+                            address,
+                            interface: None,
+                            ack: None,
+                        },
                         vec![address],
                     )
                     .await;

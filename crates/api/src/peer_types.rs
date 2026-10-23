@@ -2594,6 +2594,9 @@ pub enum ConfigEvent {
     SetNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2603,6 +2606,9 @@ pub enum ConfigEvent {
     SetNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2612,6 +2618,9 @@ pub enum ConfigEvent {
     ClearNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },
@@ -2619,6 +2628,9 @@ pub enum ConfigEvent {
     ClearNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },
@@ -2642,6 +2654,9 @@ pub enum ConfigEvent {
     SetNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Peer-group name.
         peer_group: String,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2651,6 +2666,9 @@ pub enum ConfigEvent {
     ClearNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },

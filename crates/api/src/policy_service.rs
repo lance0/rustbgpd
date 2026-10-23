@@ -1077,11 +1077,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "PolicyService.SetNeighborImportChain",
             OwnedCatalogMutation::SetNeighborImportChain {
                 address,
-                interface,
+                interface: interface.clone(),
                 policy_names: policy_names.clone(),
             },
             ConfigEvent::SetNeighborImportChain {
                 address,
+                interface,
                 policy_names,
                 ack: None,
             },
@@ -1114,11 +1115,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "PolicyService.SetNeighborExportChain",
             OwnedCatalogMutation::SetNeighborExportChain {
                 address,
-                interface,
+                interface: interface.clone(),
                 policy_names: policy_names.clone(),
             },
             ConfigEvent::SetNeighborExportChain {
                 address,
+                interface,
                 policy_names,
                 ack: None,
             },
@@ -1148,8 +1150,15 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         self.execute_owned_policy_mutation(
             RuntimeConfigOperationKind::NeighborImportChainClear,
             "PolicyService.ClearNeighborImportChain",
-            OwnedCatalogMutation::ClearNeighborImportChain { address, interface },
-            ConfigEvent::ClearNeighborImportChain { address, ack: None },
+            OwnedCatalogMutation::ClearNeighborImportChain {
+                address,
+                interface: interface.clone(),
+            },
+            ConfigEvent::ClearNeighborImportChain {
+                address,
+                interface,
+                ack: None,
+            },
             persist_permit,
         )
         .await?;
@@ -1176,8 +1185,15 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         self.execute_owned_policy_mutation(
             RuntimeConfigOperationKind::NeighborExportChainClear,
             "PolicyService.ClearNeighborExportChain",
-            OwnedCatalogMutation::ClearNeighborExportChain { address, interface },
-            ConfigEvent::ClearNeighborExportChain { address, ack: None },
+            OwnedCatalogMutation::ClearNeighborExportChain {
+                address,
+                interface: interface.clone(),
+            },
+            ConfigEvent::ClearNeighborExportChain {
+                address,
+                interface,
+                ack: None,
+            },
             persist_permit,
         )
         .await?;
@@ -4047,10 +4063,12 @@ mod tests {
         match config_rx.recv().await {
             Some(ConfigEvent::SetNeighborImportChain {
                 address,
+                interface,
                 policy_names,
                 ack,
             }) => {
                 assert_eq!(address.to_string(), "10.0.0.2");
+                assert_eq!(interface, None);
                 assert_eq!(policy_names, vec!["tag-internal".to_string()]);
                 ack.expect("persisted mutation must carry an ack")
                     .fail_write("disk full");

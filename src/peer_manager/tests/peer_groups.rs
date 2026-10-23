@@ -148,11 +148,16 @@ async fn peer_group_bfd_membership_edits_reject_before_effects() {
             let event = if attach {
                 ConfigEvent::SetNeighborPeerGroup {
                     address,
+                    interface: None,
                     peer_group: "protected".into(),
                     ack: None,
                 }
             } else {
-                ConfigEvent::ClearNeighborPeerGroup { address, ack: None }
+                ConfigEvent::ClearNeighborPeerGroup {
+                    address,
+                    interface: None,
+                    ack: None,
+                }
             };
             let error = if owned {
                 let outcome = mgr

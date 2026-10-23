@@ -67,7 +67,14 @@ impl PeerManager {
 
     pub(super) fn policy_event_details(
         event: &ConfigEvent,
-    ) -> (&'static str, &'static str, String, Option<IpAddr>) {
+    ) -> (&'static str, &'static str, String, Option<PeerKey>) {
+        let neighbor = |operation: &'static str,
+                        target_type: &'static str,
+                        address: &IpAddr,
+                        interface: &Option<String>| {
+            let peer = PeerKey::new(*address, interface.clone());
+            (operation, target_type, address.to_string(), Some(peer))
+        };
         match event {
             ConfigEvent::SetPolicy { name, .. } => ("set", "policy", name.clone(), None),
             ConfigEvent::DeletePolicy { name, .. } => ("delete", "policy", name.clone(), None),
@@ -87,46 +94,28 @@ impl PeerManager {
             ConfigEvent::ClearGlobalExportChain { .. } => {
                 ("clear", "global_export_chain", "global".to_string(), None)
             }
-            ConfigEvent::SetNeighborImportChain { address, .. } => (
-                "set",
-                "neighbor_import_chain",
-                address.to_string(),
-                Some(*address),
-            ),
-            ConfigEvent::SetNeighborExportChain { address, .. } => (
-                "set",
-                "neighbor_export_chain",
-                address.to_string(),
-                Some(*address),
-            ),
-            ConfigEvent::ClearNeighborImportChain { address, .. } => (
-                "clear",
-                "neighbor_import_chain",
-                address.to_string(),
-                Some(*address),
-            ),
-            ConfigEvent::ClearNeighborExportChain { address, .. } => (
-                "clear",
-                "neighbor_export_chain",
-                address.to_string(),
-                Some(*address),
-            ),
+            ConfigEvent::SetNeighborImportChain {
+                address, interface, ..
+            } => neighbor("set", "neighbor_import_chain", address, interface),
+            ConfigEvent::SetNeighborExportChain {
+                address, interface, ..
+            } => neighbor("set", "neighbor_export_chain", address, interface),
+            ConfigEvent::ClearNeighborImportChain {
+                address, interface, ..
+            } => neighbor("clear", "neighbor_import_chain", address, interface),
+            ConfigEvent::ClearNeighborExportChain {
+                address, interface, ..
+            } => neighbor("clear", "neighbor_export_chain", address, interface),
             ConfigEvent::SetPeerGroup { name, .. } => ("set", "peer_group", name.clone(), None),
             ConfigEvent::DeletePeerGroup { name, .. } => {
                 ("delete", "peer_group", name.clone(), None)
             }
-            ConfigEvent::SetNeighborPeerGroup { address, .. } => (
-                "set",
-                "neighbor_peer_group",
-                address.to_string(),
-                Some(*address),
-            ),
-            ConfigEvent::ClearNeighborPeerGroup { address, .. } => (
-                "clear",
-                "neighbor_peer_group",
-                address.to_string(),
-                Some(*address),
-            ),
+            ConfigEvent::SetNeighborPeerGroup {
+                address, interface, ..
+            } => neighbor("set", "neighbor_peer_group", address, interface),
+            ConfigEvent::ClearNeighborPeerGroup {
+                address, interface, ..
+            } => neighbor("clear", "neighbor_peer_group", address, interface),
             ConfigEvent::DynamicNeighborAdded { prefix, .. } => {
                 ("add", "dynamic_neighbor", prefix.clone(), None)
             }
@@ -159,8 +148,10 @@ impl PeerManager {
         }
         // Scoped label so link-local peers correlate with lifecycle events.
         let peer_label = peer
-            .and_then(|address| self.unique_peer_key_for_address(address))
-            .map(|key| key.label());
+            .as_ref()
+            .filter(|key| self.peers.contains_key(key))
+            .map(PeerKey::label);
+        let peer = peer.map(|key| key.address);
         let reason = format!("policy {operation} {target_type} {target}");
         self.publish_policy_event(PolicyEvent {
             operation,
