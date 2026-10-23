@@ -1231,6 +1231,8 @@ with an empty `NeighborConfig.address` and its `interface`:
   interface-only neighbor. `GetNeighborState` answers for it bound or not.
   Actions that need a session (enable, disable, reset, soft reset, refresh,
   replay) return `FAILED_PRECONDITION` until an address is bound.
+  `DeleteNeighbor` returns `FAILED_PRECONDITION` for an interface-only
+  neighbor, bound or not: remove its stanza from the configuration instead.
 
 ### Add a neighbor
 
