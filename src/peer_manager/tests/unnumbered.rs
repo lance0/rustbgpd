@@ -1356,3 +1356,94 @@ async fn an_address_change_never_promotes_a_pending_candidate_into_a_retired_pee
     );
     assert_eq!(h.peers_at(ll(3)), []);
 }
+
+/// Confirmed carrier loss and interface recreation stay unconditional while
+/// a retirement is unsettled: the unresponsive session is not read first,
+/// and a session that has exited is not rebound at the vanished index.
+async fn a_lost_link_overrides_an_unsettled_retirement(recreated: bool, exits: bool) {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let (release, released) = oneshot::channel();
+    let (exited_tx, exited) = oneshot::channel();
+    h.replace_session(
+        &swp1_key(2),
+        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+    );
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "unsettled");
+    // Unreleased, the session answers nothing more.
+    let _held = if exits {
+        release.send(()).unwrap();
+        exited.await.unwrap();
+        None
+    } else {
+        Some(release)
+    };
+
+    let links = if recreated {
+        [("swp1", 9, true)]
+    } else {
+        [("swp1", 7, false)]
+    };
+    // Mutation-red: settling first blocks on the unresponsive session, or
+    // rebinds an exited one at the old index.
+    h.links_changed(snapshot(true, &links));
+    h.reconcile().await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [],
+        "retired (recreated: {recreated}, exits: {exits})"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn carrier_loss_retires_an_unresponsive_session_with_an_unsettled_retirement() {
+    a_lost_link_overrides_an_unsettled_retirement(false, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn recreation_retires_an_unresponsive_session_with_an_unsettled_retirement() {
+    a_lost_link_overrides_an_unsettled_retirement(true, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn recreation_never_rebinds_an_exited_session_at_the_old_index() {
+    a_lost_link_overrides_an_unsettled_retirement(true, true).await;
+}
+
+/// The endpoint recovered for an exited session outlives a rebind that a
+/// staged transaction defers: the next pass, with no discovery binding,
+/// still recreates the session there.
+#[tokio::test(start_paused = true)]
+async fn a_recovered_endpoint_survives_a_deferred_rebind() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let (release, released) = oneshot::channel();
+    let (exited_tx, exited) = oneshot::channel();
+    h.replace_session(
+        &swp1_key(2),
+        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+    );
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    release.send(()).unwrap();
+    exited.await.unwrap();
+
+    h.mgr.config_snapshot_staged = true;
+    h.bind("swp1", None).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [],
+        "exited peer retired; rebind deferred"
+    );
+    h.mgr.config_snapshot_staged = false;
+    // Mutation-red: a recovery endpoint held only for one pass is gone.
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "recreated on retry");
+    assert!(matches!(
+        h.mgr.peers[&swp1_key(2)]
+            .handle()
+            .query_state_outcome(Duration::from_secs(1))
+            .await,
+        rustbgpd_transport::StateQueryOutcome::State(_)
+    ));
+}

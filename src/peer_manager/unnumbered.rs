@@ -74,6 +74,10 @@ struct Port {
     /// still have shut the session down, which reports nothing. Settled by
     /// reading the session before the binding is trusted again.
     retire_unsettled: bool,
+    /// The endpoint of a session found exited, to rebind when discovery has
+    /// no binding. Kept across retries until a replacement is installed; it
+    /// is not a discovery binding and confirmed carrier loss drops it.
+    recover: Option<Endpoint>,
 }
 
 /// State of an interface-only neighbor that belongs to the neighbor, not to
@@ -359,9 +363,12 @@ impl PeerManager {
 
     /// Whether an unanswered retirement ended the bound session since: the
     /// read queues behind that command, so it settles the outcome. `false`
-    /// with nothing unsettled; `None` (retry armed) when still unanswered.
-    async fn settle_retirement(&mut self, name: &str, peer: &PeerKey) -> Option<bool> {
-        if !self.port_mut(name).retire_unsettled {
+    /// with nothing unsettled, and on a `lost` link, which ends the session
+    /// unconditionally without reading it (it may never answer) or recovering
+    /// its endpoint (the index is gone). `None` (retry armed) when still
+    /// unanswered.
+    async fn settle_retirement(&mut self, name: &str, peer: &PeerKey, lost: bool) -> Option<bool> {
+        if lost || !self.port_mut(name).retire_unsettled {
             return Some(false);
         }
         let outcome = match self.peers.get(peer) {
@@ -492,32 +499,39 @@ impl PeerManager {
         let link_down = matches!(port.link, Some((_, LinkState::Down | LinkState::Removed)));
         let current_ifindex = port.link.map(|(ifindex, _)| ifindex);
         let (bound, established) = (port.bound.clone(), port.established);
+        if link_down {
+            port.recover = None;
+        }
         // A binding learned on an older index of a recreated interface is
         // stale: the link monitor may report the recreation as Up then Up.
-        let desired = port
-            .desired
-            .filter(|endpoint| current_ifindex.is_none_or(|ifindex| ifindex == endpoint.ifindex));
+        let current = |endpoint: &Endpoint| current_ifindex.is_none_or(|i| i == endpoint.ifindex);
+        let recover = port.recover.filter(current);
+        let mut desired = port.desired.filter(current).or(recover);
 
-        let mut desired = desired;
         if let Some(key) = bound {
             let bound_scope = self
                 .peers
                 .get(&key)
                 .and_then(|managed| managed.transport_config.peer_scope_id);
+            // Level-triggered: the bound peer's scope against the interface's
+            // index now. A mismatch means the interface it ran on is gone.
+            let recreated = current_ifindex.is_some_and(|ifindex| bound_scope != Some(ifindex));
             // A session that an unanswered retirement ended is replaced, at
             // the same endpoint when the binding no longer points elsewhere.
-            let Some(exited) = self.settle_retirement(name, &key).await else {
+            let Some(exited) = self
+                .settle_retirement(name, &key, link_down || recreated)
+                .await
+            else {
                 return;
             };
             if exited
                 && desired.is_none()
                 && let (IpAddr::V6(address), Some(ifindex)) = (key.address, bound_scope)
             {
-                desired = Some(Endpoint { address, ifindex });
+                let endpoint = Endpoint { address, ifindex };
+                self.port_mut(name).recover = Some(endpoint);
+                desired = Some(endpoint);
             }
-            // Level-triggered: the bound peer's scope against the interface's
-            // index now. A mismatch means the interface it ran on is gone.
-            let recreated = current_ifindex.is_some_and(|ifindex| bound_scope != Some(ifindex));
             let same_endpoint = desired.is_some_and(|endpoint| {
                 key.address == IpAddr::V6(endpoint.address) && bound_scope == Some(endpoint.ifindex)
             });
@@ -899,6 +913,7 @@ impl PeerManager {
         let port = self.port_mut(name);
         port.rib_peer = port.rib_peer.or(Some(rib_peer));
         port.bound = Some(key);
+        port.recover = None;
         Ok(())
     }
 }
