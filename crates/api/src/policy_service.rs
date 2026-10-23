@@ -1906,13 +1906,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     peer_address: chain
                         .peer
                         .map_or_else(|| "global".to_string(), |peer| peer.to_string()),
-                    // The RIB's export map is keyed by bare address; the
-                    // duplicate-address guard makes the managed peer at that
-                    // address unique, so its key supplies the scope.
+                    // The chain's own neighbor handle supplies the scope, so
+                    // neighbors sharing a link-local address stay apart.
                     peer_interface: chain
                         .peer
-                        .and_then(|peer| roster.unique_peer(peer.addr()))
-                        .and_then(|peer| peer.key.interface.clone())
+                        .and_then(rustbgpd_rib::PeerId::endpoint)
+                        .and_then(|endpoint| endpoint.interface)
+                        .map(|interface| interface.to_string())
                         .unwrap_or_default(),
                     direction: "export".to_string(),
                     routes_evaluated: chain.evals,
@@ -5890,6 +5890,51 @@ policy client-x {
         assert_eq!(dataset.records, 2);
         assert_eq!(dataset.last_error, "line 3: bad");
         assert_eq!(dataset.path, "/var/lib/rustbgpd/datasets/customers.list");
+    }
+
+    /// Export rows of neighbors that share a link-local address name each
+    /// neighbor's interface from the chain's own handle.
+    #[tokio::test]
+    async fn get_policy_stats_scopes_same_address_export_rows() {
+        let chain = stats_export_chain();
+        let link_local = "fe80::1".parse().unwrap();
+        let handles = ["eth0", "eth1"].map(|interface| {
+            PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(link_local, Some(interface)))
+        });
+        let mut export = ExportRosterPublisher::new();
+        export.publish(
+            handles
+                .iter()
+                .map(|&peer| (peer, Some(Arc::clone(chain.hit_counters()))))
+                .collect(),
+            None,
+        );
+        let (roster, _publication) = stats_roster();
+        let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
+        let resp = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                allow_partial: false,
+                peer_address: String::new(),
+                direction: "export".to_string(),
+            }),
+        )
+        .await
+        .expect("stats query succeeds")
+        .into_inner();
+        let mut rows = resp
+            .chains
+            .iter()
+            .map(|chain| (chain.peer_address.as_str(), chain.peer_interface.as_str()))
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        assert_eq!(rows, [("fe80::1", "eth0"), ("fe80::1", "eth1")]);
+        for handle in handles {
+            assert!(handle.release());
+        }
     }
 
     /// The import direction reads the session's published counters and
