@@ -2767,6 +2767,10 @@ impl EffectiveNeighborImpactKind {
 #[derive(Debug, serde::Serialize)]
 pub struct EffectiveNeighborImpact {
     pub address: String,
+    /// The interface of a link-local neighbor; with `address` it names one
+    /// of several neighbors that share a link-local address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
     pub reasons: Vec<String>,
     /// Operator-visible impact kind. `policy_chain` commits through the
     /// live-policy executor; `session_reshape` commits through the session
@@ -2783,6 +2787,33 @@ pub struct EffectiveNeighborImpact {
     pub is_dynamic_range: bool,
 }
 
+impl EffectiveNeighborImpact {
+    /// Whether this impact is for the static neighbor `neighbor`.
+    pub fn names(&self, neighbor: &Neighbor) -> bool {
+        !self.is_dynamic_range
+            && self.address == neighbor.address
+            && self.interface == neighbor.interface
+    }
+
+    /// The address, scoped to its interface for a link-local neighbor.
+    pub fn label(&self) -> String {
+        scoped_neighbor_label(&self.address, self.interface.as_deref())
+    }
+}
+
+/// A static neighbor's identity: its address and, when scoped, interface.
+fn neighbor_key(neighbor: &Neighbor) -> (&str, Option<&str>) {
+    (neighbor.address.as_str(), neighbor.interface.as_deref())
+}
+
+/// `address`, or `address%interface` for an interface-scoped neighbor.
+fn scoped_neighbor_label(address: &str, interface: Option<&str>) -> String {
+    match interface {
+        Some(interface) => format!("{address}%{interface}"),
+        None => address.to_string(),
+    }
+}
+
 /// Serializable neighbor diff summary (`NeighborDiff` uses `IpAddr` which is fine,
 /// but we want address strings + field-level details).
 #[derive(Debug, serde::Serialize)]
@@ -2795,6 +2826,9 @@ pub struct NeighborDiffSummary {
 #[derive(Debug, serde::Serialize)]
 pub struct NeighborAddSummary {
     pub address: String,
+    /// The interface of a link-local neighbor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
     /// The resolved ASN: the number, `global.asn` for `internal`, 0 for
     /// `external`. `remote_asn_mode` says which.
     pub remote_asn: u32,
@@ -2805,6 +2839,9 @@ pub struct NeighborAddSummary {
 #[derive(Debug, serde::Serialize)]
 pub struct NeighborChangeSummary {
     pub address: String,
+    /// The interface of a link-local neighbor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
     pub changes: Vec<FieldChange>,
 }
 
@@ -2896,20 +2933,20 @@ impl ConfigDiff {
     /// config entries, not live TCP sessions (a dynamic range counts once
     /// however many sessions it currently holds).
     pub fn session_reset_entries(&self) -> usize {
-        let mut addresses: std::collections::BTreeSet<&str> = self
+        let mut entries: std::collections::BTreeSet<(&str, Option<&str>)> = self
             .neighbors
             .changed
             .iter()
             .filter(|change| change.changes.iter().any(FieldChange::resets_session))
-            .map(|change| change.address.as_str())
+            .map(|change| (change.address.as_str(), change.interface.as_deref()))
             .collect();
-        addresses.extend(
+        entries.extend(
             self.effective_neighbor_impact
                 .iter()
                 .filter(|impact| !impact.kind.is_policy_chain())
-                .map(|impact| impact.address.as_str()),
+                .map(|impact| (impact.address.as_str(), impact.interface.as_deref())),
         );
-        addresses.len()
+        entries.len()
     }
 }
 
@@ -4362,15 +4399,13 @@ fn session_reshape_transaction(diff: &ConfigDiff) -> bool {
     if diff.neighbors.changed.is_empty() {
         return true;
     }
-    let impacted: HashSet<&str> = diff
-        .effective_neighbor_impact
-        .iter()
-        .map(|impact| impact.address.as_str())
-        .collect();
-    diff.neighbors
-        .changed
-        .iter()
-        .all(|neighbor| impacted.contains(neighbor.address.as_str()))
+    diff.neighbors.changed.iter().all(|neighbor| {
+        diff.effective_neighbor_impact.iter().any(|impact| {
+            !impact.is_dynamic_range
+                && impact.address == neighbor.address
+                && impact.interface == neighbor.interface
+        })
+    })
 }
 
 fn transaction_sections_are_one_family(sections: &[String]) -> bool {
@@ -4591,7 +4626,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                     out,
                     "    {} {} (AS {})",
                     style.add_marker,
-                    n.address,
+                    scoped_neighbor_label(&n.address, n.interface.as_deref()),
                     if n.remote_asn_mode == "external" {
                         "external".to_string()
                     } else {
@@ -4603,7 +4638,8 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 let _ = writeln!(out, "    {} {addr}", style.remove_marker);
             }
             for n in &diff.neighbors.changed {
-                let _ = writeln!(out, "    {} {}:", style.change_marker, n.address);
+                let label = scoped_neighbor_label(&n.address, n.interface.as_deref());
+                let _ = writeln!(out, "    {} {label}:", style.change_marker);
                 for change in &n.changes {
                     let _ = writeln!(out, "        {}", change.render());
                 }
@@ -4692,7 +4728,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                     out,
                     "    {} {} [{}]:",
                     style.change_marker,
-                    impact.address,
+                    impact.label(),
                     impact.kind.as_str()
                 );
                 for reason in &impact.reasons {
@@ -5003,11 +5039,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     pin_bfd_startup_only_runtime(&mut reload_new, old);
     let neighbor_diff = diff_neighbors(&old.neighbors, &reload_new.neighbors);
 
-    let old_map: HashMap<&str, &Neighbor> = old
-        .neighbors
-        .iter()
-        .map(|n| (n.address.as_str(), n))
-        .collect();
+    let old_map: HashMap<(&str, Option<&str>), &Neighbor> =
+        old.neighbors.iter().map(|n| (neighbor_key(n), n)).collect();
 
     let neighbors = NeighborDiffSummary {
         added: neighbor_diff
@@ -5015,6 +5048,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             .iter()
             .map(|n| NeighborAddSummary {
                 address: n.address.clone(),
+                interface: n.interface.clone(),
                 remote_asn: n.remote_asn.resolve(new.global.asn),
                 remote_asn_mode: n.remote_asn.mode(),
             })
@@ -5029,9 +5063,10 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             .iter()
             .filter_map(|n| {
                 old_map
-                    .get(n.address.as_str())
+                    .get(&(n.address.as_str(), n.interface.as_deref()))
                     .map(|old_n| NeighborChangeSummary {
                         address: n.address.clone(),
+                        interface: n.interface.clone(),
                         changes: describe_neighbor_changes(old_n, n),
                     })
             })
@@ -5980,16 +6015,13 @@ fn compute_effective_neighbor_impact(
         .chain(peer_groups.added.iter().map(String::as_str))
         .chain(peer_groups.removed.iter().map(String::as_str))
         .collect();
-    let new_by_addr: HashMap<&str, &Neighbor> = new
-        .neighbors
-        .iter()
-        .map(|n| (n.address.as_str(), n))
-        .collect();
+    let new_by_key: HashMap<(&str, Option<&str>), &Neighbor> =
+        new.neighbors.iter().map(|n| (neighbor_key(n), n)).collect();
 
     let mut out: Vec<EffectiveNeighborImpact> = Vec::new();
     let (mut old_stores, mut new_stores) = (ChunkedSetStore::default(), ChunkedSetStore::default());
     for old_neighbor in &old.neighbors {
-        let Some(new_neighbor) = new_by_addr.get(old_neighbor.address.as_str()) else {
+        let Some(new_neighbor) = new_by_key.get(&neighbor_key(old_neighbor)) else {
             continue;
         };
         let Ok(old_resolved) =
@@ -6077,6 +6109,7 @@ fn compute_effective_neighbor_impact(
                 };
             out.push(EffectiveNeighborImpact {
                 address: old_neighbor.address.clone(),
+                interface: old_neighbor.interface.clone(),
                 reasons,
                 kind,
                 is_dynamic_range: false,
@@ -6286,6 +6319,7 @@ fn dynamic_range_effective_impact(
                 };
             out.push(EffectiveNeighborImpact {
                 address: old_range.prefix.clone(),
+                interface: None,
                 reasons,
                 kind,
                 is_dynamic_range: true,

@@ -1799,3 +1799,47 @@ fn same_address_neighbors_must_agree_on_gtsm() {
         parse(&pair(eth0, eth1)).unwrap();
     }
 }
+
+/// Two neighbors that share a link-local address are diffed against their
+/// own prior records: an unchanged pair in different peer groups is a no-op,
+/// and a peer-group edit impacts only that group's member.
+#[test]
+fn same_address_neighbors_diff_against_their_own_records() {
+    let groups = "[peer_groups.a]\n[peer_groups.b]\n";
+    let config = |groups: &str| {
+        parse(&same_address_pair("peer_group = \"a\"", groups).replace(
+            "interface = \"eth1\"\nremote_asn = 65002\n",
+            "interface = \"eth1\"\nremote_asn = 65002\npeer_group = \"b\"\n",
+        ))
+        .unwrap()
+    };
+    let current = config(groups);
+
+    let unchanged = diff_config(&current, &config(groups));
+    assert!(
+        unchanged.effective_neighbor_impact.is_empty(),
+        "{:?}",
+        unchanged.effective_neighbor_impact
+    );
+    assert_eq!(unchanged.session_reset_entries(), 0);
+    let class = classify_config_transaction_v1(&unchanged);
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+
+    let changed = diff_config(
+        &current,
+        &config("[peer_groups.a]\nhold_time = 30\n[peer_groups.b]\n"),
+    );
+    let impacts = changed
+        .effective_neighbor_impact
+        .iter()
+        .map(|impact| (impact.label(), impact.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        impacts,
+        [(
+            "fe80::1%eth0".to_string(),
+            EffectiveNeighborImpactKind::SessionReshape
+        )]
+    );
+    assert_eq!(changed.session_reset_entries(), 1);
+}

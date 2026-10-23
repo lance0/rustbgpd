@@ -3754,10 +3754,6 @@ struct PeerSessionReshapeTargets {
     dynamic_purge_ranges: Vec<DynamicRangeTarget>,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the reshape target resolver keeps its closed-world validation and static/dynamic target construction in one auditable pass"
-)]
 fn resolve_peer_session_reshape_targets(
     previous: &Config,
     candidate: &Config,
@@ -3780,16 +3776,12 @@ fn resolve_peer_session_reshape_targets(
         ));
     }
 
-    let impacted: std::collections::HashSet<&str> = diff
-        .effective_neighbor_impact
-        .iter()
-        .map(|impact| impact.address.as_str())
-        .collect();
-    if neighbor_diff
-        .changed
-        .iter()
-        .any(|neighbor| !impacted.contains(neighbor.address.as_str()))
-    {
+    if neighbor_diff.changed.iter().any(|neighbor| {
+        !diff
+            .effective_neighbor_impact
+            .iter()
+            .any(|impact| impact.names(neighbor))
+    }) {
         return Err(ConfigTransactionApplyError::Internal(
             "peer-session reshape executor received non-reshape neighbor changes".to_string(),
         ));
@@ -3848,28 +3840,18 @@ fn resolve_peer_session_reshape_targets(
             }
             continue;
         }
-        let mut matches = candidate
+        // `(address, interface)` names one record; the loader refuses a
+        // duplicate.
+        let Some(neighbor) = candidate
             .neighbors
             .iter()
-            .filter(|neighbor| neighbor.address == impact.address);
-        let Some(neighbor) = matches.next() else {
+            .find(|neighbor| impact.names(neighbor))
+        else {
             return Err(ConfigTransactionApplyError::Internal(format!(
                 "peer-session reshape impact references neighbor {} absent from the candidate",
-                impact.address
+                impact.label()
             )));
         };
-        // Defense in depth: two neighbors sharing an address would make the
-        // resolve target ambiguous. The config loader forbids this today —
-        // `interface` is only valid for IPv6 link-local, and a link-local
-        // address may not repeat across interfaces — so this branch is
-        // unreachable via a loadable config, but we fail closed rather than
-        // reshape an arbitrarily-chosen session if that ever changes.
-        if matches.next().is_some() {
-            return Err(ConfigTransactionApplyError::Internal(format!(
-                "peer-session reshape impact for {} is ambiguous across multiple scoped neighbors",
-                impact.address
-            )));
-        }
         let resolved = candidate
             .resolve_neighbor(neighbor)
             .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
