@@ -827,22 +827,31 @@ async fn an_inbound_connection_binds_the_neighbor_on_its_arrival_interface() {
         "discovery owns the learned peer"
     );
 
+    assert_eq!(dropped(&h, "unconfigured"), 0.0, "an accepted arrival");
+
+    // A second router dials while that candidate is opening: the primary
+    // is not, but the bound address is live.
+    // Mutation-red: checking only the primary retires both sessions.
+    let _second = inbound(&mut h, 12, 8).await;
+    assert_eq!(h.peers_at(ll(9)), std::slice::from_ref(&swp2), "kept");
+    assert_eq!(h.peers_at(ll(12)), []);
+    assert_eq!(dropped(&h, "unconfigured"), 1.0);
+
     // An arrival scope that belongs to no interface-only neighbor still
     // drops, whatever the address.
-    assert_eq!(dropped(&h, "unconfigured"), 0.0, "an accepted arrival");
     let _client = inbound(&mut h, 10, 99).await;
     assert_eq!(h.peers_at(ll(10)), []);
-    assert_eq!(dropped(&h, "unconfigured"), 1.0);
+    assert_eq!(dropped(&h, "unconfigured"), 2.0);
 
     // A confirmed-down link refuses learning, and the refusal is counted.
     h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
     h.reconcile().await;
-    // Mutation-red: a refusal that is only logged leaves the count at 1.
+    // Mutation-red: a refusal that is only logged leaves the count at 2.
     let _client = inbound(&mut h, 11, 8).await;
     assert_eq!(h.peers_at(ll(11)), []);
     assert_eq!(
         dropped(&h, "unconfigured"),
-        2.0,
+        3.0,
         "link-down refusal counted"
     );
 }
@@ -971,4 +980,65 @@ async fn an_inbound_connection_from_a_held_address_is_refused() {
         "exactly one link admitted"
     );
     assert_eq!(dropped(&h, "unconfigured"), 2.0);
+
+    // The bound session is down and a held address dials: the refusal
+    // leaves the current endpoint bound.
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    // Mutation-red: checking the holder only after retirement unbinds swp1.
+    let _client = inbound(&mut h, 5, 7).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "still bound");
+    assert_eq!(dropped(&h, "unconfigured"), 3.0);
+}
+
+/// A max-prefix shutdown the old session reported as it went Idle is applied
+/// before that session is retired for an inbound-learned address, so the
+/// replacement starts latched instead of enabled.
+#[tokio::test]
+async fn an_inbound_rebind_keeps_a_max_prefix_shutdown_queued_by_the_old_session() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 2, 7).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Idle,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let session_id = h.mgr.peers[&swp1_key(2)].session_id();
+    h.mgr
+        .session_notify_tx
+        .send(SessionNotification::MaxPrefixExceeded {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: IpAddr::V6(ll(2)),
+            count: 501,
+            bound: 500,
+            family: None,
+            received: false,
+            path_limit: false,
+        })
+        .unwrap();
+
+    let _client = inbound(&mut h, 3, 7).await;
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(2)),
+        "old endpoint retired"
+    );
+    // Mutation-red: capturing the state before draining loses the latch, and
+    // the replacement starts enabled.
+    assert!(
+        h.mgr.max_prefix_latches.contains_key(&swp1_key(3)),
+        "latch carried"
+    );
+    assert!(!h.mgr.peers[&swp1_key(3)].enabled, "replacement held down");
 }

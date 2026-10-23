@@ -489,6 +489,10 @@ impl PeerManager {
     /// when the peer could not be removed; the binding is then unchanged.
     async fn retire_bound_peer(&mut self, name: &str, key: PeerKey, reason: &str) -> bool {
         info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
+        // Apply what the session already reported, such as a max-prefix
+        // shutdown queued as it went Idle, before capturing the state that
+        // outlives it; the deletion below would otherwise apply and discard it.
+        self.drain_ready_session_notifications(Some(&key)).await;
         // The neighbor's operator and safety state outlives the endpoint.
         let held = HeldState {
             enabled: self.peers.get(&key).is_none_or(|managed| managed.enabled),
@@ -534,19 +538,6 @@ impl PeerManager {
             .cloned()
     }
 
-    /// ADR-0142 secondary discovery: an inbound connection from `address`
-    /// arrived on `name`, the interface of an interface-only neighbor, and
-    /// matched no peer. Bind the neighbor to that endpoint through the same
-    /// admission check as an RA binding, and return the bound peer for the
-    /// ordinary inbound gates (BFD, admin state, NOTIFICATION backoff,
-    /// collision). `None` refuses the connection; the reason is logged here.
-    ///
-    /// Refused while the link is confirmed down, while a live RA binding or
-    /// a session past TCP establishment holds a different address (a second
-    /// router on a link defined to have one), while the bound session is
-    /// Established or held by NOTIFICATION backoff, and when another neighbor
-    /// holds the address (`duplicate_link_local_address`). A bound session
-    /// that has not reached `OpenSent` is retired: the peer moved address.
     /// Count a refused inbound learning attempt as `unconfigured`, as such a
     /// connection was before inbound learning: its source is no neighbor's
     /// configured or learned endpoint on the arrival interface.
@@ -557,6 +548,35 @@ impl PeerManager {
         None
     }
 
+    /// Another neighbor holds `address`: log the refusal and count it.
+    fn inbound_address_held(&self, name: &str, address: Ipv6Addr) -> bool {
+        let Some(holder) = self.link_local_address_holder(address) else {
+            return false;
+        };
+        warn!(
+            interface = %name, %address, %holder,
+            reason = "duplicate_link_local_address",
+            "unnumbered: refusing an inbound address another neighbor holds"
+        );
+        self.refuse_inbound();
+        true
+    }
+
+    /// ADR-0142 secondary discovery: an inbound connection from `address`
+    /// arrived on `name`, the interface of an interface-only neighbor, and
+    /// matched no peer. Bind the neighbor to that endpoint through the same
+    /// admission check as an RA binding, and return the bound peer for the
+    /// ordinary inbound gates (BFD, admin state, NOTIFICATION backoff,
+    /// collision). `None` refuses the connection; the reason is logged here
+    /// and counted in `bgp_inbound_connections_dropped_total`.
+    ///
+    /// Refused while the link is confirmed down, while a live RA binding, a
+    /// session past TCP establishment or a pending inbound candidate holds a
+    /// different address (a second router on a link defined to have one),
+    /// while the bound session is Established or held by NOTIFICATION
+    /// backoff, and when another neighbor holds the address
+    /// (`duplicate_link_local_address`). A bound session that has not
+    /// reached `OpenSent` is retired: the peer moved address.
     pub(super) async fn learn_inbound_endpoint(
         &mut self,
         name: &str,
@@ -584,9 +604,30 @@ impl PeerManager {
             );
             return self.refuse_inbound();
         }
+        if let Some(key) = port.bound.clone()
+            && key.address == IpAddr::V6(address)
+        {
+            return Some(key);
+        }
+        // Checked before the current endpoint is retired, so a refused
+        // address leaves the port bound, and again just before binding.
+        if self.inbound_address_held(name, address) {
+            return None;
+        }
         if let Some(key) = port.bound.clone() {
-            if key.address == IpAddr::V6(address) {
-                return Some(key);
+            // An inbound candidate from the bound address is opening even
+            // when the primary is not: that router is live on the link.
+            if self
+                .peers
+                .get(&key)
+                .is_some_and(|managed| managed.pending_inbound.is_some())
+            {
+                warn!(
+                    interface = %name, %address, peer = %key,
+                    reason = "multiple_routers_on_link",
+                    "unnumbered: inbound connection from a second router while the bound address has a connection pending, dropping"
+                );
+                return self.refuse_inbound();
             }
             let state = match self.peers.get(&key) {
                 None => None,
@@ -634,13 +675,8 @@ impl PeerManager {
         }
         // The same atomic admission step as an RA binding: no input runs
         // between this check and the insertion in `bind_port`.
-        if let Some(holder) = self.link_local_address_holder(address) {
-            warn!(
-                interface = %name, %address, %holder,
-                reason = "duplicate_link_local_address",
-                "unnumbered: refusing an inbound address another neighbor holds"
-            );
-            return self.refuse_inbound();
+        if self.inbound_address_held(name, address) {
+            return None;
         }
         let endpoint = Endpoint { address, ifindex };
         if let Err(error) = self.bind_port(name, endpoint).await {
