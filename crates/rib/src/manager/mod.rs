@@ -4035,7 +4035,11 @@ impl RibManager {
                     }
                 }
             }
-            RibUpdate::PeerDeleted { peer, label } => self.handle_peer_deleted(peer, label),
+            RibUpdate::PeerDeleted {
+                peer,
+                label,
+                keep_series,
+            } => self.handle_peer_deleted(peer, label, keep_series),
             RibUpdate::ReleasePeer { peer } => {
                 if !peer.release() {
                     debug!(%peer, "release of a handle that was not live");

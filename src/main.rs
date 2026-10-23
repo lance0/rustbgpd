@@ -5160,7 +5160,10 @@ async fn run<T>(
             error!("interface-only neighbors need the netlink link monitor, which did not start");
             process::exit(1);
         }
-        match ra_discovery::RaDiscovery::spawn(unnumbered_discovery_config(&config)) {
+        match ra_discovery::RaDiscovery::spawn(
+            unnumbered_discovery_config(&config),
+            metrics.clone(),
+        ) {
             Ok((discovery, events)) => {
                 peer_mgr.with_unnumbered(peer_manager::Unnumbered::new(discovery, events))
             }

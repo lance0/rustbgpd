@@ -749,7 +749,12 @@ impl RibManager {
     /// Deletion is a config decision, not a session event, so it runs the
     /// teardown unconditionally — the session-identity gate in
     /// `handle_peer_down` does not apply.
-    pub(super) fn handle_peer_deleted(&mut self, peer: PeerId, label: Option<Arc<str>>) {
+    pub(super) fn handle_peer_deleted(
+        &mut self,
+        peer: PeerId,
+        label: Option<Arc<str>>,
+        keep_series: bool,
+    ) {
         self.peer_down_teardown(peer);
         self.eor_grace_peer_deleted(peer);
         self.pending_peer_export_context
@@ -780,8 +785,10 @@ impl RibManager {
                 selection.peer_deleted(peer, &self.metrics)
             });
         self.apply_selection_deferral_transitions(transitions, "peer deleted from configuration");
-        self.metrics
-            .reap_peer_series(&label.map_or_else(|| peer.label(), |label| label.to_string()));
+        if !keep_series {
+            self.metrics
+                .reap_peer_series(&label.map_or_else(|| peer.label(), |label| label.to_string()));
+        }
     }
 
     /// Move a live neighbor to a new endpoint. Whatever its previous

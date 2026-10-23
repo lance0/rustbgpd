@@ -201,7 +201,10 @@ impl PeerManager {
             old_state: None,
             new_state: Some(SessionState::Idle),
             session_role: None,
-            reason: format!("peer {peer} added"),
+            reason: match self.unnumbered_presence_reason(peer) {
+                Some(reason) => format!("peer {peer} added: {reason}"),
+                None => format!("peer {peer} added"),
+            },
         });
     }
 

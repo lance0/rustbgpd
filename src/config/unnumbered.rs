@@ -671,6 +671,7 @@ impl Config {
             Some(ifindex),
         )?;
         resolved.transport_config.fast_external_failover = true;
+        resolved.transport_config.interface_only = true;
         Ok(resolved)
     }
 }

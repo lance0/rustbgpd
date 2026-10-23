@@ -58,7 +58,7 @@ async fn send_max_prefix_start_before(
 impl PeerManager {
     pub(super) fn publish_peer_admin_enabled_metric(&self, peer: &PeerKey, enabled: bool) {
         self.metrics.set_peer_admin_enabled(
-            &peer.label(),
+            &self.peer_metric_label(peer),
             peer.interface.as_deref().unwrap_or(""),
             enabled,
         );
@@ -71,7 +71,7 @@ impl PeerManager {
     pub(super) fn publish_max_prefix_latched_metric(&self, peer: &PeerKey, latched: bool) {
         if self.peers.contains_key(peer) {
             self.metrics.set_max_prefix_latched(
-                &peer.label(),
+                &self.peer_metric_label(peer),
                 peer.interface.as_deref().unwrap_or(""),
                 latched,
             );
@@ -86,7 +86,7 @@ impl PeerManager {
             return;
         };
         self.metrics.set_peer_info(
-            &peer.label(),
+            &self.peer_metric_label(peer),
             peer.interface.as_deref().unwrap_or(""),
             managed.remote_asn,
             &managed.description,
@@ -95,7 +95,7 @@ impl PeerManager {
     }
 
     pub(super) fn seed_peer_truth_metrics(&self, peer: &PeerKey, enabled: bool) {
-        let peer_label = peer.label();
+        let peer_label = self.peer_metric_label(peer);
         let interface = peer.interface.as_deref().unwrap_or("");
         self.metrics
             .set_peer_admin_enabled(&peer_label, interface, enabled);
@@ -126,8 +126,10 @@ impl PeerManager {
             let _ = self
                 .shutdown_handle_bounded(peer.address, context, handle)
                 .await;
-            self.metrics
-                .reap_peer_identity_series(&peer.label(), peer.interface.as_deref().unwrap_or(""));
+            self.metrics.reap_peer_identity_series(
+                &self.peer_metric_label(peer),
+                peer.interface.as_deref().unwrap_or(""),
+            );
             return Err(error);
         }
         Ok(handle)
@@ -770,6 +772,7 @@ impl PeerManager {
             };
 
         transport.neighbor_counters = self.neighbor_counters_for(&peer_key);
+        transport.interface_only = self.interface_only_owns(peer_key.interface.as_deref());
         transport.dampening_admission = self
             .configured_owner_admission_for_static(peer_key.clone(), config.remote_asn)
             .map_err(|error| PeerLifecycleError::Internal(error.to_string()))?;
@@ -788,7 +791,8 @@ impl PeerManager {
         let hold_time = Some(transport.peer.hold_time);
         let max_prefixes = transport.max_prefixes;
 
-        let (rib_peer, new_rib_peer) = self.static_rib_peer_slot(&peer_key);
+        let (rib_peer, new_rib_peer) =
+            self.static_rib_peer_slot(&peer_key, transport.interface_only);
         transport.rib_peer = rib_peer;
 
         let session_id = self.allocate_session_id();
@@ -2092,15 +2096,45 @@ impl PeerManager {
     /// The RIB identity slot for a static neighbor: its retained (or seeded)
     /// slot, or a newly allocated handle, flagged as new so a refused add can
     /// release it.
-    fn static_rib_peer_slot(&self, peer: &PeerKey) -> (rustbgpd_transport::RibPeerSlot, bool) {
-        match self.rib_peers.get(peer) {
-            Some(slot) => (slot.clone(), false),
-            None => (
-                rustbgpd_transport::RibPeerSlot::assigned(PeerId::allocate(
-                    rustbgpd_rib::PeerEndpoint::new(peer.address, peer.interface.as_deref()),
-                )),
-                true,
-            ),
+    /// An interface-only neighbor's handle labels by its interface.
+    fn static_rib_peer_slot(
+        &self,
+        peer: &PeerKey,
+        interface_only: bool,
+    ) -> (rustbgpd_transport::RibPeerSlot, bool) {
+        if let Some(slot) = self.rib_peers.get(peer) {
+            return (slot.clone(), false);
+        }
+        let endpoint = rustbgpd_rib::PeerEndpoint::new(peer.address, peer.interface.as_deref());
+        let handle = if interface_only {
+            PeerId::allocate_interface_only(endpoint)
+        } else {
+            PeerId::allocate(endpoint)
+        };
+        (rustbgpd_transport::RibPeerSlot::assigned(handle), true)
+    }
+
+    /// Whether `interface` belongs to a configured interface-only neighbor
+    /// (ADR-0142), which owns it: no static neighbor may share it, so a peer
+    /// scoped to it is that neighbor's learned endpoint.
+    pub(super) fn interface_only_owns(&self, interface: Option<&str>) -> bool {
+        interface.is_some_and(|interface| {
+            self.current_config
+                .neighbors
+                .interface_only_on(interface)
+                .is_some()
+        })
+    }
+
+    /// The `peer` metric label of `peer`, the value its session emits:
+    /// `interface:<name>` for an interface-only neighbor's learned endpoint,
+    /// else the key's own label.
+    pub(super) fn peer_metric_label(&self, peer: &PeerKey) -> String {
+        match peer.interface.as_deref() {
+            Some(interface) if self.interface_only_owns(Some(interface)) => {
+                rustbgpd_telemetry::interface_peer_label(interface)
+            }
+            _ => peer.label(),
         }
     }
 
@@ -2173,15 +2207,29 @@ impl PeerManager {
             || PeerId::from_addr(peer.address),
             |slot| slot.current(peer.address),
         );
-        let peer_label = peer.label();
-        self.publish_peer_lifecycle_event(
-            peer,
-            SessionLifecycleEventType::PeerRemoved,
-            format!("peer {peer} removed"),
-        );
-        self.metrics
-            .reap_peer_identity_series(&peer_label, peer.interface.as_deref().unwrap_or(""));
-        self.metrics.reap_peer_series(&peer_label);
+        // An interface-only neighbor's endpoint is labelled by its interface.
+        // Leaving it for the next endpoint keeps the neighbor's series; only
+        // removing its stanza ends them.
+        let owner = self.unnumbered_owner_of(peer).map(str::to_owned);
+        let keep_series = owner.as_deref().is_some_and(|interface| {
+            self.current_config
+                .neighbors
+                .interface_only_on(interface)
+                .is_some()
+        });
+        let peer_label = owner
+            .as_deref()
+            .map_or_else(|| peer.label(), rustbgpd_telemetry::interface_peer_label);
+        let removed = match self.unnumbered_presence_reason(peer) {
+            Some(reason) => format!("peer {peer} removed: {reason}"),
+            None => format!("peer {peer} removed"),
+        };
+        self.publish_peer_lifecycle_event(peer, SessionLifecycleEventType::PeerRemoved, removed);
+        if !keep_series {
+            self.metrics
+                .reap_peer_identity_series(&peer_label, peer.interface.as_deref().unwrap_or(""));
+            self.metrics.reap_peer_series(&peer_label);
+        }
         // A neighbor that never reached the RIB (a dynamic one whose OPEN
         // never validated) has no handle and no RIB state.
         if rib_peer != PeerId::UNASSIGNED {
@@ -2196,6 +2244,7 @@ impl PeerManager {
                     RibUpdate::PeerDeleted {
                         peer: rib_peer,
                         label: Some(peer_label.into()),
+                        keep_series,
                     },
                     OperatorReadAdmission::Fenced {
                         reason: "the peer removal is partly applied",

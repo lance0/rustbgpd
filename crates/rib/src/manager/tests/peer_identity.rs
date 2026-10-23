@@ -53,6 +53,7 @@ async fn a_stale_handle_message_after_delete_and_re_add_is_dropped() {
     tx.send(RibUpdate::PeerDeleted {
         peer: old,
         label: None,
+        keep_series: false,
     })
     .await
     .unwrap();
