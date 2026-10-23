@@ -12155,3 +12155,28 @@ fn interface_only_sections_join_the_snapshot_staging_families() {
         None
     );
 }
+
+/// ADR-0142: a policy-only edit of an interface-only neighbor yields a
+/// live-policy target that names its interface (the peer manager applies it
+/// to the bound peer), not an internal error or a dropped target.
+#[test]
+fn live_policy_targets_include_an_interface_only_neighbor() {
+    let config = |chain: &str| {
+        format!(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+             [global.telemetry]\nlog_format = \"json\"\n\
+             [policy.definitions.deny-all]\ndefault_action = \"deny\"\n\
+             [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+             families = [\"ipv6_unicast\"]\n{chain}"
+        )
+    };
+    // Mutation-red: an impact without an addressed record is refused.
+    let targets = resolved_policy_targets(
+        &config(""),
+        &config("import_policy_chain = [\"deny-all\"]\n"),
+    );
+    assert_eq!(targets.len(), 1);
+    assert!(targets[0].address.is_unspecified());
+    assert_eq!(targets[0].interface.as_deref(), Some("swp1"));
+    assert_eq!(import_default_action(&targets[0]), PolicyAction::Deny);
+}

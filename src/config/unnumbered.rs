@@ -17,6 +17,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use rustbgpd_api::peer_types::PeerKey;
+use rustbgpd_policy::PolicyChain;
 use rustbgpd_policy::sets::SetStore;
 
 use super::{Config, ConfigError, Neighbor, ResolvedNeighbor};
@@ -393,7 +394,7 @@ pub(crate) type BindTimeProjection = (
 
 fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
     let ResolvedNeighbor {
-        transport_config,
+        mut transport_config,
         admin_down,
         max_prefix_restart_seconds,
         label,
@@ -402,6 +403,10 @@ fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
         peer_group,
         rfc8212_external,
     } = resolved;
+    // Live-owned forwarding state (the configured kernel families of
+    // `[[fib_tables]]`) follows a reload without a rebind, as
+    // `compute_effective_neighbor_impact` treats it.
+    transport_config.local_forwarding_state = None;
     (
         transport_config,
         admin_down,
@@ -441,32 +446,49 @@ pub fn unnumbered_settings_changed(old: &Config, new: &Config) -> bool {
 /// Returns the interfaces kept. Run after the static `tcp_mss` pin, which
 /// already holds every peer group's `tcp_mss` at its running value.
 pub(crate) fn pin_interface_only_tcp_mss(new: &mut Config, current: &Config) -> Vec<String> {
-    let effective = |config: &Config, interface: &str| {
-        let neighbor = config.neighbors.interface_only_on(interface)?;
-        neighbor.tcp_mss.or_else(|| {
-            neighbor
-                .peer_group
-                .as_ref()
-                .and_then(|name| config.peer_groups.get(name))
-                .and_then(|group| group.tcp_mss)
-        })
-    };
-    let interfaces: std::collections::BTreeSet<String> = current
+    let pinned = interface_only_tcp_mss_differences(current, new);
+    for interface in &pinned {
+        let running = current.neighbors.interface_only_on(interface).cloned();
+        new.neighbors.set_interface_only(interface, running);
+    }
+    pinned
+}
+
+/// An interface-only neighbor's effective `tcp_mss`: its own, else its peer
+/// group's.
+fn interface_only_tcp_mss(config: &Config, interface: &str) -> Option<u16> {
+    let neighbor = config.neighbors.interface_only_on(interface)?;
+    neighbor.tcp_mss.or_else(|| {
+        neighbor
+            .peer_group
+            .as_ref()
+            .and_then(|name| config.peer_groups.get(name))
+            .and_then(|group| group.tcp_mss)
+    })
+}
+
+/// Interfaces whose interface-only neighbor's effective `tcp_mss` differs,
+/// including one added or removed with a clamp.
+fn interface_only_tcp_mss_differences(old: &Config, new: &Config) -> Vec<String> {
+    let interfaces: std::collections::BTreeSet<String> = old
         .neighbors
         .interface_only()
         .iter()
         .chain(new.neighbors.interface_only())
         .filter_map(|neighbor| neighbor.interface.clone())
         .collect();
-    let mut pinned = Vec::new();
-    for interface in interfaces {
-        if effective(current, &interface) != effective(new, &interface) {
-            let running = current.neighbors.interface_only_on(&interface).cloned();
-            new.neighbors.set_interface_only(&interface, running);
-            pinned.push(interface);
-        }
-    }
-    pinned
+    interfaces
+        .into_iter()
+        .filter(|interface| {
+            interface_only_tcp_mss(old, interface) != interface_only_tcp_mss(new, interface)
+        })
+        .collect()
+}
+
+/// Part of the shared `tcp_mss` restart-required comparison, so `--diff`
+/// and config transactions see an interface-only clamp change as SIGHUP does.
+pub(super) fn interface_only_tcp_mss_changed(old: &Config, new: &Config) -> bool {
+    !interface_only_tcp_mss_differences(old, new).is_empty()
 }
 
 fn invalid(neighbor: &Neighbor, field: &str, reason: &str) -> ConfigError {
@@ -674,6 +696,16 @@ impl Config {
             .clone();
         bound.address = address;
         Some(Cow::Owned(bound))
+    }
+
+    /// The import and export chains a bound peer of `neighbor` runs.
+    pub(crate) fn interface_only_policy_chains(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Option<(Option<PolicyChain>, Option<PolicyChain>)> {
+        self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
+            .ok()
+            .map(|resolved| (resolved.import_policy, resolved.export_policy))
     }
 
     /// What a bound peer of `neighbor` takes from its resolution only when it

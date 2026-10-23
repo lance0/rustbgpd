@@ -744,6 +744,10 @@ impl PeerManager {
                 None if managed.is_dynamic => {
                     Self::policy_resolution_neighbor(candidate, peer.address, managed)
                 }
+                // ADR-0142: the candidate deletes or moves the interface-only
+                // neighbor that owns this bound peer. The port reconcile ends
+                // its session once the generation commits.
+                None if self.unnumbered_owner_of(peer).is_some() => continue,
                 None => {
                     return Err(format!(
                         "static peer {peer} has no neighbor record in the candidate and no removal action"

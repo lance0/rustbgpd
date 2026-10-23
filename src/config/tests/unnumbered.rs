@@ -482,3 +482,69 @@ fn an_interface_only_change_is_a_committable_snapshot_transaction() {
     );
     assert!(!class.is_committable());
 }
+
+/// An interface-only neighbor's clamp is part of the shared `tcp_mss`
+/// comparison, so `--diff` and transactions see it as SIGHUP pins it.
+#[test]
+fn an_interface_only_tcp_mss_change_is_restart_required_in_the_diff() {
+    let old = parse(&with(SWP1)).unwrap();
+    let direct = parse(&with(&format!("{SWP1}tcp_mss = 1300\n"))).unwrap();
+    // Mutation-red: comparing addressed neighbors only misses both.
+    let diff = diff_config(&old, &direct);
+    assert!(diff.tcp_mss_changed);
+    assert!(diff.has_restart_required_changes());
+    let class = classify_config_transaction_v1(&diff);
+    assert!(!class.is_committable(), "{class:?}");
+
+    // A move between groups with different clamps.
+    let grouped = |group: &str| {
+        parse(&with(&format!(
+            "[peer_groups.a]\ntcp_mss = 1300\n[peer_groups.b]\ntcp_mss = 1400\n{SWP1}peer_group = \"{group}\"\n"
+        )))
+        .unwrap()
+    };
+    assert!(diff_config(&grouped("a"), &grouped("b")).tcp_mss_changed);
+    assert!(!diff_config(&grouped("a"), &grouped("a")).tcp_mss_changed);
+}
+
+/// The configured kernel families of `[[fib_tables]]` follow a reload
+/// without a rebind, so a FIB-only edit is not an interface-only change.
+#[test]
+fn a_fib_table_edit_is_not_an_interface_only_change() {
+    let old = parse(&with(SWP1)).unwrap();
+    let new = parse(&with(&format!(
+        "{SWP1}\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n"
+    )))
+    .unwrap();
+    // Mutation-red: the projection carries local_forwarding_state.
+    assert!(!diff_config(&old, &new).interface_only_neighbors_changed);
+}
+
+/// A policy-only edit of an interface-only neighbor is a live policy-chain
+/// impact on its bound peer, committed by the live-policy executor.
+#[test]
+fn an_interface_only_policy_edit_is_a_live_policy_impact() {
+    let policies = "[policy.definitions.deny-all]\ndefault_action = \"deny\"\n";
+    let old = parse(&with(&format!("{policies}{SWP1}"))).unwrap();
+    let new = parse(&with(&format!(
+        "{policies}{SWP1}import_policy_chain = [\"deny-all\"]\n"
+    )))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+    // Mutation-red: impact planning walks addressed neighbors only.
+    let impact = diff
+        .effective_neighbor_impact
+        .iter()
+        .find(|impact| impact.interface_only.as_deref() == Some("swp1"))
+        .expect("interface-only impact");
+    assert!(impact.kind.is_policy_chain());
+    let class = classify_config_transaction_v1(&diff);
+    assert!(class.is_committable(), "{class:?}");
+    assert!(
+        class
+            .supported_sections
+            .iter()
+            .any(|section| section == TRANSACTION_POLICY_LIVE_IMPACT_SECTION),
+        "{class:?}"
+    );
+}

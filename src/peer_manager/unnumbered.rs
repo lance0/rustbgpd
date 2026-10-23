@@ -67,6 +67,11 @@ pub(crate) struct Unnumbered {
 pub(crate) struct UnnumberedRuntime {
     /// `current_config` was replaced since the port set last followed it.
     pub(crate) config_due: bool,
+    /// The discovery actor could not be started: try again then.
+    spawn_retry_at: Option<tokio::time::Instant>,
+    /// Where the running interface-only set is published after each port
+    /// reconcile (the host IPv6 prerequisite monitor reads it).
+    running: Option<tokio::sync::watch::Sender<std::sync::Arc<Vec<crate::config::Neighbor>>>>,
     /// The `CAP_NET_RAW` check, run before a change that would need it.
     pub(crate) probe: fn() -> Result<(), String>,
     /// Spawn the actor.
@@ -88,6 +93,8 @@ impl Default for UnnumberedRuntime {
     fn default() -> Self {
         Self {
             config_due: false,
+            spawn_retry_at: None,
+            running: None,
             probe: || crate::ra_discovery::probe_raw_socket().map_err(|error| error.to_string()),
             spawn: Box::new(|config| RaDiscovery::spawn(config).map_err(|error| error.to_string())),
         }
@@ -125,6 +132,10 @@ struct Port {
 #[derive(Debug)]
 struct HeldState {
     enabled: bool,
+    /// The configured `admin_down` the retired peer ran under. A rebind
+    /// keeps the operator's toggle only while this is unchanged, as
+    /// `lifecycle::config_admin_enable` does for a static neighbor.
+    config_admin_down: bool,
     latch: Option<super::MaxPrefixLatch>,
 }
 
@@ -149,6 +160,17 @@ impl Unnumbered {
 }
 
 impl PeerManager {
+    /// Publish the running interface-only set to `running` after every
+    /// port reconcile.
+    #[must_use]
+    pub(crate) fn with_running_interface_only(
+        mut self,
+        running: tokio::sync::watch::Sender<std::sync::Arc<Vec<crate::config::Neighbor>>>,
+    ) -> Self {
+        self.unnumbered_runtime.running = Some(running);
+        self
+    }
+
     /// Start discovery on every interface-only neighbor's interface and feed
     /// it the current link snapshot.
     #[must_use]
@@ -356,7 +378,14 @@ impl PeerManager {
 
     /// When an unanswered state query is due to be asked again.
     pub(super) fn unnumbered_retry_at(&self) -> Option<tokio::time::Instant> {
-        self.unnumbered.as_ref()?.retry_at
+        let actor = self
+            .unnumbered
+            .as_ref()
+            .and_then(|unnumbered| unnumbered.retry_at);
+        [actor, self.unnumbered_runtime.spawn_retry_at]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Reconcile again after [`RECONCILE_RETRY`]; an armed deadline is kept,
@@ -372,6 +401,7 @@ impl PeerManager {
     /// The retry deadline passed: reconcile again.
     pub(super) fn unnumbered_retry_due(&mut self) {
         self.unnumbered_runtime.config_due = true;
+        self.unnumbered_runtime.spawn_retry_at = None;
         if let Some(unnumbered) = self.unnumbered.as_mut() {
             unnumbered.retry_at = None;
             unnumbered.reconcile_due = true;
@@ -411,6 +441,16 @@ impl PeerManager {
                 .values()
                 .any(|port| port.rib_peer == Some(peer))
         })
+    }
+
+    /// The peer bound for the interface-only neighbor on `interface`.
+    pub(super) fn unnumbered_bound_peer(&self, interface: &str) -> Option<PeerKey> {
+        self.unnumbered
+            .as_ref()?
+            .ports
+            .get(interface)?
+            .bound
+            .clone()
     }
 
     pub(super) fn unnumbered_owner_of(&self, peer: &PeerKey) -> Option<&str> {
@@ -516,20 +556,7 @@ impl PeerManager {
             match configured.get(name) {
                 None => self.remove_port(name).await,
                 Some(settings) => {
-                    let port = self.port_mut(name);
-                    if let Some(key) = port.bound.clone()
-                        && port.settings != *settings
-                    {
-                        if self
-                            .retire_bound_peer(name, key, "neighbor_reconfigured")
-                            .await
-                        {
-                            self.port_mut(name).settings = None;
-                        } else {
-                            // The peer keeps its old settings; try again.
-                            self.arm_unnumbered_retry();
-                        }
-                    }
+                    self.rebind_reconfigured_port(name, settings.as_ref()).await;
                 }
             }
         }
@@ -545,7 +572,11 @@ impl PeerManager {
                     self.unnumbered = Some(Box::new(Unnumbered::new(discovery, events)));
                 }
                 Err(error) => {
-                    error!(%error, "unnumbered: could not start discovery for an added interface-only neighbor");
+                    error!(%error, "unnumbered: could not start discovery for an added interface-only neighbor; retrying");
+                    // Retried until it starts or the neighbors are removed.
+                    self.unnumbered_runtime
+                        .spawn_retry_at
+                        .get_or_insert_with(|| tokio::time::Instant::now() + RECONCILE_RETRY);
                     return;
                 }
             }
@@ -559,6 +590,7 @@ impl PeerManager {
             unnumbered.reconcile_due = true;
         }
         self.feed_unnumbered_links();
+        self.publish_running_interface_only();
         if self
             .unnumbered
             .as_ref()
@@ -567,6 +599,61 @@ impl PeerManager {
         {
             info!("unnumbered: no interface-only neighbor left; stopping discovery");
             unnumbered.shutdown().await;
+        }
+    }
+
+    /// A bound peer whose bind-time settings changed is rebound under them,
+    /// on the endpoint it ran on (even one learned from an inbound
+    /// connection or whose RA has expired; link loss or a recreated
+    /// interface still invalidates it in `reconcile_port`).
+    async fn rebind_reconfigured_port(
+        &mut self,
+        name: &str,
+        settings: Option<&BindTimeProjection>,
+    ) {
+        let port = self.port_mut(name);
+        let Some(key) = port
+            .bound
+            .clone()
+            .filter(|_| port.settings.as_ref() != settings)
+        else {
+            return;
+        };
+        let scope = self
+            .peers
+            .get(&key)
+            .and_then(|managed| managed.transport_config.peer_scope_id);
+        let endpoint = match (key.address, scope) {
+            (IpAddr::V6(address), Some(ifindex)) => Some(Endpoint { address, ifindex }),
+            _ => None,
+        };
+        if self
+            .retire_bound_peer(name, key, "neighbor_reconfigured")
+            .await
+        {
+            let port = self.port_mut(name);
+            port.settings = None;
+            if let Some(endpoint) = endpoint {
+                port.desired.get_or_insert(endpoint);
+            }
+        } else {
+            // The peer keeps its old settings; try again.
+            self.arm_unnumbered_retry();
+        }
+    }
+
+    /// Publish the running interface-only set (the host IPv6 prerequisite
+    /// monitor reads it).
+    fn publish_running_interface_only(&self) {
+        if let Some(running) = &self.unnumbered_runtime.running {
+            let configured = self.current_config.neighbors.interface_only();
+            running.send_if_modified(|published| {
+                let changed = published.as_slice() != configured;
+                if changed {
+                    *published = std::sync::Arc::new(configured.to_vec());
+                }
+                changed
+            });
         }
     }
 
@@ -724,6 +811,10 @@ impl PeerManager {
         // The neighbor's operator and safety state outlives the endpoint.
         let held = HeldState {
             enabled: self.peers.get(&key).is_none_or(|managed| managed.enabled),
+            config_admin_down: self
+                .peers
+                .get(&key)
+                .is_some_and(|managed| managed.admin_down.is_some()),
             latch: self.max_prefix_latches.remove(&key),
         };
         match self.delete_peer(key.clone(), false).await {
@@ -940,11 +1031,14 @@ impl PeerManager {
         // Carry the previous endpoint's state: a disable stays, and a latch
         // keeps the new peer down until its restart deadline or an enable.
         let held = self.port_mut(name).held.take();
-        let mut enabled = config.admin_down.is_none();
+        // A changed configured admin state takes effect; an unchanged one
+        // keeps the operator's toggle. The max-prefix latch is separate.
+        let next_down = config.admin_down.is_some();
+        let enabled = match &held {
+            Some(held) if held.config_admin_down == next_down => held.enabled,
+            _ => !next_down,
+        };
         let mut carried_latch = false;
-        if let Some(held) = &held {
-            enabled &= held.enabled;
-        }
         if let Some(latch) = held.as_ref().and_then(|held| held.latch.clone()) {
             self.max_prefix_latches.insert(key.clone(), latch);
             self.publish_max_prefix_latched_metric(&key, true);

@@ -147,6 +147,28 @@ pub(super) fn resolve_live_policy_targets(
             });
             continue;
         }
+        if let Some(interface) = &impact.interface_only {
+            // ADR-0142: the target is the interface-only neighbor's bound
+            // peer, which the peer manager resolves from the interface; an
+            // unbound neighbor takes the chains when it binds.
+            let (import_policy, export_policy) = candidate
+                .neighbors
+                .interface_only_on(interface)
+                .and_then(|neighbor| candidate.interface_only_policy_chains(neighbor))
+                .ok_or_else(|| {
+                    ConfigTransactionApplyError::Internal(format!(
+                        "live-policy impact references interface-only neighbor on {interface} \
+                         absent from the candidate"
+                    ))
+                })?;
+            targets.static_targets.push(ResolvedPeerPolicy {
+                address: std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                interface: Some(interface.clone()),
+                import_policy,
+                export_policy,
+            });
+            continue;
+        }
         let Some(neighbor) = candidate_by_addr.get(impact.address.as_str()) else {
             return Err(ConfigTransactionApplyError::Internal(format!(
                 "live-policy impact references neighbor {} absent from the candidate",

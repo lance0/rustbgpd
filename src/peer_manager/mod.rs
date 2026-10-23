@@ -112,6 +112,9 @@ mod unnumbered {
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
+        pub(super) fn unnumbered_bound_peer(&self, _: &str) -> Option<PeerKey> {
+            None
+        }
         pub(super) fn unnumbered_preflight(&self, _: &crate::config::Config) -> Result<(), String> {
             Ok(())
         }

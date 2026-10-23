@@ -2789,6 +2789,12 @@ pub struct EffectiveNeighborImpact {
     /// neighbor record).
     #[serde(skip)]
     pub is_dynamic_range: bool,
+    /// The interface of an interface-only neighbor (ADR-0142) whose bound
+    /// peer this impact targets; `address` is then its label. Only policy
+    /// chain moves are reported for it: a session change rebinds the peer
+    /// through the peer manager's port reconcile instead.
+    #[serde(skip)]
+    pub interface_only: Option<String>,
 }
 
 /// Serializable neighbor diff summary (`NeighborDiff` uses `IpAddr` which is fine,
@@ -5299,6 +5305,11 @@ fn configured_peer_group_tcp_mss(config: &Config) -> BTreeMap<String, u16> {
 }
 
 fn tcp_mss_restart_required_changed(old: &Config, new: &Config) -> bool {
+    static_tcp_mss_changed(old, new) || unnumbered::interface_only_tcp_mss_changed(old, new)
+}
+
+/// The startup-owned clamps of static neighbors and peer groups.
+fn static_tcp_mss_changed(old: &Config, new: &Config) -> bool {
     effective_static_neighbor_tcp_mss(old) != effective_static_neighbor_tcp_mss(new)
         || configured_peer_group_tcp_mss(old) != configured_peer_group_tcp_mss(new)
 }
@@ -5310,7 +5321,8 @@ fn tcp_mss_restart_required_changed(old: &Config, new: &Config) -> bool {
 /// additions, changes, and removals are pinned independently, including groups
 /// that currently have no static members.
 pub(crate) fn pin_tcp_mss_startup_only_runtime(new_config: &mut Config, current: &Config) -> bool {
-    if !tcp_mss_restart_required_changed(current, new_config) {
+    // Interface-only neighbors are pinned by `pin_interface_only_tcp_mss`.
+    if !static_tcp_mss_changed(current, new_config) {
         return false;
     }
 
@@ -6105,14 +6117,53 @@ fn compute_effective_neighbor_impact(
                 reasons,
                 kind,
                 is_dynamic_range: false,
+                interface_only: None,
             });
         }
     }
 
     out.extend(dynamic_range_effective_impact(old, new, &pg_changed));
+    out.extend(interface_only_policy_impact(old, new));
 
     out.sort_by(|a, b| a.address.cmp(&b.address));
     out
+}
+
+/// ADR-0142: interface-only neighbors kept by the candidate whose resolved
+/// policy chains move while their bind-time session settings do not. Their
+/// bound peers take the new chains live, as a static neighbor's would.
+fn interface_only_policy_impact(old: &Config, new: &Config) -> Vec<EffectiveNeighborImpact> {
+    new.neighbors
+        .interface_only()
+        .iter()
+        .filter_map(|new_neighbor| {
+            let interface = new_neighbor.interface.as_deref()?;
+            let old_neighbor = old.neighbors.interface_only_on(interface)?;
+            let (old_chains, new_chains) = (
+                old.interface_only_policy_chains(old_neighbor)?,
+                new.interface_only_policy_chains(new_neighbor)?,
+            );
+            if old_chains == new_chains
+                || old.bind_time_settings(old_neighbor) != new.bind_time_settings(new_neighbor)
+            {
+                return None;
+            }
+            let mut reasons = Vec::new();
+            if old_chains.0 != new_chains.0 {
+                reasons.push("import policy resolved differently".to_string());
+            }
+            if old_chains.1 != new_chains.1 {
+                reasons.push("export policy resolved differently".to_string());
+            }
+            Some(EffectiveNeighborImpact {
+                address: new_neighbor.label(),
+                reasons,
+                kind: EffectiveNeighborImpactKind::PolicyChain,
+                is_dynamic_range: false,
+                interface_only: Some(interface.to_owned()),
+            })
+        })
+        .collect()
 }
 
 /// Name direct compiled term edits in a changed resolved chain only when its
@@ -6314,6 +6365,7 @@ fn dynamic_range_effective_impact(
                 reasons,
                 kind,
                 is_dynamic_range: true,
+                interface_only: None,
             });
         }
     }

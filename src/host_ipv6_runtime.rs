@@ -51,8 +51,14 @@ pub(crate) fn check(config: &Config) -> usize {
     count
 }
 
+/// Watch the configured static link-local neighbors (from the accepted
+/// snapshot) and the interface-only neighbors the peer manager is running.
+/// The running set is the one that matters for discovery: a reload can keep
+/// an interface-only neighbor the desired file removed, until restart (an
+/// effective `tcp_mss` change).
 pub(crate) fn spawn(
     mut accepted: watch::Receiver<Arc<AcceptedConfigSnapshot>>,
+    mut running_interface_only: watch::Receiver<Arc<Vec<Neighbor>>>,
 ) -> tokio_util::task::AbortOnDropHandle<()> {
     tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let mut previous = Findings::new();
@@ -62,12 +68,18 @@ pub(crate) fn spawn(
             tokio::select! {
                 _ = interval.tick() => {}
                 changed = accepted.changed() => { if changed.is_err() { return; } }
+                changed = running_interface_only.changed() => { if changed.is_err() { return; } }
             }
-            // Interface-only neighbors follow reload, so the accepted
-            // snapshot carries the set that is running.
             let snapshot = Arc::clone(&accepted.borrow_and_update());
+            let interface_only = Arc::clone(&running_interface_only.borrow_and_update());
             let Ok(current) = tokio::task::spawn_blocking(move || {
-                inspect_neighbors(snapshot.config_ref().neighbors.all())
+                inspect_neighbors(
+                    snapshot
+                        .config_ref()
+                        .neighbors
+                        .iter()
+                        .chain(interface_only.iter()),
+                )
             })
             .await
             else {

@@ -1483,3 +1483,163 @@ async fn a_static_add_is_refused_against_a_learned_endpoint_before_any_effect() 
         assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "{state}");
     }
 }
+
+/// SIGHUP deletes a bound interface-only neighbor through the real
+/// generation executor: the generation skips the bound peer whose neighbor
+/// the candidate no longer has, and the port reconcile ends it after the
+/// commit.
+#[tokio::test]
+async fn a_reload_generation_deletes_a_bound_interface_only_neighbor() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let swp2_session = h.session(&swp2);
+    let candidate = config_with(&port_stanza("swp2", ""));
+    let actions =
+        crate::config::plan_reload_peer_actions(&h.mgr.current_config, &candidate).unwrap();
+    // Mutation-red: without the skip the generation is rejected for the
+    // bound peer that has no record in the candidate.
+    let outcome = Box::pin(h.mgr.apply_reload_generation(
+        candidate,
+        actions,
+        crate::config::PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            crate::peer_manager::generation::ReloadGenerationOutcome::Applied(_)
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(2)),
+        "deleted after commit"
+    );
+    assert_eq!(h.session(&swp2), swp2_session, "the other neighbor is kept");
+}
+
+/// A transaction's policy-only edit reaches a bound interface-only peer
+/// live: the target names the interface, the peer manager applies it to the
+/// bound peer, and the session is kept.
+#[tokio::test]
+async fn a_policy_impact_target_reaches_the_bound_interface_only_peer() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let session = h.session(&swp1_key(2));
+    let deny = rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![],
+        default_action: rustbgpd_policy::PolicyAction::Deny,
+    }]);
+    let target = rustbgpd_api::peer_types::ResolvedPeerPolicy {
+        address: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        interface: Some("swp1".into()),
+        import_policy: Some(deny.clone()),
+        export_policy: None,
+    };
+    // Mutation-red: without the interface mapping the target names no peer.
+    let priors = h
+        .mgr
+        .apply_policy_impact_snapshot(vec![target], Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(priors.len(), 1);
+    assert_eq!(
+        priors[0].address,
+        IpAddr::V6(ll(2)),
+        "prior is the bound peer"
+    );
+    assert_eq!(
+        h.mgr.peers[&swp1_key(2)].import_policy.as_ref(),
+        Some(&deny)
+    );
+    assert_eq!(h.session(&swp1_key(2)), session, "session kept");
+}
+
+/// A rebind follows the configured admin state only when it changed, and
+/// otherwise keeps the operator's toggle.
+#[tokio::test]
+async fn a_rebind_follows_a_changed_admin_down_and_keeps_an_operator_toggle() {
+    let config = |admin_down: bool, hold: u16| {
+        config_with(&port_stanza(
+            "swp1",
+            &format!(
+                "hold_time = {hold}\n{}",
+                if admin_down {
+                    "admin_down = true\n"
+                } else {
+                    ""
+                }
+            ),
+        ))
+    };
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config(true, 90)).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(!h.mgr.peers[&swp1_key(2)].enabled, "configured down");
+
+    // Mutation-red (AND of the old toggle): clearing admin_down left the
+    // replacement disabled.
+    h.reload(config(false, 90)).await;
+    assert!(
+        h.mgr.peers[&swp1_key(2)].enabled,
+        "a cleared admin_down enables"
+    );
+
+    // An operator disable survives an unrelated edit.
+    h.mgr.disable_peer(swp1_key(2), None).await.unwrap();
+    h.reload(config(false, 60)).await;
+    assert_eq!(h.mgr.peers[&swp1_key(2)].hold_time, Some(60), "rebound");
+    assert!(!h.mgr.peers[&swp1_key(2)].enabled, "operator disable kept");
+}
+
+/// A config rebind keeps the endpoint the peer ran on when discovery holds
+/// no binding for it (an expired RA, or an inbound-learned endpoint).
+#[tokio::test]
+async fn a_rebind_keeps_the_endpoint_without_a_discovery_binding() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp1", None).await;
+    assert!(
+        h.mgr.peers.contains_key(&swp1_key(2)),
+        "lost binding keeps the peer"
+    );
+    // Mutation-red: retiring without keeping the endpoint leaves no peer.
+    h.reload(config_with(&port_stanza("swp1", "remote_asn = 65002\n")))
+        .await;
+    let rebound = &h.mgr.peers[&swp1_key(2)];
+    assert_eq!(rebound.transport_config.peer.remote_asn, 65002);
+    assert_eq!(rebound.transport_config.peer_scope_id, Some(7));
+
+    // A link that went down in between invalidates it.
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)));
+}
+
+/// The first discovery actor that fails to start is retried until it starts.
+#[tokio::test]
+async fn a_discovery_actor_that_fails_to_start_is_retried() {
+    let (mut h, launched) = Harness::without_discovery(&[("swp1", 7, true)]);
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sink = Arc::clone(&launched);
+    let counter = Arc::clone(&attempts);
+    h.mgr.unnumbered_runtime.spawn = Box::new(move |_| {
+        if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Err("transient".to_string());
+        }
+        let (discovery, commands) = RaDiscovery::recording();
+        sink.lock().unwrap().push(commands);
+        Ok((discovery, mpsc::unbounded_channel().1))
+    });
+    h.reload(config_with(&port_stanza("swp1", ""))).await;
+    assert!(launched.lock().unwrap().is_empty());
+    // Mutation-red: with no deadline outside the actor nothing retries.
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "retry armed");
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(launched.lock().unwrap().len(), 1, "started on retry");
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

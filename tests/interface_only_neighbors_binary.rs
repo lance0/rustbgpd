@@ -117,6 +117,12 @@ struct Daemon {
 
 impl Daemon {
     fn start(ns: &str, dir: &Path, asn: u32, router_id: &str) -> Self {
+        Self::start_with(ns, dir, asn, router_id, "")
+    }
+
+    /// [`Self::start`] with `neighbor_extra` appended to the `veth`
+    /// interface-only neighbor's stanza.
+    fn start_with(ns: &str, dir: &Path, asn: u32, router_id: &str, neighbor_extra: &str) -> Self {
         let runtime = dir.join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -152,7 +158,7 @@ interface = "veth"
 remote_asn = "external"
 families = ["ipv6_unicast"]
 hold_time = {HOLD_TIME_SECS}
-"#,
+{neighbor_extra}"#,
                 runtime = runtime.display()
             ),
         )
