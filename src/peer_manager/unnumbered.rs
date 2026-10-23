@@ -439,6 +439,15 @@ impl PeerManager {
             })
     }
 
+    /// The addresses interface-only neighbors are bound to now.
+    pub(super) fn unnumbered_bound_addresses(&self) -> std::collections::HashSet<IpAddr> {
+        self.unnumbered
+            .iter()
+            .flat_map(|unnumbered| unnumbered.ports.values())
+            .filter_map(|port| port.bound.as_ref().map(|key| key.address))
+            .collect()
+    }
+
     /// The interface whose interface-only neighbor owns `peer`.
     /// Whether an interface-only neighbor keeps `peer` as its RIB identity.
     pub(super) fn unnumbered_holds(&self, peer: rustbgpd_rib::PeerId) -> bool {
@@ -655,6 +664,12 @@ impl PeerManager {
             self.publish_max_prefix_latched_metric(&key, false);
             self.recompute_next_max_prefix_restart_deadline();
         }
+        // The endpoint's BFD session goes with it. Left disabled by the
+        // deletion when this cannot run now; the next membership change
+        // prunes it.
+        if let Err(error) = self.set_bound_bfd_session(key.address, None).await {
+            warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound BFD session yet");
+        }
         let port = self.port_mut(name);
         port.bound = None;
         port.established = false;
@@ -852,6 +867,22 @@ impl PeerManager {
         // they retained; after the window it carries R=0.
         let config = Self::peer_manager_config_from_resolved(resolved, true);
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
+        // The binding's BFD session exists before its peer, so a strict peer
+        // is added withheld until BFD is Up on this endpoint (ADR-0142).
+        let bfd = crate::bfd_runtime::bound_session_params(
+            &self.current_config,
+            &neighbor,
+            name,
+            endpoint.address,
+            endpoint.ifindex,
+        )
+        .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
+        let has_bfd = bfd.is_some();
+        if has_bfd {
+            self.set_bound_bfd_session(key.address, bfd)
+                .await
+                .map_err(PeerLifecycleError::Internal)?;
+        }
         // Carry the previous endpoint's state: a disable stays, and a latch
         // keeps the new peer down until its restart deadline or an enable.
         let held = self.port_mut(name).held.take();
@@ -893,6 +924,9 @@ impl PeerManager {
             {
                 self.rib_peers.remove(&key);
                 self.port_mut(name).held = held;
+                if has_bfd {
+                    let _ = self.set_bound_bfd_session(key.address, None).await;
+                }
                 return Err(PeerLifecycleError::Internal(
                     "RIB channel closed while rebinding the neighbor".into(),
                 ));
@@ -906,6 +940,9 @@ impl PeerManager {
                 self.rib_peers.remove(&key);
             }
             self.port_mut(name).held = held;
+            if has_bfd {
+                let _ = self.set_bound_bfd_session(key.address, None).await;
+            }
             return Err(error);
         }
         info!(interface = %name, peer = %key, enabled, "unnumbered: bound peer added");

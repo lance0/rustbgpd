@@ -48,6 +48,17 @@ struct Harness {
 /// (`remote_asn = "external"`), discovery recorded, and `links` reported by
 /// the link monitor.
 fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
+    harness_with(interfaces, links, "", "")
+}
+
+/// [`harness`] with `neighbor_extra` added to every interface-only stanza and
+/// `extra` appended to the configuration.
+fn harness_with(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    neighbor_extra: &str,
+    extra: &str,
+) -> Harness {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -64,14 +75,14 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
         .iter()
         .map(|name| {
             format!(
-                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n"
+                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n{neighbor_extra}"
             )
         })
         .collect::<Vec<_>>()
         .concat();
     let config: crate::config::Config = toml::from_str(&format!(
         "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
-         [global.telemetry]\nlog_format = \"json\"\n{neighbors}"
+         [global.telemetry]\nlog_format = \"json\"\n{neighbors}{extra}"
     ))
     .unwrap();
     mgr.current_config = config;
@@ -1446,4 +1457,277 @@ async fn a_recovered_endpoint_survives_a_deferred_rebind() {
             .await,
         rustbgpd_transport::StateQueryOutcome::State(_)
     ));
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0142 "Lifecycle", BFD: an interface-only neighbor's binding registers
+// its single-hop session at runtime through the acknowledged replacement
+// path; rebinding replaces it and unbinding removes it.
+// ---------------------------------------------------------------------------
+
+/// The BFD runtime side of a [`Harness`]: every acknowledged membership the
+/// manager asks for, and the state the fake actor reports for each session.
+struct BfdSide {
+    applied: mpsc::UnboundedReceiver<crate::bfd_runtime::BfdRuntimeConfig>,
+    state: Arc<std::sync::Mutex<rustbgpd_bfd::SessionState>>,
+}
+
+impl BfdSide {
+    fn next_applied(&mut self) -> crate::bfd_runtime::BfdRuntimeConfig {
+        self.applied
+            .try_recv()
+            .expect("a membership change was acknowledged")
+    }
+
+    fn sessions(config: &crate::bfd_runtime::BfdRuntimeConfig) -> Vec<(IpAddr, Option<u32>)> {
+        let mut sessions: Vec<_> = config
+            .sessions
+            .iter()
+            .map(|params| (params.peer, params.scope_id))
+            .collect();
+        sessions.sort();
+        sessions
+    }
+}
+
+/// A harness whose interface-only neighbors run BFD (`strict` or not) with a
+/// fake BFD actor acknowledging every membership change. The IPv6 single-hop
+/// socket counts as already open, so tests bind no real socket.
+fn bfd_harness(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    strict: bool,
+) -> (Harness, BfdSide) {
+    let h = harness_with(
+        interfaces,
+        links,
+        &format!("bfd = {{ profile = \"fast\", strict = {strict} }}\n"),
+        "[[bfd_profiles]]\nname = \"fast\"\n",
+    );
+    let Harness {
+        mgr,
+        commands,
+        links,
+        rib_rx,
+    } = h;
+    let opened: IpAddr = "fe80::ffff".parse().unwrap();
+    let mut socket_family = crate::bfd_runtime::bound_session_params(
+        &mgr.current_config,
+        mgr.current_config
+            .neighbors
+            .interface_only()
+            .first()
+            .unwrap(),
+        "swp1",
+        "fe80::ffff".parse().unwrap(),
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    socket_family.peer = opened;
+    let (desired_tx, _desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    let mut mgr = mgr
+        .with_bfd_coupling(
+            desired_tx,
+            state_rx,
+            HashMap::from([(opened, socket_family)]),
+        )
+        .with_bfd_reload(reload_tx);
+    mgr.bfd_coupling.as_mut().unwrap().configured.clear();
+    let state = Arc::new(std::sync::Mutex::new(rustbgpd_bfd::SessionState::Down));
+    let (applied_tx, applied) = mpsc::unbounded_channel();
+    let reported = state.clone();
+    tokio::spawn(async move {
+        while let Some(command) = reload_rx.recv().await {
+            let state = *reported.lock().unwrap();
+            let acks = command
+                .desired
+                .sessions
+                .iter()
+                .filter(|params| params.enabled)
+                .map(|params| crate::bfd_runtime::BfdStateChange {
+                    revision: params.revision,
+                    peer: params.peer,
+                    state,
+                    diagnostic: rustbgpd_bfd::Diagnostic::None,
+                    remote_admin_down: false,
+                    resync: true,
+                })
+                .collect();
+            let _ = applied_tx.send(command.desired);
+            let _ = command.reply.send(acks);
+        }
+    });
+    (
+        Harness {
+            mgr,
+            commands,
+            links,
+            rib_rx,
+        },
+        BfdSide { applied, state },
+    )
+}
+
+fn bfd_revision(h: &Harness, peer: Ipv6Addr) -> u64 {
+    h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(peer)].revision
+}
+
+/// No session exists before a binding; binding registers the single-hop
+/// session to the learned address on the binding's index; an address change
+/// removes it and registers the new endpoint under a fresh revision; carrier
+/// loss removes it. Every change goes through the acknowledged path.
+#[tokio::test]
+async fn a_binding_registers_replaces_and_removes_its_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+
+    // Mutation-red: without registration the bound peer runs no BFD.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7))]
+    );
+    let first = bfd_revision(&h, ll(2));
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(3)), Some(7))]
+    );
+    assert!(bfd_revision(&h, ll(3)) > first, "a fresh revision");
+
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().bound.is_empty());
+}
+
+/// A strict neighbor is added withheld and released only by BFD Up for the
+/// current binding's revision; an Up for a retired binding never releases
+/// the new one.
+#[tokio::test]
+async fn a_strict_binding_waits_for_bfd_up_on_its_own_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let peer = IpAddr::V6(ll(2));
+    // Mutation-red: registering after the peer is added starts it unheld.
+    assert!(h.mgr.bfd_withholding(&peer), "held until BFD is Up");
+    let old = bfd_revision(&h, ll(2));
+
+    // The address changes before BFD came up.
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    bfd.next_applied();
+    bfd.next_applied();
+    let new_peer = IpAddr::V6(ll(3));
+    assert!(h.mgr.bfd_withholding(&new_peer));
+    let up = |peer, revision| crate::bfd_runtime::BfdStateChange {
+        revision,
+        peer,
+        state: rustbgpd_bfd::SessionState::Up,
+        diagnostic: rustbgpd_bfd::Diagnostic::None,
+        remote_admin_down: false,
+        resync: false,
+    };
+    h.mgr.handle_bfd_state_change(up(new_peer, old)).await;
+    assert!(
+        h.mgr.bfd_withholding(&new_peer),
+        "a stale revision never releases"
+    );
+    h.mgr
+        .handle_bfd_state_change(up(new_peer, bfd_revision(&h, ll(3))))
+        .await;
+    assert!(!h.mgr.bfd_withholding(&new_peer), "released by its own Up");
+}
+
+/// BFD down is a session-down input for a bound peer: its BGP session gets
+/// `BfdDown` and is held until BFD permits BGP again.
+#[tokio::test]
+async fn bfd_down_tears_down_a_bound_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    *bfd.state.lock().unwrap() = rustbgpd_bfd::SessionState::Up;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    h.replace_session(
+        &swp1_key(2),
+        PeerHandle::from_parts(tx, tokio::spawn(std::future::pending())),
+    );
+    let peer = IpAddr::V6(ll(2));
+    h.mgr
+        .handle_bfd_state_change(crate::bfd_runtime::BfdStateChange {
+            revision: bfd_revision(&h, ll(2)),
+            peer,
+            state: rustbgpd_bfd::SessionState::Down,
+            diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
+            remote_admin_down: false,
+            resync: false,
+        })
+        .await;
+    assert!(matches!(rx.try_recv(), Ok(PeerCommand::BfdDown)));
+    assert!(h.mgr.bfd_withholding(&peer));
+}
+
+/// A reload rebuilds BFD membership from configuration, which has no
+/// address for an interface-only neighbor: the binding's session is carried
+/// over unchanged.
+#[tokio::test]
+async fn a_reload_keeps_a_bindings_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let revision = bfd_revision(&h, ll(2));
+    let candidate = h.mgr.current_config.clone();
+    // Mutation-red: without the carry-over the reload drops the session.
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7))]
+    );
+    assert_eq!(bfd_revision(&h, ll(2)), revision, "unchanged");
+
+    // A profile edit applies to the binding's session on reload.
+    let mut candidate = h.mgr.current_config.clone();
+    candidate.bfd_profiles[0].multiplier = 5;
+    // Mutation-red: carrying the old session over ignores the edit.
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    bfd.next_applied();
+    let session = &h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(ll(2))];
+    assert_eq!((session.detect_mult, session.scope_id), (5, Some(7)));
+    assert_ne!(session.revision, revision, "replaced");
+}
+
+/// A recreated interface moves a binding's session only by rebinding it,
+/// never through the configured link-local scope refresh: one mechanism
+/// owns each session.
+#[tokio::test]
+async fn a_recreated_interface_moves_a_bindings_bfd_session_only_by_rebinding() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+
+    h.links_changed(snapshot(true, &[("swp1", 9, true)]));
+    h.mgr.run_due_bfd_scope_refresh().await;
+    // Mutation-red: the scope refresh would move it to index 9 itself.
+    assert!(bfd.applied.try_recv().is_err(), "no refresh replacement");
+    assert_eq!(
+        h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(ll(2))].scope_id,
+        Some(7)
+    );
+
+    h.reconcile().await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [], "retired");
+    h.bind("swp1", Some(endpoint(2, 9))).await;
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(9))],
+        "rebound on the new index"
+    );
 }
