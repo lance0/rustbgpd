@@ -1131,7 +1131,13 @@ refused on neighbors that share one:
 - TCP MD5 (`md5_password`) and TCP-AO (`tcp_ao`), which the passive listener
   keys by peer address;
 - a `log_level` that differs between them, because the per-neighbor log
-  directive matches the bare address.
+  directive matches the bare address;
+- an effective GTSM policy (`ttl_security`, `ttl_security_hops`, direct or
+  inherited) that differs between them, because the passive listener selects
+  it by peer address.
+
+`NeighborService/ReplayOutbound`, whose completion BMP reports, also refuses
+either neighbor of such a pair.
 
 ```toml
 [[neighbors]]
