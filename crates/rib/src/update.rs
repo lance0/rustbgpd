@@ -4080,10 +4080,33 @@ pub struct MrtPeerEntry {
     pub peer: PeerId,
     /// Peer's transport address, captured when the snapshot was built.
     pub peer_addr: IpAddr,
+    /// Interface of a scoped (link-local) neighbor, captured with
+    /// `peer_addr`. Never encoded: it orders same-address entries, so the
+    /// encoder never reads the live peer table. `None` for a numbered
+    /// neighbor and for an entry decoded from a file.
+    pub interface: Option<Arc<str>>,
     /// Peer's BGP router ID.
     pub peer_bgp_id: Ipv4Addr,
     /// Peer's autonomous system number.
     pub peer_asn: u32,
+}
+
+impl MrtPeerEntry {
+    /// An entry for `peer` with its endpoint as the peer table has it now.
+    /// The RIB calls this in the turn that builds a snapshot.
+    #[must_use]
+    pub fn capture(peer: PeerId, peer_asn: u32, peer_bgp_id: Ipv4Addr) -> Self {
+        let endpoint = peer.endpoint();
+        Self {
+            peer,
+            peer_addr: endpoint
+                .as_ref()
+                .map_or_else(|| peer.addr(), |endpoint| endpoint.addr),
+            interface: endpoint.and_then(|endpoint| endpoint.interface),
+            peer_bgp_id,
+            peer_asn,
+        }
+    }
 }
 
 /// Complete RIB snapshot for MRT dump.

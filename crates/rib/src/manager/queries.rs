@@ -4056,15 +4056,9 @@ impl RibManager {
             let mut peers: Vec<MrtPeerEntry> = self
                 .peer_asn
                 .iter()
-                .map(|(&peer, &asn)| MrtPeerEntry {
-                    peer,
-                    peer_addr: peer.addr(),
-                    peer_bgp_id: self
-                        .peer_bgp_id
-                        .get(&peer)
-                        .copied()
-                        .unwrap_or(Ipv4Addr::UNSPECIFIED),
-                    peer_asn: asn,
+                .map(|(&peer, &asn)| {
+                    let bgp_id = self.peer_bgp_id.get(&peer).copied();
+                    MrtPeerEntry::capture(peer, asn, bgp_id.unwrap_or(Ipv4Addr::UNSPECIFIED))
                 })
                 .collect();
             // A route whose neighbor has no session (retained through
@@ -4080,12 +4074,7 @@ impl RibManager {
                 .chain(evpn_routes.iter().map(|route| route.peer));
             for peer in sources {
                 if last.replace(peer) != Some(peer) && listed.insert(peer) {
-                    peers.push(MrtPeerEntry {
-                        peer,
-                        peer_addr: peer.addr(),
-                        peer_bgp_id: Ipv4Addr::UNSPECIFIED,
-                        peer_asn: 0,
-                    });
+                    peers.push(MrtPeerEntry::capture(peer, 0, Ipv4Addr::UNSPECIFIED));
                 }
             }
 
@@ -4194,11 +4183,8 @@ impl RibManager {
 
         let mut peers: Vec<_> = peer_identity
             .iter()
-            .map(|(&peer, &(_, peer_asn, peer_bgp_id))| MrtPeerEntry {
-                peer,
-                peer_addr: peer.addr(),
-                peer_bgp_id,
-                peer_asn,
+            .map(|(&peer, &(_, peer_asn, peer_bgp_id))| {
+                MrtPeerEntry::capture(peer, peer_asn, peer_bgp_id)
             })
             .collect();
         peers.sort_by_key(|peer| peer.peer_addr);

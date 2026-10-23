@@ -540,6 +540,7 @@ fn make_peer(index: usize) -> MrtPeerEntry {
     MrtPeerEntry {
         peer: PeerId::from_addr(IpAddr::V4(address)),
         peer_addr: IpAddr::V4(address),
+        interface: None,
         peer_bgp_id: address,
         peer_asn: 64_512 + ordinal,
     }

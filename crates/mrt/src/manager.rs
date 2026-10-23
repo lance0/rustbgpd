@@ -371,6 +371,7 @@ mod tests {
                             10, 0, 0, 1,
                         ))),
                         peer_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                        interface: None,
                         peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
                         peer_asn: 65001,
                     }],

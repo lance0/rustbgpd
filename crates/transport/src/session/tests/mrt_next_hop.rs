@@ -98,6 +98,7 @@ fn peers() -> [MrtPeerEntry; 1] {
     [MrtPeerEntry {
         peer: rustbgpd_rib::PeerId::from_addr(IpAddr::V4(RECEIVED)),
         peer_addr: IpAddr::V4(RECEIVED),
+        interface: None,
         peer_bgp_id: RECEIVED,
         peer_asn: 65002,
     }]

@@ -727,6 +727,7 @@ fn parse_peer_index_table(
             // A file names no RIB neighbor; `peer_index` tells entries apart.
             peer: rustbgpd_rib::PeerId::UNASSIGNED,
             peer_addr,
+            interface: None,
             peer_bgp_id,
             peer_asn,
         });
@@ -786,6 +787,7 @@ mod tests {
         MrtPeerEntry {
             peer: PeerId::from_addr(addr),
             peer_addr: addr,
+            interface: None,
             peer_bgp_id: bgp_id,
             peer_asn: asn,
         }
