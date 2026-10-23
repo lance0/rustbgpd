@@ -2600,9 +2600,7 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
         event_type: event_type.into(),
         prefix: event.prefix.addr_string(),
         prefix_length: u32::from(event.prefix.prefix_len()),
-        peer_address: event
-            .peer
-            .map_or_else(String::new, |p: PeerId| p.to_string()),
+        peer_address: event.peer.map_or_else(String::new, |p| p.to_string()),
         afi_safi: match event.prefix {
             Prefix::V4(_) => proto::AddressFamily::Ipv4Unicast,
             Prefix::V6(_) => proto::AddressFamily::Ipv6Unicast,
@@ -2612,12 +2610,12 @@ pub(crate) fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::Ro
         timestamp_unix_ms: event.timestamp_unix_ms,
         previous_peer_address: event
             .previous_peer
-            .map_or_else(String::new, |p: PeerId| p.to_string()),
+            .map_or_else(String::new, |p| p.to_string()),
         path_id: event.path_id,
         event_id: event.event_id,
         target_peer_address: event
             .target_peer
-            .map_or_else(String::new, |p: PeerId| p.to_string()),
+            .map_or_else(String::new, |p| p.to_string()),
         peer_interface: event
             .peer_interface()
             .as_deref()
@@ -8269,8 +8267,8 @@ mod tests {
                 event_id: 0,
                 event_type: RouteEventType::BestChanged,
                 prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
-                peer: Some(PeerId::from_addr("192.0.2.1".parse().unwrap())),
-                previous_peer: Some(PeerId::from_addr("192.0.2.2".parse().unwrap())),
+                peer: Some("192.0.2.1".parse().unwrap()),
+                previous_peer: Some("192.0.2.2".parse().unwrap()),
                 target_peer: None,
                 peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
                 previous_peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,

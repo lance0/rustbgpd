@@ -282,7 +282,7 @@ pub(crate) fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         event_id: 0,
         event_type: RouteEventType::BestChanged,
         prefix,
-        peer: Some(PeerId::from_addr(peer)),
+        peer: Some(peer),
         previous_peer: None,
         target_peer: None,
         peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,

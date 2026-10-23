@@ -435,8 +435,8 @@ async fn no_advertise_candidate_is_removed_before_add_path_rank_compaction() {
         1,
         "policy-added NO_ADVERTISE emits one policy-filtered event"
     );
-    assert_eq!(policy_filtered[0].peer, Some(peer_v4(source_b)));
-    assert_eq!(policy_filtered[0].target_peer, Some(target));
+    assert_eq!(policy_filtered[0].peer, Some(peer_v4(source_b).addr()));
+    assert_eq!(policy_filtered[0].target_peer, Some(target.addr()));
     assert_eq!(policy_filtered[0].prefix, Prefix::V4(prefix));
 
     drop(tx);
@@ -1747,7 +1747,7 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
         .collect::<Vec<_>>();
     assert_eq!(policy_filtered.len(), 2);
     assert!(policy_filtered.iter().all(|event| {
-        event.target_peer == Some(target)
+        event.target_peer == Some(target.addr())
             && event.prefix == Prefix::V4(prefix)
             && event.reason == "policy_denied"
     }));

@@ -3243,7 +3243,7 @@ fn evpn_history_and_live_broadcast_share_arc() {
     manager.publish_evpn_route_event(crate::event::EvpnRouteEvent {
         event_type: RouteEventType::Added,
         key: route.key(),
-        peer: Some(route.peer),
+        peer: Some(route.peer.addr()),
         previous_peer: None,
         best: Some(route),
         previous_best: None,
@@ -3329,7 +3329,7 @@ async fn evpn_route_event_added_on_new_best() {
         .expect("broadcast not closed");
     assert_eq!(event.event_type, crate::event::RouteEventType::Added);
     assert_eq!(event.key, key);
-    assert_eq!(event.peer, Some(peer));
+    assert_eq!(event.peer, Some(peer.addr()));
     assert!(event.previous_peer.is_none());
     assert!(event.best.is_some(), "Added must carry a best path");
 
@@ -3370,7 +3370,7 @@ async fn evpn_event_history_records_events_without_subscriber() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].event_type, RouteEventType::Added);
     assert_eq!(history[0].key, key);
-    assert_eq!(history[0].peer, Some(peer));
+    assert_eq!(history[0].peer, Some(peer.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -3423,8 +3423,8 @@ async fn evpn_event_history_filters_peer_rd_type_and_limit() {
         query_evpn_event_history(&tx, Some(peer1), Some(2), Some(rd), event_types, 1).await;
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].event_type, RouteEventType::BestChanged);
-    assert_eq!(history[0].peer, Some(peer2));
-    assert_eq!(history[0].previous_peer, Some(peer1));
+    assert_eq!(history[0].peer, Some(peer2.addr()));
+    assert_eq!(history[0].previous_peer, Some(peer1.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -3527,8 +3527,8 @@ async fn evpn_route_event_best_changed_on_higher_mobility() {
         .expect("EVPN broadcast should deliver event within 2s")
         .expect("broadcast not closed");
     assert_eq!(event.event_type, crate::event::RouteEventType::BestChanged);
-    assert_eq!(event.peer, Some(peer_v4(new_peer)));
-    assert_eq!(event.previous_peer, Some(peer_v4(original_peer)));
+    assert_eq!(event.peer, Some(peer_v4(new_peer).addr()));
+    assert_eq!(event.previous_peer, Some(peer_v4(original_peer).addr()));
     let best = event
         .best
         .as_ref()
@@ -3600,8 +3600,11 @@ async fn evpn_route_event_best_changed_on_local_mac_ip_reinject_with_higher_mobi
         .expect("broadcast not closed");
     assert_eq!(event.event_type, crate::event::RouteEventType::BestChanged);
     assert_eq!(event.key, key);
-    assert_eq!(event.peer, Some(peer_v4(Ipv4Addr::UNSPECIFIED)));
-    assert_eq!(event.previous_peer, Some(peer_v4(Ipv4Addr::UNSPECIFIED)));
+    assert_eq!(event.peer, Some(peer_v4(Ipv4Addr::UNSPECIFIED).addr()));
+    assert_eq!(
+        event.previous_peer,
+        Some(peer_v4(Ipv4Addr::UNSPECIFIED).addr())
+    );
     let best = event
         .best
         .as_ref()
@@ -3673,7 +3676,7 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
     assert_eq!(event.event_type, crate::event::RouteEventType::Withdrawn);
     assert_eq!(event.key, key);
     assert!(event.peer.is_none());
-    assert_eq!(event.previous_peer, Some(peer));
+    assert_eq!(event.previous_peer, Some(peer.addr()));
     assert!(event.best.is_none(), "Withdrawn must not carry a best");
     let prior = event
         .previous_best

@@ -200,3 +200,102 @@ async fn a_rebind_purges_routes_retained_from_the_previous_endpoint() {
     actor.await.unwrap();
     assert!(peer.release());
 }
+
+/// History keeps the endpoint each event recorded. A rebind moves the
+/// handle to a new address; the events built before it, including the
+/// teardown's withdrawals, still name the old address, for unicast and EVPN
+/// alike, and none name the new one.
+#[tokio::test]
+async fn route_event_history_keeps_the_endpoint_each_event_recorded() {
+    let (tx, actor) = spawn_manager();
+    let old = Ipv4Addr::new(192, 0, 2, 1);
+    let new: IpAddr = "192.0.2.9".parse().unwrap();
+    let peer = PeerId::allocate(PeerEndpoint::new(IpAddr::V4(old), None));
+    let mut imet = make_evpn_imet(old, 7);
+    imet.peer = peer;
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 1,
+        peer,
+        announced: vec![tied_route(peer)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RebindPeer {
+        peer,
+        endpoint: PeerEndpoint::new(new, None),
+    })
+    .await
+    .unwrap();
+
+    let unicast = |address: IpAddr| {
+        let tx = tx.clone();
+        async move {
+            let (reply, response) = oneshot::channel();
+            tx.send(RibUpdate::QueryRouteEventHistory {
+                peer: Some(address),
+                peer_interface: None,
+                afi: None,
+                prefix: None,
+                limit: 0,
+                reply,
+            })
+            .await
+            .unwrap();
+            response.await.unwrap()
+        }
+    };
+    let evpn = |address: IpAddr| {
+        let tx = tx.clone();
+        async move {
+            let (reply, response) = oneshot::channel();
+            tx.send(RibUpdate::QueryEvpnRouteEventHistory {
+                peer: Some(address),
+                route_type: None,
+                rd: None,
+                event_types: std::collections::BTreeSet::new(),
+                limit: 0,
+                reply,
+            })
+            .await
+            .unwrap();
+            response.await.unwrap()
+        }
+    };
+    let old = IpAddr::V4(old);
+    let recorded: Vec<_> = unicast(old)
+        .await
+        .iter()
+        .map(|event| (event.event_type, event.peer, event.previous_peer))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            (RouteEventType::Added, Some(old), None),
+            (RouteEventType::Withdrawn, None, Some(old)),
+        ]
+    );
+    let recorded: Vec<_> = evpn(old)
+        .await
+        .iter()
+        .map(|event| (event.event_type, event.peer, event.previous_peer))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            (RouteEventType::Added, Some(old), None),
+            (RouteEventType::Withdrawn, None, Some(old)),
+        ]
+    );
+    assert!(unicast(new).await.is_empty());
+    assert!(evpn(new).await.is_empty());
+
+    drop(tx);
+    actor.await.unwrap();
+    assert!(peer.release());
+}

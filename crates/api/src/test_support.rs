@@ -105,7 +105,7 @@ pub(crate) fn route_event(prefix: Prefix, peer: IpAddr) -> RouteEvent {
         event_id: 1,
         event_type: RouteEventType::Added,
         prefix,
-        peer: Some(PeerId::from_addr(peer)),
+        peer: Some(peer),
         previous_peer: None,
         target_peer: None,
         peer_scope: rustbgpd_rib::route::AspaContextId::DEFAULT,
@@ -158,8 +158,8 @@ pub(crate) fn evpn_event(
         key,
         best: route,
         previous_best,
-        peer: peer.map(PeerId::from_addr),
-        previous_peer: previous_peer.map(PeerId::from_addr),
+        peer,
+        previous_peer,
         timestamp_unix_ms: 123_000,
     }
 }
@@ -228,7 +228,7 @@ pub(crate) fn spawn_fake_rib_with_evpn_history(
                             Some(peer) => [event.peer, event.previous_peer]
                                 .into_iter()
                                 .flatten()
-                                .any(|named| named.addr() == peer),
+                                .any(|named| named == peer),
                             None => true,
                         })
                         .take(limit)

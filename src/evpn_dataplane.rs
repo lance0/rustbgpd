@@ -6044,7 +6044,7 @@ mod tests {
         rustbgpd_rib::EvpnRouteEvent {
             event_type: rustbgpd_rib::RouteEventType::Added,
             key: route.key(),
-            peer: Some(route.peer),
+            peer: Some(route.peer.addr()),
             previous_peer: None,
             best: Some(route),
             previous_best: None,

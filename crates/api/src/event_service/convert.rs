@@ -92,8 +92,16 @@ pub fn evpn_event_to_bgp_event(event: &rustbgpd_rib::EvpnRouteEvent) -> proto::B
         _ => "changed",
     };
     let summary = format!("EVPN route {action} type={route_type} key={route_key}");
-    let route = event.best.as_ref().map(evpn_route_to_proto);
-    let previous_route = event.previous_best.as_ref().map(evpn_route_to_proto);
+    // The bodies' handles may have moved since; render the event's addresses.
+    let body = |route: &rustbgpd_rib::EvpnRibRoute, address: &str| proto::EvpnRouteEntry {
+        peer_address: address.to_string(),
+        ..evpn_route_to_proto(route)
+    };
+    let route = event.best.as_ref().map(|route| body(route, &peer_address));
+    let previous_route = event
+        .previous_best
+        .as_ref()
+        .map(|route| body(route, &previous_peer_address));
     let payload = proto::EvpnRouteEvent {
         event_type: event_type as i32,
         peer_address: peer_address.clone(),
@@ -399,6 +407,29 @@ pub(super) fn dataplane_summary_to_bgp_event(
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    /// Route bodies render the address the event recorded, not the one
+    /// their handles resolve to now (after a rebind or slot reuse).
+    #[test]
+    fn evpn_route_bodies_render_the_event_time_address() {
+        let mut event = crate::test_support::evpn_event(
+            rustbgpd_rib::RouteEventType::BestChanged,
+            Some("192.0.2.1".parse().unwrap()),
+            Some("192.0.2.2".parse().unwrap()),
+        );
+        let moved = rustbgpd_rib::PeerId::from_addr("192.0.2.9".parse().unwrap());
+        event.best.as_mut().unwrap().peer = moved;
+        event.previous_best.as_mut().unwrap().peer = moved;
+        let Some(proto::bgp_event::Payload::Evpn(payload)) =
+            evpn_event_to_bgp_event(&event).payload
+        else {
+            panic!("EVPN payload expected");
+        };
+        assert_eq!(payload.peer_address, "192.0.2.1");
+        assert_eq!(payload.route.unwrap().peer_address, "192.0.2.1");
+        assert_eq!(payload.previous_peer_address, "192.0.2.2");
+        assert_eq!(payload.previous_route.unwrap().peer_address, "192.0.2.2");
+    }
 
     #[test]
     fn rd_event_output_round_trips_the_exact_event_filter() {

@@ -3794,10 +3794,7 @@ impl RibManager {
             .filter(|event| rd.is_none_or(|rd| crate::event::evpn_key_rd(&event.key) == Some(rd)))
             .filter(|event| event_types.is_empty() || event_types.contains(&event.event_type))
             .filter(|event| match peer {
-                Some(peer) => [event.peer, event.previous_peer]
-                    .into_iter()
-                    .flatten()
-                    .any(|named| named.addr() == peer),
+                Some(peer) => event.peer == Some(peer) || event.previous_peer == Some(peer),
                 None => true,
             })
             .take(limit)
