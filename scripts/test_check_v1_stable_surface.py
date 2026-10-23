@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -773,6 +774,37 @@ class RoleFamilyTests(unittest.TestCase):
                 roles = copy.deepcopy(self.inventory["roles"])
                 next(r for r in roles if r["id"] == "route-reflector-l3vpn")["families"] = families
                 self.rejected(roles, expected)
+
+
+class EvpnReflectorFixtureTests(unittest.TestCase):
+    """route-reflector-evpn configuration is archived on the upgrade chain."""
+
+    TAG = "v0.79.0"
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        shutil.copytree(checker.ROOT / checker.FIXTURES_ROOT / self.TAG, self.root / self.TAG)
+        self.fixture = self.root / self.TAG / "rr-evpn-fabric" / "config.toml"
+
+    def rejected(self, expected):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            checker.check_archived_fixture_directories(self.root, set())
+        self.assertIn(expected, stderr.getvalue())
+
+    def test_archived_evpn_reflector_example_passes(self):
+        self.assertIn('families = ["l2vpn_evpn"]', self.fixture.read_text())
+        checker.check_archived_fixture_directories(self.root, set())
+
+    def test_missing_evpn_reflector_fixture_fails(self):
+        shutil.rmtree(self.fixture.parent)
+        self.rejected(f"{self.TAG} carries examples/rr-evpn-fabric/config.toml but")
+
+    def test_edited_evpn_reflector_fixture_fails(self):
+        self.fixture.write_text(self.fixture.read_text().replace("l2vpn_evpn", "ipv4_unicast"))
+        self.rejected(f"{self.TAG}/rr-evpn-fabric/config.toml does not match")
 
 
 class NestedExperimentalJsonFieldTests(unittest.TestCase):
