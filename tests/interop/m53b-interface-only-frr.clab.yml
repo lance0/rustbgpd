@@ -8,6 +8,7 @@
 #   * link-local next-hops carry their output interface scope into the FIB;
 #   * Linux installs two-way ECMP via the discovered link-local addresses;
 #   * carrier loss removes the failed leg and restoration recovers ECMP;
+#   * single-hop BFD to FRR1 runs on the learned eth1 endpoint;
 #   * a lab-owned bridge on eth2 permits a third RA source without host links;
 #   * FRR3 sends no RAs (`no bgp ipv6-auto-ra`) and dials rustbgpd through a
 #     static link-local neighbor, so rustbgpd learns it from the inbound
@@ -48,7 +49,7 @@ topology:
       kind: linux
       image: quay.io/frrouting/frr:10.7.1
       binds:
-        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-daemons-bfd:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m53b-1.conf:/etc/frr/frr.conf:ro
         - /dev/null:/etc/frr/vtysh.conf:ro
       exec:
