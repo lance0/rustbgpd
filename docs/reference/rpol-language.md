@@ -68,7 +68,10 @@ file), `2` in-language test failures (or no tests under
 [Coverage and lints](#coverage-and-lints)), `4` a lint denied by
 `--deny-lints`, otherwise `0`. The
 [CLI reference](../../crates/cli/README.md#policy-check-as-a-ci-and-editor-gate)
-has the full table. `--json` emits a machine-readable report.
+has the full table. `--json` emits a machine-readable report with stable
+compiler-stage codes: `lex-error`, `parse-error`, `resolve-error`,
+`typecheck-error` and `lower-error`. The CLI reference describes their
+boundaries; error messages remain in the legacy `diagnostics` array.
 
 ## Lexical structure
 
@@ -511,6 +514,17 @@ does not match `peer.group != "leaf"`. Include fixtures with omitted
 attributes when testing guards over optional fields. `route.local-pref`
 and `route.med` use their implicit defaults, so they do not have the
 absent-field behavior in the last row.
+
+`rbgp policy check` reports `optional-field-negation` for a direct
+`!(optional-field == literal)` guard. It points at the negated expression,
+including inside compound guards and loops. Use `!=` when absence must not
+match, or keep the negation and test an absent-field fixture when it is
+intentional. The lint does not flag defaulted `route.local-pref` or
+`route.med`, total fields such as `route.rpki`, arithmetic comparisons, or
+field-to-field comparisons.
+Parameters and local bindings on the right-hand side are outside this
+literal-only lint; local numeric comparisons use checked evaluation, where
+an absent operand fails the walk rather than matching through negation.
 
 ### Checked u32 value expressions
 
@@ -1430,6 +1444,8 @@ Static lints ride the same pass and need no fixtures:
   conservatively reachable — this is not a reachability prover.
 - `unreferenced-policy` — no test and no `apply` names it in the
   compilation unit (with the config-chain caveat above).
+- `optional-field-negation` — `!(optional-field == literal)` also matches
+  absence; see [optional comparison semantics](#expressions).
 
 Coverage is a report: it never changes the exit code by itself. For
 CI, `--coverage-min PCT` (which implies `--coverage`) exits **3**

@@ -21,7 +21,7 @@
 
 use logos::Logos;
 
-use super::diag::{Diagnostic, Span};
+use super::diag::{Diagnostic, DiagnosticCode, Span};
 
 /// One `.rpol` token kind. Text is recovered by slicing the source
 /// with the token's span.
@@ -341,7 +341,8 @@ pub fn lex(source: &str, file: u32) -> (Vec<Token>, Vec<Diagnostic>) {
                 last_span.end = span.end;
                 continue;
             }
-            diagnostics.push(Diagnostic::new(
+            diagnostics.push(Diagnostic::coded(
+                DiagnosticCode::Lex,
                 span,
                 format!("unrecognized token `{}`", &source[span.range()]),
                 "not a valid `.rpol` token",

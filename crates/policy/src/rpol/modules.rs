@@ -45,7 +45,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::ast;
-use super::diag::{Diagnostic, Diagnostics, Span, Spanned};
+use super::diag::{Diagnostic, DiagnosticCode, Diagnostics, Span, Spanned};
 use super::parser;
 
 /// Maximum import nesting depth (ADR-0103 Decision 3): the main file
@@ -329,7 +329,8 @@ impl Resolver {
         // strictly subsumed by this check once the budget had to fit
         // IRR-scale single-file renders).
         if self.total_bytes > self.max_graph_bytes {
-            self.diags.push(Diagnostic::new(
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Resolve,
                 Span::in_file(0..0, id),
                 format!(
                     "resolved module graph exceeds {} total source bytes \
@@ -362,6 +363,10 @@ impl Resolver {
     /// Resolve one `import "path"` declaration of module `importer` at
     /// nesting `depth`. Returns the imported module's id, or `None`
     /// with a diagnostic recorded.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bounded import walk keeps path checks and their stage-tagged diagnostics together"
+    )]
     fn resolve_import(
         &mut self,
         importer: u32,
@@ -371,7 +376,8 @@ impl Resolver {
         let rel = Path::new(&import.node);
         if rel.is_absolute() {
             self.diags.push(
-                Diagnostic::new(
+                Diagnostic::coded(
+                    DiagnosticCode::Resolve,
                     import.span,
                     format!("import path {:?} is absolute", import.node),
                     "imports must be relative paths",
@@ -384,7 +390,8 @@ impl Resolver {
             return None;
         }
         if depth >= MAX_MODULE_DEPTH {
-            self.diags.push(Diagnostic::new(
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Resolve,
                 import.span,
                 format!("imports nest more than {MAX_MODULE_DEPTH} deep"),
                 "this import exceeds the module depth budget",
@@ -404,7 +411,8 @@ impl Resolver {
             .iter()
             .find_map(|dir| dir.join(rel).canonicalize().ok())
         else {
-            self.diags.push(Diagnostic::new(
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Resolve,
                 import.span,
                 format!("cannot resolve import {:?}", import.node),
                 "not found relative to this file or any configured policy root",
@@ -413,7 +421,8 @@ impl Resolver {
         };
         if !self.confine.iter().any(|root| canon.starts_with(root)) {
             self.diags.push(
-                Diagnostic::new(
+                Diagnostic::coded(
+                    DiagnosticCode::Resolve,
                     import.span,
                     format!(
                         "import {:?} escapes the configured policy roots",
@@ -441,7 +450,8 @@ impl Resolver {
                     .map(|(_, m)| m.path.clone())
                     .collect();
                 names.push(self.modules[existing as usize].path.clone());
-                self.diags.push(Diagnostic::new(
+                self.diags.push(Diagnostic::coded(
+                    DiagnosticCode::Resolve,
                     import.span,
                     format!("import cycle: {}", names.join(" -> ")),
                     "this import closes the cycle",
@@ -452,7 +462,8 @@ impl Resolver {
         }
 
         if self.modules.len() >= MAX_MODULE_FILES {
-            self.diags.push(Diagnostic::new(
+            self.diags.push(Diagnostic::coded(
+                DiagnosticCode::Resolve,
                 import.span,
                 format!("module graph has more than {MAX_MODULE_FILES} files"),
                 "file-count budget exhausted at this import",
@@ -462,7 +473,8 @@ impl Resolver {
         let (text, raw_len, raw_sha256) = match read_source(&canon) {
             Ok(source) => source,
             Err(e) => {
-                self.diags.push(Diagnostic::new(
+                self.diags.push(Diagnostic::coded(
+                    DiagnosticCode::Resolve,
                     import.span,
                     format!("cannot read import {:?}: {e}", import.node),
                     "failed to read this import",
