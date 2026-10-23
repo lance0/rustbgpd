@@ -327,3 +327,34 @@ async fn an_mrt_snapshot_lists_same_address_neighbors_separately() {
     drop(tx);
     actor.await.unwrap();
 }
+
+/// Acceptance: when the interface breaks the tie between two neighbors on
+/// one link-local address, explain names each neighbor's scope in the
+/// human detail and keeps the machine reason `lower_peer_address`.
+#[tokio::test]
+async fn explain_names_the_scope_when_the_interface_breaks_the_tie() {
+    let (tx, actor) = spawn_manager();
+    let (eth1, eth0) = (scoped("fe80::1", "eth1"), scoped("fe80::1", "eth0"));
+    announce(&tx, eth1, 1).await;
+    announce(&tx, eth0, 2).await;
+    let explain = query_explain_best_path(&tx, tied_route(eth0).prefix).await;
+    assert_eq!(explain.best.as_ref().map(|best| best.peer), Some(eth0));
+    let reason = explain.best_reason.expect("a contested prefix");
+    assert_eq!(reason.code(), "lower_peer_address");
+    assert_eq!(
+        explain.best_reason_detail,
+        "peer fe80::1%eth0 < fe80::1%eth1 (scope tie-break)"
+    );
+    let [loser] = explain.candidates.as_slice() else {
+        panic!("one candidate expected");
+    };
+    assert_eq!(loser.route.peer, eth1);
+    assert_eq!(loser.vs_best_reason.code(), "lower_peer_address");
+    assert_eq!(
+        loser.vs_best_detail,
+        "peer fe80::1%eth1 > fe80::1%eth0 (scope tie-break)"
+    );
+
+    drop(tx);
+    actor.await.unwrap();
+}
