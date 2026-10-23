@@ -549,7 +549,9 @@ impl PeerManager {
         }
         // The neighbor keeps its RIB identity across endpoints. The RIB moves
         // it to the new endpoint, in order after the previous binding's
-        // deletion and before the new session's first message.
+        // deletion and before the new session's first message. Always sent:
+        // the table may not yet reflect a rebind still queued to the RIB,
+        // whose handler skips an unchanged endpoint in its own order.
         let rib_peer = self.port_mut(name).rib_peer;
         if let Some(rib_peer) = rib_peer {
             self.rib_peers.insert(
@@ -557,19 +559,18 @@ impl PeerManager {
                 rustbgpd_transport::RibPeerSlot::assigned(rib_peer),
             );
             let next = rustbgpd_rib::PeerEndpoint::new(IpAddr::V6(endpoint.address), Some(name));
-            if rib_peer.endpoint().as_ref() != Some(&next)
-                && self
-                    .send_rib_update(
-                        rustbgpd_rib::RibUpdate::RebindPeer {
-                            peer: rib_peer,
-                            endpoint: next,
-                        },
-                        super::OperatorReadAdmission::Fenced {
-                            reason: "an interface-only neighbor is changing endpoint",
-                        },
-                    )
-                    .await
-                    .is_err()
+            if self
+                .send_rib_update(
+                    rustbgpd_rib::RibUpdate::RebindPeer {
+                        peer: rib_peer,
+                        endpoint: next,
+                    },
+                    super::OperatorReadAdmission::Fenced {
+                        reason: "an interface-only neighbor is changing endpoint",
+                    },
+                )
+                .await
+                .is_err()
             {
                 self.rib_peers.remove(&key);
                 self.port_mut(name).held = held;

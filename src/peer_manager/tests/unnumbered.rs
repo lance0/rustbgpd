@@ -254,6 +254,30 @@ async fn an_address_change_keeps_the_neighbors_rib_identity() {
     assert!(first.is_live());
 }
 
+/// The RIB applies rebinds in its own message order, so the peer manager
+/// cannot skip one by reading the handle's current endpoint: with A → B
+/// still queued, the move back to A must be queued too, or the RIB lands
+/// on B while the session runs at A.
+#[tokio::test]
+async fn a_change_back_to_the_previous_endpoint_is_queued_behind_a_pending_rebind() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let handle = h.mgr.rib_peer_of(&swp1_key(2));
+    while h.rib_rx.try_recv().is_ok() {}
+
+    // Nothing drains the RIB channel, so the table still says ll(2).
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.mgr.rib_peer_of(&swp1_key(2)), handle);
+    let rebinds: Vec<IpAddr> = std::iter::from_fn(|| h.rib_rx.try_recv().ok())
+        .filter_map(|update| match update {
+            RibUpdate::RebindPeer { peer, endpoint } if peer == handle => Some(endpoint.addr),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rebinds, [IpAddr::V6(ll(3)), IpAddr::V6(ll(2))]);
+}
+
 #[tokio::test]
 async fn a_lost_binding_keeps_the_peer_while_the_link_is_up() {
     let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
