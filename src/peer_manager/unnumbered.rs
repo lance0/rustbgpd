@@ -70,6 +70,10 @@ struct Port {
     /// up under the same `PeerId`. Never released; the stanza lives until
     /// restart.
     rib_peer: Option<rustbgpd_rib::PeerId>,
+    /// A conditional retirement of the bound session went unanswered: it may
+    /// still have shut the session down, which reports nothing. Settled by
+    /// reading the session before the binding is trusted again.
+    retire_unsettled: bool,
 }
 
 /// State of an interface-only neighbor that belongs to the neighbor, not to
@@ -316,6 +320,16 @@ impl PeerManager {
         let Some(managed) = self.peers.get(key) else {
             return true;
         };
+        // A pending inbound connection from the bound address is that router,
+        // live. The retirement's notification drains would promote it once
+        // the primary is gone, and it could establish before the deletion.
+        // Only the accept path creates candidates, and it cannot run during
+        // this retirement, so checking here fences promotion for its length.
+        if managed.pending_inbound.is_some() {
+            info!(interface = %name, peer = %key, "unnumbered: a connection from the bound address is pending; keeping it");
+            self.arm_unnumbered_retry();
+            return false;
+        }
         match managed
             .handle()
             .shutdown_unless_established_timeout(BOUND_STATE_QUERY_TIMEOUT)
@@ -336,10 +350,39 @@ impl PeerManager {
             }
             Err(error) => {
                 warn!(interface = %name, peer = %key, %error, "unnumbered: bound session did not answer the retirement check; retrying");
+                self.port_mut(name).retire_unsettled = true;
                 self.arm_unnumbered_retry();
                 false
             }
         }
+    }
+
+    /// Whether an unanswered retirement ended the bound session since: the
+    /// read queues behind that command, so it settles the outcome. `false`
+    /// with nothing unsettled; `None` (retry armed) when still unanswered.
+    async fn settle_retirement(&mut self, name: &str, peer: &PeerKey) -> Option<bool> {
+        if !self.port_mut(name).retire_unsettled {
+            return Some(false);
+        }
+        let outcome = match self.peers.get(peer) {
+            None => rustbgpd_transport::StateQueryOutcome::SessionGone,
+            Some(managed) => {
+                managed
+                    .handle()
+                    .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
+                    .await
+            }
+        };
+        let exited = match outcome {
+            rustbgpd_transport::StateQueryOutcome::State(_) => false,
+            rustbgpd_transport::StateQueryOutcome::SessionGone => true,
+            rustbgpd_transport::StateQueryOutcome::TimedOut => {
+                self.arm_unnumbered_retry();
+                return None;
+            }
+        };
+        self.port_mut(name).retire_unsettled = false;
+        Some(exited)
     }
 
     /// When an unanswered state query is due to be asked again.
@@ -455,11 +498,23 @@ impl PeerManager {
             .desired
             .filter(|endpoint| current_ifindex.is_none_or(|ifindex| ifindex == endpoint.ifindex));
 
+        let mut desired = desired;
         if let Some(key) = bound {
             let bound_scope = self
                 .peers
                 .get(&key)
                 .and_then(|managed| managed.transport_config.peer_scope_id);
+            // A session that an unanswered retirement ended is replaced, at
+            // the same endpoint when the binding no longer points elsewhere.
+            let Some(exited) = self.settle_retirement(name, &key).await else {
+                return;
+            };
+            if exited
+                && desired.is_none()
+                && let (IpAddr::V6(address), Some(ifindex)) = (key.address, bound_scope)
+            {
+                desired = Some(Endpoint { address, ifindex });
+            }
             // Level-triggered: the bound peer's scope against the interface's
             // index now. A mismatch means the interface it ran on is gone.
             let recreated = current_ifindex.is_some_and(|ifindex| bound_scope != Some(ifindex));
@@ -469,7 +524,7 @@ impl PeerManager {
             // A lost binding keeps the peer; a new one never displaces an
             // Established session; confirmed carrier loss or interface
             // recreation always ends it.
-            let gone = link_down || recreated;
+            let gone = link_down || recreated || exited;
             let keep = !gone && (desired.is_none() || same_endpoint || established);
             if keep {
                 return;
@@ -502,6 +557,8 @@ impl PeerManager {
                 "link_down"
             } else if recreated {
                 "interface_recreated"
+            } else if exited {
+                "session_exited"
             } else {
                 "peer_address_changed"
             };
@@ -587,6 +644,7 @@ impl PeerManager {
         let port = self.port_mut(name);
         port.bound = None;
         port.established = false;
+        port.retire_unsettled = false;
         port.held = Some(held);
         // The retired session's queued reports have been drained by
         // now; an Established among them must not outlive it.
