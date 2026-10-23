@@ -72,7 +72,15 @@ EXPECTED_EFFECTIVE_FAMILY_CASES = (
     '&[(Afi::Ipv4,Safi::Unicast)]',
 )
 FIXTURES_ROOT = "tests/fixtures/v1-stable"
-STABLE_FIXTURE_ROLES = ("route-server", "route-reflector")
+# Example directory archived per stable role, and the first release that owes
+# it. The route-reflector-evpn example shipped long before that role was frozen
+# for 1.0, so its chain starts at v0.79.0, the release current at the freeze,
+# rather than at the example's first tag.
+STABLE_FIXTURE_ROLES = {
+    "route-server": V1_UPGRADE_HISTORY_ORIGIN,
+    "route-reflector": V1_UPGRADE_HISTORY_ORIGIN,
+    "rr-evpn-fabric": (0, 79, 0),
+}
 FIXTURE_VALIDATION_LINKAGE = (
     (f'"{INVENTORY_PATH.relative_to(ROOT)}"', "read the stable-surface inventory"),
     ('["fixture_directory"]', "take each exercise's fixture_directory"),
@@ -1886,13 +1894,14 @@ def check_archived_fixture_directories(
 
     A staged next-release fixture, and any role other than the exercised one,
     must equal `<tag>:examples/<role>/` byte for byte. A tag that carries a
-    stable role's example owes that role's fixture directory.
+    stable role's example, from that role's first owed release on, owes that
+    role's fixture directory.
     """
     for tag_directory in sorted(fixtures_root.iterdir()):
         tag = tag_directory.name
         if tag_directory.is_symlink() or not tag_directory.is_dir():
             fail(f"archived fixture entry {FIXTURES_ROOT}/{tag} must be a tag directory")
-        parse_release_tag(tag)
+        version = parse_release_tag(tag)
         require_git_tag(tag)
         for role_directory in sorted(tag_directory.iterdir()):
             role = role_directory.name
@@ -1912,9 +1921,10 @@ def check_archived_fixture_directories(
                         f"archived fixture {archived}/{name} does not match "
                         f"{tag}:examples/{role}/{name}"
                     )
-        for role in STABLE_FIXTURE_ROLES:
+        for role, first_owed in STABLE_FIXTURE_ROLES.items():
             if (
-                tagged(tag, f"examples/{role}/config.toml") is not None
+                version >= first_owed
+                and tagged(tag, f"examples/{role}/config.toml") is not None
                 and not (tag_directory / role).is_dir()
             ):
                 fail(
@@ -1957,10 +1967,23 @@ def check_archived_fixture_directory_selftests() -> None:
             f"{tag} carries examples/route-reflector/config.toml but",
             "tag carries a stable role example with no archived fixture",
         )
-        check_archived_fixture_directories(
-            root,
-            set(),
-            lambda _tag, path: None if "route-reflector" in path else carried(_tag, path),
+        def without_rr(_tag: str, path: str) -> bytes | None:
+            return None if "route-reflector" in path else carried(_tag, path)
+
+        check_archived_fixture_directories(root, set(), without_rr)
+        # A role is owed only from its first owed release: the EVPN reflector
+        # example carried by the origin tag needs no fixture there, but does
+        # beside its first owed release.
+        (root / tag / "rr-evpn-fabric" / "config.toml").unlink()
+        (root / tag / "rr-evpn-fabric").rmdir()
+        check_archived_fixture_directories(root, set(), without_rr)
+        owed = f"v{'.'.join(map(str, STABLE_FIXTURE_ROLES['rr-evpn-fabric']))}"
+        (root / owed / "route-server").mkdir(parents=True)
+        (root / owed / "route-server" / "config.toml").write_bytes(b"tagged")
+        expect_checker_failure(
+            lambda: check_archived_fixture_directories(root, set(), without_rr),
+            f"{owed} carries examples/rr-evpn-fabric/config.toml but",
+            "owed EVPN reflector release with no archived fixture",
         )
 
 
