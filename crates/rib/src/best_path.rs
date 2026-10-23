@@ -122,8 +122,11 @@ pub(crate) fn compare_bgp_identifier(
 ) -> Option<(Ordering, BestPathReason)> {
     let id_a = effective_bgp_identifier(a.0, a.1, a.2);
     let id_b = effective_bgp_identifier(b.0, b.1, b.2);
-    // `Option` orders `None` (locally originated) before any identifier.
-    let cmp = id_a.cmp(&id_b);
+    // `Option` orders `None` (locally originated) before any identifier;
+    // the bits order like the octets without a byte-wise compare.
+    let cmp = id_a
+        .map(Ipv4Addr::to_bits)
+        .cmp(&id_b.map(Ipv4Addr::to_bits));
     if cmp == Ordering::Equal {
         return None;
     }
