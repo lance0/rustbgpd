@@ -31,6 +31,9 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
     window, a third miss in one window, a schedule that drifts off the
     interval grid, or a miss that cannot be placed on the wall clock
     (summary without completed_unix) fails
+  - outbound registration wait: the maximum sampled
+    bgp_rib_outbound_registration_pending_oldest_seconds is recorded and
+    must not exceed 300 s
   - RSS peak ceiling; late-window RSS/intern slope (evaluated only when
     the late window spans >= --min-slope-seconds)
   - no ABORT record in cycles.log
@@ -56,17 +59,25 @@ from flagship_daemon_log import analyze_daemon_log
 REQUIRED = {
     "timestamp", "elapsed_sec", "rss_mb", "intern_size", "established",
     "flaps_total", "msgs_sent_total", "max_prefix_exceeded_total",
-    "readyz_code", "readyz_ms",
+    "readyz_code", "readyz_ms", "registration_pending_oldest_sec",
 }
 COUNTERS = {
     "intern_size", "established", "flaps_total", "msgs_sent_total",
     "max_prefix_exceeded_total", "readyz_code",
+    "registration_pending_oldest_sec",
 }
 
 RSS_PEAK_LIMIT_MB = 3072.0
 RSS_LATE_SLOPE_LIMIT = 10.0     # MB/h over the late window
 INTERN_LATE_SLOPE_LIMIT = 100.0  # entries/h over the late window
 READYZ_MS_LIMIT = 250.0
+# The RIB's oldest Established-but-unregistered outbound registration wait
+# (bgp_rib_outbound_registration_pending_oldest_seconds). A deferred
+# registration clears in seconds once queued imports drain; the bound matches
+# the BgpPeerOutboundUnregistered alert's five-minute hold, so only a
+# registration that is stuck or lost exceeds it. A soak gate only: the
+# daemon's readiness does not use it.
+REGISTRATION_WAIT_LIMIT_SEC = 300
 # This scenario borrows Kubernetes readiness probes' failureThreshold default
 # of 3. Its 30 s sampling interval and 250 ms latency limit are separate soak
 # acceptance choices, not Kubernetes probe semantics. Three samples span at
@@ -710,6 +721,23 @@ def check_trip(n: int, trip: dict, meta: dict) -> list[str]:
     return defects
 
 
+def registration_wait_gate(rows: list[dict[str, str]],
+                           elapsed: list[float]) -> dict:
+    """Max sampled oldest-registration wait; FAIL above the bound."""
+    waits = [int(float(r["registration_pending_oldest_sec"])) for r in rows]
+    peak = max(range(len(waits)), key=waits.__getitem__)
+    return {
+        "value": {
+            "max_seconds": waits[peak],
+            "at_elapsed_sec": elapsed[peak],
+            "samples_over_limit": sum(1 for w in waits
+                                      if w > REGISTRATION_WAIT_LIMIT_SEC),
+        },
+        "limit": REGISTRATION_WAIT_LIMIT_SEC,
+        "pass": waits[peak] <= REGISTRATION_WAIT_LIMIT_SEC,
+    }
+
+
 def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
             min_slope_seconds: float) -> dict:
     peers = meta["peers"]
@@ -896,6 +924,7 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
             "value": cycles["aborts"],
             "pass": not cycles["aborts"],
         },
+        "outbound_registration_wait": registration_wait_gate(rows, elapsed),
     }
 
     all_pass = all(g["pass"] for g in gates.values())
@@ -910,6 +939,8 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
         "rss_late_slope_per_hour": rss_slope,
         "intern_late_slope_per_hour": intern_slope,
         "slope_window_evaluated": slope_evaluated,
+        "max_registration_wait_sec":
+            gates["outbound_registration_wait"]["value"]["max_seconds"],
         "gates": gates,
     }
 

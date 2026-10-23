@@ -27,7 +27,7 @@ T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 FIELDS = [
     "timestamp", "elapsed_sec", "rss_mb", "intern_size", "established",
     "flaps_total", "msgs_sent_total", "max_prefix_exceeded_total",
-    "readyz_code", "readyz_ms",
+    "readyz_code", "readyz_ms", "registration_pending_oldest_sec",
 ]
 
 
@@ -109,6 +109,7 @@ def smoke_rows():
             "msgs_sent_total": str(1000 + i * 500),
             "max_prefix_exceeded_total": str(exceeded),
             "readyz_code": "200", "readyz_ms": "5.0",
+            "registration_pending_oldest_sec": "0",
         })
     return rows
 
@@ -145,6 +146,7 @@ def long_rows(rss_of=None):
             "msgs_sent_total": str(10_000 + i * 5000),
             "max_prefix_exceeded_total": str(trips_done),
             "readyz_code": "200", "readyz_ms": "5.0",
+            "registration_pending_oldest_sec": "0",
         })
     return rows
 
@@ -1198,6 +1200,44 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
                 self.assertFalse(
                     payload["gates"]["management_failures"]["pass"]
                 )
+
+    def test_registration_wait_max_is_recorded_and_passes_at_the_bound(self):
+        rows = smoke_rows()
+        rows[2]["registration_pending_oldest_sec"] = "12"
+        rows[4]["registration_pending_oldest_sec"] = "300"
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gate = payload["gates"]["outbound_registration_wait"]
+        self.assertTrue(gate["pass"])
+        self.assertEqual(gate["limit"], 300)
+        self.assertEqual(gate["value"]["max_seconds"], 300)
+        self.assertEqual(gate["value"]["at_elapsed_sec"], 120.0)
+        self.assertEqual(payload["max_registration_wait_sec"], 300)
+
+    def test_registration_wait_above_the_bound_fails(self):
+        # Seeded: a lost registration keeps ageing across samples.
+        rows = smoke_rows()
+        for index, wait in ((6, "240"), (7, "270"), (8, "301")):
+            rows[index]["registration_pending_oldest_sec"] = wait
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(payload["verdict"], "fail")
+        gate = payload["gates"]["outbound_registration_wait"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(gate["value"]["max_seconds"], 301)
+        self.assertEqual(gate["value"]["samples_over_limit"], 1)
+
+    def test_registration_wait_missing_or_invalid_is_input_error(self):
+        fields = [f for f in FIELDS if f != "registration_pending_oldest_sec"]
+        result, _ = run_analyzer(smoke_rows(), smoke_cycles(), smoke_meta(),
+                                 fields=fields)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("registration_pending_oldest_sec", result.stderr)
+        for value in ("nan", "-1", "1.5", ""):
+            rows = smoke_rows()
+            rows[3]["registration_pending_oldest_sec"] = value
+            result, _ = run_analyzer(rows, smoke_cycles(), smoke_meta())
+            self.assertEqual(result.returncode, 2, value)
 
     def test_missing_column_is_input_error(self):
         fields = [f for f in FIELDS if f != "max_prefix_exceeded_total"]

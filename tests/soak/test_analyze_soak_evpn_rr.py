@@ -19,7 +19,7 @@ T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 FIELDS = [
     "timestamp", "elapsed_sec", "rss_mb", "intern_size", "established",
     "flaps_total", "msgs_sent_total", "max_prefix_exceeded_total",
-    "readyz_code", "readyz_ms",
+    "readyz_code", "readyz_ms", "registration_pending_oldest_sec",
 ]
 OPERATIONS = ("metrics", "neighbor", "evpn_received", "evpn_advertised", "doctor")
 PEERS = 12
@@ -118,6 +118,7 @@ def smoke_rows():
             "intern_size": 50, "established": PEERS, "flaps_total": flaps,
             "msgs_sent_total": 1000 + elapsed * 50, "max_prefix_exceeded_total": 0,
             "readyz_code": 200, "readyz_ms": 5.0,
+            "registration_pending_oldest_sec": 0,
         })
     return rows
 

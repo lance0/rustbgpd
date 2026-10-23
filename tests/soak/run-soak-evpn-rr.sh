@@ -340,6 +340,7 @@ sample_row() {
     # Keep each command substitution in its own command (see the flagship
     # runners: Bash 5.2 signal-trap parsing).
     local timestamp rss_mb intern_size established flaps messages_sent max_prefix
+    local registration_wait
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || :
     rss_mb=$(tree_rss_mb) || :
     intern_size=$(prom_get bgp_rib_attr_intern_global_size) || :
@@ -347,10 +348,11 @@ sample_row() {
     flaps=$(prom_sum bgp_session_flaps_total) || :
     messages_sent=$(prom_sum bgp_messages_sent_total) || :
     max_prefix=$(prom_sum bgp_max_prefix_exceeded_total) || :
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    registration_wait=$(prom_get bgp_rib_outbound_registration_pending_oldest_seconds) || :
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$timestamp" "$elapsed" "$rss_mb" "$intern_size" "$established" \
         "$flaps" "$messages_sent" "$max_prefix" "$code" "$ms" \
-        >>"$SAMPLES_CSV"
+        "$registration_wait" >>"$SAMPLES_CSV"
     if ((SAMPLE_ROWS % METRICS_SNAPSHOT_EVERY == 0)); then
         prom_snapshot "$timestamp" "$elapsed" || cycle_log "metrics snapshot append failed"
     fi
@@ -561,7 +563,7 @@ main() {
     write_run_json
     log "sampling starts (interval=${SAMPLE_INTERVAL}s warmup=${WARMUP_SEC}s)"
 
-    echo "timestamp,elapsed_sec,rss_mb,intern_size,established,flaps_total,msgs_sent_total,max_prefix_exceeded_total,readyz_code,readyz_ms" >"$SAMPLES_CSV"
+    echo "timestamp,elapsed_sec,rss_mb,intern_size,established,flaps_total,msgs_sent_total,max_prefix_exceeded_total,readyz_code,readyz_ms,registration_pending_oldest_sec" >"$SAMPLES_CSV"
     local start_epoch now next_sample overall_deadline
     start_epoch=$(date +%s)
     SAMPLE_START_EPOCH=$start_epoch
