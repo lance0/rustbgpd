@@ -216,6 +216,45 @@ pub(super) const BMP_DUMP_CHUNK_SIZE: usize = 256;
 /// capped at `n` — the mutation-robust cursor step of the resumable
 /// BMP Loc-RIB dump. Returns fewer than `n` keys iff the walk past
 /// `after` is exhausted.
+/// The `n` smallest export destinations strictly after `after`, ascending,
+/// holding at most `n` at any time. A destination listed both as a
+/// registered session and as a managed peer (same address and scope) is kept
+/// once, as registered. Unregistered orders immediately before registered
+/// for one destination, so the two forms always fall on the same side of the
+/// cut: the selection holds the registered form or neither.
+fn smallest_destinations_after(
+    candidates: impl Iterator<Item = ExportCandidate>,
+    after: Option<&ExportCandidate>,
+    n: usize,
+) -> Vec<ExportCandidate> {
+    let mut kept = std::collections::BTreeSet::new();
+    for candidate in candidates {
+        if after.is_some_and(|after| candidate <= *after) {
+            continue;
+        }
+        // Equality ignores the handle, so any `Some` names the registered form.
+        let registered_form = ExportCandidate {
+            peer: Some(PeerId::LOCAL),
+            ..candidate.clone()
+        };
+        if candidate.peer.is_some() {
+            kept.remove(&ExportCandidate {
+                peer: None,
+                ..candidate.clone()
+            });
+        } else if kept.contains(&registered_form) {
+            continue;
+        }
+        kept.insert(candidate);
+        if kept.len() > n {
+            kept.pop_last();
+        }
+        #[cfg(test)]
+        EXPORT_SELECTION_HIGH_WATER.set(EXPORT_SELECTION_HIGH_WATER.get().max(kept.len()));
+    }
+    kept.into_iter().collect()
+}
+
 fn smallest_keys_after<K: Ord>(
     keys: impl Iterator<Item = K>,
     after: Option<&K>,
@@ -1422,7 +1461,7 @@ impl RibManager {
         siblings.sort_by(|a, b| {
             a.next_hop
                 .cmp(&b.next_hop)
-                .then(a.peer.addr().cmp(&b.peer.addr()))
+                .then(a.peer.cmp_selection(b.peer))
                 .then(a.path_id.cmp(&b.path_id))
         });
         let mut next_hops = Vec::new();
@@ -2039,9 +2078,13 @@ impl RibManager {
         // never needs more than the budget left, so the second selection's
         // prefix serves them all.
         let mut resumed = after.map(|(peer, scope)| {
-            smallest_keys_after(
+            smallest_destinations_after(
                 self.export_candidates(&managed),
-                Some(&(peer, scope, true)),
+                Some(&ExportCandidate {
+                    addr: peer,
+                    scope,
+                    peer: Some(PeerId::LOCAL),
+                }),
                 budget + 1,
             )
         });
@@ -2073,35 +2116,36 @@ impl RibManager {
             // The cursor applies only to the key it was issued in, which is
             // the first one this page visits.
             let after_cursor;
-            let remaining: &[ExportCandidate] =
-                if let Some(selected) = resumed.take().filter(|_| index == start) {
-                    after_cursor = selected;
-                    &after_cursor
-                } else {
-                    from_start.get_or_insert_with(|| {
-                        smallest_keys_after(self.export_candidates(&managed), None, budget + 1)
-                    })
-                };
-            #[cfg(test)]
-            EXPORT_SELECTION_HIGH_WATER.set(EXPORT_SELECTION_HIGH_WATER.get().max(remaining.len()));
+            let remaining: &[ExportCandidate] = if let Some(selected) =
+                resumed.take().filter(|_| index == start)
+            {
+                after_cursor = selected;
+                &after_cursor
+            } else {
+                from_start.get_or_insert_with(|| {
+                    smallest_destinations_after(self.export_candidates(&managed), None, budget + 1)
+                })
+            };
             let take = remaining.len().min(budget);
             budget -= take.max(1);
             entry.peers = remaining[..take]
                 .iter()
-                .map(|(peer, scope, registered)| {
-                    if *registered {
-                        export(self, PeerId::from_addr(*peer), route)
-                    } else {
-                        not_established_export(PeerId::from_addr(*peer), scope.clone())
-                    }
+                .map(|candidate| match candidate.peer {
+                    Some(peer) => export(self, peer, route),
+                    // ponytail: a row label only, pinned once per address; S3
+                    // gives export rows the managed neighbor's own handle.
+                    None => not_established_export(
+                        PeerId::from_addr(candidate.addr),
+                        candidate.scope.clone(),
+                    ),
                 })
                 .collect();
             listed.push(entry);
             if take < remaining.len() {
-                let (peer, scope, _) = &remaining[take - 1];
+                let last = &remaining[take - 1];
                 next = Some(RouteExportCursor {
                     key: index,
-                    after: Some((*peer, scope.clone())),
+                    after: Some((last.addr, last.scope.clone())),
                 });
                 break;
             }
@@ -2165,28 +2209,28 @@ impl RibManager {
     }
 
     /// Every destination of an export walk, unordered, with whether it is
-    /// registered for outbound updates: the registered sessions, plus each
-    /// `managed` peer that no registered session matches by address and
-    /// scope. Nothing is collected; the caller keeps a bounded selection.
+    /// registered for outbound updates: the registered sessions, then each
+    /// `managed` peer as unregistered. A managed peer that a registered
+    /// session also covers appears in both forms; the bounded selection
+    /// ([`smallest_destinations_after`]) keeps the registered one. Nothing
+    /// is collected.
     fn export_candidates<'a>(
         &'a self,
         managed: &'a [ExportDestination],
     ) -> impl Iterator<Item = ExportCandidate> + 'a {
-        let registered = self.peer_sendable_families.keys().map(|&peer| {
-            (
-                peer.addr(),
-                self.session_peer_scope(peer).peer_interface(),
-                true,
-            )
+        let registered = self
+            .peer_sendable_families
+            .keys()
+            .map(|&peer| ExportCandidate {
+                addr: peer.addr(),
+                scope: self.session_peer_scope(peer).peer_interface(),
+                peer: Some(peer),
+            });
+        let unregistered = managed.iter().map(|(addr, scope)| ExportCandidate {
+            addr: *addr,
+            scope: scope.clone(),
+            peer: None,
         });
-        let unregistered = managed
-            .iter()
-            .filter(|(peer, scope)| {
-                let peer = PeerId::from_addr(*peer);
-                !(self.peer_sendable_families.contains_key(&peer)
-                    && self.session_peer_scope(peer).peer_interface() == *scope)
-            })
-            .map(|(peer, scope)| (*peer, scope.clone(), false));
         registered.chain(unregistered)
     }
 
@@ -3714,7 +3758,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_route_event_history(
         &mut self,
-        peer: Option<(PeerId, Option<&str>)>,
+        peer: Option<(IpAddr, Option<&str>)>,
         afi: Option<Afi>,
         prefix: Option<Prefix>,
         limit: usize,
@@ -3759,7 +3803,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_evpn_route_event_history(
         &mut self,
-        peer: Option<PeerId>,
+        peer: Option<IpAddr>,
         route_type: Option<u8>,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
         event_types: &std::collections::BTreeSet<RouteEventType>,
@@ -4227,11 +4271,42 @@ impl RibManager {
     }
 }
 
-/// An export walk destination with whether it is registered for outbound
-/// updates. Each destination is listed once, so the order is the
-/// destination order; a cursor compares with the flag set, which skips its
-/// destination either way.
-type ExportCandidate = (IpAddr, Option<Arc<str>>, bool);
+/// A destination of an export walk: the address, the scope of a scoped
+/// neighbor, and the neighbor when a session is registered for it. Walks
+/// order by address, then scope, then unregistered before registered. A
+/// cursor compares as registered, so it skips its destination in either form.
+#[derive(Debug, Clone)]
+struct ExportCandidate {
+    addr: IpAddr,
+    scope: Option<Arc<str>>,
+    peer: Option<PeerId>,
+}
+
+impl ExportCandidate {
+    fn order_key(&self) -> (IpAddr, Option<&str>, bool) {
+        (self.addr, self.scope.as_deref(), self.peer.is_some())
+    }
+}
+
+impl PartialEq for ExportCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.order_key() == other.order_key()
+    }
+}
+
+impl Eq for ExportCandidate {}
+
+impl PartialOrd for ExportCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ExportCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.order_key().cmp(&other.order_key())
+    }
+}
 
 /// Fingerprint of the local route state that export reads for every
 /// queried key, absent routes included, for [`RouteExportVersion::route`].

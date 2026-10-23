@@ -113,7 +113,7 @@ fn send_update_group_snapshot(
 static SNAPSHOT_PEER_ORDER_KEY_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-fn snapshot_peer_order_key(peer: &PeerId) -> [u8; 17] {
+fn snapshot_peer_order_key(peer: PeerId) -> [u8; 17] {
     #[cfg(test)]
     SNAPSHOT_PEER_ORDER_KEY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -136,7 +136,7 @@ fn materialize_update_group_snapshot(
     if reply.is_closed() {
         return None;
     }
-    peers.sort_by_key(snapshot_peer_order_key);
+    peers.sort_by_key(|peer| snapshot_peer_order_key(*peer));
 
     let mut rows = Vec::with_capacity(peers.len());
     for &peer in peers.iter() {

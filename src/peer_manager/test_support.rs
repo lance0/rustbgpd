@@ -169,6 +169,7 @@ impl PeerManager {
             ),
         );
         self.register_session(session_id, &key);
+        self.retain_neighbor_counters(&key);
         acks
     }
 }

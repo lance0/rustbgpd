@@ -18,6 +18,20 @@ use crate::import_roster::{ImportRoster, ImportRosterReader};
 use crate::peer_types::PeerKey;
 
 /// IPv6 link-local addresses are the only scoped neighbor addresses.
+/// The RIB identity of the neighbor at `address` (on `interface` when one is
+/// given), from the peer manager's roster. A standalone service without a
+/// roster uses the address's pinned identity, as its sessions do.
+pub(crate) fn rib_peer(
+    roster: Option<&ImportRosterReader>,
+    address: IpAddr,
+    interface: Option<&str>,
+) -> rustbgpd_rib::PeerId {
+    roster.map_or_else(
+        || rustbgpd_rib::PeerId::from_addr(address),
+        |roster| roster.load().rib_peer(address, interface),
+    )
+}
+
 pub(crate) fn is_scoped_address(address: IpAddr) -> bool {
     matches!(address, IpAddr::V6(v6) if v6.is_unicast_link_local())
 }
@@ -159,6 +173,16 @@ pub(crate) fn require_current_scope<'a>(
     }
 }
 
+/// [`parse_neighbor`] resolved to the neighbor's RIB identity.
+pub(crate) fn parse_neighbor_rib_peer(
+    field: &str,
+    value: &str,
+    roster: Option<&ImportRosterReader>,
+) -> Result<Option<rustbgpd_rib::PeerId>, Status> {
+    Ok(parse_neighbor(field, value, "", roster)?
+        .map(|key| rib_peer(roster, key.address, key.interface.as_deref())))
+}
+
 /// [`parse_neighbor`] for a required selector.
 pub(crate) fn require_neighbor(
     field: &str,
@@ -168,15 +192,6 @@ pub(crate) fn require_neighbor(
 ) -> Result<PeerKey, Status> {
     parse_neighbor(field, value, interface, roster)?
         .ok_or_else(|| Status::invalid_argument(format!("{field} is required")))
-}
-
-/// The address of an optional selector, for state keyed by address.
-pub(crate) fn parse_neighbor_address(
-    field: &str,
-    value: &str,
-    roster: Option<&ImportRosterReader>,
-) -> Result<Option<IpAddr>, Status> {
-    Ok(parse_neighbor(field, value, "", roster)?.map(|key| key.address))
 }
 
 /// The address to echo for a selector: the request's own text for a
@@ -234,6 +249,7 @@ mod tests {
                 key: PeerKey::new(address.parse().unwrap(), interface.map(str::to_string)),
                 session_id: 1,
                 publication: tokio::sync::watch::channel(None).1,
+                rib_peer: rustbgpd_transport::RibPeerSlot::default(),
             })
             .collect();
         let publisher = crate::import_roster::test_support::publisher(peers, Vec::new());

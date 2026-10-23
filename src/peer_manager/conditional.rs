@@ -5,7 +5,6 @@
 //! restores a captured install on compensation, and reconciles it after
 //! config mutations that do not install it explicitly.
 
-use rustbgpd_rib::PeerId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -156,7 +155,7 @@ impl PeerManager {
         datasets: &[String],
     ) -> bool {
         self.conditional_advertisements
-            .advertise_policy_references(PeerId::from_addr(peer), datasets)
+            .advertise_policy_references(peer, datasets)
     }
 
     /// Re-observe conditions whose `condition_policy` reads a swapped

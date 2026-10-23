@@ -443,10 +443,18 @@ impl AdmittedRecovery {
         self.index(peer).is_ok()
     }
 
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
     pub(in crate::manager) fn contains_key(&self, peer: &PeerId) -> bool {
         self.get(peer).is_some()
     }
 
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
     pub(in crate::manager) fn get(&self, peer: &PeerId) -> Option<AdmittedKeyView<'_>> {
         let record = &self.records[self.index(*peer).ok()?];
         if record.state != State::Complete {
@@ -469,6 +477,10 @@ impl AdmittedRecovery {
     }
 
     #[cfg(test)]
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
     pub(in crate::manager) fn owned_proof(&self, peer: &PeerId) -> Option<AdmittedKeys> {
         self.get(peer).map(|proof| proof.iter().collect())
     }
@@ -1989,6 +2001,10 @@ impl AdmittedRecovery {
         Ok(true)
     }
 
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
     pub(in crate::manager) fn remove_with_checkpoint(
         &mut self,
         peer: &PeerId,
@@ -2074,6 +2090,10 @@ impl AdmittedRecovery {
         self.apply_admitted_with_checkpoint(peer, announcements, withdrawals, &mut |_| {})
     }
 
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
     pub(in crate::manager) fn remove(&mut self, peer: &PeerId) -> bool {
         self.remove_with_checkpoint(peer, &mut |_| {})
     }

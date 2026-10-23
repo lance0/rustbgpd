@@ -632,6 +632,11 @@ pub struct PeerManager {
     /// deleted, like its Prometheus series, so a reconfigure that re-adds
     /// the neighbor keeps counting.
     neighbor_counters: BTreeMap<PeerKey, rustbgpd_transport::NeighborCounters>,
+    /// RIB identity slots by neighbor key, shared with every session spawned
+    /// for that neighbor. Like the counter blocks, a slot lives until the
+    /// neighbor is deleted, so a reconfigure keeps the neighbor's `PeerId`;
+    /// a deletion releases it, so a re-added neighbor gets a new one.
+    rib_peers: BTreeMap<PeerKey, rustbgpd_transport::RibPeerSlot>,
     /// Maximum dynamic peers allowed. Default 100.
     dynamic_neighbor_limit: u32,
     /// ADR-0120 per-source accept-rate limiter. `None` when
@@ -1243,6 +1248,10 @@ impl PeerManager {
         clippy::too_many_arguments,
         reason = "configured peer construction keeps all explicit lifecycle dependencies visible"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one initializer per manager field; splitting would scatter the constructor"
+    )]
     pub fn new_with_config(
         rx: mpsc::Receiver<PeerManagerCommand>,
         internal_rx: mpsc::Receiver<InternalCommand>,
@@ -1324,6 +1333,7 @@ impl PeerManager {
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
             neighbor_counters: BTreeMap::new(),
+            rib_peers: BTreeMap::new(),
             dynamic_neighbor_limit: current_config.effective_dynamic_neighbor_limit(),
             inbound_admission: admission::InboundAdmission::from_config(
                 &current_config.inbound_admission,

@@ -1,4 +1,3 @@
-use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
@@ -241,7 +240,7 @@ impl PeerManager {
         let live = snapshot
             .peers
             .into_iter()
-            .map(|row| (row.peer, row))
+            .map(|row| (row.peer.addr(), row))
             .collect::<BTreeMap<_, _>>();
         let peers = current
             .keys()
@@ -254,7 +253,7 @@ impl PeerManager {
         for peer in peers {
             let current_cfg = current.get(&peer);
             let candidate_cfg = candidate.get(&peer);
-            let live = live.get(&PeerId::from_addr(peer));
+            let live = live.get(&peer);
             let current_state = if current_cfg.is_none() {
                 PlannedGroupability::Absent
             } else {
@@ -344,7 +343,7 @@ impl PeerManager {
                 other => other.label(),
             };
             entries.push(UpdateGroupFamilyImpact {
-                peer: PeerId::from_addr(peer),
+                peer,
                 afi,
                 safi,
                 current,
@@ -497,7 +496,7 @@ mod tests {
         assert!(!requires_local_resync(&deleted, true));
 
         let entries = [UpdateGroupFamilyImpact {
-            peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
+            peer: "192.0.2.1".parse().unwrap(),
             afi: 1,
             safi: 1,
             current: PlannedGroupability::Group {

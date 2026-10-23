@@ -7,6 +7,7 @@ use std::net::Ipv4Addr;
 
 use rustbgpd_wire::{AsPath, AspaValidation, COMMUNITY_LLGR_STALE, RpkiValidation};
 
+use crate::PeerId;
 use crate::route::{Route, RouteOrigin};
 
 /// Numeric preference for RPKI validation state: higher = more preferred.
@@ -121,8 +122,11 @@ pub(crate) fn compare_bgp_identifier(
 ) -> Option<(Ordering, BestPathReason)> {
     let id_a = effective_bgp_identifier(a.0, a.1, a.2);
     let id_b = effective_bgp_identifier(b.0, b.1, b.2);
-    // `Option` orders `None` (locally originated) before any identifier.
-    let cmp = id_a.cmp(&id_b);
+    // `Option` orders `None` (locally originated) before any identifier;
+    // the bits order like the octets without a byte-wise compare.
+    let cmp = id_a
+        .map(Ipv4Addr::to_bits)
+        .cmp(&id_b.map(Ipv4Addr::to_bits));
     if cmp == Ordering::Equal {
         return None;
     }
@@ -287,12 +291,22 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
         return (cmp, BestPathReason::ShorterClusterList);
     }
 
-    let cmp = a.peer.addr().cmp(&b.peer.addr());
+    peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id))
+}
+
+/// The final selection step every family shares: the lower peer endpoint
+/// (numeric address, then interface name compared bytewise, so two
+/// neighbors on one link-local address order by interface), then, for two
+/// paths from the same peer, the lower inbound Add-Path identifier. The
+/// identifier has no preference semantics (RFC 7911 §2); it only makes
+/// distinct same-peer routes a total order. Never the `PeerId` order, so
+/// configuration and connection order cannot move the winner.
+pub(crate) fn peer_tiebreak(a: (PeerId, u32), b: (PeerId, u32)) -> (Ordering, BestPathReason) {
+    let cmp = a.0.cmp_selection(b.0);
     if cmp != Ordering::Equal {
         return (cmp, BestPathReason::LowerPeerAddress);
     }
-
-    (a.path_id.cmp(&b.path_id), BestPathReason::LowerPathId)
+    (a.1.cmp(&b.1), BestPathReason::LowerPathId)
 }
 
 /// Compare two routes under RFC 9107 ORR and return the decisive reason.
@@ -462,7 +476,7 @@ pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> 
             format!(
                 "peer {} {} {}",
                 a.peer,
-                cmp_symbol(&a.peer, &b.peer),
+                cmp_symbol(&a.peer.addr(), &b.peer.addr()),
                 b.peer
             )
         }
@@ -675,13 +689,16 @@ fn cmp_chain(
         return cmp;
     }
 
-    // 6. Lowest peer address, then inbound Add-Path identifier. The
-    // identifier has no preference semantics (RFC 7911 §2); this last
-    // comparison only makes distinct same-peer routes a total order.
-    a.peer
-        .addr()
-        .cmp(&b.peer.addr())
-        .then_with(|| a.path_id.cmp(&b.path_id))
+    // 6. Lowest peer endpoint, then inbound Add-Path identifier.
+    route_peer_tiebreak(a, b)
+}
+
+/// [`peer_tiebreak`] for two unicast routes, out of line: the endpoint
+/// comparison would otherwise grow [`cmp_chain`] past the size at which its
+/// callers inline it, slowing every comparison an earlier step decides.
+#[inline(never)]
+fn route_peer_tiebreak(a: &Route, b: &Route) -> Ordering {
+    peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
 }
 
 /// Whether `other` is co-installable with the best route `best` as an
@@ -1134,37 +1151,52 @@ mod tests {
         r
     }
 
-    /// Pins today's tie-break for two neighbors that share one IPv6
-    /// link-local address on different interfaces (config validation still
-    /// rejects the pair). Equal on every attribute, without Add-Path, the
-    /// comparators fall through to the peer address and cannot order them
-    /// even though each route records its own interface. The scoped
-    /// tie-break must turn this red.
+    /// Two neighbors that share one IPv6 link-local address on different
+    /// interfaces, equal on every attribute and without Add-Path, order by
+    /// interface name (bytewise) after the equal address, in every
+    /// comparator and whichever was allocated first. Before the scoped
+    /// tie-break they compared `Equal`, so the candidate order picked the
+    /// winner. Two paths from one of them still order by path id.
     #[test]
-    fn same_link_local_address_on_two_interfaces_compares_equal() {
-        let context = rustbgpd_wire::AspaValidationContext {
-            neighbor_asn: Some(65001),
-            local_role: None,
-            first_as_check_exempt: false,
-        };
-        let on = |interface: &str| {
-            let mut route = base_route(Ipv4Addr::new(1, 0, 0, 1));
-            route.peer = PeerId::from_addr("fe80::1".parse().unwrap());
-            route.aspa_context =
-                crate::route::AspaContextId::intern_scoped(context, Some(interface));
-            route
-        };
-        let (eth0, eth1) = (on("eth0"), on("eth1"));
-        assert_eq!(eth0.peer_interface().as_deref(), Some("eth0"));
-        assert_eq!(eth1.peer_interface().as_deref(), Some("eth1"));
-
-        for (a, b) in [(&eth0, &eth1), (&eth1, &eth0)] {
-            assert_eq!(best_path_cmp(a, b), Ordering::Equal);
-            assert_eq!(best_path_cmp_orr(a, b, Some(10), Some(10)), Ordering::Equal);
+    fn same_link_local_address_on_two_interfaces_orders_by_interface_name() {
+        for names in [["eth1", "eth0"], ["eth0", "eth1"]] {
+            let handles = names.map(|name| {
+                PeerId::allocate(crate::PeerEndpoint::new(
+                    "fe80::1".parse().unwrap(),
+                    Some(name),
+                ))
+            });
+            let on = |name: &str| {
+                let mut route = base_route(Ipv4Addr::new(1, 0, 0, 1));
+                route.peer = handles[names.iter().position(|n| *n == name).unwrap()];
+                route
+            };
+            let (eth0, eth1) = (on("eth0"), on("eth1"));
+            assert_eq!(best_path_cmp(&eth0, &eth1), Ordering::Less);
+            assert_eq!(best_path_cmp(&eth1, &eth0), Ordering::Greater);
             assert_eq!(
-                best_path_cmp_with_reason(a, b),
-                (Ordering::Equal, BestPathReason::LowerPathId)
+                best_path_cmp_orr(&eth0, &eth1, Some(10), Some(10)),
+                Ordering::Less
             );
+            assert_eq!(
+                best_path_cmp_with_reason(&eth0, &eth1),
+                (Ordering::Less, BestPathReason::LowerPeerAddress)
+            );
+            assert_eq!(
+                best_path_cmp_orr_with_reason(&eth1, &eth0, Some(10), Some(10)),
+                (Ordering::Greater, BestPathReason::LowerPeerAddress)
+            );
+            let mut eth0_second = eth0.clone();
+            eth0_second.path_id = 7;
+            assert_eq!(
+                best_path_cmp_with_reason(&eth0, &eth0_second),
+                (Ordering::Less, BestPathReason::LowerPathId)
+            );
+            // The interface decides even against a lower path id.
+            assert_eq!(best_path_cmp(&eth0_second, &eth1), Ordering::Less);
+            for handle in handles {
+                assert!(handle.release());
+            }
         }
     }
 

@@ -23,7 +23,7 @@ use crate::route::{FlowSpecRoute, Route, RouteOrigin};
 
 /// The RIB identity of the IPv4 neighbor at `addr`.
 pub(crate) const fn peer_v4(addr: Ipv4Addr) -> crate::PeerId {
-    crate::PeerId::from_addr(IpAddr::V4(addr))
+    crate::PeerId::from_ipv4(addr)
 }
 
 /// The BGP Identifier of the session peer at `peer`: the address itself

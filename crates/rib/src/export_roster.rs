@@ -198,20 +198,26 @@ async fn capture_export_until(
     peer: Option<PeerId>,
     mut expired: impl FnMut(usize) -> bool,
 ) -> Result<Vec<ExportPolicyTermHits>, ExportCaptureError> {
-    let selected: Vec<(Option<PeerId>, &Arc<PolicyHitCounters>)> = match peer {
-        Some(peer) => roster
+    let selected: Vec<(Option<PeerId>, &Arc<PolicyHitCounters>)> = if let Some(peer) = peer {
+        roster
             .for_peer(peer)
             .map(|counters| (Some(peer), counters))
             .into_iter()
-            .collect(),
-        None => roster
+            .collect()
+    } else {
+        let mut peers: Vec<_> = roster
             .peers
             .iter()
             .filter_map(|(peer, counters)| {
                 counters.as_ref().map(|counters| (Some(*peer), counters))
             })
+            .collect();
+        // Rows list peers in address order, not handle order.
+        peers.sort_by_cached_key(|(peer, _)| peer.map(PeerId::addr));
+        peers
+            .into_iter()
             .chain(roster.global.iter().map(|counters| (None, counters)))
-            .collect(),
+            .collect()
     };
     let mut rows = Vec::with_capacity(selected.len());
     let mut read = 0_usize;

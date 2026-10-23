@@ -2389,8 +2389,8 @@ fn evpn_event_macip(
         key: route.key(),
         best: Some(route.clone()),
         previous_best: None,
-        peer: Some(PeerId::from_addr(ipa(peer_addr))),
-        previous_peer: previous_peer.map(PeerId::from_addr),
+        peer: Some(ipa(peer_addr)),
+        previous_peer,
         timestamp_unix_ms: 0,
     }
 }
@@ -2604,7 +2604,7 @@ async fn handle_evpn_event_lower_seq_different_rd_does_not_displace_winner() {
         key: pe_b.key(),
         best: Some(pe_b),
         previous_best: None,
-        peer: Some(PeerId::from_addr(ipa("10.0.0.3"))),
+        peer: Some(ipa("10.0.0.3")),
         previous_peer: None,
         timestamp_unix_ms: 0,
     };
@@ -2671,7 +2671,7 @@ async fn handle_evpn_event_non_winning_withdrawn_keeps_winning_view() {
         best: None,
         previous_best: Some(pe_b_prior),
         peer: None,
-        previous_peer: Some(PeerId::from_addr(ipa("10.0.0.3"))),
+        previous_peer: Some(ipa("10.0.0.3")),
         timestamp_unix_ms: 0,
     };
 
@@ -2727,7 +2727,7 @@ async fn handle_evpn_event_non_macip_does_not_repoll() {
         key: imet_key,
         best: None,
         previous_best: None,
-        peer: Some(PeerId::from_addr(ipa("10.0.0.2"))),
+        peer: Some(ipa("10.0.0.2")),
         previous_peer: None,
         timestamp_unix_ms: 0,
     };
@@ -2869,7 +2869,7 @@ async fn handle_evpn_event_withdrawn_clears_remote_view_when_rib_empty() {
         best: None,
         previous_best: Some(prior),
         peer: None,
-        previous_peer: Some(PeerId::from_addr(ipa("10.0.0.2"))),
+        previous_peer: Some(ipa("10.0.0.2")),
         timestamp_unix_ms: 0,
     };
 

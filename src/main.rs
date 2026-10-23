@@ -1070,7 +1070,7 @@ fn eor_grace_config(
             .map(|neighbor| &neighbor.transport_config)
             .filter(|transport| transport.peer.graceful_restart && transport.gr_eor_grace_time > 0)
             .map(|transport| rustbgpd_rib::EorGracePeerConfig {
-                peer: PeerId::from_addr(transport.remote_addr.ip()),
+                peer: transport.rib_peer.current(transport.remote_addr.ip()),
                 deadline: (start_time + Duration::from_secs(transport.gr_eor_grace_time.into()))
                     .min(restart_deadline),
                 families: transport
@@ -1617,7 +1617,7 @@ fn build_warm_checkpoint_plan(
                 session.peer
             ));
         }
-        let peer = PeerId::from_addr(session.peer.address);
+        let peer = session.rib_peer;
         for &(afi, safi) in &session.peer_gr_families {
             if !session.negotiated_families.contains(&(afi, safi)) {
                 continue;
@@ -4394,10 +4394,21 @@ async fn run<T>(
     // session starts. RFC 4724 restarting-speaker deferral must freeze this
     // roster up front; discovering peers incrementally after the first EoR
     // can release selection prematurely in a multi-peer topology.
-    let peer_configs = config.resolved_neighbors().unwrap_or_else(|e| {
+    let mut peer_configs = config.resolved_neighbors().unwrap_or_else(|e| {
         error!(error = %e, "invalid policy configuration");
         process::exit(1);
     });
+    // Allocate each static neighbor's RIB identity up front: the RIB's
+    // startup waiters below and the peer manager's sessions share it.
+    for neighbor in &mut peer_configs {
+        let transport = &mut neighbor.transport_config;
+        transport.rib_peer = rustbgpd_transport::RibPeerSlot::assigned(PeerId::allocate(
+            rustbgpd_rib::PeerEndpoint::new(
+                transport.remote_addr.ip(),
+                transport.peer_interface.as_deref(),
+            ),
+        ));
+    }
 
     // Resolve every validated policy/EVPN startup derivation before the first
     // teardown-owned actor starts. A second failure after config validation is
@@ -4754,7 +4765,10 @@ async fn run<T>(
             .iter()
             .filter(|neighbor| neighbor.transport_config.peer.graceful_restart)
             .map(|neighbor| rustbgpd_rib::SelectionDeferralWaiterConfig {
-                peer: PeerId::from_addr(neighbor.transport_config.remote_addr.ip()),
+                peer: neighbor
+                    .transport_config
+                    .rib_peer
+                    .current(neighbor.transport_config.remote_addr.ip()),
                 families: neighbor
                     .transport_config
                     .peer
@@ -5100,7 +5114,17 @@ async fn run<T>(
     )
     .with_local_forwarding_state(local_forwarding_state.clone())
     .with_readiness_queries(peer_mgr_readiness_rx)
-    .with_operator_queries(peer_mgr_operator_rx);
+    .with_operator_queries(peer_mgr_operator_rx)
+    .with_rib_peers(peer_configs.iter().map(|neighbor| {
+        let transport = &neighbor.transport_config;
+        (
+            rustbgpd_api::peer_types::PeerKey::new(
+                transport.remote_addr.ip(),
+                transport.peer_interface.clone(),
+            ),
+            transport.rib_peer.clone(),
+        )
+    }));
     let peer_mgr = if let Some((_, accepted_identity_rx)) = &accepted_watch {
         peer_mgr.with_accepted_identity(accepted_identity_rx.clone())
     } else {
@@ -10802,6 +10826,7 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
     fn checkpoint_plan_session() -> WarmCheckpointSession {
         WarmCheckpointSession {
             peer: rustbgpd_api::peer_types::PeerKey::new("10.0.0.2".parse().unwrap(), None),
+            rib_peer: PeerId::from_addr("10.0.0.2".parse().unwrap()),
             session_id: 41,
             peer_asn: 65002,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),

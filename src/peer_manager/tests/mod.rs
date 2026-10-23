@@ -521,6 +521,7 @@ fn insert_test_managed_peer_for_key(
         ),
     );
     mgr.register_session(session_id, peer_key);
+    mgr.retain_neighbor_counters(peer_key);
 }
 
 /// Capture every managed peer's import counters from the published roster

@@ -785,6 +785,32 @@ impl RibManager {
         );
     }
 
+    /// Move a live neighbor to a new endpoint. Whatever its previous
+    /// endpoint's sessions left in the RIB (routes retained for Graceful
+    /// Restart or LLGR, registrations) is torn down first, as a session down
+    /// before the new endpoint's session comes up: a retained route keeps
+    /// resolving to the endpoint it was learned on until it is gone, and the
+    /// handle resolves to the new endpoint only afterwards.
+    pub(super) fn handle_rebind_peer(&mut self, peer: PeerId, endpoint: crate::PeerEndpoint) {
+        let Some(previous) = peer.endpoint().filter(|_| peer.is_live()) else {
+            debug!(%peer, "ignoring a rebind for a deleted neighbor's handle");
+            return;
+        };
+        if previous == endpoint {
+            return;
+        }
+        info!(
+            %peer,
+            previous = %previous,
+            next = %endpoint,
+            "neighbor endpoint changed: purging state retained from the previous endpoint"
+        );
+        // Idempotent, and it covers every family's retained routes.
+        self.peer_down_teardown(peer);
+        // Live: checked above, and only this actor releases handles.
+        let _ = peer.rebind(endpoint);
+    }
+
     /// Clear the per-session outbound state shared by the `PeerDown` and
     /// graceful-restart teardown paths. Keeping ONE list prevents the two
     /// cleanup sites from drifting — the GR path historically missed maps

@@ -102,7 +102,7 @@ fn install_set(
         definitions: vec![definition],
         attachments: peers
             .iter()
-            .map(|peer| (ip(*peer), vec![Arc::from(NAME)]))
+            .map(|peer| (ip(*peer).addr(), vec![Arc::from(NAME)]))
             .collect(),
     }
 }

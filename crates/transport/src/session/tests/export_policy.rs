@@ -360,3 +360,46 @@ async fn export_policy_accepted_before_establishment_rides_peer_up() {
     };
     assert_eq!(export_policy, Some(next));
 }
+
+/// A dynamic neighbor gets its RIB handle only once its OPEN validates. An
+/// export-policy update while the connection waits for OPEN names no handle
+/// and allocates none; the session allocates at establishment.
+#[tokio::test]
+async fn an_export_policy_update_before_open_allocates_no_handle() {
+    let (mut session, mut rib_rx, _bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.rib_peer = crate::RibPeerSlot::allocate_after_open();
+    let (reply, accepted) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::UpdateExportPolicy {
+            policy: Some(Box::new(export_chain(PolicyAction::Permit))),
+            reply,
+        })
+        .await;
+    assert_eq!(accepted.await.unwrap(), Ok(()));
+    let RibUpdate::SetPeerSessionExportPolicy { peer, .. } = rib_rx.recv().await.unwrap() else {
+        panic!("expected the accepting session's policy update");
+    };
+    assert_eq!(peer, PeerId::UNASSIGNED);
+    assert_eq!(session.config.rib_peer.get(), None, "nothing allocated");
+
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session
+        .execute_actions(vec![Action::SessionEstablished(Box::new(
+            negotiated_session(65002, false),
+        ))])
+        .await;
+    let RibUpdate::PeerUp { peer, .. } = recv_peer_up_after_export_context(&mut rib_rx).await
+    else {
+        unreachable!("the helper returns PeerUp");
+    };
+    let allocated = session
+        .config
+        .rib_peer
+        .get()
+        .expect("allocated at establishment");
+    assert_eq!(peer, allocated);
+    assert!(allocated.is_live());
+    assert_ne!(allocated, PeerId::from_addr(session.peer_ip));
+    assert!(allocated.release());
+}

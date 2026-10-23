@@ -1522,14 +1522,16 @@ mod tests {
 
     use super::*;
 
-    /// Both per-copy fields shrank: `aspa_context` from a 12-byte context to
-    /// a 2-byte id, `received_at` from a 16-byte `Instant` to a 4-byte stamp.
-    /// Every RIB layer stores full `Route` bodies, so this is paid per path.
+    /// Per-copy fields shrank: `aspa_context` from a 12-byte context to a
+    /// 2-byte id, `received_at` from a 16-byte `Instant` to a 4-byte stamp,
+    /// and `peer` from a 17-byte address to an 8-byte handle. Every RIB layer
+    /// stores full `Route` bodies, so this is paid per path.
     #[test]
-    fn route_layout_is_112_bytes() {
+    fn route_layout_is_104_bytes() {
         assert_eq!(size_of::<ReceivedAt>(), 4);
         assert_eq!(size_of::<AspaContextId>(), 2);
-        assert_eq!(size_of::<Route>(), 112);
+        assert_eq!(size_of::<crate::PeerId>(), 8);
+        assert_eq!(size_of::<Route>(), 104);
     }
 
     #[test]

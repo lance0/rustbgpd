@@ -703,6 +703,8 @@ impl std::fmt::Debug for RuntimeConfigSnapshotReply {
 pub struct WarmCheckpointSession {
     /// Unambiguous configured peer identity (V1 admits numbered peers only).
     pub peer: PeerKey,
+    /// The peer's RIB identity.
+    pub rib_peer: rustbgpd_rib::PeerId,
     /// Peer-manager generation of the exact active transport session.
     pub session_id: u64,
     /// Remote ASN negotiated in the current OPEN exchange.

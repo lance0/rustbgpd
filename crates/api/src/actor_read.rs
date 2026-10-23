@@ -1,6 +1,5 @@
 //! Shared transport boundary for read-only requests to the state-owning actors.
 
-use rustbgpd_rib::PeerId;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -88,6 +87,7 @@ impl KnownPeerQueries {
         }
         // Snapshot before either actor read: completion may race their replies.
         let initial_roster_pending = self.daemon_gate.initial_roster_pending();
+        let rib_peer = crate::peer_selector::rib_peer(self.roster.as_ref(), address, None);
         let known = tokio::time::timeout(PEER_MANAGER_READ_TIMEOUT, async {
             let managed = peer_manager_operator_read(
                 &self.peer_manager,
@@ -99,7 +99,7 @@ impl KnownPeerQueries {
                 return Ok(true);
             }
             let retained = rib_manager_read(&self.rib, |reply| RibUpdate::QueryPeerRetainedStale {
-                peer: PeerId::from_addr(address),
+                peer: rib_peer,
                 reply,
             })
             .await?;
@@ -197,7 +197,7 @@ pub(crate) fn mock_known_peer_queries(managed: IpAddr, retained: IpAddr) -> Know
             let RibUpdate::QueryPeerRetainedStale { peer, reply } = update else {
                 panic!("known-peer check sends only QueryPeerRetainedStale");
             };
-            let _ = reply.send(if peer == PeerId::from_addr(retained) {
+            let _ = reply.send(if peer == rustbgpd_rib::PeerId::from_addr(retained) {
                 3
             } else {
                 0

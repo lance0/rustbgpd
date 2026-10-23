@@ -692,8 +692,8 @@ impl RibManager {
                         continue;
                     }
                 };
-                let previous_peer = previous_best.as_ref().map(|r| r.peer);
-                let peer = new_best.as_ref().map(|r| r.peer);
+                let previous_peer = previous_best.as_ref().map(|r| r.peer.addr());
+                let peer = new_best.as_ref().map(|r| r.peer.addr());
                 if rustbgpd_wire::is_dataplane_route_type(key.route_type()) {
                     match (previous_best.is_some(), new_best.is_some()) {
                         (false, true) => {

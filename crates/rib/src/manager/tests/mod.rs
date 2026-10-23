@@ -1327,7 +1327,7 @@ async fn query_route_event_history(
 ) -> Vec<crate::event::RouteEvent> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryRouteEventHistory {
-        peer,
+        peer: peer.map(PeerId::addr),
         peer_interface: None,
         afi,
         prefix,
@@ -1453,6 +1453,7 @@ mod outbound_commit_accounting;
 mod outbound_prefix_limits;
 mod outbound_resync_state;
 mod paged_query;
+mod peer_identity;
 mod per_client_best;
 mod policy;
 mod ready_drain;

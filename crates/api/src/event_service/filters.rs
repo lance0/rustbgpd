@@ -1,4 +1,3 @@
-use rustbgpd_rib::PeerId;
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 
@@ -41,7 +40,7 @@ impl WatchEventsFilter {
         }
 
         if let Some(peer) = &self.peer
-            && !event.involves(PeerId::from_addr(peer.address), peer.interface.as_deref())
+            && !event.involves(peer.address, peer.interface.as_deref())
         {
             return false;
         }
@@ -255,8 +254,8 @@ impl WatchEventsFilter {
 
         // EVPN events carry bare addresses; see the dataplane note above.
         if let Some(peer) = &self.peer {
-            let matches_current = event.peer == Some(PeerId::from_addr(peer.address));
-            let matches_previous = event.previous_peer == Some(PeerId::from_addr(peer.address));
+            let matches_current = event.peer == Some(peer.address);
+            let matches_previous = event.previous_peer == Some(peer.address);
             if !matches_current && !matches_previous {
                 return false;
             }

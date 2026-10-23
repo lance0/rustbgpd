@@ -624,8 +624,8 @@ async fn replace_peer_export_policy_resyncs_outbound_state_and_emits_policy_filt
         .filter(|event| event.event_type == RouteEventType::PolicyFiltered)
         .collect::<Vec<_>>();
     assert_eq!(policy_filtered.len(), 1);
-    assert_eq!(policy_filtered[0].peer, Some(source));
-    assert_eq!(policy_filtered[0].target_peer, Some(target));
+    assert_eq!(policy_filtered[0].peer, Some(source.addr()));
+    assert_eq!(policy_filtered[0].target_peer, Some(target.addr()));
     assert_eq!(policy_filtered[0].reason, "policy_denied");
     assert_eq!(policy_filtered[0].peer_interface().as_deref(), Some("eth0"));
     assert_eq!(
@@ -1781,8 +1781,8 @@ async fn single_best_policy_added_no_advertise_emits_policy_filtered_event() {
         1,
         "policy-added NO_ADVERTISE must record a policy-filtered entry"
     );
-    assert_eq!(policy_filtered[0].peer, Some(source));
-    assert_eq!(policy_filtered[0].target_peer, Some(target));
+    assert_eq!(policy_filtered[0].peer, Some(source.addr()));
+    assert_eq!(policy_filtered[0].target_peer, Some(target.addr()));
     assert_eq!(policy_filtered[0].reason, "policy_denied");
 
     // The route itself was withheld — nothing was announced to the peer.
@@ -1901,7 +1901,8 @@ async fn grouped_join_inherits_group_export_policy_denials() {
     let policy_filtered = history
         .iter()
         .filter(|event| {
-            event.event_type == RouteEventType::PolicyFiltered && event.target_peer == Some(joiner)
+            event.event_type == RouteEventType::PolicyFiltered
+                && event.target_peer == Some(joiner.addr())
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -1909,7 +1910,7 @@ async fn grouped_join_inherits_group_export_policy_denials() {
         1,
         "the joiner inherits the group denial"
     );
-    assert_eq!(policy_filtered[0].peer, Some(source));
+    assert_eq!(policy_filtered[0].peer, Some(source.addr()));
 
     drop(tx);
     handle.await.unwrap();

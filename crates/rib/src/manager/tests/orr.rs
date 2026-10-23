@@ -2488,7 +2488,9 @@ async fn conditional_advertisement_gates_the_orr_winner_after_earlier_gates() {
             condition_policy: None,
             settle_time: Duration::ZERO,
         }],
-        attachments: [(client, vec![Arc::from("backup")])].into_iter().collect(),
+        attachments: [(client.addr(), vec![Arc::from("backup")])]
+            .into_iter()
+            .collect(),
     };
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(

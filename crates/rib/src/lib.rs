@@ -91,7 +91,7 @@ pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
     OrrState, OrrStatusSnapshot, OrrTopology, OrrTopologySnapshot, OrrVantageStatus, SpfResult,
 };
-pub use peer_id::PeerId;
+pub use peer_id::{PeerEndpoint, PeerId};
 pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
     FibInstallNextHop, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey, LabeledRibRoute,

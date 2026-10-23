@@ -72,3 +72,8 @@ required-features = ["bench-internals"]
 name = "gr_end_of_rib"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "contested_prefix_scoped"
+harness = false
+required-features = ["bench-internals"]

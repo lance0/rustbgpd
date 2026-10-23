@@ -1005,9 +1005,18 @@ struct AcceptedTransport {
 }
 
 impl PeerSession {
-    /// This session's neighbor identity in the RIB.
+    /// This session's neighbor identity in the RIB. A dynamic neighbor gets
+    /// its handle only once an OPEN validates; before that every caller
+    /// reads the slot without allocating, so an unvalidated connection names
+    /// [`PeerId::UNASSIGNED`] (which the RIB drops) and never enters the
+    /// peer table.
     pub(super) fn rib_peer(&self) -> PeerId {
-        PeerId::from_addr(self.peer_ip)
+        if self.negotiated.is_none() && self.fsm.negotiated().is_none() {
+            return self.config.rib_peer.current(self.peer_ip);
+        }
+        self.config.rib_peer.resolve(|| {
+            rustbgpd_rib::PeerEndpoint::new(self.peer_ip, self.config.peer_interface.as_deref())
+        })
     }
 
     fn path_receive_admission(&self) -> Option<PathReceiveAdmission> {

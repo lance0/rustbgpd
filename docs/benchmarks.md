@@ -1155,12 +1155,12 @@ counts. The summary repeats the mode and result beside the row table.
 
 | Type | Size |
 |------|------|
-| `Route` | 112 bytes |
+| `Route` | 104 bytes |
 | `Prefix` | 18 bytes |
 | `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1552 bytes |
+| `AdjRibIn` | 1536 bytes |
 | `LocRib` | 1104 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
@@ -1208,6 +1208,11 @@ Each route keeps the id of the session that sent it, so routes retained
 across a graceful restart are still revalidated with their own session's
 context. Every RIB layer stores full `Route` bodies, so the 24 bytes are
 saved per stored path.
+
+`Route` then fell from 112 to 104 bytes when its peer identity changed from
+the 17-byte neighbor address to an 8-byte generational handle that a
+process-wide peer table resolves to the neighbor's address and interface.
+`AdjRibIn`, which records its own peer, fell from 1552 to 1536 bytes with it.
 
 `Route.attributes` is `Arc<AttrSet>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via

@@ -304,6 +304,7 @@ impl PeerTable {
                 key: key.clone(),
                 session_id: peer.session_id,
                 publication: peer.handle.import_policy_counters(),
+                rib_peer: peer.state.transport_config.rib_peer.clone(),
             })
             .collect();
         self.publisher.publish(peers, Arc::clone(&self.datasets));

@@ -788,6 +788,9 @@ impl PeerManager {
         let hold_time = Some(transport.peer.hold_time);
         let max_prefixes = transport.max_prefixes;
 
+        let (rib_peer, new_rib_peer) = self.static_rib_peer_slot(&peer_key);
+        transport.rib_peer = rib_peer;
+
         // Before the session's first emission: emitters that know only the
         // bare address (RIB, BFD, transport) label this neighbor's series
         // with its scoped value.
@@ -829,7 +832,7 @@ impl PeerManager {
         // BFD actor confirms the current permitted state through a resync ack
         // or a fresh transition.
         let withhold = enabled && self.bfd_should_withhold(&address);
-        let handle = self
+        let handle = match self
             .provision_new_peer_session(
                 &peer_key,
                 enabled,
@@ -838,9 +841,17 @@ impl PeerManager {
                 "static peer start failure",
             )
             .await
-            .map_err(|error| {
-                PeerLifecycleError::Internal(format!("failed to start peer: {error}"))
-            })?;
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                if new_rib_peer && let Some(peer) = transport.rib_peer.get() {
+                    self.release_unused_rib_peer(peer).await;
+                }
+                return Err(PeerLifecycleError::Internal(format!(
+                    "failed to start peer: {error}"
+                )));
+            }
+        };
 
         info!(peer = %address, %remote_asn, "peer added dynamically");
         let tcp_ao_protected = transport.tcp_ao.is_some();
@@ -2059,13 +2070,94 @@ impl PeerManager {
             .unwrap_or_default()
     }
 
-    /// Keep the installed neighbor's counter block until it is deleted.
+    /// Keep the installed neighbor's counter block and RIB identity slot
+    /// until it is deleted.
     pub(super) fn retain_neighbor_counters(&mut self, peer: &PeerKey) {
         if let Some(managed) = self.peers.get(peer) {
             self.neighbor_counters.insert(
                 peer.clone(),
                 managed.transport_config.neighbor_counters.clone(),
             );
+            self.rib_peers
+                .insert(peer.clone(), managed.transport_config.rib_peer.clone());
+        }
+    }
+
+    /// Seed the RIB identities the daemon allocated for its startup
+    /// neighbors, so the RIB's startup waiters and the sessions agree.
+    #[must_use]
+    pub(crate) fn with_rib_peers(
+        mut self,
+        peers: impl IntoIterator<Item = (PeerKey, rustbgpd_transport::RibPeerSlot)>,
+    ) -> Self {
+        self.rib_peers.extend(peers);
+        self
+    }
+
+    /// The RIB identity slot for a static neighbor: its retained (or seeded)
+    /// slot, or a newly allocated handle, flagged as new so a refused add can
+    /// release it.
+    fn static_rib_peer_slot(&self, peer: &PeerKey) -> (rustbgpd_transport::RibPeerSlot, bool) {
+        match self.rib_peers.get(peer) {
+            Some(slot) => (slot.clone(), false),
+            None => (
+                rustbgpd_transport::RibPeerSlot::assigned(PeerId::allocate(
+                    rustbgpd_rib::PeerEndpoint::new(peer.address, peer.interface.as_deref()),
+                )),
+                true,
+            ),
+        }
+    }
+
+    /// The handle the neighbor's sessions use in the RIB: its allocated one,
+    /// or [`PeerId::UNASSIGNED`] while a dynamic neighbor has none yet (its
+    /// OPEN has not validated) or for an unknown neighbor, which names no
+    /// RIB state.
+    pub(super) fn rib_peer_of(&self, peer: &PeerKey) -> PeerId {
+        self.rib_peers
+            .get(peer)
+            .or_else(|| {
+                self.peers
+                    .get(peer)
+                    .map(|managed| &managed.transport_config.rib_peer)
+            })
+            .map_or(PeerId::UNASSIGNED, |slot| slot.current(peer.address))
+    }
+
+    /// The RIB handle of the managed neighbor at `address`, or
+    /// [`PeerId::UNASSIGNED`] while it has none, which names no RIB state.
+    /// Address-keyed callers resolve through it; the duplicate-address guard
+    /// keeps the address unique among managed neighbors.
+    /// A neighbor removed from the table but not yet reaped (a retiring
+    /// dynamic neighbor) still resolves through its retained slot.
+    pub(super) fn rib_peer_at(&self, address: std::net::IpAddr) -> PeerId {
+        let retained = self
+            .rib_peers
+            .range(PeerKey::new(address, None)..)
+            .next()
+            .map(|(key, _)| key)
+            .filter(|key| key.address == address)
+            .cloned();
+        retained
+            .or_else(|| self.peer_keys_for_address(address).into_iter().next())
+            .map_or(PeerId::UNASSIGNED, |key| self.rib_peer_of(&key))
+    }
+
+    /// Release a handle the RIB never learned of (a refused add). Queued
+    /// behind anything a session might have sent, like a deletion's release.
+    async fn release_unused_rib_peer(&mut self, peer: PeerId) {
+        if self
+            .send_rib_update(
+                RibUpdate::ReleasePeer { peer },
+                OperatorReadAdmission::Fenced {
+                    reason: "a refused peer add is releasing its identity",
+                },
+            )
+            .await
+            .is_err()
+        {
+            // The RIB is gone, so nothing can still name the handle.
+            let _ = peer.release();
         }
     }
 
@@ -2080,7 +2172,12 @@ impl PeerManager {
     pub(super) async fn reap_deleted_peer_metric_series_for_key(&mut self, peer: &PeerKey) {
         // A deleted neighbor's counters end with it; a re-add starts at 0.
         self.neighbor_counters.remove(peer);
-        let address = peer.address;
+        // A peer installed without a retained slot (a test harness peer)
+        // ran on its standalone slot, which is its address's pinned handle.
+        let rib_peer = self.rib_peers.remove(peer).map_or_else(
+            || PeerId::from_addr(peer.address),
+            |slot| slot.current(peer.address),
+        );
         let peer_label = peer.label();
         self.publish_peer_lifecycle_event(
             peer,
@@ -2090,9 +2187,9 @@ impl PeerManager {
         self.metrics
             .reap_peer_identity_series(&peer_label, peer.interface.as_deref().unwrap_or(""));
         self.metrics.reap_peer_series(&peer_label);
-        // The RIB is keyed by bare address: a surviving peer on the same
-        // link-local address (another interface) still owns its state.
-        if self.peer_keys_for_address(address).is_empty() {
+        // A neighbor that never reached the RIB (a dynamic one whose OPEN
+        // never validated) has no handle and no RIB state.
+        if rib_peer != PeerId::UNASSIGNED {
             // The RIB manager emits bare-address series from its own
             // task; this marker is queued behind the session's final
             // `PeerDown`, so the RIB manager reaps again *after* its
@@ -2102,7 +2199,7 @@ impl PeerManager {
             let _ = self
                 .send_rib_update(
                     RibUpdate::PeerDeleted {
-                        peer: PeerId::from_addr(address),
+                        peer: rib_peer,
                         label: Some(peer_label.into()),
                     },
                     OperatorReadAdmission::Fenced {
@@ -2110,6 +2207,19 @@ impl PeerManager {
                     },
                 )
                 .await;
+            // An interface-only neighbor keeps its handle across endpoints;
+            // any other deletion returns it, after the cleanup above, so a
+            // re-added neighbor gets a new one and late messages are dropped.
+            if !self.unnumbered_holds(rib_peer) {
+                let _ = self
+                    .send_rib_update(
+                        RibUpdate::ReleasePeer { peer: rib_peer },
+                        OperatorReadAdmission::Fenced {
+                            reason: "the peer removal is partly applied",
+                        },
+                    )
+                    .await;
+            }
         }
     }
 
@@ -2397,6 +2507,7 @@ impl PeerManager {
         admission: OperatorReadAdmission,
     ) -> Result<Result<(), RibCommandError>, String> {
         let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
+        let rib_peer = self.rib_peer_at(peer);
         let timed_out = || {
             format!(
                 "outbound refresh for peer {peer} timed out after {:?}",
@@ -2415,7 +2526,7 @@ impl PeerManager {
             }
             let (reply, response) = oneshot::channel();
             permit.send(RibUpdate::RefreshPeerOutbound {
-                peer: PeerId::from_addr(peer),
+                peer: rib_peer,
                 reply,
             });
             response

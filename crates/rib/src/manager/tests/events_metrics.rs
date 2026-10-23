@@ -8,11 +8,15 @@ use crate::test_support::peer_v4;
 fn event_storage_layout_and_lazy_history_capacity_are_pinned() {
     use std::mem::size_of;
 
+    // Events name peers by the address they had when the event was built
+    // (17 B each), not by a handle whose endpoint can move.
     assert_eq!(size_of::<crate::event::RouteEvent>(), 120);
     // SMET widens the Copy key from 36 to 64 B while the full route stays
-    // 68 B; the millisecond `i64` event time replaced a 24 B `String`.
+    // 68 B; the millisecond `i64` event time replaced a 24 B `String`; the
+    // two routes' peer handles are 8 B where addresses were 17 B, and the
+    // event's own two peers are event-time addresses.
     // Neither Arc slots nor the lazy history's initial capacity grow.
-    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 416);
+    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 400);
     assert_eq!(size_of::<Arc<crate::event::RouteEvent>>(), 8);
     assert_eq!(size_of::<Arc<crate::event::EvpnRouteEvent>>(), 8);
 
@@ -135,7 +139,7 @@ async fn route_event_added_on_new_best() {
     assert_eq!(event.event_id, 1);
     assert_eq!(event.event_type, crate::event::RouteEventType::Added);
     assert_eq!(event.prefix, Prefix::V4(prefix));
-    assert_eq!(event.peer, Some(peer));
+    assert_eq!(event.peer, Some(peer.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -168,7 +172,7 @@ async fn route_event_history_records_events_without_subscriber() {
     assert_eq!(history[0].event_id, 1);
     assert_eq!(history[0].event_type, crate::event::RouteEventType::Added);
     assert_eq!(history[0].prefix, Prefix::V4(prefix));
-    assert_eq!(history[0].peer, Some(peer));
+    assert_eq!(history[0].peer, Some(peer.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -230,7 +234,7 @@ async fn route_event_history_records_withdrawn_events() {
     );
     assert_eq!(history[1].prefix, Prefix::V4(prefix));
     assert_eq!(history[1].peer, None);
-    assert_eq!(history[1].previous_peer, Some(peer));
+    assert_eq!(history[1].previous_peer, Some(peer.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -282,15 +286,15 @@ async fn route_event_history_filters_previous_peer_and_limit() {
     assert_eq!(history[0].event_id, 2);
     assert_eq!(history[0].event_type, crate::event::RouteEventType::Added);
     assert!(matches!(history[0].prefix, Prefix::V4(_)));
-    assert_eq!(history[0].peer, Some(peer1));
+    assert_eq!(history[0].peer, Some(peer1.addr()));
     assert_eq!(
         history[1].event_type,
         crate::event::RouteEventType::BestChanged
     );
     assert_eq!(history[1].event_id, 3);
     assert_eq!(history[1].prefix, Prefix::V4(prefix1));
-    assert_eq!(history[1].peer, Some(peer2));
-    assert_eq!(history[1].previous_peer, Some(peer1));
+    assert_eq!(history[1].peer, Some(peer2.addr()));
+    assert_eq!(history[1].previous_peer, Some(peer1.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -441,14 +445,14 @@ async fn route_event_history_prefix_peer_and_limit_interact() {
         history[0].event_type,
         crate::event::RouteEventType::BestChanged
     );
-    assert_eq!(history[0].peer, Some(peer2));
-    assert_eq!(history[0].previous_peer, Some(peer1));
+    assert_eq!(history[0].peer, Some(peer2.addr()));
+    assert_eq!(history[0].previous_peer, Some(peer1.addr()));
     assert_eq!(
         history[1].event_type,
         crate::event::RouteEventType::BestChanged
     );
-    assert_eq!(history[1].peer, Some(peer1));
-    assert_eq!(history[1].previous_peer, Some(peer2));
+    assert_eq!(history[1].peer, Some(peer1.addr()));
+    assert_eq!(history[1].previous_peer, Some(peer2.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -786,7 +790,7 @@ async fn route_event_best_changed_on_better_path() {
     let event = events_rx.recv().await.unwrap();
     assert_eq!(event.event_type, crate::event::RouteEventType::BestChanged);
     assert_eq!(event.prefix, Prefix::V4(prefix));
-    assert_eq!(event.peer, Some(peer2));
+    assert_eq!(event.peer, Some(peer2.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -870,7 +874,7 @@ async fn route_event_withdrawn_carries_previous_peer() {
     let event = events_rx.recv().await.unwrap();
     assert_eq!(event.event_type, RouteEventType::Withdrawn);
     assert!(event.peer.is_none());
-    assert_eq!(event.previous_peer, Some(peer));
+    assert_eq!(event.previous_peer, Some(peer.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -918,8 +922,8 @@ async fn route_event_best_changed_carries_both_peers() {
 
     let event = events_rx.recv().await.unwrap();
     assert_eq!(event.event_type, RouteEventType::BestChanged);
-    assert_eq!(event.peer, Some(peer2));
-    assert_eq!(event.previous_peer, Some(peer1));
+    assert_eq!(event.peer, Some(peer2.addr()));
+    assert_eq!(event.previous_peer, Some(peer1.addr()));
 
     drop(tx);
     handle.await.unwrap();
@@ -983,7 +987,7 @@ async fn route_event_added_has_no_previous_peer() {
 
     let event = events_rx.recv().await.unwrap();
     assert_eq!(event.event_type, RouteEventType::Added);
-    assert_eq!(event.peer, Some(peer));
+    assert_eq!(event.peer, Some(peer.addr()));
     assert!(event.previous_peer.is_none());
 
     drop(tx);
@@ -1019,7 +1023,7 @@ async fn route_event_carries_best_path_id() {
 
     let event = events_rx.recv().await.unwrap();
     assert_eq!(event.event_type, RouteEventType::Added);
-    assert_eq!(event.peer, Some(peer));
+    assert_eq!(event.peer, Some(peer.addr()));
     assert_eq!(event.path_id, 42);
 
     drop(tx);
@@ -1826,7 +1830,7 @@ async fn route_events_keep_the_scope_their_routes_were_learned_on() {
         async move {
             let (reply, response) = oneshot::channel();
             tx.send(RibUpdate::QueryRouteEventHistory {
-                peer,
+                peer: peer.map(PeerId::addr),
                 peer_interface: interface,
                 afi: None,
                 prefix: None,

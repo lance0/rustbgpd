@@ -28,6 +28,7 @@ use rustbgpd_transport::{ImportPolicyTermHits, PeerHandle};
 use tokio::sync::watch;
 
 use crate::peer_types::PeerKey;
+use rustbgpd_rib::PeerId;
 
 /// One managed peer's current session, as the roster designates it.
 #[derive(Debug, Clone)]
@@ -38,6 +39,8 @@ pub struct ImportRosterPeer {
     pub session_id: u64,
     /// That session's installed import-policy publication.
     pub publication: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
+    /// The neighbor's RIB identity slot.
+    pub rib_peer: rustbgpd_transport::RibPeerSlot,
 }
 
 /// One bound policy dataset and its configured source path.
@@ -75,6 +78,26 @@ impl ImportRoster {
     #[must_use]
     pub fn datasets(&self) -> &[ImportRosterDataset] {
         &self.datasets
+    }
+
+    /// The RIB identity of the managed peer at `address`, on `interface`
+    /// when one is given (the first such peer otherwise), or
+    /// [`PeerId::UNASSIGNED`] when no managed peer matches, which names no
+    /// RIB state. `0.0.0.0` names the synthetic peer that owns locally
+    /// injected routes, which no roster lists.
+    #[must_use]
+    pub fn rib_peer(&self, address: IpAddr, interface: Option<&str>) -> PeerId {
+        if address == PeerId::LOCAL.addr() {
+            return PeerId::LOCAL;
+        }
+        let start = self
+            .peers
+            .partition_point(|peer| peer.key.address < address);
+        self.peers[start..]
+            .iter()
+            .take_while(|peer| peer.key.address == address)
+            .find(|peer| interface.is_none() || peer.key.interface.as_deref() == interface)
+            .map_or(PeerId::UNASSIGNED, |peer| peer.rib_peer.current(address))
     }
 
     /// The one managed peer at `address`, or `None` when no peer or several
@@ -383,6 +406,7 @@ pub(crate) mod test_support {
             key: PeerKey::new(address.parse().unwrap(), None),
             session_id: 1,
             publication,
+            rib_peer: rustbgpd_transport::RibPeerSlot::default(),
         }
     }
 
@@ -431,6 +455,7 @@ mod tests {
             key: PeerKey::new("fe80::1".parse().unwrap(), Some(interface.to_string())),
             session_id: 1,
             publication: rx.clone(),
+            rib_peer: rustbgpd_transport::RibPeerSlot::default(),
         };
         let publisher = publisher(
             vec![
@@ -459,6 +484,15 @@ mod tests {
         assert!(roster.unique_peer("fe80::1".parse().unwrap()).is_none());
         assert!(roster.unique_peer("192.0.2.3".parse().unwrap()).is_none());
         assert!(roster.unique_peer("0.0.0.0".parse().unwrap()).is_none());
+        // The synthetic local peer resolves without a roster entry.
+        assert_eq!(
+            roster.rib_peer("0.0.0.0".parse().unwrap(), None),
+            PeerId::LOCAL
+        );
+        assert_eq!(
+            roster.rib_peer("192.0.2.3".parse().unwrap(), None),
+            PeerId::UNASSIGNED
+        );
     }
 
     /// Installed publications are read in one poll with no yield: a fleet

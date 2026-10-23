@@ -1,8 +1,12 @@
 //! Route change events published by the RIB manager. A [`RouteEvent`]
 //! identifies the changed prefix and the peers involved but carries no route;
 //! an [`EvpnRouteEvent`] carries the full new and previous best route.
+//!
+//! Events name peers by the address each had when the event was built, not
+//! by [`PeerId`]: a handle can move to a new endpoint or, once released, to
+//! nothing, and history must keep the endpoint it recorded.
 
-use crate::PeerId;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,12 +36,14 @@ pub struct RouteEvent {
     pub event_type: RouteEventType,
     /// The affected prefix.
     pub prefix: Prefix,
-    /// The peer advertising the current best route, if any.
-    pub peer: Option<PeerId>,
-    /// The peer that previously held the best route, if any.
-    pub previous_peer: Option<PeerId>,
-    /// Outbound peer whose export policy filtered the route, if any.
-    pub target_peer: Option<PeerId>,
+    /// Address of the peer advertising the current best route, if any,
+    /// when the event was built.
+    pub peer: Option<IpAddr>,
+    /// Address of the peer that previously held the best route, if any.
+    pub previous_peer: Option<IpAddr>,
+    /// Address of the outbound peer whose export policy filtered the route,
+    /// if any.
+    pub target_peer: Option<IpAddr>,
     /// Interned source context of `peer`, which records its interface when
     /// it is a scoped (IPv6 link-local) neighbor. Captured when the event
     /// is built, so history keeps the interface the route was learned on
@@ -77,13 +83,15 @@ impl RouteEvent {
         self.target_peer_scope.peer_interface()
     }
 
-    /// Whether this event names the neighbor (`peer`, `interface`) as its
-    /// current, previous or target peer. A scoped neighbor matches only on
-    /// the interface the event recorded; a numbered one has none.
+    /// Whether this event names the neighbor (`address`, `interface`) as
+    /// its current, previous or target peer. A scoped neighbor matches only
+    /// on the interface the event recorded; a numbered one has none. By
+    /// address, so history keeps matching a neighbor deleted or re-added
+    /// since the event.
     #[must_use]
-    pub fn involves(&self, peer: PeerId, interface: Option<&str>) -> bool {
-        let named = |address: Option<PeerId>, scope: AspaContextId| {
-            address == Some(peer) && scope.peer_interface().as_deref() == interface
+    pub fn involves(&self, address: IpAddr, interface: Option<&str>) -> bool {
+        let named = |peer: Option<IpAddr>, scope: AspaContextId| {
+            peer == Some(address) && scope.peer_interface().as_deref() == interface
         };
         named(self.peer, self.peer_scope)
             || named(self.previous_peer, self.previous_peer_scope)
@@ -98,7 +106,7 @@ impl RouteEvent {
 /// daemon's local-MAC originator — need the full new best to build a
 /// `RemoteMacView` without a follow-up RIB query. Carrying the full
 /// [`EvpnRibRoute`] on the event side keeps the consumer's hot path
-/// allocation-free: the 416 B event is allocated once, then the
+/// allocation-free: the 400 B event is allocated once, then the
 /// history and live broadcast share that allocation through `Arc`.
 /// Each subscriber clone copies one `Arc`; nested path attributes
 /// remain shared, and the hot path still avoids a follow-up query.
@@ -128,10 +136,13 @@ pub struct EvpnRouteEvent {
     /// scan, and lets BMP-style observers report the prior next-hop
     /// without a back-channel query.
     pub previous_best: Option<EvpnRibRoute>,
-    /// Peer that holds the new best (`None` for `Withdrawn`).
-    pub peer: Option<PeerId>,
-    /// Peer that previously held best (`None` for `Added`).
-    pub previous_peer: Option<PeerId>,
+    /// Address of the peer that holds the new best when the event was
+    /// built (`None` for `Withdrawn`). Render `best` with this address, not
+    /// by resolving its handle.
+    pub peer: Option<IpAddr>,
+    /// Address of the peer that previously held best (`None` for `Added`);
+    /// `previous_best`'s address, like `peer`.
+    pub previous_peer: Option<IpAddr>,
     /// Event time in Unix epoch milliseconds, captured when the event is
     /// built (see [`unix_time_ms_now`]).
     pub timestamp_unix_ms: i64,

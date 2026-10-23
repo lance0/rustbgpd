@@ -48,6 +48,10 @@ impl ExportChains {
 
     /// `peer`'s own entry: `Some(None)` when explicitly disabled, `None`
     /// when the peer falls back to the global chain.
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
     pub(super) fn get(&self, peer: &PeerId) -> Option<&Option<PolicyChain>> {
         self.peers.get(peer)
     }
@@ -62,6 +66,10 @@ impl ExportChains {
     }
 
     #[cfg(test)]
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
     pub(super) fn contains_key(&self, peer: &PeerId) -> bool {
         self.peers.contains_key(peer)
     }
@@ -73,6 +81,10 @@ impl ExportChains {
     }
 
     /// Remove `peer`'s entry, so it falls back to the global chain.
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
     pub(super) fn remove(&mut self, peer: &PeerId) {
         if self.peers.remove(peer).is_some() {
             self.version += 1;
