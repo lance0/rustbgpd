@@ -3031,6 +3031,26 @@ does not expose the status, because "no evidence" is not "no problem". A red
 verdict here never affects `/readyz`: missing operator policy is a
 configuration state to repair, not a daemon that cannot serve traffic.
 
+Interface-only neighbors
+([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)) are checked
+by interface:
+
+- `interface_only.<if>.discovery` is red when the interface does not exist
+  and yellow while its link is down. While the link is up with no peer
+  address learned, it is green for three RA intervals (`ra_interval_secs`),
+  counted from the daemon's start or the neighbor's last retained session
+  event, and then yellow with hints: the peer may send no Router
+  Advertisements (FRR `no bgp ipv6-auto-ra`), FRR without `v6only` may
+  prefer an IPv4 /30 or /31 session, and with `router_advertisements = false`
+  the peer cannot discover this router unless another router advertises on
+  the link. A bound neighbor's session is checked as
+  `peer.<learned>%<if>.*`, like any other peer.
+- `interface_only.<if>.multiple_routers` is yellow when
+  `bgp_unnumbered_ra_conflicts_total` shows a second router on the link since
+  the daemon started.
+- `unnumbered.ra_socket` is yellow when a discovery socket failed to open
+  since the daemon started (`bgp_unnumbered_ra_socket_open_failures_total`).
+
 `rpki.invalid_route_policy` and `aspa.invalid_route_policy` are advisory compiled-policy
 disposition proofs. Green requires a complete, nonempty response whose aggregate and every
 scope are enforced; it does not claim readiness/currentness, traffic, intent, FIB state, or

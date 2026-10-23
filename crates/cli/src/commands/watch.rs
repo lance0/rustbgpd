@@ -36,7 +36,7 @@ fn scope_route_event(event: &mut RouteEvent) {
 
 /// Render a stream event's neighbors in scoped form: the payload carries
 /// the interfaces, which also scope the envelope's addresses.
-fn scope_bgp_event(event: &mut BgpEvent) {
+pub(crate) fn scope_bgp_event(event: &mut BgpEvent) {
     use crate::commands::neighbor::scope_address;
     use crate::proto::bgp_event::Payload;
     match &mut event.payload {
