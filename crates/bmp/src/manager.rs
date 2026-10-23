@@ -215,11 +215,12 @@ pub struct BmpManager {
     /// identifier used as the `collector` label on `bmp_*` Prometheus
     /// counters.
     collectors: Vec<Collector>,
-    /// Latest encoded `PeerUp` message per peer address, one encoding
-    /// per BMP version (indexed by [`BmpVersion::idx`]).
-    peer_up_cache: std::collections::HashMap<std::net::IpAddr, [Bytes; 2]>,
-    /// One metadata-only explicit replay per peer; generation enrollment is fixed.
-    outbound_replays: std::collections::HashMap<std::net::IpAddr, OutboundReplayEnrollment>,
+    /// Latest encoded `PeerUp` message per neighbor
+    /// ([`BmpPeerInfo::neighbor`]), with its address for replay order and
+    /// one encoding per BMP version (indexed by [`BmpVersion::idx`]).
+    peer_up_cache: std::collections::HashMap<u64, (std::net::IpAddr, [Bytes; 2])>,
+    /// One metadata-only explicit replay per neighbor; generation enrollment is fixed.
+    outbound_replays: std::collections::HashMap<u64, OutboundReplayEnrollment>,
     /// RFC 9069 Loc-RIB instance-peer identity. `None` = no collector
     /// monitors `loc_rib`; Loc-RIB events are dropped.
     loc_rib: Option<BmpLocRibConfig>,
@@ -659,7 +660,7 @@ impl BmpManager {
     async fn handle_outbound_replay_event(&mut self, event: &BmpEvent) {
         match event {
             BmpEvent::OutboundReplayBegin { peer_info, replay } => {
-                let peer = peer_info.peer_addr;
+                let peer = peer_info.neighbor;
                 let active = self
                     .outbound_replays
                     .get(&peer)
@@ -685,7 +686,7 @@ impl BmpManager {
                     && self.peer_up_cache.contains_key(&peer)
                     && !collectors.is_empty();
                 if accepted {
-                    let cached = self.peer_up_cache[&peer].clone();
+                    let cached = self.peer_up_cache[&peer].1.clone();
                     let mut down_info = peer_info.clone();
                     down_info.is_rib_out = false;
                     down_info.is_post_policy = false;
@@ -720,7 +721,7 @@ impl BmpManager {
                 replay,
                 end_of_rib,
             } => {
-                let peer = peer_info.peer_addr;
+                let peer = peer_info.neighbor;
                 let matches = self
                     .outbound_replays
                     .get(&peer)
@@ -766,7 +767,7 @@ impl BmpManager {
                 self.handle_loc_rib_event(event).await;
             }
             BmpEvent::PeerUp { peer_info, .. } => {
-                if let Some((replay, _)) = self.outbound_replays.remove(&peer_info.peer_addr) {
+                if let Some((replay, _)) = self.outbound_replays.remove(&peer_info.neighbor) {
                     replay.cancel();
                 }
 
@@ -777,14 +778,15 @@ impl BmpManager {
                     Self::encode_event(event, BmpVersion::V4),
                 ];
                 self.fan_out(|version| encoded[version.idx()].clone()).await;
-                self.peer_up_cache.insert(peer_info.peer_addr, encoded);
+                self.peer_up_cache
+                    .insert(peer_info.neighbor, (peer_info.peer_addr, encoded));
             }
             BmpEvent::PeerDown { peer_info, .. } => {
-                if let Some((replay, _)) = self.outbound_replays.remove(&peer_info.peer_addr) {
+                if let Some((replay, _)) = self.outbound_replays.remove(&peer_info.neighbor) {
                     replay.cancel();
                 }
 
-                self.peer_up_cache.remove(&peer_info.peer_addr);
+                self.peer_up_cache.remove(&peer_info.neighbor);
                 self.fan_out(|version| Self::encode_event(event, version))
                     .await;
             }
@@ -955,12 +957,12 @@ impl BmpManager {
         // Stable ordering makes reconnect behavior deterministic without
         // retaining any history beyond the current Peer Up cache.
         let mut peers: Vec<_> = self.peer_up_cache.iter().collect();
-        peers.sort_unstable_by_key(|(addr, _)| **addr);
+        peers.sort_unstable_by_key(|&(&neighbor, &(addr, _))| (addr, neighbor));
         let mut messages = Vec::with_capacity(peers.len() + usize::from(collector.filter.loc_rib));
         messages.extend(
             peers
                 .into_iter()
-                .map(|(_, encoded)| encoded[collector.version.idx()].clone()),
+                .map(|(_, (_, encoded))| encoded[collector.version.idx()].clone()),
         );
         let loc_rib_peer_up = collector.filter.loc_rib && self.loc_rib.is_some();
         if loc_rib_peer_up {
@@ -1570,6 +1572,7 @@ mod tests {
     pub(super) fn sample_peer_info() -> BmpPeerInfo {
         BmpPeerInfo {
             peer_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            neighbor: 1,
             peer_asn: 65002,
             peer_bgp_id: Ipv4Addr::new(10, 0, 0, 2),
             peer_type: BmpPeerType::Global,
@@ -2858,6 +2861,7 @@ mod tests {
         for octet in 1..=5u8 {
             let mut info = sample_peer_info();
             info.peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet));
+            info.neighbor = u64::from(octet);
             info.peer_bgp_id = Ipv4Addr::new(10, 0, 0, octet);
             event_tx
                 .send(BmpEvent::PeerUp {
@@ -4297,6 +4301,7 @@ mod tests {
             let peer_addr: IpAddr = addr.parse().unwrap();
             BmpPeerInfo {
                 peer_addr,
+                neighbor: u64::from(asn),
                 peer_asn: asn,
                 peer_bgp_id: Ipv4Addr::new(10, 9, 0, u8::try_from(asn % 200).unwrap()),
                 is_ipv6: peer_addr.is_ipv6(),

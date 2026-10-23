@@ -1488,6 +1488,7 @@ async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
         .try_send(BmpEvent::StatsReport {
             peer_info: rustbgpd_bmp::BmpPeerInfo {
                 peer_addr: addr,
+                neighbor: 1,
                 peer_asn: 65002,
                 peer_bgp_id: Ipv4Addr::UNSPECIFIED,
                 peer_type: rustbgpd_bmp::BmpPeerType::Global,

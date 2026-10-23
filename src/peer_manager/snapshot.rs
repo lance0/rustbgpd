@@ -806,12 +806,14 @@ impl PeerManager {
 
     fn bmp_peer_info(
         peer_addr: IpAddr,
+        rib_peer: rustbgpd_rib::PeerId,
         remote_asn: u32,
         remote_router_id: Option<Ipv4Addr>,
         four_octet_as: Option<bool>,
     ) -> BmpPeerInfo {
         BmpPeerInfo {
             peer_addr,
+            neighbor: rib_peer.to_raw(),
             peer_asn: remote_asn,
             peer_bgp_id: remote_router_id.unwrap_or(Ipv4Addr::UNSPECIFIED),
             peer_type: BmpPeerType::Global,
@@ -954,6 +956,7 @@ impl PeerManager {
             let event = BmpEvent::StatsReport {
                 peer_info: Self::bmp_peer_info(
                     peer_addr,
+                    rib_peer,
                     remote_asn,
                     state.remote_router_id,
                     state.four_octet_as,

@@ -572,6 +572,7 @@ mod tests {
     fn sample_peer_info() -> BmpPeerInfo {
         BmpPeerInfo {
             peer_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            neighbor: 1,
             peer_asn: 65002,
             peer_bgp_id: Ipv4Addr::new(10, 0, 0, 2),
             peer_type: BmpPeerType::Global,
@@ -1306,6 +1307,7 @@ mod tests {
     fn loc_rib_flags_zero_even_with_flag_bools_set() {
         let info = BmpPeerInfo {
             peer_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            neighbor: 0,
             peer_asn: 65001,
             peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
             peer_type: BmpPeerType::LocRib,

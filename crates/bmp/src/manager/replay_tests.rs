@@ -275,3 +275,75 @@ async fn explicit_replay_reset_failure_rejects_without_survivors_and_keeps_healt
         }
     }
 }
+
+/// Acceptance: two neighbors on one link-local address keep their own
+/// manager state. The second neighbor's Peer Up neither replaces the
+/// first's cached Peer Up, nor does its Peer Down cancel the first's
+/// replay or clear its cache; a reconnecting collector replays the
+/// surviving neighbor's own Peer Up. Keyed by address, every check fails.
+#[tokio::test]
+async fn same_address_neighbors_keep_their_own_peer_up_and_replay() {
+    let (mut manager, mut receivers) = manager(&[(outbound_filter(), BmpVersion::V3)]);
+    let first_up = peer_up();
+    let mut second_info = sample_peer_info();
+    second_info.neighbor = 2;
+    second_info.peer_asn = 65009;
+    let BmpEvent::PeerUp {
+        local_open,
+        remote_open,
+        local_addr,
+        local_port,
+        remote_port,
+        ..
+    } = peer_up()
+    else {
+        unreachable!()
+    };
+    let second_up = BmpEvent::PeerUp {
+        peer_info: second_info.clone(),
+        local_open,
+        remote_open,
+        local_addr,
+        local_port,
+        remote_port,
+    };
+    let first_cached = BmpManager::encode_event(&first_up, BmpVersion::V3);
+    manager.handle_event(&first_up).await;
+    manager.handle_event(&second_up).await;
+    while receivers[0].try_recv().is_ok() {}
+
+    let (replay, enrolled) = BmpReplay::new(Duration::from_secs(5));
+    begin(&mut manager, &replay).await;
+    assert!(enrolled.await.unwrap());
+    let _reset = receivers[0].try_recv().unwrap();
+    assert_eq!(receivers[0].try_recv().unwrap(), first_cached);
+
+    manager
+        .handle_event(&BmpEvent::PeerDown {
+            peer_info: second_info,
+            reason: crate::PeerDownReason::RemoteNoNotification,
+        })
+        .await;
+    while receivers[0].try_recv().is_ok() {}
+    assert!(
+        replay.is_valid(),
+        "another neighbor's Peer Down canceled it"
+    );
+    complete(&mut manager, &replay).await;
+    let terminal = receivers[0].try_recv().unwrap();
+    assert_eq!(&terminal[48..], eor().as_ref());
+
+    let (sender, _live) = mpsc::channel(16);
+    let (bootstrap, bootstrap_rx) = tokio::sync::oneshot::channel();
+    assert!(
+        !manager
+            .handle_control(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: collector_addr(0),
+                sender,
+                bootstrap,
+            })
+            .await
+    );
+    assert_eq!(bootstrap_rx.await.unwrap().messages, [first_cached]);
+}

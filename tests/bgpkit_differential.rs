@@ -105,6 +105,7 @@ fn generated_fixtures() -> [(&'static str, Vec<u8>); 3] {
     let bmp = encode_route_monitoring(
         &BmpPeerInfo {
             peer_addr: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            neighbor: 1,
             peer_asn: 64512,
             peer_bgp_id: Ipv4Addr::new(192, 0, 2, 2),
             peer_type: BmpPeerType::Global,
