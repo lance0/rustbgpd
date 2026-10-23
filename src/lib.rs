@@ -51,7 +51,7 @@ pub mod bench_internals {
     pub fn project_fib_intent_counts(
         tables: &[FibTableConfig],
         candidates: &[FibInstallCandidate],
-        peer_groups: &BTreeMap<IpAddr, String>,
+        peer_groups: &BTreeMap<rustbgpd_rib::PeerId, String>,
     ) -> FibIntentCounts {
         let intent =
             crate::fib::project_fib_intent_with_peer_groups(tables, candidates, peer_groups);
