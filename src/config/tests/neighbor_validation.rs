@@ -1843,3 +1843,60 @@ fn same_address_neighbors_diff_against_their_own_records() {
     );
     assert_eq!(changed.session_reset_entries(), 1);
 }
+
+/// The TCP-AO startup pin matches each neighbor with its own live record,
+/// so it never swaps one same-address neighbor for the other.
+#[test]
+fn tcp_ao_pin_keeps_same_address_neighbors_apart() {
+    let ao =
+        "tcp_ao = { key = \"secret\", send_id = 7, recv_id = 9, algorithm = \"hmac(sha256)\" }";
+    let single = |extra: &str| {
+        parse(&same_address_pair(extra, "").replace(
+            "\n[[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth1\"\nremote_asn = 65002\n",
+            "\n",
+        ))
+        .unwrap()
+    };
+    let identities = |config: &Config| {
+        config
+            .neighbors
+            .iter()
+            .map(|neighbor| {
+                (
+                    neighbor.interface.clone().unwrap_or_default(),
+                    neighbor.tcp_ao.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let owned = |pairs: &[(&str, bool)]| {
+        pairs
+            .iter()
+            .map(|(interface, ao)| ((*interface).to_string(), *ao))
+            .collect::<Vec<_>>()
+    };
+
+    // Dropping eth0's key and adding eth1 keeps eth0's live key and leaves
+    // the new eth1 record alone.
+    let live = single(ao);
+    assert_eq!(identities(&live), owned(&[("eth0", true)]));
+    let mut runtime = parse(&same_address_pair("", "")).unwrap();
+    assert_eq!(
+        super::pin_tcp_ao_startup_only_runtime(&mut runtime, &live),
+        1
+    );
+    assert_eq!(
+        identities(&runtime),
+        owned(&[("eth0", true), ("eth1", false)])
+    );
+
+    // Keeping only eth0 and adding a key to it pins eth0 to its own live
+    // record; eth1's removal stands.
+    let live = parse(&same_address_pair("", "")).unwrap();
+    let mut runtime = single(ao);
+    assert_eq!(
+        super::pin_tcp_ao_startup_only_runtime(&mut runtime, &live),
+        1
+    );
+    assert_eq!(identities(&runtime), owned(&[("eth0", false)]));
+}

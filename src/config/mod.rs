@@ -5439,19 +5439,13 @@ pub(crate) fn pin_rfc8212_posture_startup_only(new_config: &mut Config, current:
 }
 
 fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool {
-    let old_by_addr: HashMap<&str, &Neighbor> = old
-        .neighbors
-        .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
-        .collect();
-    let new_by_addr: HashMap<&str, &Neighbor> = new
-        .neighbors
-        .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
-        .collect();
+    let old_by_key: HashMap<(&str, Option<&str>), &Neighbor> =
+        old.neighbors.iter().map(|n| (neighbor_key(n), n)).collect();
+    let new_by_key: HashMap<(&str, Option<&str>), &Neighbor> =
+        new.neighbors.iter().map(|n| (neighbor_key(n), n)).collect();
 
     for new_neighbor in &new.neighbors {
-        match old_by_addr.get(new_neighbor.address.as_str()) {
+        match old_by_key.get(&neighbor_key(new_neighbor)) {
             Some(old_neighbor) if old_neighbor.tcp_ao != new_neighbor.tcp_ao => return true,
             None if new_neighbor.tcp_ao.is_some() => return true,
             _ => {}
@@ -5459,7 +5453,7 @@ fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool 
     }
 
     old.neighbors.iter().any(|old_neighbor| {
-        old_neighbor.tcp_ao.is_some() && !new_by_addr.contains_key(old_neighbor.address.as_str())
+        old_neighbor.tcp_ao.is_some() && !new_by_key.contains_key(&neighbor_key(old_neighbor))
     })
 }
 
@@ -5610,7 +5604,10 @@ pub(crate) fn pin_tcp_ao_startup_only_runtime(new_config: &mut Config, current: 
         pin_tcp_ao_dependency_graph(
             new_config,
             current,
-            result.pinned_current_neighbors.iter().map(String::as_str),
+            result
+                .pinned_current_neighbors
+                .iter()
+                .map(|(address, interface)| (address.as_str(), interface.as_deref())),
         );
     }
     result.pinned
@@ -5636,26 +5633,28 @@ fn pin_tcp_ao_restart_required_globals(new_config: &mut Config, current: &Config
 
 struct TcpAoPinResult {
     pinned: usize,
-    pinned_current_neighbors: Vec<String>,
+    /// `(address, interface)` of each live neighbor kept by the pin.
+    pinned_current_neighbors: Vec<(String, Option<String>)>,
 }
 
 fn pin_tcp_ao_startup_only_neighbors(
     new_neighbors: &mut Vec<Neighbor>,
     current_neighbors: &[Neighbor],
 ) -> TcpAoPinResult {
-    let current_by_addr: HashMap<&str, &Neighbor> = current_neighbors
+    let owned_key = |neighbor: &Neighbor| (neighbor.address.clone(), neighbor.interface.clone());
+    let current_by_key: HashMap<(String, Option<String>), &Neighbor> = current_neighbors
         .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .map(|neighbor| (owned_key(neighbor), neighbor))
         .collect();
 
     let mut pinned = 0usize;
     let mut pinned_current_neighbors = Vec::new();
     for neighbor in new_neighbors.iter_mut() {
-        match current_by_addr.get(neighbor.address.as_str()) {
+        match current_by_key.get(&owned_key(neighbor)) {
             Some(current_neighbor) if current_neighbor.tcp_ao != neighbor.tcp_ao => {
                 *neighbor = (*current_neighbor).clone();
                 pinned += 1;
-                pinned_current_neighbors.push(current_neighbor.address.clone());
+                pinned_current_neighbors.push(owned_key(current_neighbor));
             }
             _ => {}
         }
@@ -5663,19 +5662,16 @@ fn pin_tcp_ao_startup_only_neighbors(
 
     let before_len = new_neighbors.len();
     new_neighbors.retain(|neighbor| {
-        current_by_addr.contains_key(neighbor.address.as_str()) || neighbor.tcp_ao.is_none()
+        current_by_key.contains_key(&owned_key(neighbor)) || neighbor.tcp_ao.is_none()
     });
     pinned += before_len - new_neighbors.len();
 
-    let new_addrs: HashSet<String> = new_neighbors
-        .iter()
-        .map(|neighbor| neighbor.address.clone())
-        .collect();
+    let new_keys: HashSet<(String, Option<String>)> = new_neighbors.iter().map(owned_key).collect();
     for current_neighbor in current_neighbors {
-        if current_neighbor.tcp_ao.is_some() && !new_addrs.contains(&current_neighbor.address) {
+        if current_neighbor.tcp_ao.is_some() && !new_keys.contains(&owned_key(current_neighbor)) {
             new_neighbors.push(current_neighbor.clone());
             pinned += 1;
-            pinned_current_neighbors.push(current_neighbor.address.clone());
+            pinned_current_neighbors.push(owned_key(current_neighbor));
         }
     }
 
@@ -5688,12 +5684,12 @@ fn pin_tcp_ao_startup_only_neighbors(
 fn pin_tcp_ao_dependency_graph<'a>(
     new_config: &mut Config,
     current: &Config,
-    pinned_current_neighbors: impl Iterator<Item = &'a str>,
+    pinned_current_neighbors: impl Iterator<Item = (&'a str, Option<&'a str>)>,
 ) {
-    let current_by_addr: HashMap<&str, &Neighbor> = current
+    let current_by_key: HashMap<(&str, Option<&str>), &Neighbor> = current
         .neighbors
         .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .map(|neighbor| (neighbor_key(neighbor), neighbor))
         .collect();
 
     let mut policy_names = HashSet::new();
@@ -5702,8 +5698,8 @@ fn pin_tcp_ao_dependency_graph<'a>(
     let mut pin_global_import_chain = false;
     let mut pin_global_export_chain = false;
 
-    for address in pinned_current_neighbors {
-        let Some(neighbor) = current_by_addr.get(address) else {
+    for key in pinned_current_neighbors {
+        let Some(neighbor) = current_by_key.get(&key) else {
             continue;
         };
         let pinned_global = collect_tcp_ao_neighbor_dependency_refs(
