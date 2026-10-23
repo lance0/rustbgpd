@@ -7,7 +7,8 @@
 #   * IPv4 routes are exchanged using RFC 8950 Extended Next Hop;
 #   * link-local next-hops carry their output interface scope into the FIB;
 #   * Linux installs two-way ECMP via the discovered link-local addresses;
-#   * carrier loss removes the failed leg and restoration recovers ECMP.
+#   * carrier loss removes the failed leg and restoration recovers ECMP;
+#   * a lab-owned bridge on eth2 permits a third RA source without host links.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -35,7 +36,7 @@ topology:
         - ip link set eth1 up
         - ip link set eth2 up
       env:
-        RUST_LOG: info
+        RUST_LOG: info,rustbgpd::ra_discovery=debug
 
     frr1:
       kind: linux
@@ -61,6 +62,22 @@ topology:
         - ip link set eth1 addrgenmode eui64
         - ip link set eth1 up
 
+    switch:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+
+    rogue:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip link set eth1 addrgenmode eui64
+        - ip link set eth1 up
+
   links:
     - endpoints: ["rustbgpd:eth1", "frr1:eth1"]
-    - endpoints: ["rustbgpd:eth2", "frr2:eth1"]
+    - endpoints: ["rustbgpd:eth2", "switch:eth1"]
+    - endpoints: ["frr2:eth1", "switch:eth2"]
+    - endpoints: ["rogue:eth1", "switch:eth3"]

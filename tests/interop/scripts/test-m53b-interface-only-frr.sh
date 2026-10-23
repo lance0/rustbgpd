@@ -11,10 +11,167 @@ source "$SCRIPT_DIR/test-lib.sh"
 
 FRR1="clab-${TOPO}-frr1"
 FRR2="clab-${TOPO}-frr2"
+SWITCH="clab-${TOPO}-switch"
+ROGUE="clab-${TOPO}-rogue"
 PREFIX=198.51.100.53/32
 INJECTED_PREFIX=192.0.2.53/32
 TABLE_ID=1000
 METRIC=200
+WORK=$(mktemp -d /tmp/m53b-lifecycle.XXXXXX)
+PACKET_HELPER=$WORK/packet.py
+CAPTURE="clab-${TOPO}-capture"
+
+cleanup_m53b() {
+    local rc=$?
+    docker rm -f "$CAPTURE" >/dev/null 2>&1 || true
+    cp "$WORK/capture.jsonl" /tmp/m53b-lifecycle-last-capture.jsonl 2>/dev/null || true
+    docker exec "$RUSTBGPD" cat /tmp/m53b-rustbgpd.log \
+        >/tmp/m53b-lifecycle-last-daemon.log 2>/dev/null || true
+    rm -rf "$WORK"
+    _cleanup_on_exit
+    return "$rc"
+}
+trap cleanup_m53b EXIT
+
+configure_bridge() {
+    docker exec "$SWITCH" sh -ec '
+        ip link add br-m53b type bridge
+        ip link set br-m53b up
+        for dev in eth1 eth2 eth3; do
+            ip link set "$dev" master br-m53b
+            ip link set "$dev" up
+        done'
+}
+
+write_packet_helper() {
+    cat >"$PACKET_HELPER" <<'PY'
+import ipaddress
+import json
+import os
+import socket
+import struct
+import sys
+import time
+
+
+def checksum(data):
+    if len(data) & 1:
+        data += b"\0"
+    words = struct.unpack("!%dH" % (len(data) // 2), data)
+    total = sum(words)
+    while total >> 16:
+        total = (total & 0xffff) + (total >> 16)
+    return (~total) & 0xffff
+
+
+def capture(dev, output, ready, stop):
+    # ETH_P_ALL is required on a Linux bridge slave: an ETH_P_IPV6 socket
+    # misses frames forwarded through the bridge on this lab kernel.
+    sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+    sock.bind((dev, 0))
+    sock.settimeout(0.1)
+    with open(output, "w", buffering=1) as stream:
+        open(ready, "w").close()  # socket is already bound before the signal
+        while not os.path.exists(stop):
+            try:
+                frame = sock.recv(65535)
+            except socket.timeout:
+                continue
+            if len(frame) < 62 or frame[12:14] != b"\x86\xdd" or frame[20] != 58:
+                continue
+            kind = frame[54]
+            if kind not in (133, 134) or (kind == 134 and len(frame) < 70):
+                continue
+            stream.write(json.dumps({
+                "ns": time.monotonic_ns(),
+                "type": "RS" if kind == 133 else "RA",
+                "src": str(ipaddress.IPv6Address(frame[22:38])),
+                "dst": str(ipaddress.IPv6Address(frame[38:54])),
+                "lifetime": int.from_bytes(frame[60:62], "big") if kind == 134 else None,
+            }) + "\n")
+
+
+def send_ra(dev, source, lifetime):
+    src = ipaddress.IPv6Address(source).packed
+    dst = ipaddress.IPv6Address("ff02::1").packed
+    mac = bytes.fromhex(open("/sys/class/net/%s/address" % dev).read().strip().replace(":", ""))
+    icmp = struct.pack("!BBHBBHII", 134, 0, 0, 64, 0, lifetime, 0, 0)
+    pseudo = src + dst + struct.pack("!I3xB", len(icmp), 58)
+    icmp = icmp[:2] + struct.pack("!H", checksum(pseudo + icmp)) + icmp[4:]
+    ip6 = struct.pack("!IHBB", 6 << 28, len(icmp), 58, 255) + src + dst
+    frame = bytes.fromhex("333300000001") + mac + b"\x86\xdd" + ip6 + icmp
+    sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x86dd))
+    sock.bind((dev, 0))
+    sock.send(frame)
+
+
+if sys.argv[1] == "capture":
+    capture(*sys.argv[2:])
+elif sys.argv[1] == "send-ra":
+    send_ra(sys.argv[2], sys.argv[3], int(sys.argv[4]))
+else:
+    raise SystemExit("unknown command")
+PY
+}
+
+capture_start() {
+    rm -f "$WORK/capture.jsonl" "$WORK/capture.ready" "$WORK/capture.stop"
+    docker run -d --rm --name "$CAPTURE" --network "container:$SWITCH" \
+        --cap-add NET_RAW -v "$WORK:/work" --entrypoint python3 \
+        quay.io/frrouting/frr:10.7.1 /work/packet.py capture eth2 \
+        /work/capture.jsonl /work/capture.ready /work/capture.stop >/dev/null
+    local deadline=$((SECONDS + 10))
+    until [ -f "$WORK/capture.ready" ]; do
+        if ((SECONDS >= deadline)) || ! docker inspect "$CAPTURE" >/dev/null 2>&1; then
+            docker logs "$CAPTURE" >&2 || true
+            fail "packet capture did not arm"; return 1
+        fi
+        sleep 0.1
+    done
+}
+
+send_ra() {
+    local node=$1 source=$2 lifetime=$3
+    docker run --rm --network "container:$node" --cap-add NET_RAW \
+        -v "$WORK:/work:ro" --entrypoint python3 quay.io/frrouting/frr:10.7.1 \
+        /work/packet.py send-ra eth1 "$source" "$lifetime"
+}
+
+capture_ra_count() {
+    jq -s --arg src "$LL2" '[.[] | select(.type == "RA" and .src == $src)] | length' "$WORK/capture.jsonl"
+}
+
+ra_count() {
+    local source=$1 lifetime=$2
+    jq -s --arg src "$source" --argjson lifetime "$lifetime" '
+        [.[] | select(.type == "RA" and .src == $src and .lifetime == $lifetime)] | length' \
+        "$WORK/capture.jsonl"
+}
+
+wait_ra_count() {
+    local source=$1 lifetime=$2 before=$3
+    for _ in $(seq 1 30); do
+        if [ "$(ra_count "$source" "$lifetime")" -gt "$before" ]; then return 0; fi
+        sleep 0.1
+    done
+    return 1
+}
+
+assert_solicited_recovery() {
+    local recovery_ns=$1 quiet_count=$2
+    for _ in $(seq 1 100); do
+        if jq -s -e --arg mode packets --argjson recovery "$recovery_ns" --arg ll "$LL2" \
+            --arg own "$LOCAL_LL2" --argjson before "$quiet_count" \
+            -f "$SCRIPT_DIR/m53b-next-hop.jq" "$WORK/capture.jsonl" >/dev/null 2>&1; then
+            ok "restored link sent RS; FRR replied before its unsolicited RA interval"
+            return 0
+        fi
+        sleep 0.1
+    done
+    fail "no captured recovery RS followed by FRR RA before unsolicited interval"
+    cat "$WORK/capture.jsonl" >&2
+    return 1
+}
 
 resolve_grpc_addr
 
@@ -22,6 +179,63 @@ neighbors() { grpcurl_call "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbor
 received() { grpcurl_call "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes; }
 fib() { grpcurl_call "$GRPC_ADDR" rustbgpd.v1.RibService/ListFibRoutes; }
 route() { docker exec "$RUSTBGPD" ip route show table "$TABLE_ID" exact "$PREFIX"; }
+daemon_events() { docker exec "$RUSTBGPD" cat /tmp/m53b-rustbgpd.log | sed -n '/^{/p'; }
+
+event_count() {
+    local message=$1 interface=$2
+    daemon_events | jq -s --arg message "$message" --arg interface "$interface" '
+        [.[] | select(.fields.message? == $message and .fields.interface? == $interface)] | length'
+}
+
+event_count_address() {
+    local message=$1 interface=$2 address=$3
+    daemon_events | jq -s --arg message "$message" --arg interface "$interface" --arg address "$address" '
+        [.[] | select(.fields.message? == $message and .fields.interface? == $interface
+            and .fields.address? == $address)] | length'
+}
+
+own_drop_count() {
+    daemon_events | jq -s --arg source "$LOCAL_LL2" '
+        [.[] | select(.fields.message? == "router discovery packet dropped"
+            and .fields.reason? == "own_address" and .fields.source? == $source)] | length'
+}
+
+flap_count() {
+    neighbors | jq -r --arg ll "$LL2" '
+        [.neighbors[]? | select(.config.interface == "eth2" and .config.address == $ll
+            and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6) and .stale != true)]
+        | if length == 1 then (.[0].flapCount // 0 | tonumber) else error("bound eth2 peer not Established") end'
+}
+
+wait_event() {
+    local message=$1 interface=$2 address=$3 after=$4
+    for _ in $(seq 1 100); do
+        if daemon_events | jq -s -e --arg message "$message" --arg interface "$interface" \
+            --arg address "$address" --argjson after "$after" '
+            [.[] | select(.fields.message? == $message and .fields.interface? == $interface)]
+            | .[$after:][] | select(.fields.address? == $address
+                or .fields.source? == $address or .fields.other? == $address)' >/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+assert_stable_two_paths() {
+    neighbors | jq -e --arg one "$LL1" --arg two "$LL2" '
+        [.neighbors[]? | select((.config.interface == "eth1" and .config.address == $one
+            or .config.interface == "eth2" and .config.address == $two)
+            and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6)
+            and (.stale != true))] | length == 2' >/dev/null || return 1
+    received | jq -e '[.routes[]? | select(.prefix == "198.51.100.53" and .prefixLength == 32)] | length == 2' >/dev/null || return 1
+    fib | jq -e '[.routes[]? | select(.prefix == "198.51.100.53" and .prefixLength == 32)]
+        | length == 1 and (.[0].nextHops | length) == 2' >/dev/null || return 1
+    local text
+    text=$(route) || return 1
+    grep -Fq "nexthop via inet6 $LL1 dev eth1" <<<"$text" || return 1
+    grep -Fq "nexthop via inet6 $LL2 dev eth2" <<<"$text" || return 1
+}
 
 dump_state() {
     neighbors >&2 || true
@@ -160,35 +374,151 @@ assert_outbound() {
     ok "both FRR peers received IPv4 with RFC 8950 link-local next hops"
 }
 
+configure_bridge
+for pair in "$RUSTBGPD eth2" "$FRR2 eth1" "$SWITCH br-m53b" "$SWITCH eth1" "$SWITCH eth2" "$SWITCH eth3" "$ROGUE eth1"; do
+    node=${pair% *}
+    dev=${pair#* }
+    docker exec "$node" sh -c "echo 0 > /proc/sys/net/ipv6/conf/$dev/router_solicitations"
+done
+write_packet_helper
+capture_start
+frr_ra_config=$(docker exec "$FRR2" vtysh -c 'show running-config')
+if [[ $frr_ra_config != *'ipv6 nd ra-interval 900'* \
+    || $frr_ra_config != *'no ipv6 nd ra-fast-retrans'* \
+    || $frr_ra_config != *'ipv6 nd ra-lifetime 1800'* ]]; then
+    fail "FRR2 lacks the pinned long RA cadence needed for solicited-response proof"; exit 1
+fi
 assert_fabric_addresses
-start_rustbgpd
+ROGUE_LL=$(link_local "$ROGUE" eth1)
+start_rustbgpd '/usr/local/bin/start-rustbgpd.sh >/tmp/m53b-rustbgpd.log 2>&1'
 wait_established 2
 wait_paths 2
 wait_kernel_route 2
 assert_outbound
 
-docker exec "$FRR2" ip link set eth1 down
+carrier_start=$(python3 -c 'import time; print(time.monotonic_ns())')
+docker exec "$SWITCH" ip link set eth1 down
+if ! docker exec "$RUSTBGPD" ip -j link show dev eth2 | jq -e '.[0].operstate == "DOWN"' >/dev/null; then
+    fail "Rust eth2 did not lose carrier when its switch endpoint went down"; exit 1
+fi
 down=0
-for _ in $(seq 1 30); do
-    if neighbors | jq -e '
-        any(.neighbors[]?; .config.interface == "eth1"
-            and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6))
-        and all(.neighbors[]?; .config.interface != "eth2"
-            or (.state != "SESSION_STATE_ESTABLISHED" and .state != 6))' >/dev/null 2>&1; then
-        ok "carrier loss ended eth2 session"
+for _ in $(seq 1 20); do
+    if neighbors | jq -e --arg mode down -f "$SCRIPT_DIR/m53b-next-hop.jq" >/dev/null 2>&1; then
         down=1
         break
     fi
-    sleep 1
+    sleep 0.05
 done
 if [ "$down" != 1 ]; then
-    fail "eth2 session did not leave Established with eth1 still up"; dump_state; exit 1
+    fail "eth2 session did not leave Established after carrier loss"; dump_state; exit 1
 fi
+carrier_ns=$(( $(python3 -c 'import time; print(time.monotonic_ns())') - carrier_start ))
+carrier_ms=$(( carrier_ns / 1000000 ))
+if ((carrier_ns > 1000000000)); then
+    fail "carrier loss did not end eth2 session within 1s (${carrier_ms}ms)"
+    dump_state; exit 1
+fi
+ok "carrier loss ended eth2 session in ${carrier_ms}ms"
 wait_paths 1
 wait_kernel_route 1
+if ! docker exec "$FRR2" ip -j link show dev eth1 | jq -e '.[0].operstate == "UP"' >/dev/null; then
+    fail "FRR2 carrier changed during rustbgpd eth2 flap"; exit 1
+fi
 
-docker exec "$FRR2" ip link set eth1 up
+ra_before_quiet=$(capture_ra_count)
+sleep 2
+ra_before_recovery=$(capture_ra_count)
+if [ "$ra_before_quiet" != "$ra_before_recovery" ]; then
+    fail "FRR sent an unsolicited RA during the pre-recovery quiet window"; exit 1
+fi
+recovery_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
+learned_recovery_before=$(event_count "unnumbered: peer address learned" eth2)
+docker exec "$SWITCH" ip link set eth1 up
+assert_solicited_recovery "$recovery_ns" "$ra_before_recovery"
+if ! wait_event "unnumbered: peer address learned" eth2 "$LL2" "$learned_recovery_before"; then
+    fail "recovery RA did not yield a new learned eth2 candidate"; exit 1
+fi
+ok "restored-link RA relearned the FRR endpoint"
 wait_established 2
 wait_paths 2
 wait_kernel_route 2
+baseline_flaps=$(flap_count)
+added_before=$(event_count "unnumbered: bound peer added" eth2)
+ending_before=$(event_count "unnumbered: ending the bound session" eth2)
+binding_before=$(event_count "unnumbered: binding changed" eth2)
+learned_before=$(event_count "unnumbered: peer address learned" eth2)
+conflicts_before=$(event_count "unnumbered: a second router advertises on an interface-only link" eth2)
+own_before=$(own_drop_count)
+own_ra_before=$(ra_count "$LOCAL_LL2" 60)
+send_ra "$ROGUE" "$LOCAL_LL2" 60
+if ! wait_ra_count "$LOCAL_LL2" 60 "$own_ra_before"; then
+    fail "spoofed own-source RA was not seen on eth2 segment"; exit 1
+fi
+for _ in $(seq 1 30); do
+    if [ "$(own_drop_count)" -gt "$own_before" ]; then break; fi
+    sleep 0.1
+done
+if ! daemon_events | jq -s -e --arg mode own --arg source "$LOCAL_LL2" \
+    --argjson drop_before "$own_before" --argjson learned_before "$learned_before" \
+    --argjson conflict_before "$conflicts_before" -f "$SCRIPT_DIR/m53b-next-hop.jq" >/dev/null; then
+    fail "own-source RA caused learning/conflict or lacked own_address drop"; exit 1
+fi
+assert_stable_two_paths || { fail "own-source RA changed BGP/FIB paths"; exit 1; }
+ok "received own-source RA was dropped without candidate or conflict"
+
+conflict_before=$(event_count "unnumbered: a second router advertises on an interface-only link" eth2)
+exact_conflict_before=$(daemon_events | jq -s --arg bound "$LL2" --arg other "$ROGUE_LL" '
+    [.[] | select(.fields.message? == "unnumbered: a second router advertises on an interface-only link"
+        and .fields.interface? == "eth2" and .fields.bound? == $bound and .fields.other? == $other)] | length')
+rogue_learned_before=$(event_count_address "unnumbered: peer address learned" eth2 "$ROGUE_LL")
+rogue_expired_before=$(event_count_address "unnumbered: peer address expired" eth2 "$ROGUE_LL")
+rogue_ra_before=$(ra_count "$ROGUE_LL" 60)
+send_ra "$ROGUE" "$ROGUE_LL" 60
+if ! wait_ra_count "$ROGUE_LL" 60 "$rogue_ra_before" \
+    || ! wait_event "unnumbered: peer address learned" eth2 "$ROGUE_LL" "$learned_before" \
+    || ! wait_event "unnumbered: a second router advertises on an interface-only link" eth2 "$ROGUE_LL" "$conflict_before"; then
+    fail "third-source RA did not produce a conflict on bound eth2"; exit 1
+fi
+rogue_ra_ns=$(jq -s --arg source "$ROGUE_LL" '
+    [.[] | select(.type == "RA" and .src == $source and .lifetime == 60)] | last | .ns' \
+    "$WORK/capture.jsonl")
+if [ "$(event_count_address "unnumbered: peer address learned" eth2 "$ROGUE_LL")" -le "$rogue_learned_before" ]; then
+    fail "third RA source was not learned as a candidate"; exit 1
+fi
+if ! daemon_events | jq -s -e --arg mode conflict --arg bound "$LL2" --arg other "$ROGUE_LL" \
+    --argjson learned_before "$rogue_learned_before" --argjson conflict_before "$exact_conflict_before" \
+    -f "$SCRIPT_DIR/m53b-next-hop.jq" >/dev/null; then
+    fail "conflict log did not identify bound and third RA sources"; exit 1
+fi
+assert_stable_two_paths || { fail "third-source conflict changed BGP/FIB paths"; exit 1; }
+[ "$(flap_count)" = "$baseline_flaps" ] || { fail "third-source conflict flapped eth2"; exit 1; }
+ok "third RA source reported conflict without peer flap or path change"
+
+# A regular FRR RA after the lifetime-2 packet would refresh this candidate;
+# the capture count invalidates that case.
+regular_before=$(ra_count "$LL2" 1800)
+expired_before=$(event_count_address "unnumbered: peer address expired" eth2 "$LL2")
+expired_total_before=$(event_count "unnumbered: peer address expired" eth2)
+short_before=$(ra_count "$LL2" 2)
+send_ra "$FRR2" "$LL2" 2
+if ! wait_ra_count "$LL2" 2 "$short_before" \
+    || ! wait_event "unnumbered: peer address expired" eth2 "$LL2" "$expired_total_before"; then
+    fail "bound candidate did not expire after a captured lifetime-2 RA"; exit 1
+fi
+if [ "$(ra_count "$LL2" 1800)" != "$regular_before" ] \
+    || (( $(python3 -c 'import time; print(time.monotonic_ns())') - rogue_ra_ns >= 60000000000 )) \
+    || ! daemon_events | jq -s -e --arg mode expiry --arg bound "$LL2" --arg other "$ROGUE_LL" \
+        --argjson expired_before "$expired_before" --argjson other_expired_before "$rogue_expired_before" \
+        --argjson binding_before "$binding_before" --argjson added_before "$added_before" \
+        --argjson ending_before "$ending_before" -f "$SCRIPT_DIR/m53b-next-hop.jq" >/dev/null; then
+    fail "unsolicited RA or expired third candidate invalidated bound expiry"; exit 1
+fi
+assert_stable_two_paths || { fail "candidate expiry changed established BGP/FIB paths"; exit 1; }
+if [ "$(flap_count)" != "$baseline_flaps" ] \
+    || [ "$(event_count "unnumbered: bound peer added" eth2)" != "$added_before" ] \
+    || [ "$(event_count "unnumbered: ending the bound session" eth2)" != "$ending_before" ] \
+    || [ "$(event_count "unnumbered: binding changed" eth2)" != "$binding_before" ]; then
+    fail "third source or candidate expiry replaced or flapped the bound session"; exit 1
+fi
+ok "bound RA candidate expired while Established binding and FIB stayed healthy"
 print_summary
