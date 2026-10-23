@@ -1734,3 +1734,68 @@ peer_group = "ixp"
     parse(&toml_str.replace("admin_down = true", "admin_down = false"))
         .expect("an explicit false is allowed");
 }
+
+/// The confirmed-transaction rollback check compares each neighbor with its
+/// own prior record, not with another neighbor at the same address.
+#[test]
+fn rollback_limit_check_pairs_same_address_neighbors_by_interface() {
+    let with_eth1_limit = |limit: u32| {
+        parse(
+            &same_address_pair("max_prefixes_out_ipv4_unicast = 100", "").replace(
+                "interface = \"eth1\"\nremote_asn = 65002\n",
+                &format!(
+                    "interface = \"eth1\"\nremote_asn = 65002\n\
+                     max_prefixes_out_ipv4_unicast = {limit}\n"
+                ),
+            ),
+        )
+        .unwrap()
+    };
+    let rollback = with_eth1_limit(10);
+    assert_eq!(
+        rollback.neighbors[1].max_prefixes_out_ipv4_unicast,
+        std::num::NonZeroU32::new(10)
+    );
+    assert!(outbound_prefix_limits_loosen(
+        &rollback,
+        &with_eth1_limit(20)
+    ));
+    assert!(!outbound_prefix_limits_loosen(
+        &rollback,
+        &with_eth1_limit(10)
+    ));
+}
+
+/// The listener selects GTSM by peer address, so a same-address pair must
+/// agree on the effective policy, inherited and disabled states included.
+#[test]
+fn same_address_neighbors_must_agree_on_gtsm() {
+    let group = "[peer_groups.gtsm]\nttl_security = true\n";
+    let pair = |eth0: &str, eth1: &str| {
+        same_address_pair(eth0, group).replace(
+            "interface = \"eth1\"\nremote_asn = 65002\n",
+            &format!("interface = \"eth1\"\nremote_asn = 65002\n{eth1}\n"),
+        )
+    };
+    for (eth0, eth1) in [
+        ("ttl_security = true", ""),
+        ("peer_group = \"gtsm\"", ""),
+        (
+            "ttl_security = true\nttl_security_hops = 2",
+            "ttl_security = true",
+        ),
+        (
+            "peer_group = \"gtsm\"",
+            "ttl_security = false\npeer_group = \"gtsm\"",
+        ),
+    ] {
+        assert_pair_refused(&pair(eth0, eth1), "ttl_security", "GTSM");
+    }
+    for (eth0, eth1) in [
+        ("peer_group = \"gtsm\"", "peer_group = \"gtsm\""),
+        ("ttl_security = true", "peer_group = \"gtsm\""),
+        ("ttl_security = false", ""),
+    ] {
+        parse(&pair(eth0, eth1)).unwrap();
+    }
+}

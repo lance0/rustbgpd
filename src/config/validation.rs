@@ -497,6 +497,9 @@ impl Config {
     ///   address.
     /// - Per-neighbor `log_level`: its span directive matches the bare
     ///   address, so the pair must agree on it.
+    /// - GTSM: the passive listener selects its TTL-security policy by peer
+    ///   address, so the pair must agree on the effective `ttl_security`
+    ///   and `ttl_security_hops`.
     fn validate_same_address_neighbors(&self) -> Result<(), ConfigError> {
         let mut by_address: std::collections::BTreeMap<IpAddr, Vec<&Neighbor>> =
             std::collections::BTreeMap::new();
@@ -507,7 +510,14 @@ impl Config {
                 by_address.entry(addr).or_default().push(neighbor);
             }
         }
-        for group in by_address.values().filter(|group| group.len() > 1) {
+        by_address
+            .values()
+            .filter(|group| group.len() > 1)
+            .try_for_each(|group| self.validate_same_address_group(group))
+    }
+
+    fn validate_same_address_group(&self, group: &[&Neighbor]) -> Result<(), ConfigError> {
+        {
             let names = group
                 .iter()
                 .map(|neighbor| {
@@ -568,15 +578,16 @@ impl Config {
                 }
             }
             let level = |neighbor: &Neighbor| {
-                neighbor.log_level.clone().or_else(|| {
-                    self.peer_group_for_neighbor(neighbor)
-                        .ok()
-                        .flatten()
-                        .and_then(|group| group.log_level.clone())
-                })
+                let group = self.peer_group_for_neighbor(neighbor).ok().flatten();
+                neighbor
+                    .log_level
+                    .clone()
+                    .or_else(|| group.and_then(|group| group.log_level.clone()))
             };
-            let first = level(group[0]);
-            if group.iter().any(|neighbor| level(neighbor) != first) {
+            if group
+                .iter()
+                .any(|neighbor| level(neighbor) != level(group[0]))
+            {
                 return Err(refuse(
                     "log_level",
                     format!(
@@ -586,8 +597,38 @@ impl Config {
                     ),
                 ));
             }
+            let gtsm = |neighbor: &Neighbor| self.effective_gtsm_hops(neighbor);
+            if group
+                .iter()
+                .any(|neighbor| gtsm(neighbor) != gtsm(group[0]))
+            {
+                return Err(refuse(
+                    "ttl_security",
+                    format!(
+                        "neighbors {names} share one IPv6 link-local address, and the \
+                         listener selects its GTSM policy by peer address; give them the \
+                         same effective ttl_security and ttl_security_hops"
+                    ),
+                ));
+            }
         }
         Ok(())
+    }
+
+    /// A neighbor's effective GTSM hop limit, `None` when GTSM is off,
+    /// resolved as `resolve_neighbor` does.
+    fn effective_gtsm_hops(&self, neighbor: &Neighbor) -> Option<std::num::NonZeroU8> {
+        let group = self.peer_group_for_neighbor(neighbor).ok().flatten();
+        neighbor
+            .ttl_security
+            .or_else(|| group.and_then(|group| group.ttl_security))
+            .unwrap_or(false)
+            .then(|| {
+                neighbor
+                    .ttl_security_hops
+                    .or_else(|| group.and_then(|group| group.ttl_security_hops))
+                    .unwrap_or(std::num::NonZeroU8::MIN)
+            })
     }
 
     #[expect(
