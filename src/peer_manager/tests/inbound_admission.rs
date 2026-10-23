@@ -1,6 +1,6 @@
 use super::*;
 
-async fn localhost_inbound_stream() -> (TcpStream, TcpStream) {
+pub(super) async fn localhost_inbound_stream() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
@@ -1028,7 +1028,7 @@ async fn dead_lettered_pending_over_cap_evicts_oldest_entry() {
 
 /// Commands observed by [`backoff_session_handle`].
 #[derive(Default)]
-struct BackoffSessionCounters {
+pub(super) struct BackoffSessionCounters {
     shutdown: AtomicU32,
     collision_dump: AtomicU32,
     activate: AtomicU32,
@@ -1038,7 +1038,7 @@ struct BackoffSessionCounters {
 
 /// A session that reports `state` with the given NOTIFICATION streak and
 /// pending reconnect wait.
-fn backoff_session_handle(
+pub(super) fn backoff_session_handle(
     peer_addr: IpAddr,
     state: SessionState,
     notification_idle_failures: u32,

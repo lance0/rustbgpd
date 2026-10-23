@@ -1355,7 +1355,8 @@ An interface-only neighbor names a port and no address, as FRR's
 `neighbor swp1 interface remote-as external` does
 ([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)). rustbgpd learns
 the peer's IPv6 link-local address from the Router Advertisements it sends on
-that link and opens an ordinary scoped link-local session to it.
+that link, or from the peer's own BGP connection arriving on that interface,
+and opens an ordinary scoped link-local session to it.
 
 ```toml
 [global.unnumbered]            # optional
@@ -1382,6 +1383,16 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   is intended for dedicated fabric links. `router_advertisements = false`
   stops sending (RAs and the link-up RS); reception stays on, so `CAP_NET_RAW`
   is still required.
+- **Inbound learning.** A peer that sends no Router Advertisements, such as
+  FRR with `no bgp ipv6-auto-ra` and a static `neighbor fe80::…%eth1` toward
+  this router, is learned from its connection instead. A BGP connection from
+  a link-local address that arrives on the interface is matched by that
+  interface, never by its address, and binds the neighbor to its source. It
+  is accepted while the neighbor has no Established session; it is dropped
+  while a live Router Advertisement binding or an opening session holds a
+  different address (a second router on the link), during a NOTIFICATION
+  reconnect wait, and when another neighbor holds the address. The connection
+  then passes the same checks as any configured neighbor's.
 - **Binding.** The neighbor binds one learned address at a time and keeps it
   while it stays live. Discovery never ends an Established session: an
   address change takes effect only after the session fails (hold timer, BFD,

@@ -36,6 +36,15 @@ hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
 link_local_next_hop = true
 
+# FRR3 sends no RAs; this peer is learned from FRR3's inbound connection.
+[[neighbors]]
+interface = "eth3"
+remote_asn = "external"
+description = "frr3-inbound-learned"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+link_local_next_hop = true
+
 [security.grpc]
 enforcement = "tier"
 
