@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_rib::{ConditionalAdvertisementCapture, ConditionalAdvertisementSet, RibUpdate};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -151,11 +152,11 @@ impl PeerManager {
     /// dataset (the peer then joins the export re-evaluation).
     pub(super) fn conditional_advertise_policy_references(
         &self,
-        peer: std::net::IpAddr,
+        peer: &PeerKey,
         datasets: &[String],
     ) -> bool {
         self.conditional_advertisements
-            .advertise_policy_references(peer, datasets)
+            .advertise_policy_references(&peer.rib_endpoint(), datasets)
     }
 
     /// Re-observe conditions whose `condition_policy` reads a swapped

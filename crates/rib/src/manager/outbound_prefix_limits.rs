@@ -810,17 +810,17 @@ impl RibManager {
         config: &OutboundPrefixLimitConfig,
         peer: PeerId,
     ) -> OutboundPrefixLimitPair {
-        config
-            .neighbors
-            .get(&peer.addr())
-            .copied()
-            .unwrap_or_else(|| {
-                self.peer_group
-                    .get(&peer)
-                    .and_then(|group| config.groups.get(group))
-                    .copied()
-                    .unwrap_or_default()
-            })
+        let configured = (!config.neighbors.is_empty())
+            .then(|| peer.endpoint())
+            .flatten()
+            .and_then(|endpoint| config.neighbors.get(&endpoint));
+        configured.copied().unwrap_or_else(|| {
+            self.peer_group
+                .get(&peer)
+                .and_then(|group| config.groups.get(group))
+                .copied()
+                .unwrap_or_default()
+        })
     }
 
     /// Neighbor-facing rows for one peer, one per limited unicast family.

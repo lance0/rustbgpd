@@ -2336,9 +2336,10 @@ impl OutboundPrefixLimitPair {
 /// without the caller enumerating live sessions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutboundPrefixLimitConfig {
-    /// Per-neighbor overrides, keyed by the configured neighbor address
-    /// (configuration compares equal across reloads; handles are runtime).
-    pub neighbors: HashMap<IpAddr, OutboundPrefixLimitPair>,
+    /// Per-neighbor overrides, keyed by the configured neighbor endpoint:
+    /// address and, for a link-local neighbor, interface (configuration
+    /// compares equal across reloads; handles are runtime).
+    pub neighbors: HashMap<PeerEndpoint, OutboundPrefixLimitPair>,
     /// Peer-group defaults, keyed by group name.
     pub groups: HashMap<String, OutboundPrefixLimitPair>,
 }

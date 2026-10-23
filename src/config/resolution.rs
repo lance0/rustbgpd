@@ -1497,7 +1497,10 @@ impl Config {
                 })
                 .filter_map(|neighbor| {
                     Some((
-                        neighbor.address.parse().ok()?,
+                        rustbgpd_rib::PeerEndpoint::new(
+                            neighbor.address.parse().ok()?,
+                            neighbor.interface.as_deref(),
+                        ),
                         pair(
                             neighbor.max_prefixes_out_ipv4_unicast,
                             neighbor.max_prefixes_out_ipv6_unicast,
@@ -1821,7 +1824,10 @@ impl Config {
                 .map(|name| std::sync::Arc::from(name.as_str()))
                 .collect();
             attached.extend(effective.iter().cloned());
-            set.attachments.insert(address, names);
+            set.attachments.insert(
+                rustbgpd_rib::PeerEndpoint::new(address, neighbor.interface.as_deref()),
+                names,
+            );
         }
         let mut store = SetStore::new();
         for name in attached {
