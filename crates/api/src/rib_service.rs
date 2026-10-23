@@ -7633,6 +7633,43 @@ mod tests {
     }
 
     /// LAN-347: the unicast conversion dropped the GR stale flags, so
+    /// A page that left the RIB still renders its neighbor's address, and
+    /// still builds its cursor from it, after that neighbor is deleted and
+    /// other neighbors come and go before the page is converted.
+    #[test]
+    fn a_page_renders_its_neighbor_after_release_and_slot_churn() {
+        let address: IpAddr = "192.0.2.77".parse().unwrap();
+        let peer = PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(address, None));
+        let mut route = test_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            vec![],
+        );
+        route.peer = peer;
+        let page = RoutePage {
+            routes: vec![route],
+            total: 2,
+            has_more: true,
+            version: RoutePageVersion::default(),
+            injection: Vec::new(),
+        };
+
+        // Deleted while the page is in flight, then other neighbors churn.
+        assert!(peer.release());
+        for octet in 0..=255u8 {
+            let churn = PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(
+                IpAddr::V4(Ipv4Addr::new(198, 18, 0, octet)),
+                None,
+            ));
+            assert!(churn.release());
+        }
+
+        let scope = RouteQueryScope::Received { peer: None };
+        let response = route_page_to_response(&page, scope, &"0".repeat(64), false, None);
+        assert_eq!(response.routes[0].peer_address, "192.0.2.77");
+        let cursor = decode_route_page_token(&response.next_page_token).unwrap();
+        assert_eq!(cursor.after.1, address);
+    }
+
     /// `rbgp rib received` showed stale routes as normal during a
     /// graceful-restart window.
     #[test]

@@ -21,9 +21,10 @@
 //! (a [`RebindPeer`](crate::update::RibUpdate::RebindPeer) message), after it
 //! has purged every route the neighbor's earlier session left behind, so a
 //! retained route always resolves to the endpoint of the session that learned
-//! it. A released slot keeps its endpoint until the slot is reused, so history
-//! that names a deleted neighbor still renders; once reused, the stale handle
-//! resolves to nothing rather than to the new neighbor.
+//! it. A released slot keeps its endpoint until the slot is reused, which
+//! waits until `REUSE_QUARANTINE` later releases, so history and query
+//! replies that name a deleted neighbor still render; once reused, the stale
+//! handle resolves to nothing rather than to the new neighbor.
 //!
 //! [`PeerId::from_addr`] gives routes that come from no managed neighbor
 //! (MRT files, test and benchmark fixtures) a pinned identity per address.
@@ -53,6 +54,15 @@ pub struct PeerId {
     index: u32,
     generation: NonZeroU32,
 }
+
+/// The number of released slots held back from reuse. A released handle keeps
+/// resolving its endpoint until this many neighbors have been released after
+/// it, so a query reply or event that left the RIB with the handle still
+/// renders the neighbor it named, however late it is converted.
+// ponytail: a count bound, not a reader lifetime; a reply converted after
+// 1024 later deletions renders `peer#<index>.<generation>`. Per-reply endpoint
+// capture if that window ever matters.
+const REUSE_QUARANTINE: usize = 1024;
 
 /// Generation of the reserved [`PeerId::UNASSIGNED`].
 const RESERVED: NonZeroU32 = NonZeroU32::MAX;
@@ -126,8 +136,9 @@ struct Slot {
 #[derive(Debug, Default)]
 struct Slots {
     entries: Vec<Slot>,
-    /// Released slots, reused oldest first so a stale handle keeps resolving
-    /// for as long as possible.
+    /// Released slots, reused oldest first and only beyond
+    /// [`REUSE_QUARANTINE`], so a stale handle keeps resolving for as long as
+    /// possible.
     free: VecDeque<u32>,
     /// Pinned slot of each unscoped IPv6 address [`PeerId::from_addr`]
     /// interned.
@@ -141,7 +152,12 @@ impl Slots {
     }
 
     fn allocate(&mut self, endpoint: PeerEndpoint, state: SlotState) -> PeerId {
-        if let Some(index) = self.free.pop_front() {
+        let reused = if self.free.len() > REUSE_QUARANTINE {
+            self.free.pop_front()
+        } else {
+            None
+        };
+        if let Some(index) = reused {
             let slot = &mut self.entries[index as usize];
             // Only a slot below the last generation enters the free list.
             slot.generation = slot
@@ -589,6 +605,9 @@ mod tests {
         assert_eq!(last.addr(), "198.51.100.250".parse::<IpAddr>().unwrap());
     }
 
+    /// Released slots stay out of reuse until the quarantine is full, then
+    /// are reused oldest first. Red proof: ignoring the quarantine reuses `b`'s
+    /// slot for the first allocation after it is released.
     #[test]
     fn released_slots_are_reused_oldest_first_with_a_new_generation() {
         let mut slots = Slots::default();
@@ -596,7 +615,14 @@ mod tests {
         let b = slots.allocate(endpoint("192.0.2.2", None), SlotState::Live);
         assert!(slots.release(b));
         assert!(slots.release(a));
-        // A released handle keeps its endpoint until its slot is reused.
+        // Released handles keep resolving while the quarantine fills.
+        for _ in 0..REUSE_QUARANTINE - 1 {
+            let other = slots.allocate(endpoint("198.18.0.1", None), SlotState::Live);
+            assert_ne!(other.index, b.index);
+            assert_ne!(other.index, a.index);
+            assert!(slots.release(other));
+        }
+        assert_eq!(slots.slot(b).unwrap().endpoint, endpoint("192.0.2.2", None));
         assert!(slots.slot(a).is_some());
         let c = slots.allocate(endpoint("192.0.2.3", None), SlotState::Live);
         assert_eq!(
