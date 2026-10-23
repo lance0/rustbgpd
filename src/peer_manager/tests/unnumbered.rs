@@ -1491,19 +1491,45 @@ impl BfdSide {
 }
 
 /// A harness whose interface-only neighbors run BFD (`strict` or not) with a
-/// fake BFD actor acknowledging every membership change. The IPv6 single-hop
-/// socket counts as already open, so tests bind no real socket.
+/// fake BFD actor acknowledging every membership change.
 fn bfd_harness(
     interfaces: &[&str],
     links: &[(&str, u32, bool)],
     strict: bool,
 ) -> (Harness, BfdSide) {
-    let h = harness_with(
-        interfaces,
-        links,
-        &format!("bfd = {{ profile = \"fast\", strict = {strict} }}\n"),
-        "[[bfd_profiles]]\nname = \"fast\"\n",
-    );
+    attach_bfd(
+        harness_with(
+            interfaces,
+            links,
+            &format!("bfd = {{ profile = \"fast\", strict = {strict} }}\n"),
+            "[[bfd_profiles]]\nname = \"fast\"\n",
+        ),
+        &[],
+    )
+}
+
+/// A BFD session parameter set for `peer` (scoped when link-local).
+fn session_params(peer: IpAddr, scope: Option<u32>) -> crate::bfd_runtime::BfdSessionParams {
+    crate::bfd_runtime::BfdSessionParams {
+        revision: 1,
+        peer,
+        peer_label: peer.to_string(),
+        scope_id: scope,
+        destination: crate::bfd_runtime::bfd_destination(peer, scope, false).unwrap(),
+        desired_min_tx_us: 300_000,
+        required_min_rx_us: 300_000,
+        detect_mult: 3,
+        strict: false,
+        enabled: true,
+        multihop: false,
+        source: None,
+    }
+}
+
+/// Attach BFD coupling with a fake actor acknowledging every membership
+/// change, plus configured single-hop members at `statics` (IPv4). The IPv6
+/// and IPv4 single-hop sockets count as already open, so tests bind none.
+fn attach_bfd(h: Harness, statics: &[IpAddr]) -> (Harness, BfdSide) {
     let Harness {
         mgr,
         commands,
@@ -1511,31 +1537,24 @@ fn bfd_harness(
         rib_rx,
     } = h;
     let opened: IpAddr = "fe80::ffff".parse().unwrap();
-    let mut socket_family = crate::bfd_runtime::bound_session_params(
-        &mgr.current_config,
-        mgr.current_config
-            .neighbors
-            .interface_only()
-            .first()
-            .unwrap(),
-        "swp1",
-        "fe80::ffff".parse().unwrap(),
-        1,
-    )
-    .unwrap()
-    .unwrap();
-    socket_family.peer = opened;
+    let mut configured = HashMap::from([(opened, session_params(opened, Some(1)))]);
+    for peer in statics {
+        configured.insert(*peer, session_params(*peer, None));
+    }
+    configured
+        .entry("192.0.2.255".parse().unwrap())
+        .or_insert_with(|| session_params("192.0.2.255".parse().unwrap(), None));
     let (desired_tx, _desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
     let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
     let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
     let mut mgr = mgr
-        .with_bfd_coupling(
-            desired_tx,
-            state_rx,
-            HashMap::from([(opened, socket_family)]),
-        )
+        .with_bfd_coupling(desired_tx, state_rx, configured)
         .with_bfd_reload(reload_tx);
-    mgr.bfd_coupling.as_mut().unwrap().configured.clear();
+    mgr.bfd_coupling
+        .as_mut()
+        .unwrap()
+        .configured
+        .retain(|peer, _| statics.contains(peer));
     let state = Arc::new(std::sync::Mutex::new(rustbgpd_bfd::SessionState::Down));
     let (applied_tx, applied) = mpsc::unbounded_channel();
     let reported = state.clone();
@@ -1767,4 +1786,104 @@ async fn a_recovered_endpoint_outlives_an_expired_discovery_binding() {
             .await,
         rustbgpd_transport::StateQueryOutcome::State(_)
     ));
+}
+
+/// A neighbor deleted through the runtime API leaves its BFD member
+/// drained. A binding's membership change must not publish it enabled again,
+/// on bind or on unbind.
+#[tokio::test]
+async fn a_binding_change_never_restarts_a_deleted_neighbors_bfd_session() {
+    let deleted: IpAddr = "192.0.2.9".parse().unwrap();
+    let (mut h, mut bfd) = attach_bfd(
+        harness_with(
+            &["swp1"],
+            &[("swp1", 7, true)],
+            "bfd = { profile = \"fast\" }\n",
+            "[[bfd_profiles]]\nname = \"fast\"\n",
+        ),
+        &[deleted],
+    );
+    insert_test_managed_peer(
+        &mut h.mgr,
+        deleted,
+        fake_peer_handle(
+            deleted,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    h.mgr
+        .delete_peer_runtime(PeerKey::new(deleted, None), false)
+        .await
+        .unwrap();
+    let drained = |config: &crate::bfd_runtime::BfdRuntimeConfig| {
+        config
+            .sessions
+            .iter()
+            .find(|params| params.peer == deleted)
+            .is_some_and(|params| !params.enabled)
+    };
+
+    // Mutation-red: rebuilding the disabled set from live peers only
+    // re-enables the deleted neighbor's session.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(drained(&bfd.next_applied()), "still drained after a bind");
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(
+        drained(&bfd.next_applied()),
+        "still drained after an unbind"
+    );
+}
+
+/// Prepare and commit the BFD side of a reload to `candidate`, then adopt it.
+async fn reload(h: &mut Harness, candidate: crate::config::Config) {
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    h.mgr.current_config = candidate;
+}
+
+/// Inherited BFD enabled, disabled and enabled again by peer-group reloads
+/// reaches an interface-only neighbor that is already bound, without a
+/// rebind: the session is registered (and a strict one holds BGP until Up),
+/// removed, and registered again.
+#[tokio::test]
+async fn a_reload_enables_disables_and_reenables_bfd_on_a_bound_neighbor() {
+    let (mut h, mut bfd) = attach_bfd(
+        harness_with(
+            &["swp1"],
+            &[("swp1", 7, true)],
+            "peer_group = \"fabric\"\n",
+            "[[bfd_profiles]]\nname = \"fast\"\n[peer_groups.fabric]\n",
+        ),
+        &[],
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(bfd.applied.try_recv().is_err(), "no BFD configured yet");
+    let peer = IpAddr::V6(ll(2));
+    let with_bfd = |h: &Harness, bfd: Option<&str>| {
+        let mut candidate = h.mgr.current_config.clone();
+        candidate.peer_groups.get_mut("fabric").unwrap().bfd =
+            bfd.map(|bfd| toml::from_str::<crate::config::BfdConfig>(bfd).unwrap());
+        candidate
+    };
+
+    // Mutation-red: rebuilding only existing sessions never adds one.
+    let enabled = with_bfd(&h, Some("profile = \"fast\"\nstrict = true"));
+    reload(&mut h, enabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
+    assert!(h.mgr.bfd_withholding(&peer), "strict holds BGP until Up");
+
+    let disabled = with_bfd(&h, None);
+    reload(&mut h, disabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert!(!h.mgr.bfd_withholding(&peer), "released with its session");
+    assert!(!h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
+
+    let enabled = with_bfd(&h, Some("profile = \"fast\""));
+    reload(&mut h, enabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
 }

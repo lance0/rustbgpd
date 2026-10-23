@@ -89,6 +89,8 @@ pub(super) struct BfdCoupling {
     /// not derived from configuration: a reload carries them over, and the
     /// binding, not the scope refresh, moves them.
     pub(super) bound: HashSet<IpAddr>,
+    /// The bound members a staged reload settles on, applied with it.
+    pending_bound: Option<HashSet<IpAddr>>,
 }
 
 impl PeerManager {
@@ -132,6 +134,7 @@ impl PeerManager {
             disabled: HashSet::new(),
             held_down: HashSet::new(),
             bound: HashSet::new(),
+            pending_bound: None,
         });
         self
     }
@@ -153,12 +156,13 @@ impl PeerManager {
         let Some(coupling) = self.bfd_coupling.as_mut() else {
             return Ok(None);
         };
+        coupling.pending_bound = Some(bound.iter().map(|params| params.peer).collect());
         let mut desired =
             BfdRuntimeConfig::from_reload(candidate, &self.current_config, &coupling.configured)
                 .map_err(|error| error.to_string())?;
-        // A binding's session is not in configuration: it is rebuilt for the
-        // same endpoint from the candidate's profiles, so a profile edit
-        // applies, and keeps its revision when nothing changed.
+        // A binding's session is not in configuration: every live binding's
+        // is rebuilt from the candidate, so enabling, disabling or editing
+        // its BFD applies, and an unchanged one keeps its revision.
         desired.sessions.extend(bound);
         for params in &mut desired.sessions {
             if let Some(old) = coupling.configured.get(&params.peer) {
@@ -194,30 +198,14 @@ impl PeerManager {
         Ok(prepared)
     }
 
-    /// The bound members' sessions as `candidate` configures them, each for
-    /// its binding's endpoint; a neighbor that no longer runs BFD has none.
+    /// Every live binding's session as `candidate` configures it, for the
+    /// binding's endpoint; a neighbor that runs no BFD there has none.
     fn rebuild_bound_bfd_sessions(
         &self,
         candidate: &crate::config::Config,
     ) -> Result<Vec<BfdSessionParams>, String> {
-        let Some(coupling) = self.bfd_coupling.as_ref() else {
-            return Ok(Vec::new());
-        };
         let mut sessions = Vec::new();
-        for current in coupling
-            .bound
-            .iter()
-            .filter_map(|peer| coupling.configured.get(peer))
-        {
-            let (IpAddr::V6(address), Some(ifindex)) = (current.peer, current.scope_id) else {
-                continue;
-            };
-            let Some(interface) = self
-                .unique_peer_key_for_address(current.peer)
-                .and_then(|key| key.interface)
-            else {
-                continue;
-            };
+        for (interface, address, ifindex) in self.unnumbered_bindings() {
             let Some(neighbor) = candidate.neighbors.interface_only_on(&interface) else {
                 continue;
             };
@@ -463,6 +451,7 @@ impl PeerManager {
     pub(super) fn abort_bfd_reload(&mut self) {
         if let Some(coupling) = self.bfd_coupling.as_mut() {
             coupling.pending = None;
+            coupling.pending_bound = None;
             coupling.reloading = false;
             coupling.rollback_lookup = false;
             coupling.held_down.retain(|peer| {
@@ -527,12 +516,25 @@ impl PeerManager {
             })
             .collect();
         coupling.configured = configured;
+        if let Some(bound) = coupling.pending_bound.take() {
+            coupling.bound = bound;
+        }
+        let previously_disabled = std::mem::take(&mut coupling.disabled);
         coupling.disabled = self
             .peers
             .iter()
             .filter(|(_, managed)| !managed.enabled)
             .map(|(key, _)| key.address)
             .collect();
+        // A member with no peer keeps its state: a membership change that
+        // configuration did not make (a binding, a scope move) must not
+        // restart a session that a runtime deletion drained.
+        coupling
+            .disabled
+            .extend(previously_disabled.into_iter().filter(|peer| {
+                coupling.configured.contains_key(peer)
+                    && !self.peers.keys().any(|key| key.address == *peer)
+            }));
         coupling.reloading = false;
         coupling.rollback_lookup = false;
         let desired = BfdRuntimeConfig {

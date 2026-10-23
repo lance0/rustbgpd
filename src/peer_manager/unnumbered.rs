@@ -439,6 +439,23 @@ impl PeerManager {
             })
     }
 
+    /// Every live binding: its interface, learned address and the index its
+    /// peer is scoped to.
+    pub(super) fn unnumbered_bindings(&self) -> Vec<(String, Ipv6Addr, u32)> {
+        self.unnumbered
+            .iter()
+            .flat_map(|unnumbered| unnumbered.ports.iter())
+            .filter_map(|(name, port)| {
+                let key = port.bound.as_ref()?;
+                let IpAddr::V6(address) = key.address else {
+                    return None;
+                };
+                let ifindex = self.peers.get(key)?.transport_config.peer_scope_id?;
+                Some((name.clone(), address, ifindex))
+            })
+            .collect()
+    }
+
     /// The addresses interface-only neighbors are bound to now.
     pub(super) fn unnumbered_bound_addresses(&self) -> std::collections::HashSet<IpAddr> {
         self.unnumbered
