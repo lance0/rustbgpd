@@ -1,6 +1,6 @@
 //! gRPC RIB service — route listing, filtering, and bounded event history.
 
-use rustbgpd_rib::PeerId;
+use rustbgpd_rib::{PeerId, PeerScope};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -25,7 +25,7 @@ use rustbgpd_rib::{
     OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus, ReceivedFlowSpecRoute, RibRowFilter,
     RibUpdate, Route, RouteEventType, RoutePage, RoutePageError, RoutePageVersion,
     RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RtcRibRoute,
-    VpnRibRoute, route_query_key,
+    VpnRibRoute, route_query_key_in,
 };
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, AspaValidation, EvpnRoute, LargeCommunity, PathAttribute, Prefix,
@@ -397,14 +397,20 @@ impl RibService {
         let next_page_token = if page.has_more {
             page.routes
                 .last()
-                .map(|route| encode_evpn_page_token(scope, &identity, route, page.version))
+                .map(|route| {
+                    encode_evpn_page_token(scope, &identity, route, &page.peer_scope, page.version)
+                })
                 .transpose()?
                 .unwrap_or_default()
         } else {
             String::new()
         };
         let mut response = Response::new(proto::ListPeerEvpnRoutesResponse {
-            routes: page.routes.iter().map(evpn_route_to_proto).collect(),
+            routes: page
+                .routes
+                .iter()
+                .map(|route| evpn_route_to_proto_in(route, &page.peer_scope))
+                .collect(),
             next_page_token,
             total_count: page.total,
             page_version: Some(proto::RoutePageVersion {
@@ -1518,7 +1524,7 @@ fn parse_hex_octets(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn encode_bgpls_page_key(route: &BgpLsRibRoute) -> String {
+fn encode_bgpls_page_key(route: &BgpLsRibRoute, peers: &PeerScope) -> String {
     format!(
         "{}~{:04x}~{}~{}~{}~{}",
         bgpls_family_label(route.family),
@@ -1528,7 +1534,7 @@ fn encode_bgpls_page_key(route: &BgpLsRibRoute) -> String {
             .route_distinguisher
             .map_or_else(|| "-".to_string(), |rd| hex_octets(&rd)),
         hex_octets(&route.nlri.payload),
-        route.peer,
+        peers.display(route.peer),
         route.path_id
     )
 }
@@ -1756,6 +1762,7 @@ fn encode_evpn_page_token(
     scope: RouteQueryScope,
     identity: &str,
     route: &EvpnRibRoute,
+    peers: &PeerScope,
     version: RoutePageVersion,
 ) -> Result<String, Status> {
     use std::fmt::Write as _;
@@ -1773,7 +1780,7 @@ fn encode_evpn_page_token(
         version.epoch,
         version.generation,
         route_page_scope_token(scope),
-        route.peer
+        peers.display(route.peer)
     );
     Ok(format!(
         "{payload}|{}",
@@ -2006,7 +2013,7 @@ fn route_page_to_response(
                 encode_route_page_token(
                     scope,
                     query_identity,
-                    &route_query_key(route),
+                    &route_query_key_in(route, &page.peer_scope),
                     page.version,
                     page.total,
                 )
@@ -2021,7 +2028,7 @@ fn route_page_to_response(
             .iter()
             .enumerate()
             .map(|(index, route)| {
-                let mut row = route_to_proto(route, best);
+                let mut row = scoped_route_to_proto(route, best, &page.peer_scope);
                 if let (Some(Some(tag)), Some(leases)) = (page.injection.get(index), leases) {
                     set_row_lease(
                         &mut row.injection_owner,
@@ -2357,9 +2364,11 @@ fn export_gate_to_proto(step: rustbgpd_rib::update::ExportGateStep) -> proto::Ex
 }
 
 fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertisedRouteResponse {
+    // Handles resolve as they were when the RIB built the explanation.
+    let peers = &explain.peer_scope;
     proto::ExplainAdvertisedRouteResponse {
         decision: explain_decision_to_proto(explain.decision),
-        peer_address: explain.peer.to_string(),
+        peer_address: peers.display(explain.peer),
         prefix: explain.prefix.addr_string(),
         prefix_length: u32::from(explain.prefix.prefix_len()),
         next_hop: explain
@@ -2368,7 +2377,7 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
         path_id: explain.path_id,
         route_peer_address: explain
             .route_peer
-            .map_or_else(String::new, |peer| peer.to_string()),
+            .map_or_else(String::new, |peer| peers.display(peer)),
         route_peer_interface: explain
             .route_peer_interface
             .as_deref()
@@ -2397,7 +2406,7 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
             .orr_candidates
             .into_iter()
             .map(|candidate| proto::OrrExplainCandidate {
-                peer_address: candidate.peer.to_string(),
+                peer_address: peers.display(candidate.peer),
                 peer_interface: candidate
                     .peer_interface
                     .as_deref()
@@ -2420,7 +2429,7 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
         // The explained route is the requested source, so it shares the
         // selected route's recorded scope.
         source: explain.source.map(|source| proto::RouteSourceIdentity {
-            peer_address: source.peer.to_string(),
+            peer_address: peers.display(source.peer),
             path_id: source.path_id,
             peer_interface: explain
                 .route_peer_interface
@@ -2432,10 +2441,15 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
 }
 
 fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPathResponse {
+    // Handles resolve as they were when the RIB built the explanation.
+    let peers = &explain.peer_scope;
     proto::ExplainBestPathResponse {
         prefix: explain.prefix.addr_string(),
         prefix_length: u32::from(explain.prefix.prefix_len()),
-        best_route: explain.best.as_ref().map(|r| route_to_proto(r, true)),
+        best_route: explain
+            .best
+            .as_ref()
+            .map(|r| scoped_route_to_proto(r, true, peers)),
         // The step that selected the winner (vs the runner-up). A best
         // route with no eligible competing candidates is the trivial winner:
         // "only_path". Invalid-only input retains candidate diagnostics with
@@ -2457,7 +2471,7 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
             .map(|c| {
                 // Candidates never include the winner (filtered in RIB manager).
                 proto::BestPathCandidate {
-                    route: Some(route_to_proto(&c.route, false)),
+                    route: Some(scoped_route_to_proto(&c.route, false, peers)),
                     vs_best_reason: c.vs_best_reason.to_string(),
                     vs_best_ordering: match c.vs_best_ordering {
                         std::cmp::Ordering::Less => "better".to_string(),
@@ -2470,13 +2484,22 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
                 }
             })
             .collect(),
-        peer_address: explain.peer.map(|p| p.to_string()).unwrap_or_default(),
+        peer_address: explain.peer.map(|p| peers.display(p)).unwrap_or_default(),
         // Echoed from the request by the handler.
         peer_interface: String::new(),
         add_path_send_max: explain.add_path_send_max,
         orr_vantage: explain
             .orr_vantage
             .map_or_else(String::new, |vantage| vantage.to_string()),
+    }
+}
+
+/// [`route_to_proto`] for a row of a reply that carries the peer table as
+/// of its RIB turn: the source address is the one the row was built with.
+fn scoped_route_to_proto(route: &Route, best: bool, peers: &PeerScope) -> proto::Route {
+    proto::Route {
+        peer_address: peers.display(route.peer),
+        ..route_to_proto(route, best)
     }
 }
 
@@ -3441,7 +3464,7 @@ impl proto::rib_service_server::RibService for RibService {
                             "{:016x}~{}~{}~{}",
                             u64::from_be_bytes(r.nlri.route_distinguisher.0),
                             r.nlri.prefix,
-                            r.peer,
+                            page.peer_scope.display(r.peer),
                             r.path_id
                         ),
                         page.version,
@@ -3452,7 +3475,11 @@ impl proto::rib_service_server::RibService for RibService {
             String::new()
         };
         Ok(Response::new(proto::ListVpnRibRoutesResponse {
-            routes: page.routes.iter().map(vpn_route_to_proto).collect(),
+            routes: page
+                .routes
+                .iter()
+                .map(|route| vpn_route_to_proto_in(route, &page.peer_scope))
+                .collect(),
             next_page_token,
             total_count: page.total,
             page_version: Some(proto::RoutePageVersion {
@@ -3517,7 +3544,12 @@ impl proto::rib_service_server::RibService for RibService {
                     encode_family_page_token(
                         scope,
                         &identity,
-                        &format!("{}~{}~{}", r.nlri.prefix, r.peer, r.path_id),
+                        &format!(
+                            "{}~{}~{}",
+                            r.nlri.prefix,
+                            page.peer_scope.display(r.peer),
+                            r.path_id
+                        ),
                         page.version,
                     )
                 })
@@ -3526,7 +3558,11 @@ impl proto::rib_service_server::RibService for RibService {
             String::new()
         };
         Ok(Response::new(proto::ListLabeledRibRoutesResponse {
-            routes: page.routes.iter().map(labeled_route_to_proto).collect(),
+            routes: page
+                .routes
+                .iter()
+                .map(|route| labeled_route_to_proto_in(route, &page.peer_scope))
+                .collect(),
             next_page_token,
             total_count: page.total,
             page_version: Some(proto::RoutePageVersion {
@@ -3600,7 +3636,7 @@ impl proto::rib_service_server::RibService for RibService {
                             r.nlri.origin_as,
                             r.nlri.route_target_bits,
                             r.nlri.prefix_len,
-                            r.peer,
+                            page.peer_scope.display(r.peer),
                             r.path_id
                         ),
                         page.version,
@@ -3611,7 +3647,11 @@ impl proto::rib_service_server::RibService for RibService {
             String::new()
         };
         Ok(Response::new(proto::ListRtcRibRoutesResponse {
-            routes: page.routes.iter().map(rtc_route_to_proto).collect(),
+            routes: page
+                .routes
+                .iter()
+                .map(|route| rtc_route_to_proto_in(route, &page.peer_scope))
+                .collect(),
             next_page_token,
             total_count: page.total,
             page_version: Some(proto::RoutePageVersion {
@@ -3672,7 +3712,7 @@ impl proto::rib_service_server::RibService for RibService {
                     encode_family_page_token(
                         scope,
                         &identity,
-                        &encode_bgpls_page_key(r),
+                        &encode_bgpls_page_key(r, &page.peer_scope),
                         page.version,
                     )
                 })
@@ -3681,7 +3721,11 @@ impl proto::rib_service_server::RibService for RibService {
             String::new()
         };
         Ok(Response::new(proto::ListBgpLsRibRoutesResponse {
-            routes: page.routes.iter().map(bgpls_route_to_proto).collect(),
+            routes: page
+                .routes
+                .iter()
+                .map(|route| bgpls_route_to_proto_in(route, &page.peer_scope))
+                .collect(),
             next_page_token,
             total_count: page.total,
             page_version: Some(proto::RoutePageVersion {
@@ -3727,14 +3771,20 @@ impl proto::rib_service_server::RibService for RibService {
         let next_page_token = if page.has_more {
             page.routes
                 .last()
-                .map(|r| encode_evpn_page_token(scope, &identity, r, page.version))
+                .map(|r| {
+                    encode_evpn_page_token(scope, &identity, r, &page.peer_scope, page.version)
+                })
                 .transpose()?
                 .unwrap_or_default()
         } else {
             String::new()
         };
         Ok(Response::new(proto::ListBestEvpnRoutesResponse {
-            routes: page.routes.iter().map(evpn_route_to_proto).collect(),
+            routes: page
+                .routes
+                .iter()
+                .map(|route| evpn_route_to_proto_in(route, &page.peer_scope))
+                .collect(),
             next_page_token,
             total_count: page.total,
             page_version: Some(proto::RoutePageVersion {
@@ -4360,6 +4410,46 @@ fn prefix_sid_to_proto(
         Err(error) => view.decode_error = error.to_string(),
     }
     Some(Box::new(view))
+}
+
+/// Family row converters for a page row, with the source address recorded
+/// in the page's RIB turn rather than resolved now.
+fn vpn_route_to_proto_in(route: &VpnRibRoute, peers: &PeerScope) -> proto::VpnRouteEntry {
+    proto::VpnRouteEntry {
+        peer_address: peers.display(route.peer),
+        ..vpn_route_to_proto(route)
+    }
+}
+
+fn labeled_route_to_proto_in(
+    route: &LabeledRibRoute,
+    peers: &PeerScope,
+) -> proto::LabeledRouteEntry {
+    proto::LabeledRouteEntry {
+        peer_address: peers.display(route.peer),
+        ..labeled_route_to_proto(route)
+    }
+}
+
+fn rtc_route_to_proto_in(route: &RtcRibRoute, peers: &PeerScope) -> proto::RtcRouteEntry {
+    proto::RtcRouteEntry {
+        peer_address: peers.display(route.peer),
+        ..rtc_route_to_proto(route)
+    }
+}
+
+fn bgpls_route_to_proto_in(route: &BgpLsRibRoute, peers: &PeerScope) -> proto::BgpLsRouteEntry {
+    proto::BgpLsRouteEntry {
+        peer_address: peers.display(route.peer),
+        ..bgpls_route_to_proto(route)
+    }
+}
+
+fn evpn_route_to_proto_in(route: &EvpnRibRoute, peers: &PeerScope) -> proto::EvpnRouteEntry {
+    proto::EvpnRouteEntry {
+        peer_address: peers.display(route.peer),
+        ..evpn_route_to_proto(route)
+    }
 }
 
 pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
@@ -5194,6 +5284,7 @@ mod tests {
                     }
                     RibUpdate::QueryVpnRoutesPage { reply, .. } => {
                         let _ = reply.send(Ok(rustbgpd_rib::RibRowsPage {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             routes: Vec::new(),
                             total: 0,
                             has_more: false,
@@ -5202,6 +5293,7 @@ mod tests {
                     }
                     RibUpdate::QueryLabeledRoutesPage { reply, .. } => {
                         let _ = reply.send(Ok(rustbgpd_rib::RibRowsPage {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             routes: Vec::new(),
                             total: 0,
                             has_more: false,
@@ -5210,6 +5302,7 @@ mod tests {
                     }
                     RibUpdate::QueryRtcRoutesPage { reply, .. } => {
                         let _ = reply.send(Ok(rustbgpd_rib::RibRowsPage {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             routes: Vec::new(),
                             total: 0,
                             has_more: false,
@@ -5218,6 +5311,7 @@ mod tests {
                     }
                     RibUpdate::QueryBgpLsRoutesPage { reply, .. } => {
                         let _ = reply.send(Ok(rustbgpd_rib::RibRowsPage {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             routes: Vec::new(),
                             total: 0,
                             has_more: false,
@@ -5429,6 +5523,9 @@ mod tests {
 
     #[path = "family_pages_tests.rs"]
     mod family_pages;
+
+    #[path = "rebind_pages_tests.rs"]
+    mod rebind_pages;
 
     fn non_unicast_routes(
         peer: IpAddr,
@@ -6043,14 +6140,18 @@ mod tests {
             epoch: 5,
             generation: 17,
         };
-        let token = encode_evpn_page_token(scope, "6:65000:100", &route, version).unwrap();
+        let token =
+            encode_evpn_page_token(scope, "6:65000:100", &route, &PeerScope::default(), version)
+                .unwrap();
         assert!(token.starts_with("ep1|"));
         let before = decode_evpn_page_token(&token).unwrap();
         route.route = EvpnRoute::Smet(rustbgpd_wire::EvpnSmet {
             flags: 0xfa,
             ..smet
         });
-        let token = encode_evpn_page_token(scope, "6:65000:100", &route, version).unwrap();
+        let token =
+            encode_evpn_page_token(scope, "6:65000:100", &route, &PeerScope::default(), version)
+                .unwrap();
         assert_eq!(decode_evpn_page_token(&token).unwrap().after, before.after);
         assert_eq!(before.after, (route.key(), peer.addr()));
         assert!(token.len() <= 1024);
@@ -6098,6 +6199,7 @@ mod tests {
                         assert!(after.is_none());
                         reply
                             .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                                peer_scope: rustbgpd_rib::PeerScope::default(),
                                 routes: vec![route.clone()],
                                 total: 2,
                                 has_more: true,
@@ -6992,7 +7094,8 @@ mod tests {
         }));
         for variant in variants {
             route.route = variant;
-            let token = encode_evpn_page_token(scope, "0:", &route, version).unwrap();
+            let token = encode_evpn_page_token(scope, "0:", &route, &PeerScope::default(), version)
+                .unwrap();
             let cursor = decode_evpn_page_token(&token).unwrap();
             assert_eq!(cursor.after, (route.key(), peer.addr()));
             assert_eq!(cursor.scope, scope);
@@ -7048,6 +7151,7 @@ mod tests {
             RouteQueryScope::Received { peer: Some(peer) },
             &peer_evpn_filter(3, "65000:100", "", "", None).unwrap().1,
             &route,
+            &PeerScope::default(),
             version,
         )
         .unwrap();
@@ -7160,6 +7264,7 @@ mod tests {
             assert_eq!(page_size, 100);
             reply
                 .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                    peer_scope: rustbgpd_rib::PeerScope::default(),
                     routes: vec![route],
                     total: 2,
                     has_more: true,
@@ -7646,6 +7751,7 @@ mod tests {
         );
         route.peer = peer;
         let page = RoutePage {
+            peer_scope: rustbgpd_rib::PeerScope::default(),
             routes: vec![route],
             total: 2,
             has_more: true,
@@ -8011,6 +8117,7 @@ mod tests {
     async fn lookup_best_path_uses_distinct_command_and_returns_matched_prefix() {
         let matched = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
         let explanation = rustbgpd_rib::ExplainBestPath {
+            peer_scope: rustbgpd_rib::PeerScope::default(),
             prefix: matched,
             best: Some(test_route(matched, vec![PathAttribute::LocalPref(100)])),
             candidates: vec![],
@@ -8047,6 +8154,7 @@ mod tests {
         let mut loser = test_route(prefix, vec![PathAttribute::LocalPref(100)]);
         loser.peer = PeerId::from_addr("10.0.0.2".parse().unwrap());
         let explanation = rustbgpd_rib::ExplainBestPath {
+            peer_scope: rustbgpd_rib::PeerScope::default(),
             prefix,
             best: Some(best),
             candidates: vec![rustbgpd_rib::BestPathCandidate {
@@ -8085,6 +8193,7 @@ mod tests {
         let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
         let vantage: IpAddr = "10.0.1.9".parse().unwrap();
         let explanation = rustbgpd_rib::ExplainBestPath {
+            peer_scope: rustbgpd_rib::PeerScope::default(),
             prefix,
             best: Some(test_route(prefix, vec![PathAttribute::LocalPref(100)])),
             candidates: vec![],
@@ -8113,6 +8222,7 @@ mod tests {
     async fn explain_best_path_single_path_reports_only_path() {
         let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
         let explanation = rustbgpd_rib::ExplainBestPath {
+            peer_scope: rustbgpd_rib::PeerScope::default(),
             prefix,
             best: Some(test_route(prefix, vec![PathAttribute::LocalPref(100)])),
             candidates: vec![],
@@ -8138,6 +8248,7 @@ mod tests {
     async fn explain_best_path_preserves_srv6_ineligible_only_candidates() {
         let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
         let explanation = rustbgpd_rib::ExplainBestPath {
+            peer_scope: rustbgpd_rib::PeerScope::default(),
             prefix,
             best: None,
             candidates: vec![rustbgpd_rib::BestPathCandidate {
@@ -8173,6 +8284,7 @@ mod tests {
         // No paths in any Adj-RIB-In: the manager reports an empty
         // explanation; the RPC maps it to NOT_FOUND.
         let explanation = rustbgpd_rib::ExplainBestPath {
+            peer_scope: rustbgpd_rib::PeerScope::default(),
             prefix,
             best: None,
             candidates: vec![],
@@ -9329,6 +9441,7 @@ mod tests {
                 // Path ID 9 stops before selection, as an ORF gate does.
                 let selected = source.filter(|source| source.path_id != 9);
                 let _ = reply.send(Ok(ExplainAdvertisedRoute {
+                    peer_scope: rustbgpd_rib::PeerScope::default(),
                     decision: ExplainDecision::Advertise,
                     peer,
                     prefix,
@@ -9455,6 +9568,7 @@ mod tests {
         };
         reply
             .send(Ok(ExplainAdvertisedRoute {
+                peer_scope: rustbgpd_rib::PeerScope::default(),
                 decision: ExplainDecision::Advertise,
                 peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
                 prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
@@ -10248,6 +10362,7 @@ mod tests {
         };
         let response = route_page_to_response(
             &RoutePage {
+                peer_scope: rustbgpd_rib::PeerScope::default(),
                 routes: Vec::new(),
                 total: 0,
                 has_more: false,
@@ -10516,6 +10631,7 @@ mod tests {
                     assert!(expected_version.is_none());
                     assert_eq!(page_size, 1);
                     let _ = reply.send(Ok(RoutePage {
+                        peer_scope: rustbgpd_rib::PeerScope::default(),
                         routes: vec![page_route.clone()],
                         total: 2,
                         has_more: true,
@@ -10551,7 +10667,7 @@ mod tests {
             encode_route_page_token(
                 RouteQueryScope::Received { peer: None },
                 &query_identity,
-                &route_query_key(&route),
+                &rustbgpd_rib::route_query_key(&route),
                 RoutePageVersion {
                     epoch: 7,
                     generation: 9
@@ -10603,6 +10719,7 @@ mod tests {
                 if let RibUpdate::QueryRoutesPage { scope, reply, .. } = update {
                     assert_eq!(scope, RouteQueryScope::Received { peer: Some(peer) });
                     let _ = reply.send(Ok(RoutePage {
+                        peer_scope: rustbgpd_rib::PeerScope::default(),
                         routes: vec![route.clone()],
                         total: 2,
                         has_more: true,
@@ -10690,6 +10807,7 @@ mod tests {
                 assert!(filter(&matching));
                 assert!(!filter(&nonmatching));
                 let _ = reply.send(Ok(RoutePage {
+                    peer_scope: rustbgpd_rib::PeerScope::default(),
                     routes: vec![response_route],
                     total: 1,
                     has_more: false,
@@ -10768,6 +10886,7 @@ mod tests {
                 assert_eq!(after, Some(key));
                 assert_eq!(expected_version, Some(version));
                 let _ = reply.send(Ok(RoutePage {
+                    peer_scope: rustbgpd_rib::PeerScope::default(),
                     routes: Vec::new(),
                     total: 1,
                     has_more: false,
@@ -10813,6 +10932,7 @@ mod tests {
             while let Some(update) = rx.recv().await {
                 if let RibUpdate::QueryRoutesPage { reply, .. } = update {
                     let _ = reply.send(Ok(RoutePage {
+                        peer_scope: rustbgpd_rib::PeerScope::default(),
                         routes: page.clone(),
                         total: 2,
                         has_more: false,

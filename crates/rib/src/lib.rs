@@ -91,7 +91,7 @@ pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,
     OrrState, OrrStatusSnapshot, OrrTopology, OrrTopologySnapshot, OrrVantageStatus, SpfResult,
 };
-pub use peer_id::{PeerEndpoint, PeerId};
+pub use peer_id::{PeerEndpoint, PeerId, PeerScope};
 pub use route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FibInstallCandidate,
     FibInstallNextHop, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey, LabeledRibRoute,
@@ -125,4 +125,5 @@ pub use update::{
     UpdateGroupImpactPlan, UpdateGroupImpactRollup, UpdateGroupPeerComparison,
     UpdateGroupPeerSnapshot, UpdateGroupSnapshot, VersionedPeerGroups, VpnRouteQueryKey,
     WarmMrtSnapshotBudget, WarmMrtSnapshotView, classify_update_group, route_query_key,
+    route_query_key_in,
 };

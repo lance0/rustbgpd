@@ -724,7 +724,10 @@ fn parse_peer_index_table(
             cur.u32("peer AS (4 octet)")?
         };
         peers.push(MrtPeerEntry {
+            // A file names no RIB neighbor; `peer_index` tells entries apart.
+            peer: rustbgpd_rib::PeerId::UNASSIGNED,
             peer_addr,
+            interface: None,
             peer_bgp_id,
             peer_asn,
         });
@@ -782,7 +785,9 @@ mod tests {
             IpAddr::V6(_) => Ipv4Addr::new(10, 0, 0, 1),
         };
         MrtPeerEntry {
+            peer: PeerId::from_addr(addr),
             peer_addr: addr,
+            interface: None,
             peer_bgp_id: bgp_id,
             peer_asn: asn,
         }

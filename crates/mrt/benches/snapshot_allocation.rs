@@ -538,7 +538,9 @@ fn make_peer(index: usize) -> MrtPeerEntry {
     let ordinal = u32::try_from(index).expect("source count fits u32");
     let address = Ipv4Addr::from(PEER_IPV4_BASE + ordinal);
     MrtPeerEntry {
+        peer: PeerId::from_addr(IpAddr::V4(address)),
         peer_addr: IpAddr::V4(address),
+        interface: None,
         peer_bgp_id: address,
         peer_asn: 64_512 + ordinal,
     }

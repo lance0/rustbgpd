@@ -197,6 +197,8 @@ impl BmpLocRibConfig {
     pub fn peer_info(&self, timestamp: SystemTime) -> BmpPeerInfo {
         BmpPeerInfo {
             peer_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            // The instance peer is never cached by neighbor.
+            neighbor: 0,
             peer_asn: self.local_asn,
             peer_bgp_id: self.router_id,
             peer_type: BmpPeerType::LocRib,
@@ -333,6 +335,11 @@ pub struct BmpCollectorBootstrap {
 pub struct BmpPeerInfo {
     /// Remote peer IP address.
     pub peer_addr: IpAddr,
+    /// Process-local identity of the neighbor: the RIB's `PeerId` in raw
+    /// form. It keys the manager's per-neighbor state, so two neighbors on
+    /// one scoped link-local address never read or clear each other's
+    /// cached Peer Up. Never encoded.
+    pub neighbor: u64,
     /// Remote peer ASN.
     pub peer_asn: u32,
     /// Remote peer BGP identifier.

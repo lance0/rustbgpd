@@ -2427,6 +2427,7 @@ impl PeerSession {
             .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id);
         BmpPeerInfo {
             peer_addr: self.peer_ip,
+            neighbor: self.rib_peer().to_raw(),
             peer_asn: self
                 .negotiated
                 .as_ref()

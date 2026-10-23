@@ -1178,6 +1178,7 @@ pub(crate) mod test_fixture {
         let addr: IpAddr = addr.parse().unwrap();
         BmpPeerInfo {
             peer_addr: addr,
+            neighbor: 1,
             peer_asn: asn,
             peer_bgp_id: Ipv4Addr::new(192, 0, 2, 99),
             peer_type: BmpPeerType::Global,

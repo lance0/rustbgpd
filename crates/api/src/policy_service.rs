@@ -1404,7 +1404,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use prost::Message;
         use rustbgpd_policy::rpol::RpolFile;
         use rustbgpd_policy::sets::SetStore;
-        use rustbgpd_rib::{RouteQueryScope, route_query_key};
+        use rustbgpd_rib::{RouteQueryScope, route_query_key_in};
 
         let req = request.into_inner();
         if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
@@ -1445,7 +1445,6 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "",
             self.import_roster.as_ref(),
         )?;
-        let peer_filter = peer_key.as_ref().map(|key| key.address);
 
         // Compile the candidate source server-side. Diagnostics are a
         // successful RPC with compiled=false — the dry run's answer.
@@ -1498,7 +1497,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
 
         let scope = TestPolicyScope {
             import,
-            target_peer: peer_filter,
+            target_peer: peer_key.clone(),
             family_filter,
             limit: req.limit as usize,
             show_changes: req.show_changes as usize,
@@ -1512,7 +1511,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         loop {
             run_test_policy_page(
                 &chain,
-                &page.routes,
+                &page,
                 &scope,
                 &peer_context,
                 &mut response,
@@ -1522,9 +1521,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             {
                 break;
             }
-            let after = page.routes.last().map(route_query_key).ok_or_else(|| {
-                Status::unavailable("route pagination returned an empty continuation page")
-            })?;
+            let after = page
+                .routes
+                .last()
+                .map(|route| route_query_key_in(route, &page.peer_scope))
+                .ok_or_else(|| {
+                    Status::unavailable("route pagination returned an empty continuation page")
+                })?;
             drop(page);
             page = query_test_policy_page(rib_tx, query_scope, Some(after), Some(snapshot_version))
                 .await?;
@@ -1545,7 +1548,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use prost::Message;
         use rustbgpd_policy::rpol::RpolFile;
         use rustbgpd_policy::sets::SetStore;
-        use rustbgpd_rib::{RibUpdate, RouteQueryScope, route_query_key};
+        use rustbgpd_rib::{RibUpdate, RouteQueryScope, route_query_key_in};
 
         let req = request.into_inner();
         if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
@@ -1730,7 +1733,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         .await?;
 
         let scope = ComparePolicyScope {
-            target: target.addr(),
+            target: target_key.clone(),
             family_filter,
             limit: req.limit as usize,
             max_samples: req.max_samples as usize,
@@ -1746,7 +1749,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 &installed,
                 &candidate,
                 &frames,
-                &page.routes,
+                &page,
                 &scope,
                 &peer_context,
                 &mut response,
@@ -1755,9 +1758,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             {
                 break;
             }
-            let after = page.routes.last().map(route_query_key).ok_or_else(|| {
-                Status::unavailable("route pagination returned an empty continuation page")
-            })?;
+            let after = page
+                .routes
+                .last()
+                .map(|route| route_query_key_in(route, &page.peer_scope))
+                .ok_or_else(|| {
+                    Status::unavailable("route pagination returned an empty continuation page")
+                })?;
             drop(page);
             page = query_test_policy_page(
                 rib_tx,
@@ -2036,7 +2043,12 @@ async fn dry_run_peer_context(
     }
     Ok(peers
         .into_iter()
-        .map(|info| (info.address, (info.remote_asn, info.peer_group)))
+        .map(|info| {
+            (
+                PeerKey::new(info.address, info.interface),
+                (info.remote_asn, info.peer_group),
+            )
+        })
         .collect())
 }
 
@@ -2222,7 +2234,7 @@ struct TestPolicyScope {
     import: bool,
     /// Export evaluation target (also the import snapshot filter,
     /// applied upstream by the RIB query).
-    target_peer: Option<IpAddr>,
+    target_peer: Option<PeerKey>,
     /// `Some(true)` = IPv4 only, `Some(false)` = IPv6 only.
     family_filter: Option<bool>,
     /// Max routes evaluated; 0 = all.
@@ -2239,13 +2251,14 @@ struct TestPolicyScope {
 /// its inputs — no daemon state is touched (ADR-0096 Decision 6).
 fn run_test_policy_page(
     chain: &rustbgpd_policy::ir::CompiledChain,
-    routes: &[rustbgpd_rib::Route],
+    page: &rustbgpd_rib::RoutePage,
     scope: &TestPolicyScope,
     peer_context: &DryRunPeerContext,
     response: &mut proto::TestPolicyResponse,
     hits: &mut [Vec<u64>],
 ) {
     use rustbgpd_policy::PolicyAction;
+    let (routes, peers) = (&page.routes, &page.peer_scope);
 
     let needs_as_path_string = chain.requires_as_path_string();
     let remaining = if scope.limit == 0 {
@@ -2263,10 +2276,12 @@ fn run_test_policy_page(
         })
         .take(remaining)
     {
+        let source;
         let ctx_peer = if scope.import {
-            Some(route.peer.addr())
+            source = route_source_key(route, peers);
+            Some(&source)
         } else {
-            scope.target_peer
+            scope.target_peer.as_ref()
         };
         let as_path_str = dry_run_as_path_string(route, needs_as_path_string);
         let ctx = dry_run_route_context(route, &as_path_str, ctx_peer, peer_context);
@@ -2280,7 +2295,7 @@ fn run_test_policy_page(
                     response.diffs.push(proto::TestPolicyDiff {
                         prefix: route.prefix.addr_string(),
                         prefix_length: u32::from(route.prefix.prefix_len()),
-                        peer: route.peer.to_string(),
+                        peer: peers.display(route.peer),
                         peer_interface: route
                             .peer_interface()
                             .as_deref()
@@ -2298,7 +2313,7 @@ fn run_test_policy_page(
                     .push(proto::TestPolicyRejectedRoute {
                         prefix: route.prefix.addr_string(),
                         prefix_length: u32::from(route.prefix.prefix_len()),
-                        peer: route.peer.to_string(),
+                        peer: peers.display(route.peer),
                         peer_interface: route
                             .peer_interface()
                             .as_deref()
@@ -2310,8 +2325,19 @@ fn run_test_policy_page(
     }
 }
 
-/// Peer context for dry runs: address -> (remote ASN, peer group).
-type DryRunPeerContext = std::collections::HashMap<IpAddr, (u32, Option<String>)>;
+/// The neighbor a route was learned from: its address as of the page's RIB
+/// turn and the interface its receiving session recorded.
+fn route_source_key(route: &rustbgpd_rib::Route, peers: &rustbgpd_rib::PeerScope) -> PeerKey {
+    PeerKey::new(
+        peers.addr(route.peer),
+        route.peer_interface().map(|name| name.to_string()),
+    )
+}
+
+/// Peer context for dry runs: neighbor -> (remote ASN, peer group). Keyed by
+/// the scoped neighbor, so two neighbors on one link-local address keep
+/// their own ASN and group.
+type DryRunPeerContext = std::collections::HashMap<PeerKey, (u32, Option<String>)>;
 
 /// The rendered `AS_PATH` string, only when some guard needs it.
 fn dry_run_as_path_string(route: &rustbgpd_rib::Route, needed: bool) -> String {
@@ -2329,14 +2355,14 @@ fn dry_run_as_path_string(route: &rustbgpd_rib::Route, needed: bool) -> String {
 fn dry_run_route_context<'a>(
     route: &'a rustbgpd_rib::Route,
     as_path_str: &'a str,
-    ctx_peer: Option<IpAddr>,
+    ctx_peer: Option<&PeerKey>,
     peer_context: &'a DryRunPeerContext,
 ) -> rustbgpd_policy::RouteContext<'a> {
     use rustbgpd_policy::{RouteContext, RouteType};
     use rustbgpd_rib::RouteOrigin;
 
     let (peer_asn, peer_group) = ctx_peer
-        .and_then(|addr| peer_context.get(&addr))
+        .and_then(|key| peer_context.get(key))
         .map_or((None, None), |(asn, group)| (Some(*asn), group.as_deref()));
     RouteContext {
         prefix: Some(route.prefix),
@@ -2350,7 +2376,7 @@ fn dry_run_route_context<'a>(
         origin_asn: route.as_path().and_then(rustbgpd_wire::AsPath::origin_asn),
         validation_state: route.validation_state,
         aspa_state: route.aspa_state,
-        peer_address: ctx_peer,
+        peer_address: ctx_peer.map(|key| key.address),
         peer_asn,
         peer_group,
         route_type: Some(match route.origin_type {
@@ -2394,7 +2420,7 @@ fn compile_compare_candidates(
 /// Route selection scope for one `ComparePolicy` run.
 struct ComparePolicyScope {
     /// Export target: its address and peer context are the evaluation context.
-    target: IpAddr,
+    target: PeerKey,
     /// `Some(true)` = IPv4 only, `Some(false)` = IPv6 only.
     family_filter: Option<bool>,
     /// Max routes evaluated; 0 = all.
@@ -2478,12 +2504,13 @@ fn run_compare_policy_page(
     installed: &rustbgpd_policy::ir::CompiledChain,
     candidate: &rustbgpd_policy::ir::CompiledChain,
     frames: &ComparePolicyFrames,
-    routes: &[rustbgpd_rib::Route],
+    page: &rustbgpd_rib::RoutePage,
     scope: &ComparePolicyScope,
     peer_context: &DryRunPeerContext,
     response: &mut proto::ComparePolicyResponse,
 ) {
     use rustbgpd_policy::PolicyAction;
+    let (routes, peers) = (&page.routes, &page.peer_scope);
 
     let needs_as_path_string =
         installed.requires_as_path_string() || candidate.requires_as_path_string();
@@ -2503,7 +2530,7 @@ fn run_compare_policy_page(
         .take(remaining)
     {
         let as_path_str = dry_run_as_path_string(route, needs_as_path_string);
-        let ctx = dry_run_route_context(route, &as_path_str, Some(scope.target), peer_context);
+        let ctx = dry_run_route_context(route, &as_path_str, Some(&scope.target), peer_context);
         response.routes_evaluated += 1;
         let before = installed.evaluate_pinned(&ctx, &frames.installed);
         let after = candidate.evaluate_pinned(&ctx, &frames.candidate);
@@ -2540,7 +2567,7 @@ fn run_compare_policy_page(
             samples.push(proto::ComparePolicyRoute {
                 prefix: route.prefix.addr_string(),
                 prefix_length: u32::from(route.prefix.prefix_len()),
-                peer: route.peer.to_string(),
+                peer: peers.display(route.peer),
                 installed_changes: changes(&before),
                 candidate_changes: changes(&after),
             });
@@ -4202,6 +4229,7 @@ policy customer-in(peer_lp: u32) {
                         last_cursor = page_routes.last().map(rustbgpd_rib::route_query_key);
                         query_index += 1;
                         let _ = reply.send(Ok(rustbgpd_rib::RoutePage {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             routes: page_routes,
                             total: scoped.len() as u64,
                             has_more,
@@ -5140,9 +5168,12 @@ policy client-x {
             &installed,
             &candidate,
             &frames,
-            &compare_routes(),
+            &rustbgpd_rib::RoutePage {
+                routes: compare_routes(),
+                ..Default::default()
+            },
             &ComparePolicyScope {
-                target: COMPARE_PEER.parse().unwrap(),
+                target: PeerKey::new(COMPARE_PEER.parse().unwrap(), None),
                 family_filter: None,
                 limit: 0,
                 max_samples: 10,
@@ -6963,6 +6994,45 @@ policy client-x {
             Some(interface),
         );
         route
+    }
+
+    /// A dry-run page evaluated after its source neighbor learned a new
+    /// address still reads that neighbor's context under the address the
+    /// page's RIB turn had, and reports it in its samples.
+    #[test]
+    fn dry_run_source_follows_the_page_scope_across_a_rebind() {
+        let moving = PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(link_local(), Some("eth1")));
+        let mut route = scoped_route("192.0.2.0", "eth1");
+        route.peer = moving;
+        let peers = rustbgpd_rib::PeerScope::capture();
+        assert!(moving.rebind(rustbgpd_rib::PeerEndpoint::new(
+            "fe80::99".parse().unwrap(),
+            Some("eth1")
+        )));
+        assert_eq!(
+            route_source_key(&route, &peers),
+            PeerKey::new(link_local(), Some("eth1".to_string()))
+        );
+        assert!(moving.release());
+    }
+
+    /// Dry runs read a route's peer ASN and group from the neighbor that
+    /// sent it: two neighbors on one link-local address keep their own.
+    #[test]
+    fn dry_run_peer_context_keeps_same_address_neighbors_apart() {
+        let scoped = |name: &str| PeerKey::new(link_local(), Some(name.to_string()));
+        let context: DryRunPeerContext = [
+            (scoped("eth0"), (65_000, None)),
+            (scoped("eth1"), (65_001, Some("fabric".to_string()))),
+        ]
+        .into_iter()
+        .collect();
+        let route = scoped_route("192.0.2.0", "eth1");
+        let source = route_source_key(&route, &rustbgpd_rib::PeerScope::default());
+        let ctx = dry_run_route_context(&route, "", Some(&source), &context);
+        assert_eq!(ctx.peer_address, Some(link_local()));
+        assert_eq!(ctx.peer_asn, Some(65_001));
+        assert_eq!(ctx.peer_group, Some("fabric"));
     }
 
     /// Peer-manager reads carry the whole key to the actor, which answers

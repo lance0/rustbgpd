@@ -38,6 +38,7 @@ async fn rd_output_round_trips_legacy_best_and_both_peer_filters() {
                     let rows = matching(&expected, filter.as_ref());
                     reply
                         .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             total: rows.len() as u64,
                             routes: rows,
                             has_more: false,
@@ -206,6 +207,7 @@ async fn rd_output_round_trips_vpn_explain_and_filter() {
                     assert!(filter.unwrap()(&vpn));
                     reply
                         .send(Ok(rustbgpd_rib::RibRowsPage {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             routes: vec![vpn.clone()],
                             total: 1,
                             has_more: false,
@@ -226,6 +228,7 @@ async fn rd_output_round_trips_vpn_explain_and_filter() {
                     assert_eq!(rd, Some(vpn.nlri.route_distinguisher));
                     reply
                         .send(Ok(ExplainAdvertisedRoute {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             decision: ExplainDecision::Advertise,
                             peer,
                             prefix,

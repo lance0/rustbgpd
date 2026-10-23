@@ -3,7 +3,7 @@
 //! and the query, explain, paging and update-group planning types they carry.
 
 use crate::PeerId;
-use crate::peer_id::PeerEndpoint;
+use crate::peer_id::{PeerEndpoint, PeerScope};
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -1451,6 +1451,9 @@ pub struct ExplainAdvertisedRoute {
     /// Requested Adj-RIB-In identity. `None` preserves the legacy
     /// winner-oriented explanation.
     pub source: Option<RouteSourceIdentity>,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// A negotiated family a session withholds from export, with the reason.
@@ -1761,6 +1764,9 @@ pub struct ExplainBestPath {
     /// (e.g. `"local_pref 200 > 100"`). Empty when `best_reason` is
     /// `None`.
     pub best_reason_detail: String,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// A candidate route with its comparison result against the best route.
@@ -1832,6 +1838,13 @@ pub type RouteQueryKey = (Prefix, IpAddr, u32);
 #[must_use]
 pub fn route_query_key(route: &Route) -> RouteQueryKey {
     (route.prefix, route.peer.addr(), route.path_id)
+}
+
+/// [`route_query_key`] with the source address `peer_scope` recorded, for a
+/// cursor built from a page after the RIB has moved on.
+#[must_use]
+pub fn route_query_key_in(route: &Route, peer_scope: &PeerScope) -> RouteQueryKey {
+    (route.prefix, peer_scope.addr(route.peer), route.path_id)
 }
 
 /// Row filter evaluated inside the RIB task during a paged route query.
@@ -2003,6 +2016,9 @@ pub struct RoutePage {
     /// ADR-0141 lease tags of locally injected rows, aligned with `routes`
     /// and captured in the same RIB turn; empty when no row is owned.
     pub injection: Vec<Option<crate::injection_lease::InjectionTag>>,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// One bounded family page; only returned rows are cloned.
@@ -2016,6 +2032,9 @@ pub struct RibRowsPage<T> {
     pub has_more: bool,
     /// Conservative scope mutation version.
     pub version: RoutePageVersion,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// VPN page identity, excluding mutable labels.
@@ -2056,6 +2075,9 @@ pub struct EvpnRoutePage {
     pub has_more: bool,
     /// Conservative scope-class mutation version.
     pub version: RoutePageVersion,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// A bounded internal dataplane page could not be served.
@@ -4052,18 +4074,46 @@ pub struct EvpnDataplaneRoutesResponse {
 /// Peer metadata for MRT `PEER_INDEX_TABLE`.
 #[derive(Debug, Clone)]
 pub struct MrtPeerEntry {
-    /// Peer's transport address.
+    /// The neighbor this entry indexes; routes reference their entry through
+    /// it, so two neighbors sharing an address get one entry each.
+    /// [`PeerId::UNASSIGNED`] for an entry decoded from a file.
+    pub peer: PeerId,
+    /// Peer's transport address, captured when the snapshot was built.
     pub peer_addr: IpAddr,
+    /// Interface of a scoped (link-local) neighbor, captured with
+    /// `peer_addr`. Never encoded: it orders same-address entries, so the
+    /// encoder never reads the live peer table. `None` for a numbered
+    /// neighbor and for an entry decoded from a file.
+    pub interface: Option<Arc<str>>,
     /// Peer's BGP router ID.
     pub peer_bgp_id: Ipv4Addr,
     /// Peer's autonomous system number.
     pub peer_asn: u32,
 }
 
+impl MrtPeerEntry {
+    /// An entry for `peer` with its endpoint as the peer table has it now.
+    /// The RIB calls this in the turn that builds a snapshot.
+    #[must_use]
+    pub fn capture(peer: PeerId, peer_asn: u32, peer_bgp_id: Ipv4Addr) -> Self {
+        let endpoint = peer.endpoint();
+        Self {
+            peer,
+            peer_addr: endpoint
+                .as_ref()
+                .map_or_else(|| peer.addr(), |endpoint| endpoint.addr),
+            interface: endpoint.and_then(|endpoint| endpoint.interface),
+            peer_bgp_id,
+            peer_asn,
+        }
+    }
+}
+
 /// Complete RIB snapshot for MRT dump.
 #[derive(Debug)]
 pub struct MrtSnapshotData {
-    /// All known peers for the `PEER_INDEX_TABLE`.
+    /// All known peers for the `PEER_INDEX_TABLE`, including one for every
+    /// neighbor a route below names, with its address as of the snapshot.
     pub peers: Vec<MrtPeerEntry>,
     /// All post-import-policy Adj-RIB-In unicast routes across all peers.
     pub routes: Vec<Route>,

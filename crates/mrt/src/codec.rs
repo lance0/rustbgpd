@@ -1,4 +1,5 @@
 //! Pure encoding functions for MRT `TABLE_DUMP_V2` records (RFC 6396).
+use rustbgpd_rib::PeerId;
 use rustbgpd_rib::route::{EvpnRibRoute, Route};
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
@@ -1024,8 +1025,21 @@ enum RouteEntrySelection {
     AddPath,
 }
 
+/// Each neighbor's `PEER_INDEX_TABLE` position and the address its entry
+/// captured. Keyed by neighbor, not address: two neighbors that share a
+/// scoped link-local address get one entry each.
+type PeerIndex = HashMap<PeerId, (u16, IpAddr)>;
+
+/// The address `route`'s neighbor had when the snapshot was built.
+fn captured_addr(peer_index: &PeerIndex, route: &Route) -> IpAddr {
+    peer_index
+        .get(&route.peer)
+        .map_or_else(|| route.peer.addr(), |&(_, addr)| addr)
+}
+
 fn route_uses_add_path(
     route: &Route,
+    peer_index: &PeerIndex,
     profiles: Option<&HashSet<MrtAddPathReceiveProfile>>,
 ) -> bool {
     profiles.is_some_and(|profiles| {
@@ -1034,7 +1048,7 @@ fn route_uses_add_path(
             Prefix::V6(_) => Afi::Ipv6,
         };
         profiles.contains(&MrtAddPathReceiveProfile {
-            peer: route.peer.addr(),
+            peer: captured_addr(peer_index, route),
             afi,
             safi: Safi::Unicast,
         })
@@ -1051,7 +1065,7 @@ fn encode_route_entries_profile<const FIX_ORIGINATED_TIME: bool>(
     seq_num: u32,
     prefix: &Prefix,
     routes: &[&Route],
-    peer_index: &HashMap<IpAddr, u16>,
+    peer_index: &PeerIndex,
     profiles: Option<&HashSet<MrtAddPathReceiveProfile>>,
     selection: RouteEntrySelection,
     entry_count: u16,
@@ -1073,7 +1087,7 @@ fn encode_route_entries_profile<const FIX_ORIGINATED_TIME: bool>(
         let mut encoded_count = 0u16;
         for route in routes {
             buf.check()?;
-            let uses_add_path = route_uses_add_path(route, profiles);
+            let uses_add_path = route_uses_add_path(route, peer_index, profiles);
             let selected = match selection {
                 RouteEntrySelection::All => true,
                 RouteEntrySelection::Legacy => !uses_add_path,
@@ -1082,8 +1096,8 @@ fn encode_route_entries_profile<const FIX_ORIGINATED_TIME: bool>(
             if !selected {
                 continue;
             }
-            let peer_index = peer_index
-                .get(&route.peer.addr())
+            let (peer_index, _) = peer_index
+                .get(&route.peer)
                 .copied()
                 .expect("effective peer inventory includes every route origin");
             let age = route.received_at.elapsed().as_secs();
@@ -1427,16 +1441,16 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
             attempted: peer_bytes,
         })?;
     effective_peers.extend_from_slice(peers);
-    let mut seen_peers = HashSet::<IpAddr>::new();
+    let mut seen_peers = HashSet::<PeerId>::new();
     seen_peers
         .try_reserve(peers.len())
         .map_err(|_| EncodeError::AllocationFailed {
-            attempted: peers.len().saturating_mul(std::mem::size_of::<IpAddr>()),
+            attempted: peers.len().saturating_mul(std::mem::size_of::<PeerId>()),
         })?;
-    seen_peers.extend(effective_peers.iter().map(|peer| peer.peer_addr));
+    seen_peers.extend(effective_peers.iter().map(|peer| peer.peer));
     for route in routes {
         output.check()?;
-        if !seen_peers.contains(&route.peer.addr()) {
+        if !seen_peers.contains(&route.peer) {
             if effective_peers.len() == usize::from(u16::MAX) {
                 return Err(EncodeError::FieldTooLarge {
                     field: "PEER_INDEX_TABLE.peer_count",
@@ -1449,7 +1463,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                     attempted: seen_peers
                         .len()
                         .saturating_add(1)
-                        .saturating_mul(std::mem::size_of::<IpAddr>()),
+                        .saturating_mul(std::mem::size_of::<PeerId>()),
                 })?;
             effective_peers
                 .try_reserve_exact(1)
@@ -1459,17 +1473,15 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                         .saturating_add(1)
                         .saturating_mul(std::mem::size_of::<MrtPeerEntry>()),
                 })?;
-            seen_peers.insert(route.peer.addr());
-            effective_peers.push(MrtPeerEntry {
-                peer_addr: route.peer.addr(),
-                peer_bgp_id: Ipv4Addr::UNSPECIFIED,
-                peer_asn: 0,
-            });
+            seen_peers.insert(route.peer);
+            // A caller that listed every source (the RIB snapshot does)
+            // never reaches this; others get the endpoint as of now.
+            effective_peers.push(MrtPeerEntry::capture(route.peer, 0, Ipv4Addr::UNSPECIFIED));
         }
     }
     for route in evpn_routes {
         output.check()?;
-        if !seen_peers.contains(&route.peer.addr()) {
+        if !seen_peers.contains(&route.peer) {
             if effective_peers.len() == usize::from(u16::MAX) {
                 return Err(EncodeError::FieldTooLarge {
                     field: "PEER_INDEX_TABLE.peer_count",
@@ -1482,7 +1494,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                     attempted: seen_peers
                         .len()
                         .saturating_add(1)
-                        .saturating_mul(std::mem::size_of::<IpAddr>()),
+                        .saturating_mul(std::mem::size_of::<PeerId>()),
                 })?;
             effective_peers
                 .try_reserve_exact(1)
@@ -1492,17 +1504,21 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
                         .saturating_add(1)
                         .saturating_mul(std::mem::size_of::<MrtPeerEntry>()),
                 })?;
-            seen_peers.insert(route.peer.addr());
-            effective_peers.push(MrtPeerEntry {
-                peer_addr: route.peer.addr(),
-                peer_bgp_id: Ipv4Addr::UNSPECIFIED,
-                peer_asn: 0,
-            });
+            seen_peers.insert(route.peer);
+            // A caller that listed every source (the RIB snapshot does)
+            // never reaches this; others get the endpoint as of now.
+            effective_peers.push(MrtPeerEntry::capture(route.peer, 0, Ipv4Addr::UNSPECIFIED));
         }
     }
+    // Captured fields only: the live peer table can change while this runs,
+    // and a comparator reading it would not be a total order. Same-address
+    // neighbors order by interface name bytewise, as selection does, never
+    // by handle; an unscoped entry sorts first.
     sort_cancellable_by(&mut effective_peers, budget, |a, b| {
         a.peer_addr
             .cmp(&b.peer_addr)
+            // `str` orders bytewise.
+            .then_with(|| a.interface.cmp(&b.interface))
             .then(a.peer_asn.cmp(&b.peer_asn))
             .then(a.peer_bgp_id.octets().cmp(&b.peer_bgp_id.octets()))
     })?;
@@ -1516,13 +1532,13 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
         &effective_peers,
     )?;
     // 3. Build peer index lookup
-    let mut peer_index = HashMap::<IpAddr, u16>::new();
+    let mut peer_index = PeerIndex::new();
     peer_index
         .try_reserve(effective_peers.len())
         .map_err(|_| EncodeError::AllocationFailed {
             attempted: effective_peers
                 .len()
-                .saturating_mul(std::mem::size_of::<(IpAddr, u16)>()),
+                .saturating_mul(std::mem::size_of::<(PeerId, (u16, IpAddr))>()),
         })?;
     for (index, peer) in effective_peers.iter().enumerate() {
         output.check()?;
@@ -1530,7 +1546,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
             field: "peer index",
             value: index,
         })?;
-        peer_index.insert(peer.peer_addr, index);
+        peer_index.insert(peer.peer, (index, peer.peer_addr));
     }
     output.check()?;
     // 4. Order borrowed routes once. No path attributes are cloned or retained
@@ -1538,8 +1554,12 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     // output after their profile counts have been preflighted.
     let mut ordered_routes = collect_cancellable(routes.iter(), budget)?;
     sort_cancellable_by(&mut ordered_routes, budget, |a, b| {
-        let a_index = peer_index.get(&a.peer.addr()).copied().unwrap_or(u16::MAX);
-        let b_index = peer_index.get(&b.peer.addr()).copied().unwrap_or(u16::MAX);
+        let a_index = peer_index
+            .get(&a.peer)
+            .map_or(u16::MAX, |&(index, _)| index);
+        let b_index = peer_index
+            .get(&b.peer)
+            .map_or(u16::MAX, |&(index, _)| index);
         a.prefix
             .cmp(&b.prefix)
             .then(a_index.cmp(&b_index))
@@ -1594,10 +1614,10 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
         let mut add_path_count = 0usize;
         for route in prefix_routes {
             output.check()?;
-            let uses_add_path = route_uses_add_path(route, add_path_receive);
+            let uses_add_path = route_uses_add_path(route, &peer_index, add_path_receive);
             if !uses_add_path && route.path_id != 0 {
                 return Err(EncodeError::AddPathProfileMismatch {
-                    peer: route.peer.addr(),
+                    peer: captured_addr(&peer_index, route),
                     path_id: route.path_id,
                 });
             }
@@ -1660,15 +1680,19 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     // route-type/field order. Do not retain one encoded NLRI Vec per route.
     let mut sorted_evpn = collect_cancellable(evpn_routes.iter(), budget)?;
     sort_cancellable_by(&mut sorted_evpn, budget, |a, b| {
-        let a_idx = peer_index.get(&a.peer.addr()).copied().unwrap_or(u16::MAX);
-        let b_idx = peer_index.get(&b.peer.addr()).copied().unwrap_or(u16::MAX);
+        let a_idx = peer_index
+            .get(&a.peer)
+            .map_or(u16::MAX, |&(index, _)| index);
+        let b_idx = peer_index
+            .get(&b.peer)
+            .map_or(u16::MAX, |&(index, _)| index);
         a_idx
             .cmp(&b_idx)
             .then_with(|| a.route.key().cmp(&b.route.key()))
     })?;
     for route in sorted_evpn {
         output.check()?;
-        let Some(&idx) = peer_index.get(&route.peer.addr()) else {
+        let Some(&(idx, _)) = peer_index.get(&route.peer) else {
             continue;
         };
         let age = route.received_at.elapsed().as_secs();
@@ -1954,7 +1978,9 @@ mod tests {
             IpAddr::V6(_) => Ipv4Addr::new(10, 0, 0, 1),
         };
         MrtPeerEntry {
+            peer: PeerId::from_addr(addr),
             peer_addr: addr,
+            interface: None,
             peer_bgp_id: bgp_id,
             peer_asn: asn,
         }
@@ -3253,5 +3279,299 @@ mod tests {
                 })
             ));
         }
+    }
+
+    /// Compatibility pin: a snapshot of ordinary (one neighbor per address)
+    /// peers encodes to exactly the bytes main produced before the peer index
+    /// was keyed by neighbor identity. Covers explicit IPv4 and IPv6 peers, a
+    /// peer known only from its routes, an Add-Path entry, a shared prefix
+    /// and EVPN. Regenerate with `BLESS=1` only for an intended format change.
+    #[test]
+    fn ordinary_peer_snapshot_bytes_are_unchanged() {
+        let v4_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let v4_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let v6 = IpAddr::V6("2001:db8::7".parse().unwrap());
+        let implicit = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9));
+        let shared = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+        let nh = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let mut add_path = make_route(shared, v4_b, nh);
+        add_path.path_id = 7;
+        let routes = vec![
+            make_route(shared, v4_a, nh),
+            add_path,
+            make_route(shared, implicit, nh),
+            make_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+                v4_b,
+                nh,
+            ),
+            make_route(
+                Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
+                v6,
+                IpAddr::V6("2001:db8::7".parse().unwrap()),
+            ),
+        ];
+        let evpn = vec![make_evpn_macip(v4_a, nh), make_evpn_ipprefix(implicit, nh)];
+        let peers = [
+            make_peer(v6, 65003),
+            make_peer(v4_a, 65002),
+            make_peer(v4_b, 65001),
+        ];
+        let (bytes, _) = encode_snapshot_with_allocation_diagnostics(
+            Ipv4Addr::new(10, 255, 0, 1),
+            &peers,
+            &routes,
+            &evpn,
+            1_700_000_000,
+            1_699_999_000,
+        )
+        .unwrap();
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ordinary_peer_snapshot.mrt"
+        );
+        if std::env::var_os("BLESS").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(fixture).parent().unwrap()).unwrap();
+            std::fs::write(fixture, &bytes).unwrap();
+        }
+        assert_eq!(bytes, std::fs::read(fixture).unwrap());
+    }
+
+    fn scoped_neighbor(addr: &str, interface: &str) -> PeerId {
+        PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(
+            addr.parse().unwrap(),
+            Some(interface),
+        ))
+    }
+
+    /// Acceptance: two neighbors on one link-local address, on different
+    /// interfaces, get one `PEER_INDEX_TABLE` entry each, every route
+    /// references its own neighbor's entry, and
+    /// the file round-trips through the repository's decoder.
+    #[test]
+    fn same_address_neighbors_get_their_own_peer_index_entries() {
+        let addr: IpAddr = "fe80::1".parse().unwrap();
+        let eth0 = scoped_neighbor("fe80::1", "eth0");
+        let eth1 = scoped_neighbor("fe80::1", "eth1");
+        let nh: IpAddr = "2001:db8::1".parse().unwrap();
+        let shared = Prefix::V6(Ipv6Prefix::new("2001:db8:10::".parse().unwrap(), 48));
+        let only_eth1 = Prefix::V6(Ipv6Prefix::new("2001:db8:11::".parse().unwrap(), 48));
+        let route = |prefix, peer| Route {
+            peer,
+            ..make_route(prefix, addr, nh)
+        };
+        // ASNs reversed against interface order: the interface decides
+        // between same-address entries before the ASN does.
+        let bgp_id = Ipv4Addr::new(10, 0, 0, 1);
+        let peers = [
+            MrtPeerEntry::capture(eth1, 65010, bgp_id),
+            MrtPeerEntry::capture(eth0, 65011, bgp_id),
+        ];
+        let routes = [
+            route(shared, eth0),
+            route(shared, eth1),
+            route(only_eth1, eth1),
+        ];
+        let bytes = encode_snapshot(Ipv4Addr::new(10, 255, 0, 1), &peers, &routes, &[], 1).unwrap();
+
+        let mut reader = crate::reader::SnapshotReader::new(&bytes).unwrap();
+        let table: Vec<_> = reader
+            .peers()
+            .iter()
+            .map(|peer| (peer.peer_addr, peer.peer_asn))
+            .collect();
+        // Ordered by interface name, eth0 first, never by handle or ASN.
+        assert_eq!(table, [(addr, 65011), (addr, 65010)]);
+        let mut decoded: Vec<_> = reader
+            .by_ref()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let crate::reader::SnapshotNlri::Unicast(prefix) = entry.nlri else {
+                    panic!("unicast entry expected");
+                };
+                (prefix, entry.peer_index, entry.peer.peer_asn)
+            })
+            .collect();
+        decoded.sort_unstable();
+        assert_eq!(
+            decoded,
+            [
+                (shared, 0, 65011),
+                (shared, 1, 65010),
+                (only_eth1, 1, 65010)
+            ]
+        );
+    }
+
+    /// The prefixes `bytes` files under each `PEER_INDEX_TABLE` position.
+    fn prefixes_by_index(bytes: &[u8]) -> Vec<(u16, Prefix)> {
+        let mut decoded: Vec<_> = crate::reader::SnapshotReader::new(bytes)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let crate::reader::SnapshotNlri::Unicast(prefix) = entry.nlri else {
+                    panic!("unicast entry expected");
+                };
+                (entry.peer_index, prefix)
+            })
+            .collect();
+        decoded.sort_unstable();
+        decoded
+    }
+
+    /// Two otherwise-identical same-address entries keep the order of the
+    /// interfaces captured with the snapshot when one neighbor's endpoint
+    /// changes before encoding: the encoder orders by captured fields, not
+    /// by the peer table as it is during the sort.
+    #[test]
+    fn peer_index_order_follows_the_endpoints_captured_with_the_snapshot() {
+        let addr: IpAddr = "fe80::1".parse().unwrap();
+        let (eth0, eth1) = (
+            scoped_neighbor("fe80::1", "eth0"),
+            scoped_neighbor("fe80::1", "eth1"),
+        );
+        let bgp_id = Ipv4Addr::new(10, 0, 0, 1);
+        let peers = [
+            MrtPeerEntry::capture(eth1, 65000, bgp_id),
+            MrtPeerEntry::capture(eth0, 65000, bgp_id),
+        ];
+        let (p0, p1) = (
+            Prefix::V6(Ipv6Prefix::new("2001:db8:30::".parse().unwrap(), 48)),
+            Prefix::V6(Ipv6Prefix::new("2001:db8:31::".parse().unwrap(), 48)),
+        );
+        let nh: IpAddr = "2001:db8::1".parse().unwrap();
+        let routes = [
+            Route {
+                peer: eth0,
+                ..make_route(p0, addr, nh)
+            },
+            Route {
+                peer: eth1,
+                ..make_route(p1, addr, nh)
+            },
+        ];
+        // After the capture, eth0's neighbor moves to an interface that
+        // sorts after eth1.
+        assert!(eth0.rebind(rustbgpd_rib::PeerEndpoint::new(addr, Some("eth9"))));
+
+        let bytes = encode_snapshot(Ipv4Addr::new(10, 255, 0, 1), &peers, &routes, &[], 1).unwrap();
+        assert_eq!(prefixes_by_index(&bytes), [(0, p0), (1, p1)]);
+        assert!(eth0.release() && eth1.release());
+    }
+
+    /// The encoder orders peer entries without consulting the peer table:
+    /// handles the table cannot resolve still encode in the order of their
+    /// captured interfaces.
+    #[test]
+    fn peer_index_order_never_reads_the_peer_table() {
+        let addr: IpAddr = "fe80::1".parse().unwrap();
+        let unknown = |generation: u64| PeerId::from_raw(generation << 32 | 0xFFFF_FF00).unwrap();
+        let (on_eth0, on_eth1) = (unknown(3), unknown(4));
+        assert_eq!((on_eth0.endpoint(), on_eth1.endpoint()), (None, None));
+        let entry = |peer, name: &str| MrtPeerEntry {
+            peer,
+            interface: Some(Arc::from(name)),
+            ..make_peer(addr, 65000)
+        };
+        let peers = [entry(on_eth1, "eth1"), entry(on_eth0, "eth0")];
+        let (p0, p1) = (
+            Prefix::V6(Ipv6Prefix::new("2001:db8:40::".parse().unwrap(), 48)),
+            Prefix::V6(Ipv6Prefix::new("2001:db8:41::".parse().unwrap(), 48)),
+        );
+        let nh: IpAddr = "2001:db8::1".parse().unwrap();
+        let routes = [
+            Route {
+                peer: on_eth0,
+                ..make_route(p0, addr, nh)
+            },
+            Route {
+                peer: on_eth1,
+                ..make_route(p1, addr, nh)
+            },
+        ];
+        let bytes = encode_snapshot(Ipv4Addr::new(10, 255, 0, 1), &peers, &routes, &[], 1).unwrap();
+        assert_eq!(prefixes_by_index(&bytes), [(0, p0), (1, p1)]);
+    }
+
+    /// Acceptance: an MRT snapshot taken before an interface-only neighbor
+    /// learns a new address (`RebindPeer`) and encoded after it attributes
+    /// each route to the endpoint that held it when the RIB built the
+    /// snapshot. The neighbor here has no session, so its entry comes from
+    /// the routes: dropping the snapshot's capture of route sources, or
+    /// resolving the address in the encoder, files the routes under the
+    /// new address.
+    #[tokio::test]
+    async fn a_snapshot_encoded_after_a_rebind_keeps_the_endpoint_it_was_built_with() {
+        use rustbgpd_rib::update::RibUpdate;
+        use tokio::sync::{mpsc, oneshot};
+
+        async fn snapshot(tx: &mpsc::Sender<RibUpdate>) -> rustbgpd_rib::MrtSnapshotData {
+            let (reply, rx) = oneshot::channel();
+            tx.send(RibUpdate::QueryMrtSnapshot { reply })
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        }
+
+        let (tx, rx) = mpsc::channel(16);
+        let manager = rustbgpd_rib::RibManager::new(
+            rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let actor = tokio::spawn(manager.run());
+        let old: IpAddr = "fe80::a".parse().unwrap();
+        let peer = scoped_neighbor("fe80::a", "swp1");
+        let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:20::".parse().unwrap(), 48));
+        let route = Route {
+            peer,
+            ..make_route(prefix, old, "2001:db8::1".parse().unwrap())
+        };
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 1,
+            peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+        let before = snapshot(&tx).await;
+        assert_eq!(before.routes.len(), 1);
+
+        tx.send(RibUpdate::RebindPeer {
+            peer,
+            endpoint: rustbgpd_rib::PeerEndpoint::new("fe80::b".parse().unwrap(), Some("swp1")),
+        })
+        .await
+        .unwrap();
+        assert!(snapshot(&tx).await.routes.is_empty(), "rebind purges");
+        assert_eq!(peer.addr(), "fe80::b".parse::<IpAddr>().unwrap());
+
+        let bytes = encode_snapshot(
+            Ipv4Addr::new(10, 255, 0, 1),
+            &before.peers,
+            &before.routes,
+            &before.evpn_routes,
+            1,
+        )
+        .unwrap();
+        let mut reader = crate::reader::SnapshotReader::new(&bytes).unwrap();
+        let table: Vec<_> = reader.peers().iter().map(|peer| peer.peer_addr).collect();
+        assert_eq!(table, [old]);
+        let sources: Vec<_> = reader
+            .by_ref()
+            .map(|entry| entry.unwrap().peer.peer_addr)
+            .collect();
+        assert_eq!(sources, [old]);
+
+        drop(tx);
+        actor.await.unwrap();
     }
 }

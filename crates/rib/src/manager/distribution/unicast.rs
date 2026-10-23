@@ -440,6 +440,7 @@ impl RibManager {
         use crate::update::ExportGateVerdict::{NotApplicable, Pass, Stop};
 
         let mut explain = ExplainAdvertisedRoute {
+            peer_scope: crate::PeerScope::capture(),
             decision: ExplainDecision::NoBestRoute,
             peer: target_peer,
             prefix,

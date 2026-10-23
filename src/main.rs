@@ -10659,7 +10659,9 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             reply
                 .send(Ok(rustbgpd_rib::MrtSnapshotData {
                     peers: vec![rustbgpd_rib::MrtPeerEntry {
+                        peer: PeerId::from_addr(session.peer.address),
                         peer_addr: session.peer.address,
+                        interface: None,
                         peer_bgp_id: session.peer_router_id,
                         peer_asn: session.peer_asn,
                     }],
@@ -10757,7 +10759,9 @@ tcp_ao = {{ key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha256)"
             reply
                 .send(Ok(rustbgpd_rib::MrtSnapshotData {
                     peers: vec![rustbgpd_rib::MrtPeerEntry {
+                        peer: PeerId::from_addr(session.peer.address),
                         peer_addr: session.peer.address,
+                        interface: None,
                         peer_bgp_id: session.peer_router_id,
                         peer_asn: session.peer_asn,
                     }],

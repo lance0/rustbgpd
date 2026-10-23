@@ -1102,7 +1102,10 @@ pub(crate) fn evpn_reason_detail(
             a.cluster_list().len(),
             b.cluster_list().len()
         ),
-        R::LowerPeerAddress => format!("peer {} versus {}", a.peer, b.peer),
+        R::LowerPeerAddress => match crate::best_path::scope_tie(a.peer, b.peer) {
+            Some((x, y)) => format!("peer {x} versus {y} (scope tie-break)"),
+            None => format!("peer {} versus {}", a.peer, b.peer),
+        },
         _ => reason.code().to_string(),
     }
 }
@@ -3444,6 +3447,45 @@ mod tests {
                 "missing compared values: {detail}"
             );
         }
+    }
+
+    /// Two EVPN neighbors on one link-local address: the detail names each
+    /// one's interface; ordinary peers keep the bare-address text.
+    #[test]
+    fn evpn_peer_tie_detail_names_the_scope_only_for_a_shared_address() {
+        let scoped = |name: &str| {
+            let mut route = make_evpn_type2(1, vec![]);
+            route.peer = PeerId::allocate(crate::PeerEndpoint::new(
+                "fe80::1".parse().unwrap(),
+                Some(name),
+            ));
+            route
+        };
+        let (eth0, eth1) = (scoped("eth0"), scoped("eth1"));
+        assert_eq!(
+            evpn_cmp_with_reason(&eth0, &eth1),
+            (
+                Ordering::Less,
+                crate::best_path::BestPathReason::LowerPeerAddress
+            )
+        );
+        assert_eq!(
+            evpn_reason_detail(
+                crate::best_path::BestPathReason::LowerPeerAddress,
+                &eth0,
+                &eth1
+            ),
+            "peer fe80::1%eth0 versus fe80::1%eth1 (scope tie-break)"
+        );
+        assert_eq!(
+            evpn_reason_detail(
+                crate::best_path::BestPathReason::LowerPeerAddress,
+                &make_evpn_type2(1, vec![]),
+                &make_evpn_type2(2, vec![])
+            ),
+            "peer 10.0.0.1 versus 10.0.0.2"
+        );
+        assert!(eth0.peer.release() && eth1.peer.release());
     }
 
     #[test]

@@ -1665,6 +1665,7 @@ impl ExportGateTrace {
     ) -> ExplainAdvertisedRoute {
         let (decision, reasons) = self.decision_and_reasons();
         ExplainAdvertisedRoute {
+            peer_scope: crate::PeerScope::capture(),
             decision,
             peer,
             prefix,

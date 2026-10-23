@@ -7,8 +7,8 @@ use std::net::Ipv4Addr;
 
 use rustbgpd_wire::{AsPath, AspaValidation, COMMUNITY_LLGR_STALE, RpkiValidation};
 
-use crate::PeerId;
 use crate::route::{Route, RouteOrigin};
+use crate::{PeerEndpoint, PeerId};
 
 /// Numeric preference for RPKI validation state: higher = more preferred.
 fn rpki_preference(v: RpkiValidation) -> u8 {
@@ -309,6 +309,14 @@ pub(crate) fn peer_tiebreak(a: (PeerId, u32), b: (PeerId, u32)) -> (Ordering, Be
     (a.1.cmp(&b.1), BestPathReason::LowerPathId)
 }
 
+/// The two endpoints when the peer tie-break was decided by interface: two
+/// neighbors on one (link-local) address. Explain text then names each
+/// neighbor's scope; the machine reason stays `lower_peer_address`.
+pub(crate) fn scope_tie(a: PeerId, b: PeerId) -> Option<(PeerEndpoint, PeerEndpoint)> {
+    let (a, b) = (a.endpoint()?, b.endpoint()?);
+    (a.addr == b.addr && a != b).then_some((a, b))
+}
+
 /// Compare two routes under RFC 9107 ORR and return the decisive reason.
 ///
 /// Same ordering as [`best_path_cmp_orr`], derived by composition rather
@@ -472,14 +480,18 @@ pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> 
                 show(y)
             )
         }
-        BestPathReason::LowerPeerAddress => {
-            format!(
+        BestPathReason::LowerPeerAddress => match scope_tie(a.peer, b.peer) {
+            Some((x, y)) => format!(
+                "peer {x} {} {y} (scope tie-break)",
+                cmp_symbol(&x.interface, &y.interface)
+            ),
+            None => format!(
                 "peer {} {} {}",
                 a.peer,
                 cmp_symbol(&a.peer.addr(), &b.peer.addr()),
                 b.peer
-            )
-        }
+            ),
+        },
         BestPathReason::LowerPathId => {
             format!(
                 "path_id {} {} {}",

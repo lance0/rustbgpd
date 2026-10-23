@@ -37,6 +37,7 @@ fn update(attrs: &[u8], nlri: &[u8]) -> Vec<u8> {
 fn capture(originator: u8, cluster: u8, eor: bool) -> Vec<u8> {
     let info = BmpPeerInfo {
         peer_addr: "192.0.2.30".parse().unwrap(),
+        neighbor: 1,
         peer_asn: 65001,
         peer_bgp_id: Ipv4Addr::new(192, 0, 2, 30),
         peer_type: BmpPeerType::Global,

@@ -367,7 +367,11 @@ mod tests {
             if let Some(RibUpdate::QueryMrtSnapshot { reply }) = rib_rx.recv().await {
                 let _ = reply.send(MrtSnapshotData {
                     peers: vec![MrtPeerEntry {
+                        peer: rustbgpd_rib::PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                            10, 0, 0, 1,
+                        ))),
                         peer_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                        interface: None,
                         peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
                         peer_asn: 65001,
                     }],

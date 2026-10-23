@@ -337,6 +337,7 @@ pub(super) fn page_routes<'a>(
         .collect();
     let has_more = remaining > routes.len() as u64;
     RoutePage {
+        peer_scope: crate::PeerScope::capture(),
         routes,
         total,
         has_more,
@@ -401,6 +402,7 @@ fn page_family_rows<'a, T: Clone + 'a, K: Ord>(
         .map(|entry| entry.1.clone())
         .collect();
     crate::update::RibRowsPage {
+        peer_scope: crate::PeerScope::capture(),
         has_more: remaining > routes.len(),
         routes,
         total,
@@ -418,6 +420,7 @@ fn page_evpn_routes<'a>(
         (r.key(), r.peer.addr())
     });
     EvpnRoutePage {
+        peer_scope: crate::PeerScope::capture(),
         routes: page.routes,
         total: page.total,
         has_more: page.has_more,
@@ -440,6 +443,7 @@ fn page_ordered_routes<'a>(
     let has_more = routes.len() > n;
     routes.truncate(n);
     RoutePage {
+        peer_scope: crate::PeerScope::capture(),
         routes,
         total,
         has_more,
@@ -514,6 +518,7 @@ where
     let has_more = routes.len() > n;
     routes.truncate(n);
     RoutePage {
+        peer_scope: crate::PeerScope::capture(),
         routes,
         total,
         has_more,
@@ -1041,6 +1046,7 @@ impl RibManager {
                 k.as_bytes().to_vec()
             });
             crate::update::RibRowsPage {
+                peer_scope: crate::PeerScope::capture(),
                 routes: topology.render_nodes(&page.routes),
                 total: page.total,
                 has_more: page.has_more,
@@ -1080,6 +1086,7 @@ impl RibManager {
             };
             let page = page_family_rows(topology.links().iter(), None, after, page_size, key);
             crate::update::RibRowsPage {
+                peer_scope: crate::PeerScope::capture(),
                 routes: topology.render_links(&page.routes),
                 total: page.total,
                 has_more: page.has_more,
@@ -3666,6 +3673,7 @@ impl RibManager {
         };
 
         let explanation = ExplainBestPath {
+            peer_scope: crate::PeerScope::capture(),
             prefix,
             best,
             candidates,
@@ -3736,6 +3744,7 @@ impl RibManager {
                 },
             );
         let explanation = ExplainBestPath {
+            peer_scope: crate::PeerScope::capture(),
             prefix,
             best: Some(best),
             candidates,
@@ -4032,20 +4041,6 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<MrtSnapshotData>,
     ) {
         send_mrt_snapshot(reply, || {
-            let peers: Vec<MrtPeerEntry> = self
-                .peer_asn
-                .iter()
-                .map(|(&addr, &asn)| MrtPeerEntry {
-                    peer_addr: addr.addr(),
-                    peer_bgp_id: self
-                        .peer_bgp_id
-                        .get(&addr)
-                        .copied()
-                        .unwrap_or(Ipv4Addr::UNSPECIFIED),
-                    peer_asn: asn,
-                })
-                .collect();
-
             let routes: Vec<_> = self
                 .ribs
                 .values()
@@ -4057,6 +4052,31 @@ impl RibManager {
                 .values()
                 .flat_map(|rib| rib.iter_evpn().cloned())
                 .collect();
+
+            let mut peers: Vec<MrtPeerEntry> = self
+                .peer_asn
+                .iter()
+                .map(|(&peer, &asn)| {
+                    let bgp_id = self.peer_bgp_id.get(&peer).copied();
+                    MrtPeerEntry::capture(peer, asn, bgp_id.unwrap_or(Ipv4Addr::UNSPECIFIED))
+                })
+                .collect();
+            // A route whose neighbor has no session (retained through
+            // Graceful Restart, say) still gets an entry here, with the
+            // address it has in this turn: the encoder runs after the RIB
+            // moves on and must not resolve a handle a later `RebindPeer`
+            // moved. Zero ASN and BGP ID, as the encoder would fill in.
+            let mut listed: HashSet<PeerId> = peers.iter().map(|entry| entry.peer).collect();
+            let mut last = None;
+            let sources = routes
+                .iter()
+                .map(|route| route.peer)
+                .chain(evpn_routes.iter().map(|route| route.peer));
+            for peer in sources {
+                if last.replace(peer) != Some(peer) && listed.insert(peer) {
+                    peers.push(MrtPeerEntry::capture(peer, 0, Ipv4Addr::UNSPECIFIED));
+                }
+            }
 
             MrtSnapshotData {
                 peers,
@@ -4163,10 +4183,8 @@ impl RibManager {
 
         let mut peers: Vec<_> = peer_identity
             .iter()
-            .map(|(&peer, &(_, peer_asn, peer_bgp_id))| MrtPeerEntry {
-                peer_addr: peer.addr(),
-                peer_bgp_id,
-                peer_asn,
+            .map(|(&peer, &(_, peer_asn, peer_bgp_id))| {
+                MrtPeerEntry::capture(peer, peer_asn, peer_bgp_id)
             })
             .collect();
         peers.sort_by_key(|peer| peer.peer_addr);
