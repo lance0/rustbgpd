@@ -344,21 +344,43 @@ impl PeerId {
     /// [`PeerEndpoint::cmp_selection`] order, never the handles' order.
     /// Equal for the same handle. A handle whose slot was reused sorts
     /// after every resolvable one.
+    #[inline]
     #[must_use]
     pub fn cmp_selection(self, other: Self) -> Ordering {
+        // A pinned IPv4 index is the address bits, so it orders numerically.
+        if self.generation == PINNED_V4 && other.generation == PINNED_V4 {
+            return self.index.cmp(&other.index);
+        }
+        self.cmp_resolved(other)
+    }
+
+    /// The table half of [`Self::cmp_selection`], kept out of line so the
+    /// comparators that inline it stay small, under one read lock.
+    #[inline(never)]
+    fn cmp_resolved(self, other: Self) -> Ordering {
         if self == other {
             return Ordering::Equal;
         }
-        if let (Some(a), Some(b)) = (self.pinned_v4(), other.pinned_v4()) {
-            return a.cmp(&b);
-        }
-        self.with_endpoint(|a| {
-            other.with_endpoint(|b| match (a, b) {
+        let pinned = |peer: Self| {
+            peer.pinned_v4().map(|addr| PeerEndpoint {
+                addr: IpAddr::V4(addr),
+                interface: None,
+            })
+        };
+        let (pinned_a, pinned_b) = (pinned(self), pinned(other));
+        read(|slots| {
+            let a = pinned_a
+                .as_ref()
+                .or_else(|| slots.slot(self).map(|s| &s.endpoint));
+            let b = pinned_b
+                .as_ref()
+                .or_else(|| slots.slot(other).map(|s| &s.endpoint));
+            match (a, b) {
                 (Some(a), Some(b)) => a.cmp_selection(b),
                 (Some(_), None) => Ordering::Less,
                 (None, Some(_)) => Ordering::Greater,
                 (None, None) => Ordering::Equal,
-            })
+            }
         })
     }
 

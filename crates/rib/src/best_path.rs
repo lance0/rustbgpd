@@ -687,6 +687,14 @@ fn cmp_chain(
     }
 
     // 6. Lowest peer endpoint, then inbound Add-Path identifier.
+    route_peer_tiebreak(a, b)
+}
+
+/// [`peer_tiebreak`] for two unicast routes, out of line: the endpoint
+/// comparison would otherwise grow [`cmp_chain`] past the size at which its
+/// callers inline it, slowing every comparison an earlier step decides.
+#[inline(never)]
+fn route_peer_tiebreak(a: &Route, b: &Route) -> Ordering {
     peer_tiebreak((a.peer, a.path_id), (b.peer, b.path_id)).0
 }
 
