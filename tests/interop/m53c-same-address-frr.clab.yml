@@ -1,0 +1,74 @@
+# Containerlab topology: rustbgpd ↔ FRR over two parallel links (M53c — one
+# link-local address on two interfaces)
+#
+# FRR gives both of its fabric interfaces the same MAC address, so the kernel
+# generates the same EUI-64 link-local address on each. rustbgpd configures
+# two neighbors with that one address, scoped to eth1 and eth2. rustbgpd's
+# own link-local addresses are static (fe80::1 on eth1, fe80::2 on eth2), so
+# FRR can name each session without router advertisements.
+#
+#   * no IPv4 addresses on the fabric links;
+#   * both sessions establish and stay separate neighbors;
+#   * IPv4 routes arrive over RFC 8950 Extended Next Hop on both sessions and
+#     install as two-way ECMP through the same gateway on two devices;
+#   * route refresh, carrier loss and neighbor deletion on one link leave the
+#     other neighbor's session and route in place.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m53c-same-address-frr.clab.yml
+#   bash tests/interop/scripts/test-m53c-same-address-frr.sh
+#   containerlab destroy -t tests/interop/m53c-same-address-frr.clab.yml --cleanup
+
+name: m53c-same-address-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m53c-same-address.toml:/etc/rustbgpd/config.template.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        # Neighbor delete and re-add persist into a writable copy.
+        - cp /etc/rustbgpd/config.template.toml /etc/rustbgpd/config.toml
+        - ip -4 addr flush dev eth1
+        - ip -4 addr flush dev eth2
+        - ip link set eth1 addrgenmode none
+        - ip link set eth2 addrgenmode none
+        - ip -6 addr flush dev eth1 scope link
+        - ip -6 addr flush dev eth2 scope link
+        - ip -6 addr replace fe80::1/64 dev eth1 nodad
+        - ip -6 addr replace fe80::2/64 dev eth2 nodad
+        - ip link set eth1 up
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m53c.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip -4 addr flush dev eth2
+        - ip link set eth1 down
+        - ip link set eth2 down
+        - ip link set eth1 address 02:53:0c:00:00:01
+        - ip link set eth2 address 02:53:0c:00:00:01
+        - ip -6 addr flush dev eth1 scope link
+        - ip -6 addr flush dev eth2 scope link
+        - ip link set eth1 addrgenmode eui64
+        - ip link set eth2 addrgenmode eui64
+        - ip link set eth1 up
+        - ip link set eth2 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr1:eth2"]
