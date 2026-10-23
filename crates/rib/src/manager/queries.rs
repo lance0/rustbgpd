@@ -4032,20 +4032,6 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<MrtSnapshotData>,
     ) {
         send_mrt_snapshot(reply, || {
-            let peers: Vec<MrtPeerEntry> = self
-                .peer_asn
-                .iter()
-                .map(|(&addr, &asn)| MrtPeerEntry {
-                    peer_addr: addr.addr(),
-                    peer_bgp_id: self
-                        .peer_bgp_id
-                        .get(&addr)
-                        .copied()
-                        .unwrap_or(Ipv4Addr::UNSPECIFIED),
-                    peer_asn: asn,
-                })
-                .collect();
-
             let routes: Vec<_> = self
                 .ribs
                 .values()
@@ -4057,6 +4043,42 @@ impl RibManager {
                 .values()
                 .flat_map(|rib| rib.iter_evpn().cloned())
                 .collect();
+
+            let mut peers: Vec<MrtPeerEntry> = self
+                .peer_asn
+                .iter()
+                .map(|(&peer, &asn)| MrtPeerEntry {
+                    peer,
+                    peer_addr: peer.addr(),
+                    peer_bgp_id: self
+                        .peer_bgp_id
+                        .get(&peer)
+                        .copied()
+                        .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                    peer_asn: asn,
+                })
+                .collect();
+            // A route whose neighbor has no session (retained through
+            // Graceful Restart, say) still gets an entry here, with the
+            // address it has in this turn: the encoder runs after the RIB
+            // moves on and must not resolve a handle a later `RebindPeer`
+            // moved. Zero ASN and BGP ID, as the encoder would fill in.
+            let mut listed: HashSet<PeerId> = peers.iter().map(|entry| entry.peer).collect();
+            let mut last = None;
+            let sources = routes
+                .iter()
+                .map(|route| route.peer)
+                .chain(evpn_routes.iter().map(|route| route.peer));
+            for peer in sources {
+                if last.replace(peer) != Some(peer) && listed.insert(peer) {
+                    peers.push(MrtPeerEntry {
+                        peer,
+                        peer_addr: peer.addr(),
+                        peer_bgp_id: Ipv4Addr::UNSPECIFIED,
+                        peer_asn: 0,
+                    });
+                }
+            }
 
             MrtSnapshotData {
                 peers,
@@ -4164,6 +4186,7 @@ impl RibManager {
         let mut peers: Vec<_> = peer_identity
             .iter()
             .map(|(&peer, &(_, peer_asn, peer_bgp_id))| MrtPeerEntry {
+                peer,
                 peer_addr: peer.addr(),
                 peer_bgp_id,
                 peer_asn,

@@ -4052,7 +4052,11 @@ pub struct EvpnDataplaneRoutesResponse {
 /// Peer metadata for MRT `PEER_INDEX_TABLE`.
 #[derive(Debug, Clone)]
 pub struct MrtPeerEntry {
-    /// Peer's transport address.
+    /// The neighbor this entry indexes; routes reference their entry through
+    /// it, so two neighbors sharing an address get one entry each.
+    /// [`PeerId::UNASSIGNED`] for an entry decoded from a file.
+    pub peer: PeerId,
+    /// Peer's transport address, captured when the snapshot was built.
     pub peer_addr: IpAddr,
     /// Peer's BGP router ID.
     pub peer_bgp_id: Ipv4Addr,
@@ -4063,7 +4067,8 @@ pub struct MrtPeerEntry {
 /// Complete RIB snapshot for MRT dump.
 #[derive(Debug)]
 pub struct MrtSnapshotData {
-    /// All known peers for the `PEER_INDEX_TABLE`.
+    /// All known peers for the `PEER_INDEX_TABLE`, including one for every
+    /// neighbor a route below names, with its address as of the snapshot.
     pub peers: Vec<MrtPeerEntry>,
     /// All post-import-policy Adj-RIB-In unicast routes across all peers.
     pub routes: Vec<Route>,

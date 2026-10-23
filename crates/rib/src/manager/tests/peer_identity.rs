@@ -299,3 +299,31 @@ async fn route_event_history_keeps_the_endpoint_each_event_recorded() {
     actor.await.unwrap();
     assert!(peer.release());
 }
+
+/// Acceptance: an MRT snapshot lists two neighbors on one link-local
+/// address as two peer entries, each with the address the RIB had for it
+/// in the snapshot's turn, so the encoder gives each its own index.
+#[tokio::test]
+async fn an_mrt_snapshot_lists_same_address_neighbors_separately() {
+    let (tx, actor) = spawn_manager();
+    let (eth0, eth1) = (scoped("fe80::1", "eth0"), scoped("fe80::1", "eth1"));
+    announce(&tx, eth0, 1).await;
+    announce(&tx, eth1, 2).await;
+    let snapshot = query_mrt_snapshot(&tx).await;
+    let mut peers: Vec<_> = snapshot
+        .peers
+        .iter()
+        .map(|entry| (entry.peer, entry.peer_addr))
+        .collect();
+    peers.sort_unstable();
+    let mut expected = vec![
+        (eth0, "fe80::1".parse::<IpAddr>().unwrap()),
+        (eth1, "fe80::1".parse().unwrap()),
+    ];
+    expected.sort_unstable();
+    assert_eq!(peers, expected);
+    assert_eq!(snapshot.routes.len(), 2);
+
+    drop(tx);
+    actor.await.unwrap();
+}
