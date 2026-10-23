@@ -1971,16 +1971,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        // Empty address means broadcast to every currently-managed peer
-        // (operator running planned maintenance on the whole router).
-        let peer = if req.address.is_empty() {
+        // An empty address and interface means every currently-managed peer
+        // (planned maintenance on the whole router). Any other selector names
+        // one neighbor, including an interface-only one by its interface.
+        let peer = if req.address.is_empty() && req.interface.trim().is_empty() {
             None
         } else {
-            Some(peer_key(
-                &req.address,
-                &req.interface,
-                self.roster.as_ref(),
-            )?)
+            Some(self.select_neighbor(&req.address, &req.interface).await?)
         };
 
         peer_manager_request(&self.peer_mgr_tx, |reply| {
@@ -2973,6 +2970,49 @@ mod tests {
         assert_eq!(
             looked_up,
             PeerKey::new("fe80::2".parse().unwrap(), Some("swp1".into()))
+        );
+    }
+
+    /// An interface selector never reaches the every-peer form: an unbound
+    /// interface-only neighbor is a failed precondition, an unknown interface
+    /// is not found, and neither sends a command.
+    #[tokio::test]
+    async fn graceful_shutdown_with_an_interface_selector_never_broadcasts() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let responder = tokio::spawn(async move {
+            let mut other_commands = 0;
+            while let Some(command) = peer_rx.recv().await {
+                if let PeerManagerCommand::ListPeers { reply } = command {
+                    let _ = reply.send(vec![unbound_swp1()]);
+                } else {
+                    other_commands += 1;
+                }
+            }
+            other_commands
+        });
+        for (interface, code) in [
+            ("swp1", tonic::Code::FailedPrecondition),
+            ("swp9", tonic::Code::NotFound),
+        ] {
+            // Mutation-red: treating an empty address as every peer sends
+            // SetGracefulShutdown { peer: None }.
+            let error = svc
+                .set_graceful_shutdown(Request::new(proto::SetGracefulShutdownRequest {
+                    address: String::new(),
+                    interface: interface.into(),
+                    enabled: true,
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), code, "{interface}: {error}");
+        }
+        drop(svc);
+        assert_eq!(
+            responder.await.unwrap(),
+            0,
+            "no command reaches the manager"
         );
     }
 

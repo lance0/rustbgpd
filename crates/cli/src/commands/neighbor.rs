@@ -1669,6 +1669,26 @@ pub async fn replay_outbound(
     }
 }
 
+/// The request for one neighbor, or for every peer when `peer` is `None`.
+/// An empty address and interface is the daemon's every-peer form, so a
+/// named neighbor that would send one is refused instead.
+fn graceful_shutdown_request(
+    peer: Option<&str>,
+    enabled: bool,
+) -> Result<SetGracefulShutdownRequest, CliError> {
+    let (address, interface) = peer.map(split_scoped_address).unwrap_or_default();
+    if peer.is_some() && address.is_empty() && interface.trim().is_empty() {
+        return Err(CliError::Argument(
+            "--neighbor needs an address or an interface name".into(),
+        ));
+    }
+    Ok(SetGracefulShutdownRequest {
+        address,
+        enabled,
+        interface,
+    })
+}
+
 /// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates.
 /// `peer = None` applies to every currently-managed peer (operator
 /// running planned maintenance on the whole router).
@@ -1678,10 +1698,9 @@ pub async fn set_graceful_shutdown(
     enabled: bool,
     json: bool,
 ) -> Result<(), CliError> {
+    let request = graceful_shutdown_request(peer.as_deref(), enabled)?;
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let address = peer.clone().unwrap_or_default();
-    let (address_only, interface) = split_scoped_address(&address);
     mutation_rpc(
         "SetGracefulShutdown",
         MUTATION_RPC_TIMEOUT,
@@ -1689,11 +1708,7 @@ pub async fn set_graceful_shutdown(
             || "`rbgp neighbor`".to_string(),
             |peer| format!("`rbgp neighbor {peer}`"),
         ),
-        client.set_graceful_shutdown(SetGracefulShutdownRequest {
-            address: address_only,
-            enabled,
-            interface,
-        }),
+        client.set_graceful_shutdown(request),
     )
     .await?;
     let scope = peer.as_deref().unwrap_or("all peers");
@@ -1761,6 +1776,24 @@ mod tests {
             split_scoped_address("10.0.0.2"),
             ("10.0.0.2".to_string(), String::new())
         );
+    }
+
+    /// Only `None` sends the every-peer form; a named neighbor never does,
+    /// and an interface name selects that interface's neighbor.
+    #[test]
+    fn graceful_shutdown_broadcasts_only_without_a_neighbor() {
+        let all = graceful_shutdown_request(None, true).unwrap();
+        assert_eq!((all.address.as_str(), all.interface.as_str()), ("", ""));
+        let swp1 = graceful_shutdown_request(Some("swp1"), true).unwrap();
+        assert_eq!(
+            (swp1.address.as_str(), swp1.interface.as_str()),
+            ("", "swp1")
+        );
+        // Mutation-red: passing the split through sends the broadcast form.
+        for empty in ["", " "] {
+            let error = graceful_shutdown_request(Some(empty), true).unwrap_err();
+            assert!(matches!(error, CliError::Argument(_)), "{empty:?}");
+        }
     }
 
     #[test]
