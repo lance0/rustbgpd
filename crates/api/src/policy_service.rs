@@ -1511,7 +1511,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         loop {
             run_test_policy_page(
                 &chain,
-                &page.routes,
+                &page,
                 &scope,
                 &peer_context,
                 &mut response,
@@ -1749,7 +1749,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 &installed,
                 &candidate,
                 &frames,
-                &page.routes,
+                &page,
                 &scope,
                 &peer_context,
                 &mut response,
@@ -2251,13 +2251,14 @@ struct TestPolicyScope {
 /// its inputs — no daemon state is touched (ADR-0096 Decision 6).
 fn run_test_policy_page(
     chain: &rustbgpd_policy::ir::CompiledChain,
-    routes: &[rustbgpd_rib::Route],
+    page: &rustbgpd_rib::RoutePage,
     scope: &TestPolicyScope,
     peer_context: &DryRunPeerContext,
     response: &mut proto::TestPolicyResponse,
     hits: &mut [Vec<u64>],
 ) {
     use rustbgpd_policy::PolicyAction;
+    let (routes, peers) = (&page.routes, &page.peer_scope);
 
     let needs_as_path_string = chain.requires_as_path_string();
     let remaining = if scope.limit == 0 {
@@ -2277,7 +2278,7 @@ fn run_test_policy_page(
     {
         let source;
         let ctx_peer = if scope.import {
-            source = route_source_key(route);
+            source = route_source_key(route, peers);
             Some(&source)
         } else {
             scope.target_peer.as_ref()
@@ -2294,7 +2295,7 @@ fn run_test_policy_page(
                     response.diffs.push(proto::TestPolicyDiff {
                         prefix: route.prefix.addr_string(),
                         prefix_length: u32::from(route.prefix.prefix_len()),
-                        peer: route.peer.to_string(),
+                        peer: peers.display(route.peer),
                         peer_interface: route
                             .peer_interface()
                             .as_deref()
@@ -2312,7 +2313,7 @@ fn run_test_policy_page(
                     .push(proto::TestPolicyRejectedRoute {
                         prefix: route.prefix.addr_string(),
                         prefix_length: u32::from(route.prefix.prefix_len()),
-                        peer: route.peer.to_string(),
+                        peer: peers.display(route.peer),
                         peer_interface: route
                             .peer_interface()
                             .as_deref()
@@ -2324,11 +2325,11 @@ fn run_test_policy_page(
     }
 }
 
-/// The neighbor a route was learned from: its address and the interface its
-/// receiving session recorded.
-fn route_source_key(route: &rustbgpd_rib::Route) -> PeerKey {
+/// The neighbor a route was learned from: its address as of the page's RIB
+/// turn and the interface its receiving session recorded.
+fn route_source_key(route: &rustbgpd_rib::Route, peers: &rustbgpd_rib::PeerScope) -> PeerKey {
     PeerKey::new(
-        route.peer.addr(),
+        peers.addr(route.peer),
         route.peer_interface().map(|name| name.to_string()),
     )
 }
@@ -2503,12 +2504,13 @@ fn run_compare_policy_page(
     installed: &rustbgpd_policy::ir::CompiledChain,
     candidate: &rustbgpd_policy::ir::CompiledChain,
     frames: &ComparePolicyFrames,
-    routes: &[rustbgpd_rib::Route],
+    page: &rustbgpd_rib::RoutePage,
     scope: &ComparePolicyScope,
     peer_context: &DryRunPeerContext,
     response: &mut proto::ComparePolicyResponse,
 ) {
     use rustbgpd_policy::PolicyAction;
+    let (routes, peers) = (&page.routes, &page.peer_scope);
 
     let needs_as_path_string =
         installed.requires_as_path_string() || candidate.requires_as_path_string();
@@ -2565,7 +2567,7 @@ fn run_compare_policy_page(
             samples.push(proto::ComparePolicyRoute {
                 prefix: route.prefix.addr_string(),
                 prefix_length: u32::from(route.prefix.prefix_len()),
-                peer: route.peer.to_string(),
+                peer: peers.display(route.peer),
                 installed_changes: changes(&before),
                 candidate_changes: changes(&after),
             });
@@ -5166,7 +5168,10 @@ policy client-x {
             &installed,
             &candidate,
             &frames,
-            &compare_routes(),
+            &rustbgpd_rib::RoutePage {
+                routes: compare_routes(),
+                ..Default::default()
+            },
             &ComparePolicyScope {
                 target: PeerKey::new(COMPARE_PEER.parse().unwrap(), None),
                 family_filter: None,
@@ -6991,6 +6996,26 @@ policy client-x {
         route
     }
 
+    /// A dry-run page evaluated after its source neighbor learned a new
+    /// address still reads that neighbor's context under the address the
+    /// page's RIB turn had, and reports it in its samples.
+    #[test]
+    fn dry_run_source_follows_the_page_scope_across_a_rebind() {
+        let moving = PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(link_local(), Some("eth1")));
+        let mut route = scoped_route("192.0.2.0", "eth1");
+        route.peer = moving;
+        let peers = rustbgpd_rib::PeerScope::capture();
+        assert!(moving.rebind(rustbgpd_rib::PeerEndpoint::new(
+            "fe80::99".parse().unwrap(),
+            Some("eth1")
+        )));
+        assert_eq!(
+            route_source_key(&route, &peers),
+            PeerKey::new(link_local(), Some("eth1".to_string()))
+        );
+        assert!(moving.release());
+    }
+
     /// Dry runs read a route's peer ASN and group from the neighbor that
     /// sent it: two neighbors on one link-local address keep their own.
     #[test]
@@ -7003,7 +7028,7 @@ policy client-x {
         .into_iter()
         .collect();
         let route = scoped_route("192.0.2.0", "eth1");
-        let source = route_source_key(&route);
+        let source = route_source_key(&route, &rustbgpd_rib::PeerScope::default());
         let ctx = dry_run_route_context(&route, "", Some(&source), &context);
         assert_eq!(ctx.peer_address, Some(link_local()));
         assert_eq!(ctx.peer_asn, Some(65_001));
