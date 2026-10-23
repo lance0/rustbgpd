@@ -307,6 +307,41 @@ impl PeerManager {
         true
     }
 
+    /// Shut the bound session down unless it is Established, atomically in
+    /// the session. `true` once it can no longer establish (or is already
+    /// gone). An Established session is kept and reported to discovery. An
+    /// unanswered command keeps the binding and retries: it may still run
+    /// later, and the retry's command then finds the session gone.
+    async fn shut_down_unless_established(&mut self, name: &str, key: &PeerKey) -> bool {
+        let Some(managed) = self.peers.get(key) else {
+            return true;
+        };
+        match managed
+            .handle()
+            .shutdown_unless_established_timeout(BOUND_STATE_QUERY_TIMEOUT)
+            .await
+        {
+            Ok(true)
+            | Err(
+                rustbgpd_transport::PeerCommandError::SessionExited
+                | rustbgpd_transport::PeerCommandError::ReplyDropped,
+            ) => true,
+            Ok(false) => {
+                info!(interface = %name, peer = %key, "unnumbered: bound session became Established; keeping it");
+                if let Some(unnumbered) = self.unnumbered.as_mut() {
+                    unnumbered.discovery.session_established(name);
+                }
+                self.port_mut(name).established = true;
+                false
+            }
+            Err(error) => {
+                warn!(interface = %name, peer = %key, %error, "unnumbered: bound session did not answer the retirement check; retrying");
+                self.arm_unnumbered_retry();
+                false
+            }
+        }
+    }
+
     /// When an unanswered state query is due to be asked again.
     pub(super) fn unnumbered_retry_at(&self) -> Option<tokio::time::Instant> {
         self.unnumbered.as_ref()?.retry_at
@@ -470,7 +505,7 @@ impl PeerManager {
             } else {
                 "peer_address_changed"
             };
-            if !self.retire_bound_peer(name, key, reason).await {
+            if !self.retire_bound_peer(name, key, reason, !gone).await {
                 return;
             }
         }
@@ -509,7 +544,21 @@ impl PeerManager {
     /// End the bound peer's session and clear the binding, keeping the
     /// neighbor's operator and safety state for its next endpoint. `false`
     /// when the peer could not be removed; the binding is then unchanged.
-    async fn retire_bound_peer(&mut self, name: &str, key: PeerKey, reason: &str) -> bool {
+    ///
+    /// An address change (`unless_established`) never ends an Established
+    /// session: the session itself checks and shuts down in one turn, so a
+    /// KEEPALIVE landing after the caller's state read cannot be torn down.
+    /// Confirmed carrier loss and interface recreation end it regardless.
+    async fn retire_bound_peer(
+        &mut self,
+        name: &str,
+        key: PeerKey,
+        reason: &str,
+        unless_established: bool,
+    ) -> bool {
+        if unless_established && !self.shut_down_unless_established(name, &key).await {
+            return false;
+        }
         info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
         // Apply what the session already reported, such as a max-prefix
         // shutdown queued as it went Idle, before capturing the state that
@@ -689,7 +738,7 @@ impl PeerManager {
                 return None; // counted as `notification_backoff`
             }
             if !self
-                .retire_bound_peer(name, key, "peer_address_changed")
+                .retire_bound_peer(name, key, "peer_address_changed", true)
                 .await
             {
                 return self.refuse_inbound();
