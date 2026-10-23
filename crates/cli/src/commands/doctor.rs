@@ -937,9 +937,11 @@ fn registration_wait_evidence(metrics: Option<&str>) -> Option<(u64, u64)> {
 
 /// `peer.<addr>.outbound`: an Established session with no outbound
 /// registration in a current snapshot, past the investigation grace. Always
-/// an advisory: legitimate import deferral has no fixed bound. The daemon's
-/// own wait gauges, when scraped, replace "duration unknown" with the oldest
-/// wait, an upper bound on this peer's if it is among them.
+/// an advisory: legitimate import deferral has no fixed bound. When doctor's
+/// metrics read carries the daemon's wait gauges, their count and oldest age
+/// replace "duration unknown". That read precedes the neighbor snapshot and is
+/// an independent sample: it neither bounds this peer's wait nor shows that a
+/// registration completed.
 fn outbound_registration_check(
     address: &str,
     state: &str,
@@ -959,9 +961,12 @@ fn outbound_registration_check(
     let detail = if supports_outbound_registration(daemon_version) {
         let wait = match registration_wait {
             None => "absence duration unknown".to_string(),
-            Some((0, _)) => "the RIB's metrics, a separate read, count no session awaiting registration, so it may have completed since".to_string(),
+            Some((0, _)) => {
+                "doctor's earlier metrics read counted no Established session awaiting registration"
+                    .to_string()
+            }
             Some((pending, oldest)) => format!(
-                "the RIB counts {pending} Established session(s) awaiting registration, the oldest for {}, which bounds this peer's wait",
+                "doctor's earlier metrics read counted {pending} Established session(s) awaiting registration, the oldest for {}",
                 output::format_duration(oldest)
             ),
         };
@@ -5699,16 +5704,18 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert!(detail(None).contains("absent in this snapshot (absence duration unknown)"));
         let pending = detail(Some((2, 420)));
         assert!(
-            pending.contains("the RIB counts 2 Established session(s) awaiting registration, the oldest for 00:07:00"),
+            pending.contains("doctor's earlier metrics read counted 2 Established session(s) awaiting registration, the oldest for 00:07:00)"),
             "{pending}"
         );
         assert!(!pending.contains("duration unknown"));
+        assert!(!pending.contains("bounds this peer"), "{pending}");
         let none = detail(Some((0, 0)));
         assert!(
-            none.contains("count no session awaiting registration"),
+            none.contains("doctor's earlier metrics read counted no Established session awaiting registration)"),
             "{none}"
         );
         assert!(!none.contains("duration unknown"));
+        assert!(!none.contains("completed"), "{none}");
         let old = outbound_registration_check(
             "10.0.0.2",
             "Established",
@@ -7802,7 +7809,7 @@ paths = ["x"]
             let detail = warning["detail"].as_str().unwrap();
             if metrics.is_some() {
                 assert!(
-                    detail.contains("the RIB counts 1 Established session(s) awaiting registration, the oldest for 00:06:00"),
+                    detail.contains("doctor's earlier metrics read counted 1 Established session(s) awaiting registration, the oldest for 00:06:00)"),
                     "{detail}"
                 );
             } else if version == "0.50.0" {

@@ -2248,11 +2248,12 @@ age exceeds 300 seconds.
 `rbgp doctor` adds a yellow `peer.<addr>.outbound` check when a successful,
 non-stale neighbor/RIB snapshot shows an Established session older than five
 minutes with an empty `update_group`. The message reports session age and
-current absence. When doctor's metrics scrape includes the gauges above, it
-also reports how many sessions the RIB counts as waiting and the oldest wait,
-which bounds this peer's wait; without them, the duration of missing
-registration is reported as unknown. The scrape is a separate read from the
-snapshot, so a zero count means the registration may have completed since.
+current absence. When doctor's metrics read includes the gauges above, the
+message also reports the count and oldest wait from that read. Doctor reads
+metrics before the neighbor snapshot, so these are an earlier, independent
+sample: they neither bound this peer's wait nor show whether its registration
+completed. Without the gauges, the duration of missing registration is
+reported as unknown.
 Unavailable snapshots and stale session observations do not establish absence. An empty
 field also requires a recognized daemon health version of at least `0.50.0`,
 a release that exposes membership. Missing, older, malformed, or prerelease
