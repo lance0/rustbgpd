@@ -153,7 +153,7 @@ fn family_page_tokens_bind_family_scope_filters_and_version() {
     let token = encode_family_page_token(
         scope,
         &identity,
-        "0000fde800000001~10.0.0.0/24~192.0.2.1~7",
+        &format!("0000fde800000001~10.0.0.0/24~{}~7", PageSource::of(peer)),
         version,
     );
     let (_, after, expected) =
@@ -183,8 +183,14 @@ fn family_page_tokens_bind_family_scope_filters_and_version() {
     assert!(decode_family_page_token(&"x".repeat(1025), FAMILY_PAGE_TOKEN_MAX_LEN).is_err());
     assert!(parse_family_prefix("10.0.0.1/24", 24).is_err());
     assert!(parse_family_prefix("2001:db8::1/64", 64).is_err());
-    assert!(parse_vpn_page_key("0000fde800000001~10.0.0.1/24~192.0.2.1~7").is_err());
-    assert!(parse_labeled_page_key("2001:db8::1/64~192.0.2.1~7").is_err());
+    assert!(
+        parse_vpn_page_key(&format!(
+            "0000fde800000001~10.0.0.1/24~{}~7",
+            PageSource::of(peer)
+        ))
+        .is_err()
+    );
+    assert!(parse_labeled_page_key(&format!("2001:db8::1/64~{}~7", PageSource::of(peer))).is_err());
     assert!(family_page_scope(0, "192.0.2.1", "", None).is_err());
     assert!(family_page_scope(2, "", "", None).is_err());
     assert!(family_page_scope(3, "invalid", "", None).is_err());

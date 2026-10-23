@@ -1862,7 +1862,8 @@ max-prefix peer retained disabled for explicit recovery still owns one.
 inbound dynamic connection is dropped because all slots are occupied.
 `bgp_inbound_connections_dropped_total` breaks accept-path drops down by a
 bounded `reason` vocabulary (ADR-0120): `unconfigured` (source matched no
-static neighbor and no dynamic range), `rate_limited` (the opt-in
+static neighbor and no dynamic range, including a link-local connection that
+an interface-only neighbor refused to learn on its interface), `rate_limited` (the opt-in
 `[inbound_admission]` per-source token bucket was empty),
 `dynamic_limit` (slot saturation, counted alongside the legacy counter), and
 `notification_backoff` (a configured neighbor dialled in while its session
@@ -1919,6 +1920,8 @@ name it.
 | `bgp_route_refresh_stale_entries{peer,family}` | Routes still awaiting replacement before EoRR or timeout during an inbound Enhanced Route Refresh window |
 | `bgp_rib_route_refresh_actor_duration_seconds{operation}` | Wall-clock RIB-actor time for accepted inbound Enhanced Route Refresh work. The closed `operation` label is `begin` (BoRR's full stale snapshot/count/gauge update), `eorr` (an active EoRR's complete stale sweep, recompute, distribution, and cleanup), or `timeout` (the same active finisher after expiry). Duplicate accepted BoRRs are counted; stale-session markers and EoRR/timeout markers without an active family are not. Uses the standard RIB actor duration buckets. |
 | `bgp_rib_outbound_registered_peers` | Global count of peers currently registered for outbound route distribution. It has no `peer` label and cannot identify an unregistered Established peer. Confirm a suspected gap with the peer's session state and `bgp_peer_update_group{peer}`: its series is absent when no outbound membership exists; absence can also persist while initial registration is deferred behind queued imports; there is no fixed maximum delay |
+| `bgp_rib_outbound_registration_pending_peers` | Established sessions the RIB holds a live-session record for but has not registered for outbound distribution: an initial registration deferred behind queued imports, or one that never completed. Counted from the session records rather than the deferral queue, so a registration lost from the queue stays counted. Unlabeled; sampled at most once per second. See [delayed outbound registration](#delayed-outbound-registration) |
+| `bgp_rib_outbound_registration_pending_oldest_seconds` | Age in whole seconds of the oldest wait counted above, 0 when none. A wait starts at the session's `PeerUp`, or at a collision failback onto a survivor whose earlier registration had completed, and ends when the registration completes or the session goes down. It keeps rising while the actor is otherwise idle. An investigation signal, not a readiness condition: legitimate import deferral has no fixed bound |
 | `bgp_rib_outbound_registration_replaced_total{peer}` | `PeerUp` re-registrations that replaced a still-registered outbound sender for the same address — two sessions overlapped (collision window); the replacement resets the prior session's RIB state and keeps the superseded session live for failover; its `PeerDown` is matched by session identity |
 | `bgp_rib_stale_peer_down_ignored_total{peer}` | `PeerDown`/`PeerGracefulRestart` events discarded because their session id didn't match the registered session — a stale teardown from a superseded collision-loser session; the surviving session's state is untouched |
 | `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded by the same session-identity rule — a superseded session's queued message processed after the replacement's `PeerUp`. `kind` labels: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`, `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`, `family_sendable`. These identify the combined unicast / FlowSpec / EVPN `RoutesReceived` envelope, the separate BGP-LS, VPN, labeled-unicast, and RT-Constrain route-message variants, End-of-RIB, route-refresh request / RFC 7313 BoRR/EoRR, RFC 5291 ORF push, peer-group policy identity, slow-peer state, and a family made sendable mid-session (IPv6 unicast unlocked by a reloaded `local_ipv6_nexthop`) respectively. The registered session's state is untouched |
@@ -2227,11 +2230,32 @@ proof that registration was lost. Inspect peer state and RIB backlog before
 attributing the absence to a fault; slow-peer and writer-queue signals can stay
 quiet when no outbound registration exists.
 
+The RIB also reports the wait itself.
+`bgp_rib_outbound_registration_pending_peers` counts Established sessions with
+a live-session record but no outbound registration, and
+`bgp_rib_outbound_registration_pending_oldest_seconds` is the age of the oldest
+such wait, measured from its `PeerUp`. Both come from the daemon, so they need
+no join across series and also cover a registration lost inside the RIB. The
+age is unlabeled: it shows how long the worst wait has lasted, and the
+per-peer `bgp_peer_update_group` absence identifies which addresses are
+waiting. A deferred registration normally clears within seconds once queued
+imports drain. A steadily rising age while the import backlog
+(`bgp_rib_ingest_channel_depth`) is empty points at a registration that will
+not complete on its own. The age is an investigation signal like the alert:
+readiness does not use it and no release gate depends on it. The flagship
+soaks and the EVPN route-reflector soak fail a run whose maximum sampled
+age exceeds 300 seconds.
+
 `rbgp doctor` adds a yellow `peer.<addr>.outbound` check when a successful,
 non-stale neighbor/RIB snapshot shows an Established session older than five
-minutes with an empty `update_group`. The message reports **session age and
-current absence**, not the duration of missing registration. Unavailable
-snapshots and stale session observations do not establish absence. An empty
+minutes with an empty `update_group`. The message reports session age and
+current absence. When doctor's metrics read includes the gauges above, the
+message also reports the count and oldest wait from that read. Doctor reads
+metrics before the neighbor snapshot, so these are an earlier, independent
+sample: they neither bound this peer's wait nor show whether its registration
+completed. Without the gauges, the duration of missing registration is
+reported as unknown.
+Unavailable snapshots and stale session observations do not establish absence. An empty
 field also requires a recognized daemon health version of at least `0.50.0`,
 a release that exposes membership. Missing, older, malformed, or prerelease
 version strings leave registration unknown; any nonempty group remains evidence

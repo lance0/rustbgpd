@@ -25,7 +25,7 @@ const INBOUND_HOLD_NOTIFICATION_STREAK: u32 = 2;
 /// an escalated NOTIFICATION reconnect wait holds its neighbor's inbound
 /// connections too, as BIRD's error delay does; otherwise a neighbor that
 /// reconnects to us bypasses the wait and every cycle's RIB churn with it.
-fn notification_backoff_holds_inbound(state: &PeerSessionState) -> bool {
+pub(super) fn notification_backoff_holds_inbound(state: &PeerSessionState) -> bool {
     state.fsm_state == SessionState::Idle
         && state.reconnect_in_secs > 0
         && state.notification_idle_failures >= INBOUND_HOLD_NOTIFICATION_STREAK
@@ -355,19 +355,41 @@ impl PeerManager {
             return;
         }
         let accepted_generation = tcp_ao_generation.unwrap_or(self.tcp_ao_generation);
-        let peer_key = self.inbound_peer_key(peer_addr);
+        let mut peer_key = self.inbound_peer_key(peer_addr);
         if let Some(key) = &peer_key {
             self.adopt_inbound_link_local_scope(key, peer_addr);
         }
+        // An unmatched source can only become a peer by dynamic acceptance or
+        // interface-only learning, and both build it from `current_config`,
+        // which is provisional while a transaction snapshot is staged: a
+        // rollback would not undo the peer's installed policies.
+        if peer_key.is_none() && self.config_snapshot_staged {
+            warn!(
+                peer = %peer_ip,
+                "dropping dynamic inbound connection while a config transaction snapshot is staged"
+            );
+            return;
+        }
+        // ADR-0142 secondary discovery: an unmatched link-local arrival on an
+        // interface-only neighbor's interface is matched by its arrival
+        // scope, never by address, and binds that neighbor. The bound peer
+        // then passes the same gates as any configured peer below.
+        if peer_key.is_none()
+            && let SocketAddr::V6(v6) = peer_addr
+            && v6.ip().segments()[0] & 0xffc0 == 0xfe80
+            && let Some(interface) = self.interface_only_port_at(v6.scope_id())
+        {
+            // Boxed: a cold path that would otherwise enlarge every
+            // inbound future by the binding's state.
+            let Some(key) =
+                Box::pin(self.learn_inbound_endpoint(&interface, *v6.ip(), v6.scope_id())).await
+            else {
+                return;
+            };
+            peer_key = Some(key);
+        }
         // If peer is not statically configured, try dynamic range matching.
         if peer_key.is_none() {
-            if self.config_snapshot_staged {
-                warn!(
-                    peer = %peer_ip,
-                    "dropping dynamic inbound connection while a config transaction snapshot is staged"
-                );
-                return;
-            }
             // A link-local inbound that did not match a configured scoped peer
             // must not fall through to dynamic acceptance: dynamic peers are
             // keyed by bare address (`PeerKey::new(ip, None)`), so accepting a
@@ -1007,7 +1029,7 @@ impl PeerManager {
 
     /// Count and (throttled) log an inbound connection held by the neighbor's
     /// escalated NOTIFICATION reconnect wait.
-    fn record_notification_backoff_drop(
+    pub(super) fn record_notification_backoff_drop(
         &mut self,
         peer: std::net::IpAddr,
         primary: &PeerSessionState,

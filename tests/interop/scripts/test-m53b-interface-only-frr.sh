@@ -11,9 +11,11 @@ source "$SCRIPT_DIR/test-lib.sh"
 
 FRR1="clab-${TOPO}-frr1"
 FRR2="clab-${TOPO}-frr2"
+FRR3="clab-${TOPO}-frr3"
 SWITCH="clab-${TOPO}-switch"
 ROGUE="clab-${TOPO}-rogue"
 PREFIX=198.51.100.53/32
+PREFIX3=198.51.100.54/32
 INJECTED_PREFIX=192.0.2.53/32
 TABLE_ID=1000
 METRIC=200
@@ -242,7 +244,7 @@ dump_state() {
     received >&2 || true
     fib >&2 || true
     route >&2 || true
-    for frr in "$FRR1" "$FRR2"; do
+    for frr in "$FRR1" "$FRR2" "$FRR3"; do
         docker exec "$frr" ip -6 addr show dev eth1 >&2 || true
         docker exec "$frr" vtysh -c 'show bgp summary' >&2 || true
     done
@@ -256,7 +258,7 @@ link_local() {
 }
 
 assert_fabric_addresses() {
-    for pair in "$RUSTBGPD eth1" "$RUSTBGPD eth2" "$FRR1 eth1" "$FRR2 eth1"; do
+    for pair in "$RUSTBGPD eth1" "$RUSTBGPD eth2" "$RUSTBGPD eth3" "$FRR1 eth1" "$FRR2 eth1" "$FRR3 eth1"; do
         local node=${pair% *} dev=${pair#* }
         if docker exec "$node" ip -4 addr show dev "$dev" | grep -q ' inet '; then
             fail "$node $dev has an IPv4 fabric address"; return 1
@@ -274,7 +276,10 @@ assert_fabric_addresses() {
     LL2=$(link_local "$FRR2" eth1)
     LOCAL_LL=$(link_local "$RUSTBGPD" eth1)
     LOCAL_LL2=$(link_local "$RUSTBGPD" eth2)
-    if [ "$LL1" = "$LL2" ] || [ "$LOCAL_LL" = "$LOCAL_LL2" ]; then
+    LL3=$(link_local "$FRR3" eth1)
+    LOCAL_LL3=$(link_local "$RUSTBGPD" eth3)
+    if [ "$(printf '%s\n' "$LL1" "$LL2" "$LL3" | sort -u | wc -l)" != 3 ] \
+        || [ "$(printf '%s\n' "$LOCAL_LL" "$LOCAL_LL2" "$LOCAL_LL3" | sort -u | wc -l)" != 3 ]; then
         fail "parallel fabric links generated duplicate link-local addresses"; return 1
     fi
     ok "fabric uses distinct kernel EUI-64 link-local addresses and no IPv4"
@@ -374,6 +379,67 @@ assert_outbound() {
     ok "both FRR peers received IPv4 with RFC 8950 link-local next hops"
 }
 
+# FRR3 sends no RAs and dials rustbgpd through a static link-local neighbor,
+# so the eth3 interface-only neighbor can only be learned from that inbound
+# connection (ADR-0142 secondary discovery).
+eth3_established() {
+    neighbors | jq -e --arg ll "$LL3" '
+        [.neighbors[]? | select(.config.interface == "eth3" and .config.address == $ll
+            and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6) and .stale != true)]
+        | length == 1' >/dev/null 2>&1
+}
+
+assert_inbound_learning() {
+    local config
+    config=$(docker exec "$FRR3" vtysh -c 'show running-config')
+    # `ipv6 nd suppress-ra` is FRR's default and is not rendered; the absence
+    # of any RA candidate on eth3 below proves FRR3 advertised nothing.
+    if [[ $config != *'no bgp ipv6-auto-ra'* ]]; then
+        fail "FRR3 lacks no bgp ipv6-auto-ra"; return 1
+    fi
+    if neighbors | jq -e '[.neighbors[]? | select(.config.interface == "eth3")] | length != 0' >/dev/null; then
+        fail "eth3 neighbor was bound before FRR3 dialed"; dump_state; return 1
+    fi
+    docker exec "$FRR3" vtysh -c 'configure terminal' -c 'router bgp 65003' \
+        -c "neighbor $LOCAL_LL3 remote-as 65001" \
+        -c "neighbor $LOCAL_LL3 interface eth1" \
+        -c "neighbor $LOCAL_LL3 capability extended-nexthop" \
+        -c "neighbor $LOCAL_LL3 timers connect 5" \
+        -c 'address-family ipv6 unicast' -c "neighbor $LOCAL_LL3 activate" >/dev/null
+    local established=0
+    for _ in $(seq 1 45); do
+        if eth3_established \
+            && docker exec "$FRR3" vtysh -c 'show bgp summary json' \
+                | jq -e '.. | objects | select(.state? == "Established")' >/dev/null 2>&1 \
+            && received | jq -e '[.routes[]? | select(.prefix == "198.51.100.54" and .prefixLength == 32)] | length == 1' >/dev/null 2>&1; then
+            established=1; break
+        fi
+        sleep 2
+    done
+    if [ "$established" != 1 ]; then
+        fail "FRR3 static link-local neighbor did not establish through inbound learning"
+        dump_state; return 1
+    fi
+    if [ "$(event_count_address "unnumbered: peer address learned from an inbound connection" eth3 "$LL3")" -lt 1 ] \
+        || [ "$(event_count "unnumbered: peer address learned" eth3)" != 0 ] \
+        || [ "$(event_count "unnumbered: binding changed" eth3)" != 0 ]; then
+        fail "eth3 endpoint was not learned from the inbound connection alone"
+        daemon_events | jq -c 'select(.fields.interface? == "eth3")' >&2 || true
+        return 1
+    fi
+    local text
+    for _ in $(seq 1 30); do
+        text=$(docker exec "$RUSTBGPD" ip route show table "$TABLE_ID" exact "$PREFIX3")
+        if grep -Fq "via inet6 $LL3 dev eth3" <<<"$text"; then
+            ok "FRR3 with no RAs established through inbound learning; $PREFIX3 via $LL3 dev eth3"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "$PREFIX3 was not installed via the inbound-learned endpoint"
+    dump_state; return 1
+}
+
 configure_bridge
 for pair in "$RUSTBGPD eth2" "$FRR2 eth1" "$SWITCH br-m53b" "$SWITCH eth1" "$SWITCH eth2" "$SWITCH eth3" "$ROGUE eth1"; do
     node=${pair% *}
@@ -395,6 +461,7 @@ wait_established 2
 wait_paths 2
 wait_kernel_route 2
 assert_outbound
+assert_inbound_learning || exit 1
 
 carrier_start=$(python3 -c 'import time; print(time.monotonic_ns())')
 docker exec "$SWITCH" ip link set eth1 down

@@ -1266,8 +1266,11 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
         crate::ConditionalAdvertisementSet {
             definitions: vec![core, absent_if(SETTLE)],
             attachments: [
-                (peer(1).addr(), vec![Arc::from(NAME)]),
-                (peer(2).addr(), vec![Arc::from(NAME), Arc::from("core")]),
+                (peer(1).addr().into(), vec![Arc::from(NAME)]),
+                (
+                    peer(2).addr().into(),
+                    vec![Arc::from(NAME), Arc::from("core")],
+                ),
             ]
             .into_iter()
             .collect(),
@@ -1352,7 +1355,7 @@ async fn status_query_is_served_by_the_running_actor() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_conditional_advertisements(crate::ConditionalAdvertisementSet {
             definitions: vec![absent_if(SETTLE)],
-            attachments: [(peer(1).addr(), vec![Arc::from(NAME)])]
+            attachments: [(peer(1).addr().into(), vec![Arc::from(NAME)])]
                 .into_iter()
                 .collect(),
         });

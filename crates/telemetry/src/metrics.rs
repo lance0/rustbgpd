@@ -653,6 +653,8 @@ struct BgpMetricsInner {
     rib_dirty_resync: IntCounterVec,
     rib_outbound_dirty_peers: IntGauge,
     rib_outbound_dirty_oldest_seconds: IntGauge,
+    rib_outbound_registration_pending_peers: IntGauge,
+    rib_outbound_registration_pending_oldest_seconds: IntGauge,
     rib_ingest_channel_depth: IntGauge,
     rib_policy_transition_in_progress: IntGauge,
     rib_policy_transition_last_duration_milliseconds: IntGauge,
@@ -1675,6 +1677,25 @@ impl BgpMetrics {
             "Age in whole seconds of the oldest current dirty-peer episode (0 when no \
              peer is dirty), sampled once per RIB manager loop iteration. An episode \
              starts when a peer becomes dirty and ends when its resync completes.",
+        )
+        .expect("valid metric definition");
+        let rib_outbound_registration_pending_peers = IntGauge::new(
+            "bgp_rib_outbound_registration_pending_peers",
+            "Established sessions the RIB holds a live-session record for but has not \
+             yet registered for outbound distribution (an initial registration deferred \
+             behind queued imports, or one that never completed), sampled at most once \
+             per second by the RIB manager loop.",
+        )
+        .expect("valid metric definition");
+        let rib_outbound_registration_pending_oldest_seconds = IntGauge::new(
+            "bgp_rib_outbound_registration_pending_oldest_seconds",
+            "Age in whole seconds of the oldest outbound registration wait counted by \
+             bgp_rib_outbound_registration_pending_peers (0 when none is pending), sampled \
+             at most once per second. A wait starts at the session's PeerUp, or at a \
+             collision failback onto a survivor whose earlier registration had completed, \
+             and ends when the registration completes or the session goes down. \
+             Import deferral has no fixed bound: this is an investigation signal, not a \
+             readiness condition.",
         )
         .expect("valid metric definition");
 
@@ -3200,6 +3221,14 @@ impl BgpMetrics {
             .register(Box::new(rib_outbound_dirty_oldest_seconds.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_registration_pending_peers.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(
+                rib_outbound_registration_pending_oldest_seconds.clone(),
+            ))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_policy_transition_in_progress.clone()))
             .expect("metric not already registered");
         registry
@@ -3716,6 +3745,8 @@ impl BgpMetrics {
             rib_dirty_resync,
             rib_outbound_dirty_peers,
             rib_outbound_dirty_oldest_seconds,
+            rib_outbound_registration_pending_peers,
+            rib_outbound_registration_pending_oldest_seconds,
             rib_ingest_channel_depth,
             rib_policy_transition_in_progress,
             rib_policy_transition_last_duration_milliseconds,
@@ -5473,6 +5504,15 @@ impl BgpMetrics {
     /// Set the sampled age of the oldest current dirty-peer episode.
     pub fn set_rib_outbound_dirty_oldest_seconds(&self, seconds: i64) {
         self.0.rib_outbound_dirty_oldest_seconds.set(seconds);
+    }
+
+    /// Set the sampled number of Established sessions awaiting outbound
+    /// registration and the age of the oldest such wait.
+    pub fn set_rib_outbound_registration_pending(&self, peers: i64, oldest_seconds: i64) {
+        self.0.rib_outbound_registration_pending_peers.set(peers);
+        self.0
+            .rib_outbound_registration_pending_oldest_seconds
+            .set(oldest_seconds);
     }
 
     /// Set the sampled depth of the RIB manager ingest channel.
@@ -10772,12 +10812,15 @@ mod tests {
         metrics.set_update_group_recovery_limit_bytes(64, 512);
         metrics.set_rib_outbound_dirty_peers(3);
         metrics.set_rib_outbound_dirty_oldest_seconds(42);
+        metrics.set_rib_outbound_registration_pending(2, 301);
         let text = gather_text(&metrics);
         for series in [
             "bgp_update_group_recovery_limit_bytes{scope=\"peer\"} 64",
             "bgp_update_group_recovery_limit_bytes{scope=\"daemon\"} 512",
             "bgp_rib_outbound_dirty_peers 3",
             "bgp_rib_outbound_dirty_oldest_seconds 42",
+            "bgp_rib_outbound_registration_pending_peers 2",
+            "bgp_rib_outbound_registration_pending_oldest_seconds 301",
         ] {
             assert!(text.lines().any(|line| line == series), "missing {series}");
         }

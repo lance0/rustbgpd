@@ -903,7 +903,7 @@ async fn dataset_refresh_discovers_conditional_advertisement_predicates() {
             condition_policy: Some(dataset_chain("primary")),
             settle_time: Duration::from_secs(5),
         }],
-        attachments: [(attached, vec![Arc::from("backup")])]
+        attachments: [(attached.into(), vec![Arc::from("backup")])]
             .into_iter()
             .collect(),
     };
@@ -2555,8 +2555,10 @@ async fn conditional_install_shares_one_deadline_across_send_and_reply() {
         drop(held);
     });
     let mut set = rustbgpd_rib::ConditionalAdvertisementSet::default();
-    set.attachments
-        .insert(Ipv4Addr::new(10, 0, 0, 1).into(), vec![Arc::from("backup")]);
+    set.attachments.insert(
+        std::net::IpAddr::from(Ipv4Addr::new(10, 0, 0, 1)).into(),
+        vec![Arc::from("backup")],
+    );
     let started = tokio::time::Instant::now();
     let error = mgr
         .install_conditional_advertisements(set, &[])

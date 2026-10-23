@@ -786,6 +786,11 @@ pub struct RibManager {
     /// registers the peer's CURRENT last live session, so a session
     /// superseded or failed over while queued resolves to its survivor.
     pending_initial_registrations: VecDeque<PeerId>,
+    /// When the next `bgp_rib_outbound_registration_pending_*` sample runs.
+    /// Armed one interval ahead when a registration wait starts, so a burst
+    /// of `PeerUp`s shares one scan; re-armed one interval out while the last
+    /// sample counted a wait; `None` once a sample counts none.
+    registration_wait_sample_at: Option<tokio::time::Instant>,
     /// Loc-RIB size below which a `PeerUp` initial dump always completes
     /// inline even with queued actor work — a small dump costs microseconds,
     /// so deferring it buys nothing and only perturbs registration-timing
@@ -1200,6 +1205,10 @@ pub struct RibManager {
 /// emitter. When exceeded, the OLDEST (most-superseded) record is dropped
 /// — its eventual `PeerDown` is then discarded as stale.
 const MAX_LIVE_SESSIONS_PER_PEER: usize = 2;
+
+/// Cadence of the `bgp_rib_outbound_registration_pending_*` sample while a
+/// registration wait may exist.
+const REGISTRATION_WAIT_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A transition exceeding the former cohort wait budget is still allowed to
 /// complete, but deserves an operator-visible warning and metric investigation.
@@ -1788,6 +1797,10 @@ pub(in crate::manager) const MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP: std::tim
 )]
 pub(super) struct LiveSessionRecord {
     session_id: u64,
+    /// Start of this session's current outbound-registration wait: its
+    /// `PeerUp`, or the collision failback that handed an earlier-registered
+    /// survivor the registration again. `None` once its registration installs.
+    registration_wait_since: Option<tokio::time::Instant>,
     source_context: Option<Arc<crate::update::PeerSourceContext>>,
     /// Interned scope of `source_context`'s interface, resolved at
     /// registration; `DEFAULT` for a numbered neighbor.
@@ -2428,6 +2441,7 @@ impl RibManager {
             pending_eor: HashMap::new(),
             pending_refresh: HashMap::new(),
             pending_initial_registrations: VecDeque::new(),
+            registration_wait_sample_at: None,
             initial_dump_defer_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             refresh_in_progress: HashMap::new(),
             refresh_deadlines: graceful_restart::DeadlineMap::default(),
@@ -3446,6 +3460,46 @@ impl RibManager {
         );
         self.metrics.set_rib_outbound_dirty_oldest_seconds(
             i64::try_from(convergence.oldest_pending_secs).unwrap_or(i64::MAX),
+        );
+    }
+
+    /// Publish the registration-wait gauges at most once per second, and only
+    /// while a wait may exist: a steady state with every Established session
+    /// registered costs nothing here.
+    fn sample_outbound_registration_wait_if_due(&mut self) {
+        if self
+            .registration_wait_sample_at
+            .is_some_and(|at| tokio::time::Instant::now() >= at)
+        {
+            self.sample_outbound_registration_wait();
+        }
+    }
+
+    /// Count Established sessions whose newest live-session record is not
+    /// the registered outbound session, and the age of the oldest such wait.
+    /// Derived from the session records rather than the deferral queue, so a
+    /// registration lost from the queue stays counted and keeps ageing.
+    fn sample_outbound_registration_wait(&mut self) {
+        let now = tokio::time::Instant::now();
+        let mut pending = 0_usize;
+        let mut oldest = 0_u64;
+        for (peer, sessions) in &self.live_sessions {
+            let Some(record) = sessions.last() else {
+                continue;
+            };
+            if self.outbound_session_ids.get(peer) == Some(&record.session_id) {
+                continue;
+            }
+            pending += 1;
+            if let Some(since) = record.registration_wait_since {
+                oldest = oldest.max(now.saturating_duration_since(since).as_secs());
+            }
+        }
+        self.registration_wait_sample_at =
+            (pending != 0).then(|| now + REGISTRATION_WAIT_SAMPLE_INTERVAL);
+        self.metrics.set_rib_outbound_registration_pending(
+            i64::try_from(pending).unwrap_or(i64::MAX),
+            i64::try_from(oldest).unwrap_or(i64::MAX),
         );
     }
 
@@ -5993,6 +6047,11 @@ impl RibManager {
         let conditional_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(conditional_sleep);
 
+        // Registration-wait sample: armed only while a wait may exist, so a
+        // registration lost while the actor is idle still ages on the gauge.
+        let registration_wait_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
+        tokio::pin!(registration_wait_sleep);
+
         loop {
             if self.dampening_history.notice_failed() {
                 tracing::error!(
@@ -6012,6 +6071,7 @@ impl RibManager {
                 i64::try_from(self.primary_backlog()).unwrap_or(i64::MAX),
             );
             self.sample_outbound_dirty_gauges();
+            self.sample_outbound_registration_wait_if_due();
 
             if let Some(mut pending) = self.pending_clean_policy_transition.take() {
                 // A newly owned transition supersedes any trace still armed
@@ -6177,7 +6237,15 @@ impl RibManager {
                 false
             };
 
+            let has_registration_wait_timer = if let Some(at) = self.registration_wait_sample_at {
+                registration_wait_sleep.as_mut().reset(at);
+                true
+            } else {
+                false
+            };
+
             let needs_timers = has_attr_gc_timer
+                || has_registration_wait_timer
                 || resync_armed
                 || has_gr_timers
                 || has_llgr_timers
@@ -6463,6 +6531,7 @@ impl RibManager {
                     () = rtc_eor_sleep.as_mut(), if has_rtc_eor_timer => {}
                     () = selection_sleep.as_mut(), if has_selection_timer => {}
                     () = conditional_sleep.as_mut(), if has_conditional_timer => {}
+                    () = registration_wait_sleep.as_mut(), if has_registration_wait_timer => {}
                 }
             } else {
                 // No timers needed — wait for a route update or query.

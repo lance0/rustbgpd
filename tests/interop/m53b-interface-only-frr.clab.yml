@@ -8,7 +8,10 @@
 #   * link-local next-hops carry their output interface scope into the FIB;
 #   * Linux installs two-way ECMP via the discovered link-local addresses;
 #   * carrier loss removes the failed leg and restoration recovers ECMP;
-#   * a lab-owned bridge on eth2 permits a third RA source without host links.
+#   * a lab-owned bridge on eth2 permits a third RA source without host links;
+#   * FRR3 sends no RAs (`no bgp ipv6-auto-ra`) and dials rustbgpd through a
+#     static link-local neighbor, so rustbgpd learns it from the inbound
+#     connection alone.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -31,10 +34,13 @@ topology:
       exec:
         - ip -4 addr flush dev eth1
         - ip -4 addr flush dev eth2
+        - ip -4 addr flush dev eth3
         - ip link set eth1 addrgenmode eui64
         - ip link set eth2 addrgenmode eui64
+        - ip link set eth3 addrgenmode eui64
         - ip link set eth1 up
         - ip link set eth2 up
+        - ip link set eth3 up
       env:
         RUST_LOG: info,rustbgpd::ra_discovery=debug
 
@@ -62,6 +68,18 @@ topology:
         - ip link set eth1 addrgenmode eui64
         - ip link set eth1 up
 
+    frr3:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m53b-3.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip link set eth1 addrgenmode eui64
+        - ip link set eth1 up
+
     switch:
       kind: linux
       image: rustbgpd:dev
@@ -81,3 +99,4 @@ topology:
     - endpoints: ["rustbgpd:eth2", "switch:eth1"]
     - endpoints: ["frr2:eth1", "switch:eth2"]
     - endpoints: ["rogue:eth1", "switch:eth3"]
+    - endpoints: ["rustbgpd:eth3", "frr3:eth1"]

@@ -142,6 +142,21 @@ learned endpoint is installed in that inventory.
   It is accepted while the neighbor has no Established session. This covers
   peers that are configured statically toward us or that do not send RAs, and
   needs no extra privilege.
+
+  Implementation note (2026-10-23): the inbound path binds through the same
+  admission check as an RA binding. While the neighbor is not Established it
+  also drops a connection from a different address when a live RA binding, a
+  bound session in OpenSent or OpenConfirm, or a pending inbound connection
+  from the bound address holds another address (a second router on the link,
+  `multiple_routers_on_link`), or when the bound session is in its
+  NOTIFICATION reconnect wait. A bound session that has not reached OpenSent
+  is replaced, as for an address change. While a configuration transaction
+  is staged, neither an inbound connection nor an RA binds or replaces an
+  endpoint, because the staged configuration may still roll back; the RA
+  binding waits for the commit or rollback, and the inbound connection is
+  dropped as dynamic acceptance is. Every other refused connection is counted
+  in `bgp_inbound_connections_dropped_total`, as `notification_backoff` for
+  the reconnect wait and as `unconfigured` otherwise.
 - **The kernel neighbor table is not a discovery source.** It is a cache: an
   entry exists only after traffic has resolved it, it ages and is
   garbage-collected, and it does not say which neighbor is a BGP speaker. A

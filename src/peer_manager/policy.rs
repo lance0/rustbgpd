@@ -3121,7 +3121,7 @@ impl PeerManager {
             .filter_map(|(peer_key, managed)| {
                 let import = references_any(&managed.import_policy);
                 let export = references_any(&managed.export_policy)
-                    || self.conditional_advertise_policy_references(peer_key.address, swapped);
+                    || self.conditional_advertise_policy_references(peer_key, swapped);
                 (import || export).then(|| (peer_key.clone(), import, export))
             })
             .collect();
@@ -3263,8 +3263,8 @@ impl PeerManager {
         for (peer, managed) in &self.peers {
             let mut import = references(&managed.import_policy);
             let mut export = references(&managed.export_policy)
-                || self.conditional_advertise_policy_references(peer.address, changed)
-                || candidate_conditional.advertise_policy_references(peer.address, changed);
+                || self.conditional_advertise_policy_references(peer, changed)
+                || candidate_conditional.advertise_policy_references(&peer.rib_endpoint(), changed);
             let neighbor = candidate
                 .neighbor_record(peer)
                 .map(std::borrow::Cow::into_owned)
