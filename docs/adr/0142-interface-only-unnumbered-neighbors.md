@@ -371,6 +371,20 @@ confirmed down, not when its retained GR or LLGR state retires. Until that
 release lands, a peer that goes silent on a link that stays up keeps its last
 address reserved, and the neighbor keeps redialing it.
 
+Implementation note (2026-10-23): the release on retirement is now
+implemented. When an interface-only neighbor has no binding, its link is up
+and its session is not Established, the peer manager asks the RIB whether the
+neighbor still retains GR or LLGR stale routes. While it does, the peer stays
+and keeps redialing its last address, which stays reserved; the check repeats
+at the RIB's next GR or LLGR timer, which sweeps the routes or promotes them
+to LLGR. Once nothing is retained, the peer is removed with reason
+`binding_expired`, which ends the redial and releases the address to any
+other neighbor. A session that ends without retention, including one that
+never established, releases the address as soon as the binding is gone. This
+replaces the first implementation's rebinding of an exited session at its
+last endpoint when discovery had no binding: such a session retains nothing,
+so its address is released instead.
+
 That covers the common Clos shape, where each fabric link goes to a different
 switch with its own MAC. **Limitation:** parallel links to the same device
 (one router MAC on every port, so one EUI-64 address), or `fe80::1` on every

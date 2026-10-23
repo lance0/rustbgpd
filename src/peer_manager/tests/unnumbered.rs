@@ -5,7 +5,7 @@
 use std::net::Ipv6Addr;
 
 use rustbgpd_fsm::SessionState;
-use rustbgpd_rib::PeerId;
+use rustbgpd_rib::{PeerId, PeerRetention};
 use rustbgpd_transport::{LinkSnapshot, LinkState as KernelLink};
 use tokio::sync::watch;
 
@@ -125,6 +125,26 @@ impl Harness {
             .unwrap()
             .transport_config
             .set_link_local_scope(scope.unwrap());
+    }
+
+    /// Answer the RIB's retention queries with the returned value, as it
+    /// stands when each query arrives. Every other RIB message is dropped.
+    fn answer_retention(&mut self) -> Arc<std::sync::Mutex<PeerRetention>> {
+        let retention = Arc::new(std::sync::Mutex::new(PeerRetention {
+            stale_routes: 0,
+            next_deadline: None,
+        }));
+        let (_tx, rx) = mpsc::channel(1);
+        let mut rib_rx = std::mem::replace(&mut self.rib_rx, rx);
+        let answer = Arc::clone(&retention);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::QueryPeerRetention { reply, .. } = update {
+                    let _ = reply.send(*answer.lock().unwrap());
+                }
+            }
+        });
+        retention
     }
 
     fn peers_at(&self, address: Ipv6Addr) -> Vec<PeerKey> {
@@ -279,12 +299,89 @@ async fn a_change_back_to_the_previous_endpoint_is_queued_behind_a_pending_rebin
 }
 
 #[tokio::test]
-async fn a_lost_binding_keeps_the_peer_while_the_link_is_up() {
+async fn a_lost_binding_keeps_an_established_peer_while_the_link_is_up() {
     let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
     h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
     // Mutation-red: treating a lost binding as an unbind removes the peer.
     h.bind("swp1", None).await;
     assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+}
+
+/// ADR-0142: the binding expires under an Established session, which then
+/// fails with Graceful Restart. The neighbor keeps redialing its last
+/// address, reserved against every other link, until the stale timer
+/// retires the routes; then the peer is removed and the address released.
+#[tokio::test(start_paused = true)]
+async fn an_unbound_neighbors_address_is_reserved_until_its_gr_routes_retire() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    let retention = h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    h.mgr
+        .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
+    h.bind("swp1", None).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 3,
+        next_deadline: Some(deadline),
+    };
+    h.mgr.note_unnumbered_session_idle(&key);
+    h.reconcile().await;
+    // Mutation-red: releasing without reading the retention removes it here.
+    assert_eq!(
+        h.peers_at(ll(2)),
+        std::slice::from_ref(&key),
+        "reserved while retained"
+    );
+    assert_eq!(
+        h.mgr.unnumbered_retry_at(),
+        Some(deadline),
+        "checked again at the RIB's timer"
+    );
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        std::slice::from_ref(&key),
+        "another link is refused"
+    );
+
+    // The stale timer sweeps the routes.
+    tokio::time::sleep_until(deadline).await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    h.reconcile().await;
+    // Mutation-red: keeping every unbound peer leaves swp1 holding it.
+    assert_eq!(h.peers_at(ll(2)), [swp2], "released, then admitted on swp2");
+}
+
+/// Without retained routes the address is released as soon as the session
+/// is down.
+#[tokio::test(start_paused = true)]
+async fn an_unbound_neighbor_without_retained_routes_is_released_at_once() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    h.mgr
+        .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
+    h.bind("swp1", None).await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+
+    h.mgr.note_unnumbered_session_idle(&key);
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), []);
 }
 
 #[tokio::test]
@@ -1270,8 +1367,9 @@ fn retirement_answered_after_release(
 
 /// An admitted retirement whose answer came too late ended the session
 /// afterwards. Whether discovery then expires the new address or reverts to
-/// the old one, the binding is not trusted on its face: the session is read,
-/// found gone, and recreated at the endpoint the neighbor keeps.
+/// the old one, the binding is not trusted on its face: the session is read
+/// and found gone. A reverted binding recreates it; an expired one leaves
+/// nothing retained, so the address is released.
 async fn settle_an_unanswered_retirement(reverted: bool) {
     {
         let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
@@ -1294,7 +1392,11 @@ async fn settle_an_unanswered_retirement(reverted: bool) {
         // exited session that never reconnects.
         let back = reverted.then(|| endpoint(2, 7));
         h.bind("swp1", back).await;
-        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "reverted: {reverted}");
+        if !reverted {
+            assert_eq!(h.peers_at(ll(2)), [], "released");
+            return;
+        }
+        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
         assert!(
             matches!(
                 h.mgr.peers[&swp1_key(2)]
@@ -1303,13 +1405,13 @@ async fn settle_an_unanswered_retirement(reverted: bool) {
                     .await,
                 rustbgpd_transport::StateQueryOutcome::State(_)
             ),
-            "a live session replaces the exited one (reverted: {reverted})"
+            "a live session replaces the exited one"
         );
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unanswered_retirement_then_an_expired_endpoint_recreates_the_session() {
+async fn an_unanswered_retirement_then_an_expired_endpoint_releases_the_address() {
     settle_an_unanswered_retirement(false).await;
 }
 
@@ -1409,41 +1511,4 @@ async fn recreation_retires_an_unresponsive_session_with_an_unsettled_retirement
 #[tokio::test(start_paused = true)]
 async fn recreation_never_rebinds_an_exited_session_at_the_old_index() {
     a_lost_link_overrides_an_unsettled_retirement(true, true).await;
-}
-
-/// The endpoint recovered for an exited session outlives a rebind that a
-/// staged transaction defers: the next pass, with no discovery binding,
-/// still recreates the session there.
-#[tokio::test(start_paused = true)]
-async fn a_recovered_endpoint_survives_a_deferred_rebind() {
-    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
-    h.bind("swp1", Some(endpoint(2, 7))).await;
-    let (release, released) = oneshot::channel();
-    let (exited_tx, exited) = oneshot::channel();
-    h.replace_session(
-        &swp1_key(2),
-        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
-    );
-    h.bind("swp1", Some(endpoint(3, 7))).await;
-    release.send(()).unwrap();
-    exited.await.unwrap();
-
-    h.mgr.config_snapshot_staged = true;
-    h.bind("swp1", None).await;
-    assert_eq!(
-        h.peers_at(ll(2)),
-        [],
-        "exited peer retired; rebind deferred"
-    );
-    h.mgr.config_snapshot_staged = false;
-    // Mutation-red: a recovery endpoint held only for one pass is gone.
-    h.reconcile().await;
-    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "recreated on retry");
-    assert!(matches!(
-        h.mgr.peers[&swp1_key(2)]
-            .handle()
-            .query_state_outcome(Duration::from_secs(1))
-            .await,
-        rustbgpd_transport::StateQueryOutcome::State(_)
-    ));
 }
