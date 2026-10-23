@@ -83,9 +83,13 @@ impl ImportRoster {
     /// The RIB identity of the managed peer at `address`, on `interface`
     /// when one is given (the first such peer otherwise), or
     /// [`PeerId::UNASSIGNED`] when no managed peer matches, which names no
-    /// RIB state.
+    /// RIB state. `0.0.0.0` names the synthetic peer that owns locally
+    /// injected routes, which no roster lists.
     #[must_use]
     pub fn rib_peer(&self, address: IpAddr, interface: Option<&str>) -> PeerId {
+        if address == PeerId::LOCAL.addr() {
+            return PeerId::LOCAL;
+        }
         let start = self
             .peers
             .partition_point(|peer| peer.key.address < address);
@@ -480,6 +484,15 @@ mod tests {
         assert!(roster.unique_peer("fe80::1".parse().unwrap()).is_none());
         assert!(roster.unique_peer("192.0.2.3".parse().unwrap()).is_none());
         assert!(roster.unique_peer("0.0.0.0".parse().unwrap()).is_none());
+        // The synthetic local peer resolves without a roster entry.
+        assert_eq!(
+            roster.rib_peer("0.0.0.0".parse().unwrap(), None),
+            PeerId::LOCAL
+        );
+        assert_eq!(
+            roster.rib_peer("192.0.2.3".parse().unwrap(), None),
+            PeerId::UNASSIGNED
+        );
     }
 
     /// Installed publications are read in one poll with no yield: a fleet

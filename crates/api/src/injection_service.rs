@@ -4595,6 +4595,28 @@ mod tests {
         ]
     }
 
+    /// A read service holding a one-peer managed roster, as the daemon's
+    /// does. Keep the publisher alive: dropping it closes the roster.
+    fn rib_service_with_roster(
+        rib_tx: mpsc::Sender<RibUpdate>,
+    ) -> (
+        crate::rib_service::RibService,
+        crate::import_roster::ImportRosterPublisher,
+    ) {
+        use crate::import_roster::test_support::{peer, publisher};
+        let roster = publisher(
+            vec![peer("10.0.0.1", tokio::sync::watch::channel(None).1)],
+            Vec::new(),
+        );
+        let mut known = crate::actor_read::mock_known_peer_queries(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+        );
+        known.roster = Some(roster.reader());
+        let rib = crate::rib_service::RibService::new(rib_tx).with_known_peer_queries(known);
+        (rib, roster)
+    }
+
     async fn list_local_flowspec(
         rib: &crate::rib_service::RibService,
     ) -> proto::ListFlowSpecResponse {
@@ -4638,7 +4660,9 @@ mod tests {
     /// replaced / unchanged from the local Adj-RIB-In, a received rule that
     /// out-selects the local one does not mask a real replacement, the
     /// 0.0.0.0 received view lists exactly the injected rules, and a missing
-    /// delete is `NOT_FOUND` unless `allow_missing` is set.
+    /// delete is `NOT_FOUND` unless `allow_missing` is set. The read service
+    /// holds a managed-peer roster, as the daemon's does: `0.0.0.0` names the
+    /// synthetic local peer, which no roster lists.
     #[tokio::test]
     async fn flowspec_injection_reports_local_outcomes_and_reconciles() {
         use proto::rib_service_server::RibService as _;
@@ -4657,7 +4681,7 @@ mod tests {
             AccessMode::ReadWrite,
             Arc::new(InjectionLeases::new()),
         );
-        let rib = crate::rib_service::RibService::new(rib_tx.clone());
+        let (rib, _roster) = rib_service_with_roster(rib_tx.clone());
 
         assert_eq!(
             add_rate(&svc, 0.0).await,
