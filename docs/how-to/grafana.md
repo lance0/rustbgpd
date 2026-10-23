@@ -129,6 +129,9 @@ siblings share RIB membership and cannot be diagnosed independently by this
 signal. See [delayed outbound registration](../reference/operations.md#delayed-outbound-registration)
 for the distinct snapshot-and-session-age advisory in `rbgp doctor`, which
 requires a known supporting daemon version before reporting absence.
+The daemon's own `bgp_rib_outbound_registration_pending_oldest_seconds`
+measures the oldest registration wait directly, without the join; it is an
+investigation signal with the same no-fixed-bound caveat.
 
 `BgpSessionNotEstablished` joins `bgp_peer_info` with
 `group_left(remote_asn, description, peer_group)`, so its alert labels carry

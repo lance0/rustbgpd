@@ -1160,6 +1160,7 @@ impl RibManager {
             });
         let record = LiveSessionRecord {
             session_id,
+            registration_wait_since: None,
             source_context,
             peer_scope,
             peer_group: self
@@ -1251,6 +1252,20 @@ impl RibManager {
         reason = "session classification (GR, LLGR, RTC, selection deferral) stays in one auditable pass"
     )]
     fn register_active_session(&mut self, peer: PeerId, registration: ActiveSessionRegistration) {
+        // A wait starts at PeerUp; a failback onto a survivor that never
+        // registered keeps that survivor's PeerUp stamp.
+        if let Some(record) = self
+            .live_sessions
+            .get_mut(&peer)
+            .and_then(|sessions| sessions.last_mut())
+        {
+            record
+                .registration_wait_since
+                .get_or_insert_with(tokio::time::Instant::now);
+            self.registration_wait_sample_at.get_or_insert_with(|| {
+                tokio::time::Instant::now() + super::REGISTRATION_WAIT_SAMPLE_INTERVAL
+            });
+        }
         let Some(record) = self
             .live_sessions
             .get(&peer)
@@ -1600,12 +1615,14 @@ impl RibManager {
     fn install_outbound_registration(&mut self, peer: PeerId) -> bool {
         let Some(record) = self
             .live_sessions
-            .get(&peer)
-            .and_then(|sessions| sessions.last())
+            .get_mut(&peer)
+            .and_then(|sessions| sessions.last_mut())
         else {
             debug_assert!(false, "complete_outbound_registration with no live session");
             return false;
         };
+        // This session's registration wait ends here.
+        record.registration_wait_since = None;
         let session_id = record.session_id;
         let outbound_tx = record.outbound_tx.clone();
         let export_policy = record.export_policy.clone();

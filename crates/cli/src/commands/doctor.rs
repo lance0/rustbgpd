@@ -782,7 +782,6 @@ fn peer_checks(
     session_evidence: SessionHistoryEvidence,
     now: u64,
     last_error: &str,
-    daemon_version: Option<&str>,
 ) -> Vec<Check> {
     let mut checks = Vec::new();
     if stale {
@@ -913,25 +912,78 @@ fn peer_checks(
             ),
         });
     }
-    if !stale
-        && state == "Established"
-        && update_group.is_empty()
-        && uptime_seconds > OUTBOUND_REGISTRATION_GRACE_SECS
-    {
-        checks.push(Check {
-            name: format!("peer.{address}.outbound"),
-            status: CheckStatus::Warn,
-            detail: if supports_outbound_registration(daemon_version) {
-                format!(
-                    "peer {address} Established for {}; outbound registration is absent in this snapshot (absence duration unknown). Queued imports can defer registration without a fixed deadline; inspect RIB backlog and peer state",
-                    output::format_duration(uptime_seconds)
-                )
-            } else {
-                format!("peer {address} outbound registration is unknown: daemon version does not establish update-group field support")
-            },
-        });
-    }
     checks
+}
+
+/// The RIB's pending-registration gauges from doctor's metrics scrape:
+/// Established sessions awaiting outbound registration and the oldest wait in
+/// seconds. `None` when the scrape failed or predates the gauges.
+fn registration_wait_evidence(metrics: Option<&str>) -> Option<(u64, u64)> {
+    let metrics = metrics?;
+    let gauge = |name: &str| {
+        metrics.lines().find_map(|line| {
+            line.strip_prefix(name)?
+                .strip_prefix(' ')?
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+    };
+    Some((
+        gauge("bgp_rib_outbound_registration_pending_peers")?,
+        gauge("bgp_rib_outbound_registration_pending_oldest_seconds")?,
+    ))
+}
+
+/// `peer.<addr>.outbound`: an Established session with no outbound
+/// registration in a current snapshot, past the investigation grace. Always
+/// an advisory: legitimate import deferral has no fixed bound. When doctor's
+/// metrics read carries the daemon's wait gauges, their count and oldest age
+/// replace "duration unknown". That read precedes the neighbor snapshot and is
+/// an independent sample: it neither bounds this peer's wait nor shows that a
+/// registration completed.
+fn outbound_registration_check(
+    address: &str,
+    state: &str,
+    stale: bool,
+    update_group: &str,
+    uptime_seconds: u64,
+    daemon_version: Option<&str>,
+    registration_wait: Option<(u64, u64)>,
+) -> Option<Check> {
+    if stale
+        || state != "Established"
+        || !update_group.is_empty()
+        || uptime_seconds <= OUTBOUND_REGISTRATION_GRACE_SECS
+    {
+        return None;
+    }
+    let detail = if supports_outbound_registration(daemon_version) {
+        let wait = match registration_wait {
+            None => "absence duration unknown".to_string(),
+            Some((0, _)) => {
+                "doctor's earlier metrics read counted no Established session awaiting registration"
+                    .to_string()
+            }
+            Some((pending, oldest)) => format!(
+                "doctor's earlier metrics read counted {pending} Established session(s) awaiting registration, the oldest for {}",
+                output::format_duration(oldest)
+            ),
+        };
+        format!(
+            "peer {address} Established for {}; outbound registration is absent in this snapshot ({wait}). Queued imports can defer registration without a fixed deadline; inspect RIB backlog, bgp_rib_outbound_registration_pending_oldest_seconds and peer state",
+            output::format_duration(uptime_seconds)
+        )
+    } else {
+        format!(
+            "peer {address} outbound registration is unknown: daemon version does not establish update-group field support"
+        )
+    };
+    Some(Check {
+        name: format!("peer.{address}.outbound"),
+        status: CheckStatus::Warn,
+        detail,
+    })
 }
 
 /// A grouped member in update-group recovery fallback resyncs by withdrawing
@@ -3811,6 +3863,7 @@ async fn run_with_deadlines(
                 Ok(resp) => {
                     let neighbors = resp.into_inner();
                     let admin_enabled = metrics_text.as_deref().and_then(admin_enabled_inventory);
+                    let registration_wait = registration_wait_evidence(metrics_text.as_deref());
                     let gtsm = admin_enabled
                         .as_ref()
                         .and(effective_config.as_ref())
@@ -3939,8 +3992,17 @@ async fn run_with_deadlines(
                             session_evidence,
                             now,
                             &record.support.last_error,
+                        )
+                        .into_iter()
+                        .chain(outbound_registration_check(
+                            &record.identity,
+                            &record.support.state,
+                            record.support.stale,
+                            &record.update_group,
+                            record.support.uptime_seconds,
                             daemon_version.as_deref(),
-                        ) {
+                            registration_wait,
+                        )) {
                             reporter.record(check.name, check.status, check.detail)?;
                         }
                         if let Some(check) = gtsm_advisory_check(
@@ -4936,7 +4998,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
-            Some("0.50.0"),
         );
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Ok);
@@ -4954,18 +5015,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         };
         let diagnose = |stale, countdown, evidence| {
             peer_checks(
-                "10.0.0.2",
-                "Connect",
-                stale,
-                countdown,
-                false,
-                "",
-                0,
-                0,
-                evidence,
-                1_000_000,
-                "",
-                Some("0.50.0"),
+                "10.0.0.2", "Connect", stale, countdown, false, "", 0, 0, evidence, 1_000_000, "",
             )
         };
 
@@ -5407,7 +5457,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(transitioned), None),
             now,
             "",
-            Some("0.50.0"),
         );
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Fail);
@@ -5433,7 +5482,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(now - STUCK_PEER_SECS + 1), None),
             now,
             "",
-            Some("0.50.0"),
         );
         assert!(checks[0].status == CheckStatus::Warn);
     }
@@ -5460,7 +5508,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             ),
             now,
             "",
-            Some("0.50.0"),
         );
 
         assert_eq!(checks.len(), 3);
@@ -5494,7 +5541,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Enabled)),
             1_000_000,
             "",
-            Some("0.50.0"),
         );
 
         assert_eq!(checks.len(), 1);
@@ -5519,7 +5565,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
-            Some("0.50.0"),
         );
         assert!(checks[0].status == CheckStatus::Warn);
         assert!(checks[0].detail.contains("unknown duration"));
@@ -5542,7 +5587,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
-            Some("0.50.0"),
         );
         assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Warn);
@@ -5571,7 +5615,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(now - 30), Some(now - 30)),
             now,
             "",
-            Some("0.50.0"),
         );
         assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Fail);
@@ -5618,38 +5661,92 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             ("Established", true, "", 3600, false),
             ("Idle", false, "", 3600, false),
         ] {
-            let checks = peer_checks(
-                "fe80::1%eth0",
-                state,
-                stale,
-                None,
-                false,
-                group,
-                uptime,
-                0,
-                SessionHistoryEvidence::Unavailable,
-                1_000_000,
-                "",
-                Some("0.50.0"),
-            );
-            let outbound = checks
-                .iter()
-                .find(|check| check.name == "peer.fe80::1%eth0.outbound");
-            assert_eq!(
-                outbound.is_some(),
-                expected,
-                "{state} {stale} {group} {uptime}"
-            );
-            if let Some(check) = outbound {
-                assert_eq!(check.status, CheckStatus::Warn);
-                assert!(check.detail.contains("Established for 00:05:01"));
-                assert!(
-                    check
-                        .detail
-                        .contains("absent in this snapshot (absence duration unknown)")
+            // Daemon-side evidence never creates or suppresses the advisory.
+            for evidence in [None, Some((0, 0)), Some((1, 4000))] {
+                let outbound = outbound_registration_check(
+                    "fe80::1%eth0",
+                    state,
+                    stale,
+                    group,
+                    uptime,
+                    Some("0.50.0"),
+                    evidence,
                 );
+                assert_eq!(
+                    outbound.is_some(),
+                    expected,
+                    "{state} {stale} {group} {uptime} {evidence:?}"
+                );
+                if let Some(check) = outbound {
+                    assert_eq!(check.name, "peer.fe80::1%eth0.outbound");
+                    assert_eq!(check.status, CheckStatus::Warn);
+                    assert!(check.detail.contains("Established for 00:05:01"));
+                }
             }
         }
+    }
+
+    #[test]
+    fn outbound_registration_advisory_reports_the_daemon_side_wait() {
+        let detail = |evidence| {
+            outbound_registration_check(
+                "10.0.0.2",
+                "Established",
+                false,
+                "",
+                3600,
+                Some("0.50.0"),
+                evidence,
+            )
+            .unwrap()
+            .detail
+        };
+        assert!(detail(None).contains("absent in this snapshot (absence duration unknown)"));
+        let pending = detail(Some((2, 420)));
+        assert!(
+            pending.contains("doctor's earlier metrics read counted 2 Established session(s) awaiting registration, the oldest for 00:07:00)"),
+            "{pending}"
+        );
+        assert!(!pending.contains("duration unknown"));
+        assert!(!pending.contains("bounds this peer"), "{pending}");
+        let none = detail(Some((0, 0)));
+        assert!(
+            none.contains("doctor's earlier metrics read counted no Established session awaiting registration)"),
+            "{none}"
+        );
+        assert!(!none.contains("duration unknown"));
+        assert!(!none.contains("completed"), "{none}");
+        let old = outbound_registration_check(
+            "10.0.0.2",
+            "Established",
+            false,
+            "",
+            3600,
+            Some("0.45.0"),
+            Some((2, 420)),
+        )
+        .unwrap();
+        assert!(old.detail.contains("outbound registration is unknown"));
+    }
+
+    #[test]
+    fn registration_wait_evidence_needs_both_gauges() {
+        let both = "bgp_rib_outbound_registration_pending_peers 2\n\
+                    bgp_rib_outbound_registration_pending_oldest_seconds 301\n";
+        assert_eq!(registration_wait_evidence(Some(both)), Some((2, 301)));
+        assert_eq!(registration_wait_evidence(None), None);
+        assert_eq!(
+            registration_wait_evidence(Some("bgp_rib_outbound_registration_pending_peers 2\n")),
+            None
+        );
+        // A same-prefix family is not the gauge.
+        assert_eq!(
+            registration_wait_evidence(Some(
+                "bgp_rib_outbound_registration_pending_peers_x 2\n\
+                 bgp_rib_outbound_registration_pending_oldest_seconds 301\n"
+            )),
+            None
+        );
     }
 
     #[test]
@@ -5666,7 +5763,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Disabled)),
             1_000_000,
             "",
-            Some("0.50.0"),
         );
         // LAN-668 red proof: retained disabled intent must not turn a stale
         // timeout placeholder green.
@@ -5692,7 +5788,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
-            Some("0.50.0"),
         );
 
         assert_eq!(checks.len(), 2);
@@ -5713,7 +5808,6 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
-            Some("0.50.0"),
         );
         assert_eq!(ungrouped[1].detail, expected);
     }
@@ -7665,9 +7759,17 @@ paths = ["x"]
 
     #[tokio::test]
     async fn doctor_bundle_reports_outbound_registration_as_advisory() {
-        for version in ["0.50.0", "0.45.0", ""] {
+        const WAIT: &str = "bgp_rib_outbound_registration_pending_peers 1\n\
+                            bgp_rib_outbound_registration_pending_oldest_seconds 360\n";
+        for (version, metrics) in [
+            ("0.50.0", None),
+            ("0.45.0", None),
+            ("", None),
+            ("0.50.0", Some(WAIT)),
+        ] {
             let server = spawn_mock_server(None).await;
             *server.state.health_daemon_version.lock().await = Some(version.to_string());
+            *server.state.metrics_text.lock().await = metrics.map(str::to_string);
             let dir = tempfile::tempdir().unwrap();
             *server.state.config_effective_toml.lock().await = Some(format!(
                 "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
@@ -7705,7 +7807,12 @@ paths = ["x"]
             let warning = manifest_check(&manifest, "peer.10.0.0.2.outbound");
             assert_eq!(warning["status"], "warn");
             let detail = warning["detail"].as_str().unwrap();
-            if version == "0.50.0" {
+            if metrics.is_some() {
+                assert!(
+                    detail.contains("doctor's earlier metrics read counted 1 Established session(s) awaiting registration, the oldest for 00:06:00)"),
+                    "{detail}"
+                );
+            } else if version == "0.50.0" {
                 assert!(detail.contains("absence duration unknown"));
             } else {
                 assert!(detail.contains("outbound registration is unknown"));
