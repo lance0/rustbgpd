@@ -1233,6 +1233,12 @@ with an empty `NeighborConfig.address` and its `interface`:
   replay) return `FAILED_PRECONDITION` until an address is bound.
   `DeleteNeighbor` returns `FAILED_PRECONDITION` for an interface-only
   neighbor, bound or not: remove its stanza from the configuration instead.
+  `SetGracefulShutdown` applies to every peer only when both the address and
+  the interface are empty; an interface alone selects that interface's
+  neighbor like any other action.
+- Peer-scoped RIB and explain requests take the learned address with its
+  scope, `fe80::2%swp1`, not the interface alone. gNMI lists an
+  interface-only neighbor once it has a learned address.
 
 ### Add a neighbor
 
