@@ -1998,22 +1998,30 @@ fn render_one_neighbor_updates(
     select
         .leaves()
         .into_iter()
-        .map(|leaf| {
-            let value = neighbor_leaf_value(peer, local_as, leaf);
-            leaf_update(
+        .filter_map(|leaf| {
+            let value = neighbor_leaf_value(peer, local_as, leaf)?;
+            Some(leaf_update(
                 neighbor_leaf_path(&peer_info_key(peer), leaf),
                 &value,
                 encoding,
-            )
+            ))
         })
         .collect()
 }
 
-fn neighbor_leaf_value(peer: &PeerInfo, local_as: u32, leaf: NeighborLeaf) -> LeafValue {
-    match leaf {
+/// A leaf's value, `None` when the neighbor has none to report.
+fn neighbor_leaf_value(peer: &PeerInfo, local_as: u32, leaf: NeighborLeaf) -> Option<LeafValue> {
+    Some(match leaf {
         NeighborLeaf::NeighborAddress => LeafValue::Str(peer_info_key(peer).label()),
         NeighborLeaf::Enabled => LeafValue::Bool(peer.enabled),
-        NeighborLeaf::PeerAs => LeafValue::U32(peer.remote_asn),
+        // A configured number is the peer's AS. With `remote_asn = "external"`
+        // or `"internal"` the AS is the one the session negotiated, and there
+        // is none while the session is down: the leaf is absent, never 0.
+        NeighborLeaf::PeerAs => LeafValue::U32(match peer.remote_asn_mode {
+            crate::peer_types::RemoteAsnMode::Numeric => peer.remote_asn,
+            crate::peer_types::RemoteAsnMode::External
+            | crate::peer_types::RemoteAsnMode::Internal => peer.negotiated_remote_asn?,
+        }),
         // `local-as` is derived from the global ASN: rustbgpd is single-AS and
         // has no per-neighbor local-as override.
         NeighborLeaf::LocalAs => LeafValue::U32(local_as),
@@ -2026,7 +2034,7 @@ fn neighbor_leaf_value(peer: &PeerInfo, local_as: u32, leaf: NeighborLeaf) -> Le
         NeighborLeaf::UpdatesReceived => LeafValue::U64(peer.updates_received),
         NeighborLeaf::NotificationsSent => LeafValue::U64(peer.notifications_sent),
         NeighborLeaf::NotificationsReceived => LeafValue::U64(peer.notifications_received),
-    }
+    })
 }
 
 fn session_state_name(state: SessionState) -> &'static str {
@@ -4861,6 +4869,110 @@ mod tests {
             vec![Some(path)]
         );
         assert_eq!(calls.load(Ordering::SeqCst), 4);
+    }
+
+    fn external_peer(negotiated: Option<u32>) -> PeerInfo {
+        let mut peer = test_peer("10.0.0.2".parse().unwrap());
+        peer.remote_asn_mode = crate::peer_types::RemoteAsnMode::External;
+        peer.negotiated_remote_asn = negotiated;
+        peer
+    }
+
+    /// `peer-as` is the configured number for a numeric neighbor and the
+    /// session's AS for an `external`/`internal` one, absent (never 0) while
+    /// that session is down.
+    #[test]
+    fn peer_as_follows_the_remote_asn_mode() {
+        let peer_as = |peer: &PeerInfo| {
+            neighbor_leaf_value(peer, 65001, NeighborLeaf::PeerAs).map(|value| match value {
+                LeafValue::U32(asn) => asn,
+                _ => panic!("peer-as is a uint32"),
+            })
+        };
+        let numeric = test_peer("10.0.0.3".parse().unwrap());
+        assert_eq!(peer_as(&numeric), Some(numeric.remote_asn));
+        // Mutation-red: reading `remote_asn` reports 0, or the last OPEN's AS
+        // after the session dropped.
+        assert_eq!(peer_as(&external_peer(None)), None);
+        assert_eq!(peer_as(&external_peer(Some(65009))), Some(65009));
+        let mut internal = external_peer(None);
+        internal.remote_asn_mode = crate::peer_types::RemoteAsnMode::Internal;
+        assert_eq!(peer_as(&internal), None);
+        internal.negotiated_remote_asn = Some(65001);
+        assert_eq!(peer_as(&internal), Some(65001));
+    }
+
+    /// Get omits the leaf for a down `external` neighbor and renders the
+    /// rest of its state.
+    #[tokio::test]
+    async fn get_omits_peer_as_for_a_down_external_neighbor() {
+        let state = |peer: PeerInfo| async move {
+            let response = test_service(vec![peer])
+                .get(get_request(mounted_path(&[
+                    pe("bgp"),
+                    pe("neighbors"),
+                    keyed_pe("neighbor", "neighbor-address", "10.0.0.2"),
+                    pe("state"),
+                ])))
+                .await
+                .unwrap()
+                .into_inner();
+            json_ietf_values(&response)
+        };
+        let down = state(external_peer(None)).await;
+        assert_eq!(down.len(), 9);
+        assert!(!down.contains(&"0".to_string()), "{down:?}");
+        let up = state(external_peer(Some(65009))).await;
+        assert_eq!(up[2], "65009");
+    }
+
+    /// `SAMPLE` with `suppress_redundant`: the leaf appears when the session
+    /// establishes, is absent while it is down, and reappears afterwards.
+    /// `ON_CHANGE` does not cover `peer-as`.
+    #[tokio::test(start_paused = true)]
+    async fn sampled_peer_as_appears_only_while_the_session_is_up() {
+        let peers = Arc::new(Mutex::new(vec![external_peer(None)]));
+        let snapshot = Arc::clone(&peers);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let peers = snapshot.lock().unwrap().clone();
+            async move { Ok(peers) }
+        });
+        let path = neighbor_leaf_path(
+            &PeerKey::new("10.0.0.2".parse().unwrap(), None),
+            NeighborLeaf::PeerAs,
+        );
+        let list = controlled_sample_list(path.clone(), true, 1_000_000_000, 0);
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        tokio::spawn(service.run_stream_sample(plan, tx));
+        tokio::task::yield_now().await;
+        // Down: the initial snapshot carries no peer-as, only the sync.
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        let mut tick = async |peer: PeerInfo| {
+            *peers.lock().unwrap() = vec![peer];
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            rx.try_recv()
+                .ok()
+                .map(|response| subscribe_updates(response.unwrap()))
+        };
+        let up = tick(external_peer(Some(65009))).await.expect("established");
+        assert_eq!(up.len(), 1);
+        assert_eq!(up[0].path, Some(path.clone()));
+        assert!(
+            tick(external_peer(None)).await.is_none(),
+            "absent while down"
+        );
+        assert!(
+            tick(external_peer(Some(65009))).await.is_some(),
+            "reappears"
+        );
+
+        let on_change = parse_subscription_list(&stream_on_change_list(path)).unwrap_err();
+        assert_eq!(on_change.code(), tonic::Code::Unimplemented);
     }
 
     #[tokio::test]
