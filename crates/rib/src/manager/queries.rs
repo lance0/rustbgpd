@@ -216,6 +216,45 @@ pub(super) const BMP_DUMP_CHUNK_SIZE: usize = 256;
 /// capped at `n` — the mutation-robust cursor step of the resumable
 /// BMP Loc-RIB dump. Returns fewer than `n` keys iff the walk past
 /// `after` is exhausted.
+/// The `n` smallest export destinations strictly after `after`, ascending,
+/// holding at most `n` at any time. A destination listed both as a
+/// registered session and as a managed peer (same address and scope) is kept
+/// once, as registered. Unregistered orders immediately before registered
+/// for one destination, so the two forms always fall on the same side of the
+/// cut: the selection holds the registered form or neither.
+fn smallest_destinations_after(
+    candidates: impl Iterator<Item = ExportCandidate>,
+    after: Option<&ExportCandidate>,
+    n: usize,
+) -> Vec<ExportCandidate> {
+    let mut kept = std::collections::BTreeSet::new();
+    for candidate in candidates {
+        if after.is_some_and(|after| candidate <= *after) {
+            continue;
+        }
+        // Equality ignores the handle, so any `Some` names the registered form.
+        let registered_form = ExportCandidate {
+            peer: Some(PeerId::LOCAL),
+            ..candidate.clone()
+        };
+        if candidate.peer.is_some() {
+            kept.remove(&ExportCandidate {
+                peer: None,
+                ..candidate.clone()
+            });
+        } else if kept.contains(&registered_form) {
+            continue;
+        }
+        kept.insert(candidate);
+        if kept.len() > n {
+            kept.pop_last();
+        }
+        #[cfg(test)]
+        EXPORT_SELECTION_HIGH_WATER.set(EXPORT_SELECTION_HIGH_WATER.get().max(kept.len()));
+    }
+    kept.into_iter().collect()
+}
+
 fn smallest_keys_after<K: Ord>(
     keys: impl Iterator<Item = K>,
     after: Option<&K>,
@@ -2039,7 +2078,7 @@ impl RibManager {
         // never needs more than the budget left, so the second selection's
         // prefix serves them all.
         let mut resumed = after.map(|(peer, scope)| {
-            smallest_keys_after(
+            smallest_destinations_after(
                 self.export_candidates(&managed),
                 Some(&ExportCandidate {
                     addr: peer,
@@ -2077,17 +2116,16 @@ impl RibManager {
             // The cursor applies only to the key it was issued in, which is
             // the first one this page visits.
             let after_cursor;
-            let remaining: &[ExportCandidate] =
-                if let Some(selected) = resumed.take().filter(|_| index == start) {
-                    after_cursor = selected;
-                    &after_cursor
-                } else {
-                    from_start.get_or_insert_with(|| {
-                        smallest_keys_after(self.export_candidates(&managed), None, budget + 1)
-                    })
-                };
-            #[cfg(test)]
-            EXPORT_SELECTION_HIGH_WATER.set(EXPORT_SELECTION_HIGH_WATER.get().max(remaining.len()));
+            let remaining: &[ExportCandidate] = if let Some(selected) =
+                resumed.take().filter(|_| index == start)
+            {
+                after_cursor = selected;
+                &after_cursor
+            } else {
+                from_start.get_or_insert_with(|| {
+                    smallest_destinations_after(self.export_candidates(&managed), None, budget + 1)
+                })
+            };
             let take = remaining.len().min(budget);
             budget -= take.max(1);
             entry.peers = remaining[..take]
@@ -2171,35 +2209,29 @@ impl RibManager {
     }
 
     /// Every destination of an export walk, unordered, with whether it is
-    /// registered for outbound updates: the registered sessions, plus each
-    /// `managed` peer that no registered session matches by address and
-    /// scope. Nothing is collected; the caller keeps a bounded selection.
+    /// registered for outbound updates: the registered sessions, then each
+    /// `managed` peer as unregistered. A managed peer that a registered
+    /// session also covers appears in both forms; the bounded selection
+    /// ([`smallest_destinations_after`]) keeps the registered one. Nothing
+    /// is collected.
     fn export_candidates<'a>(
         &'a self,
         managed: &'a [ExportDestination],
     ) -> impl Iterator<Item = ExportCandidate> + 'a {
-        let registered: Vec<ExportCandidate> = self
+        let registered = self
             .peer_sendable_families
             .keys()
             .map(|&peer| ExportCandidate {
                 addr: peer.addr(),
                 scope: self.session_peer_scope(peer).peer_interface(),
                 peer: Some(peer),
-            })
-            .collect();
-        let destinations: HashSet<(IpAddr, Option<Arc<str>>)> = registered
-            .iter()
-            .map(|candidate| (candidate.addr, candidate.scope.clone()))
-            .collect();
-        let unregistered = managed
-            .iter()
-            .filter(move |destination| !destinations.contains(*destination))
-            .map(|(addr, scope)| ExportCandidate {
-                addr: *addr,
-                scope: scope.clone(),
-                peer: None,
             });
-        registered.into_iter().chain(unregistered)
+        let unregistered = managed.iter().map(|(addr, scope)| ExportCandidate {
+            addr: *addr,
+            scope: scope.clone(),
+            peer: None,
+        });
+        registered.chain(unregistered)
     }
 
     /// [`RouteExportVersion::policy`]: the installed export chains' change
@@ -4239,13 +4271,10 @@ impl RibManager {
     }
 }
 
-/// An export walk destination with whether it is registered for outbound
-/// updates. Each destination is listed once, so the order is the
-/// destination order; a cursor compares with the flag set, which skips its
-/// destination either way.
 /// A destination of an export walk: the address, the scope of a scoped
 /// neighbor, and the neighbor when a session is registered for it. Walks
-/// order by address, then scope, then unregistered before registered.
+/// order by address, then scope, then unregistered before registered. A
+/// cursor compares as registered, so it skips its destination in either form.
 #[derive(Debug, Clone)]
 struct ExportCandidate {
     addr: IpAddr,
