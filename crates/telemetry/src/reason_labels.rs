@@ -483,7 +483,9 @@ impl std::fmt::Display for GrEorGraceReleaseReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InboundConnectionDropReason {
     /// The source matched no configured static neighbor and no
-    /// `[[dynamic_neighbors]]` range.
+    /// `[[dynamic_neighbors]]` range. This includes a link-local connection
+    /// that an interface-only neighbor refused to learn on its interface
+    /// (ADR-0142).
     Unconfigured,
     /// The ADR-0120 per-source token bucket was empty for the source's
     /// aggregate.

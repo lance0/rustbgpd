@@ -1862,7 +1862,8 @@ max-prefix peer retained disabled for explicit recovery still owns one.
 inbound dynamic connection is dropped because all slots are occupied.
 `bgp_inbound_connections_dropped_total` breaks accept-path drops down by a
 bounded `reason` vocabulary (ADR-0120): `unconfigured` (source matched no
-static neighbor and no dynamic range), `rate_limited` (the opt-in
+static neighbor and no dynamic range, including a link-local connection that
+an interface-only neighbor refused to learn on its interface), `rate_limited` (the opt-in
 `[inbound_admission]` per-source token bucket was empty),
 `dynamic_limit` (slot saturation, counted alongside the legacy counter), and
 `notification_backoff` (a configured neighbor dialled in while its session

@@ -547,16 +547,32 @@ impl PeerManager {
     /// Established or held by NOTIFICATION backoff, and when another neighbor
     /// holds the address (`duplicate_link_local_address`). A bound session
     /// that has not reached `OpenSent` is retired: the peer moved address.
+    /// Count a refused inbound learning attempt as `unconfigured`, as such a
+    /// connection was before inbound learning: its source is no neighbor's
+    /// configured or learned endpoint on the arrival interface.
+    fn refuse_inbound(&self) -> Option<PeerKey> {
+        self.metrics.record_inbound_connection_drop(
+            rustbgpd_telemetry::reason_labels::InboundConnectionDropReason::Unconfigured,
+        );
+        None
+    }
+
     pub(super) async fn learn_inbound_endpoint(
         &mut self,
         name: &str,
         address: Ipv6Addr,
         ifindex: u32,
     ) -> Option<PeerKey> {
-        let port = self.unnumbered.as_ref()?.ports.get(name)?;
+        let Some(port) = self
+            .unnumbered
+            .as_ref()
+            .and_then(|unnumbered| unnumbered.ports.get(name))
+        else {
+            return self.refuse_inbound();
+        };
         if matches!(port.link, Some((_, LinkState::Down | LinkState::Removed))) {
             info!(interface = %name, %address, "unnumbered: inbound connection on a link that is down, dropping");
-            return None;
+            return self.refuse_inbound();
         }
         if let Some(desired) = port.desired
             && desired.address != address
@@ -566,7 +582,7 @@ impl PeerManager {
                 reason = "multiple_routers_on_link",
                 "unnumbered: inbound connection from a second router on an interface-only link, dropping"
             );
-            return None;
+            return self.refuse_inbound();
         }
         if let Some(key) = port.bound.clone() {
             if key.address == IpAddr::V6(address) {
@@ -583,14 +599,14 @@ impl PeerManager {
                     rustbgpd_transport::StateQueryOutcome::SessionGone => None,
                     rustbgpd_transport::StateQueryOutcome::TimedOut => {
                         info!(interface = %name, %address, peer = %key, "unnumbered: bound session did not report its state; dropping the inbound connection (remote will retry)");
-                        return None;
+                        return self.refuse_inbound();
                     }
                 },
             };
             match state.as_ref().map(|state| state.fsm_state) {
                 Some(SessionState::Established) => {
                     info!(interface = %name, %address, peer = %key, "unnumbered: inbound connection while the neighbor is Established, dropping");
-                    return None;
+                    return self.refuse_inbound();
                 }
                 Some(SessionState::OpenSent | SessionState::OpenConfirm) => {
                     warn!(
@@ -598,7 +614,7 @@ impl PeerManager {
                         reason = "multiple_routers_on_link",
                         "unnumbered: inbound connection from a second router while the bound session is opening, dropping"
                     );
-                    return None;
+                    return self.refuse_inbound();
                 }
                 _ => {}
             }
@@ -607,13 +623,13 @@ impl PeerManager {
                 .filter(|state| super::inbound::notification_backoff_holds_inbound(state))
             {
                 self.record_notification_backoff_drop(key.address, state, "inbound connection");
-                return None;
+                return None; // counted as `notification_backoff`
             }
             if !self
                 .retire_bound_peer(name, key, "peer_address_changed")
                 .await
             {
-                return None;
+                return self.refuse_inbound();
             }
         }
         // The same atomic admission step as an RA binding: no input runs
@@ -624,12 +640,12 @@ impl PeerManager {
                 reason = "duplicate_link_local_address",
                 "unnumbered: refusing an inbound address another neighbor holds"
             );
-            return None;
+            return self.refuse_inbound();
         }
         let endpoint = Endpoint { address, ifindex };
         if let Err(error) = self.bind_port(name, endpoint).await {
             warn!(interface = %name, %address, %error, "unnumbered: could not add the peer learned from an inbound connection");
-            return None;
+            return self.refuse_inbound();
         }
         info!(interface = %name, %address, "unnumbered: peer address learned from an inbound connection");
         self.port_mut(name).bound.clone()

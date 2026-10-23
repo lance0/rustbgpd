@@ -793,6 +793,11 @@ async fn inbound(h: &mut Harness, last: u16, scope: u32) -> TcpStream {
     client
 }
 
+/// `bgp_inbound_connections_dropped_total` for `reason`.
+fn dropped(h: &Harness, reason: &str) -> f64 {
+    inbound_drop_metric(&h.mgr.metrics, reason).expect("exported from startup")
+}
+
 /// ADR-0142 secondary discovery: a peer that sends no RAs dials us, and its
 /// connection is matched by arrival scope to the interface-only neighbor on
 /// that interface, which binds its source address and takes the connection
@@ -824,8 +829,22 @@ async fn an_inbound_connection_binds_the_neighbor_on_its_arrival_interface() {
 
     // An arrival scope that belongs to no interface-only neighbor still
     // drops, whatever the address.
+    assert_eq!(dropped(&h, "unconfigured"), 0.0, "an accepted arrival");
     let _client = inbound(&mut h, 10, 99).await;
     assert_eq!(h.peers_at(ll(10)), []);
+    assert_eq!(dropped(&h, "unconfigured"), 1.0);
+
+    // A confirmed-down link refuses learning, and the refusal is counted.
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
+    h.reconcile().await;
+    // Mutation-red: a refusal that is only logged leaves the count at 1.
+    let _client = inbound(&mut h, 11, 8).await;
+    assert_eq!(h.peers_at(ll(11)), []);
+    assert_eq!(
+        dropped(&h, "unconfigured"),
+        2.0,
+        "link-down refusal counted"
+    );
 }
 
 /// Accepted only while the neighbor has no Established session: an
@@ -850,6 +869,11 @@ async fn an_inbound_connection_rebinds_only_while_the_neighbor_is_not_establishe
     let _client = inbound(&mut h, 3, 7).await;
     assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept");
     assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
+    assert_eq!(
+        dropped(&h, "unconfigured"),
+        1.0,
+        "Established refusal counted"
+    );
 
     // The peer moved address and its session is down: the new source binds.
     h.replace_session(
@@ -868,6 +892,7 @@ async fn an_inbound_connection_rebinds_only_while_the_neighbor_is_not_establishe
     );
     assert!(h.mgr.peers.contains_key(&swp1_key(3)));
     assert_eq!(h.mgr.unnumbered_owner_of(&swp1_key(3)), Some("swp1"));
+    assert_eq!(dropped(&h, "unconfigured"), 1.0, "a rebind is not a drop");
 }
 
 /// A live RA binding or a bound session past TCP establishment is a second
@@ -879,6 +904,7 @@ async fn an_inbound_connection_keeps_the_existing_gates() {
     h.bind("swp1", Some(endpoint(2, 7))).await;
     let _client = inbound(&mut h, 3, 7).await;
     assert_eq!(h.peers_at(ll(3)), [], "RA binding to another router holds");
+    assert_eq!(dropped(&h, "unconfigured"), 1.0);
 
     // The RA binding expired; the session to it is opening.
     h.bind("swp1", None).await;
@@ -893,6 +919,7 @@ async fn an_inbound_connection_keeps_the_existing_gates() {
     );
     let _client = inbound(&mut h, 3, 7).await;
     assert_eq!(h.peers_at(ll(3)), [], "opening session holds");
+    assert_eq!(dropped(&h, "unconfigured"), 2.0);
 
     // Idle in an escalated NOTIFICATION reconnect wait.
     h.replace_session(
@@ -908,6 +935,9 @@ async fn an_inbound_connection_keeps_the_existing_gates() {
     let _client = inbound(&mut h, 3, 7).await;
     assert_eq!(h.peers_at(ll(3)), [], "NOTIFICATION backoff holds");
     assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    // Counted once, under the existing backoff reason.
+    assert_eq!(dropped(&h, "notification_backoff"), 1.0);
+    assert_eq!(dropped(&h, "unconfigured"), 2.0);
 }
 
 /// Inbound learning admits an address through the same atomic check as an
@@ -927,6 +957,11 @@ async fn an_inbound_connection_from_a_held_address_is_refused() {
         h.peers_at(ll(5)),
         [PeerKey::new(IpAddr::V6(ll(5)), Some("eth9".into()))]
     );
+    assert_eq!(
+        dropped(&h, "unconfigured"),
+        1.0,
+        "held-address refusal counted"
+    );
 
     let _client = inbound(&mut h, 2, 7).await;
     let _client = inbound(&mut h, 2, 8).await;
@@ -935,4 +970,5 @@ async fn an_inbound_connection_from_a_held_address_is_refused() {
         [swp1_key(2)],
         "exactly one link admitted"
     );
+    assert_eq!(dropped(&h, "unconfigured"), 2.0);
 }
