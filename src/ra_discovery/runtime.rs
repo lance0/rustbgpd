@@ -884,9 +884,17 @@ mod tests {
         assert!(actor.pending_rs.is_empty());
     }
 
+    /// Reach the "router discovery send failed" callsite once.
+    fn fail_link_up_send() {
+        let (mut actor, _) = flaky_actor(0, true);
+        fake_sender(&mut actor, u32::MAX);
+        actor.handle(Input::Command(Command::Start("x".into())), Instant::now());
+        actor.handle(link(LinkState::Up), Instant::now());
+    }
+
     #[tokio::test]
     async fn send_failures_count_every_attempt_and_warn_once_per_generation() {
-        use std::io::{Read, Seek};
+        use std::io::{Read, Seek, SeekFrom};
 
         let mut log = tempfile::tempfile().unwrap();
         let writer = log.try_clone().unwrap();
@@ -895,7 +903,16 @@ mod tests {
             .with_writer(move || writer.try_clone().unwrap())
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
+        // A sibling test reaching the warning with no subscriber, after this
+        // install, caches its process-wide interest as never. Force that
+        // ordering, then warm the callsite here, rebuild the cache and read
+        // only what follows.
+        tokio::task::spawn_blocking(fail_link_up_send)
+            .await
+            .unwrap();
+        fail_link_up_send();
         tracing::callsite::rebuild_interest_cache();
+        let start = log.stream_position().unwrap();
         let (mut actor, _) = flaky_actor(0, true);
         actor.sender =
             Box::new(|_, _, _| Err(std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL)));
@@ -918,7 +935,7 @@ mod tests {
         actor.handle(link(LinkState::Up), now + Duration::from_secs(3));
         let second_generation = actor.sockets["x"].generation;
         assert_ne!(first_generation, second_generation);
-        log.rewind().unwrap();
+        log.seek(SeekFrom::Start(start)).unwrap();
         let mut text = String::new();
         log.read_to_string(&mut text).unwrap();
         let rows: Vec<serde_json::Value> = text
