@@ -1643,3 +1643,41 @@ async fn a_discovery_actor_that_fails_to_start_is_retried() {
     assert_eq!(launched.lock().unwrap().len(), 1, "started on retry");
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// A settings rebind keeps the address the session ran on, even when
+/// discovery has meanwhile bound another router's address.
+#[tokio::test]
+async fn a_settings_rebind_keeps_the_working_address_over_a_new_discovery_binding() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "Established kept");
+    // Mutation-red (get_or_insert): the rebind moves the peer to fe80::3.
+    h.reload(config_with(&port_stanza("swp1", "hold_time = 60\n")))
+        .await;
+    assert_eq!(h.mgr.peers[&swp1_key(2)].hold_time, Some(60));
+    assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
+}
+
+/// An operator's graceful-shutdown advertisement outlives a settings
+/// rebind, as it does a static neighbor's reconfigure.
+#[tokio::test(start_paused = true)]
+async fn a_settings_rebind_keeps_graceful_shutdown() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // The session is not Established, so its outbound refresh times out;
+    // the intent is stored regardless.
+    let _ = h.mgr.set_graceful_shutdown(Some(swp1_key(2)), true).await;
+    assert!(h.mgr.peers[&swp1_key(2)].advertise_graceful_shutdown);
+    let session = h.session(&swp1_key(2));
+    h.reload(config_with(&port_stanza("swp1", "hold_time = 60\n")))
+        .await;
+    assert_ne!(h.session(&swp1_key(2)), session, "rebound");
+    // Mutation-red: without the held flag the new peer advertises nothing.
+    assert!(h.mgr.peers[&swp1_key(2)].advertise_graceful_shutdown);
+}

@@ -4051,6 +4051,13 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .supported_sections
             .push(TRANSACTION_NEIGHBOR_MODIFY_SECTION.to_string());
     }
+    // Registered before the family and external-input guards below, which
+    // read the supported sections.
+    if diff.interface_only_neighbors_changed {
+        class
+            .supported_sections
+            .push(TRANSACTION_INTERFACE_ONLY_SECTION.to_string());
+    }
     if diff.dynamic_neighbors_changed && !diff.dynamic_neighbor_tcp_ao_changed {
         class
             .supported_sections
@@ -4270,11 +4277,6 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
         class
             .restart_required_sections
             .push("[[neighbors]] / [peer_groups.*].tcp_mss".to_string());
-    }
-    if diff.interface_only_neighbors_changed {
-        class
-            .supported_sections
-            .push(TRANSACTION_INTERFACE_ONLY_SECTION.to_string());
     }
     if diff.unnumbered_changed {
         class

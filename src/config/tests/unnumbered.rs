@@ -548,3 +548,40 @@ fn an_interface_only_policy_edit_is_a_live_policy_impact() {
         "{class:?}"
     );
 }
+
+/// The interface-only section is registered before the guards that read
+/// the supported sections: an unverified external input fences it like any
+/// full-snapshot family, and it does not mix with the static neighbor
+/// executor.
+#[test]
+fn interface_only_transactions_meet_the_family_and_external_input_guards() {
+    let old = parse(&with(SWP1)).unwrap();
+    let new = parse(&with(&SWP1.replace("\"external\"", "65002"))).unwrap();
+    let mut diff = diff_config(&old, &new);
+    diff.policy.external_inputs_present = true;
+    // Mutation-red: registering the section after the guards commits it.
+    let fenced = classify_config_transaction_v1(&diff);
+    assert!(
+        fenced
+            .unsupported_sections
+            .iter()
+            .any(|section| section.contains("external inputs")),
+        "{fenced:?}"
+    );
+    assert!(!fenced.is_committable());
+
+    let mixed = parse(&with(&format!(
+        "{}\n[[neighbors]]\naddress = \"10.0.0.9\"\nremote_asn = 65009\n",
+        SWP1.replace("\"external\"", "65002")
+    )))
+    .unwrap();
+    let class = classify_config_transaction_v1(&diff_config(&old, &mixed));
+    assert!(
+        class
+            .unsupported_sections
+            .iter()
+            .any(|section| section == "mixed transaction families"),
+        "{class:?}"
+    );
+    assert!(!class.is_committable());
+}

@@ -136,6 +136,9 @@ struct HeldState {
     /// keeps the operator's toggle only while this is unchanged, as
     /// `lifecycle::config_admin_enable` does for a static neighbor.
     config_admin_down: bool,
+    /// An operator's RFC 8326 graceful-shutdown advertisement, replayed on
+    /// the next peer as a static neighbor's reconfigure does.
+    graceful_shutdown: bool,
     latch: Option<super::MaxPrefixLatch>,
 }
 
@@ -633,8 +636,10 @@ impl PeerManager {
         {
             let port = self.port_mut(name);
             port.settings = None;
+            // The working address, even when discovery has meanwhile seen
+            // another router's RA: a settings edit never moves the peer.
             if let Some(endpoint) = endpoint {
-                port.desired.get_or_insert(endpoint);
+                port.desired = Some(endpoint);
             }
         } else {
             // The peer keeps its old settings; try again.
@@ -815,6 +820,10 @@ impl PeerManager {
                 .peers
                 .get(&key)
                 .is_some_and(|managed| managed.admin_down.is_some()),
+            graceful_shutdown: self
+                .peers
+                .get(&key)
+                .is_some_and(|managed| managed.advertise_graceful_shutdown),
             latch: self.max_prefix_latches.remove(&key),
         };
         match self.delete_peer(key.clone(), false).await {
@@ -1088,6 +1097,12 @@ impl PeerManager {
             return Err(error);
         }
         info!(interface = %name, peer = %key, enabled, "unnumbered: bound peer added");
+        // Best-effort, like a static neighbor's reconfigure replay.
+        if held.as_ref().is_some_and(|held| held.graceful_shutdown)
+            && let Err(error) = self.set_graceful_shutdown(Some(key.clone()), true).await
+        {
+            warn!(interface = %name, peer = %key, %error, "unnumbered: could not replay graceful shutdown on the new peer");
+        }
         let rib_peer = self.rib_peer_of(&key);
         let settings = self.current_config.bind_time_settings(&neighbor);
         let port = self.port_mut(name);
