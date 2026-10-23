@@ -4191,7 +4191,7 @@ impl PeerManager {
     pub(super) async fn apply_policy_change(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Option<Vec<IpAddr>>,
+        affected_peers: Option<Vec<PeerKey>>,
     ) -> Result<(), CatalogMutationError> {
         if let ConfigEvent::DeletePolicy { name, .. } = &event {
             let refs = policy_references(&self.current_config, name);
@@ -4239,7 +4239,7 @@ impl PeerManager {
     pub(super) async fn apply_policy_change_owned(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Option<Vec<IpAddr>>,
+        affected_peers: Option<Vec<PeerKey>>,
     ) -> OwnedCatalogMutationOutcome {
         if let ConfigEvent::DeletePolicy { name, .. } = &event {
             let refs = policy_references(&self.current_config, name);
@@ -4435,7 +4435,7 @@ impl PeerManager {
     async fn refresh_policies_for_config(
         &mut self,
         next_config: Config,
-        affected_peers: Option<Vec<IpAddr>>,
+        affected_peers: Option<Vec<PeerKey>>,
     ) -> Result<usize, CatalogMutationError> {
         self.refresh_policies_for_config_classified(next_config, affected_peers, false)
             .await
@@ -4445,7 +4445,7 @@ impl PeerManager {
     async fn refresh_policies_for_config_classified(
         &mut self,
         next_config: Config,
-        affected_peers: Option<Vec<IpAddr>>,
+        affected_peers: Option<Vec<PeerKey>>,
         require_clean_convergence: bool,
     ) -> Result<usize, PolicySnapshotFailure> {
         let peers: Vec<PeerKey> = affected_peers.map_or_else(
@@ -4453,7 +4453,7 @@ impl PeerManager {
             |peers| {
                 peers
                     .into_iter()
-                    .flat_map(|address| self.peer_keys_for_address(address))
+                    .filter(|key| self.peers.contains_key(key))
                     .collect()
             },
         );

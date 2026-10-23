@@ -221,7 +221,7 @@ async fn owned_policy_cohort_failure_reports_fully_compensated() {
                 },
                 ack: None,
             },
-            Some(vec![first.addr(), failing.addr()]),
+            Some(keys([first.addr(), failing.addr()])),
         )
         .await;
     assert!(

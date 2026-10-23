@@ -1844,6 +1844,7 @@ impl PeerManager {
                         interface,
                         policy_names,
                     } => {
+                        let peer = PeerKey::new(address, interface.clone());
                         self.apply_policy_change_owned(
                             ConfigEvent::SetNeighborImportChain {
                                 address,
@@ -1851,7 +1852,7 @@ impl PeerManager {
                                 policy_names,
                                 ack: None,
                             },
-                            Some(vec![address]),
+                            Some(vec![peer]),
                         )
                         .await
                     }
@@ -1860,6 +1861,7 @@ impl PeerManager {
                         interface,
                         policy_names,
                     } => {
+                        let peer = PeerKey::new(address, interface.clone());
                         self.apply_policy_change_owned(
                             ConfigEvent::SetNeighborExportChain {
                                 address,
@@ -1867,29 +1869,31 @@ impl PeerManager {
                                 policy_names,
                                 ack: None,
                             },
-                            Some(vec![address]),
+                            Some(vec![peer]),
                         )
                         .await
                     }
                     OwnedCatalogMutation::ClearNeighborImportChain { address, interface } => {
+                        let peer = PeerKey::new(address, interface.clone());
                         self.apply_policy_change_owned(
                             ConfigEvent::ClearNeighborImportChain {
                                 address,
                                 interface,
                                 ack: None,
                             },
-                            Some(vec![address]),
+                            Some(vec![peer]),
                         )
                         .await
                     }
                     OwnedCatalogMutation::ClearNeighborExportChain { address, interface } => {
+                        let peer = PeerKey::new(address, interface.clone());
                         self.apply_policy_change_owned(
                             ConfigEvent::ClearNeighborExportChain {
                                 address,
                                 interface,
                                 ack: None,
                             },
-                            Some(vec![address]),
+                            Some(vec![peer]),
                         )
                         .await
                     }
@@ -2397,7 +2401,7 @@ impl PeerManager {
                             policy_names,
                             ack: None,
                         },
-                        Some(vec![address]),
+                        Some(vec![PeerKey::new(address, None)]),
                     )
                     .await;
                 let _ = reply.send(result);
@@ -2415,7 +2419,7 @@ impl PeerManager {
                             policy_names,
                             ack: None,
                         },
-                        Some(vec![address]),
+                        Some(vec![PeerKey::new(address, None)]),
                     )
                     .await;
                 let _ = reply.send(result);
@@ -2428,7 +2432,7 @@ impl PeerManager {
                             interface: None,
                             ack: None,
                         },
-                        Some(vec![address]),
+                        Some(vec![PeerKey::new(address, None)]),
                     )
                     .await;
                 let _ = reply.send(result);
@@ -2441,7 +2445,7 @@ impl PeerManager {
                             interface: None,
                             ack: None,
                         },
-                        Some(vec![address]),
+                        Some(vec![PeerKey::new(address, None)]),
                     )
                     .await;
                 let _ = reply.send(result);
