@@ -207,6 +207,14 @@ learned endpoint is installed in that inventory.
   first interface-only neighbor fail with an error that names `CAP_NET_RAW`.
   The daemon never degrades silently to inbound-only discovery. The security
   reference and the example systemd units are updated to match.
+
+  Implementation note (2026-10-23): reload and config transactions add and
+  remove interface-only neighbors live. The check runs in the peer manager
+  before any effect, for a SIGHUP generation and a transaction plan alike,
+  when a candidate introduces the first interface-only neighbor; it also
+  requires the link monitor. Deleting the last one stops the discovery actor
+  and closes its raw sockets. `[global.unnumbered]` remains
+  restart-required.
 - **Trust boundary.** The trust boundary is the link, as for any directly
   connected session. An RA or a SYN only proposes a TCP endpoint on that one
   interface, and the session still has to pass OPEN validation. Two hop-limit
@@ -336,6 +344,13 @@ unbound neighbor's reservation only when the neighbor rebinds or its link is
 confirmed down, not when its retained GR or LLGR state retires. Until that
 release lands, a peer that goes silent on a link that stays up keeps its last
 address reserved, and the neighbor keeps redialing it.
+
+Implementation note (2026-10-23): deleting an interface-only neighbor by
+reload or config transaction ends its session, purges its retained routes and
+releases its RIB identity, and with it any reservation. The static admission
+check covers a static link-local neighbor added by reload or transaction
+against bound and reserved learned endpoints, and refuses the whole change
+before any effect.
 
 That covers the common Clos shape, where each fabric link goes to a different
 switch with its own MAC. **Limitation:** parallel links to the same device
