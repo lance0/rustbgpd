@@ -1404,7 +1404,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use prost::Message;
         use rustbgpd_policy::rpol::RpolFile;
         use rustbgpd_policy::sets::SetStore;
-        use rustbgpd_rib::{RouteQueryScope, route_query_key};
+        use rustbgpd_rib::{RouteQueryScope, route_query_key_in};
 
         let req = request.into_inner();
         if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
@@ -1522,9 +1522,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             {
                 break;
             }
-            let after = page.routes.last().map(route_query_key).ok_or_else(|| {
-                Status::unavailable("route pagination returned an empty continuation page")
-            })?;
+            let after = page
+                .routes
+                .last()
+                .map(|route| route_query_key_in(route, &page.peer_scope))
+                .ok_or_else(|| {
+                    Status::unavailable("route pagination returned an empty continuation page")
+                })?;
             drop(page);
             page = query_test_policy_page(rib_tx, query_scope, Some(after), Some(snapshot_version))
                 .await?;
@@ -1545,7 +1549,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use prost::Message;
         use rustbgpd_policy::rpol::RpolFile;
         use rustbgpd_policy::sets::SetStore;
-        use rustbgpd_rib::{RibUpdate, RouteQueryScope, route_query_key};
+        use rustbgpd_rib::{RibUpdate, RouteQueryScope, route_query_key_in};
 
         let req = request.into_inner();
         if req.encoded_len() > TEST_POLICY_MAX_REQUEST_BYTES {
@@ -1755,9 +1759,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             {
                 break;
             }
-            let after = page.routes.last().map(route_query_key).ok_or_else(|| {
-                Status::unavailable("route pagination returned an empty continuation page")
-            })?;
+            let after = page
+                .routes
+                .last()
+                .map(|route| route_query_key_in(route, &page.peer_scope))
+                .ok_or_else(|| {
+                    Status::unavailable("route pagination returned an empty continuation page")
+                })?;
             drop(page);
             page = query_test_policy_page(
                 rib_tx,
@@ -4202,6 +4210,7 @@ policy customer-in(peer_lp: u32) {
                         last_cursor = page_routes.last().map(rustbgpd_rib::route_query_key);
                         query_index += 1;
                         let _ = reply.send(Ok(rustbgpd_rib::RoutePage {
+                            peer_scope: rustbgpd_rib::PeerScope::default(),
                             routes: page_routes,
                             total: scoped.len() as u64,
                             has_more,

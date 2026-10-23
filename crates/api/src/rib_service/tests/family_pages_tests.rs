@@ -475,6 +475,7 @@ async fn evpn_peer_filter_acknowledgement_preserves_unfiltered_calls() {
             };
             reply
                 .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                    peer_scope: rustbgpd_rib::PeerScope::default(),
                     routes: vec![route.clone()],
                     total: 1,
                     has_more: false,
@@ -555,6 +556,7 @@ async fn evpn_peer_raw_rd_filter_changes_reject_foreign_continuation() {
             scope,
             &identity0,
             &route,
+            &PeerScope::default(),
             RoutePageVersion {
                 epoch: 1,
                 generation: 2,
@@ -667,6 +669,7 @@ async fn evpn_peer_pages_apply_mac_esi_vni_filters_and_preserve_source() {
             assert!(!filter(&wrong), "a raw MPLS label is not a VXLAN VNI");
             reply
                 .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                    peer_scope: rustbgpd_rib::PeerScope::default(),
                     routes: vec![route.clone()],
                     total: 1,
                     has_more: false,
@@ -844,8 +847,14 @@ async fn raw_page_filters_preserve_rd_and_rt_encoding_and_reject_non_targets() {
         epoch: 1,
         generation: 2,
     };
-    let token =
-        encode_evpn_page_token(RouteQueryScope::Best, &raw_identity, &route, version).unwrap();
+    let token = encode_evpn_page_token(
+        RouteQueryScope::Best,
+        &raw_identity,
+        &route,
+        &PeerScope::default(),
+        version,
+    )
+    .unwrap();
     let (tx, _rx) = mpsc::channel(1);
     let svc = RibService::new(tx);
     assert_eq!(
@@ -903,6 +912,7 @@ async fn rtc_raw_target_filter_matches_only_the_exact_full_wire_membership() {
         assert!(!filter(&partial));
         reply
             .send(Ok(rustbgpd_rib::RibRowsPage {
+                peer_scope: rustbgpd_rib::PeerScope::default(),
                 routes: vec![route],
                 total: 1,
                 has_more: false,
@@ -1045,6 +1055,7 @@ async fn evpn_loc_filters_and_page_scope_are_applied_before_materialization() {
         assert!(filter.unwrap()(&route));
         reply
             .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                peer_scope: rustbgpd_rib::PeerScope::default(),
                 routes: vec![route],
                 total: 2,
                 has_more: true,
@@ -1105,6 +1116,7 @@ async fn vpn_family_page_response_filters_and_invalidation() {
         assert!(!filter.unwrap()(&wrong));
         reply
             .send(Ok(rustbgpd_rib::RibRowsPage {
+                peer_scope: rustbgpd_rib::PeerScope::default(),
                 routes: vec![route],
                 total: 2,
                 has_more: true,
@@ -1226,6 +1238,7 @@ async fn labeled_family_page_response_filters_and_invalidation() {
         assert!(!filter.unwrap()(&wrong));
         reply
             .send(Ok(rustbgpd_rib::RibRowsPage {
+                peer_scope: rustbgpd_rib::PeerScope::default(),
                 routes: vec![route],
                 total: 2,
                 has_more: true,
@@ -1346,6 +1359,7 @@ async fn rtc_family_page_response_filters_and_invalidation() {
         assert!(!filter.unwrap()(&wrong));
         reply
             .send(Ok(rustbgpd_rib::RibRowsPage {
+                peer_scope: rustbgpd_rib::PeerScope::default(),
                 routes: vec![route],
                 total: 2,
                 has_more: true,
@@ -1568,7 +1582,7 @@ async fn bgpls_page_tokens_reject_forgery_and_foreign_queries() {
     let route = bgpls_test_routes(peer).remove(1);
     let scope = RouteQueryScope::Best;
     let identity = family_query_identity("bgpls", "None:None:0");
-    let key = encode_bgpls_page_key(&route);
+    let key = encode_bgpls_page_key(&route, &PeerScope::default());
     let token = encode_family_page_token(
         scope,
         &identity,

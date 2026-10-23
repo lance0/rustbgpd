@@ -337,6 +337,7 @@ pub(super) fn page_routes<'a>(
         .collect();
     let has_more = remaining > routes.len() as u64;
     RoutePage {
+        peer_scope: crate::PeerScope::capture(),
         routes,
         total,
         has_more,
@@ -401,6 +402,7 @@ fn page_family_rows<'a, T: Clone + 'a, K: Ord>(
         .map(|entry| entry.1.clone())
         .collect();
     crate::update::RibRowsPage {
+        peer_scope: crate::PeerScope::capture(),
         has_more: remaining > routes.len(),
         routes,
         total,
@@ -418,6 +420,7 @@ fn page_evpn_routes<'a>(
         (r.key(), r.peer.addr())
     });
     EvpnRoutePage {
+        peer_scope: crate::PeerScope::capture(),
         routes: page.routes,
         total: page.total,
         has_more: page.has_more,
@@ -440,6 +443,7 @@ fn page_ordered_routes<'a>(
     let has_more = routes.len() > n;
     routes.truncate(n);
     RoutePage {
+        peer_scope: crate::PeerScope::capture(),
         routes,
         total,
         has_more,
@@ -514,6 +518,7 @@ where
     let has_more = routes.len() > n;
     routes.truncate(n);
     RoutePage {
+        peer_scope: crate::PeerScope::capture(),
         routes,
         total,
         has_more,
@@ -1041,6 +1046,7 @@ impl RibManager {
                 k.as_bytes().to_vec()
             });
             crate::update::RibRowsPage {
+                peer_scope: crate::PeerScope::capture(),
                 routes: topology.render_nodes(&page.routes),
                 total: page.total,
                 has_more: page.has_more,
@@ -1080,6 +1086,7 @@ impl RibManager {
             };
             let page = page_family_rows(topology.links().iter(), None, after, page_size, key);
             crate::update::RibRowsPage {
+                peer_scope: crate::PeerScope::capture(),
                 routes: topology.render_links(&page.routes),
                 total: page.total,
                 has_more: page.has_more,
@@ -3666,6 +3673,7 @@ impl RibManager {
         };
 
         let explanation = ExplainBestPath {
+            peer_scope: crate::PeerScope::capture(),
             prefix,
             best,
             candidates,
@@ -3736,6 +3744,7 @@ impl RibManager {
                 },
             );
         let explanation = ExplainBestPath {
+            peer_scope: crate::PeerScope::capture(),
             prefix,
             best: Some(best),
             candidates,

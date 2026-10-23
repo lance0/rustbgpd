@@ -523,6 +523,82 @@ impl PeerId {
     }
 }
 
+/// The peer table as it stood when a reply was built.
+///
+/// A query reply that leaves the RIB holding `PeerId`s is converted after
+/// the RIB has moved on. An interface-only neighbor that learned a new
+/// address in between ([`RebindPeer`](crate::update::RibUpdate::RebindPeer))
+/// would render routes it no longer holds under the new address, and a
+/// continuation cursor built from them would point at the wrong position.
+/// A reply that carries a scope, captured in the same RIB turn as its rows,
+/// resolves every handle as it was then. Capturing costs one reference
+/// count; the selection tie-break never reads through a scope.
+#[derive(Clone)]
+pub struct PeerScope(Arc<Snapshot>);
+
+impl PeerScope {
+    /// The table now. The RIB calls this in the turn that builds the reply.
+    #[must_use]
+    pub fn capture() -> Self {
+        Self(TABLE.published.load_full())
+    }
+
+    fn with_endpoint<T>(&self, peer: PeerId, f: impl FnOnce(Option<&PeerEndpoint>) -> T) -> T {
+        match peer.pinned_v4() {
+            Some(addr) => f(Some(&PeerEndpoint {
+                addr: IpAddr::V4(addr),
+                interface: None,
+            })),
+            None => f(slot_of(&self.0.entries, peer).map(|slot| &slot.endpoint)),
+        }
+    }
+
+    /// [`PeerId::endpoint`] as of the capture.
+    #[must_use]
+    pub fn endpoint(&self, peer: PeerId) -> Option<PeerEndpoint> {
+        fn owned(endpoint: Option<&PeerEndpoint>) -> Option<PeerEndpoint> {
+            endpoint.cloned()
+        }
+        self.with_endpoint(peer, owned)
+    }
+
+    /// [`PeerId::addr`] as of the capture.
+    #[must_use]
+    pub fn addr(&self, peer: PeerId) -> IpAddr {
+        self.with_endpoint(peer, |endpoint| {
+            endpoint.map_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED), |endpoint| endpoint.addr)
+        })
+    }
+
+    /// The handle's [`Display`](fmt::Display) form as of the capture.
+    #[must_use]
+    pub fn display(&self, peer: PeerId) -> String {
+        self.with_endpoint(peer, |endpoint| {
+            display_peer(peer, endpoint.map(|e| e.addr))
+        })
+    }
+}
+
+/// The scope of the table at the time of the call, like [`PeerScope::capture`].
+impl Default for PeerScope {
+    fn default() -> Self {
+        Self::capture()
+    }
+}
+
+impl fmt::Debug for PeerScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PeerScope({} slots)", self.0.entries.len())
+    }
+}
+
+fn display_peer(peer: PeerId, addr: Option<IpAddr>) -> String {
+    match addr {
+        Some(addr) => addr.to_string(),
+        None => format!("peer#{}.{}", peer.index, peer.generation),
+    }
+}
+
 impl Hash for PeerId {
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(self.to_raw());
@@ -557,6 +633,25 @@ mod tests {
 
     fn endpoint(addr: &str, interface: Option<&str>) -> PeerEndpoint {
         PeerEndpoint::new(addr.parse().unwrap(), interface)
+    }
+
+    /// A scope resolves every handle as it was when captured: a later
+    /// rebind moves the live table, not the scope.
+    #[test]
+    fn a_scope_keeps_the_endpoints_it_captured() {
+        let peer = PeerId::allocate(endpoint("fe80::1", Some("swp1")));
+        let pinned = PeerId::from_ipv4(Ipv4Addr::new(192, 0, 2, 7));
+        let scope = PeerScope::capture();
+        assert!(peer.rebind(endpoint("fe80::9", Some("swp1"))));
+        assert_eq!(peer.addr(), "fe80::9".parse::<IpAddr>().unwrap());
+        assert_eq!(scope.addr(peer), "fe80::1".parse::<IpAddr>().unwrap());
+        assert_eq!(scope.display(peer), "fe80::1");
+        assert_eq!(
+            scope.endpoint(peer),
+            Some(endpoint("fe80::1", Some("swp1")))
+        );
+        assert_eq!(scope.display(pinned), "192.0.2.7");
+        assert!(peer.release());
     }
 
     #[test]

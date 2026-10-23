@@ -3,7 +3,7 @@
 //! and the query, explain, paging and update-group planning types they carry.
 
 use crate::PeerId;
-use crate::peer_id::PeerEndpoint;
+use crate::peer_id::{PeerEndpoint, PeerScope};
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -1451,6 +1451,9 @@ pub struct ExplainAdvertisedRoute {
     /// Requested Adj-RIB-In identity. `None` preserves the legacy
     /// winner-oriented explanation.
     pub source: Option<RouteSourceIdentity>,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// A negotiated family a session withholds from export, with the reason.
@@ -1761,6 +1764,9 @@ pub struct ExplainBestPath {
     /// (e.g. `"local_pref 200 > 100"`). Empty when `best_reason` is
     /// `None`.
     pub best_reason_detail: String,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// A candidate route with its comparison result against the best route.
@@ -1832,6 +1838,13 @@ pub type RouteQueryKey = (Prefix, IpAddr, u32);
 #[must_use]
 pub fn route_query_key(route: &Route) -> RouteQueryKey {
     (route.prefix, route.peer.addr(), route.path_id)
+}
+
+/// [`route_query_key`] with the source address `peer_scope` recorded, for a
+/// cursor built from a page after the RIB has moved on.
+#[must_use]
+pub fn route_query_key_in(route: &Route, peer_scope: &PeerScope) -> RouteQueryKey {
+    (route.prefix, peer_scope.addr(route.peer), route.path_id)
 }
 
 /// Row filter evaluated inside the RIB task during a paged route query.
@@ -2003,6 +2016,9 @@ pub struct RoutePage {
     /// ADR-0141 lease tags of locally injected rows, aligned with `routes`
     /// and captured in the same RIB turn; empty when no row is owned.
     pub injection: Vec<Option<crate::injection_lease::InjectionTag>>,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// One bounded family page; only returned rows are cloned.
@@ -2016,6 +2032,9 @@ pub struct RibRowsPage<T> {
     pub has_more: bool,
     /// Conservative scope mutation version.
     pub version: RoutePageVersion,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// VPN page identity, excluding mutable labels.
@@ -2056,6 +2075,9 @@ pub struct EvpnRoutePage {
     pub has_more: bool,
     /// Conservative scope-class mutation version.
     pub version: RoutePageVersion,
+    /// The peer table as of this reply, for rendering its handles and
+    /// building continuation cursors after the RIB moves on.
+    pub peer_scope: PeerScope,
 }
 
 /// A bounded internal dataplane page could not be served.
