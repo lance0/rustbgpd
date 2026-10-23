@@ -451,35 +451,8 @@ impl PeerManager {
             } else {
                 "peer_address_changed"
             };
-            info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
-            // The neighbor's operator and safety state outlives the endpoint.
-            let held = HeldState {
-                enabled: self.peers.get(&key).is_none_or(|managed| managed.enabled),
-                latch: self.max_prefix_latches.remove(&key),
-            };
-            match self.delete_peer(key.clone(), false).await {
-                // Already gone: nothing is left to clear.
-                Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
-                Err(error) => {
-                    if let Some(latch) = held.latch {
-                        self.max_prefix_latches.insert(key.clone(), latch);
-                    }
-                    warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound peer");
-                    return;
-                }
-            }
-            if held.latch.is_some() {
-                self.publish_max_prefix_latched_metric(&key, false);
-                self.recompute_next_max_prefix_restart_deadline();
-            }
-            let port = self.port_mut(name);
-            port.bound = None;
-            port.established = false;
-            port.held = Some(held);
-            // The retired session's queued reports have been drained by
-            // now; an Established among them must not outlive it.
-            if let Some(unnumbered) = self.unnumbered.as_mut() {
-                unnumbered.discovery.session_failed(name);
+            if !self.retire_bound_peer(name, key, reason).await {
+                return;
             }
         }
         if link_down {
@@ -509,6 +482,157 @@ impl PeerManager {
             warn!(interface = %name, address = %endpoint.address, %error, "unnumbered: could not add the bound peer; retrying");
             self.arm_unnumbered_retry();
         }
+    }
+
+    /// End the bound peer's session and clear the binding, keeping the
+    /// neighbor's operator and safety state for its next endpoint. `false`
+    /// when the peer could not be removed; the binding is then unchanged.
+    async fn retire_bound_peer(&mut self, name: &str, key: PeerKey, reason: &str) -> bool {
+        info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
+        // The neighbor's operator and safety state outlives the endpoint.
+        let held = HeldState {
+            enabled: self.peers.get(&key).is_none_or(|managed| managed.enabled),
+            latch: self.max_prefix_latches.remove(&key),
+        };
+        match self.delete_peer(key.clone(), false).await {
+            // Already gone: nothing is left to clear.
+            Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
+            Err(error) => {
+                if let Some(latch) = held.latch {
+                    self.max_prefix_latches.insert(key.clone(), latch);
+                }
+                warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound peer");
+                return false;
+            }
+        }
+        if held.latch.is_some() {
+            self.publish_max_prefix_latched_metric(&key, false);
+            self.recompute_next_max_prefix_restart_deadline();
+        }
+        let port = self.port_mut(name);
+        port.bound = None;
+        port.established = false;
+        port.held = Some(held);
+        // The retired session's queued reports have been drained by
+        // now; an Established among them must not outlive it.
+        if let Some(unnumbered) = self.unnumbered.as_mut() {
+            unnumbered.discovery.session_failed(name);
+        }
+        true
+    }
+
+    /// The interface-only neighbor's interface whose current index is
+    /// `scope_id`: an inbound link-local connection's arrival scope, resolved
+    /// by interface name as for every link-local dial and inbound match.
+    pub(super) fn interface_only_port_at(&self, scope_id: u32) -> Option<String> {
+        let feed = self.link_state_feed(true);
+        self.unnumbered
+            .as_ref()?
+            .ports
+            .keys()
+            .find(|name| feed.resolve_interface(name) == Some(scope_id))
+            .cloned()
+    }
+
+    /// ADR-0142 secondary discovery: an inbound connection from `address`
+    /// arrived on `name`, the interface of an interface-only neighbor, and
+    /// matched no peer. Bind the neighbor to that endpoint through the same
+    /// admission check as an RA binding, and return the bound peer for the
+    /// ordinary inbound gates (BFD, admin state, NOTIFICATION backoff,
+    /// collision). `None` refuses the connection; the reason is logged here.
+    ///
+    /// Refused while the link is confirmed down, while a live RA binding or
+    /// a session past TCP establishment holds a different address (a second
+    /// router on a link defined to have one), while the bound session is
+    /// Established or held by NOTIFICATION backoff, and when another neighbor
+    /// holds the address (`duplicate_link_local_address`). A bound session
+    /// that has not reached `OpenSent` is retired: the peer moved address.
+    pub(super) async fn learn_inbound_endpoint(
+        &mut self,
+        name: &str,
+        address: Ipv6Addr,
+        ifindex: u32,
+    ) -> Option<PeerKey> {
+        let port = self.unnumbered.as_ref()?.ports.get(name)?;
+        if matches!(port.link, Some((_, LinkState::Down | LinkState::Removed))) {
+            info!(interface = %name, %address, "unnumbered: inbound connection on a link that is down, dropping");
+            return None;
+        }
+        if let Some(desired) = port.desired
+            && desired.address != address
+        {
+            warn!(
+                interface = %name, %address, bound = %desired.address,
+                reason = "multiple_routers_on_link",
+                "unnumbered: inbound connection from a second router on an interface-only link, dropping"
+            );
+            return None;
+        }
+        if let Some(key) = port.bound.clone() {
+            if key.address == IpAddr::V6(address) {
+                return Some(key);
+            }
+            let state = match self.peers.get(&key) {
+                None => None,
+                Some(managed) => match managed
+                    .handle()
+                    .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
+                    .await
+                {
+                    rustbgpd_transport::StateQueryOutcome::State(state) => Some(state),
+                    rustbgpd_transport::StateQueryOutcome::SessionGone => None,
+                    rustbgpd_transport::StateQueryOutcome::TimedOut => {
+                        info!(interface = %name, %address, peer = %key, "unnumbered: bound session did not report its state; dropping the inbound connection (remote will retry)");
+                        return None;
+                    }
+                },
+            };
+            match state.as_ref().map(|state| state.fsm_state) {
+                Some(SessionState::Established) => {
+                    info!(interface = %name, %address, peer = %key, "unnumbered: inbound connection while the neighbor is Established, dropping");
+                    return None;
+                }
+                Some(SessionState::OpenSent | SessionState::OpenConfirm) => {
+                    warn!(
+                        interface = %name, %address, peer = %key,
+                        reason = "multiple_routers_on_link",
+                        "unnumbered: inbound connection from a second router while the bound session is opening, dropping"
+                    );
+                    return None;
+                }
+                _ => {}
+            }
+            if let Some(state) = state
+                .as_ref()
+                .filter(|state| super::inbound::notification_backoff_holds_inbound(state))
+            {
+                self.record_notification_backoff_drop(key.address, state, "inbound connection");
+                return None;
+            }
+            if !self
+                .retire_bound_peer(name, key, "peer_address_changed")
+                .await
+            {
+                return None;
+            }
+        }
+        // The same atomic admission step as an RA binding: no input runs
+        // between this check and the insertion in `bind_port`.
+        if let Some(holder) = self.link_local_address_holder(address) {
+            warn!(
+                interface = %name, %address, %holder,
+                reason = "duplicate_link_local_address",
+                "unnumbered: refusing an inbound address another neighbor holds"
+            );
+            return None;
+        }
+        let endpoint = Endpoint { address, ifindex };
+        if let Err(error) = self.bind_port(name, endpoint).await {
+            warn!(interface = %name, %address, %error, "unnumbered: could not add the peer learned from an inbound connection");
+            return None;
+        }
+        info!(interface = %name, %address, "unnumbered: peer address learned from an inbound connection");
+        self.port_mut(name).bound.clone()
     }
 
     async fn bind_port(

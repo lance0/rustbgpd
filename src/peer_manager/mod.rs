@@ -108,6 +108,17 @@ mod unnumbered {
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
+        pub(super) fn interface_only_port_at(&self, _: u32) -> Option<String> {
+            None
+        }
+        pub(super) async fn learn_inbound_endpoint(
+            &mut self,
+            _: &str,
+            _: std::net::Ipv6Addr,
+            _: u32,
+        ) -> Option<PeerKey> {
+            None
+        }
     }
 }
 pub(crate) use unnumbered::Unnumbered;

@@ -781,3 +781,158 @@ async fn a_late_established_report_is_released_by_retirement() {
         Some(&Command::SessionFailed("swp1".into()))
     );
 }
+
+/// An inbound connection from `fe80::<last>` arriving on interface index
+/// `scope`, as the listener reports it.
+async fn inbound(h: &mut Harness, last: u16, scope: u32) -> TcpStream {
+    let (server, client) = super::inbound_admission::localhost_inbound_stream().await;
+    let source = std::net::SocketAddrV6::new(ll(last), 50179, 0, scope);
+    h.mgr
+        .handle_inbound(server, SocketAddr::V6(source), None, None)
+        .await;
+    client
+}
+
+/// ADR-0142 secondary discovery: a peer that sends no RAs dials us, and its
+/// connection is matched by arrival scope to the interface-only neighbor on
+/// that interface, which binds its source address and takes the connection
+/// through the ordinary collision path.
+#[tokio::test]
+async fn an_inbound_connection_binds_the_neighbor_on_its_arrival_interface() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    // Mutation-red: without inbound learning the arrival is dropped as
+    // unconfigured and nothing is bound.
+    let _client = inbound(&mut h, 9, 8).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(9)), Some("swp2".into()));
+    assert_eq!(
+        h.peers_at(ll(9)),
+        std::slice::from_ref(&swp2),
+        "bound on swp2 only"
+    );
+    let managed = &h.mgr.peers[&swp2];
+    assert_eq!(managed.transport_config.peer_scope_id, Some(8));
+    assert!(managed.transport_config.peer.remote_asn_external);
+    assert!(
+        managed.pending_inbound.is_some(),
+        "the connection enters the ordinary collision path"
+    );
+    assert_eq!(
+        h.mgr.unnumbered_owner_of(&swp2),
+        Some("swp2"),
+        "discovery owns the learned peer"
+    );
+
+    // An arrival scope that belongs to no interface-only neighbor still
+    // drops, whatever the address.
+    let _client = inbound(&mut h, 10, 99).await;
+    assert_eq!(h.peers_at(ll(10)), []);
+}
+
+/// Accepted only while the neighbor has no Established session: an
+/// Established session drops a connection from a new address, and a session
+/// that is down lets the new address replace the old binding.
+#[tokio::test]
+async fn an_inbound_connection_rebinds_only_while_the_neighbor_is_not_established() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 2, 7).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    // Mutation-red: without the Established refusal the healthy session is
+    // retired for the new address.
+    let _client = inbound(&mut h, 3, 7).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept");
+    assert!(!h.mgr.peers.contains_key(&swp1_key(3)));
+
+    // The peer moved address and its session is down: the new source binds.
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let _client = inbound(&mut h, 3, 7).await;
+    assert!(
+        !h.mgr.peers.contains_key(&swp1_key(2)),
+        "old endpoint retired"
+    );
+    assert!(h.mgr.peers.contains_key(&swp1_key(3)));
+    assert_eq!(h.mgr.unnumbered_owner_of(&swp1_key(3)), Some("swp1"));
+}
+
+/// A live RA binding or a bound session past TCP establishment is a second
+/// router on the link, and NOTIFICATION backoff on the bound session holds
+/// the neighbor's inbound connections whatever their source.
+#[tokio::test]
+async fn an_inbound_connection_keeps_the_existing_gates() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(h.peers_at(ll(3)), [], "RA binding to another router holds");
+
+    // The RA binding expired; the session to it is opening.
+    h.bind("swp1", None).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::OpenConfirm,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(h.peers_at(ll(3)), [], "opening session holds");
+
+    // Idle in an escalated NOTIFICATION reconnect wait.
+    h.replace_session(
+        &swp1_key(2),
+        super::inbound_admission::backoff_session_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Idle,
+            2,
+            60,
+            Arc::default(),
+        ),
+    );
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(h.peers_at(ll(3)), [], "NOTIFICATION backoff holds");
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+}
+
+/// Inbound learning admits an address through the same atomic check as an
+/// RA binding: one held by a static neighbor or by another interface-only
+/// neighbor is refused with `duplicate_link_local_address`.
+#[tokio::test]
+async fn an_inbound_connection_from_a_held_address_is_refused() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    let mut static_peer = make_config(IpAddr::V6(ll(5)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    // Mutation-red: without the admission check the static neighbor's
+    // address is admitted a second time on swp1.
+    let _client = inbound(&mut h, 5, 7).await;
+    assert_eq!(
+        h.peers_at(ll(5)),
+        [PeerKey::new(IpAddr::V6(ll(5)), Some("eth9".into()))]
+    );
+
+    let _client = inbound(&mut h, 2, 7).await;
+    let _client = inbound(&mut h, 2, 8).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [swp1_key(2)],
+        "exactly one link admitted"
+    );
+}
