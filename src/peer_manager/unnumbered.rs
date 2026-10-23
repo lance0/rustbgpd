@@ -293,6 +293,20 @@ impl PeerManager {
         }
     }
 
+    /// A binding resolves its peer from `current_config`, which is
+    /// provisional while a transaction snapshot is staged: a rollback would
+    /// not undo the bound peer's installed policies. Defer it; the commit or
+    /// rollback that clears the stage wakes the loop, which reconciles again.
+    fn defer_unnumbered_while_staged(&mut self) -> bool {
+        if !self.config_snapshot_staged {
+            return false;
+        }
+        if let Some(unnumbered) = self.unnumbered.as_mut() {
+            unnumbered.reconcile_due = true;
+        }
+        true
+    }
+
     /// When an unanswered state query is due to be asked again.
     pub(super) fn unnumbered_retry_at(&self) -> Option<tokio::time::Instant> {
         self.unnumbered.as_ref()?.retry_at
@@ -425,6 +439,11 @@ impl PeerManager {
             if keep {
                 return;
             }
+            // Replacing the endpoint binds from `current_config`; wait out a
+            // staged transaction. Teardown on a lost link reads no config.
+            if !gone && self.defer_unnumbered_while_staged() {
+                return;
+            }
             // Level-triggered check of what the edge events claimed.
             if !gone {
                 match self.bound_session_established(&key).await {
@@ -461,6 +480,9 @@ impl PeerManager {
         let Some(endpoint) = desired else {
             return;
         };
+        if self.defer_unnumbered_while_staged() {
+            return;
+        }
         if let Some(holder) = self.link_local_address_holder(endpoint.address) {
             let port = self.port_mut(name);
             if port.refused != Some(endpoint.address) {

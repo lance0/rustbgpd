@@ -359,6 +359,17 @@ impl PeerManager {
         if let Some(key) = &peer_key {
             self.adopt_inbound_link_local_scope(key, peer_addr);
         }
+        // An unmatched source can only become a peer by dynamic acceptance or
+        // interface-only learning, and both build it from `current_config`,
+        // which is provisional while a transaction snapshot is staged: a
+        // rollback would not undo the peer's installed policies.
+        if peer_key.is_none() && self.config_snapshot_staged {
+            warn!(
+                peer = %peer_ip,
+                "dropping dynamic inbound connection while a config transaction snapshot is staged"
+            );
+            return;
+        }
         // ADR-0142 secondary discovery: an unmatched link-local arrival on an
         // interface-only neighbor's interface is matched by its arrival
         // scope, never by address, and binds that neighbor. The bound peer
@@ -379,13 +390,6 @@ impl PeerManager {
         }
         // If peer is not statically configured, try dynamic range matching.
         if peer_key.is_none() {
-            if self.config_snapshot_staged {
-                warn!(
-                    peer = %peer_ip,
-                    "dropping dynamic inbound connection while a config transaction snapshot is staged"
-                );
-                return;
-            }
             // A link-local inbound that did not match a configured scoped peer
             // must not fall through to dynamic acceptance: dynamic peers are
             // keyed by bare address (`PeerKey::new(ip, None)`), so accepting a

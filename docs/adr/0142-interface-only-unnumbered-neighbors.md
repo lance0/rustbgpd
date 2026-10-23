@@ -150,7 +150,11 @@ learned endpoint is installed in that inventory.
   from the bound address holds another address (a second router on the link,
   `multiple_routers_on_link`), or when the bound session is in its
   NOTIFICATION reconnect wait. A bound session that has not reached OpenSent
-  is replaced, as for an address change. Every refused connection is counted
+  is replaced, as for an address change. While a configuration transaction
+  is staged, neither an inbound connection nor an RA binds or replaces an
+  endpoint, because the staged configuration may still roll back; the RA
+  binding waits for the commit or rollback, and the inbound connection is
+  dropped as dynamic acceptance is. Every other refused connection is counted
   in `bgp_inbound_connections_dropped_total`, as `notification_backoff` for
   the reconnect wait and as `unconfigured` otherwise.
 - **The kernel neighbor table is not a discovery source.** It is a cache: an

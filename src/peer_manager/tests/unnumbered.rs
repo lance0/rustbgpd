@@ -1042,3 +1042,77 @@ async fn an_inbound_rebind_keeps_a_max_prefix_shutdown_queued_by_the_old_session
     );
     assert!(!h.mgr.peers[&swp1_key(3)].enabled, "replacement held down");
 }
+
+/// While a config transaction snapshot is staged, `current_config` is
+/// provisional and a rollback would not undo a new peer's installed
+/// policies. An inbound connection then neither binds an unbound neighbor
+/// nor replaces a bound endpoint; learning resumes once the commit or
+/// rollback clears the stage (both clear `config_snapshot_staged`).
+#[tokio::test]
+async fn a_staged_transaction_holds_inbound_learning_for_an_unbound_neighbor() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.mgr.config_snapshot_staged = true;
+    // Mutation-red: learning ahead of the staged guard binds from the
+    // provisional config.
+    let _client = inbound(&mut h, 9, 7).await;
+    assert_eq!(h.peers_at(ll(9)), [], "no bind while staged");
+    h.mgr.config_snapshot_staged = false;
+    let _client = inbound(&mut h, 9, 7).await;
+    assert_eq!(h.peers_at(ll(9)), [swp1_key(9)], "learning resumes");
+}
+
+/// The same hold for an endpoint replacement on a bound neighbor whose
+/// session is down.
+#[tokio::test]
+async fn a_staged_transaction_holds_an_inbound_endpoint_replacement() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 9, 7).await;
+    h.replace_session(
+        &swp1_key(9),
+        fake_peer_handle(
+            IpAddr::V6(ll(9)),
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    h.mgr.config_snapshot_staged = true;
+    // Mutation-red: learning ahead of the staged guard retires the bound
+    // endpoint and binds the new one from the provisional config.
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(h.peers_at(ll(9)), [swp1_key(9)], "kept while staged");
+    assert_eq!(h.peers_at(ll(3)), []);
+    h.mgr.config_snapshot_staged = false;
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(h.peers_at(ll(9)), [], "replaced after the stage clears");
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+}
+
+/// The RA path binds from the same `current_config`: a binding or an
+/// endpoint replacement waits out a staged transaction, and reconciliation
+/// stays due so the next loop pass after the commit or rollback applies it.
+#[tokio::test]
+async fn a_staged_transaction_defers_an_ra_binding() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.mgr.config_snapshot_staged = true;
+    // Mutation-red: binding while staged resolves the provisional config.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [], "no bind while staged");
+    assert!(h.mgr.unnumbered_reconcile_due(), "still due");
+    h.mgr.config_snapshot_staged = false;
+    h.reconcile().await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [swp1_key(2)],
+        "bound after the stage clears"
+    );
+
+    h.mgr.config_snapshot_staged = true;
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "kept while staged");
+    assert_eq!(h.peers_at(ll(3)), []);
+    h.mgr.config_snapshot_staged = false;
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), []);
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+}
