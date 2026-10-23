@@ -647,7 +647,10 @@ impl PeerManager {
 
     /// The RIB's GR/LLGR retention for the bound peer's identity; `None`
     /// when the RIB did not answer in time.
-    async fn bound_peer_retention(&mut self, key: &PeerKey) -> Option<rustbgpd_rib::PeerRetention> {
+    pub(super) async fn bound_peer_retention(
+        &mut self,
+        key: &PeerKey,
+    ) -> Option<rustbgpd_rib::PeerRetention> {
         let (reply, response) = tokio::sync::oneshot::channel();
         let request = rustbgpd_rib::RibUpdate::QueryPeerRetention {
             peer: self.rib_peer_of(key),
