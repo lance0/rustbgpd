@@ -216,8 +216,9 @@ pub struct BmpManager {
     /// counters.
     collectors: Vec<Collector>,
     /// Latest encoded `PeerUp` message per neighbor
-    /// ([`BmpPeerInfo::neighbor`]), with its address for replay order and
-    /// one encoding per BMP version (indexed by [`BmpVersion::idx`]).
+    /// ([`BmpPeerInfo::neighbor`](crate::BmpPeerInfo::neighbor)), with its
+    /// address for replay order and one encoding per BMP version (indexed
+    /// by [`BmpVersion::idx`]).
     peer_up_cache: std::collections::HashMap<u64, (std::net::IpAddr, [Bytes; 2])>,
     /// One metadata-only explicit replay per neighbor; generation enrollment is fixed.
     outbound_replays: std::collections::HashMap<u64, OutboundReplayEnrollment>,
