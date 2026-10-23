@@ -76,11 +76,17 @@ fn scoped_address(address: &str, interface: &str) -> String {
     address
 }
 
+/// A neighbor argument as the request's address and interface: an IP
+/// address, a scoped `fe80::1%eth0`, or an interface name, which selects
+/// that interface's interface-only neighbor (empty address).
 fn split_scoped_address(address: &str) -> (String, String) {
-    address.rsplit_once('%').map_or_else(
-        || (address.to_string(), String::new()),
-        |(addr, iface)| (addr.to_string(), iface.to_string()),
-    )
+    if let Some((addr, iface)) = address.rsplit_once('%') {
+        return (addr.to_string(), iface.to_string());
+    }
+    if address.parse::<std::net::IpAddr>().is_err() {
+        return (String::new(), address.to_string());
+    }
+    (address.to_string(), String::new())
 }
 
 fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
@@ -89,6 +95,9 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
         interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
         remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
+        remote_asn_mode: output::remote_asn_mode_label(cfg),
+        learned_peer_address: n.learned_peer_address.clone(),
+        discovery_state: output::discovery_state_label(n),
         state: output::format_state_with_stale(n.state, n.stale).to_string(),
         stale: n.stale,
         slow_peer: n.slow_peer,
@@ -358,6 +367,9 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
         address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
         interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
         remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
+        remote_asn_mode: output::remote_asn_mode_label(cfg),
+        learned_peer_address: n.learned_peer_address.clone(),
+        discovery_state: output::discovery_state_label(n),
         state: output::format_state_with_stale(n.state, n.stale).to_string(),
         stale: n.stale,
         slow_peer: n.slow_peer,
@@ -573,7 +585,25 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
     if !interface.is_empty() {
         rows.field(0, "Interface", interface);
     }
-    rows.field(0, "Remote ASN", cfg.map(|c| c.remote_asn).unwrap_or(0));
+    if let Some(discovery) = output::discovery_state_label(n) {
+        let learned = if n.learned_peer_address.is_empty() {
+            "-"
+        } else {
+            n.learned_peer_address.as_str()
+        };
+        rows.field(0, "Learned Address", learned);
+        rows.field(0, "Discovery", discovery);
+    }
+    let remote_asn = cfg.map(output::remote_asn_label).unwrap_or_default();
+    let negotiated_asn = n
+        .negotiated_session
+        .as_ref()
+        .and_then(|negotiated| negotiated.remote_asn)
+        .filter(|asn| remote_asn != asn.to_string());
+    match negotiated_asn {
+        Some(asn) => rows.field(0, "Remote ASN", format!("{remote_asn} (session {asn})")),
+        None => rows.field(0, "Remote ASN", remote_asn),
+    }
     rows.field(
         0,
         "Description",
@@ -993,6 +1023,7 @@ fn negotiated_session_json(
         .negotiated_session
         .as_ref()
         .map(|negotiated| JsonNegotiatedSession {
+            remote_asn: negotiated.remote_asn,
             hold_time_seconds: negotiated.hold_time_seconds,
             remote_router_id: negotiated.remote_router_id.clone(),
             four_octet_as: negotiated.four_octet_as,
@@ -1258,8 +1289,40 @@ fn json_paths_limit(limit: &crate::proto::PathsLimitState) -> JsonPathsLimit {
     }
 }
 
+/// `--remote-asn`: an AS number, `external` (any ASN but the local one) or
+/// `internal` (the local ASN), as in the configuration file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteAsnArg {
+    Number(u32),
+    External,
+    Internal,
+}
+
+impl RemoteAsnArg {
+    /// The request's `remote_asn` and `remote_asn_mode`.
+    fn to_request(self) -> (u32, crate::proto::RemoteAsnMode) {
+        match self {
+            Self::Number(asn) => (asn, crate::proto::RemoteAsnMode::Numeric),
+            Self::External => (0, crate::proto::RemoteAsnMode::External),
+            Self::Internal => (0, crate::proto::RemoteAsnMode::Internal),
+        }
+    }
+}
+
+/// Parse `--remote-asn`: a number, `external` or `internal`.
+pub fn parse_remote_asn(value: &str) -> Result<RemoteAsnArg, String> {
+    match value {
+        "external" => Ok(RemoteAsnArg::External),
+        "internal" => Ok(RemoteAsnArg::Internal),
+        number => number
+            .parse()
+            .map(RemoteAsnArg::Number)
+            .map_err(|_| format!("{value:?} is not an AS number, \"external\" or \"internal\"")),
+    }
+}
+
 pub struct AddNeighborOpts {
-    pub asn: u32,
+    pub asn: RemoteAsnArg,
     pub description: Option<String>,
     pub hold_time: Option<u32>,
     pub min_hold_time: Option<u32>,
@@ -1318,12 +1381,14 @@ fn add_neighbor_request(address: &str, opts: AddNeighborOpts) -> AddNeighborRequ
         send_max: 0,
         paths_limit_receive_max: 0,
     });
+    let (remote_asn, remote_asn_mode) = opts.asn.to_request();
     AddNeighborRequest {
         intent: Some(NeighborCreateIntent {
             config: Some(NeighborConfig {
                 address,
                 interface,
-                remote_asn: opts.asn,
+                remote_asn,
+                remote_asn_mode: remote_asn_mode.into(),
                 description: opts.description.unwrap_or_default(),
                 hold_time: opts.hold_time.unwrap_or(0),
                 min_hold_time: opts.min_hold_time,
@@ -1681,9 +1746,85 @@ mod tests {
 
     // Exhaustive generated-message literals intentionally avoid Default so new
     // API fields require an explicit curated-output decision.
+    #[test]
+    fn a_neighbor_argument_that_is_not_an_address_is_an_interface() {
+        // Mutation-red: passing it through as an address fails the request.
+        assert_eq!(
+            split_scoped_address("swp1"),
+            (String::new(), "swp1".to_string())
+        );
+        assert_eq!(
+            split_scoped_address("fe80::2%swp1"),
+            ("fe80::2".to_string(), "swp1".to_string())
+        );
+        assert_eq!(
+            split_scoped_address("10.0.0.2"),
+            ("10.0.0.2".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn remote_asn_accepts_a_number_external_or_internal() {
+        assert_eq!(parse_remote_asn("65002"), Ok(RemoteAsnArg::Number(65002)));
+        assert_eq!(parse_remote_asn("external"), Ok(RemoteAsnArg::External));
+        assert_eq!(parse_remote_asn("internal"), Ok(RemoteAsnArg::Internal));
+        assert!(parse_remote_asn("ebgp").is_err());
+        let request = add_neighbor_request(
+            "10.0.0.9",
+            AddNeighborOpts {
+                asn: RemoteAsnArg::External,
+                ..base_add_opts()
+            },
+        );
+        let config = request.intent.unwrap().config.unwrap();
+        assert_eq!(config.remote_asn, 0);
+        assert_eq!(
+            config.remote_asn_mode,
+            crate::proto::RemoteAsnMode::External as i32
+        );
+    }
+
+    /// An interface-only neighbor reads as its interface with the learned
+    /// address (or `-`), and a non-numeric `remote_asn` as its mode with the
+    /// session's ASN beside it.
+    #[test]
+    fn interface_only_and_external_neighbors_render_by_identity_and_mode() {
+        let mut state = neighbor_projection_fixture();
+        let config = state.config.as_mut().unwrap();
+        config.address = String::new();
+        config.interface = "swp1".into();
+        config.remote_asn = 0;
+        config.remote_asn_mode = crate::proto::RemoteAsnMode::External as i32;
+        state.learned_peer_address = "fe80::2".into();
+        state.discovery_state = crate::proto::NeighborDiscoveryState::Bound as i32;
+        state.negotiated_session.as_mut().unwrap().remote_asn = Some(65009);
+        assert_eq!(output::neighbor_identity(&state), "swp1 (fe80::2)");
+        assert_eq!(
+            output::remote_asn_label(state.config.as_ref().unwrap()),
+            "external"
+        );
+        let detail = render_neighbor_detail_human(&state);
+        assert!(detail.contains("Learned Address:"), "{detail}");
+        assert!(detail.contains("fe80::2"), "{detail}");
+        assert!(detail.contains("Discovery:"), "{detail}");
+        assert!(detail.contains("bound"), "{detail}");
+        assert!(detail.contains("external (session 65009)"), "{detail}");
+        let json = serde_json::to_value(json_neighbor(&state)).unwrap();
+        assert_eq!(json["remote_asn_mode"], "external");
+        assert_eq!(json["learned_peer_address"], "fe80::2");
+        assert_eq!(json["discovery_state"], "bound");
+
+        state.learned_peer_address.clear();
+        state.discovery_state = crate::proto::NeighborDiscoveryState::AwaitingDiscovery as i32;
+        assert_eq!(output::neighbor_identity(&state), "swp1 (-)");
+    }
+
     fn neighbor_projection_fixture() -> crate::proto::NeighborState {
         crate::proto::NeighborState {
+            discovery_state: 0,
+            learned_peer_address: String::new(),
             config: Some(crate::proto::NeighborConfig {
+                remote_asn_mode: 0,
                 address: "fe80::2".to_string(),
                 remote_asn: 65002,
                 description: "description-value".to_string(),
@@ -1796,6 +1937,7 @@ mod tests {
             prefixes_received_ipv6: 142,
             negotiation_available: Some(true),
             negotiated_session: Some(crate::proto::NegotiatedSessionState {
+                remote_asn: None,
                 hold_time_seconds: Some(0),
                 remote_router_id: Some("remote_router_id-value".to_string()),
                 four_octet_as: Some(false),
@@ -2571,6 +2713,7 @@ Last Error:               last_error-value
             peer_extended_message: Some(false),
             outbound_max_message_bytes: Some(4096),
             graceful_restart: None,
+            remote_asn: None,
         });
         assert_eq!(negotiation_status_label(&state), "negotiated");
         let negotiated = state.negotiated_session.as_ref().unwrap();
@@ -2741,7 +2884,7 @@ Last Error:               last_error-value
 
     fn base_add_opts() -> AddNeighborOpts {
         AddNeighborOpts {
-            asn: 65002,
+            asn: RemoteAsnArg::Number(65002),
             description: None,
             hold_time: None,
             min_hold_time: None,

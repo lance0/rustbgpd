@@ -628,6 +628,15 @@ impl Config {
         Some(Cow::Owned(bound))
     }
 
+    /// One interface-only neighbor resolved with a placeholder link-local
+    /// address and no scope, for reporting an unbound neighbor's settings.
+    pub(crate) fn resolve_unbound_interface_neighbor(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
+    }
+
     /// Interface-only neighbors resolved with a placeholder link-local
     /// address and no scope: for startup inventories that need only their
     /// settings (listener MSS clamp, Graceful Restart timing), never for a

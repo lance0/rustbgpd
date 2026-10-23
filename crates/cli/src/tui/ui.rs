@@ -191,7 +191,7 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let rows = app.neighbors.iter().map(|n| {
         let cfg = n.config.as_ref();
         let identity = neighbor_key(n).unwrap_or_default();
-        let asn = cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default();
+        let asn = cfg.map(crate::output::remote_asn_label).unwrap_or_default();
         let state_label = format_state_with_stale(n.state, n.stale);
         let state_color = theme.state_color_with_stale(n.state, n.stale);
         let uptime = format_duration(n.uptime_seconds);
@@ -490,7 +490,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
         ),
         row(
             "Remote ASN:",
-            cfg.map(|config| config.remote_asn.to_string())
+            cfg.map(crate::output::remote_asn_label)
                 .unwrap_or_else(|| "unknown".to_string()),
             text,
         ),

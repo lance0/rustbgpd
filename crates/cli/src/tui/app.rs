@@ -185,6 +185,10 @@ pub(crate) fn neighbor_key(neighbor: &NeighborState) -> Option<String> {
     neighbor.config.as_ref().map(|config| {
         if config.interface.is_empty() {
             config.address.clone()
+        } else if config.address.is_empty() {
+            // An interface-only neighbor (ADR-0142) is selected by its
+            // interface.
+            config.interface.clone()
         } else {
             format!("{}%{}", config.address, config.interface)
         }

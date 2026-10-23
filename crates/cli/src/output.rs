@@ -304,6 +304,15 @@ pub struct JsonNeighbor {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub interface: String,
     pub remote_asn: u32,
+    /// `numeric`, `external` or `internal`; `remote_asn` is 0 unless numeric.
+    pub remote_asn_mode: &'static str,
+    /// Interface-only neighbor: the bound IPv6 link-local address. Omitted
+    /// until bound and for every other neighbor.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub learned_peer_address: String,
+    /// Interface-only neighbor discovery state; omitted for other neighbors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_state: Option<&'static str>,
     pub state: String,
     /// True when the daemon couldn't read fresh state from the peer
     /// session task — `state` is a placeholder Idle rather than an
@@ -383,6 +392,14 @@ pub struct JsonNeighborDetail {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub interface: String,
     pub remote_asn: u32,
+    /// See [`JsonNeighbor::remote_asn_mode`].
+    pub remote_asn_mode: &'static str,
+    /// See [`JsonNeighbor::learned_peer_address`].
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub learned_peer_address: String,
+    /// See [`JsonNeighbor::discovery_state`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_state: Option<&'static str>,
     pub state: String,
     /// See [`JsonNeighbor::stale`].
     #[serde(skip_serializing_if = "is_false")]
@@ -586,6 +603,9 @@ pub struct JsonOutboundPrefixLimit {
 
 #[derive(Serialize)]
 pub struct JsonNegotiatedSession {
+    /// The ASN the peer sent in its OPEN.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_asn: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_time_seconds: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -858,6 +878,58 @@ fn ansi_overhead(colored: &str, plain_len: usize) -> usize {
 /// (MsgRcvd, MsgSent, Flaps, RRC), a compact slow-peer marker, and the overloaded
 /// `State/PfxRcd` — prefixes-received count when Established, state name
 /// otherwise — as the last column.
+/// `remote_asn` as configured: the number, `external` or `internal`.
+pub(crate) fn remote_asn_label(config: &proto::NeighborConfig) -> String {
+    match proto::RemoteAsnMode::try_from(config.remote_asn_mode) {
+        Ok(proto::RemoteAsnMode::External) => "external".to_string(),
+        Ok(proto::RemoteAsnMode::Internal) => "internal".to_string(),
+        _ => config.remote_asn.to_string(),
+    }
+}
+
+/// `numeric`, `external` or `internal`, for JSON.
+pub(crate) fn remote_asn_mode_label(config: Option<&proto::NeighborConfig>) -> &'static str {
+    match config.map(|c| proto::RemoteAsnMode::try_from(c.remote_asn_mode)) {
+        Some(Ok(proto::RemoteAsnMode::External)) => "external",
+        Some(Ok(proto::RemoteAsnMode::Internal)) => "internal",
+        _ => "numeric",
+    }
+}
+
+/// Interface-only discovery state for JSON and detail views; `None` for
+/// every other neighbor.
+pub(crate) fn discovery_state_label(n: &proto::NeighborState) -> Option<&'static str> {
+    match proto::NeighborDiscoveryState::try_from(n.discovery_state) {
+        Ok(proto::NeighborDiscoveryState::InterfaceMissing) => Some("interface_missing"),
+        Ok(proto::NeighborDiscoveryState::LinkDown) => Some("link_down"),
+        Ok(proto::NeighborDiscoveryState::AwaitingDiscovery) => Some("awaiting_discovery"),
+        Ok(proto::NeighborDiscoveryState::Bound) => Some("bound"),
+        _ => None,
+    }
+}
+
+/// The neighbor's identity for tables: the address (scoped as
+/// `fe80::1%eth0` for a link-local neighbor), or for an interface-only
+/// neighbor its interface and learned address, `swp1 (fe80::2)` or
+/// `swp1 (-)` until one is bound.
+pub(crate) fn neighbor_identity(n: &proto::NeighborState) -> String {
+    let Some(c) = n.config.as_ref() else {
+        return String::new();
+    };
+    if c.address.is_empty() && !c.interface.is_empty() {
+        let learned = if n.learned_peer_address.is_empty() {
+            "-"
+        } else {
+            n.learned_peer_address.as_str()
+        };
+        format!("{} ({learned})", c.interface)
+    } else if c.interface.is_empty() {
+        c.address.clone()
+    } else {
+        format!("{}%{}", c.address, c.interface)
+    }
+}
+
 pub(crate) fn write_neighbor_table<W: Write + ?Sized>(
     writer: &mut W,
     neighbors: &[proto::NeighborState],
@@ -916,16 +988,8 @@ fn render_neighbor_table(neighbors: &[proto::NeighborState], wide: bool) -> Stri
                 Default::default()
             };
             Row {
-                addr: cfg
-                    .map(|c| {
-                        if c.interface.is_empty() {
-                            c.address.clone()
-                        } else {
-                            format!("{}%{}", c.address, c.interface)
-                        }
-                    })
-                    .unwrap_or_default(),
-                asn: cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default(),
+                addr: neighbor_identity(n),
+                asn: cfg.map(remote_asn_label).unwrap_or_default(),
                 state_plain: format_state_with_stale(n.state, n.stale).to_string(),
                 state_colored: colored_state_with_stale(n.state, n.stale),
                 uptime: format_duration(n.uptime_seconds),
@@ -2046,6 +2110,9 @@ mod tests {
             address: "10.0.0.2".to_string(),
             interface: "eth0".to_string(),
             remote_asn: 65002,
+            remote_asn_mode: "numeric",
+            learned_peer_address: String::new(),
+            discovery_state: None,
             state: "Established".to_string(),
             stale: true,
             slow_peer: true,
@@ -2116,6 +2183,7 @@ mod tests {
             discard_path_attributes: vec![4, 8],
             negotiation_available: Some(true),
             negotiated_session: Some(JsonNegotiatedSession {
+                remote_asn: Some(65002),
                 hold_time_seconds: Some(0),
                 remote_router_id: Some("192.0.2.7".to_string()),
                 four_octet_as: Some(false),
