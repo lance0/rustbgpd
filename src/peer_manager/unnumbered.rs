@@ -17,6 +17,12 @@
 //!   session is not Established. A lost binding with the link up keeps the
 //!   peer: session liveness belongs to the hold timer, and the peer keeps
 //!   its address reserved.
+//! - The port set follows `current_config`: a configured interface gains a
+//!   port (and discovery starts when it is the first), a removed one loses
+//!   its peer, RIB identity and port (and discovery stops with the last), and
+//!   a neighbor whose bind-time settings changed is rebound under them. This
+//!   runs on the owner loop after the mutating command, never under a staged
+//!   transaction snapshot.
 //! - Admission refuses an address that another neighbor holds
 //!   (`duplicate_link_local_address`) until the scoped RIB identity lands.
 //!   The check and the insertion run in this single owner without an
@@ -31,7 +37,10 @@ use rustbgpd_fsm::SessionState;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::ra_discovery::{DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaDiscovery};
+use crate::config::BindTimeProjection;
+use crate::ra_discovery::{
+    DiscoveryConfig, DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaDiscovery,
+};
 
 use super::PeerManager;
 
@@ -51,6 +60,40 @@ pub(crate) struct Unnumbered {
     retry_at: Option<tokio::time::Instant>,
 }
 
+/// The owner's view of configured interface-only neighbors: whether the port
+/// set needs reconciling with `current_config`, and how Router Advertisement
+/// discovery opens when the first one arrives after startup. Tests replace
+/// `probe` and `spawn`.
+pub(crate) struct UnnumberedRuntime {
+    /// `current_config` was replaced since the port set last followed it.
+    pub(crate) config_due: bool,
+    /// The `CAP_NET_RAW` check, run before a change that would need it.
+    pub(crate) probe: fn() -> Result<(), String>,
+    /// Spawn the actor.
+    #[expect(
+        clippy::type_complexity,
+        reason = "one boxed constructor matching RaDiscovery::spawn"
+    )]
+    pub(crate) spawn: Box<
+        dyn FnMut(
+                DiscoveryConfig,
+            )
+                -> Result<(RaDiscovery, mpsc::UnboundedReceiver<DiscoveryEvent>), String>
+            + Send
+            + Sync,
+    >,
+}
+
+impl Default for UnnumberedRuntime {
+    fn default() -> Self {
+        Self {
+            config_due: false,
+            probe: || crate::ra_discovery::probe_raw_socket().map_err(|error| error.to_string()),
+            spawn: Box::new(|config| RaDiscovery::spawn(config).map_err(|error| error.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Port {
     /// Discovery's current binding.
@@ -67,9 +110,12 @@ struct Port {
     held: Option<HeldState>,
     /// The neighbor's RIB identity, allocated at its first binding and kept
     /// across every later endpoint: an address change is a session down and
-    /// up under the same `PeerId`. Never released; the stanza lives until
-    /// restart.
+    /// up under the same `PeerId`. Released when configuration deletes the
+    /// neighbor.
     rib_peer: Option<rustbgpd_rib::PeerId>,
+    /// The bind-time settings the bound peer was created with; a change
+    /// rebinds it.
+    settings: Option<BindTimeProjection>,
 }
 
 /// State of an interface-only neighbor that belongs to the neighbor, not to
@@ -137,7 +183,8 @@ impl PeerManager {
     }
 
     pub(super) fn unnumbered_reconcile_due(&self) -> bool {
-        self.unnumbered.as_ref().is_some_and(|u| u.reconcile_due)
+        self.unnumbered_runtime.config_due
+            || self.unnumbered.as_ref().is_some_and(|u| u.reconcile_due)
     }
 
     /// Pass each interface's state in the current link snapshot to discovery
@@ -324,6 +371,7 @@ impl PeerManager {
 
     /// The retry deadline passed: reconcile again.
     pub(super) fn unnumbered_retry_due(&mut self) {
+        self.unnumbered_runtime.config_due = true;
         if let Some(unnumbered) = self.unnumbered.as_mut() {
             unnumbered.retry_at = None;
             unnumbered.reconcile_due = true;
@@ -390,8 +438,51 @@ impl PeerManager {
             })
     }
 
-    /// Bring every interface-only neighbor's peer in line with its binding.
+    /// Check a candidate configuration before it takes effect anywhere:
+    /// the first interface-only neighbor needs the link monitor and
+    /// `CAP_NET_RAW` (ADR-0142 "Privilege"), and a static link-local neighbor
+    /// it adds must not take an address a learned endpoint holds, bound or
+    /// reserved ("Same-address neighbors"). The error names the cause.
+    pub(super) fn unnumbered_preflight(
+        &self,
+        candidate: &crate::config::Config,
+    ) -> Result<(), String> {
+        for neighbor in &candidate.neighbors {
+            let Ok(IpAddr::V6(address)) = neighbor.address.parse::<IpAddr>() else {
+                continue;
+            };
+            if !address.is_unicast_link_local() {
+                continue;
+            }
+            let key = PeerKey::new(IpAddr::V6(address), neighbor.interface.clone());
+            if let Some(holder) = self.unnumbered_holder_of(IpAddr::V6(address), &key) {
+                return Err(format!(
+                    "duplicate_link_local_address: neighbor {key} uses {address}, which the \
+                     interface-only neighbor on {holder} holds; remove that neighbor first"
+                ));
+            }
+        }
+        if self.current_config.neighbors.interface_only().is_empty()
+            && !candidate.neighbors.interface_only().is_empty()
+        {
+            if self.link_check.state.is_none() {
+                return Err(
+                    "interface-only neighbors need the netlink link monitor, which is not running"
+                        .to_string(),
+                );
+            }
+            (self.unnumbered_runtime.probe)()?;
+        }
+        Ok(())
+    }
+
+    /// Bring the port set in line with the configured interface-only
+    /// neighbors, then every neighbor's peer in line with its binding.
     pub(super) async fn reconcile_unnumbered(&mut self) {
+        if self.unnumbered_runtime.config_due && !self.config_snapshot_staged {
+            self.unnumbered_runtime.config_due = false;
+            self.sync_unnumbered_ports().await;
+        }
         let Some(unnumbered) = self.unnumbered.as_mut() else {
             return;
         };
@@ -399,6 +490,116 @@ impl PeerManager {
         let names: Vec<String> = unnumbered.ports.keys().cloned().collect();
         for name in names {
             self.reconcile_port(&name).await;
+        }
+    }
+
+    /// Add, remove and rebind ports against `current_config`.
+    async fn sync_unnumbered_ports(&mut self) {
+        let configured: BTreeMap<String, Option<BindTimeProjection>> = self
+            .current_config
+            .neighbors
+            .interface_only()
+            .iter()
+            .filter_map(|neighbor| {
+                Some((
+                    neighbor.interface.clone()?,
+                    self.current_config.bind_time_settings(neighbor),
+                ))
+            })
+            .collect();
+        let existing: Vec<String> = self
+            .unnumbered
+            .as_ref()
+            .map(|unnumbered| unnumbered.ports.keys().cloned().collect())
+            .unwrap_or_default();
+        for name in &existing {
+            match configured.get(name) {
+                None => self.remove_port(name).await,
+                Some(settings) => {
+                    let port = self.port_mut(name);
+                    if let Some(key) = port.bound.clone()
+                        && port.settings != *settings
+                        && self
+                            .retire_bound_peer(name, key, "neighbor_reconfigured")
+                            .await
+                    {
+                        self.port_mut(name).settings = None;
+                    }
+                }
+            }
+        }
+        let added: Vec<&String> = configured
+            .keys()
+            .filter(|name| !existing.contains(name))
+            .collect();
+        if !added.is_empty() && self.unnumbered.is_none() {
+            let config = crate::unnumbered_discovery_config(&self.current_config);
+            match (self.unnumbered_runtime.spawn)(config) {
+                Ok((discovery, events)) => {
+                    info!("unnumbered: starting Router Advertisement discovery");
+                    self.unnumbered = Some(Box::new(Unnumbered::new(discovery, events)));
+                }
+                Err(error) => {
+                    error!(%error, "unnumbered: could not start discovery for an added interface-only neighbor");
+                    return;
+                }
+            }
+        }
+        if let Some(unnumbered) = self.unnumbered.as_mut() {
+            for name in added {
+                info!(interface = %name, "unnumbered: interface-only neighbor added");
+                unnumbered.discovery.start(name);
+                unnumbered.ports.insert(name.clone(), Port::default());
+            }
+            unnumbered.reconcile_due = true;
+        }
+        self.feed_unnumbered_links();
+        if self
+            .unnumbered
+            .as_ref()
+            .is_some_and(|unnumbered| unnumbered.ports.is_empty())
+            && let Some(unnumbered) = self.unnumbered.take()
+        {
+            info!("unnumbered: no interface-only neighbor left; stopping discovery");
+            unnumbered.shutdown().await;
+        }
+    }
+
+    /// Configuration deleted the neighbor on `name`: end its session, purge
+    /// what it learned, release its RIB identity (and with it any address
+    /// reservation) and stop discovery there. A peer that cannot be removed
+    /// keeps its port, and the removal is retried.
+    async fn remove_port(&mut self, name: &str) {
+        let Some(port) = self
+            .unnumbered
+            .as_mut()
+            .and_then(|unnumbered| unnumbered.ports.remove(name))
+        else {
+            return;
+        };
+        info!(interface = %name, "unnumbered: interface-only neighbor removed");
+        if let Some(key) = port.bound.clone() {
+            self.drain_ready_session_notifications(Some(&key)).await;
+            // The port is gone, so the deletion releases the RIB identity.
+            match self.delete_peer(key.clone(), false).await {
+                Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
+                Err(error) => {
+                    warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the deleted neighbor's peer; retrying");
+                    if let Some(unnumbered) = self.unnumbered.as_mut() {
+                        unnumbered.ports.insert(name.to_owned(), port);
+                    }
+                    self.arm_unnumbered_retry();
+                    return;
+                }
+            }
+            if self.max_prefix_latches.contains_key(&key) {
+                self.remove_max_prefix_latch(&key);
+            }
+        } else if let Some(rib_peer) = port.rib_peer {
+            self.release_unused_rib_peer(rib_peer).await;
+        }
+        if let Some(unnumbered) = self.unnumbered.as_mut() {
+            unnumbered.discovery.stop(name);
         }
     }
 
@@ -789,9 +990,11 @@ impl PeerManager {
         }
         info!(interface = %name, peer = %key, enabled, "unnumbered: bound peer added");
         let rib_peer = self.rib_peer_of(&key);
+        let settings = self.current_config.bind_time_settings(&neighbor);
         let port = self.port_mut(name);
         port.rib_peer = port.rib_peer.or(Some(rib_peer));
         port.bound = Some(key);
+        port.settings = settings;
         Ok(())
     }
 }

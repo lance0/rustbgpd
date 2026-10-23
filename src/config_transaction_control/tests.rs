@@ -12121,3 +12121,37 @@ async fn confirmed_live_policy_faults_are_enumerated() {
         }
     }
 }
+
+/// Interface-only neighbors ride the families that stage the full candidate:
+/// the peer manager reconciles them once the commit clears the stage.
+#[test]
+fn interface_only_sections_join_the_snapshot_staging_families() {
+    let section = |name: &str| name.to_string();
+    // Mutation-red: an unknown section reaches no executor.
+    assert_eq!(
+        apply_family(&[section(TRANSACTION_INTERFACE_ONLY_SECTION)]),
+        Some(ApplyFamily::CatalogSnapshot)
+    );
+    assert_eq!(
+        apply_family(&[
+            section(TRANSACTION_INTERFACE_ONLY_SECTION),
+            section(TRANSACTION_POLICY_LIVE_IMPACT_SECTION),
+        ]),
+        Some(ApplyFamily::LivePolicyImpact)
+    );
+    assert_eq!(
+        apply_family(&[
+            section(TRANSACTION_INTERFACE_ONLY_SECTION),
+            section(TRANSACTION_SESSION_RESHAPE_SECTION),
+        ]),
+        Some(ApplyFamily::PeerSessionReshape)
+    );
+    // Static neighbor executors do not stage a snapshot.
+    assert_eq!(
+        apply_family(&[
+            section(TRANSACTION_INTERFACE_ONLY_SECTION),
+            section(TRANSACTION_NEIGHBOR_ADD_SECTION),
+        ]),
+        None
+    );
+}

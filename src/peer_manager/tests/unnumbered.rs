@@ -566,9 +566,9 @@ async fn an_unanswered_state_query_keeps_the_session_and_retries() {
 }
 
 /// A peer-group edit that changes an interface-only neighbor's session
-/// settings is reported restart-required for it.
+/// settings is detected for it, so the owner rebinds it.
 #[test]
-fn a_group_session_edit_is_restart_required_for_its_interface_only_neighbor() {
+fn a_group_session_edit_is_detected_for_its_interface_only_neighbor() {
     let config = |hold: u16| -> crate::config::Config {
         toml::from_str(&format!(
             "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
@@ -1115,4 +1115,371 @@ async fn a_staged_transaction_defers_an_ra_binding() {
     h.reconcile().await;
     assert_eq!(h.peers_at(ll(2)), []);
     assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+}
+
+// ---------------------------------------------------------------------------
+// Live configuration of interface-only neighbors: reload, transactions and
+// the RPCs all replace `current_config`; the owner reconciles its ports to it.
+// ---------------------------------------------------------------------------
+
+/// An interface-only neighbor stanza (`remote_asn = "external"` unless
+/// `extra` sets it).
+fn port_stanza(name: &str, extra: &str) -> String {
+    let asn = if extra.contains("remote_asn") {
+        ""
+    } else {
+        "remote_asn = \"external\"\n"
+    };
+    format!("[[neighbors]]\ninterface = \"{name}\"\n{asn}families = [\"ipv6_unicast\"]\n{extra}")
+}
+
+fn config_with(body: &str) -> crate::config::Config {
+    toml::from_str(&format!(
+        "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+         [global.telemetry]\nlog_format = \"json\"\n{body}"
+    ))
+    .unwrap()
+}
+
+type Launched = Arc<std::sync::Mutex<Vec<mpsc::UnboundedReceiver<Command>>>>;
+
+/// A launcher that records every discovery it opens.
+fn recording_launcher(mgr: &mut PeerManager) -> Launched {
+    let launched: Launched = Arc::default();
+    let sink = Arc::clone(&launched);
+    mgr.unnumbered_runtime.spawn = Box::new(move |_| {
+        let (discovery, commands) = RaDiscovery::recording();
+        sink.lock().unwrap().push(commands);
+        Ok((discovery, mpsc::unbounded_channel().1))
+    });
+    launched
+}
+
+impl Harness {
+    /// The startup harness with a recording launcher: no interface-only
+    /// neighbor configured, discovery not running.
+    fn without_discovery(links: &[(&str, u32, bool)]) -> (Self, Launched) {
+        let mut h = harness(&[], links);
+        h.mgr.unnumbered = None;
+        let launched = recording_launcher(&mut h.mgr);
+        (h, launched)
+    }
+
+    /// Install `config` the way every runtime config path does, then run the
+    /// owner loop's reconcile pass.
+    async fn reload(&mut self, config: crate::config::Config) {
+        self.mgr.replace_current_config(config);
+        self.reconcile().await;
+    }
+
+    fn session(&self, key: &PeerKey) -> u64 {
+        self.mgr.peers[key].session_id()
+    }
+
+    fn rib_sent(&mut self) -> Vec<RibUpdate> {
+        std::iter::from_fn(|| self.rib_rx.try_recv().ok()).collect()
+    }
+}
+
+fn drain_launched(launched: &Launched) -> Vec<Command> {
+    launched
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .flat_map(|commands| std::iter::from_fn(|| commands.try_recv().ok()).collect::<Vec<_>>())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_reload_adds_the_first_interface_only_neighbor_and_starts_discovery() {
+    let (mut h, launched) = Harness::without_discovery(&[("swp1", 7, true), ("swp2", 8, true)]);
+    // Mutation-red: without the port-set pass the added neighbor never
+    // reaches discovery and no peer can bind.
+    h.reload(config_with(&port_stanza("swp1", ""))).await;
+    assert_eq!(launched.lock().unwrap().len(), 1, "discovery started");
+    assert_eq!(
+        drain_launched(&launched),
+        [
+            Command::Start("swp1".into()),
+            Command::Link(LinkEvent {
+                ifindex: 7,
+                name: "swp1".into(),
+                state: LinkState::Up,
+            }),
+        ]
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let session = h.session(&swp1_key(2));
+
+    // A second neighbor joins the running discovery; the first keeps its
+    // session.
+    h.reload(config_with(&format!(
+        "{}{}",
+        port_stanza("swp1", ""),
+        port_stanza("swp2", "")
+    )))
+    .await;
+    assert_eq!(launched.lock().unwrap().len(), 1, "no second actor");
+    assert_eq!(
+        drain_launched(&launched),
+        [
+            Command::Start("swp2".into()),
+            Command::Link(LinkEvent {
+                ifindex: 8,
+                name: "swp2".into(),
+                state: LinkState::Up,
+            }),
+        ]
+    );
+    assert_eq!(h.session(&swp1_key(2)), session, "unchanged neighbor kept");
+}
+
+#[tokio::test]
+async fn deleting_an_interface_only_neighbor_ends_its_session_and_releases_its_identity() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let swp2_session = h.session(&swp2);
+    let identity = h.mgr.rib_peer_of(&swp1_key(2));
+    h.drain();
+    h.rib_sent();
+
+    h.reload(config_with(&port_stanza("swp2", ""))).await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "session ended");
+    assert_eq!(h.session(&swp2), swp2_session, "the other neighbor is kept");
+    assert_eq!(h.drain(), [Command::Stop("swp1".into())]);
+    let sent = h.rib_sent();
+    let deleted = sent
+        .iter()
+        .position(
+            |update| matches!(update, RibUpdate::PeerDeleted { peer, .. } if *peer == identity),
+        )
+        .expect("its RIB state is purged");
+    // The port leaves first, so the deletion releases the identity instead
+    // of keeping it as an endpoint change does.
+    let released = sent
+        .iter()
+        .position(|update| matches!(update, RibUpdate::ReleasePeer { peer } if *peer == identity))
+        .expect("its RIB identity is released");
+    assert!(deleted < released);
+
+    // The address is no longer reserved: a static neighbor may take it.
+    let mut static_peer = make_config(IpAddr::V6(ll(2)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+
+    // Deleting the last one stops discovery and closes its sockets.
+    h.reload(config_with("")).await;
+    assert!(!h.mgr.peers.contains_key(&swp2));
+    assert_eq!(h.drain(), [Command::Stop("swp2".into())]);
+    assert!(h.mgr.unnumbered.is_none(), "discovery shut down");
+}
+
+/// A neighbor deleted while unbound still releases the identity its earlier
+/// bindings held.
+#[tokio::test]
+async fn deleting_an_unbound_neighbor_releases_its_earlier_identity() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let identity = h.mgr.rib_peer_of(&swp1_key(2));
+    // Carrier loss retires the peer but keeps the neighbor's identity.
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)));
+    h.rib_sent();
+
+    h.reload(config_with("")).await;
+    // Mutation-red: releasing only through a peer deletion leaks it.
+    assert!(
+        h.rib_sent()
+            .iter()
+            .any(|update| matches!(update, RibUpdate::ReleasePeer { peer } if *peer == identity)),
+        "identity released"
+    );
+}
+
+#[tokio::test]
+async fn a_reconfigured_neighbor_is_rebound_under_its_identity() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let (swp1_session, swp2_session) = (h.session(&swp1_key(2)), h.session(&swp2));
+    let identity = h.mgr.rib_peer_of(&swp1_key(2));
+    h.rib_sent();
+
+    // `remote_asn` mode changes from "external" to a number.
+    h.reload(config_with(&format!(
+        "{}{}",
+        port_stanza("swp1", "remote_asn = 65002\n"),
+        port_stanza("swp2", "")
+    )))
+    .await;
+    // Mutation-red: comparing only the port set keeps the old session.
+    let rebound = &h.mgr.peers[&swp1_key(2)];
+    assert_ne!(rebound.session_id(), swp1_session, "rebound");
+    assert_eq!(rebound.transport_config.peer.remote_asn, 65002);
+    assert!(!rebound.transport_config.peer.remote_asn_external);
+    assert_eq!(h.mgr.rib_peer_of(&swp1_key(2)), identity, "same identity");
+    assert!(
+        !h.rib_sent()
+            .iter()
+            .any(|update| matches!(update, RibUpdate::ReleasePeer { .. })),
+        "the identity is kept"
+    );
+    assert_eq!(h.session(&swp2), swp2_session, "unchanged neighbor kept");
+
+    // Reloading the same configuration again rebinds nothing.
+    let session = h.session(&swp1_key(2));
+    h.reload(config_with(&format!(
+        "{}{}",
+        port_stanza("swp1", "remote_asn = 65002\n"),
+        port_stanza("swp2", "")
+    )))
+    .await;
+    assert_eq!(h.session(&swp1_key(2)), session);
+}
+
+#[tokio::test]
+async fn a_peer_group_edit_rebinds_only_its_interface_only_members() {
+    let groups = |fabric_hold: u16, swp2_group: &str| {
+        config_with(&format!(
+            "[peer_groups.fabric]\nhold_time = {fabric_hold}\n\
+             [peer_groups.other]\nhold_time = 90\n{}{}",
+            port_stanza("swp1", "peer_group = \"fabric\"\n"),
+            port_stanza("swp2", &format!("peer_group = \"{swp2_group}\"\n"))
+        ))
+    };
+    let mut h = harness(&[], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.reload(groups(9, "other")).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let (swp1_session, swp2_session) = (h.session(&swp1_key(2)), h.session(&swp2));
+
+    // Mutation-red: comparing neighbor records alone misses a group edit.
+    h.reload(groups(30, "other")).await;
+    assert_ne!(
+        h.session(&swp1_key(2)),
+        swp1_session,
+        "fabric member rebound"
+    );
+    assert_eq!(h.mgr.peers[&swp1_key(2)].hold_time, Some(30));
+    assert_eq!(h.session(&swp2), swp2_session, "other group untouched");
+
+    // Moving swp2 into the group rebinds it.
+    h.reload(groups(30, "fabric")).await;
+    assert_ne!(h.session(&swp2), swp2_session);
+    assert_eq!(h.mgr.peers[&swp2].hold_time, Some(30));
+}
+
+/// A staged transaction snapshot is provisional: the port set follows it
+/// only once the commit clears the stage.
+#[tokio::test]
+async fn a_staged_snapshot_changes_no_port_until_the_commit() {
+    let (mut h, launched) = Harness::without_discovery(&[("swp1", 7, true)]);
+    h.mgr.config_snapshot_staged = true;
+    // Mutation-red: syncing ports under the stage starts discovery that a
+    // rollback could not undo.
+    h.reload(config_with(&port_stanza("swp1", ""))).await;
+    assert!(launched.lock().unwrap().is_empty(), "nothing while staged");
+    assert!(h.mgr.unnumbered_reconcile_due(), "still due");
+    h.mgr.config_snapshot_staged = false;
+    h.reconcile().await;
+    assert_eq!(
+        launched.lock().unwrap().len(),
+        1,
+        "applied after the commit"
+    );
+}
+
+#[tokio::test]
+async fn the_first_interface_only_neighbor_needs_cap_net_raw_and_the_link_monitor() {
+    let (mut h, launched) = Harness::without_discovery(&[("swp1", 7, true)]);
+    let candidate = config_with(&port_stanza("swp1", ""));
+    h.mgr.unnumbered_runtime.probe = || {
+        Err(
+            "interface-only neighbor discovery needs CAP_NET_RAW to open a raw ICMPv6 socket"
+                .into(),
+        )
+    };
+    let before = h.mgr.current_config.clone();
+    // Mutation-red: without the preflight the generation applies.
+    let outcome = Box::pin(h.mgr.apply_reload_generation(
+        candidate.clone(),
+        Vec::new(),
+        crate::config::PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    let crate::peer_manager::generation::ReloadGenerationOutcome::RejectedNoEffect(error) = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert!(error.contains("CAP_NET_RAW"), "{error}");
+    assert_eq!(h.mgr.current_config, before, "running config untouched");
+    h.reconcile().await;
+    assert!(launched.lock().unwrap().is_empty(), "no discovery");
+    assert!(h.mgr.unnumbered.is_none());
+
+    // Without the link monitor the same change is refused by name.
+    h.mgr.link_check.state = None;
+    let error = h.mgr.unnumbered_preflight(&candidate).unwrap_err();
+    assert!(error.contains("link monitor"), "{error}");
+
+    // A running interface-only neighbor already holds the capability.
+    let h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let mut mgr = h.mgr;
+    mgr.unnumbered_runtime.probe = || Err("CAP_NET_RAW".into());
+    let more = config_with(&format!(
+        "{}{}",
+        port_stanza("swp1", ""),
+        port_stanza("swp2", "")
+    ));
+    assert_eq!(mgr.unnumbered_preflight(&more), Ok(()));
+}
+
+/// A static link-local neighbor added by reload is checked against learned
+/// endpoints before any effect, whether the endpoint is bound or reserved
+/// by a neighbor whose binding was lost.
+#[tokio::test]
+async fn a_static_add_is_refused_against_a_learned_endpoint_before_any_effect() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let mut candidate = h.mgr.current_config.clone();
+    candidate.neighbors.push(
+        toml::from_str::<crate::config::Neighbor>(
+            "address = \"fe80::2\"\ninterface = \"eth9\"\nremote_asn = 65002\n",
+        )
+        .unwrap(),
+    );
+    for state in ["bound", "reserved"] {
+        if state == "reserved" {
+            // The binding is lost while the link stays up: the peer, and its
+            // address, are kept.
+            h.bind("swp1", None).await;
+            assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+        }
+        let before = h.mgr.current_config.clone();
+        // Mutation-red: without the static check the generation adds it.
+        let outcome = Box::pin(h.mgr.apply_reload_generation(
+            candidate.clone(),
+            Vec::new(),
+            crate::config::PreparedDatasetGeneration::default(),
+        ))
+        .await;
+        let crate::peer_manager::generation::ReloadGenerationOutcome::RejectedNoEffect(error) =
+            outcome
+        else {
+            panic!("{state}: {outcome:?}");
+        };
+        assert!(
+            error.contains("duplicate_link_local_address"),
+            "{state}: {error}"
+        );
+        assert!(error.contains("swp1"), "{state}: names the holder: {error}");
+        assert_eq!(h.mgr.current_config, before, "{state}");
+        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "{state}");
+    }
 }

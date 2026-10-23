@@ -2010,13 +2010,12 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
     new_config.rpki.clone_from(&current.rpki);
     new_config.bmp.clone_from(&current.bmp);
     new_config.mrt.clone_from(&current.mrt);
-    // ADR-0142: Router Advertisement discovery starts once, at startup, for
-    // the interface-only neighbors and settings it was given.
+    // ADR-0142: the discovery actor takes its RA template and timing when it
+    // starts. Interface-only neighbors themselves apply live.
     new_config
         .global
         .unnumbered
         .clone_from(&current.global.unnumbered);
-    new_config.neighbors.pin_interface_only(&current.neighbors);
 }
 
 #[cfg(test)]
@@ -2229,19 +2228,11 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // any external apply. The desired snapshot still carries the edited TOML
     // so restart intent is preserved and the same drift remains visible on
     // every reload.
-    for interface in config::interface_only_session_changes(current, &new_config) {
+    if config::unnumbered_settings_changed(current, &new_config) {
         error!(
-            interface,
-            "the session settings of the interface-only neighbor on this interface changed \
-             (for example through its peer group): a bound peer takes them only when it \
-             binds. Restart rustbgpd to apply them; policy chains still follow this reload."
-        );
-    }
-    if config::interface_only_neighbors_changed(current, &new_config) {
-        error!(
-            "interface-only [[neighbors]] (interface with no address) or \
-             [global.unnumbered] changed — adding, removing or editing them requires a \
-             restart. The running set is kept for this reload."
+            "[global.unnumbered] changed: Router Advertisement discovery takes its settings \
+             when it starts. Restart rustbgpd to apply them; interface-only [[neighbors]] \
+             still follow this reload."
         );
     }
     pin_unreconciled_daemon_runtime_fields(&mut new_config, current);
@@ -2251,6 +2242,14 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
              passive-listener sockets install TCP_MAXSEG only when created. Restart rustbgpd \
              to add, remove, or change a neighbor or peer-group tcp_mss. The running snapshot \
              keeps its startup values for this reload."
+        );
+    }
+    for interface in config::pin_interface_only_tcp_mss(&mut new_config, current) {
+        error!(
+            interface,
+            "the effective tcp_mss of the interface-only neighbor on this interface changed: \
+             sockets take the clamp only when created. Restart rustbgpd to apply it; the \
+             running neighbor is kept for this reload."
         );
     }
 
@@ -2517,7 +2516,12 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // One shared classification decides the executor before the first
     // credential, listener, session, or catalog effect.
     let route = config::classify_sighup_reload(config::SighupReloadFamilies {
-        generation: !neighbors_unchanged || !peer_groups_unchanged || policy_generation_changed,
+        // ADR-0142: the generation's adopted candidate carries the
+        // interface-only set the peer manager reconciles its ports to.
+        generation: !neighbors_unchanged
+            || !peer_groups_unchanged
+            || policy_generation_changed
+            || config::interface_only_neighbors_changed(current, &new_config),
         bfd_members: config::bfd_member_attachments_changed(current, &new_config),
         datasets: dataset_commit_pending || dataset_events_pending,
         dataset_bindings: policy_diff.datasets_changed
@@ -11217,50 +11221,94 @@ hold_time = 90
         }
     }
 
-    /// ADR-0142: interface-only neighbors are pinned to the running set
-    /// before validation, so a candidate that is valid alone but invalid
-    /// against that set is refused before any runtime mutation.
+    /// ADR-0142: interface-only neighbors are reloaded, not pinned. Adding,
+    /// editing and deleting one each reach the peer manager as one owned
+    /// generation carrying the candidate set, and a refusal there is a
+    /// clean, effect-free reload failure.
     #[tokio::test]
-    async fn reload_refuses_a_candidate_invalid_against_the_pinned_interface_only_set() {
-        let swp1 = "\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\npeer_group = \"fabric\"\n";
-        let group = "\n[peer_groups.fabric]\nhold_time = 9\n";
-        let initial = format!("{}{group}{swp1}", baseline_toml());
+    async fn reload_applies_interface_only_neighbors_through_the_generation() {
+        let swp1 = "\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n";
+        let swp2 = "\n[[neighbors]]\ninterface = \"swp2\"\nremote_asn = 65009\n";
+        let base = baseline_toml();
         let cases = [
             (
-                // swp1 becomes a static link-local neighbor on the same port.
-                format!(
-                    "{}{group}\n[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"swp1\"\nremote_asn = 65009\n",
-                    baseline_toml()
-                ),
-                "already has a static link-local neighbor",
+                "add",
+                base.to_string(),
+                format!("{base}{swp1}"),
+                vec!["swp1"],
             ),
             (
-                // The group the running interface-only neighbor uses is deleted.
-                baseline_toml().to_string(),
-                "fabric",
+                "modify",
+                format!("{base}{swp1}"),
+                format!("{base}{}", swp1.replace("\"external\"", "65010")),
+                vec!["swp1"],
             ),
+            (
+                "add and delete",
+                format!("{base}{swp1}"),
+                format!("{base}{swp2}"),
+                vec!["swp2"],
+            ),
+            ("delete", format!("{base}{swp1}"), base.to_string(), vec![]),
         ];
-        for (desired, expected) in cases {
-            // Mutation-red: pinning after validation lets both reach the
-            // generation apply.
+        for (case, initial, desired, interfaces) in cases {
+            // Mutation-red: pinning the running set sends the old one.
             let (outcome, tags, calls) =
                 drive_generation(&initial, &desired, GenerationReply::Applied).await;
-            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome
-            else {
-                panic!("{expected}: the reload must be refused");
+            let SighupReloadOutcome::Acknowledged(authority) = outcome else {
+                panic!("{case}: the reload must apply");
             };
             assert!(
-                failure.error.to_string().contains(expected),
-                "{expected}: {}",
-                failure.error
+                matches!(authority.completion, SighupCompletion::Complete),
+                "{case}: {:?}",
+                authority.completion
             );
-            assert!(tags.is_empty(), "no sequential mutation: {tags:?}");
-            assert!(calls.is_empty(), "no generation mutation");
+            assert_eq!(
+                tags,
+                ["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)"],
+                "{case}: no sequential step, no static session action"
+            );
+            let [call] = calls.as_slice() else {
+                panic!("{case}: exactly one generation, got {}", calls.len());
+            };
+            let sent: Vec<&str> = call
+                .candidate
+                .neighbors
+                .interface_only()
+                .iter()
+                .filter_map(|neighbor| neighbor.interface.as_deref())
+                .collect();
+            assert_eq!(sent, interfaces, "{case}");
+            assert!(call.actions.is_empty(), "{case}: static sessions untouched");
         }
+
+        // The peer manager's preflight refusal (CAP_NET_RAW, a duplicate
+        // address) leaves nothing applied.
+        let (outcome, tags, _) = drive_generation(
+            base,
+            &format!("{base}{swp1}"),
+            GenerationReply::RejectedNoEffect(
+                "interface-only neighbor discovery needs CAP_NET_RAW",
+            ),
+        )
+        .await;
+        let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome else {
+            panic!("the refused generation must be a clean failure");
+        };
+        assert!(
+            failure.error.to_string().contains("CAP_NET_RAW"),
+            "{}",
+            failure.error
+        );
+        assert!(
+            tags.iter()
+                .all(|tag| tag.starts_with("ApplyReloadGeneration")),
+            "only the refused generation: {tags:?}"
+        );
     }
 
     #[test]
-    fn unnumbered_settings_and_interface_only_neighbors_are_restart_required() {
+    fn unnumbered_settings_stay_restart_required_and_interface_only_neighbors_reload() {
         let current: Config = toml::from_str(
             r#"
 [global]
@@ -11286,21 +11334,60 @@ remote_asn = 65002
             ra_interval_secs: None,
         });
         let diff = config::diff_config(&current, &candidate);
-        assert!(diff.interface_only_neighbors_changed);
+        assert!(diff.unnumbered_changed);
+        assert!(!diff.interface_only_neighbors_changed);
         assert!(diff.has_restart_required_changes());
         // Mutation-red: leaving [global.unnumbered] unpinned advances it.
         pin_unreconciled_daemon_runtime_fields(&mut candidate, &current);
         assert_eq!(candidate.global.unnumbered, None);
 
-        // The interface-only set is pinned too, in its running position.
+        // An interface-only edit is reload-applied and survives the pins.
         let mut candidate: Config = toml::from_str(
             &toml::to_string(&current)
                 .unwrap()
                 .replace("remote_asn = \"external\"", "remote_asn = 65009"),
         )
         .unwrap();
+        let diff = config::diff_config(&current, &candidate);
+        assert!(diff.interface_only_neighbors_changed);
+        assert!(!diff.has_restart_required_changes());
+        assert!(diff.has_reload_applied_changes());
         pin_unreconciled_daemon_runtime_fields(&mut candidate, &current);
-        assert_eq!(candidate, current);
+        assert_eq!(
+            candidate
+                .neighbors
+                .interface_only_on("swp1")
+                .unwrap()
+                .remote_asn,
+            config::RemoteAsn::from(65009)
+        );
+    }
+
+    /// A clamp lives on sockets created at startup, so an interface-only
+    /// neighbor whose effective `tcp_mss` would change keeps its running
+    /// record while the rest of the reload applies.
+    #[test]
+    fn an_interface_only_tcp_mss_change_keeps_the_running_neighbor() {
+        let load = |extra: &str| -> Config {
+            toml::from_str(&format!(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+                 [global.telemetry]\nlog_format = \"json\"\n{extra}"
+            ))
+            .unwrap()
+        };
+        let swp1 = "[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n";
+        let current = load(swp1);
+        let mut candidate = load(&format!(
+            "{}[[neighbors]]\ninterface = \"swp2\"\nremote_asn = 65002\ntcp_mss = 1200\n",
+            swp1.replace("\"external\"\n", "\"external\"\ntcp_mss = 1300\n")
+        ));
+        // Mutation-red: without the pin both clamps reach the running set.
+        let pinned = config::pin_interface_only_tcp_mss(&mut candidate, &current);
+        assert_eq!(pinned, ["swp1", "swp2"]);
+        assert_eq!(
+            candidate.neighbors.interface_only(),
+            current.neighbors.interface_only()
+        );
     }
 
     #[tokio::test]

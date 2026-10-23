@@ -8,9 +8,10 @@ mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
 mod unnumbered;
+pub(crate) use unnumbered::{BindTimeProjection, pin_interface_only_tcp_mss};
 pub use unnumbered::{
     NeighborList, RemoteAsn, UnnumberedConfig, interface_only_neighbors_changed,
-    interface_only_session_changes,
+    interface_only_session_changes, unnumbered_settings_changed,
 };
 mod validation;
 
@@ -1844,6 +1845,9 @@ pub(crate) const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neig
 pub(crate) const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 pub(crate) const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
 pub(crate) const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
+/// Interface-only `[[neighbors]]`: staged with the full candidate snapshot and
+/// reconciled by the peer manager once the commit clears the stage.
+pub(crate) const TRANSACTION_INTERFACE_ONLY_SECTION: &str = "[[neighbors]] interface-only";
 const TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION: &str =
     "[policy] external inputs (rpol_files / datasets; deploy files and apply via SIGHUP reload)";
 
@@ -2592,9 +2596,13 @@ pub struct ConfigDiff {
     /// they are created, so edits remain pinned to the startup snapshot until
     /// the daemon restarts.
     pub tcp_mss_changed: bool,
-    /// Interface-only `[[neighbors]]` (ADR-0142) added, removed or edited, or
-    /// `[global.unnumbered]` changed. The running set is kept until restart.
+    /// Interface-only `[[neighbors]]` (ADR-0142) added, removed or edited,
+    /// directly or through their peer group. Reload and transactions apply
+    /// these live.
     pub interface_only_neighbors_changed: bool,
+    /// `[global.unnumbered]` changed: the RA discovery actor takes it only
+    /// when it starts, so it stays restart-required.
+    pub unnumbered_changed: bool,
     /// BFD profile definitions changed. Profiles remain startup-owned even
     /// when no running member currently references the changed profile.
     pub bfd_changed: bool,
@@ -2838,6 +2846,7 @@ impl ConfigDiff {
             || self.gnmi_dialout_changed
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
             || self.evpn_runtime_change_class.is_reload_applied()
+            || self.interface_only_neighbors_changed
     }
 
     /// Changes that require a full daemon restart.
@@ -2854,7 +2863,7 @@ impl ConfigDiff {
             || self.neighbor_tcp_ao_changed
             || self.dynamic_neighbor_tcp_ao_changed
             || self.tcp_mss_changed
-            || self.interface_only_neighbors_changed
+            || self.unnumbered_changed
             || self.bfd_changed
             || self.policy_explain_changed
             || self.policy_reject_retention_changed
@@ -3730,7 +3739,8 @@ impl SighupReloadFamilies {
             || diff.policy.export_chain_changed
             || !diff.policy.conditional_advertisements_changed.is_empty()
             || diff.policy.route_flap_dampening_changed
-            || diff.policy.rpol_changed;
+            || diff.policy.rpol_changed
+            || diff.interface_only_neighbors_changed;
         Self {
             generation,
             bfd_members: diff.bfd_members_changed,
@@ -4257,8 +4267,13 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
     }
     if diff.interface_only_neighbors_changed {
         class
+            .supported_sections
+            .push(TRANSACTION_INTERFACE_ONLY_SECTION.to_string());
+    }
+    if diff.unnumbered_changed {
+        class
             .restart_required_sections
-            .push("[[neighbors]] interface-only / [global.unnumbered]".to_string());
+            .push("[global.unnumbered]".to_string());
     }
     if diff.bfd_members_changed {
         class
@@ -4394,7 +4409,8 @@ fn transaction_sections_are_one_family(sections: &[String]) -> bool {
             // The live-impact section co-occurs with the catalog record sections
             // it stems from (a policy/peer-group/chain edit), so it counts as
             // the same family rather than tripping the mixed-family guard.
-            | TRANSACTION_POLICY_LIVE_IMPACT_SECTION => {
+            | TRANSACTION_POLICY_LIVE_IMPACT_SECTION
+            | TRANSACTION_INTERFACE_ONLY_SECTION => {
                 has_catalog = true;
             }
             _ => {
@@ -4468,6 +4484,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "conditional_advertisements_changed": &diff.policy.conditional_advertisements_changed,
             "route_flap_dampening_changed": diff.policy.route_flap_dampening_changed,
             "rpol_changed": diff.policy.rpol_changed,
+            "interface_only_neighbors_changed": diff.interface_only_neighbors_changed,
             "datasets_changed": diff.policy.datasets_changed,
             "declared_datasets_count": diff.policy.declared_datasets_count,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
@@ -4504,7 +4521,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
             "dynamic_neighbor_tcp_ao_changed": diff.dynamic_neighbor_tcp_ao_changed,
             "tcp_mss_changed": diff.tcp_mss_changed,
-            "interface_only_neighbors_changed": diff.interface_only_neighbors_changed,
+            "unnumbered_changed": diff.unnumbered_changed,
             "bfd_changed": diff.bfd_changed,
             "policy_explain_changed": diff.policy_explain_changed,
             "policy_reject_retention_changed": diff.policy_reject_retention_changed,
@@ -4723,6 +4740,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 style.change_marker
             );
         }
+        if diff.interface_only_neighbors_changed {
+            let _ = writeln!(
+                out,
+                "  {} interface-only [[neighbors]] reconciled (added, removed or rebound)",
+                style.change_marker
+            );
+        }
         if diff.dynamic_neighbors_reload_applied_changed {
             let _ = writeln!(
                 out,
@@ -4823,8 +4847,8 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.tcp_mss_changed {
         restart_sections.push("[[neighbors]] / [peer_groups.*].tcp_mss");
     }
-    if diff.interface_only_neighbors_changed {
-        restart_sections.push("[[neighbors]] interface-only / [global.unnumbered]");
+    if diff.unnumbered_changed {
+        restart_sections.push("[global.unnumbered]");
     }
     if diff.bfd_changed {
         restart_sections.push("[[bfd_profiles]]");
@@ -5116,6 +5140,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         neighbor_tcp_ao_changed,
         tcp_mss_changed,
         interface_only_neighbors_changed: interface_only_neighbors_changed(old, new),
+        unnumbered_changed: unnumbered_settings_changed(old, new),
         bfd_changed,
         bfd_members_changed,
         policy_explain_changed: old.policy.explain != new.policy.explain,
@@ -6669,6 +6694,9 @@ pub fn reject_unappliable_sequential_reload(
     let mut pinned = new.clone();
     pin_tcp_mss_startup_only_runtime(&mut pinned, old);
     let mut blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
+    if interface_only_neighbors_changed(old, &pinned) {
+        blocked.push("interface-only [[neighbors]]".to_string());
+    }
     blocked.extend(conditional_advertisement_changes(old, &pinned));
     if old.policy.route_flap_dampening != pinned.policy.route_flap_dampening {
         blocked.push("policy.route_flap_dampening".to_string());

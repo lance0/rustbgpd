@@ -241,12 +241,19 @@ fn ra_interval_secs_is_bounded() {
 }
 
 #[test]
-fn interface_only_edits_are_restart_required_in_the_diff() {
+fn interface_only_edits_are_reload_applied_in_the_diff() {
     let old = parse(&with(SWP1)).unwrap();
     let new = parse(&with(&SWP1.replace("\"external\"", "65002"))).unwrap();
     let diff = diff_config(&old, &new);
     assert!(diff.interface_only_neighbors_changed);
-    assert!(diff.has_restart_required_changes());
+    // Mutation-red: counting the edit as restart-required pins it again.
+    assert!(!diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert_eq!(
+        diff.sighup_route,
+        crate::config::SighupReloadRoute::Generation,
+        "an interface-only change is one owned generation"
+    );
     assert!(!diff_config(&old, &old).interface_only_neighbors_changed);
     // Static neighbor machinery never sees interface-only neighbors.
     let neighbor_diff = diff_neighbors(&old.neighbors, &new.neighbors);
@@ -443,4 +450,35 @@ fn bounded_rendering_chunks_an_interface_only_neighbors_inline_policy() {
         257
     );
     assert_eq!(bounded, oracle, "byte-identical to the unbounded render");
+}
+
+/// A config transaction carries an interface-only change as its own section
+/// in the snapshot-staging family; `[global.unnumbered]` stays
+/// restart-required.
+#[test]
+fn an_interface_only_change_is_a_committable_snapshot_transaction() {
+    let old = parse(&with(SWP1)).unwrap();
+    let new = parse(&with(&SWP1.replace("\"external\"", "65002"))).unwrap();
+    let class = classify_config_transaction_v1(&diff_config(&old, &new));
+    // Mutation-red: classifying it restart-required rejects the transaction.
+    assert_eq!(
+        class.supported_sections,
+        [TRANSACTION_INTERFACE_ONLY_SECTION]
+    );
+    assert!(class.is_committable(), "{class:?}");
+
+    let mut unnumbered = old.clone();
+    unnumbered.global.unnumbered = Some(UnnumberedConfig {
+        router_advertisements: Some(false),
+        ra_interval_secs: None,
+    });
+    let class = classify_config_transaction_v1(&diff_config(&old, &unnumbered));
+    assert!(
+        class
+            .restart_required_sections
+            .iter()
+            .any(|section| section == "[global.unnumbered]"),
+        "{class:?}"
+    );
+    assert!(!class.is_committable());
 }

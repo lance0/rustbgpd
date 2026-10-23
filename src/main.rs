@@ -2176,7 +2176,7 @@ fn zero_static_peer_summary(dynamic_range_count: usize) -> String {
 /// `[global.unnumbered]` as the discovery engine takes it; validation has
 /// already bounded `ra_interval_secs`.
 #[cfg(target_os = "linux")]
-fn unnumbered_discovery_config(config: &Config) -> ra_discovery::DiscoveryConfig {
+pub(crate) fn unnumbered_discovery_config(config: &Config) -> ra_discovery::DiscoveryConfig {
     let unnumbered = config.global.unnumbered.clone().unwrap_or_default();
     ra_discovery::DiscoveryConfig {
         send: unnumbered.router_advertisements.unwrap_or(true),

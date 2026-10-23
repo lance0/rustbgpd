@@ -54,15 +54,6 @@ pub(crate) fn check(config: &Config) -> usize {
 pub(crate) fn spawn(
     mut accepted: watch::Receiver<Arc<AcceptedConfigSnapshot>>,
 ) -> tokio_util::task::AbortOnDropHandle<()> {
-    // Discovery is startup-owned; reload publishes desired entries before restart.
-    let interface_only = Arc::new(
-        accepted
-            .borrow()
-            .config_ref()
-            .neighbors
-            .interface_only()
-            .to_vec(),
-    );
     tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let mut previous = Findings::new();
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -72,16 +63,11 @@ pub(crate) fn spawn(
                 _ = interval.tick() => {}
                 changed = accepted.changed() => { if changed.is_err() { return; } }
             }
+            // Interface-only neighbors follow reload, so the accepted
+            // snapshot carries the set that is running.
             let snapshot = Arc::clone(&accepted.borrow_and_update());
-            let interface_only = Arc::clone(&interface_only);
             let Ok(current) = tokio::task::spawn_blocking(move || {
-                inspect_neighbors(
-                    snapshot
-                        .config_ref()
-                        .neighbors
-                        .iter()
-                        .chain(interface_only.iter()),
-                )
+                inspect_neighbors(snapshot.config_ref().neighbors.all())
             })
             .await
             else {

@@ -51,12 +51,13 @@ use tracing::{error, info, warn};
 
 use crate::config::{
     AcceptedConfigSnapshot, Config, EffectiveNeighborImpactKind, Neighbor,
-    TRANSACTION_DYNAMIC_SECTION, TRANSACTION_FIB_SECTION, TRANSACTION_NEIGHBOR_ADD_SECTION,
-    TRANSACTION_NEIGHBOR_DELETE_SECTION, TRANSACTION_NEIGHBOR_MODIFY_SECTION,
-    TRANSACTION_PEER_GROUP_CATALOG_SECTION, TRANSACTION_POLICY_DEFINITIONS_SECTION,
-    TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION, TRANSACTION_POLICY_LIVE_IMPACT_SECTION,
-    TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION, TRANSACTION_SESSION_RESHAPE_SECTION, diff_config,
-    diff_neighbors, normalized_discard_path_attributes,
+    TRANSACTION_DYNAMIC_SECTION, TRANSACTION_FIB_SECTION, TRANSACTION_INTERFACE_ONLY_SECTION,
+    TRANSACTION_NEIGHBOR_ADD_SECTION, TRANSACTION_NEIGHBOR_DELETE_SECTION,
+    TRANSACTION_NEIGHBOR_MODIFY_SECTION, TRANSACTION_PEER_GROUP_CATALOG_SECTION,
+    TRANSACTION_POLICY_DEFINITIONS_SECTION, TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION,
+    TRANSACTION_POLICY_LIVE_IMPACT_SECTION, TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION,
+    TRANSACTION_SESSION_RESHAPE_SECTION, diff_config, diff_neighbors,
+    normalized_discard_path_attributes,
 };
 use crate::fib_table_control::{
     FibTableControlDeps, FibTransactionReplaceOutcome, read_current_tables,
@@ -3238,6 +3239,7 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
                 .any(|s| s == TRANSACTION_POLICY_LIVE_IMPACT_SECTION)
                 && sections.iter().all(|s| {
                     s == TRANSACTION_POLICY_LIVE_IMPACT_SECTION
+                        || s == TRANSACTION_INTERFACE_ONLY_SECTION
                         || s == TRANSACTION_PEER_GROUP_CATALOG_SECTION
                         || s == TRANSACTION_POLICY_DEFINITIONS_SECTION
                         || s == TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
@@ -3252,6 +3254,7 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
                 .any(|s| s == TRANSACTION_SESSION_RESHAPE_SECTION)
                 && sections.iter().all(|s| {
                     s == TRANSACTION_SESSION_RESHAPE_SECTION
+                        || s == TRANSACTION_INTERFACE_ONLY_SECTION
                         || s == TRANSACTION_PEER_GROUP_CATALOG_SECTION
                         || s == TRANSACTION_POLICY_DEFINITIONS_SECTION
                         || s == TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
@@ -3265,6 +3268,7 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
             if !sections.is_empty()
                 && sections.iter().all(|s| {
                     s == TRANSACTION_PEER_GROUP_CATALOG_SECTION
+                        || s == TRANSACTION_INTERFACE_ONLY_SECTION
                         || s == TRANSACTION_POLICY_DEFINITIONS_SECTION
                         || s == TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
                         || s == TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION

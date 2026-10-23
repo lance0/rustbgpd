@@ -68,6 +68,10 @@ mod unnumbered {
 
     pub(crate) enum Unnumbered {}
     pub(crate) enum DiscoveryEvent {}
+    #[derive(Default)]
+    pub(crate) struct UnnumberedRuntime {
+        pub(crate) config_due: bool,
+    }
 
     impl Unnumbered {
         pub(super) async fn shutdown(self) {
@@ -108,6 +112,9 @@ mod unnumbered {
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
+        pub(super) fn unnumbered_preflight(&self, _: &crate::config::Config) -> Result<(), String> {
+            Ok(())
+        }
         pub(super) fn interface_only_port_at(&self, _: u32) -> Option<String> {
             None
         }
@@ -121,7 +128,7 @@ mod unnumbered {
         }
     }
 }
-pub(crate) use unnumbered::Unnumbered;
+pub(crate) use unnumbered::{Unnumbered, UnnumberedRuntime};
 #[cfg(test)]
 pub(crate) mod test_support;
 mod update_group_plan;
@@ -688,6 +695,9 @@ pub struct PeerManager {
     /// ADR-0142 interface-only neighbors: Router Advertisement discovery and
     /// the peers created for its bindings. `None` when none is configured.
     unnumbered: Option<Box<Unnumbered>>,
+    /// Whether the configured interface-only set needs reconciling, and how
+    /// discovery opens when the first one arrives at runtime.
+    unnumbered_runtime: UnnumberedRuntime,
     /// Per-process key for the optimistic config-transaction snapshot token.
     /// Seeded once at construction; never leaves the process. Keeps the token
     /// from acting as an offline oracle for config secrets. See
@@ -871,6 +881,7 @@ impl PeerManager {
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
         self.conditional_reconcile_pending = true;
+        self.unnumbered_runtime.config_due = true;
         previous
     }
 
@@ -1370,6 +1381,7 @@ impl PeerManager {
             bfd_coupling: None,
             link_check: link_failover::LinkCheckDelivery::default(),
             unnumbered: None,
+            unnumbered_runtime: UnnumberedRuntime::default(),
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             accepted_rx: None,
             #[cfg(test)]

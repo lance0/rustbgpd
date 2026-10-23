@@ -248,6 +248,11 @@ impl PeerManager {
         actions: Vec<ReloadPeerAction>,
         datasets: PreparedDatasetGeneration,
     ) -> ReloadGenerationOutcome {
+        // ADR-0142: refused before any effect, naming CAP_NET_RAW or the
+        // duplicate address.
+        if let Err(error) = self.unnumbered_preflight(&candidate) {
+            return ReloadGenerationOutcome::RejectedNoEffect(error);
+        }
         let prepared = match self.prepare_bfd_reload(&candidate) {
             Ok(prepared) => prepared,
             Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),

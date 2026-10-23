@@ -2145,7 +2145,7 @@ impl PeerManager {
 
     /// Release a handle the RIB never learned of (a refused add). Queued
     /// behind anything a session might have sent, like a deletion's release.
-    async fn release_unused_rib_peer(&mut self, peer: PeerId) {
+    pub(super) async fn release_unused_rib_peer(&mut self, peer: PeerId) {
         if self
             .send_rib_update(
                 RibUpdate::ReleasePeer { peer },

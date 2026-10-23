@@ -243,11 +243,25 @@ impl NeighborList {
             .find(|neighbor| neighbor.interface.as_deref() == Some(interface))
     }
 
-    /// Take `running`'s interface-only neighbors and their positions
-    /// (reload pins them).
-    pub fn pin_interface_only(&mut self, running: &Self) {
-        self.interface_only.clone_from(&running.interface_only);
-        self.anchors.clone_from(&running.anchors);
+    /// Replace, add or (with `None`) remove the interface-only neighbor on
+    /// `interface`. An added entry goes after every addressed entry.
+    pub fn set_interface_only(&mut self, interface: &str, neighbor: Option<Neighbor>) {
+        let index = self
+            .interface_only
+            .iter()
+            .position(|entry| entry.interface.as_deref() == Some(interface));
+        match (index, neighbor) {
+            (Some(index), Some(neighbor)) => self.interface_only[index] = neighbor,
+            (Some(index), None) => {
+                self.interface_only.remove(index);
+                self.anchors.remove(index);
+            }
+            (None, Some(neighbor)) => {
+                self.anchors.push(self.addressed.len());
+                self.interface_only.push(neighbor);
+            }
+            (None, None) => {}
+        }
     }
 
     /// Every entry in configuration order.
@@ -351,12 +365,7 @@ impl JsonSchema for NeighborList {
 /// neighbor; policy chains still follow live.
 #[must_use]
 pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<&'a str> {
-    let session = |config: &Config, neighbor: &Neighbor| {
-        config
-            .resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
-            .ok()
-            .map(bind_time_projection)
-    };
+    let session = |config: &Config, neighbor: &Neighbor| config.bind_time_settings(neighbor);
     new.neighbors
         .interface_only()
         .iter()
@@ -373,7 +382,7 @@ pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<
 /// all of it except the policy chains, which follow a reload live.
 /// Destructured without `..`, so a new resolved field must be classified
 /// here before it compiles.
-type BindTimeProjection = (
+pub(crate) type BindTimeProjection = (
     rustbgpd_transport::TransportConfig,
     Option<String>,
     Option<u32>,
@@ -404,8 +413,8 @@ fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
 }
 
 /// Interface-only neighbors (compared by interface, so reordering is not a
-/// change), their resolved session settings, or `[global.unnumbered]`
-/// differ: restart-required.
+/// change) or their resolved session settings differ. Reload, transactions
+/// and the peer manager apply these live.
 #[must_use]
 pub fn interface_only_neighbors_changed(old: &Config, new: &Config) -> bool {
     fn by_interface(config: &Config) -> std::collections::BTreeMap<Option<&str>, &Neighbor> {
@@ -416,9 +425,48 @@ pub fn interface_only_neighbors_changed(old: &Config, new: &Config) -> bool {
             .map(|neighbor| (neighbor.interface.as_deref(), neighbor))
             .collect()
     }
+    by_interface(old) != by_interface(new) || !interface_only_session_changes(old, new).is_empty()
+}
+
+/// `[global.unnumbered]` differs. The discovery actor takes its RA template
+/// and timing when it starts, so this stays restart-required.
+#[must_use]
+pub fn unnumbered_settings_changed(old: &Config, new: &Config) -> bool {
     old.global.unnumbered != new.global.unnumbered
-        || by_interface(old) != by_interface(new)
-        || !interface_only_session_changes(old, new).is_empty()
+}
+
+/// Keep `current`'s version of every interface-only neighbor whose
+/// effective `tcp_mss` (its own or its peer group's) would change: the
+/// listener and active-open sockets take the clamp only when created.
+/// Returns the interfaces kept. Run after the static `tcp_mss` pin, which
+/// already holds every peer group's `tcp_mss` at its running value.
+pub(crate) fn pin_interface_only_tcp_mss(new: &mut Config, current: &Config) -> Vec<String> {
+    let effective = |config: &Config, interface: &str| {
+        let neighbor = config.neighbors.interface_only_on(interface)?;
+        neighbor.tcp_mss.or_else(|| {
+            neighbor
+                .peer_group
+                .as_ref()
+                .and_then(|name| config.peer_groups.get(name))
+                .and_then(|group| group.tcp_mss)
+        })
+    };
+    let interfaces: std::collections::BTreeSet<String> = current
+        .neighbors
+        .interface_only()
+        .iter()
+        .chain(new.neighbors.interface_only())
+        .filter_map(|neighbor| neighbor.interface.clone())
+        .collect();
+    let mut pinned = Vec::new();
+    for interface in interfaces {
+        if effective(current, &interface) != effective(new, &interface) {
+            let running = current.neighbors.interface_only_on(&interface).cloned();
+            new.neighbors.set_interface_only(&interface, running);
+            pinned.push(interface);
+        }
+    }
+    pinned
 }
 
 fn invalid(neighbor: &Neighbor, field: &str, reason: &str) -> ConfigError {
@@ -626,6 +674,15 @@ impl Config {
             .clone();
         bound.address = address;
         Some(Cow::Owned(bound))
+    }
+
+    /// What a bound peer of `neighbor` takes from its resolution only when it
+    /// binds, independent of the learned address. `None` when the neighbor
+    /// does not resolve.
+    pub(crate) fn bind_time_settings(&self, neighbor: &Neighbor) -> Option<BindTimeProjection> {
+        self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
+            .ok()
+            .map(bind_time_projection)
     }
 
     /// Interface-only neighbors resolved with a placeholder link-local
