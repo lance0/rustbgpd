@@ -80,6 +80,7 @@ STABLE_FIXTURE_ROLES = {
     "route-server": V1_UPGRADE_HISTORY_ORIGIN,
     "route-reflector": V1_UPGRADE_HISTORY_ORIGIN,
     "rr-evpn-fabric": (0, 79, 0),
+    "flowspec-controller": V1_UPGRADE_HISTORY_ORIGIN,
 }
 FIXTURE_VALIDATION_LINKAGE = (
     (f'"{INVENTORY_PATH.relative_to(ROOT)}"', "read the stable-surface inventory"),
@@ -1950,7 +1951,7 @@ def check_archived_fixture_directory_selftests() -> None:
             lambda: check_archived_fixture_directories(
                 root, set(), lambda _tag, path: carried(_tag, path) and b"drifted"
             ),
-            f"{tag}/route-reflector/config.toml does not match",
+            f"{tag}/{min(STABLE_FIXTURE_ROLES)}/config.toml does not match",
             "unexercised fixture bytes drifted from the tag",
         )
         (root / tag / "route-server" / "stray.rpol").write_bytes(b"untagged")
@@ -1967,6 +1968,7 @@ def check_archived_fixture_directory_selftests() -> None:
             f"{tag} carries examples/route-reflector/config.toml but",
             "tag carries a stable role example with no archived fixture",
         )
+
         def without_rr(_tag: str, path: str) -> bytes | None:
             return None if "route-reflector" in path else carried(_tag, path)
 
@@ -1985,6 +1987,30 @@ def check_archived_fixture_directory_selftests() -> None:
             f"{owed} carries examples/rr-evpn-fabric/config.toml but",
             "owed EVPN reflector release with no archived fixture",
         )
+
+    # Every role, at a release that owes all of them: an edited or a missing
+    # fixture fails and names that role.
+    owed = f"v{'.'.join(map(str, max(STABLE_FIXTURE_ROLES.values())))}"
+    for role in STABLE_FIXTURE_ROLES:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            for each in STABLE_FIXTURE_ROLES:
+                (root / owed / each).mkdir(parents=True)
+                (root / owed / each / "config.toml").write_bytes(b"tagged")
+            check_archived_fixture_directories(root, set(), carried)
+            (root / owed / role / "config.toml").write_bytes(b"edited")
+            expect_checker_failure(
+                lambda root=root: check_archived_fixture_directories(root, set(), carried),
+                f"{owed}/{role}/config.toml does not match",
+                f"edited {role} fixture",
+            )
+            (root / owed / role / "config.toml").unlink()
+            (root / owed / role).rmdir()
+            expect_checker_failure(
+                lambda root=root: check_archived_fixture_directories(root, set(), carried),
+                f"{owed} carries examples/{role}/config.toml but",
+                f"missing {role} fixture",
+            )
 
 
 def check_fixture_validation_linkage(test_region: str, test: str) -> None:

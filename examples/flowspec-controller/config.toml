@@ -1,0 +1,56 @@
+# FlowSpec controller backend
+#
+# rustbgpd as the BGP speaker behind a mitigation controller. The controller
+# owns the desired rules and injects them over gRPC; rustbgpd originates them
+# as IPv4/IPv6 FlowSpec (RFC 8955 / RFC 8956) to the border routers, which
+# enforce them in their own dataplane.
+#
+#   detection -> controller -> rustbgpd (gRPC) -> border routers (iBGP FlowSpec)
+#
+# The controller uses three RPCs:
+#   InjectionService.AddFlowSpec     upsert a rule; CREATED / REPLACED / UNCHANGED
+#   InjectionService.DeleteFlowSpec  remove a rule; DELETED / NOT_FOUND
+#   RibService.ListFlowSpecRoutes    selected rules, retained local intent
+#                                    (received_peer_address = "0.0.0.0"), or
+#                                    what a border router was sent
+#                                    (advertised_peer_address)
+#
+# Keep the desired rules in the controller, not here: after a daemon restart,
+# upgrade, or rollback, re-inject them and confirm with ListFlowSpecRoutes.
+# See the FlowSpec controller boundary in docs/reference/v1-stable-contract.md.
+#
+# The sessions carry only FlowSpec; the border routers learn unicast routes
+# elsewhere. Receive-side FlowSpec validation on this speaker is a separate
+# opt-in and is not configured here.
+
+[global]
+asn = 64512
+router_id = "192.0.2.1"
+listen_port = 179
+# RFC 8212 posture, stated rather than inherited. It governs eBGP sessions
+# only; the iBGP sessions below are unaffected.
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# The controller connects to the implicit owner-only socket at
+# <runtime_state_dir>/grpc.sock. Filesystem ownership authenticates the
+# implicit local-operator identity, whose operator tier can inject rules.
+
+# --- Border routers (iBGP, FlowSpec only) ---
+
+[[neighbors]]
+address = "192.0.2.11"
+remote_asn = 64512
+description = "border-01"
+hold_time = 90
+families = ["ipv4_flowspec", "ipv6_flowspec"]
+
+[[neighbors]]
+address = "192.0.2.12"
+remote_asn = 64512
+description = "border-02"
+hold_time = 90
+families = ["ipv4_flowspec", "ipv6_flowspec"]

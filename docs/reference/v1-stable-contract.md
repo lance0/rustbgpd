@@ -610,10 +610,11 @@ The `route-reflector-evpn` role is archived from `examples/rr-evpn-fabric/`
 starting at `v0.79.0`, the release current when that role was frozen for 1.0;
 earlier tags carried the example but owe no fixture for it.
 
-The `flowspec-controller` role has no configuration fixture. Its frozen surface
-is the inventoried gRPC method sets, which the checker pins by signature and
-message-graph digest, plus the `ipv4_flowspec` / `ipv6_flowspec` family labels,
-which it checks against the wire crate's configured-family table.
+The `flowspec-controller` role is archived from `examples/flowspec-controller/`,
+from the first release that ships it: neighbors that carry only
+`ipv4_flowspec` / `ipv6_flowspec`, with no keys outside the inventory. Its
+gRPC surface is pinned separately, by the signature and message-graph digests
+of the inventoried method sets.
 
 ## Release gate
 

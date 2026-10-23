@@ -1725,7 +1725,7 @@ must also verify the documented response acknowledgement before using rows.
 
 ## Sample profiles
 
-The repo ships ten config profiles, plus a Docker Compose quick-start, under
+The repo ships eleven config profiles, plus a Docker Compose quick-start, under
 [`examples/`](../../examples) covering the standard deployment
 shapes. Pick the closest match, copy, edit:
 
@@ -1739,6 +1739,7 @@ shapes. Pick the closest match, copy, edit:
 | EVPN VTEP leaf | [`examples/evpn-vtep-leaf/config.toml`](../../examples/evpn-vtep-leaf/config.toml) | Bidirectional VTEP: kernel FDB → Type 2 origination. |
 | EVPN RR fabric | [`examples/rr-evpn-fabric/config.toml`](../../examples/rr-evpn-fabric/config.toml) | Route Reflector mode, stateless EVI (no `[[evpn_instances]]`). |
 | Route collector | [`examples/route-collector/config.toml`](../../examples/route-collector/config.toml) | Passive listener, MRT dumps, BMP export. |
+| FlowSpec controller | [`examples/flowspec-controller/config.toml`](../../examples/flowspec-controller/config.toml) | gRPC-driven IPv4/IPv6 FlowSpec origination to border routers over FlowSpec-only iBGP sessions. |
 | DDoS mitigation | [`examples/ddos-mitigation/config.toml`](../../examples/ddos-mitigation/config.toml) | FlowSpec injection + RTBH (RFC 7999 BLACKHOLE). |
 | Hosting provider | [`examples/hosting-provider/config.toml`](../../examples/hosting-provider/config.toml) | iBGP injector for customer-prefix automation. |
 | Docker Compose | [`examples/docker-compose/`](../../examples/docker-compose/docker-compose.yml) | Quick-start with an FRR peer (gRPC on TCP). |
