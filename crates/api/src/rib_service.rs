@@ -2827,13 +2827,15 @@ impl proto::rib_service_server::RibService for RibService {
                 peer: self.rib_peer(key),
                 path_id: source.path_id,
             });
+        // The handle the query sent: the roster can change during the read.
+        let source_peer = source.as_ref().map(|source| source.peer);
         let explain = self
             .query_explain_advertised_route(peer, prefix, rd, req.labeled, source)
             .await?;
         // The explained source route records its scope; a selector naming
         // another interface does not identify it.
         if let Some(key) = &source_key
-            && explain.route_peer == Some(self.rib_peer(key))
+            && explain.route_peer == source_peer
             && explain.route_peer_interface.as_deref() != key.interface.as_deref()
         {
             return Err(Status::not_found(format!(

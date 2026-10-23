@@ -1381,10 +1381,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 .then_with(|| left.interface.cmp(&right.interface))
         });
 
+        // Resolved once: the roster can be republished during the RIB read,
+        // and the reply answers the handles this request sent.
+        let peers: Vec<PeerId> = infos.iter().map(|info| self.rib_peer(info)).collect();
         let snapshots = query_neighbor_rib_snapshots(
             &self.rib_tx,
             self.rib_summary_tx.as_ref(),
-            infos.iter().map(|info| self.rib_peer(info)).collect(),
+            peers.clone(),
             None,
             // Down dynamic neighbors whose routes are still retained.
             true,
@@ -1397,8 +1400,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         }
 
         let mut neighbors = Vec::with_capacity(infos.len());
-        for (info, snapshot) in infos.iter().zip(snapshots.snapshots) {
-            if snapshot.peer != self.rib_peer(info) {
+        for ((info, peer), snapshot) in infos.iter().zip(peers).zip(snapshots.snapshots) {
+            if snapshot.peer != peer {
                 return Err(Status::internal(
                     "RIB snapshot did not preserve requested neighbor order",
                 ));
@@ -1508,13 +1511,15 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .ok_or_else(|| missing_peer(compare_peer))?;
         }
 
+        // Resolved once, as in `list_neighbors`.
+        let rib_peer = self.rib_peer(&info);
         let comparison_pair = compare_peer
             .as_ref()
-            .map(|compare_peer| (self.rib_peer(&info), self.rib_peer_for(compare_peer)));
+            .map(|compare_peer| (rib_peer, self.rib_peer_for(compare_peer)));
         let snapshots = query_neighbor_rib_snapshots(
             &self.rib_tx,
             self.rib_summary_tx.as_ref(),
-            vec![self.rib_peer(&info)],
+            vec![rib_peer],
             comparison_pair,
             false,
         )
@@ -1528,7 +1533,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .snapshots
             .into_iter()
             .next()
-            .filter(|snapshot| snapshot.peer == self.rib_peer(&info))
+            .filter(|snapshot| snapshot.peer == rib_peer)
             .ok_or_else(|| Status::internal("RIB snapshot did not include requested neighbor"))?;
         let mut state = peer_info_to_proto(&info);
         apply_rib_snapshot(&mut state, &snapshot);
@@ -5619,5 +5624,98 @@ mod tests {
         );
         discard.await.unwrap();
         assert!(terminal.try_recv().is_err(), "a clean owner never fences");
+    }
+
+    fn roster_peer(address: IpAddr, peer: PeerId) -> crate::import_roster::ImportRosterPeer {
+        crate::import_roster::ImportRosterPeer {
+            key: PeerKey::new(address, None),
+            session_id: 1,
+            publication: tokio::sync::watch::channel(None).1,
+            rib_peer: rustbgpd_transport::RibPeerSlot::assigned(peer),
+        }
+    }
+
+    /// A roster republished while the RIB read is in flight (the neighbor
+    /// deleted and re-added) does not turn a correctly ordered reply into
+    /// `INTERNAL`: each reply is checked against the handles its request
+    /// sent, not a fresh roster lookup.
+    #[tokio::test]
+    async fn snapshots_are_checked_against_the_handles_the_request_sent() {
+        let address: IpAddr = "10.0.0.1".parse().unwrap();
+        let allocate = move || PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(address, None));
+        let before = allocate();
+        let mut publisher = crate::import_roster::test_support::publisher(
+            vec![roster_peer(address, before)],
+            Vec::new(),
+        );
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None)
+            .with_peer_roster(publisher.reader());
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::ListPeers { reply } => {
+                        reply.send(vec![peer_info(address)]).unwrap();
+                    }
+                    PeerManagerCommand::GetPeerState { reply, .. } => {
+                        reply.send(Some(peer_info(address))).unwrap();
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let rib_task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let Some(RibUpdate::QueryNeighborRibSnapshots { peers, reply, .. }) =
+                    rib_rx.recv().await
+                else {
+                    panic!("expected an aggregate RIB snapshot");
+                };
+                assert_eq!(peers.len(), 1);
+                assert_ne!(peers[0], PeerId::UNASSIGNED);
+                // The neighbor is replaced before the reply arrives.
+                publisher.publish(vec![roster_peer(address, allocate())], Vec::new().into());
+                let snapshots = peers
+                    .into_iter()
+                    .map(|peer| NeighborRibSnapshot {
+                        peer,
+                        advertised_count: 0,
+                        policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
+                        outbound: rustbgpd_rib::PeerOutboundState {
+                            update_group: String::new(),
+                            effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                            selection_deferral: vec![],
+                            outbound_prefix_limits: vec![],
+                        },
+                        remote_asn: None,
+                        gr_retention: Vec::new(),
+                        outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
+                    })
+                    .collect();
+                reply
+                    .send(NeighborRibSnapshotResponse {
+                        snapshots,
+                        retained: Vec::new(),
+                        comparison: None,
+                    })
+                    .unwrap();
+            }
+            publisher
+        });
+
+        let listed = svc
+            .list_neighbors(Request::new(proto::ListNeighborsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.neighbors.len(), 1);
+        svc.get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+            address: address.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+        drop(rib_task.await.unwrap());
     }
 }
