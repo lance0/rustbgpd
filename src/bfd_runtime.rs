@@ -575,7 +575,7 @@ mod linux {
     };
     use rustbgpd_telemetry::BgpMetrics;
     use socket2::{Domain, Protocol, Socket, Type};
-    use tokio::io::unix::AsyncFd;
+    use tokio::io::Interest;
     use tokio::net::UdpSocket;
     use tokio::sync::{broadcast, mpsc, oneshot, watch};
     use tokio::time::Instant;
@@ -621,7 +621,7 @@ mod linux {
     /// acquisition part of daemon startup instead of an eventually logged
     /// background failure.
     struct FamilySockets {
-        rx: AsyncFd<std::net::UdpSocket>,
+        rx: UdpSocket,
         tx: UdpSocket,
     }
 
@@ -639,7 +639,7 @@ mod linux {
 
         fn open_on(v6: bool, port: u16, source: Option<IpAddr>) -> std::io::Result<Self> {
             Ok(Self {
-                rx: AsyncFd::new(rx_socket(v6, port)?)?,
+                rx: UdpSocket::from_std(rx_socket(v6, port)?)?,
                 tx: UdpSocket::from_std(tx_socket(v6, source)?)?,
             })
         }
@@ -902,7 +902,7 @@ mod linux {
 
     /// The receive and transmit halves of one family's socket pair (`None`
     /// for an unopened family).
-    type FamilyHalves = (Option<AsyncFd<std::net::UdpSocket>>, Option<UdpSocket>);
+    type FamilyHalves = (Option<UdpSocket>, Option<UdpSocket>);
 
     /// Split one mode's per-family socket pairs into `(IPv4, IPv6)` halves.
     fn split_sockets(sockets: Option<RuntimeSockets>) -> (FamilyHalves, FamilyHalves) {
@@ -923,19 +923,15 @@ mod linux {
     /// can refuse a session reached through the other mode's socket.
     async fn service_rx(
         actor: &mut Actor,
-        guard: std::io::Result<tokio::io::unix::AsyncFdReadyGuard<'_, std::net::UdpSocket>>,
+        ready: std::io::Result<&UdpSocket>,
         multihop: bool,
         metrics: &BgpMetrics,
         status_tx: &watch::Sender<Vec<BfdStatus>>,
     ) {
-        let Ok(mut g) = guard else {
+        let Ok(rx) = ready else {
             return;
         };
-        let (pkts, drained) = drain_socket(g.get_inner().as_raw_fd(), RECV_BUDGET, multihop);
-        if drained {
-            g.clear_ready();
-        }
-        for packet in pkts {
+        for packet in drain_ready(rx, multihop) {
             actor.on_packet(packet, metrics, status_tx).await;
         }
     }
@@ -986,7 +982,7 @@ mod linux {
         // and desired-set changes always win, due timers beat pending packets
         // (a garbage flood must not delay detection timeouts), and each receive
         // arm reads at most `RECV_BUDGET` datagrams before the loop re-selects
-        // (`clear_ready` is skipped when the budget ran out, so a still-loaded
+        // (readiness is kept when the budget ran out, so a still-loaded
         // socket is picked up again on the very next turn).
         // ponytail: a sustained flood on an earlier rx arm can delay the later
         // ones (biased arm order: single-hop v4, v6, then multihop v4, v6);
@@ -1052,13 +1048,29 @@ mod linux {
     /// Await readability of a receive socket, or pend forever when the family
     /// was not opened (no configured session) — so an absent family simply
     /// never fires its `select!` arm.
-    async fn readable_or_pending(
-        rx: Option<&AsyncFd<std::net::UdpSocket>>,
-    ) -> std::io::Result<tokio::io::unix::AsyncFdReadyGuard<'_, std::net::UdpSocket>> {
+    async fn readable_or_pending(rx: Option<&UdpSocket>) -> std::io::Result<&UdpSocket> {
         match rx {
-            Some(fd) => fd.readable().await,
+            Some(socket) => socket.readable().await.map(|()| socket),
             None => std::future::pending().await,
         }
+    }
+
+    /// Read up to `RECV_BUDGET` datagrams from a readable socket. Readiness
+    /// is cleared only when the socket is drained (the closure reports
+    /// `WouldBlock`); a budget-limited read keeps it set so the next turn
+    /// resumes reading.
+    fn drain_ready(rx: &UdpSocket, multihop: bool) -> Vec<ReceivedPacket> {
+        let mut pkts = Vec::new();
+        let _ = rx.try_io(Interest::READABLE, || {
+            let (read, drained) = drain_socket(rx.as_raw_fd(), RECV_BUDGET, multihop);
+            pkts = read;
+            if drained {
+                Err(std::io::ErrorKind::WouldBlock.into())
+            } else {
+                Ok(())
+            }
+        });
+        pkts
     }
 
     impl Actor {
@@ -1818,7 +1830,6 @@ mod linux {
         use std::collections::HashMap;
         use std::net::{IpAddr, SocketAddr, SocketAddrV6};
         use std::os::fd::AsRawFd;
-        use tokio::io::unix::AsyncFd;
         use tokio::time::Instant;
 
         /// Open a real loopback socket pair for one family on ephemeral ports
@@ -1831,12 +1842,12 @@ mod linux {
             let tx = std::net::UdpSocket::bind(addr)?;
             tx.set_nonblocking(true)?;
             Ok(FamilySockets {
-                rx: AsyncFd::new(rx)?,
+                rx: tokio::net::UdpSocket::from_std(rx)?,
                 tx: tokio::net::UdpSocket::from_std(tx)?,
             })
         }
 
-        /// Current-thread runtime whose reactor backs `AsyncFd`/`UdpSocket`
+        /// Current-thread runtime whose reactor backs `UdpSocket`
         /// registration in the tests that open real sockets.
         fn io_runtime() -> tokio::runtime::Runtime {
             tokio::runtime::Builder::new_current_thread()
@@ -2567,6 +2578,39 @@ mod linux {
             let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 64, false);
             assert!(pkts.is_empty());
             assert!(drained, "second turn drains the remainder");
+        }
+
+        /// The registered receive socket wakes on a datagram and keeps its
+        /// reactor readiness after a budget-limited read: readiness is
+        /// edge-triggered, so clearing it with datagrams still queued would
+        /// strand them until the next arrival.
+        #[tokio::test]
+        async fn receive_readiness_is_kept_until_the_socket_drains() {
+            use std::time::Duration;
+            let sockets = loopback_family_sockets(false).expect("sockets");
+            let rx = &sockets.rx;
+            let dst = rx.local_addr().expect("addr");
+            let tx = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind tx");
+            for _ in 0..=super::RECV_BUDGET {
+                tx.send_to(&[0u8; 24], dst).expect("send");
+            }
+            let first =
+                tokio::time::timeout(Duration::from_secs(5), super::readable_or_pending(Some(rx)))
+                    .await
+                    .expect("queued datagrams wake the receive socket")
+                    .expect("readable");
+            assert!(super::drain_ready(first, false).is_empty(), "garbage");
+            tokio::time::timeout(Duration::ZERO, rx.readable())
+                .await
+                .expect("budget-limited read keeps readiness")
+                .expect("readable");
+            assert!(super::drain_ready(rx, false).is_empty());
+            assert!(
+                tokio::time::timeout(Duration::ZERO, rx.readable())
+                    .await
+                    .is_err(),
+                "a drained socket clears readiness"
+            );
         }
 
         fn control_packet(my_discriminator: u32) -> ControlPacket {

@@ -291,6 +291,20 @@ fn set_icmp6_filter(socket: &Socket) -> io::Result<()> {
     }
 }
 
+/// Register an opened socket with the reactor.
+#[allow(
+    unsafe_code,
+    reason = "tokio exposes AsyncFd registration only as an unsafe I/O-safety contract"
+)]
+fn register(socket: Socket) -> io::Result<AsyncFd<Socket>> {
+    // SAFETY: `Socket` owns its fd, so `as_raw_fd` returns the same open
+    // descriptor until the socket is dropped, and `AsyncFd` drops it only
+    // after deregistering. The `AsyncFd` is held only behind an `Arc`, so
+    // no `get_mut`/`into_inner` can close or replace the socket, and the
+    // fd is never duplicated or closed through a raw handle elsewhere.
+    unsafe { AsyncFd::register(socket) }.map_err(io::Error::from)
+}
+
 struct Received {
     ifindex: u32,
     /// The engine's link generation the socket was opened under.
@@ -591,7 +605,7 @@ impl Actor {
                 continue;
             }
             let failures = previous.map_or(0, |r| r.failures);
-            match (self.opener)(&name, ifindex).and_then(AsyncFd::new) {
+            match (self.opener)(&name, ifindex).and_then(register) {
                 Ok(socket) => {
                     self.open_retries.remove(&name);
                     let socket = Arc::new(socket);
@@ -1064,5 +1078,45 @@ mod tests {
             actor.counters.socket_open_failures.load(Ordering::Relaxed),
             3
         );
+    }
+
+    /// An opened socket is registered with the reactor: a datagram arriving
+    /// on it wakes the reader task, which queues it for the actor tagged
+    /// with the link it was opened under.
+    #[tokio::test]
+    async fn opened_socket_delivers_datagrams_to_the_actor() {
+        let socket = Socket::new(Domain::IPV6, Type::DGRAM, None).expect("socket");
+        socket
+            .bind(&"[::1]:0".parse::<std::net::SocketAddr>().unwrap().into())
+            .expect("bind");
+        socket.set_nonblocking(true).expect("nonblocking");
+        let dst = socket.local_addr().unwrap().as_socket().unwrap();
+        let mut socket = Some(socket);
+        let opener = move |_: &str, _: u32| Ok(socket.take().expect("opened once"));
+        let (mut actor, _events, mut received) =
+            Actor::new(DiscoveryConfig::default(), 1, Box::new(opener));
+        let now = Instant::now();
+        actor.engine.start("x");
+        actor.engine.on_link(
+            &LinkEvent {
+                ifindex: 9,
+                name: "x".into(),
+                state: LinkState::Unknown,
+            },
+            now,
+        );
+        actor.open_sockets(now);
+        assert!(actor.sockets.contains_key("x"));
+
+        let tx = std::net::UdpSocket::bind("[::1]:0").expect("bind tx");
+        tx.send_to(b"ra", dst).expect("send");
+        let packet = tokio::time::timeout(Duration::from_secs(5), received.recv())
+            .await
+            .expect("reader woke on the datagram")
+            .expect("reader alive");
+        assert_eq!(packet.ifindex, 9);
+        assert_eq!(packet.generation, actor.sockets["x"].generation);
+        assert_eq!(packet.source, Ipv6Addr::LOCALHOST);
+        assert_eq!(packet.payload, b"ra");
     }
 }
