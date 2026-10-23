@@ -5942,6 +5942,8 @@ impl RibManager {
         let mut resync_armed = false;
         let mut query_rx_open = true;
         let mut primary_run = PrimaryRunBudget::default();
+        // Start of the primary work admitted since the last prestage slice.
+        let mut prestage_primary_since: Option<std::time::Instant> = None;
 
         // A deferred attribute sweep must also run when UPDATE traffic stops.
         let attr_gc_sleep = tokio::time::sleep(ATTR_INTERN_GC_INTERVAL);
@@ -6304,21 +6306,33 @@ impl RibManager {
                 continue;
             }
 
-            // Unfenced destination pre-staging: advance one budgeted slice
-            // only when no ordinary mutation traffic is queued, so churn
-            // keeps flowing (and keeps already-staged prefixes current)
-            // between slices. Readiness and a bounded query budget are
-            // served every iteration, mirroring the paced-flush seams.
+            // Unfenced destination pre-staging: queued mutation traffic goes
+            // first, so churn keeps flowing (and keeps already-staged
+            // prefixes current) between slices. That priority is bounded:
+            // once primary work has held the actor for one flush budget
+            // since the last slice, the next slice runs at a route-batch
+            // boundary even with updates still queued. Steady churn that
+            // never empties the queue would otherwise starve the walk past
+            // the caller's reply deadline and push the full staging walk
+            // back under the transition fence. Readiness and a bounded
+            // query budget are served every iteration, mirroring the
+            // paced-flush seams.
             if self.pending_destination_prestage.is_some() {
-                if self.drain_ready_updates().await {
+                let primary_since =
+                    *prestage_primary_since.get_or_insert_with(std::time::Instant::now);
+                let slice_owed = primary_since.elapsed() >= self.flush_poll_budget
+                    && self.pending_route_batches.is_empty();
+                if !slice_owed && self.drain_ready_updates().await {
                     continue;
                 }
+                prestage_primary_since = None;
                 self.drain_readiness_queries(None);
                 self.advance_destination_prestage();
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
                 continue;
             }
+            prestage_primary_since = None;
 
             // Deferred outbound registrations (LAN-475): complete one
             // initial table dump per iteration, and only after every queued

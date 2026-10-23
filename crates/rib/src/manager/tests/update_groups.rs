@@ -8210,6 +8210,118 @@ async fn discarded_prepared_destination_is_removed() {
     handle.await.unwrap();
 }
 
+/// Steady ingress that never empties the primary queue must not starve an
+/// unfenced destination prestage. Queued updates keep priority only for one
+/// flush budget; the walk then gets its slice, so the preparation completes
+/// while the ingress is still running instead of only after it stops (which
+/// at route-server scale outlives the reload's reply deadline and pushes the
+/// whole staging walk back under the transition fence).
+#[tokio::test]
+async fn destination_prestage_completes_under_sustained_ingress() {
+    const MAX_UPDATES: usize = 2_000;
+    let (tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // One primary unit per window and per budget: every primary unit is a
+    // whole route batch, and the prestage is owed a slice after each one.
+    manager.flush_poll_budget = std::time::Duration::ZERO;
+    manager.distribution_window_limits.messages = 1;
+    let handle = tokio::spawn(manager.run());
+
+    let old_policy = community_chain(0xFDE8_0001);
+    let next_policy = community_chain(0xFDE8_0002);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for peer in peers {
+        let mut spec = PeerUpSpec::ibgp(PeerId::from_addr(peer));
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(peer_up(&tx, spec).await);
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 66);
+    let routes = (0..4u8)
+        .map(|octet| {
+            crate::test_support::make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, octet), 32),
+                source,
+            )
+        })
+        .collect::<Vec<_>>();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(source),
+        announced: routes,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 4);
+    }
+
+    // Output-neutral ingress (withdrawals of a never-announced prefix) that
+    // refills the bounded queue at every actor yield.
+    let stop = Arc::new(AtomicBool::new(false));
+    let sent = Arc::new(AtomicUsize::new(0));
+    let producer = tokio::spawn({
+        let (tx, stop, sent) = (tx.clone(), Arc::clone(&stop), Arc::clone(&sent));
+        async move {
+            let absent = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+            while !stop.load(Ordering::Relaxed) && sent.load(Ordering::Relaxed) < MAX_UPDATES {
+                tx.send(RibUpdate::RoutesReceived {
+                    session_id: 0,
+                    peer: peer_v4(source),
+                    announced: vec![],
+                    withdrawn: vec![(Prefix::V4(absent), 0)],
+                    flowspec_announced: vec![],
+                    flowspec_withdrawn: vec![],
+                    evpn_announced: vec![],
+                    evpn_withdrawn: vec![],
+                    validated_with: None,
+                })
+                .await
+                .unwrap();
+                sent.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    while sent.load(Ordering::Relaxed) < 16 {
+        tokio::task::yield_now().await;
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::PrepareExportPolicyDestination {
+        peer: PeerId::from_addr(peers[0]),
+        export_policy: Some(next_policy),
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let sent_at_reply = sent.load(Ordering::Relaxed);
+    stop.store(true, Ordering::Relaxed);
+    producer.await.unwrap();
+    assert!(
+        sent_at_reply < MAX_UPDATES,
+        "the prestage completed only after the ingress stopped ({sent_at_reply} updates)"
+    );
+    assert_eq!(
+        query_uncommitted_policy_transition_groups(&tx).await,
+        1,
+        "the prepared destination is staged for the fenced transition to find maintained"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// A transition sent immediately after (or racing) a preparation must
 /// commit and leave no uncommitted group behind, whether the preparation
 /// completed (Maintained path) or was superseded mid-walk (discarded, then
