@@ -2584,7 +2584,7 @@ impl RibManager {
                             .unwrap_or_default();
                         crate::manager::helpers::set_adj_rib_out_prefixes(
                             &manager.metrics,
-                            &member.peer.to_string(),
+                            &member.peer.label(),
                             crate::manager::helpers::UNICAST_FAMILIES,
                             advertised,
                         );
@@ -2754,7 +2754,7 @@ impl RibManager {
         peer: PeerId,
         failure: OutboundCommitFailure,
     ) -> Result<(), OutboundCommitFailure> {
-        let label = peer.to_string();
+        let label = peer.label();
         match failure {
             OutboundCommitFailure::WriterUnavailable => {
                 self.metrics.record_outbound_route_drop(&label);
@@ -4333,7 +4333,7 @@ impl RibManager {
             for (key, error) in exact_rejections {
                 checkpoint();
                 self.metrics.record_exact_export_rejection(
-                    &peer.to_string(),
+                    &peer.label(),
                     key.family_label(),
                     error.code().reason(),
                 );
@@ -4494,7 +4494,7 @@ impl RibManager {
             // Formatting once per route-bearing commit replaces the former
             // seven identical allocations. EoR/refresh-only envelopes never
             // enter this block and therefore retain their zero label cost.
-            let peer_label = peer.to_string();
+            let peer_label = peer.label();
             let loc_rib_len = self.loc_rib.len();
             let rib_out = self
                 .adj_ribs_out
@@ -5850,7 +5850,7 @@ impl RibManager {
                 .unwrap_or_default();
             crate::manager::helpers::set_adj_rib_out_prefixes(
                 &self.metrics,
-                &peer.to_string(),
+                &peer.label(),
                 crate::manager::helpers::UNICAST_FAMILIES,
                 advertised,
             );
@@ -6546,7 +6546,7 @@ impl RibManager {
                 Err(crate::orf::OrfApplyError::Malformed) => true,
                 Err(crate::orf::OrfApplyError::Capacity) => {
                     self.metrics.record_orf_capacity_rejection(
-                        &peer.to_string(),
+                        &peer.label(),
                         rustbgpd_wire::family_label(afi, safi).unwrap_or("unknown"),
                     );
                     warn!(
@@ -8487,7 +8487,7 @@ impl RibManager {
                         .unwrap_or_default();
                     let loc_rib = &self.loc_rib;
                     let loc_rib_len = loc_rib.len();
-                    let target_peer_label = peer.to_string();
+                    let target_peer_label = peer.label();
                     let mut export_tally = crate::update::NeighborPolicyStats::default();
                     let policy_stats = &mut export_tally;
 

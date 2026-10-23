@@ -300,13 +300,13 @@ pub(crate) struct PeerSession {
     /// commands stay queued until this one runs after the envelope finishes.
     deferred_command: Option<PeerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
-    /// Canonical `peer` metric/log label — the bare neighbor address
-    /// from [`rustbgpd_telemetry::peer_label`], never the transport
-    /// endpoint's `addr:port`. It must equal what the RIB manager and
-    /// the BFD runtime emit for the same peer, or `by (peer)` queries
-    /// split. `BgpMetrics` maps a link-local neighbor's bare address to
-    /// its registered scoped value. Diagnostics only; nothing dials or
-    /// compares against it.
+    /// Canonical `peer` metric/log label from
+    /// [`rustbgpd_telemetry::scoped_peer_label`]: the neighbor address,
+    /// scoped to its interface for a link-local neighbor, never the
+    /// transport endpoint's `addr:port`. It must equal what the RIB manager
+    /// and the BFD runtime emit for the same neighbor, or `by (peer)`
+    /// queries split. Diagnostics only; nothing dials or compares against
+    /// it.
     peer_label: String,
     peer_ip: IpAddr,
     /// Cached scope for IPv6 link-local next-hop recursion on static
@@ -2135,7 +2135,10 @@ impl PeerSession {
             None => (None, None, None),
         };
         let peer_ip = config.remote_addr.ip();
-        let peer_label = rustbgpd_telemetry::peer_label(peer_ip);
+        // The neighbor's own value: scoped for a link-local neighbor, so a
+        // neighbor sharing its address never shares its series.
+        let peer_label =
+            rustbgpd_telemetry::scoped_peer_label(peer_ip, config.peer_interface.as_deref());
         initialize_route_safety_metric_series(&config, &metrics, &peer_label);
         let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
         // Even a default ASPA context must carry a scoped neighbor's

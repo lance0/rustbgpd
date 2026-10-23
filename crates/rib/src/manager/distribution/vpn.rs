@@ -1179,7 +1179,7 @@ impl RibManager {
                 .get(&peer)
                 .cloned()
                 .unwrap_or_default();
-            let target_peer_label = peer.to_string();
+            let target_peer_label = peer.label();
             let metrics = self.metrics.clone();
 
             let loc_rib_len = self.loc_rib.len();

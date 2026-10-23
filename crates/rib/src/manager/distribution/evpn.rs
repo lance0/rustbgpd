@@ -40,7 +40,7 @@ impl RibManager {
             rib.evpn_len()
         };
         self.metrics
-            .set_rib_prefixes(&peer.to_string(), "l2vpn_evpn", gauge_val(evpn_len));
+            .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(evpn_len));
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
@@ -86,7 +86,7 @@ impl RibManager {
             rib.evpn_len()
         };
         self.metrics
-            .set_rib_prefixes(&peer.to_string(), "l2vpn_evpn", gauge_val(evpn_len));
+            .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(evpn_len));
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
@@ -822,7 +822,7 @@ impl RibManager {
         let export_pol = self
             .export_policy_for(peer)
             .map(rustbgpd_policy::PolicyChain::share);
-        let target_peer_label = peer.to_string();
+        let target_peer_label = peer.label();
         let metrics = self.metrics.clone();
         let rtc_filter = self.rtc_export_filter(peer, sendable.as_ref());
 

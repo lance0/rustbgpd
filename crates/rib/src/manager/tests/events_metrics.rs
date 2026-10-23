@@ -1881,34 +1881,101 @@ async fn route_events_keep_the_scope_their_routes_were_learned_on() {
     handle.await.unwrap();
 }
 
-/// The final reap targets the deleted neighbor's exact scoped value, so a
-/// replacement already registered for the same link-local address on
-/// another interface keeps its series.
+/// Acceptance: an interface move replaces `fe80::1%eth0` with
+/// `fe80::1%eth1`. The old neighbor's teardown writes (a withdrawal, then
+/// the delete and its final reap) run in the RIB after the replacement has
+/// registered and published its own series, and none of them lands on the
+/// replacement. The actor applies its messages in order, which fixes the
+/// interleaving: announce old, announce new, old's late withdrawal, delete
+/// old. Labelled by bare address, the late write overwrites the
+/// replacement's gauge and the final reap removes it.
 #[tokio::test]
-async fn peer_deleted_reaps_the_carried_label_not_the_current_registration() {
+async fn an_interface_move_never_misattributes_the_old_neighbors_teardown() {
     let metrics = BgpMetrics::new();
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
-    let peer = PeerId::from_addr("fe80::1".parse().unwrap());
-    metrics.register_scoped_peer(peer.addr(), "fe80::1%eth0");
-    metrics.set_rib_prefixes("fe80::1", "ipv4_unicast", 3);
-    metrics.register_scoped_peer(peer.addr(), "fe80::1%eth1");
-    metrics.set_rib_prefixes("fe80::1", "ipv4_unicast", 7);
+    let scoped = |name: &str| {
+        PeerId::allocate(crate::PeerEndpoint::new(
+            "fe80::1".parse().unwrap(),
+            Some(name),
+        ))
+    };
+    let routes = |peer: PeerId, count: u8| -> Vec<Route> {
+        (1..=count)
+            .map(|octet| Route {
+                peer,
+                ..make_route(
+                    Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, octet), 32),
+                    Ipv4Addr::new(198, 51, 100, 1),
+                )
+            })
+            .collect()
+    };
+    let receive = |manager: &mut RibManager, peer, announced, withdrawn, session_id| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer,
+            session_id,
+            announced,
+            withdrawn,
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    let rib_prefixes = || -> Vec<(String, i64)> {
+        let mut rows: Vec<_> = metrics
+            .registry()
+            .gather()
+            .iter()
+            .filter(|family| family.name() == "bgp_rib_prefixes")
+            .flat_map(|family| family.get_metric().iter())
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "family" && label.value() == "ipv4_unicast")
+            })
+            .map(|metric| {
+                let peer = metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == "peer")
+                    .map(|label| label.value().to_owned())
+                    .unwrap_or_default();
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "test gauges hold small integer counts"
+                )]
+                let value = metric.get_gauge().get_value() as i64;
+                (peer, value)
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
 
+    let old = scoped("eth0");
+    receive(&mut manager, old, routes(old, 3), vec![], 1);
+    assert_eq!(rib_prefixes(), [("fe80::1%eth0".to_owned(), 3)]);
+    let new = scoped("eth1");
+    receive(&mut manager, new, routes(new, 7), vec![], 2);
+    // The old neighbor's write queued before its delete runs only now.
+    let late = routes(old, 1).remove(0).prefix;
+    receive(&mut manager, old, vec![], vec![(late, 0)], 1);
+    assert_eq!(
+        rib_prefixes(),
+        [
+            ("fe80::1%eth0".to_owned(), 2),
+            ("fe80::1%eth1".to_owned(), 7)
+        ]
+    );
     manager.handle_update(RibUpdate::PeerDeleted {
-        peer,
-        label: Some("fe80::1%eth0".into()),
+        peer: old,
+        label: Some(old.label().into()),
     });
-
-    let peers: Vec<String> = metrics
-        .registry()
-        .gather()
-        .iter()
-        .filter(|family| family.name() == "bgp_rib_prefixes")
-        .flat_map(|family| family.get_metric().iter())
-        .flat_map(|metric| metric.get_label().iter())
-        .filter(|label| label.name() == "peer")
-        .map(|label| label.value().to_owned())
-        .collect();
-    assert_eq!(peers, ["fe80::1%eth1"]);
+    assert_eq!(rib_prefixes(), [("fe80::1%eth1".to_owned(), 7)]);
+    assert!(old.release() && new.release());
 }

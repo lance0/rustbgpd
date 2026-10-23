@@ -724,7 +724,7 @@ impl RibManager {
         }
         super::retire_vec(&mut verdicts, &mut checkpoint);
         self.replacement_checkpoint(true);
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         for (afi, blocked, transition) in episodes {
             let family = family_label(afi);
             if blocked > 0 {
@@ -859,7 +859,7 @@ impl RibManager {
     /// headroom series instead of keeping a stale finite value.
     pub(in crate::manager) fn refresh_outbound_limit_gauges(&mut self, peer: PeerId) {
         self.replacement_checkpoint(true);
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         for row in self.outbound_prefix_limit_rows(peer) {
             self.replacement_checkpoint(false);
             self.metrics.set_outbound_prefix_capacity(

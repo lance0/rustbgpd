@@ -131,3 +131,38 @@ async fn a_missing_interface_fails_the_attempt_without_dialing() {
     assert!(error.to_string().contains(MISSING), "{error}");
     assert_eq!(session.config.peer_scope_id, Some(4));
 }
+
+/// Acceptance: two sessions on one link-local address, on different
+/// interfaces, label their series with their own scoped `peer` value, so
+/// their message counters (`messages_received`/`messages_sent` in neighbor
+/// state) and every other session series stay per neighbor.
+#[tokio::test]
+async fn same_address_sessions_label_their_series_by_interface() {
+    let metrics = BgpMetrics::new();
+    let session = |interface: &str, scope: u32| {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (rib_tx, _rib_rx) = mpsc::channel(8);
+        PeerSession::new_with_identity_and_lifecycle(
+            scoped_config(interface, scope, snapshot_with(interface, scope)),
+            metrics.clone(),
+            cmd_rx,
+            rib_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            SessionIdentity::default(),
+        )
+    };
+    let (eth0, eth1) = (session("eth0", 2), session("eth1", 3));
+    assert_eq!(eth0.peer_label, "fe80::2%eth0");
+    assert_eq!(eth1.peer_label, "fe80::2%eth1");
+    metrics.record_message_received(&eth0.peer_label, "update");
+    metrics.record_message_sent(&eth1.peer_label, "keepalive");
+    assert_eq!(metrics.peer_message_totals(&eth0.peer_label), (1, 0));
+    assert_eq!(metrics.peer_message_totals(&eth1.peer_label), (0, 1));
+}
