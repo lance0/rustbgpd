@@ -167,6 +167,11 @@ pub(super) fn build_peer_info(
 
 /// The manager half of one neighbor row: every field the manager owns, with
 /// the stale placeholders a missing session observation reports.
+/// Non-numeric `remote_asn` modes by (address, interface); see
+/// [`PeerManager::non_numeric_remote_asn_modes`].
+pub(super) type RemoteAsnModes =
+    std::collections::HashMap<(String, Option<String>), rustbgpd_api::peer_types::RemoteAsnMode>;
+
 fn manager_peer_info(
     peer: &PeerKey,
     managed: &ManagedPeerState,
@@ -779,7 +784,7 @@ impl PeerManager {
         if let Some(latch) = self.max_prefix_latches.get(peer) {
             apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
         }
-        self.apply_configured_identity(&mut info, peer);
+        self.apply_configured_identity(&mut info, peer, &self.non_numeric_remote_asn_modes());
         Some(info)
     }
 
@@ -793,6 +798,7 @@ impl PeerManager {
         // sender (the sender is `Clone`; the handle proper is not).
         let states = collect_session_states(&self.peers).await;
 
+        let modes = self.non_numeric_remote_asn_modes();
         let mut infos = Vec::with_capacity(self.peers.len());
         for (peer, managed) in &self.peers {
             let session_state = states.get(peer).and_then(|outcome| match outcome {
@@ -808,26 +814,57 @@ impl PeerManager {
             if let Some(latch) = self.max_prefix_latches.get(peer) {
                 apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
             }
-            self.apply_configured_identity(&mut info, peer);
+            self.apply_configured_identity(&mut info, peer, &modes);
             infos.push(info);
         }
         infos.extend(self.unbound_interface_only_infos());
         infos
     }
 
+    /// The configured neighbors whose `remote_asn` is `external` or
+    /// `internal`, keyed by address (empty for an interface-only neighbor)
+    /// and interface: one pass over the configuration per snapshot, and
+    /// empty for an all-numeric route-server inventory.
+    pub(super) fn non_numeric_remote_asn_modes(&self) -> RemoteAsnModes {
+        use rustbgpd_api::peer_types::RemoteAsnMode;
+        self.current_config
+            .neighbors
+            .all()
+            .filter_map(|neighbor| {
+                let mode = match neighbor.remote_asn {
+                    crate::config::RemoteAsn::External => RemoteAsnMode::External,
+                    crate::config::RemoteAsn::Internal => RemoteAsnMode::Internal,
+                    crate::config::RemoteAsn::Asn(_) => return None,
+                };
+                Some(((neighbor.address.clone(), neighbor.interface.clone()), mode))
+            })
+            .collect()
+    }
+
     /// Fill the parts of a row the configuration owns: the `remote_asn` mode
-    /// from the neighbor record (numeric for a dynamic neighbor), and the
-    /// discovery state of an interface-only neighbor's bound peer.
-    pub(super) fn apply_configured_identity(&self, info: &mut PeerInfo, peer: &PeerKey) {
+    /// from `modes` (numeric for a dynamic neighbor), and the discovery state
+    /// of an interface-only neighbor's bound peer.
+    pub(super) fn apply_configured_identity(
+        &self,
+        info: &mut PeerInfo,
+        peer: &PeerKey,
+        modes: &RemoteAsnModes,
+    ) {
         use rustbgpd_api::peer_types::{InterfaceOnlyState, NeighborDiscoveryState, RemoteAsnMode};
-        info.remote_asn_mode = match self
-            .current_config
-            .neighbor_record(peer)
-            .map(|neighbor| neighbor.remote_asn)
-        {
-            Some(crate::config::RemoteAsn::External) => RemoteAsnMode::External,
-            Some(crate::config::RemoteAsn::Internal) => RemoteAsnMode::Internal,
-            Some(crate::config::RemoteAsn::Asn(_)) | None => RemoteAsnMode::Numeric,
+        // A bound interface-only peer's stanza has no address; no static
+        // neighbor may share its interface.
+        info.remote_asn_mode = if modes.is_empty() {
+            RemoteAsnMode::Numeric
+        } else {
+            modes
+                .get(&(peer.address.to_string(), peer.interface.clone()))
+                .or_else(|| {
+                    peer.interface
+                        .as_ref()
+                        .and_then(|interface| modes.get(&(String::new(), Some(interface.clone()))))
+                })
+                .copied()
+                .unwrap_or(RemoteAsnMode::Numeric)
         };
         if self.unnumbered_owner_of(peer).is_some() {
             info.interface_only = Some(InterfaceOnlyState {
@@ -884,13 +921,14 @@ impl PeerManager {
             reserved.push((peer, managed, permit));
         }
         let ebgp_requires_policy = self.current_config.rfc8212_posture().policy_effective;
+        let modes = self.non_numeric_remote_asn_modes();
         let rows =
             reserved
                 .into_iter()
                 .map(|(peer, managed, permit)| DetachedPeerRow {
                     info: {
                         let mut info = manager_peer_info(peer, managed, ebgp_requires_policy);
-                        self.apply_configured_identity(&mut info, peer);
+                        self.apply_configured_identity(&mut info, peer, &modes);
                         info
                     },
                     md5_configured: managed.transport_config.md5_password.is_some(),
