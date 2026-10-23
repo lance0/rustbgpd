@@ -1,0 +1,168 @@
+name: "Load vrf kernel module"
+description: >-
+  Load the `vrf` kernel module. The slim hosted Azure kernel ships it only in
+  linux-modules-extra for the EXACT running kernel, so this installs that
+  package when needed: from an actions/cache entry keyed on `uname -r`, or on
+  a miss by downloading the .deb (the runner's configured apt mirrors first,
+  then archive.ubuntu.com). Cached and downloaded bytes are both checked against
+  the hash in the runner's apt index before install. A slow
+  mirror must not hang a job, so the download is bounded: 240 s by default, a
+  longer budget only for callers that declare VRF required (the local install
+  has its own 120 s bound). The action never
+  fails on its own; callers gate on `vrf-available` (skip, or fail closed).
+inputs:
+  vrf-required:
+    description: >-
+      "true" for jobs that fail closed without VRF (gives the fetch a 600 s
+      budget instead of 240 s). VRF-optional jobs keep the default.
+    required: false
+    default: "false"
+outputs:
+  vrf-available:
+    description: >-
+      "true" when the `vrf` module is loaded; "false" when it could not be
+      obtained within the budget (mirror outage, or the hosted kernel ahead of
+      linux-modules-extra in the apt index).
+    value: ${{ steps.load.outputs.vrf-available }}
+runs:
+  using: "composite"
+  steps:
+    - name: Probe vrf kernel module
+      id: probe
+      shell: bash
+      run: |
+        set -uo pipefail
+        if sudo modprobe vrf 2>/dev/null; then
+          echo "loaded=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "loaded=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "kernel=$(uname -r)" >> "$GITHUB_OUTPUT"
+        # The budget starts here, so a slow cache restore spends it too.
+        echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+    # A stalled restore would otherwise wait the action's default 10 min per
+    # segment; on timeout it is a miss and the remaining budget goes to the
+    # download.
+    - name: Restore linux-modules-extra .deb cache
+      id: cache
+      if: steps.probe.outputs.loaded != 'true'
+      uses: actions/cache/restore@v6
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
+      with:
+        path: ${{ runner.temp }}/vrf-module-cache
+        key: linux-modules-extra-${{ steps.probe.outputs.kernel }}
+
+    - name: Install linux-modules-extra and load vrf
+      id: load
+      shell: bash
+      env:
+        LOADED: ${{ steps.probe.outputs.loaded }}
+        STARTED: ${{ steps.probe.outputs.started }}
+        VRF_REQUIRED: ${{ inputs.vrf-required }}
+      run: |
+        # Composite `shell: bash` runs with -e. This step reports
+        # availability instead of failing, so a missing package or a failed
+        # lookup must reach the vrf-available output.
+        set +e -uo pipefail
+        if [ "$LOADED" = true ]; then
+          echo "::notice::vrf kernel module already available"
+          echo "vrf-available=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        budget=240
+        [ "$VRF_REQUIRED" = true ] && budget=600
+        deadline=$((SECONDS + budget - ($(date +%s) - STARTED)))
+        left() { echo $((deadline > SECONDS ? deadline - SECONDS : 1)); }
+        pkg="linux-modules-extra-$(uname -r)"
+        deb="$RUNNER_TEMP/vrf-module-cache/${pkg}.deb"
+        mkdir -p "$(dirname "$deb")"
+        downloaded=false
+        # Every .deb, cached or downloaded, must match the hash in the
+        # runner's signed apt index before it is installed as root.
+        # --print-uris gives one line: 'URL' file size hash; the candidate's
+        # SHA-256 comes from the same index entry.
+        uri='' file=''
+        read -r uri file _ < <(apt-get download --print-uris "$pkg" 2>/dev/null) || true
+        uri=${uri//\'/}
+        sha256=$(apt-cache show --no-all-versions "$pkg" 2>/dev/null | awk '$1 == "SHA256:" {print $2; exit}')
+        verify() { [ -f "$1" ] && echo "${sha256}  $1" | sha256sum --check --status; }
+        apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
+        # Seed apt's own archive cache with the verified .deb, then install by
+        # name: apt reuses a cached archive that matches the index and fetches
+        # only the small dependencies (wireless-regdb). `apt-get install
+        # ./file.deb` re-downloaded the same 51 MB from the mirror on hosted
+        # runners. The install is local work with its own bound, so a download
+        # finishing near the deadline is not killed mid-unpack.
+        install_deb() {
+          sudo install -m 0644 "$deb" "/var/cache/apt/archives/${file}" \
+            && sudo timeout 120 apt-get "${apt_opts[@]}" install -y "$pkg" \
+            && sudo modprobe vrf
+        }
+        if [ -z "$uri" ] || [ -z "$file" ] || [ -z "$sha256" ]; then
+          echo "::warning::${pkg} is not in the runner's apt index"
+        elif verify "$deb"; then
+          # Verified bytes are not fetched again: an install failure here is
+          # not a mirror problem.
+          if install_deb; then
+            echo "::notice::vrf loaded from the cached ${pkg} .deb"
+          else
+            echo "::warning::verified cached ${pkg} .deb did not install or load vrf"
+          fi
+        else
+          [ -f "$deb" ] && echo "::warning::discarding cached ${pkg} .deb that fails its apt index SHA-256"
+          rm -f "$deb"
+          # Hosted runners use `mirror+file:/etc/apt/apt-mirrors.txt` (one
+          # base URL per line, Azure first), which curl cannot fetch: expand
+          # it to the listed mirrors, then always add archive.ubuntu.com.
+          pool="pool/${uri#*/pool/}"
+          base=${uri%%/pool/*}
+          bases=()
+          if [[ "$base" == mirror+file:* ]]; then
+            mapfile -t bases < <(awk '$1 ~ /^https?:\/\// {print $1}' "${base#mirror+file:}" 2>/dev/null)
+          else
+            bases=("$base")
+          fi
+          bases+=(http://archive.ubuntu.com/ubuntu)
+          mapfile -t urls < <(for b in "${bases[@]}"; do echo "${b%/}/${pool}"; done | awk '!seen[$0]++')
+          # Rotate through the sources until one serves verified bytes or the
+          # budget runs out. --speed-limit drops a stalled transfer after
+          # 30 s below 100 KB/s so the next source gets the remaining time.
+          while [ "$downloaded" = false ] && [ "$SECONDS" -lt "$deadline" ]; do
+            for url in "${urls[@]}"; do
+              [ "$SECONDS" -lt "$deadline" ] || break
+              if curl -fsSL --connect-timeout 15 --speed-limit 102400 --speed-time 30 \
+                --max-time "$(left)" "$url" -o "$deb.part" && verify "$deb.part"; then
+                mv "$deb.part" "$deb"
+                downloaded=true
+                echo "fetched ${pkg} from ${url}"
+                break
+              fi
+              echo "::warning::${pkg} fetch from ${url} failed or was too slow"
+            done
+            [ "$downloaded" = true ] || [ $((deadline - SECONDS)) -le 5 ] || sleep 5
+          done
+          rm -f "$deb.part"
+          if [ "$downloaded" = true ] && ! install_deb; then
+            echo "::warning::${pkg} downloaded but did not install or load vrf"
+            downloaded=false
+            rm -f "$deb"
+          fi
+        fi
+        if sudo modprobe vrf 2>/dev/null; then
+          echo "::notice::vrf kernel module available"
+          echo "vrf-available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::vrf kernel module unavailable on this runner (kernel $(uname -r); ${budget}s budget, vrf-required=${VRF_REQUIRED})"
+          echo "vrf-available=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "downloaded=${downloaded}" >> "$GITHUB_OUTPUT"
+
+    # Save only bytes that matched the apt index hash and loaded vrf.
+    - name: Save linux-modules-extra .deb cache
+      if: steps.load.outputs.downloaded == 'true' && steps.load.outputs.vrf-available == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/vrf-module-cache
+        key: linux-modules-extra-${{ steps.probe.outputs.kernel }}

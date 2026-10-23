@@ -39,9 +39,9 @@ use crate::ir::{CompiledPolicy, MatchExpr};
 
 use super::Span;
 use super::ast::{
-    ActionStmt, CmpOp, Expr, ForSource, IfStmt, SourceFile, Stmt, TermDef, ValueExprAst,
+    ActionStmt, CmpOp, Expr, ForSource, IfStmt, Rhs, SourceFile, Stmt, TermDef, ValueExprAst,
 };
-use super::typeck::fold_const;
+use super::typeck::{Field, fold_const, resolve_field};
 
 /// Coverage of one source term, aggregated over every test walk that
 /// ran its policy.
@@ -113,16 +113,20 @@ pub enum LintKind {
     /// unit. Daemon config chains are not visible here, so this is a
     /// "within these files" fact, not proof of dead code.
     UnreferencedPolicy,
+    /// Negated equality on a field with no implicit default matches
+    /// when that field is absent, unlike `!=`.
+    OptionalFieldNegation,
 }
 
 impl LintKind {
     /// Every lint, in label order of the CLI reference.
-    pub const ALL: [LintKind; 5] = [
+    pub const ALL: [LintKind; 6] = [
         LintKind::UnusedSet,
         LintKind::UnusedDataset,
         LintKind::UnusedFn,
         LintKind::UnreachableTerm,
         LintKind::UnreferencedPolicy,
+        LintKind::OptionalFieldNegation,
     ];
 
     /// The lint with this stable label, if any.
@@ -140,6 +144,7 @@ impl LintKind {
             LintKind::UnusedFn => "unused-fn",
             LintKind::UnreachableTerm => "unreachable-term",
             LintKind::UnreferencedPolicy => "unreferenced-policy",
+            LintKind::OptionalFieldNegation => "optional-field-negation",
         }
     }
 }
@@ -464,6 +469,7 @@ pub(super) fn lints(file: &SourceFile) -> Vec<Lint> {
             });
         }
     }
+    out.extend(refs.optional_negations);
     out
 }
 
@@ -536,6 +542,8 @@ fn const_truth(expr: &Expr) -> Option<bool> {
 /// Names the compilation unit references, by namespace.
 #[derive(Default)]
 struct Refs<'a> {
+    /// Negated optional-field equalities found during the same AST walk.
+    optional_negations: Vec<Lint>,
     /// Set and dataset references (one flat namespace).
     sets: HashSet<&'a str>,
     /// `fn` call references (builtin names may appear; harmless — the
@@ -615,7 +623,40 @@ impl<'a> Refs<'a> {
                 self.expr(lhs);
                 self.expr(rhs);
             }
-            Expr::Not(inner, _) => self.expr(inner),
+            Expr::Not(inner, span) => {
+                if let Expr::Cmp {
+                    field,
+                    op: CmpOp::Eq,
+                    rhs,
+                    ..
+                } = inner.as_ref()
+                    && matches!(
+                        (resolve_field(field), rhs),
+                        (
+                            Ok(Field::Prefix
+                                | Field::OriginAs
+                                | Field::NextHop
+                                | Field::RouteType
+                                | Field::EvpnRouteType
+                                | Field::Family
+                                | Field::PeerAddress
+                                | Field::PeerAsn
+                                | Field::PeerGroup),
+                            Rhs::Int(..) | Rhs::Ip(..) | Rhs::Prefix(..) | Rhs::Str(_)
+                        ) | (Ok(Field::RouteType | Field::Family), Rhs::Ident(_))
+                    )
+                {
+                    self.optional_negations.push(Lint {
+                        kind: LintKind::OptionalFieldNegation,
+                        span: *span,
+                        message: format!(
+                            "negated equality matches when {} is absent; use != to require its presence, or test the absent case explicitly",
+                            field.render()
+                        ),
+                    });
+                }
+                self.expr(inner);
+            }
             Expr::In { set, .. } | Expr::IdentIn { set, .. } => {
                 self.sets.insert(&set.node);
             }

@@ -498,8 +498,9 @@ It runs the daemon **unprivileged by default**: a dedicated `rustbgpd`
 system user, the standard sandbox set (`NoNewPrivileges`,
 `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `StateDirectory` /
 `RuntimeDirectory`), and a capability set of exactly
-`CAP_NET_BIND_SERVICE` (bind port 179 as non-root). That is everything
-a route-reflector / control-plane-only deployment needs.
+`CAP_NET_BIND_SERVICE` (bind port 179 as non-root). Deployments with
+[interface-only neighbors](#interface-only-neighbors-opt-in-privilege-drop-in)
+also need the opt-in `CAP_NET_RAW` drop-in.
 
 Releases also ship the opt-in
 [`rustbgpd@.service`](../../examples/systemd/rustbgpd@.service) for IXP Manager.
@@ -623,6 +624,37 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now rustbgpd
 ```
 <!-- release-install-contract:source-checkout:end -->
+
+### Interface-only neighbors: opt-in privilege drop-in
+
+When at least one neighbor has `interface` without `address`, grant
+`CAP_NET_RAW` for ICMPv6 discovery, including with
+`[global.unnumbered] router_advertisements = false`. Static link-local
+neighbors with an explicit address and RS/RR deployments without
+interface-only neighbors do not need this capability. The base unit keeps its
+existing capability set; install the separate example from the source checkout:
+
+```sh
+sudo mkdir -p /etc/systemd/system/rustbgpd.service.d
+sudo install -m 0644 examples/systemd/rustbgpd-unnumbered.conf \
+  /etc/systemd/system/rustbgpd.service.d/rustbgpd-unnumbered.conf
+sudo systemctl daemon-reload
+sudo systemctl restart rustbgpd
+```
+
+The drop-in adds `CAP_NET_RAW` to `AmbientCapabilities` and
+`CapabilityBoundingSet`. Install the dataplane drop-in alongside it when the
+configuration also programs the kernel. For a per-handle unit, place the
+capability drop-in under the exact `rustbgpd@<handle>.service.d/` directory.
+
+A peer RA with a non-zero Router Lifetime can install a kernel default route
+independently of BGP if the host accepts RA defaults. Disable those defaults
+on dedicated peering ports (for example, `net.ipv6.conf.<port>.accept_ra=0`)
+when routing must follow BGP. rustbgpd receives discovery packets on its raw
+socket regardless of that sysctl. Its own RAs also carry a non-zero Router
+Lifetime (three times `ra_interval_secs`, 30 seconds by default), so neighboring
+hosts must apply the same RA-default policy when their routing should follow BGP.
+See the [interface-only configuration](../reference/configuration.md#interface-only-neighbors).
 
 ### Kernel dataplane: opt-in privilege drop-in
 
@@ -845,6 +877,11 @@ configuration that programs the host FIB or interfaces also needs
 `--cap-add=NET_ADMIN` on the same root host-network path, as described in
 [kernel dataplane privileges](#kernel-dataplane-opt-in-privilege-drop-in); that
 opt-in does not replace the root-user and root-owned-state requirements.
+
+Interface-only neighbor discovery also needs `--cap-add=NET_RAW` on that root
+host-network path, even when `router_advertisements = false`. The flag does
+not supply an ambient capability to the image's default non-root process.
+Static link-local neighbors with an explicit address do not need `NET_RAW`.
 
 ### systemd-supervised host-network container
 

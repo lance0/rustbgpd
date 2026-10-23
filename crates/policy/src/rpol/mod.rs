@@ -34,7 +34,7 @@ mod typeck;
 pub use coverage::{
     CoverageReport, Lint, LintKind, PolicyCoverage, PolicyTestStatus, TermCoverage,
 };
-pub use diag::{Diagnostic, Diagnostics, Span, Spanned, closest_matches};
+pub use diag::{Diagnostic, DiagnosticCode, Diagnostics, Span, Spanned, closest_matches};
 pub use fmt::{FmtError, format_rpol};
 pub use modules::{
     DEFAULT_MAX_GRAPH_BYTES, LoadError, MAX_MODULE_DEPTH, MAX_MODULE_FILES, ModuleSource,
@@ -531,7 +531,8 @@ pub fn compile_rpol(source: &str, store: &mut SetStore) -> Result<CompiledChain,
     if missing.is_empty() {
         Ok(chain)
     } else {
-        Err(Diagnostics(vec![Diagnostic::new(
+        Err(Diagnostics(vec![Diagnostic::coded(
+            DiagnosticCode::Resolve,
             Span::in_file(0..0, 0),
             format!(
                 "inline compilation cannot bind dataset{} {}",
@@ -602,7 +603,8 @@ fn front(source: &str) -> Result<(ast::SourceFile, Vec<Diagnostic>), Diagnostics
     let (file, mut diags) = parser::parse(source);
     for import in &file.imports {
         diags.push(
-            Diagnostic::new(
+            Diagnostic::coded(
+                DiagnosticCode::Resolve,
                 import.span,
                 "`import` is not available for inline sources",
                 "imports need file-based loading",

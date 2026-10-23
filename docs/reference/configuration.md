@@ -1313,6 +1313,42 @@ A still-later SIGHUP can delete deprecated MKTs that are not selected, provided
 the owner set, survivor order, and key definitions are unchanged; deleting a
 non-deprecated or selected key remains restart-required.
 
+### Host IPv6 prerequisites for link-local neighbors
+
+Static link-local and interface-only neighbors both need IPv6 enabled on their
+port (`net.ipv6.conf.<interface>.disable_ipv6=0`) and at least one usable `fe80::/10`
+address. With `addr_gen_mode=1` (no automatic address generation), configure a
+link-local address explicitly. An address marked `tentative` is still undergoing
+Duplicate Address Detection (DAD); `dadfailed` means the duplicate must be resolved.
+Inspect these flags with `ip -6 address show dev <interface>`.
+
+Startup and the running daemon report these conditions as structured warnings,
+once when a condition appears or changes; checks repeat every second and recover
+without a restart. `rustbgpd --check` reports them as advisories; add `--strict`
+to fail a deployment check. `rbgp doctor` reports unusable addresses as failures
+when run through a local Unix socket in the daemon's network namespace. An absent
+interface-only port can still appear after startup.
+If the daemon is unavailable, doctor reports host IPv6 state as unavailable.
+Runtime monitoring retains the running interface-only ports across reloads;
+changing that neighbor set requires a restart.
+
+On dedicated interface-only fabric ports, disable kernel RA default-route learning
+with `net.ipv6.conf.<interface>.accept_ra=0` or
+`net.ipv6.conf.<interface>.accept_ra_defrtr=0`. Otherwise `accept_ra=1` with IPv6
+forwarding off, or `accept_ra=2` even with forwarding on, lets a peer's non-zero
+Router Lifetime install a kernel IPv6 default route outside BGP. That route can
+persist after the peer withdraws its BGP default. These sysctls control kernel
+route learning; rustbgpd's raw-socket RA discovery still receives advertisements.
+Doctor and `--check` warn about this combination. See the
+[Linux IPv6 sysctl reference](https://www.kernel.org/doc/html/v6.12/networking/ip-sysctl.html).
+
+RFC 8950 **transit** requires IPv4 forwarding (`net.ipv4.ip_forward=1`); IPv6
+transit separately requires IPv6 forwarding. Linux 5.2 or later is required for
+IPv4 routes through IPv6 gateways
+([`RTA_VIA` support](https://github.com/torvalds/linux/commit/d15662682db2)).
+Enabling BGP or discovery alone
+does not enable host forwarding, configure addresses, or change these sysctls.
+
 ### Interface-only neighbors
 
 An interface-only neighbor names a port and no address, as FRR's

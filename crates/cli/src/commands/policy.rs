@@ -464,7 +464,7 @@ struct JsonRelated {
 struct JsonFinding {
     /// `error` (fails the check) or `warning`.
     severity: &'static str,
-    /// `compile-error` or the lint's stable name.
+    /// The compiler stage code or the lint's stable name.
     code: &'static str,
     message: String,
     #[serde(flatten)]
@@ -489,7 +489,7 @@ impl JsonFinding {
             });
         Self {
             severity: "error",
-            code: "compile-error",
+            code: diagnostic.code.label(),
             message: diagnostic.message.clone(),
             at: JsonLocation::new(sources, span),
             label,

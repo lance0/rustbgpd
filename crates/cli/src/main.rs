@@ -3,6 +3,9 @@
 mod commands;
 mod connection;
 mod error;
+#[cfg(target_os = "linux")]
+#[path = "../../../src/host_ipv6.rs"]
+mod host_ipv6;
 mod output;
 mod pager;
 #[cfg(test)]
@@ -936,7 +939,8 @@ enum PolicyAction {
         coverage_matched_min: Option<f64>,
         /// Fail the check (exit 4) on the named lints, comma-separated:
         /// unused-set, unused-dataset, unused-fn, unreachable-term,
-        /// unreferenced-policy. Bare `--deny-lints` denies every lint.
+        /// unreferenced-policy, optional-field-negation. Bare `--deny-lints`
+        /// denies every lint.
         /// Lints are always computed; without this flag they are
         /// warnings and never change the exit code. Exit codes 1, 2
         /// and 3 take precedence
@@ -7115,6 +7119,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             "unused-fn",
             "unreachable-term",
             "unreferenced-policy",
+            "optional-field-negation",
         ];
 
         assert_eq!(replies(&["--deny"]).1, ["__NOSPACE__", "--deny-lints="]);

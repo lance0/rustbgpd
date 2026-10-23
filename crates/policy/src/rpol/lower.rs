@@ -71,7 +71,7 @@ use super::ast::{
     ActionStmt, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, NextHopArg, PolicyDef,
     PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
-use super::diag::Diagnostic;
+use super::diag::{Diagnostic, DiagnosticCode};
 use super::typeck::{Field, community_attribute, resolve_field, value_field_of};
 
 /// Static slot allocation for `let` bindings (LAN-302/LAN-303): one
@@ -469,7 +469,8 @@ impl<'a> Lowerer<'a> {
             .map(|def| {
                 let policy = self.lower_policy(def, &[], store);
                 budget.add_policy(&policy).map_err(|reason| {
-                    Diagnostic::new(
+                    Diagnostic::coded(
+                        DiagnosticCode::Lower,
                         def.name.span,
                         reason,
                         "this policy exceeds the remaining chain node budget",

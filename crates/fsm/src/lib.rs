@@ -51,6 +51,7 @@
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
+#![warn(missing_docs)]
 
 mod action;
 mod config;

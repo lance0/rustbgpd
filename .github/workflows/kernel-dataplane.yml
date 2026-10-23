@@ -446,6 +446,24 @@ jobs:
           topology: tests/interop/m53-bgp-unnumbered-frr.clab.yml
           script: tests/interop/scripts/test-m53-bgp-unnumbered-frr.sh
 
+  m53b:
+    needs: [prime_dev_image]
+    name: M53b — interface-only BGP unnumbered + scoped FIB (FRR 10.7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+        id: dataplane
+      - name: Check M53b next-hop JSON oracle
+        run: bash tests/interop/scripts/test-m53b-next-hop-json.sh
+      - name: Run M53b (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M53b
+          topology: tests/interop/m53b-interface-only-frr.clab.yml
+          script: tests/interop/scripts/test-m53b-interface-only-frr.sh
+
   m51:
     needs: [prime_dev_image]
     name: M51 — ADR-0067 single-hop BFD + RFC 5882 coupling (FRR 10.7.1)
@@ -1011,29 +1029,11 @@ jobs:
       # running kernel, which can lag the kernel in the apt mirror
       # (actions/runner-images #7570 / #7587). Load it best-effort on the host
       # (the --cap-add netns containers share the host kernel) and report
-      # availability so the L3 selectors skip rather than fail on mirror skew.
+      # availability so the L3 selectors skip rather than fail on mirror skew
+      # or a slow mirror.
       - name: Load vrf kernel module (for the L3 netns selectors)
         id: vrf
-        run: |
-          set -uo pipefail
-          vrf_available=false
-          if sudo modprobe vrf 2>/dev/null; then
-            vrf_available=true
-          else
-            sudo timeout 240 apt-get -o Acquire::Retries=3 \
-              -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-              install -y "linux-modules-extra-$(uname -r)" \
-              || echo "::warning::linux-modules-extra-$(uname -r) unavailable or slow"
-            if sudo modprobe vrf 2>/dev/null; then
-              vrf_available=true
-            fi
-          fi
-          if [ "$vrf_available" = true ]; then
-            echo "::notice::vrf available; L3 netns selectors will run"
-          else
-            echo "::warning::vrf unavailable on this runner (kernel $(uname -r) likely ahead of linux-modules-extra in the apt mirror); L3 netns selectors will skip"
-          fi
-          echo "vrf-available=${vrf_available}" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/load-vrf-module
 
       - name: LAN-70 L3VNI multipath and FDB-NHG netns proof
         if: steps.vrf.outputs.vrf-available == 'true'
@@ -1094,14 +1094,14 @@ jobs:
     if: ${{ always() }}
     needs: [classify_changes, bird3_archive, prime_dev_image, m36,
       m37, m37-ip, m38, m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42, m50, m52,
-      m58, m53, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
+      m58, m53, m53b, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, m121, m123, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
         classify_changes bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
-        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
+        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m53b m51 m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 m121 m123 netns
     steps:
       - name: Aggregate required Kernel Dataplane result

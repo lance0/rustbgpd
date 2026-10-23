@@ -292,6 +292,34 @@ fn diagnostics_of(source: &str) -> (super::Diagnostics, String) {
     (diags, rendered)
 }
 
+#[test]
+fn compiler_diagnostics_identify_the_producing_stage() {
+    use super::DiagnosticCode;
+
+    for (source, expected) in [
+        ("@", DiagnosticCode::Lex),
+        ("policy", DiagnosticCode::Parse),
+        ("import \"missing.rpol\"", DiagnosticCode::Resolve),
+        (
+            "policy p { term t { if route.prefx == 1 { accept } } }",
+            DiagnosticCode::Typecheck,
+        ),
+    ] {
+        let (diagnostics, _) = diagnostics_of(source);
+        assert!(
+            diagnostics.0.iter().any(|diag| diag.code == expected),
+            "{source}: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .0
+                .iter()
+                .all(|diag| diag.code != DiagnosticCode::Compile),
+            "{source}: an untagged diagnostic escaped"
+        );
+    }
+}
+
 // ── compile + IR shape goldens ─────────────────────────────────────
 
 #[test]
@@ -6401,6 +6429,78 @@ mod coverage {
         cov
     }
 
+    #[test]
+    fn optional_field_negation_covers_optional_fields_and_nested_guards() {
+        let conditions = [
+            "route.prefix == 192.0.2.0/24",
+            "route.origin-as == 64500",
+            "route.next-hop == 192.0.2.1",
+            "route.route-type == external",
+            "route.evpn-route-type == 2",
+            "route.family == ipv4-unicast",
+            "peer.address == 192.0.2.1",
+            "peer.asn == 64500",
+            "peer.group == \"leaf\"",
+        ];
+        for condition in conditions {
+            let source = format!(
+                "policy p {{ term t {{ for asn in route.as-path {{ if route.med == 0 && !({condition}) {{ accept }} }} }} }}"
+            );
+            let cov = coverage_of(&source);
+            let lints: Vec<_> = cov
+                .lints
+                .iter()
+                .filter(|lint| lint.kind == LintKind::OptionalFieldNegation)
+                .collect();
+            assert_eq!(lints.len(), 1, "{condition}: {:?}", cov.lints);
+            // Parentheses have no AST node; the range ends at the comparison.
+            assert_eq!(&source[lints[0].span.range()], format!("!({condition}"));
+        }
+    }
+
+    #[test]
+    fn optional_field_negation_leaves_defaults_and_other_comparisons_alone() {
+        for condition in [
+            "!(route.local-pref == 100)",
+            "!(route.med == 0)",
+            "!(route.as-path.len == 0)",
+            "!(route.rpki == valid)",
+            "!(route.aspa == valid)",
+            "peer.group != \"leaf\"",
+            "!(peer.asn != 64500)",
+            "!(route.next-hop == peer.address)",
+        ] {
+            let source = format!("policy p {{ term t {{ if {condition} {{ accept }} }} }}");
+            assert!(
+                !coverage_of(&source)
+                    .lints
+                    .iter()
+                    .any(|lint| lint.kind == LintKind::OptionalFieldNegation),
+                "{condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_field_negation_does_not_flag_checked_local_comparisons() {
+        let source = r"
+policy p {
+    term t {
+        let target = 64500;
+        if !(route.origin-as == target) { accept }
+        if !(peer.asn == target) { accept }
+    }
+}
+test absent { route { med 0 } expect p == error }
+";
+        let cov = coverage_of(source);
+        assert!(
+            !cov.lints
+                .iter()
+                .any(|lint| lint.kind == LintKind::OptionalFieldNegation)
+        );
+    }
+
     fn term<'a>(cov: &'a CoverageReport, policy: &str, name: &str) -> &'a TermCoverage {
         cov.policies
             .iter()
@@ -6802,6 +6902,7 @@ fn chain_node_budget_compile_rpol_composition() {
         panic!("oversized composed chain must fail");
     };
     assert!(format!("{error:?}").contains("MAX_CHAIN_NODES"));
+    assert_eq!(error.0[0].code, super::DiagnosticCode::Lower);
     // A file registry does not compose its unused definitions into a chain.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.rpol");

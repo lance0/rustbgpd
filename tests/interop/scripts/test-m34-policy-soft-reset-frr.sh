@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# leg: m34  slug: policy-quickstart
+# proves: IPv4 import-policy SIGHUP removes one of three accepted prefixes while preserving the other two and the established session; no .rpol parity, IPv6, forwarding or scale claim
+# claims: stored
+# evidence: docs/interop.md#m34-test-results-2026-04-30-frr-1031
+# pinned: FRR 10.3.1, 2026-04-30; the dated result records no daemon revision
+#
 # M34 interop test — SIGHUP policy soft-reset
 #
 # Validates the auto-fire path inside
