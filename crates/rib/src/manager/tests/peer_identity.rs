@@ -404,3 +404,126 @@ async fn a_page_boundary_between_same_address_neighbors_skips_no_row() {
     drop(tx);
     actor.await.unwrap();
 }
+
+async fn register(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+    session_id: u64,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(256);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id,
+        peer,
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::new(198, 51, 100, 1),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    out_rx
+}
+
+/// Acceptance: two neighbors on one link-local address, on different
+/// interfaces, advertise the same prefix, and each keeps its own routes
+/// through every lifecycle event of the other: its session going down, an
+/// enhanced route refresh that withdraws everything, a Graceful Restart,
+/// and its deletion.
+#[tokio::test]
+async fn same_address_neighbors_keep_their_routes_through_each_others_lifecycle() {
+    let (tx, actor) = spawn_manager();
+    let (eth0, eth1) = (scoped("fe80::1", "eth0"), scoped("fe80::1", "eth1"));
+    let _eth0_out = register(&tx, eth0, 1).await;
+    let _eth1_down = register(&tx, eth1, 2).await;
+    announce(&tx, eth0, 1).await;
+    announce(&tx, eth1, 2).await;
+    let held = |routes: Vec<Route>| routes.iter().filter(|route| !route.is_stale).count();
+    let eth0_intact = || async {
+        let routes = query_received_routes(&tx, eth0).await;
+        assert_eq!(held(routes), 1, "eth0 lost its route");
+        let best = query_best_routes(&tx).await;
+        assert_eq!(
+            best.iter().map(|route| route.peer).collect::<Vec<_>>(),
+            [eth0]
+        );
+    };
+
+    // eth1's session goes down.
+    tx.send(RibUpdate::PeerDown {
+        peer: eth1,
+        session_id: 2,
+    })
+    .await
+    .unwrap();
+    assert!(query_received_routes(&tx, eth1).await.is_empty());
+    eth0_intact().await;
+
+    // eth1 comes back, then an enhanced route refresh re-advertises nothing.
+    let _eth1_out = register(&tx, eth1, 3).await;
+    announce(&tx, eth1, 3).await;
+    for update in [
+        RibUpdate::BeginRouteRefresh {
+            peer: eth1,
+            session_id: 3,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        },
+        RibUpdate::EndRouteRefresh {
+            peer: eth1,
+            session_id: 3,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        },
+    ] {
+        tx.send(update).await.unwrap();
+    }
+    assert!(query_received_routes(&tx, eth1).await.is_empty());
+    eth0_intact().await;
+
+    // eth1 announces again and restarts gracefully: its route is retained
+    // stale, eth0's is untouched.
+    announce(&tx, eth1, 3).await;
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 3,
+        peer: eth1,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let retained = query_received_routes(&tx, eth1).await;
+    assert_eq!(retained.len(), 1);
+    assert!(retained[0].is_stale);
+    eth0_intact().await;
+
+    // eth1 is deleted.
+    tx.send(RibUpdate::PeerDeleted {
+        peer: eth1,
+        label: Some(eth1.label().into()),
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::ReleasePeer { peer: eth1 })
+        .await
+        .unwrap();
+    assert!(query_received_routes(&tx, eth1).await.is_empty());
+    eth0_intact().await;
+
+    drop(tx);
+    actor.await.unwrap();
+    assert!(eth0.release());
+}

@@ -663,7 +663,7 @@ impl PeerManager {
             }
             StateQueryOutcome::SessionGone => {
                 let retained = self
-                    .query_peer_retained_stale(peer_key.address, rib_budget, operator_reads)
+                    .query_peer_retained_stale(peer_key, rib_budget, operator_reads)
                     .await?;
                 if retained == 0 {
                     return Ok(false);
@@ -697,7 +697,7 @@ impl PeerManager {
         }
 
         let retained = self
-            .query_peer_retained_stale(peer_key.address, rib_budget, operator_reads)
+            .query_peer_retained_stale(peer_key, rib_budget, operator_reads)
             .await?;
         if retained > 0 {
             return Err(PolicyApplyFailure {
@@ -725,7 +725,7 @@ impl PeerManager {
     /// single inline qualification, which keeps [`super::RIB_REPLY_TIMEOUT`].
     pub(super) async fn query_peer_retained_stale(
         &mut self,
-        peer: IpAddr,
+        peer: &PeerKey,
         rib_budget: Option<&mut LazyRibBudget>,
         operator_reads: OperatorReadAdmission,
     ) -> Result<usize, PolicyApplyFailure> {
@@ -738,7 +738,7 @@ impl PeerManager {
             || tokio::time::Instant::now() + allowance,
             LazyRibBudget::deadline,
         );
-        let rib_peer = self.rib_peer_at(peer);
+        let rib_peer = self.rib_peer_of(peer);
         let failed = |detail: &str| PolicyApplyFailure {
             code: RuntimeConfigPolicyFailureCode::StateRibQueryFailed,
             message: format!(
@@ -1635,7 +1635,7 @@ impl PeerManager {
         } else {
             let (reply_tx, reply_rx) = oneshot::channel();
             let rib_tx = self.rib_tx.clone();
-            let peer = self.rib_peer_at(targets[0].address);
+            let peer = self.rib_peer_of(&peer_keys[0]);
             let export_policy = targets[0].export_policy.clone();
             let round_trip = async move {
                 if rib_tx
@@ -1939,7 +1939,7 @@ impl PeerManager {
         let replacements: Vec<_> = targets
             .iter()
             .map(|target| PeerExportPolicyReplacement {
-                peer: self.rib_peer_at(target.address),
+                peer: self.rib_peer_of(&PeerKey::new(target.address, target.interface.clone())),
                 export_policy: target.export_policy.clone(),
             })
             .collect();
@@ -2163,7 +2163,7 @@ impl PeerManager {
         let _ = self
             .send_rib_update(
                 RibUpdate::DiscardPreparedExportPolicyDestination {
-                    peer: self.rib_peer_at(target.address),
+                    peer: self.rib_peer_of(&PeerKey::new(target.address, target.interface.clone())),
                     export_policy: target.export_policy.clone(),
                 },
                 OperatorReadAdmission::Fenced {
@@ -2253,7 +2253,7 @@ impl PeerManager {
     /// single-peer inline operation and keeps [`super::RIB_REPLY_TIMEOUT`].
     pub(super) async fn replace_peer_export_policy_in_rib(
         &mut self,
-        peer: IpAddr,
+        peer: &PeerKey,
         export_policy: Option<PolicyChain>,
         rib_budget: Option<&mut LazyRibBudget>,
         operator_reads: OperatorReadAdmission,
@@ -2263,7 +2263,7 @@ impl PeerManager {
             || tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT,
             LazyRibBudget::deadline,
         );
-        let rib_peer = self.rib_peer_at(peer);
+        let rib_peer = self.rib_peer_of(peer);
         let timed_out = || {
             RibCommandError::internal(if shared {
                 format!(
@@ -3197,7 +3197,7 @@ impl PeerManager {
                 }
             }
             if *export {
-                export_peers.push(peer_key.address);
+                export_peers.push(peer_key.clone());
             }
             refreshed += 1;
         }
@@ -3351,7 +3351,7 @@ impl PeerManager {
                 // The existing RFC 8212 presence-change preflight uses the
                 // same RIB proof: actor-local emptiness alone misses GR/LLGR.
                 let retained = self
-                    .query_peer_retained_stale(peer.address, Some(&mut *rib_budget), operator_reads)
+                    .query_peer_retained_stale(peer, Some(&mut *rib_budget), operator_reads)
                     .await
                     .map_err(|error| error.message)?;
                 if retained != 0 {
@@ -3385,7 +3385,7 @@ impl PeerManager {
     /// bounds a RIB that never answers, and a dropped reply is ambiguous.
     pub(super) async fn reevaluate_dataset_exports(
         &mut self,
-        peers: Vec<IpAddr>,
+        peers: Vec<PeerKey>,
         operator_reads: OperatorReadAdmission,
         swaps: Option<Vec<rustbgpd_rib::DatasetSwap>>,
     ) -> Result<(), DatasetRefreshFailure> {
@@ -3394,7 +3394,7 @@ impl PeerManager {
         }
         let rib_peers: Vec<PeerId> = peers
             .into_iter()
-            .map(|peer| self.rib_peer_at(peer))
+            .map(|peer| self.rib_peer_of(&peer))
             .collect();
         let rib_tx = self.rib_tx.clone();
         let capacity_deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
@@ -3496,11 +3496,11 @@ impl PeerManager {
         for (dependent, is_established) in dependents.iter().zip(&established) {
             if dependent.export {
                 if *is_established {
-                    exports.push(dependent.peer.address);
+                    exports.push(dependent.peer.clone());
                 } else {
                     let export_started = tokio::time::Instant::now();
                     self.reevaluate_dataset_exports(
-                        vec![dependent.peer.address],
+                        vec![dependent.peer.clone()],
                         operator_reads,
                         None,
                     )
@@ -4025,7 +4025,7 @@ impl PeerManager {
             // fail-closed: it cannot show which session took the edit.
             let rib_outcome = self
                 .replace_peer_export_policy_in_rib(
-                    address,
+                    &peer_key,
                     export_policy,
                     rib_budget,
                     operator_reads,

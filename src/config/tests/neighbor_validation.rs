@@ -86,34 +86,111 @@ fn link_local_neighbor_requires_interface() {
     }
 }
 
-#[test]
-fn link_local_neighbor_rejects_same_address_on_different_interfaces() {
-    // v1 limitation (ADR-0069 Deferred): the RIB keys peers by bare address, so
-    // the same link-local address on two interfaces would alias in the RIB.
-    // Validation rejects it until the RIB carries scoped peer identity.
-    let base = valid_toml().replace(
-        r#"address = "10.0.0.2""#,
-        r#"address = "fe80::1"
-interface = "lo""#,
-    );
-    let toml_str = format!(
+/// Two neighbors on one IPv6 link-local address, on different interfaces,
+/// with `extra` appended to the first one's `[[neighbors]]` block.
+fn same_address_pair(extra: &str, tail: &str) -> String {
+    format!(
         r#"
-{base}
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
 
+[global.telemetry]
+log_format = "json"
+{tail}
 [[neighbors]]
 address = "fe80::1"
 interface = "eth0"
-remote_asn = 65099
+remote_asn = 65002
+{extra}
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth1"
+remote_asn = 65002
 "#
+    )
+}
+
+/// The RIB keys every neighbor by its own identity, so one link-local
+/// address may name a neighbor on each of several interfaces (ADR-0069).
+#[test]
+fn link_local_neighbors_may_share_an_address_across_interfaces() {
+    let config = parse(&same_address_pair("", "")).unwrap();
+    let scopes: Vec<_> = config
+        .neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.as_str(), neighbor.interface.as_deref()))
+        .collect();
+    assert_eq!(
+        scopes,
+        [("fe80::1", Some("eth0")), ("fe80::1", Some("eth1"))]
     );
-    let err = parse(&toml_str).unwrap_err();
-    match err {
-        ConfigError::InvalidNeighborConfig { field, reason, .. } => {
-            assert_eq!(field, "interface");
-            assert!(reason.contains("multiple"), "unexpected reason: {reason}");
+}
+
+/// Expect a refusal on `field` that names both neighbors.
+fn assert_pair_refused(toml: &str, field: &str, needle: &str) {
+    match parse(toml).unwrap_err() {
+        ConfigError::InvalidNeighborConfig {
+            address,
+            field: refused,
+            reason,
+        } => {
+            assert_eq!(refused, field, "{reason}");
+            assert_eq!(address, "fe80::1%eth0 and fe80::1%eth1");
+            assert!(reason.contains("fe80::1%eth0 and fe80::1%eth1"), "{reason}");
+            assert!(reason.contains(needle), "{reason}");
         }
         other => panic!("expected InvalidNeighborConfig, got {other}"),
     }
+}
+
+/// BMP stays fail-closed: collectors cannot tell same-address sessions
+/// apart, so any collector is refused while such a pair exists. The same
+/// validator runs at startup, on reload (whose running `[bmp]` is checked
+/// against the new neighbors) and for runtime neighbor adds.
+#[test]
+fn same_address_neighbors_refuse_bmp() {
+    let bmp = "[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n";
+    assert_pair_refused(&same_address_pair("", bmp), "bmp", "BMP");
+}
+
+/// BFD, TCP MD5, TCP-AO and a differing per-neighbor `log_level` are each
+/// keyed by bare address somewhere, so a same-address neighbor may not
+/// use them.
+#[test]
+fn same_address_neighbors_refuse_address_keyed_features() {
+    let bfd_profile = "[[bfd_profiles]]\nname = \"fast\"\nmin_tx_interval = 300\nmin_rx_interval = 300\nmultiplier = 3\n";
+    assert_pair_refused(
+        &same_address_pair("bfd = { profile = \"fast\" }", bfd_profile),
+        "bfd",
+        "BFD",
+    );
+    assert_pair_refused(
+        &same_address_pair("md5_password = \"secret\"", ""),
+        "md5_password",
+        "TCP MD5",
+    );
+    assert_pair_refused(
+        &same_address_pair(
+            "tcp_ao = { key = \"secret\", send_id = 7, recv_id = 9, algorithm = \"hmac(sha256)\" }",
+            "",
+        ),
+        "tcp_ao",
+        "TCP-AO",
+    );
+    assert_pair_refused(
+        &same_address_pair("log_level = \"debug\"", ""),
+        "log_level",
+        "log_level",
+    );
+    // A disabled BFD block runs no session, so it is not refused.
+    parse(&same_address_pair(
+        "bfd = { profile = \"fast\", enabled = false }",
+        bfd_profile,
+    ))
+    .unwrap();
 }
 
 #[test]

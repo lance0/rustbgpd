@@ -569,3 +569,86 @@ async fn delete_peer_rejects_dynamic_targets() {
         "rejected delete must leave the dynamic peer managed"
     );
 }
+
+fn scoped_config(interface: &str, scope_id: u32) -> PeerManagerNeighborConfig {
+    let mut config = make_config("fe80::1".parse().unwrap(), 65002);
+    config.interface = Some(interface.to_string());
+    config.scope_id = Some(scope_id);
+    config
+}
+
+/// A runtime neighbor add that would put a second neighbor on a link-local
+/// address while BMP runs is refused before any effect, naming both
+/// neighbors and BMP (BMP running first, then the neighbor).
+#[tokio::test]
+async fn runtime_add_of_a_same_address_neighbor_is_refused_while_bmp_runs() {
+    let mut mgr = test_peer_manager();
+    mgr.current_config.bmp = Some(crate::config::BmpConfig {
+        sys_name: "rustbgpd".to_string(),
+        sys_descr: String::new(),
+        collectors: vec![crate::config::BmpCollector {
+            address: "127.0.0.1:11019".to_string(),
+            reconnect_interval: 30,
+            monitor: vec![crate::config::BmpMonitorView::RibInPre],
+            version: 3,
+        }],
+    });
+    // The persisted add resolves its interface, so the first neighbor uses
+    // one that exists; the refusal comes from validation, before the
+    // second neighbor's interface is ever resolved.
+    mgr.add_peer(scoped_config("lo", 1), true).await.unwrap();
+    let error = mgr
+        .add_peer(scoped_config("eth1", 3), true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("fe80::1%lo and fe80::1%eth1"), "{error}");
+    assert!(error.contains("BMP"), "{error}");
+    assert_eq!(mgr.peers.len(), 1, "the refused add has no effect");
+    assert_eq!(mgr.current_config.neighbors.len(), 1);
+    for (_, managed) in mgr.peers.drain() {
+        let _ = managed.into_parts().0.shutdown().await;
+    }
+}
+
+/// Every neighbor on a shared link-local address is known by that address,
+/// and operations on one reach that neighbor's own RIB handle, never its
+/// sibling's: an outbound refresh for eth1 names eth1's handle.
+#[tokio::test]
+async fn same_address_neighbors_reach_their_own_rib_handles() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    mgr.add_peer(scoped_config("eth0", 2), false).await.unwrap();
+    mgr.add_peer(scoped_config("eth1", 3), false).await.unwrap();
+    assert!(mgr.has_peer_address("fe80::1".parse().unwrap()));
+    let eth1 = scoped_key("fe80::1".parse().unwrap(), "eth1");
+    let expected = mgr.rib_peer_of(&eth1);
+    assert_ne!(
+        expected,
+        mgr.rib_peer_of(&scoped_key("fe80::1".parse().unwrap(), "eth0"))
+    );
+    let rib = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { peer, reply } = update {
+                let _ = reply.send(Ok(()));
+                return peer;
+            }
+        }
+        panic!("RefreshPeerOutbound never arrived");
+    });
+    mgr.refresh_outbound(eth1).await.unwrap();
+    assert_eq!(rib.await.unwrap(), expected);
+    for (_, managed) in mgr.peers.drain() {
+        let _ = managed.into_parts().0.shutdown().await;
+    }
+}

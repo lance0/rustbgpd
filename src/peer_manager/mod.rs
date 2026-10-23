@@ -960,7 +960,7 @@ impl PeerManager {
                 let _ = reply.send(info);
             }
             PeerManagerOperatorQuery::HasPeerAddress { address, reply } => {
-                let _ = reply.send(self.unique_peer_key_for_address(address).is_some());
+                let _ = reply.send(self.has_peer_address(address));
             }
             PeerManagerOperatorQuery::SubscribeSessionEvents { reply } => {
                 let _ = reply.send(self.session_events_tx.subscribe());
@@ -1556,6 +1556,12 @@ impl PeerManager {
             .then(|| CatalogMutationError::NotFound(format!("neighbor {key} not found")))
     }
 
+    /// Whether any managed neighbor uses `address`: every neighbor on a
+    /// link-local address that several interfaces share counts.
+    pub(super) fn has_peer_address(&self, address: IpAddr) -> bool {
+        self.peers.keys().any(|key| key.address == address)
+    }
+
     pub(super) fn peer_keys_for_address(&self, address: IpAddr) -> Vec<PeerKey> {
         self.peers
             .keys()
@@ -2013,7 +2019,7 @@ impl PeerManager {
                 .await;
             }
             PeerManagerCommand::HasPeerAddress { address, reply } => {
-                let _ = reply.send(self.unique_peer_key_for_address(address).is_some());
+                let _ = reply.send(self.has_peer_address(address));
             }
             PeerManagerCommand::EnablePeer { peer, reply } => {
                 let result = self.enable_peer(peer).await;

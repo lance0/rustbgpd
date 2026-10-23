@@ -57,12 +57,12 @@ impl PeerManager {
     /// follows their exact teardown and every previously queued route chunk.
     pub(super) async fn dampening_retirement_barrier(
         &mut self,
-        peer: std::net::IpAddr,
+        peer: &rustbgpd_api::peer_types::PeerKey,
         retired_sessions: &[u64],
     ) -> Result<(), PeerLifecycleError> {
         let (reply, response) = oneshot::channel();
         // The retiring neighbor has left the table; its slot is still retained.
-        let rib_peer = self.rib_peer_at(peer);
+        let rib_peer = self.rib_peer_of(peer);
         let commands = retired_sessions
             .iter()
             .map(|&session_id| RibUpdate::PeerDown {
