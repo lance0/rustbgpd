@@ -516,3 +516,46 @@ fn connect_failure_is_retained_for_neighbor_diagnostics() {
     session.record_connect_failure(&error);
     assert_eq!(session.last_error, error.to_string());
 }
+
+/// `ShutdownUnlessEstablished` decides in one actor turn: an `OpenConfirm`
+/// session is shut down and ends the task, and an Established one is kept.
+/// Load-bearing proof: dropping the Established check shuts the Established
+/// session down; replying without ending the task leaves the not-Established
+/// session running, free to establish.
+#[tokio::test]
+async fn shutdown_unless_established_decides_in_one_actor_turn() {
+    async fn open_confirm_session() -> (
+        PeerSession,
+        tokio::net::TcpStream,
+        mpsc::Receiver<RibUpdate>,
+    ) {
+        let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        session.drive_fsm(Event::ManualStart).await;
+        session
+            .drive_fsm(Event::OpenReceived(notification_gr_open(false)))
+            .await;
+        assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+        (session, server, rib_rx)
+    }
+
+    let (mut session, _server, _rib_rx) = open_confirm_session().await;
+    let (reply, shut_down) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ShutdownUnlessEstablished { reply })
+        .await;
+    assert!(shut_down.await.unwrap(), "OpenConfirm is shut down");
+    assert_eq!(flow, std::ops::ControlFlow::Break(()), "the task ends");
+
+    let (mut session, _server, _rib_rx) = open_confirm_session().await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    let (reply, shut_down) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ShutdownUnlessEstablished { reply })
+        .await;
+    assert!(!shut_down.await.unwrap(), "Established is refused");
+    assert_eq!(flow, std::ops::ControlFlow::Continue(()));
+    assert_eq!(session.fsm.state(), SessionState::Established, "kept");
+}
