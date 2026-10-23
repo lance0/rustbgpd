@@ -40,6 +40,10 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
 use crate::test_support::{assert_tier_authorized_test_config, tier_authorized_uds_test_config};
 
+fn keys(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<PeerKey> {
+    addrs.into_iter().map(key).collect()
+}
+
 fn key(addr: IpAddr) -> PeerKey {
     PeerKey::new(addr, None)
 }
@@ -1064,6 +1068,10 @@ fn fake_peer_handle(
     fake_peer_handle_with_route_refresh_reply(peer_addr, state, remote_router_id, counters, true)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fake session answers every command the manager sends in one match"
+)]
 fn fake_peer_handle_with_route_refresh_reply(
     peer_addr: IpAddr,
     state: SessionState,
@@ -1147,6 +1155,14 @@ fn fake_peer_handle_with_route_refresh_reply(
                 PeerCommand::CollisionDump => {
                     counters.collision_dump.fetch_add(1, Ordering::SeqCst);
                     break;
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                    let shut_down = state != SessionState::Established;
+                    let _ = reply.send(shut_down);
+                    if shut_down {
+                        counters.shutdown.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
                 }
                 PeerCommand::Shutdown => {
                     counters.shutdown.fetch_add(1, Ordering::SeqCst);

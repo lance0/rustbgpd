@@ -652,3 +652,75 @@ async fn same_address_neighbors_reach_their_own_rib_handles() {
         let _ = managed.into_parts().0.shutdown().await;
     }
 }
+
+/// The update-group planner keeps two neighbors that share a link-local
+/// address apart: a change to one is planned for that one only.
+#[test]
+fn update_group_plan_keeps_same_address_neighbors_apart() {
+    let pair = |eth0_extra: &str| -> crate::config::Config {
+        toml::from_str(&format!(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+             [global.telemetry]\nlog_format = \"json\"\n\
+             [[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth0\"\nremote_asn = 65001\n\
+             {eth0_extra}\n\
+             [[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth1\"\nremote_asn = 65001\n"
+        ))
+        .unwrap()
+    };
+    let mut mgr = test_peer_manager();
+    mgr.current_config = pair("");
+    let link_local: IpAddr = "fe80::1".parse().unwrap();
+    let endpoint = |interface| rustbgpd_rib::PeerEndpoint::new(link_local, Some(interface));
+    let handles = [
+        rustbgpd_rib::PeerId::allocate(endpoint("eth0")),
+        rustbgpd_rib::PeerId::allocate(endpoint("eth1")),
+    ];
+    let input = rustbgpd_rib::UpdateGroupClassifierInput {
+        policy_fingerprint: None,
+        policy_provenance: None,
+        policy_requires_peer_context: false,
+        target_is_ebgp: false,
+        target_is_rr_client: false,
+        target_local_role: None,
+        interpret_rfc1997: true,
+        sendable_families: vec![(1, 1)],
+        llgr_families: Vec::new(),
+        add_path_send: false,
+        per_client_best: false,
+        orr_vantage: None,
+        orf_installed: false,
+        conditional_advertisement: false,
+    };
+    let snapshot = rustbgpd_rib::UpdateGroupSnapshot {
+        peers: handles
+            .iter()
+            .map(|&peer| rustbgpd_rib::UpdateGroupPeerSnapshot {
+                peer,
+                input: input.clone(),
+                classification: rustbgpd_rib::classify_update_group(input.clone()),
+                runtime_membership: String::new(),
+            })
+            .collect(),
+    };
+
+    let plan = mgr
+        .plan_update_group_impact(&pair("route_reflector_client = true"), snapshot)
+        .unwrap();
+
+    let transitions = plan
+        .entries
+        .iter()
+        .map(|row| (row.peer.to_string(), row.transition.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transitions,
+        [
+            ("fe80::1%eth0".to_string(), "regroup"),
+            ("fe80::1%eth1".to_string(), "no_op")
+        ]
+    );
+    assert_eq!(plan.rollup.affected_peers, 1);
+    for handle in handles {
+        assert!(handle.release());
+    }
+}

@@ -292,7 +292,8 @@ Features that still key state by the bare address are refused on such
 neighbors rather than run in a half-working mode: any BMP collector (a
 collector cannot tell the two sessions apart, so a Peer Down for one would
 apply to the other's routes), BFD, TCP MD5 and TCP-AO on the passive
-listener, and differing per-neighbor `log_level` values. Dynamic neighbors
+listener, differing per-neighbor `log_level` values, and differing effective
+GTSM policies, which the listener also selects by address. Dynamic neighbors
 are never link-local, so their address-keyed bookkeeping cannot collide.
 
 ## References

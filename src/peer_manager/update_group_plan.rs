@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::IpAddr;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{
-    PlannedGroupability, RibUpdate, UpdateGroupClassification, UpdateGroupClassifierInput,
-    UpdateGroupFamilyImpact, UpdateGroupImpactPlan, UpdateGroupImpactRollup,
-    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
+    PeerEndpoint, PlannedGroupability, RibUpdate, UpdateGroupClassification,
+    UpdateGroupClassifierInput, UpdateGroupFamilyImpact, UpdateGroupImpactPlan,
+    UpdateGroupImpactRollup, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
 };
 use tokio::sync::oneshot;
 
@@ -18,13 +17,20 @@ pub(super) enum UpdateGroupImpactPlanError {
     Internal(String),
 }
 
-fn by_peer(config: &Config) -> Result<BTreeMap<IpAddr, ResolvedNeighbor>, String> {
+fn by_peer(config: &Config) -> Result<BTreeMap<PeerEndpoint, ResolvedNeighbor>, String> {
     config
         .resolved_neighbors_for_comparison()
         .map_err(|error| error.to_string())
         .map(|rows| {
             rows.into_iter()
-                .map(|row| (row.transport_config.remote_addr.ip(), row))
+                .map(|row| {
+                    let transport = &row.transport_config;
+                    let peer = PeerEndpoint::new(
+                        transport.remote_addr.ip(),
+                        transport.peer_interface.as_deref(),
+                    );
+                    (peer, row)
+                })
                 .collect()
         })
 }
@@ -156,7 +162,7 @@ fn projected_peer_count(entries: &[UpdateGroupFamilyImpact]) -> usize {
     entries
         .iter()
         .filter(|row| !matches!(row.candidate, PlannedGroupability::Absent))
-        .map(|row| row.peer)
+        .map(|row| &row.peer)
         .collect::<BTreeSet<_>>()
         .len()
 }
@@ -226,7 +232,7 @@ impl PeerManager {
         let current =
             by_peer(&self.current_config).map_err(UpdateGroupImpactPlanError::Internal)?;
         // ADR-0137: attached static neighbors take the per-peer path.
-        let conditional_peers: BTreeSet<IpAddr> = candidate
+        let conditional_peers: BTreeSet<PeerEndpoint> = candidate
             .neighbors
             .iter()
             .filter(|neighbor| {
@@ -234,18 +240,23 @@ impl PeerManager {
                     .effective_conditional_advertisements(neighbor)
                     .is_empty()
             })
-            .filter_map(|neighbor| neighbor.address.parse().ok())
+            .filter_map(|neighbor| {
+                Some(PeerEndpoint::new(
+                    neighbor.address.parse().ok()?,
+                    neighbor.interface.as_deref(),
+                ))
+            })
             .collect();
         let candidate = by_peer(candidate).map_err(UpdateGroupImpactPlanError::InvalidCandidate)?;
         let live = snapshot
             .peers
             .into_iter()
-            .map(|row| (row.peer.addr(), row))
+            .filter_map(|row| Some((row.peer.endpoint()?, row)))
             .collect::<BTreeMap<_, _>>();
         let peers = current
             .keys()
             .chain(candidate.keys())
-            .copied()
+            .cloned()
             .collect::<BTreeSet<_>>();
 
         let mut rows = Vec::new();
@@ -301,7 +312,7 @@ impl PeerManager {
             });
             for (afi, safi) in families {
                 rows.push((
-                    peer,
+                    peer.clone(),
                     afi,
                     safi,
                     current_state.clone(),
@@ -324,7 +335,7 @@ impl PeerManager {
             let class = transition(&current, &candidate).to_string();
             let changed = class != "no_op";
             if changed {
-                affected.insert(peer);
+                affected.insert(peer.clone());
                 rollup.affected_families += 1;
             }
             match class.as_str() {
@@ -366,7 +377,7 @@ impl PeerManager {
         let candidate_private = entries
             .iter()
             .filter_map(|row| {
-                matches!(row.candidate, PlannedGroupability::Private { .. }).then_some(row.peer)
+                matches!(row.candidate, PlannedGroupability::Private { .. }).then_some(&row.peer)
             })
             .collect::<BTreeSet<_>>();
         rollup.projected_shared_groups = u32::try_from(candidate_groups.len()).unwrap_or(u32::MAX);
@@ -496,7 +507,7 @@ mod tests {
         assert!(!requires_local_resync(&deleted, true));
 
         let entries = [UpdateGroupFamilyImpact {
-            peer: "192.0.2.1".parse().unwrap(),
+            peer: std::net::IpAddr::from([192, 0, 2, 1]).into(),
             afi: 1,
             safi: 1,
             current: PlannedGroupability::Group {

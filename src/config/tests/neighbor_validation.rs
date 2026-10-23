@@ -1734,3 +1734,169 @@ peer_group = "ixp"
     parse(&toml_str.replace("admin_down = true", "admin_down = false"))
         .expect("an explicit false is allowed");
 }
+
+/// The confirmed-transaction rollback check compares each neighbor with its
+/// own prior record, not with another neighbor at the same address.
+#[test]
+fn rollback_limit_check_pairs_same_address_neighbors_by_interface() {
+    let with_eth1_limit = |limit: u32| {
+        parse(
+            &same_address_pair("max_prefixes_out_ipv4_unicast = 100", "").replace(
+                "interface = \"eth1\"\nremote_asn = 65002\n",
+                &format!(
+                    "interface = \"eth1\"\nremote_asn = 65002\n\
+                     max_prefixes_out_ipv4_unicast = {limit}\n"
+                ),
+            ),
+        )
+        .unwrap()
+    };
+    let rollback = with_eth1_limit(10);
+    assert_eq!(
+        rollback.neighbors[1].max_prefixes_out_ipv4_unicast,
+        std::num::NonZeroU32::new(10)
+    );
+    assert!(outbound_prefix_limits_loosen(
+        &rollback,
+        &with_eth1_limit(20)
+    ));
+    assert!(!outbound_prefix_limits_loosen(
+        &rollback,
+        &with_eth1_limit(10)
+    ));
+}
+
+/// The listener selects GTSM by peer address, so a same-address pair must
+/// agree on the effective policy, inherited and disabled states included.
+#[test]
+fn same_address_neighbors_must_agree_on_gtsm() {
+    let group = "[peer_groups.gtsm]\nttl_security = true\n";
+    let pair = |eth0: &str, eth1: &str| {
+        same_address_pair(eth0, group).replace(
+            "interface = \"eth1\"\nremote_asn = 65002\n",
+            &format!("interface = \"eth1\"\nremote_asn = 65002\n{eth1}\n"),
+        )
+    };
+    for (eth0, eth1) in [
+        ("ttl_security = true", ""),
+        ("peer_group = \"gtsm\"", ""),
+        (
+            "ttl_security = true\nttl_security_hops = 2",
+            "ttl_security = true",
+        ),
+        (
+            "peer_group = \"gtsm\"",
+            "ttl_security = false\npeer_group = \"gtsm\"",
+        ),
+    ] {
+        assert_pair_refused(&pair(eth0, eth1), "ttl_security", "GTSM");
+    }
+    for (eth0, eth1) in [
+        ("peer_group = \"gtsm\"", "peer_group = \"gtsm\""),
+        ("ttl_security = true", "peer_group = \"gtsm\""),
+        ("ttl_security = false", ""),
+    ] {
+        parse(&pair(eth0, eth1)).unwrap();
+    }
+}
+
+/// Two neighbors that share a link-local address are diffed against their
+/// own prior records: an unchanged pair in different peer groups is a no-op,
+/// and a peer-group edit impacts only that group's member.
+#[test]
+fn same_address_neighbors_diff_against_their_own_records() {
+    let groups = "[peer_groups.a]\n[peer_groups.b]\n";
+    let config = |groups: &str| {
+        parse(&same_address_pair("peer_group = \"a\"", groups).replace(
+            "interface = \"eth1\"\nremote_asn = 65002\n",
+            "interface = \"eth1\"\nremote_asn = 65002\npeer_group = \"b\"\n",
+        ))
+        .unwrap()
+    };
+    let current = config(groups);
+
+    let unchanged = diff_config(&current, &config(groups));
+    assert!(
+        unchanged.effective_neighbor_impact.is_empty(),
+        "{:?}",
+        unchanged.effective_neighbor_impact
+    );
+    assert_eq!(unchanged.session_reset_entries(), 0);
+    let class = classify_config_transaction_v1(&unchanged);
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+
+    let changed = diff_config(
+        &current,
+        &config("[peer_groups.a]\nhold_time = 30\n[peer_groups.b]\n"),
+    );
+    let impacts = changed
+        .effective_neighbor_impact
+        .iter()
+        .map(|impact| (impact.label(), impact.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        impacts,
+        [(
+            "fe80::1%eth0".to_string(),
+            EffectiveNeighborImpactKind::SessionReshape
+        )]
+    );
+    assert_eq!(changed.session_reset_entries(), 1);
+}
+
+/// The TCP-AO startup pin matches each neighbor with its own live record,
+/// so it never swaps one same-address neighbor for the other.
+#[test]
+fn tcp_ao_pin_keeps_same_address_neighbors_apart() {
+    let ao =
+        "tcp_ao = { key = \"secret\", send_id = 7, recv_id = 9, algorithm = \"hmac(sha256)\" }";
+    let single = |extra: &str| {
+        parse(&same_address_pair(extra, "").replace(
+            "\n[[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth1\"\nremote_asn = 65002\n",
+            "\n",
+        ))
+        .unwrap()
+    };
+    let identities = |config: &Config| {
+        config
+            .neighbors
+            .iter()
+            .map(|neighbor| {
+                (
+                    neighbor.interface.clone().unwrap_or_default(),
+                    neighbor.tcp_ao.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let owned = |pairs: &[(&str, bool)]| {
+        pairs
+            .iter()
+            .map(|(interface, ao)| ((*interface).to_string(), *ao))
+            .collect::<Vec<_>>()
+    };
+
+    // Dropping eth0's key and adding eth1 keeps eth0's live key and leaves
+    // the new eth1 record alone.
+    let live = single(ao);
+    assert_eq!(identities(&live), owned(&[("eth0", true)]));
+    let mut runtime = parse(&same_address_pair("", "")).unwrap();
+    assert_eq!(
+        super::pin_tcp_ao_startup_only_runtime(&mut runtime, &live),
+        1
+    );
+    assert_eq!(
+        identities(&runtime),
+        owned(&[("eth0", true), ("eth1", false)])
+    );
+
+    // Keeping only eth0 and adding a key to it pins eth0 to its own live
+    // record; eth1's removal stands.
+    let live = parse(&same_address_pair("", "")).unwrap();
+    let mut runtime = single(ao);
+    assert_eq!(
+        super::pin_tcp_ao_startup_only_runtime(&mut runtime, &live),
+        1
+    );
+    assert_eq!(identities(&runtime), owned(&[("eth0", false)]));
+}

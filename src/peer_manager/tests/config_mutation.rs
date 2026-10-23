@@ -1675,7 +1675,7 @@ peer_group = "edge"
             },
             ack: None,
         },
-        vec![addr],
+        keys([addr]),
     )
     .await
     .unwrap();

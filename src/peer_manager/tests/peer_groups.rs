@@ -84,7 +84,7 @@ async fn targeted_required_family_edit_revalidates_dynamic_consumers() {
                 definition,
                 ack: None,
             },
-            vec!["2001:db8::2".parse().unwrap()],
+            keys(["2001:db8::2".parse().unwrap()]),
         )
         .await
         .unwrap_err();
@@ -113,7 +113,7 @@ async fn owned_peer_group_validation_rejection_is_typed_no_effect() {
                 definition,
                 ack: None,
             },
-            vec!["2001:db8::2".parse().unwrap()],
+            keys(["2001:db8::2".parse().unwrap()]),
         )
         .await;
     assert!(matches!(
@@ -161,14 +161,14 @@ async fn peer_group_bfd_membership_edits_reject_before_effects() {
             };
             let error = if owned {
                 let outcome = mgr
-                    .apply_peer_group_change_owned(event, vec![address])
+                    .apply_peer_group_change_owned(event, keys([address]))
                     .await;
                 let OwnedCatalogMutationOutcome::RejectedNoEffect(error) = outcome else {
                     panic!("expected rejection before effects: {outcome:?}");
                 };
                 error
             } else {
-                mgr.apply_peer_group_change(event, vec![address])
+                mgr.apply_peer_group_change(event, keys([address]))
                     .await
                     .unwrap_err()
             };
@@ -250,9 +250,12 @@ async fn peer_group_reshape_noop_update_does_not_bounce_or_publish() {
         .collect();
     let config_before = mgr.current_config.clone();
 
-    mgr.apply_peer_group_change(set_edge_hold_time_event(90), addresses.to_vec())
-        .await
-        .unwrap();
+    mgr.apply_peer_group_change(
+        set_edge_hold_time_event(90),
+        keys(addresses.iter().copied()),
+    )
+    .await
+    .unwrap();
 
     for (addr, session_id) in before {
         let managed = mgr.peers.get(&key(addr)).expect("managed peer");
@@ -313,7 +316,7 @@ async fn peer_group_reshape_applies_to_all_members_and_advances_config() {
         })
         .collect();
 
-    mgr.apply_peer_group_change(set_edge_hold_time_event(45), vec![a1, a2, a3])
+    mgr.apply_peer_group_change(set_edge_hold_time_event(45), keys([a1, a2, a3]))
         .await
         .unwrap();
 
@@ -386,7 +389,7 @@ async fn owned_peer_group_role_reshape_waits_for_owner_publication() {
                 definition,
                 ack: None,
             },
-            addresses.clone(),
+            keys(addresses.iter().copied()),
         )
         .await;
     assert!(matches!(
@@ -496,7 +499,7 @@ peer_group = "edge"
             definition,
             ack: None,
         },
-        vec![a1, a2],
+        keys([a1, a2]),
     )
     .await
     .unwrap();
@@ -544,7 +547,7 @@ async fn peer_group_reshape_mid_fanout_failure_restores_prior_members() {
         .apply_peer_group_change(
             set_edge_hold_time_event(45),
             // Explicit order so member 1 is reshaped before member 2 fails.
-            vec![a1, a2, a3],
+            keys([a1, a2, a3]),
         )
         .await;
     let Err(error) = result else {
@@ -618,7 +621,7 @@ async fn owned_peer_group_reshape_reports_fully_compensated_failure() {
     mgr.inject_reconfigure_failures.insert(key(a2), 0);
 
     let outcome = mgr
-        .apply_peer_group_change_owned(set_edge_hold_time_event(45), vec![a1, a2])
+        .apply_peer_group_change_owned(set_edge_hold_time_event(45), keys([a1, a2]))
         .await;
     assert!(
         matches!(
@@ -680,7 +683,7 @@ async fn peer_group_reshape_rollback_failure_still_restores_other_priors() {
             set_edge_hold_time_event(45),
             // Explicit order so members 1 and 2 are reshaped before member 3
             // fails.
-            vec![a1, a2, a3],
+            keys([a1, a2, a3]),
         )
         .await;
     let Err(error) = result else {
@@ -758,7 +761,7 @@ async fn owned_peer_group_reshape_reports_ambiguous_rollback_failure() {
     mgr.inject_reconfigure_failures.insert(key(a2), 1);
 
     let outcome = mgr
-        .apply_peer_group_change_owned(set_edge_hold_time_event(45), vec![a1, a2, a3])
+        .apply_peer_group_change_owned(set_edge_hold_time_event(45), keys([a1, a2, a3]))
         .await;
     assert!(
         matches!(
@@ -811,7 +814,7 @@ tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)" 
     );
 
     let Err(error) = mgr
-        .apply_peer_group_change(set_edge_hold_time_event(45), vec![addr])
+        .apply_peer_group_change(set_edge_hold_time_event(45), keys([addr]))
         .await
     else {
         panic!("TCP-AO delta must be rejected up front");
@@ -863,7 +866,7 @@ async fn peer_group_reshape_rollback_preserves_admin_disabled_state() {
     mgr.inject_reconfigure_failures.insert(key(a2), 0);
 
     let result = mgr
-        .apply_peer_group_change(set_edge_hold_time_event(45), vec![a1, a2])
+        .apply_peer_group_change(set_edge_hold_time_event(45), keys([a1, a2]))
         .await;
     assert!(result.is_err(), "{result:?}");
 
@@ -892,7 +895,7 @@ async fn peer_group_reshape_skips_dynamic_peers_without_bouncing() {
     );
     mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
 
-    mgr.apply_peer_group_change(set_edge_hold_time_event(45), vec![addr])
+    mgr.apply_peer_group_change(set_edge_hold_time_event(45), keys([addr]))
         .await
         .unwrap();
 
@@ -961,7 +964,7 @@ remote_asn = 65030
             definition,
             ack: None,
         },
-        vec![addr],
+        keys([addr]),
     )
     .await
     .unwrap();
@@ -1037,9 +1040,12 @@ async fn peer_group_hot_field_edit_applies_in_place_without_session_reset() {
         })
         .collect();
 
-    mgr.apply_peer_group_change(edge_group_max_prefixes_event(90, 5_000), addresses.to_vec())
-        .await
-        .unwrap();
+    mgr.apply_peer_group_change(
+        edge_group_max_prefixes_event(90, 5_000),
+        keys(addresses.iter().copied()),
+    )
+    .await
+    .unwrap();
 
     for (addr, session_id) in before {
         let managed = mgr.peers.get(&key(addr)).expect("hot-applied member");
@@ -1090,9 +1096,12 @@ async fn peer_group_mixed_impact_edit_still_reshapes_members() {
 
     // `hold_time` is OPEN-negotiated (session reset) and `max_prefixes` is
     // hot; a mixed set must not take the in-place path.
-    mgr.apply_peer_group_change(edge_group_max_prefixes_event(45, 5_000), addresses.to_vec())
-        .await
-        .unwrap();
+    mgr.apply_peer_group_change(
+        edge_group_max_prefixes_event(45, 5_000),
+        keys(addresses.iter().copied()),
+    )
+    .await
+    .unwrap();
 
     for (addr, session_id) in before {
         let managed = mgr.peers.get(&key(addr)).expect("reshaped member");
@@ -1123,7 +1132,7 @@ async fn peer_group_hot_apply_mid_cohort_failure_restores_prior_members() {
         .collect();
 
     let Err(error) = mgr
-        .apply_peer_group_change(edge_group_max_prefixes_event(90, 5_000), vec![a1, a2, a3])
+        .apply_peer_group_change(edge_group_max_prefixes_event(90, 5_000), keys([a1, a2, a3]))
         .await
     else {
         panic!("mid-cohort hot-apply failure must surface as Err");
@@ -1249,7 +1258,7 @@ async fn required_family_group_reconcile_waits_for_dynamic_reconnect() {
             definition,
             ack: None,
         },
-        vec![addr],
+        keys([addr]),
     )
     .await
     .unwrap();
@@ -1302,7 +1311,10 @@ async fn peer_group_reshape_rejects_member_missing_from_next_config() {
     );
 
     let Err(error) = mgr
-        .apply_peer_group_change(set_edge_hold_time_event(45), vec![addr])
+        .apply_peer_group_change(
+            set_edge_hold_time_event(45),
+            vec![scoped_key(addr, "rustbgpd-test-missing0")],
+        )
         .await
     else {
         panic!("member missing from next_config must be rejected");
@@ -1372,7 +1384,7 @@ async fn set_peer_group_preserves_config_file_only_session_fields() {
                 definition,
                 ack: None,
             },
-            addresses.to_vec(),
+            keys(addresses.iter().copied()),
         )
         .await;
     assert!(
@@ -1402,4 +1414,98 @@ async fn set_peer_group_preserves_config_file_only_session_fields() {
         assert!(peer.prefix_orf_receive, "{addr}");
         assert!(peer.disable_ipv4_unicast, "{addr}");
     }
+}
+
+/// Changing one same-address neighbor's peer group reshapes that neighbor
+/// only: its link-local sibling keeps its session, so its routes stay.
+#[tokio::test]
+async fn neighbor_peer_group_change_leaves_same_address_sibling_session() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+
+    assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.edge]
+hold_time = 30
+max_prefixes = 1000
+
+[[neighbors]]
+address = "fe80::5"
+interface = "lo"
+remote_asn = 65002
+peer_group = "edge"
+
+[[neighbors]]
+address = "fe80::5"
+interface = "rbgp-missing"
+remote_asn = 65002
+peer_group = "edge"
+"#,
+    );
+    let mut mgr = peer_group_reshape_manager(config);
+    let address: IpAddr = "fe80::5".parse().unwrap();
+    let sibling_counters = Arc::new(FakePeerCounters::default());
+    for (interface, scope_id, session_id, counters) in [
+        ("lo", 1, 7, Arc::new(FakePeerCounters::default())),
+        ("rbgp-missing", 42, 8, sibling_counters.clone()),
+    ] {
+        insert_test_scoped_managed_peer(
+            &mut mgr,
+            address,
+            interface,
+            scope_id,
+            session_id,
+            fake_peer_handle(address, SessionState::Established, None, counters),
+        );
+    }
+    let sibling = scoped_key(address, "rbgp-missing");
+    let mut before = mgr.peers[&scoped_key(address, "lo")].session_id();
+
+    for mutation in [
+        OwnedCatalogMutation::ClearNeighborPeerGroup {
+            address,
+            interface: Some("lo".to_string()),
+        },
+        OwnedCatalogMutation::SetNeighborPeerGroup {
+            address,
+            interface: Some("lo".to_string()),
+            peer_group: "edge".to_string(),
+        },
+    ] {
+        let (reply, response) = oneshot::channel();
+        let _ = Box::pin(
+            mgr.dispatch_command(PeerManagerCommand::OwnedCatalogMutation { mutation, reply }),
+        )
+        .await;
+        let outcome = response.await.unwrap();
+        assert!(
+            matches!(outcome, OwnedCatalogMutationOutcome::Success),
+            "{outcome:?}"
+        );
+        let changed = scoped_key(address, "lo");
+        assert_ne!(
+            mgr.peers[&changed].session_id(),
+            before,
+            "the selected neighbor is reshaped"
+        );
+        before = mgr.peers[&changed].session_id();
+        assert_eq!(mgr.peers[&sibling].session_id(), 8);
+        assert_eq!(sibling_counters.shutdown.load(Ordering::SeqCst), 0);
+    }
+    let groups = mgr
+        .current_config
+        .neighbors
+        .iter()
+        .map(|neighbor| neighbor.peer_group.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(groups, [Some("edge"), Some("edge")]);
 }
