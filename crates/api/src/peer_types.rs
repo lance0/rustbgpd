@@ -53,6 +53,14 @@ impl PeerKey {
         }
     }
 
+    /// The RIB endpoint this key names: the key that configured
+    /// per-neighbor RIB state (outbound limits, conditional attachments)
+    /// uses.
+    #[must_use]
+    pub fn rib_endpoint(&self) -> rustbgpd_rib::PeerEndpoint {
+        rustbgpd_rib::PeerEndpoint::new(self.address, self.interface.as_deref())
+    }
+
     /// The interface in an operator label rendered by [`Self::label`]
     /// (`address%interface`); empty for a numbered neighbor's label.
     #[must_use]

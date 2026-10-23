@@ -861,7 +861,7 @@ fn limit_config(
     OutboundPrefixLimitConfig {
         neighbors: neighbors
             .iter()
-            .map(|(peer, ipv4, ipv6)| (peer.addr(), pair(*ipv4, *ipv6)))
+            .map(|(peer, ipv4, ipv6)| (peer.endpoint().expect("a live peer"), pair(*ipv4, *ipv6)))
             .collect(),
         groups: groups
             .iter()
@@ -2506,4 +2506,41 @@ fn a_grouped_member_materializes_and_carries_its_admitted_set() {
             .is_some_and(|limits| limits.grouped_len(Afi::Ipv4) == 0),
         "the private table is authoritative again, so the member set is released"
     );
+}
+
+/// Acceptance: two neighbors on one link-local address, on different
+/// interfaces, each get only their own configured outbound maximum. eth0 is
+/// capped at one prefix and blocks the second; eth1, configured with no
+/// maximum, keeps exporting both. Keyed by address, eth0's cap lands on eth1.
+#[test]
+fn same_address_neighbors_keep_their_own_outbound_maximum() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let scoped = |name: &str| {
+        PeerId::allocate(crate::PeerEndpoint::new(
+            "fe80::1".parse().unwrap(),
+            Some(name),
+        ))
+    };
+    let (eth0, eth1) = (scoped("eth0"), scoped("eth1"));
+    let mut eth0_rx = register_peer(&mut manager, eth0);
+    let mut eth1_rx = register_peer(&mut manager, eth1);
+    install(&mut manager, 1, limit_config(&[(eth0, Some(1), None)], &[]));
+
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    announce(
+        &mut manager,
+        peer_v4(source),
+        source_routes(source, &[1, 2]),
+    );
+    assert_eq!(
+        wire_prefixes(&mut eth0_rx).len(),
+        1,
+        "eth0 is capped at one"
+    );
+    assert!(ipv4_row(&manager, eth0).blocking);
+    assert_eq!(wire_prefixes(&mut eth1_rx).len(), 2, "eth1 has no maximum");
+    assert!(!ipv4_row(&manager, eth1).blocking);
+    assert!(eth0.release() && eth1.release());
 }

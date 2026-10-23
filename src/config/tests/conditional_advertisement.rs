@@ -733,3 +733,34 @@ fn peer_group_attachment_changes_reload_on_the_generation_route() {
         );
     }
 }
+
+/// Per-neighbor RIB state is keyed by the configured endpoint, so a
+/// link-local neighbor's entries carry its interface: two neighbors on one
+/// link-local address can never share an attachment or a prefix maximum.
+#[test]
+fn link_local_neighbor_state_is_keyed_by_its_interface() {
+    let config = parse(&format!(
+        "{BASE}
+[[neighbors]]
+address = \"fe80::1\"
+interface = \"eth0\"
+remote_asn = 65004
+conditional_advertisements = [\"backup\"]
+max_prefixes_out_ipv4_unicast = 5
+"
+    ))
+    .unwrap();
+    let scoped = rustbgpd_rib::PeerEndpoint::new("fe80::1".parse().unwrap(), Some("eth0"));
+    let set = config.conditional_advertisement_set().unwrap();
+    assert!(
+        set.attachments.contains_key(&scoped),
+        "{:?}",
+        set.attachments
+    );
+    let limits = config.outbound_prefix_limits();
+    assert!(
+        limits.neighbors.contains_key(&scoped),
+        "{:?}",
+        limits.neighbors
+    );
+}

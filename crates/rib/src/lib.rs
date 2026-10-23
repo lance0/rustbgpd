@@ -114,7 +114,7 @@ pub use update::{
     NeighborRibSnapshotResponse, OUTBOUND_PREFIX_LIMIT_REACHED, OrrExplainCandidate,
     OrrLinkQueryKey, OrrNodeQueryKey, OutboundConvergence, OutboundPrefixLimitConfig,
     OutboundPrefixLimitFamilyState, OutboundPrefixLimitPair, OutboundPrefixLimitViolation,
-    OutboundResyncState, OutboundRouteUpdate, PeerExportPolicyReplacement,
+    OutboundResyncState, OutboundRouteUpdate, PageSource, PeerExportPolicyReplacement,
     PeerExportPolicyRestoreReceipt, PeerOutboundState, PlannedGroupability, ReceivedFlowSpecRoute,
     RibCommandError, RibReadinessError, RibReadinessQuery, RibRowFilter, RibRowsPage,
     RibSummaryQuery, RibUpdate, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter,

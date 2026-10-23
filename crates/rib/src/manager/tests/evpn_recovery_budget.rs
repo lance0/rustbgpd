@@ -748,7 +748,7 @@ fn evpn_page_guard_requires_real_owned_unsettled_state_and_preserves_cursor_prec
     manager.handle_query_evpn_routes_page(
         RouteQueryScope::Advertised { peer },
         None,
-        Some((route(1).key(), peer.addr())),
+        Some((route(1).key(), crate::update::PageSource::of(peer))),
         None,
         1,
         reply,

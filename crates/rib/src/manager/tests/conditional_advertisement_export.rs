@@ -102,7 +102,7 @@ fn install_set(
         definitions: vec![definition],
         attachments: peers
             .iter()
-            .map(|peer| (ip(*peer).addr(), vec![Arc::from(NAME)]))
+            .map(|peer| (ip(*peer).addr().into(), vec![Arc::from(NAME)]))
             .collect(),
     }
 }
@@ -1158,4 +1158,76 @@ async fn install_gates_a_peer_registered_before_it() {
     );
     resync(&mut manager);
     assert_eq!(drain(&mut rx), wire(&[], &[(controlled(), 0)]));
+}
+
+/// Acceptance: two neighbors on one link-local address, on different
+/// interfaces, each get only their own conditional advertisements. eth0
+/// advertises the controlled route only while condition A is present, eth1
+/// only while condition B is present; with A present and B absent, only
+/// eth0 exports it. Keyed by address, the two attachments collapse into one.
+#[tokio::test(start_paused = true)]
+async fn same_address_neighbors_keep_their_own_conditional_attachments() {
+    let endpoint = |name: &str| crate::PeerEndpoint::new("fe80::1".parse().unwrap(), Some(name));
+    let (eth0, eth1) = (
+        PeerId::allocate(endpoint("eth0")),
+        PeerId::allocate(endpoint("eth1")),
+    );
+    let condition_b = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let gated = |name: &str, condition: Ipv4Prefix| ConditionalAdvertisement {
+        name: Arc::from(name),
+        condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(v4(condition))],
+        ..definition(prefix_predicate(), ConditionalAdvertiseIf::Present)
+    };
+    let mut manager = manager_with(ConditionalAdvertisementSet {
+        definitions: vec![gated("needs_a", condition()), gated("needs_b", condition_b)],
+        attachments: [
+            (endpoint("eth0"), vec![Arc::from("needs_a")]),
+            (endpoint("eth1"), vec![Arc::from("needs_b")]),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    announce(
+        &mut manager,
+        SOURCE,
+        vec![
+            route(controlled(), SOURCE, 100, false),
+            route(condition(), SOURCE, 100, false),
+        ],
+    );
+    let mut receivers = [eth0, eth1].map(|peer| {
+        let (outbound_tx, outbound_rx) = mpsc::channel(256);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        outbound_rx
+    });
+    elapse(&mut manager, SETTLE).await;
+    let exported = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        drain(rx).announced.contains(&(v4(controlled()), 0))
+    };
+    assert!(exported(&mut receivers[0]), "eth0's condition is present");
+    assert!(!exported(&mut receivers[1]), "eth1's condition is absent");
+    let advertises = |peer: PeerId| {
+        manager.adj_ribs_out[&peer]
+            .iter()
+            .any(|route| route.prefix == v4(controlled()))
+    };
+    assert!(advertises(eth0) && !advertises(eth1));
+    assert!(eth0.release() && eth1.release());
 }
