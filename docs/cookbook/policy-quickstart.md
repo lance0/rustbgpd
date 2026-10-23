@@ -16,7 +16,8 @@ term afterwards. Full language reference:
 **Proven by:** [M80](../receipts.md#interop-labs--pr-gated-interopyml)
 (route-for-route parity against FRR route-maps, `rbgp policy check`
 gating, and a SIGHUP hot-apply under traffic that refreshes only the
-peers whose chains changed) and M34 (SIGHUP policy soft-reset
+peers whose chains changed) and
+[M34](../interop.md#m34-test-results-2026-04-30-frr-1031) (SIGHUP policy soft-reset
 auto-fire). The fixture this quickstart is modeled on:
 [`tests/interop/configs/rustbgpd-m80-policy.rpol`](../../tests/interop/configs/rustbgpd-m80-policy.rpol).
 
