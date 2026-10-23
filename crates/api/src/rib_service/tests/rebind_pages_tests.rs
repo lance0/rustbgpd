@@ -138,7 +138,7 @@ fn family_page_rows_and_cursors_keep_the_endpoint_of_their_page() {
         bgpls_route_to_proto_in(&bgpls[0], &peers).peer_address,
         "fe80::1"
     );
-    assert!(encode_bgpls_page_key(&bgpls[0], &peers).contains("~fe80::1~"));
+    assert!(encode_bgpls_page_key(&bgpls[0], &peers).contains("~fe80::1@"));
     let version = RoutePageVersion {
         epoch: 1,
         generation: 1,

@@ -10282,7 +10282,7 @@ mod tests {
             query_identity,
             &(
                 Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
-                "192.0.2.1".parse().unwrap(),
+                PageSource::of(PeerId::from_addr("192.0.2.1".parse().unwrap())),
                 0,
             ),
             RoutePageVersion {
@@ -10434,7 +10434,7 @@ mod tests {
         let scope = RouteQueryScope::Best;
         let key = (
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
-            "192.0.2.1".parse().unwrap(),
+            PageSource::of(PeerId::from_addr("192.0.2.1".parse().unwrap())),
             7,
         );
         let version = RoutePageVersion {
@@ -10560,7 +10560,7 @@ mod tests {
     fn route_page_token_rejects_cross_scope_reuse() {
         let key = (
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
-            "192.0.2.1".parse().unwrap(),
+            PageSource::of(PeerId::from_addr("192.0.2.1".parse().unwrap())),
             0,
         );
         let mut request = list_routes_request();
@@ -10856,7 +10856,7 @@ mod tests {
         let scope = RouteQueryScope::Received { peer: None };
         let key = (
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
-            "192.0.2.1".parse().unwrap(),
+            PageSource::of(PeerId::from_addr("192.0.2.1".parse().unwrap())),
             7,
         );
         let version = RoutePageVersion {
