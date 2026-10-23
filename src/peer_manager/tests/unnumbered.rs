@@ -366,6 +366,86 @@ async fn an_unbound_neighbors_address_is_reserved_until_its_gr_routes_retire() {
     assert_eq!(h.peers_at(ll(2)), [swp2], "released, then admitted on swp2");
 }
 
+/// The session establishes and fails with GR after the retention check but
+/// before the conditional shutdown, which then succeeds on a down session.
+/// The retention that failure left keeps the stopped peer, and its address.
+async fn retention_left_after_the_check() -> (
+    Harness,
+    Arc<std::sync::Mutex<PeerRetention>>,
+    tokio::time::Instant,
+) {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let retention = h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let flip = Arc::clone(&retention);
+    let task = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(
+                        IpAddr::V6(ll(2)),
+                        SessionState::Active,
+                    ));
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                    *flip.lock().unwrap() = PeerRetention {
+                        stale_routes: 3,
+                        next_deadline: Some(deadline),
+                    };
+                    let _ = reply.send(true);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    h.replace_session(&key, PeerHandle::from_parts(tx, task));
+
+    // Mutation-red: deciding on the first query alone purges that retention.
+    h.bind("swp1", None).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        std::slice::from_ref(&key),
+        "kept, stopped"
+    );
+    assert_eq!(h.mgr.unnumbered_retry_at(), Some(deadline));
+    (h, retention, deadline)
+}
+
+#[tokio::test(start_paused = true)]
+async fn retention_left_after_the_check_keeps_the_stopped_peer_until_it_retires() {
+    let (mut h, retention, deadline) = retention_left_after_the_check().await;
+    tokio::time::sleep_until(deadline).await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), []);
+}
+
+/// A binding that returns to the stopped peer's address replaces it with a
+/// live session instead of keeping the stopped one.
+#[tokio::test(start_paused = true)]
+async fn a_returning_binding_replaces_a_stopped_retained_peer() {
+    let (mut h, _retention, _) = retention_left_after_the_check().await;
+    // Mutation-red: keeping the same endpoint leaves the stopped session.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    assert!(matches!(
+        h.mgr.peers[&swp1_key(2)]
+            .handle()
+            .query_state_outcome(Duration::from_secs(1))
+            .await,
+        rustbgpd_transport::StateQueryOutcome::State(_)
+    ));
+}
+
 /// Without retained routes the address is released as soon as the session
 /// is down.
 #[tokio::test(start_paused = true)]

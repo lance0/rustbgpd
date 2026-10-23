@@ -78,6 +78,10 @@ struct Port {
     /// still have shut the session down, which reports nothing. Settled by
     /// reading the session before the binding is trusted again.
     retire_unsettled: bool,
+    /// The bound session was shut down to release the address, but the RIB
+    /// then reported retention it left between the check and the shutdown.
+    /// The stopped peer keeps the address until that retention ends.
+    stopped_retained: bool,
 }
 
 /// State of an interface-only neighbor that belongs to the neighbor, not to
@@ -529,7 +533,10 @@ impl PeerManager {
             // A lost binding keeps the peer; a new one never displaces an
             // Established session; confirmed carrier loss or interface
             // recreation always ends it.
-            let gone = link_down || recreated || exited;
+            // A peer stopped while retained is no session to keep at a
+            // returning binding.
+            let stopped = self.port_mut(name).stopped_retained && desired.is_some();
+            let gone = link_down || recreated || exited || stopped;
             let keep = !gone && (desired.is_none() || same_endpoint || established);
             if keep {
                 if desired.is_none() && !established {
@@ -618,31 +625,50 @@ impl PeerManager {
     /// is checked again at the RIB's next timer, which sweeps the routes or
     /// promotes them to LLGR.
     async fn release_unless_retained(&mut self, name: &str, key: PeerKey) {
-        if !self.bound_session_down(name, &key).await {
+        if !self.port_mut(name).stopped_retained {
+            if !self.bound_session_down(name, &key).await {
+                return;
+            }
+            // The session answered the read only after sending its
+            // teardown's GR or PeerDown to the RIB, so this query, queued
+            // behind it, sees the retention that teardown left.
+            if self.retained_until_next_check(name, &key).await {
+                return;
+            }
+            if !self.shut_down_unless_established(name, &key).await {
+                return;
+            }
+            // The session may have established and failed with GR between
+            // the check and the shutdown; the second query, queued behind
+            // that teardown, sees it.
+            self.port_mut(name).stopped_retained = true;
+        }
+        if self.retained_until_next_check(name, &key).await {
             return;
         }
-        // The session answered the read only after sending its teardown's
-        // GR or PeerDown to the RIB, so this query, queued behind it, sees
-        // the retention that teardown left.
-        let Some(retention) = self.bound_peer_retention(&key).await else {
-            self.arm_unnumbered_retry();
-            return;
-        };
-        if retention.stale_routes > 0 {
-            let now = tokio::time::Instant::now();
-            let at = retention
-                .next_deadline
-                .unwrap_or(now + RETENTION_RECHECK)
-                .max(now + RECONCILE_RETRY);
-            debug!(interface = %name, peer = %key, stale_routes = retention.stale_routes, "unnumbered: unbound neighbor keeps its address while its routes are retained");
-            self.arm_unnumbered_retry_at(at);
-            return;
-        }
-        // ponytail: a session that establishes and fails with GR between the
-        // read above and this conditional shutdown loses that new retention
-        // with the peer; re-query after the shutdown if that window matters.
-        self.retire_bound_peer(name, key, "binding_expired", true)
+        self.retire_bound_peer(name, key, "binding_expired", false)
             .await;
+    }
+
+    /// Whether the RIB still retains the bound peer's GR or LLGR routes.
+    /// Retained, the next check is armed at the RIB's next timer, which
+    /// sweeps them or promotes them to LLGR; no answer retries shortly.
+    async fn retained_until_next_check(&mut self, name: &str, key: &PeerKey) -> bool {
+        let Some(retention) = self.bound_peer_retention(key).await else {
+            self.arm_unnumbered_retry();
+            return true;
+        };
+        if retention.stale_routes == 0 {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        let at = retention
+            .next_deadline
+            .unwrap_or(now + RETENTION_RECHECK)
+            .max(now + RECONCILE_RETRY);
+        debug!(interface = %name, peer = %key, stale_routes = retention.stale_routes, "unnumbered: unbound neighbor keeps its address while its routes are retained");
+        self.arm_unnumbered_retry_at(at);
+        true
     }
 
     /// The RIB's GR/LLGR retention for the bound peer's identity; `None`
@@ -714,6 +740,7 @@ impl PeerManager {
         port.bound = None;
         port.established = false;
         port.retire_unsettled = false;
+        port.stopped_retained = false;
         port.held = Some(held);
         // The retired session's queued reports have been drained by
         // now; an Established among them must not outlive it.
