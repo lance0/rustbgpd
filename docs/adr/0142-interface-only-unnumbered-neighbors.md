@@ -330,10 +330,12 @@ ordinary FSM states once an address is bound.
   when OPEN validates. It is kept across endpoints and link flaps, and every
   later binding reuses it. It is released only when the neighbor leaves the
   configuration, which for an interface-only neighbor takes a restart today.
-  Allocating before OPEN is bounded: each configured
-  interface-only stanza holds at most one handle, so a stray RA or
-  connection cannot allocate more. Deferring allocation to OPEN protects
-  dynamic neighbors, whose number configuration does not bound.
+  Allocating before OPEN is bounded: each configured interface-only stanza
+  holds at most one handle, whatever arrives on its link, so a stray RA or
+  connection cannot allocate more. Dynamic neighbors defer allocation to
+  OPEN for a different reason: a connection that never validates should not
+  take a handle. Their count is bounded separately, by
+  `global.dynamic_neighbor_limit` at admission.
 
 ### Same-address neighbors before and after the scoped RIB identity
 
