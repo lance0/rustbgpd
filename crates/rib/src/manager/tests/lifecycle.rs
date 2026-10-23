@@ -2129,6 +2129,36 @@ async fn registration_wait_tracks_deferral_completion_and_peer_down() {
     assert_eq!(registration_wait(&mut manager), (0.0, 0.0));
 }
 
+/// Registrations within one sample interval share one scan: inline
+/// registrations arm the sample a full interval ahead and never pull it
+/// earlier, so a `PeerUp` burst costs one O(sessions) scan per second, not one
+/// per `PeerUp`.
+#[tokio::test(start_paused = true)]
+async fn registration_wait_sample_is_shared_by_a_peer_up_burst() {
+    let (_tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let first_due = tokio::time::Instant::now() + Duration::from_secs(1);
+    let mut receivers = Vec::new();
+    for host in 1..=5 {
+        let (outbound_tx, outbound_rx) = mpsc::channel(16);
+        manager.handle_update(test_peer_up(
+            peer_v4(Ipv4Addr::new(10, 0, 0, host)),
+            u64::from(host),
+            outbound_tx,
+        ));
+        receivers.push(outbound_rx);
+        assert_eq!(manager.outbound_peers.len(), usize::from(host));
+        // The run loop's per-turn check finds nothing due yet.
+        manager.sample_outbound_registration_wait_if_due();
+        assert_eq!(manager.registration_wait_sample_at, Some(first_due));
+        tokio::time::advance(Duration::from_millis(150)).await;
+    }
+    tokio::time::advance(Duration::from_millis(250)).await;
+    manager.sample_outbound_registration_wait_if_due();
+    assert_eq!(manager.registration_wait_sample_at, None);
+    assert_eq!(registration_wait_gauges(&manager.metrics), (0.0, 0.0));
+}
+
 /// A collision failback that re-registers an earlier-registered survivor
 /// starts a new wait at the failback, not at the survivor's original
 /// `PeerUp`, and the completed re-registration settles the gauges.

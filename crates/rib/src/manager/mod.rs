@@ -787,8 +787,9 @@ pub struct RibManager {
     /// superseded or failed over while queued resolves to its survivor.
     pending_initial_registrations: VecDeque<PeerId>,
     /// When the next `bgp_rib_outbound_registration_pending_*` sample runs.
-    /// Armed when a registration wait starts and re-armed one second out
-    /// while the last sample counted one; `None` once a sample counts none.
+    /// Armed one interval ahead when a registration wait starts, so a burst
+    /// of `PeerUp`s shares one scan; re-armed one interval out while the last
+    /// sample counted a wait; `None` once a sample counts none.
     registration_wait_sample_at: Option<tokio::time::Instant>,
     /// Loc-RIB size below which a `PeerUp` initial dump always completes
     /// inline even with queued actor work — a small dump costs microseconds,

@@ -1262,8 +1262,9 @@ impl RibManager {
             record
                 .registration_wait_since
                 .get_or_insert_with(tokio::time::Instant::now);
-            self.registration_wait_sample_at
-                .get_or_insert_with(tokio::time::Instant::now);
+            self.registration_wait_sample_at.get_or_insert_with(|| {
+                tokio::time::Instant::now() + super::REGISTRATION_WAIT_SAMPLE_INTERVAL
+            });
         }
         let Some(record) = self
             .live_sessions
