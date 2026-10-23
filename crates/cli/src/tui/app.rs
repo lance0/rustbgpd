@@ -660,6 +660,25 @@ impl App {
     pub(crate) fn take_rib_intent(&mut self) -> Option<RibIntent> {
         self.rib_intents.pop_front()
     }
+    /// The selector a RIB or explain request sends for the neighbor shown
+    /// as `key`. An interface-only neighbor's key is its interface, which the
+    /// RIB services do not accept, so it is sent as `learned%interface`;
+    /// `None` while it has no learned address. Any other key is sent as is.
+    pub(crate) fn request_peer(&self, key: &str) -> Option<String> {
+        let interface_only = self.neighbors.iter().find(|neighbor| {
+            neighbor_key(neighbor).as_deref() == Some(key)
+                && neighbor
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.address.is_empty() && !config.interface.is_empty())
+        });
+        match interface_only {
+            Some(neighbor) if neighbor.learned_peer_address.is_empty() => None,
+            Some(neighbor) => Some(format!("{}%{key}", neighbor.learned_peer_address)),
+            None => Some(key.to_owned()),
+        }
+    }
+
     pub(crate) fn record_rib_request(&mut self, identity: RibQueryIdentity) {
         self.active_rib_query = Some(identity);
     }
@@ -706,13 +725,13 @@ impl App {
                     ..
                 },
             ) => {
-                peer == &active.peer_address
+                self.request_peer(peer).as_ref() == Some(&active.peer_address)
                     && *view == self.rib_view
                     && *family == self.rib_family
                     && *filter == self.rib_filter
             }
             (View::AdvertisedExplain(peer), RibQueryKind::ExplainAdvertised { .. }) => {
-                peer == &active.peer_address
+                self.request_peer(peer).as_ref() == Some(&active.peer_address)
             }
             _ => false,
         };
@@ -1067,6 +1086,25 @@ fn format_rib_error(error: &RibQueryError) -> String {
 mod tests {
     use super::*;
     use crate::proto::{NeighborConfig, NeighborState};
+
+    /// An interface-only neighbor's UI key is its interface; RIB requests
+    /// send its learned address scoped to it, and none while it is unbound.
+    #[test]
+    fn interface_only_rib_requests_use_the_learned_address() {
+        let mut app = App::new();
+        let mut swp1 = neighbor("", 0);
+        swp1.config.as_mut().unwrap().interface = "swp1".into();
+        app.neighbors = vec![neighbor("198.51.100.1", 0), swp1];
+        // Mutation-red: forwarding the key sends `swp1`, which the RIB
+        // services reject.
+        assert_eq!(app.request_peer("swp1"), None, "unbound");
+        app.neighbors[1].learned_peer_address = "fe80::2".into();
+        assert_eq!(app.request_peer("swp1").as_deref(), Some("fe80::2%swp1"));
+        assert_eq!(
+            app.request_peer("198.51.100.1").as_deref(),
+            Some("198.51.100.1")
+        );
+    }
 
     fn neighbor(address: &str, uptime_seconds: u64) -> NeighborState {
         NeighborState {
