@@ -150,8 +150,14 @@ pub struct ConditionalAdvertisementStatus {
     pub settle_remaining: Option<Duration>,
     /// RFC 4724 selection deferral holds a condition family.
     pub selection_deferred: bool,
-    /// Static neighbors with this definition attached.
+    /// Static neighbor addresses with this definition attached, one per
+    /// neighbor: two neighbors on one link-local address appear twice.
+    /// Superseded by `attached_neighbors`, which names each one's interface.
     pub attached_peers: Vec<IpAddr>,
+    /// Static neighbors with this definition attached, in address then
+    /// interface order: each one's address and, for a link-local neighbor,
+    /// its interface.
+    pub attached_neighbors: Vec<PeerEndpoint>,
 }
 
 /// One complete conditional-advertisement install (ADR-0137): every
@@ -1363,11 +1369,12 @@ impl RibManager {
     pub(super) fn conditional_advertisement_status(&self) -> Vec<ConditionalAdvertisementStatus> {
         let now = Instant::now();
         let tracker = &self.conditional_advertisements;
-        // One pass over the attachments; peers come out in address order.
-        let mut attached: BTreeMap<&Arc<str>, Vec<IpAddr>> = BTreeMap::new();
+        // One pass over the attachments; neighbors come out in address
+        // then interface order.
+        let mut attached: BTreeMap<&Arc<str>, Vec<&PeerEndpoint>> = BTreeMap::new();
         for (peer, names) in &tracker.attachments {
             for name in names {
-                attached.entry(name).or_default().push(peer.addr);
+                attached.entry(name).or_default().push(peer);
             }
         }
         tracker
@@ -1392,7 +1399,18 @@ impl RibManager {
                         .deadline
                         .map(|deadline| deadline.saturating_duration_since(now)),
                     selection_deferred: self.condition_deferred(definition),
-                    attached_peers: attached.remove(&definition.name).unwrap_or_default(),
+                    attached_peers: attached
+                        .get(&definition.name)
+                        .into_iter()
+                        .flatten()
+                        .map(|peer| peer.addr)
+                        .collect(),
+                    attached_neighbors: attached
+                        .remove(&definition.name)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .collect(),
                 }
             })
             .collect()

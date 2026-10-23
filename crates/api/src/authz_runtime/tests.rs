@@ -1056,6 +1056,7 @@ fn spawn_conditional_status_rib(
                 settle_remaining: None,
                 selection_deferred: false,
                 attached_peers: vec!["192.0.2.1".parse().unwrap()],
+                attached_neighbors: Vec::new(),
             }]);
         }
         served

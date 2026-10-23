@@ -2292,8 +2292,21 @@ message ConditionalAdvertisementStatus {
   // True while RFC 4724 selection deferral holds a condition prefix's
   // family; no settle timer is armed until it is released.
   bool selection_deferred = 10;
-  // Static neighbor addresses with this definition attached, sorted.
+  // Static neighbor addresses with this definition attached, sorted, one
+  // per neighbor (two neighbors on one link-local address appear twice).
+  // Superseded by attached_neighbors, which also names each interface.
   repeated string attached_peers = 11;
+  // Static neighbors with this definition attached, sorted by address then
+  // interface.
+  repeated ConditionalAdvertisementNeighbor attached_neighbors = 12;
+}
+
+// One static neighbor a conditional advertisement is attached to.
+message ConditionalAdvertisementNeighbor {
+  // Bare IP literal of the neighbor.
+  string peer_address = 1;
+  // Interface of an IPv6 link-local neighbor; empty for a numbered one.
+  string peer_interface = 2;
 }
 
 // Operator-facing status of one external policy dataset (LAN-305).
