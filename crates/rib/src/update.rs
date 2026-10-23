@@ -2291,6 +2291,16 @@ pub struct OutboundResyncState {
     pub recovery_fallback: Option<&'static str>,
 }
 
+/// A peer's GR/LLGR stale-route retention, as `QueryPeerRetention` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerRetention {
+    /// Routes still held GR- or LLGR-stale.
+    pub stale_routes: usize,
+    /// The peer's earliest GR or LLGR timer: expiry sweeps the stale routes
+    /// or promotes them to LLGR. `None` when no timer is armed.
+    pub next_deadline: Option<tokio::time::Instant>,
+}
+
 /// Helper-side retention phase of one family's stale routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrRetentionPhase {
@@ -3354,6 +3364,18 @@ pub enum RibUpdate {
         peer: PeerId,
         /// Response channel.
         reply: oneshot::Sender<usize>,
+    },
+    /// Query: whether a peer's Adj-RIB-In still retains GR or LLGR stale
+    /// routes, and when the RIB next acts on them.
+    ///
+    /// ADR-0142 keeps an unbound interface-only neighbor's last address
+    /// reserved until this retention ends; the deadline tells the peer
+    /// manager when to ask again instead of polling.
+    QueryPeerRetention {
+        /// The target peer.
+        peer: PeerId,
+        /// Response channel.
+        reply: oneshot::Sender<PeerRetention>,
     },
     /// Query: return aggregate route-policy counters for a specific peer.
     QueryNeighborPolicyStats {
