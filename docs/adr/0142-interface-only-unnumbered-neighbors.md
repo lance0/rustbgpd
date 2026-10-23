@@ -243,6 +243,28 @@ reselection is deterministic:
   link that is defined to have one, and it is refused with
   `multiple_routers_on_link` instead of entering collision resolution.
 
+Amendment (2026-10-23): the identity-mismatch refusal in the last bullet is
+dropped, and collision resolution runs unchanged under RFC 4271 §6.8 and
+[ADR-0021](0021-tcp-collision-detection.md). This also replaces the reference
+to that match in "Sessions and collisions" below. The one-router rule holds
+without it:
+
+- Two connections reach collision resolution only when the inbound
+  connection matches the bound peer's address and current interface scope.
+- A connection from any other address does not create a second connection.
+  Inbound learning refuses it while a live RA binding, an opening or
+  Established session, or a pending inbound connection holds the bound
+  address. Otherwise it replaces the binding before any second connection
+  exists.
+- Two connections from the same link-local address on one link come from one
+  host. RFC 4862 §5.4 Duplicate Address Detection keeps a link-local address
+  unique on a link, so two routers sharing one needs DAD disabled or failed
+  on one of them. That is a host misconfiguration. The daemon reports its
+  own failed address as the host IPv6 condition `link_local_dad_failed`.
+- The check could not cover the whole window anyway. The primary
+  connection's identity is known only once its OPEN has arrived (OpenConfirm),
+  so a check made in OpenSent would have nothing to compare.
+
 ### Sessions and collisions
 
 Both ends connect actively, and both accept passively, as FRR does and as
@@ -302,6 +324,18 @@ ordinary FSM states once an address is bound.
   neighbor receives its handle when OPEN validates. The handle is stable
   across address changes and link flaps, and released only when configuration
   deletes the neighbor.
+
+  Amendment (2026-10-23): the handle is allocated at the neighbor's first
+  binding, whether that comes from an RA or from an inbound connection, not
+  when OPEN validates. It is kept across endpoints and link flaps, and every
+  later binding reuses it. It is released only when the neighbor leaves the
+  configuration, which for an interface-only neighbor takes a restart today.
+  Allocating before OPEN is bounded: each configured interface-only stanza
+  holds at most one handle, whatever arrives on its link, so a stray RA or
+  connection cannot allocate more. Dynamic neighbors defer allocation to
+  OPEN for a different reason: a connection that never validates should not
+  take a handle. Their count is bounded separately, by
+  `global.dynamic_neighbor_limit` at admission.
 
 ### Same-address neighbors before and after the scoped RIB identity
 
