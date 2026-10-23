@@ -4944,7 +4944,7 @@ impl PeerManager {
     pub(super) async fn apply_peer_group_change(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> Result<(), CatalogMutationError> {
         // The body clones the running configuration onto its own stack frame;
         // boxing it keeps every caller's future under clippy's size ceiling.
@@ -4958,7 +4958,7 @@ impl PeerManager {
     async fn apply_peer_group_change_inner(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> Result<(), CatalogMutationError> {
         if let ConfigEvent::DeletePeerGroup { name, .. } = &event {
             let refs = peer_group_references(&self.current_config, name);
@@ -5040,7 +5040,7 @@ impl PeerManager {
         let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
         for peer_key in affected_peers
             .into_iter()
-            .flat_map(|address| self.peer_keys_for_address(address))
+            .filter(|key| self.peers.contains_key(key))
         {
             if !seen.insert(peer_key.clone()) {
                 continue;
@@ -5100,7 +5100,7 @@ impl PeerManager {
     pub(super) async fn apply_peer_group_change_owned(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> OwnedCatalogMutationOutcome {
         // See `apply_peer_group_change`: boxed for the same stack-size reason.
         let batch = self.peers.begin_batch();
@@ -5117,7 +5117,7 @@ impl PeerManager {
     async fn apply_peer_group_change_owned_inner(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> OwnedCatalogMutationOutcome {
         if let ConfigEvent::DeletePeerGroup { name, .. } = &event {
             let refs = peer_group_references(&self.current_config, name);
@@ -5193,7 +5193,7 @@ impl PeerManager {
         let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
         for peer_key in affected_peers
             .into_iter()
-            .flat_map(|address| self.peer_keys_for_address(address))
+            .filter(|key| self.peers.contains_key(key))
         {
             if !seen.insert(peer_key.clone()) {
                 continue;
@@ -5315,7 +5315,7 @@ impl PeerManager {
         event: ConfigEvent,
         next_config: Config,
         group: &str,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> Result<(), CatalogMutationError> {
         let cohort = self.peer_group_hot_cohort(&next_config, group, &affected_peers)?;
         let members = cohort.len();
@@ -5370,21 +5370,18 @@ impl PeerManager {
         &self,
         next_config: &Config,
         group: &str,
-        affected_peers: &[IpAddr],
+        affected_peers: &[PeerKey],
     ) -> Result<Vec<(PeerManagerNeighborConfig, PeerManagerNeighborConfig)>, CatalogMutationError>
     {
         // (next config, captured live prior) per member, in apply order.
         let mut cohort: Vec<(PeerManagerNeighborConfig, PeerManagerNeighborConfig)> = Vec::new();
         let mut seen = BTreeSet::new();
 
-        for peer_key in affected_peers
-            .iter()
-            .flat_map(|address| self.peer_keys_for_address(*address))
-        {
-            if seen.contains(&peer_key) {
+        for peer_key in affected_peers {
+            if seen.contains(peer_key) {
                 continue;
             }
-            let Some(managed) = self.peers.get(&peer_key) else {
+            let Some(managed) = self.peers.get(peer_key) else {
                 continue;
             };
             // Dynamic peers at an affected address are swept below off their
@@ -5394,8 +5391,8 @@ impl PeerManager {
                 continue;
             }
             seen.insert(peer_key.clone());
-            let prior = Self::removed_peer_config(&peer_key, managed);
-            let Some(neighbor) = next_config.neighbor_record(&peer_key) else {
+            let prior = Self::removed_peer_config(peer_key, managed);
+            let Some(neighbor) = next_config.neighbor_record(peer_key) else {
                 return Err(CatalogMutationError::internal(format!(
                     "static peer {peer_key} affected by the peer-group change has no neighbor \
                      record in the updated config; refusing to hot-apply against an inconsistent \
