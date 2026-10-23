@@ -7345,13 +7345,12 @@ policy client-x {
             Vec::new(),
         );
         let export_chain = stats_export_chain();
+        // The RIB publishes a scoped neighbor's chain under its own handle.
+        let scoped = PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(link_local(), Some("eth0")));
         let mut export = ExportRosterPublisher::new();
         export.publish(
             vec![
-                (
-                    PeerId::from_addr(link_local()),
-                    Some(Arc::clone(export_chain.hit_counters())),
-                ),
+                (scoped, Some(Arc::clone(export_chain.hit_counters()))),
                 (
                     PeerId::from_addr("10.0.0.2".parse().unwrap()),
                     Some(Arc::clone(export_chain.hit_counters())),
@@ -7391,6 +7390,7 @@ policy client-x {
                 ("import", LINK_LOCAL, "eth0"),
             ]
         );
+        assert!(scoped.release());
     }
 
     /// `GetPolicyStats` selects from the one roster snapshot it parsed the
