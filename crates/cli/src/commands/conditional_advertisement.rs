@@ -53,8 +53,37 @@ fn status_json(resp: &ListConditionalAdvertisementsResponse) -> serde_json::Valu
             "settle_remaining_ms": definition.settle_remaining_ms,
             "selection_deferred": definition.selection_deferred,
             "attached_peers": definition.attached_peers,
+            "attached_neighbors": definition.attached_neighbors.iter().map(|neighbor| serde_json::json!({
+                "peer_address": neighbor.peer_address,
+                "peer_interface": neighbor.peer_interface,
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })
+}
+
+/// Each attached neighbor, scoped as `fe80::1%eth0` for a link-local one.
+/// A daemon that predates `attached_neighbors` reports bare addresses only.
+fn attached_text(definition: &ConditionalAdvertisementStatus) -> String {
+    let attached: Vec<String> = if definition.attached_neighbors.is_empty() {
+        definition.attached_peers.clone()
+    } else {
+        definition
+            .attached_neighbors
+            .iter()
+            .map(|neighbor| {
+                if neighbor.peer_interface.is_empty() {
+                    neighbor.peer_address.clone()
+                } else {
+                    format!("{}%{}", neighbor.peer_address, neighbor.peer_interface)
+                }
+            })
+            .collect()
+    };
+    if attached.is_empty() {
+        "-".to_string()
+    } else {
+        attached.join(" ")
+    }
 }
 
 fn seconds(ms: u64) -> String {
@@ -121,11 +150,7 @@ fn write_status(
             .map(condition_text)
             .collect::<Vec<_>>()
             .join(", ");
-        let attached = if definition.attached_peers.is_empty() {
-            "-".to_string()
-        } else {
-            definition.attached_peers.join(" ")
-        };
+        let attached = attached_text(definition);
         writeln!(writer, "{}", definition.name)?;
         writeln!(writer, "  advertise if:  {}", definition.advertise_if)?;
         writeln!(writer, "  applied:       {}", definition.applied)?;
@@ -145,6 +170,7 @@ fn write_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::ConditionalAdvertisementNeighbor;
 
     fn response() -> ListConditionalAdvertisementsResponse {
         ListConditionalAdvertisementsResponse {
@@ -165,6 +191,7 @@ mod tests {
                     settle_remaining_ms: 0,
                     selection_deferred: false,
                     attached_peers: vec!["203.0.113.2".to_string()],
+                    attached_neighbors: Vec::new(),
                 },
                 ConditionalAdvertisementStatus {
                     name: "core".to_string(),
@@ -201,7 +228,15 @@ mod tests {
                     settle_pending: true,
                     settle_remaining_ms: 3_500,
                     selection_deferred: false,
-                    attached_peers: vec!["192.0.2.1".to_string(), "192.0.2.2".to_string()],
+                    // Two neighbors on one link-local address, one per
+                    // interface: the bare list repeats the address.
+                    attached_peers: vec!["fe80::1".to_string(), "fe80::1".to_string()],
+                    attached_neighbors: ["eth0", "eth1"]
+                        .map(|interface| ConditionalAdvertisementNeighbor {
+                            peer_address: "fe80::1".to_string(),
+                            peer_interface: interface.to_string(),
+                        })
+                        .to_vec(),
                 },
             ],
         }
@@ -228,7 +263,7 @@ mod tests {
              \x20 settle:        pending, 3.5s left (settle_time 5s)\n\
              \x20 conditions:    198.51.100.0/24 present, 2001:db8::/32 absent, \
              10.0.0.0/8 le 24 present (10 matching: 10.1.0.0/16, 10.2.0.0/24, +8 more)\n\
-             \x20 attached:      192.0.2.1 192.0.2.2\n"
+             \x20 attached:      fe80::1%eth0 fe80::1%eth1\n"
         );
     }
 
@@ -273,7 +308,11 @@ mod tests {
                 "settle_pending": true,
                 "settle_remaining_ms": 3500,
                 "selection_deferred": false,
-                "attached_peers": ["192.0.2.1", "192.0.2.2"],
+                "attached_peers": ["fe80::1", "fe80::1"],
+                "attached_neighbors": [
+                    {"peer_address": "fe80::1", "peer_interface": "eth0"},
+                    {"peer_address": "fe80::1", "peer_interface": "eth1"},
+                ],
             })
         );
     }

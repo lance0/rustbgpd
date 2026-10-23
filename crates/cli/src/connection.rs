@@ -1165,6 +1165,7 @@ mod tests {
             observed: "absent".to_string(),
             applied: "advertise".to_string(),
             attached_peers: (0..peers).map(|i| format!("2001:db8::{i:x}")).collect(),
+            attached_neighbors: Vec::new(),
             ..Default::default()
         };
         server_proto::ListConditionalAdvertisementsResponse {

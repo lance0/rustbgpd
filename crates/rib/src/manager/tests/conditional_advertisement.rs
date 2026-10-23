@@ -1791,3 +1791,27 @@ async fn route_churn_reobserves_only_the_affected_condition_prefix() {
             .all(|condition| condition.state == "absent")
     );
 }
+
+/// Two neighbors on one link-local address, on different interfaces, both
+/// attached: the status names each one with its interface, in address then
+/// interface order, while the superseded bare-address list repeats the
+/// address once per neighbor.
+#[tokio::test(start_paused = true)]
+async fn status_names_same_address_attachments_by_interface() {
+    let mut manager = manager();
+    let scoped = |name: &str| crate::PeerEndpoint::new("fe80::1".parse().unwrap(), Some(name));
+    let _ = manager.handle_install_conditional_advertisements(
+        crate::ConditionalAdvertisementSet {
+            definitions: vec![absent_if(SETTLE)],
+            attachments: [scoped("eth1"), scoped("eth0")]
+                .into_iter()
+                .map(|endpoint| (endpoint, vec![Arc::from(NAME)]))
+                .collect(),
+        },
+        &[],
+    );
+    let backup = status(&manager, NAME);
+    assert_eq!(backup.attached_neighbors, [scoped("eth0"), scoped("eth1")]);
+    let address: std::net::IpAddr = "fe80::1".parse().unwrap();
+    assert_eq!(backup.attached_peers, [address, address]);
+}
