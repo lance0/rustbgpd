@@ -519,11 +519,16 @@ impl PeerManager {
                     let port = self.port_mut(name);
                     if let Some(key) = port.bound.clone()
                         && port.settings != *settings
-                        && self
+                    {
+                        if self
                             .retire_bound_peer(name, key, "neighbor_reconfigured")
                             .await
-                    {
-                        self.port_mut(name).settings = None;
+                        {
+                            self.port_mut(name).settings = None;
+                        } else {
+                            // The peer keeps its old settings; try again.
+                            self.arm_unnumbered_retry();
+                        }
                     }
                 }
             }
