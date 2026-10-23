@@ -1445,7 +1445,6 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "",
             self.import_roster.as_ref(),
         )?;
-        let peer_filter = peer_key.as_ref().map(|key| key.address);
 
         // Compile the candidate source server-side. Diagnostics are a
         // successful RPC with compiled=false — the dry run's answer.
@@ -1498,7 +1497,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
 
         let scope = TestPolicyScope {
             import,
-            target_peer: peer_filter,
+            target_peer: peer_key.clone(),
             family_filter,
             limit: req.limit as usize,
             show_changes: req.show_changes as usize,
@@ -1734,7 +1733,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         .await?;
 
         let scope = ComparePolicyScope {
-            target: target.addr(),
+            target: target_key.clone(),
             family_filter,
             limit: req.limit as usize,
             max_samples: req.max_samples as usize,
@@ -2044,7 +2043,12 @@ async fn dry_run_peer_context(
     }
     Ok(peers
         .into_iter()
-        .map(|info| (info.address, (info.remote_asn, info.peer_group)))
+        .map(|info| {
+            (
+                PeerKey::new(info.address, info.interface),
+                (info.remote_asn, info.peer_group),
+            )
+        })
         .collect())
 }
 
@@ -2230,7 +2234,7 @@ struct TestPolicyScope {
     import: bool,
     /// Export evaluation target (also the import snapshot filter,
     /// applied upstream by the RIB query).
-    target_peer: Option<IpAddr>,
+    target_peer: Option<PeerKey>,
     /// `Some(true)` = IPv4 only, `Some(false)` = IPv6 only.
     family_filter: Option<bool>,
     /// Max routes evaluated; 0 = all.
@@ -2271,10 +2275,12 @@ fn run_test_policy_page(
         })
         .take(remaining)
     {
+        let source;
         let ctx_peer = if scope.import {
-            Some(route.peer.addr())
+            source = route_source_key(route);
+            Some(&source)
         } else {
-            scope.target_peer
+            scope.target_peer.as_ref()
         };
         let as_path_str = dry_run_as_path_string(route, needs_as_path_string);
         let ctx = dry_run_route_context(route, &as_path_str, ctx_peer, peer_context);
@@ -2318,8 +2324,19 @@ fn run_test_policy_page(
     }
 }
 
-/// Peer context for dry runs: address -> (remote ASN, peer group).
-type DryRunPeerContext = std::collections::HashMap<IpAddr, (u32, Option<String>)>;
+/// The neighbor a route was learned from: its address and the interface its
+/// receiving session recorded.
+fn route_source_key(route: &rustbgpd_rib::Route) -> PeerKey {
+    PeerKey::new(
+        route.peer.addr(),
+        route.peer_interface().map(|name| name.to_string()),
+    )
+}
+
+/// Peer context for dry runs: neighbor -> (remote ASN, peer group). Keyed by
+/// the scoped neighbor, so two neighbors on one link-local address keep
+/// their own ASN and group.
+type DryRunPeerContext = std::collections::HashMap<PeerKey, (u32, Option<String>)>;
 
 /// The rendered `AS_PATH` string, only when some guard needs it.
 fn dry_run_as_path_string(route: &rustbgpd_rib::Route, needed: bool) -> String {
@@ -2337,14 +2354,14 @@ fn dry_run_as_path_string(route: &rustbgpd_rib::Route, needed: bool) -> String {
 fn dry_run_route_context<'a>(
     route: &'a rustbgpd_rib::Route,
     as_path_str: &'a str,
-    ctx_peer: Option<IpAddr>,
+    ctx_peer: Option<&PeerKey>,
     peer_context: &'a DryRunPeerContext,
 ) -> rustbgpd_policy::RouteContext<'a> {
     use rustbgpd_policy::{RouteContext, RouteType};
     use rustbgpd_rib::RouteOrigin;
 
     let (peer_asn, peer_group) = ctx_peer
-        .and_then(|addr| peer_context.get(&addr))
+        .and_then(|key| peer_context.get(key))
         .map_or((None, None), |(asn, group)| (Some(*asn), group.as_deref()));
     RouteContext {
         prefix: Some(route.prefix),
@@ -2358,7 +2375,7 @@ fn dry_run_route_context<'a>(
         origin_asn: route.as_path().and_then(rustbgpd_wire::AsPath::origin_asn),
         validation_state: route.validation_state,
         aspa_state: route.aspa_state,
-        peer_address: ctx_peer,
+        peer_address: ctx_peer.map(|key| key.address),
         peer_asn,
         peer_group,
         route_type: Some(match route.origin_type {
@@ -2402,7 +2419,7 @@ fn compile_compare_candidates(
 /// Route selection scope for one `ComparePolicy` run.
 struct ComparePolicyScope {
     /// Export target: its address and peer context are the evaluation context.
-    target: IpAddr,
+    target: PeerKey,
     /// `Some(true)` = IPv4 only, `Some(false)` = IPv6 only.
     family_filter: Option<bool>,
     /// Max routes evaluated; 0 = all.
@@ -2511,7 +2528,7 @@ fn run_compare_policy_page(
         .take(remaining)
     {
         let as_path_str = dry_run_as_path_string(route, needs_as_path_string);
-        let ctx = dry_run_route_context(route, &as_path_str, Some(scope.target), peer_context);
+        let ctx = dry_run_route_context(route, &as_path_str, Some(&scope.target), peer_context);
         response.routes_evaluated += 1;
         let before = installed.evaluate_pinned(&ctx, &frames.installed);
         let after = candidate.evaluate_pinned(&ctx, &frames.candidate);
@@ -5151,7 +5168,7 @@ policy client-x {
             &frames,
             &compare_routes(),
             &ComparePolicyScope {
-                target: COMPARE_PEER.parse().unwrap(),
+                target: PeerKey::new(COMPARE_PEER.parse().unwrap(), None),
                 family_filter: None,
                 limit: 0,
                 max_samples: 10,
@@ -6972,6 +6989,25 @@ policy client-x {
             Some(interface),
         );
         route
+    }
+
+    /// Dry runs read a route's peer ASN and group from the neighbor that
+    /// sent it: two neighbors on one link-local address keep their own.
+    #[test]
+    fn dry_run_peer_context_keeps_same_address_neighbors_apart() {
+        let scoped = |name: &str| PeerKey::new(link_local(), Some(name.to_string()));
+        let context: DryRunPeerContext = [
+            (scoped("eth0"), (65_000, None)),
+            (scoped("eth1"), (65_001, Some("fabric".to_string()))),
+        ]
+        .into_iter()
+        .collect();
+        let route = scoped_route("192.0.2.0", "eth1");
+        let source = route_source_key(&route);
+        let ctx = dry_run_route_context(&route, "", Some(&source), &context);
+        assert_eq!(ctx.peer_address, Some(link_local()));
+        assert_eq!(ctx.peer_asn, Some(65_001));
+        assert_eq!(ctx.peer_group, Some("fabric"));
     }
 
     /// Peer-manager reads carry the whole key to the actor, which answers
