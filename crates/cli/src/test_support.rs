@@ -2812,6 +2812,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
                     settle_remaining_ms: 3_000,
                     selection_deferred: false,
                     attached_peers: vec!["192.0.2.1".to_string()],
+                    attached_neighbors: Vec::new(),
                 }],
             },
         ))

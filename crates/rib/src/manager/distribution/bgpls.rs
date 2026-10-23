@@ -299,7 +299,7 @@ impl RibManager {
             let export_pol = self
                 .export_policy_for(peer)
                 .map(rustbgpd_policy::PolicyChain::share);
-            let target_peer_label = peer.to_string();
+            let target_peer_label = peer.label();
             let metrics = self.metrics.clone();
 
             let loc_rib_len = self.loc_rib.len();

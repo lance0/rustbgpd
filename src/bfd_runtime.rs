@@ -2039,7 +2039,6 @@ mod linux {
             old.scope_id = Some(1);
             old.peer_label = "fe80::1%eth0".to_string();
             let peer = old.peer;
-            metrics.register_scoped_peer(peer, "fe80::1%eth0");
             actor
                 .reconcile(
                     &BfdRuntimeConfig {
@@ -2091,7 +2090,6 @@ mod linux {
             // The peer manager deletes eth0 (reaping its value) and adds eth1
             // before the BFD reload commits.
             metrics.reap_peer_series("fe80::1%eth0");
-            metrics.register_scoped_peer(peer, "fe80::1%eth1");
             let mut replacement = old;
             replacement.revision = 2;
             replacement.scope_id = Some(2);

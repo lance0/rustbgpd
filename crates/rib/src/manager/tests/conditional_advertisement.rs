@@ -1266,8 +1266,11 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
         crate::ConditionalAdvertisementSet {
             definitions: vec![core, absent_if(SETTLE)],
             attachments: [
-                (peer(1).addr(), vec![Arc::from(NAME)]),
-                (peer(2).addr(), vec![Arc::from(NAME), Arc::from("core")]),
+                (peer(1).addr().into(), vec![Arc::from(NAME)]),
+                (
+                    peer(2).addr().into(),
+                    vec![Arc::from(NAME), Arc::from("core")],
+                ),
             ]
             .into_iter()
             .collect(),
@@ -1352,7 +1355,7 @@ async fn status_query_is_served_by_the_running_actor() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_conditional_advertisements(crate::ConditionalAdvertisementSet {
             definitions: vec![absent_if(SETTLE)],
-            attachments: [(peer(1).addr(), vec![Arc::from(NAME)])]
+            attachments: [(peer(1).addr().into(), vec![Arc::from(NAME)])]
                 .into_iter()
                 .collect(),
         });
@@ -1787,4 +1790,28 @@ async fn route_churn_reobserves_only_the_affected_condition_prefix() {
             .iter()
             .all(|condition| condition.state == "absent")
     );
+}
+
+/// Two neighbors on one link-local address, on different interfaces, both
+/// attached: the status names each one with its interface, in address then
+/// interface order, while the superseded bare-address list repeats the
+/// address once per neighbor.
+#[tokio::test(start_paused = true)]
+async fn status_names_same_address_attachments_by_interface() {
+    let mut manager = manager();
+    let scoped = |name: &str| crate::PeerEndpoint::new("fe80::1".parse().unwrap(), Some(name));
+    let _ = manager.handle_install_conditional_advertisements(
+        crate::ConditionalAdvertisementSet {
+            definitions: vec![absent_if(SETTLE)],
+            attachments: [scoped("eth1"), scoped("eth0")]
+                .into_iter()
+                .map(|endpoint| (endpoint, vec![Arc::from(NAME)]))
+                .collect(),
+        },
+        &[],
+    );
+    let backup = status(&manager, NAME);
+    assert_eq!(backup.attached_neighbors, [scoped("eth0"), scoped("eth1")]);
+    let address: std::net::IpAddr = "fe80::1".parse().unwrap();
+    assert_eq!(backup.attached_peers, [address, address]);
 }

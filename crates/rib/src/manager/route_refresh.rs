@@ -64,7 +64,7 @@ impl RibManager {
 
     pub(super) fn clear_peer_refresh_metrics(&self, peer: PeerId) {
         if let Some(families) = self.refresh_in_progress.get(&peer) {
-            let peer_label = peer.to_string();
+            let peer_label = peer.label();
             for &(afi, safi) in families {
                 let family_label = afi_safi_label(afi, safi);
                 self.metrics
@@ -88,7 +88,7 @@ impl RibManager {
         } else {
             0
         };
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         let family_label = afi_safi_label(afi, safi);
         self.metrics
             .set_route_refresh_in_progress(&peer_label, family_label, active);
@@ -281,7 +281,7 @@ impl RibManager {
                 rib.clear_stale_flowspec((afi, safi));
                 crate::manager::helpers::set_rib_prefixes(
                     &self.metrics,
-                    &peer.to_string(),
+                    &peer.label(),
                     crate::manager::helpers::FLOWSPEC_FAMILIES,
                     rib.flowspec_lens(),
                 );
@@ -349,7 +349,7 @@ impl RibManager {
                 self.rebuild_rtc_membership_and_restage_vpn(peer);
             }
 
-            let peer_label = peer.to_string();
+            let peer_label = peer.label();
             #[cfg(feature = "bench-internals")]
             let stale_count_started = Instant::now();
             self.publish_gr_stale_routes(peer);
@@ -468,7 +468,7 @@ impl RibManager {
                 rib.clear_llgr_stale_flowspec((afi, safi));
                 crate::manager::helpers::set_rib_prefixes(
                     &self.metrics,
-                    &peer.to_string(),
+                    &peer.label(),
                     crate::manager::helpers::FLOWSPEC_FAMILIES,
                     rib.flowspec_lens(),
                 );
@@ -524,7 +524,7 @@ impl RibManager {
                 self.rebuild_rtc_membership_and_restage_vpn(peer);
             }
 
-            let peer_label = peer.to_string();
+            let peer_label = peer.label();
             #[cfg(feature = "bench-internals")]
             let stale_count_started = Instant::now();
             self.publish_gr_stale_routes(peer);
@@ -1037,7 +1037,7 @@ impl RibManager {
             .map(|spf| (&self.orr.topology, spf));
         let per_client_best = self.peer_per_client_best.contains(&peer);
         let loc_rib = &self.loc_rib;
-        let target_peer_label = peer.to_string();
+        let target_peer_label = peer.label();
         let metrics = self.metrics.clone();
         let member_of = self.grouped_member_of(peer);
         // Resolved before the `policy_stats` borrow below (whole-`self`
@@ -2084,7 +2084,7 @@ impl RibManager {
         };
         if tx.try_send(eor).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
-            self.metrics.record_outbound_eor_deferral(&peer.to_string());
+            self.metrics.record_outbound_eor_deferral(&peer.label());
             self.pending_eor.entry(peer).or_default().extend(ready);
             if !marker_only {
                 self.mark_outbound_dirty(peer);
@@ -2296,21 +2296,18 @@ impl RibManager {
             }
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
-                &peer.to_string(),
+                &peer.label(),
                 crate::manager::helpers::UNICAST_FAMILIES,
                 rib.unicast_lens(),
             );
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
-                &peer.to_string(),
+                &peer.label(),
                 crate::manager::helpers::FLOWSPEC_FAMILIES,
                 rib.flowspec_lens(),
             );
-            self.metrics.set_rib_prefixes(
-                &peer.to_string(),
-                "l2vpn_evpn",
-                gauge_val(rib.evpn_len()),
-            );
+            self.metrics
+                .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(rib.evpn_len()));
         }
 
         let clear_route_stale_entry = if let Some(stale) = self.refresh_stale_routes.get_mut(&peer)

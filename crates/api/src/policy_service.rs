@@ -2101,6 +2101,18 @@ fn conditional_status_to_proto(
             .iter()
             .map(ToString::to_string)
             .collect(),
+        attached_neighbors: status
+            .attached_neighbors
+            .iter()
+            .map(|neighbor| proto::ConditionalAdvertisementNeighbor {
+                peer_address: neighbor.addr.to_string(),
+                peer_interface: neighbor
+                    .interface
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -4286,7 +4298,11 @@ policy customer-in(peer_lp: u32) {
             settle_time: Duration::from_secs(5),
             settle_remaining: Some(Duration::from_millis(3_750)),
             selection_deferred: false,
-            attached_peers: vec!["192.0.2.1".parse().unwrap(), "2001:db8::2".parse().unwrap()],
+            attached_peers: vec!["192.0.2.1".parse().unwrap(), "fe80::2".parse().unwrap()],
+            attached_neighbors: vec![
+                rustbgpd_rib::PeerEndpoint::new("192.0.2.1".parse().unwrap(), None),
+                rustbgpd_rib::PeerEndpoint::new("fe80::2".parse().unwrap(), Some("eth0")),
+            ],
         }
     }
 
@@ -4344,7 +4360,17 @@ policy customer-in(peer_lp: u32) {
                 settle_pending: true,
                 settle_remaining_ms: 3_750,
                 selection_deferred: false,
-                attached_peers: vec!["192.0.2.1".to_string(), "2001:db8::2".to_string()],
+                attached_peers: vec!["192.0.2.1".to_string(), "fe80::2".to_string()],
+                attached_neighbors: vec![
+                    proto::ConditionalAdvertisementNeighbor {
+                        peer_address: "192.0.2.1".to_string(),
+                        peer_interface: String::new(),
+                    },
+                    proto::ConditionalAdvertisementNeighbor {
+                        peer_address: "fe80::2".to_string(),
+                        peer_interface: "eth0".to_string(),
+                    },
+                ],
             }
         );
         assert_eq!(response.definitions[1].name, "core");

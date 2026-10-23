@@ -50,7 +50,7 @@ fn smet_pages_continue_by_key_and_peer_and_invalidate_on_flags_change() {
     let first = page(&mut manager, scope, None, None, 1).unwrap();
     assert_eq!(first.total, 2);
     assert!(first.has_more);
-    let after = (first.routes[0].key(), peer.addr());
+    let after = (first.routes[0].key(), crate::update::PageSource::of(peer));
     let second = page(&mut manager, scope, Some(after), Some(first.version), 1).unwrap();
     assert_eq!(second.routes.len(), 1);
     assert!(!second.has_more);
@@ -100,7 +100,7 @@ fn evpn_pages_bound_copy_and_order_without_losing_non_best_rows() {
     let second = page(
         &mut manager,
         scope,
-        Some((last.key(), last.peer.addr())),
+        Some((last.key(), crate::update::PageSource::of(last.peer))),
         Some(first.version),
         10,
     )
@@ -151,7 +151,7 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer.addr())),
+            Some((route.key(), crate::update::PageSource::of(peer))),
             Some(first.version),
             1
         )
@@ -171,7 +171,7 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer.addr())),
+            Some((route.key(), crate::update::PageSource::of(peer))),
             Some(before.version),
             1
         )
@@ -184,7 +184,7 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer.addr())),
+            Some((route.key(), crate::update::PageSource::of(peer))),
             Some(before.version),
             1
         )
@@ -250,7 +250,7 @@ fn evpn_advertised_scope_is_destination_and_mutation_version_tracks_commit() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), source.addr())),
+            Some((route.key(), crate::update::PageSource::of(source))),
             Some(first.version),
             1
         )
@@ -268,7 +268,7 @@ fn evpn_advertised_scope_is_destination_and_mutation_version_tracks_commit() {
         page(
             &mut manager,
             received,
-            Some((route.key(), source.addr())),
+            Some((route.key(), crate::update::PageSource::of(source))),
             Some(first.version),
             1
         )
@@ -302,7 +302,7 @@ async fn evpn_pages_invalidate_across_gr_retention_and_eor_sweep() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer.addr())),
+            Some((route.key(), crate::update::PageSource::of(peer))),
             Some(first.version),
             1
         )
@@ -315,7 +315,7 @@ async fn evpn_pages_invalidate_across_gr_retention_and_eor_sweep() {
         page(
             &mut manager,
             scope,
-            Some((route.key(), peer.addr())),
+            Some((route.key(), crate::update::PageSource::of(peer))),
             Some(retained.version),
             1
         )
@@ -347,7 +347,7 @@ fn evpn_non_best_attribute_change_still_invalidates_received_pages() {
         page(
             &mut manager,
             scope,
-            Some((best.key(), other.addr())),
+            Some((best.key(), crate::update::PageSource::of(other))),
             Some(before.version),
             1
         )

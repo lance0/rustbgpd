@@ -529,7 +529,9 @@ fn page_core_matches_full_sort_for_adversarial_order_filters_and_cursors() {
         routes.get(48).map(route_query_key),
         Some((
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 31), 32)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)),
+            crate::update::PageSource::of(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                192, 0, 2, 99,
+            )))),
             99,
         )),
     ];
@@ -837,12 +839,16 @@ fn randomized_mixed_family_add_path_continuations_match_full_key_sort() {
     let absent_cursors = [
         (
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(127, 1, 2, 0), 24)),
-            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 250)),
+            crate::update::PageSource::of(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
+                198, 51, 100, 250,
+            )))),
             77,
         ),
         (
             Prefix::V6(Ipv6Prefix::new("2001:db8:abcd::".parse().unwrap(), 64)),
-            IpAddr::V6("2001:db8::ffff".parse().unwrap()),
+            crate::update::PageSource::of(PeerId::from_addr(IpAddr::V6(
+                "2001:db8::ffff".parse().unwrap(),
+            ))),
             99,
         ),
     ];

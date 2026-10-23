@@ -417,7 +417,7 @@ fn page_evpn_routes<'a>(
     page_size: usize,
 ) -> EvpnRoutePage {
     let page = page_family_rows(routes, filter, after, page_size, |r| {
-        (r.key(), r.peer.addr())
+        (r.key(), crate::update::PageSource::of(r.peer))
     });
     EvpnRoutePage {
         peer_scope: crate::PeerScope::capture(),
@@ -813,7 +813,13 @@ impl RibManager {
             {
                 return Err(RoutePageError::ResyncInProgress);
             }
-            let key = |r: &crate::route::VpnRibRoute| (r.nlri.key(), r.peer.addr(), r.path_id);
+            let key = |r: &crate::route::VpnRibRoute| {
+                (
+                    r.nlri.key(),
+                    crate::update::PageSource::of(r.peer),
+                    r.path_id,
+                )
+            };
             let mut page = match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
                     self.ribs
@@ -877,7 +883,13 @@ impl RibManager {
             {
                 return Err(RoutePageError::Invalidated);
             }
-            let key = |r: &crate::route::LabeledRibRoute| (r.nlri.prefix, r.peer.addr(), r.path_id);
+            let key = |r: &crate::route::LabeledRibRoute| {
+                (
+                    r.nlri.prefix,
+                    crate::update::PageSource::of(r.peer),
+                    r.path_id,
+                )
+            };
             let mut page = match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
                     self.ribs
@@ -942,7 +954,7 @@ impl RibManager {
                     r.nlri.nlri_type.as_u16(),
                     r.nlri.route_distinguisher,
                     r.nlri.payload.clone(),
-                    r.peer.addr(),
+                    crate::update::PageSource::of(r.peer),
                     r.path_id,
                 )
             };
@@ -1116,7 +1128,9 @@ impl RibManager {
             {
                 return Err(RoutePageError::Invalidated);
             }
-            let key = |r: &crate::route::RtcRibRoute| (r.nlri, r.peer.addr(), r.path_id);
+            let key = |r: &crate::route::RtcRibRoute| {
+                (r.nlri, crate::update::PageSource::of(r.peer), r.path_id)
+            };
             let mut page = match scope {
                 RouteQueryScope::Received { peer: Some(peer) } => page_family_rows(
                     self.ribs

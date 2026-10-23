@@ -2045,7 +2045,7 @@ fn pcb_ordered_iterator_resumes_past_substituted_row() {
         .next()
         .map(crate::update::route_query_key)
         .unwrap();
-    assert_eq!(cursor, (p1, MEMBER.addr(), 0));
+    assert_eq!(cursor, (p1, crate::update::PageSource::of(MEMBER), 0));
     let resumed: Vec<(Prefix, PeerId)> = m
         .grouped_advertised_routes_ordered_iter(OTHER2, Some(cursor))
         .unwrap()

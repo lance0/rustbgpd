@@ -791,11 +791,6 @@ impl PeerManager {
         let (rib_peer, new_rib_peer) = self.static_rib_peer_slot(&peer_key);
         transport.rib_peer = rib_peer;
 
-        // Before the session's first emission: emitters that know only the
-        // bare address (RIB, BFD, transport) label this neighbor's series
-        // with its scoped value.
-        self.metrics
-            .register_scoped_peer(peer_key.address, &peer_key.label());
         let session_id = self.allocate_session_id();
         #[cfg(test)]
         if let Some(observations) = &mut self.dataset_generations_at_peer_construction {

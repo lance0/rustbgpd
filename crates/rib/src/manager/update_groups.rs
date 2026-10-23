@@ -2949,7 +2949,7 @@ impl RibManager {
     fn bump_export_counters(&mut self, peer: PeerId, rows: &[(Option<String>, PolicyAction, u64)]) {
         let readiness = self.replacement_readiness.clone();
         let mut stats = crate::update::NeighborPolicyStats::default();
-        let peer_label = peer.to_string();
+        let peer_label = peer.label();
         for (policy, action, n) in rows {
             super::replacement_readiness_checkpoint(&readiness, false);
             if *n == 0 {
@@ -3020,7 +3020,7 @@ impl RibManager {
             }
             self.refresh_update_group_gauges();
         }
-        self.metrics.remove_peer_update_group(&peer.to_string());
+        self.metrics.remove_peer_update_group(&peer.label());
     }
 
     /// Apply a transport slow-peer flag change (LAN-470,
@@ -3310,8 +3310,7 @@ impl RibManager {
                 fallback += 1;
                 rustbgpd_telemetry::BgpMetrics::UPDATE_GROUP_UNGROUPED
             };
-            self.metrics
-                .set_peer_update_group(&peer.to_string(), group_id);
+            self.metrics.set_peer_update_group(&peer.label(), group_id);
         }
         self.metrics
             .set_update_groups(i64::try_from(member_counts.len()).unwrap_or(i64::MAX));

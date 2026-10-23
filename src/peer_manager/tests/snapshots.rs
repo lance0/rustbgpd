@@ -172,6 +172,40 @@ async fn warm_checkpoint_session_query_returns_current_negotiated_identity() {
     );
 }
 
+/// Warm checkpoints key restored routes by peer address (the MRT peer index
+/// and the bundle's view inventory carry no interface), so two neighbors on
+/// one link-local address must never both enter one. Capture admits neither:
+/// scoped neighbors and any address two static neighbors share are skipped,
+/// while an eligible numbered neighbor is still captured.
+#[tokio::test]
+async fn warm_checkpoint_capture_admits_no_same_address_neighbors() {
+    let mut mgr = test_peer_manager();
+    let numbered: IpAddr = "10.0.0.2".parse().unwrap();
+    insert_test_managed_peer(
+        &mut mgr,
+        numbered,
+        warm_checkpoint_peer_handle(Some(eligible_warm_checkpoint_state())),
+        false,
+    );
+    for interface in ["eth0", "eth1"] {
+        let scoped = PeerKey::new("fe80::1".parse().unwrap(), Some(interface.to_string()));
+        insert_test_managed_peer_for_key(
+            &mut mgr,
+            &scoped,
+            65005,
+            warm_checkpoint_peer_handle(Some(eligible_warm_checkpoint_state())),
+            false,
+        );
+    }
+
+    let sessions = mgr.query_warm_checkpoint_capture().await.unwrap().sessions;
+    let peers: Vec<_> = sessions
+        .iter()
+        .map(|session| session.peer.clone())
+        .collect();
+    assert_eq!(peers, [key(numbered)]);
+}
+
 #[tokio::test]
 async fn warm_checkpoint_session_query_rejects_pending_collision() {
     let mut mgr = test_peer_manager();

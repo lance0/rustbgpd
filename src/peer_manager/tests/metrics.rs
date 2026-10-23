@@ -318,9 +318,9 @@ fn peer_label_values(metrics: &BgpMetrics) -> BTreeSet<String> {
 }
 
 /// A link-local neighbor has one scoped `peer` value whether the series
-/// comes from the peer manager (scoped key) or from an emitter that knows
-/// only the bare address (session, RIB, BFD); the delete and the RIB's
-/// final bare-address reap remove all of it.
+/// comes from the peer manager (scoped key) or from another emitter
+/// (session, RIB, BFD), each of which passes the same scoped value; the
+/// delete and the RIB's final reap of that value remove all of it.
 #[tokio::test]
 async fn link_local_neighbor_series_share_one_scoped_peer_value() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
@@ -344,7 +344,7 @@ async fn link_local_neighbor_series_share_one_scoped_peer_value() {
     let key = scoped_key(addr, "eth0");
     mgr.refresh_rfc8212_policy_metrics(&key);
     mgr.publish_peer_info_metric(&key);
-    seed_peer_metric_series(&metrics, "fe80::1");
+    seed_peer_metric_series(&metrics, "fe80::1%eth0");
 
     assert_eq!(
         peer_label_values(&metrics),
@@ -357,8 +357,8 @@ async fn link_local_neighbor_series_share_one_scoped_peer_value() {
 
     mgr.delete_peer(key, false).await.unwrap();
     assert!(peer_label_values(&metrics).is_empty());
-    // The RIB's bare teardown emission, then its final reap of the exact
-    // value the delete marker carries.
+    // The RIB's teardown emission, then its final reap of the exact value
+    // the delete marker carries.
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
     let RibUpdate::PeerDeleted {
         peer,
@@ -368,48 +368,13 @@ async fn link_local_neighbor_series_share_one_scoped_peer_value() {
         panic!("PeerDeleted with the scoped label expected");
     };
     assert_eq!((peer.addr(), &*label), (addr, "fe80::1%eth0"));
-    metrics.set_rib_prefixes("fe80::1", "ipv4_unicast", 0);
+    metrics.set_rib_prefixes("fe80::1%eth0", "ipv4_unicast", 0);
     assert_eq!(
         peer_label_values(&metrics),
         BTreeSet::from(["fe80::1%eth0".to_owned()])
     );
-    metrics.reap_exact_peer_series(&label);
+    metrics.reap_peer_series(&label);
     assert!(peer_label_values(&metrics).is_empty());
-}
-
-/// The BFD runtime seeds `bfd_session_up` before the initial neighbors are
-/// added, so constructing the manager registers configured scopes.
-#[test]
-fn configured_link_local_scope_is_registered_before_neighbors_are_added() {
-    let (_tx, rx) = mpsc::channel(16);
-    let (rib_tx, _rib_rx) = mpsc::channel(64);
-    let metrics = BgpMetrics::new();
-    let mut config = make_dynamic_manager_config();
-    let mut neighbor = config_neighbor("fe80::7".parse().unwrap(), 65007);
-    neighbor.interface = Some("eth3".to_string());
-    config.neighbors.push(neighbor);
-    config
-        .neighbors
-        .push(config_neighbor("192.0.2.7".parse().unwrap(), 65008));
-    let _mgr = PeerManager::new_with_config(
-        rx,
-        mpsc::channel(1).1,
-        65001,
-        Ipv4Addr::new(10, 0, 0, 1),
-        None,
-        None,
-        metrics.clone(),
-        rib_tx,
-        None,
-        None,
-        config,
-    );
-    metrics.record_bfd_state("fe80::7", false, false);
-    metrics.record_bfd_state("192.0.2.7", false, false);
-    assert_eq!(
-        peer_label_values(&metrics),
-        BTreeSet::from(["192.0.2.7".to_owned(), "fe80::7%eth3".to_owned()])
-    );
 }
 
 #[tokio::test]
@@ -1547,8 +1512,11 @@ async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
     );
 }
 
+/// Two neighbors on one link-local address own separate policy-routes
+/// scopes: retiring one neighbor's policy reaps only its own series, and a
+/// pending refresh fences only that neighbor's scope.
 #[tokio::test]
-async fn policy_route_reaper_unions_scoped_siblings_and_waits_for_current_settlement() {
+async fn policy_route_reaper_keeps_same_address_siblings_separate() {
     let mut mgr = test_peer_manager();
     let metrics = mgr.metrics.clone();
     let address: IpAddr = "fe80::1425".parse().unwrap();
@@ -1564,18 +1532,18 @@ async fn policy_route_reaper_unions_scoped_siblings_and_waits_for_current_settle
         );
         mgr.peers.get_mut(peer).unwrap().import_policy =
             Some(named_deny_policy_chain(&[Some("old-import")]));
+        metrics.record_policy_routes(&peer.label(), "old-import", "import", "deny");
     }
-    metrics.record_policy_routes("fe80::1425", "old-import", "import", "deny");
     let prior = mgr.installed_policy_routes_reachability();
 
     mgr.peers.get_mut(&eth0).unwrap().import_policy =
         Some(named_deny_policy_chain(&[Some("new-import")]));
-    assert_eq!(mgr.reap_retired_policy_routes(&prior), 0);
-    assert_eq!(
-        policy_route_counter(&metrics, "fe80::1425", "old-import", "import", "deny"),
-        Some(1.0),
-        "one sibling can still emit the bare-IP metric identity"
-    );
+    assert_eq!(mgr.reap_retired_policy_routes(&prior), 1);
+    let counter = |peer: &PeerKey| {
+        policy_route_counter(&metrics, &peer.label(), "old-import", "import", "deny")
+    };
+    assert_eq!(counter(&eth0), None, "eth0 retired its old policy");
+    assert_eq!(counter(&eth1), Some(1.0), "eth1 still runs it");
 
     let sibling_prior = mgr.installed_policy_routes_reachability();
     let sibling = mgr.peers.get_mut(&eth1).unwrap();
@@ -1583,21 +1551,18 @@ async fn policy_route_reaper_unions_scoped_siblings_and_waits_for_current_settle
     sibling.pending_refresh = true;
     assert_eq!(mgr.reap_retired_policy_routes(&sibling_prior), 0);
     assert_eq!(
-        policy_route_counter(&metrics, "fe80::1425", "old-import", "import", "deny"),
+        counter(&eth1),
         Some(1.0),
-        "any pending current sibling fences the whole aliased scope"
+        "a pending refresh fences its scope"
     );
 
     mgr.peers.get_mut(&eth1).unwrap().pending_refresh = false;
     assert_eq!(mgr.reap_retired_policy_routes(&sibling_prior), 1);
-    assert_eq!(
-        policy_route_counter(&metrics, "fe80::1425", "old-import", "import", "deny"),
-        None
-    );
+    assert_eq!(counter(&eth1), None);
 }
 
 #[tokio::test]
-async fn policy_route_reaper_heals_prior_pending_and_tracks_bare_scope_across_interface_move() {
+async fn policy_route_reaper_heals_prior_pending_and_scopes_an_interface_move() {
     let mut mgr = test_peer_manager();
     let metrics = mgr.metrics.clone();
     let address: IpAddr = "fe80::1425".parse().unwrap();
@@ -1611,7 +1576,7 @@ async fn policy_route_reaper_heals_prior_pending_and_tracks_bare_scope_across_in
     );
     mgr.peers.get_mut(&eth0).unwrap().import_policy =
         Some(named_deny_policy_chain(&[Some("pending-old")]));
-    metrics.record_policy_routes("fe80::1425", "pending-old", "import", "deny");
+    metrics.record_policy_routes(&eth0.label(), "pending-old", "import", "deny");
     let pending_prior = mgr.installed_policy_routes_reachability();
 
     let peer = mgr.peers.get_mut(&eth0).unwrap();
@@ -1619,12 +1584,14 @@ async fn policy_route_reaper_heals_prior_pending_and_tracks_bare_scope_across_in
     peer.pending_refresh = false;
     assert_eq!(mgr.reap_retired_policy_routes(&pending_prior), 1);
     assert_eq!(
-        policy_route_counter(&metrics, "fe80::1425", "pending-old", "import", "deny"),
+        policy_route_counter(&metrics, &eth0.label(), "pending-old", "import", "deny"),
         None,
         "a successful clean state can retire history captured while pending"
     );
 
-    metrics.record_policy_routes("fe80::1425", "settled-new", "import", "deny");
+    // A replacement on another interface is its own scope: retiring the old
+    // neighbor's series is the delete path's reap, never this one's.
+    metrics.record_policy_routes(&eth0.label(), "settled-new", "import", "deny");
     let interface_prior = mgr.installed_policy_routes_reachability();
     mgr.peers.remove(&eth0);
     let eth9 = scoped_key(address, "eth9");
@@ -1637,12 +1604,7 @@ async fn policy_route_reaper_heals_prior_pending_and_tracks_bare_scope_across_in
     );
     mgr.peers.get_mut(&eth9).unwrap().import_policy =
         Some(named_deny_policy_chain(&[Some("moved-new")]));
-    assert_eq!(mgr.reap_retired_policy_routes(&interface_prior), 1);
-    assert_eq!(
-        policy_route_counter(&metrics, "fe80::1425", "settled-new", "import", "deny"),
-        None,
-        "metric identity follows the bare-IP scope across interface replacement"
-    );
+    assert_eq!(mgr.reap_retired_policy_routes(&interface_prior), 0);
 }
 
 #[test]
@@ -1748,4 +1710,47 @@ fn policy_route_retirement_actor_fences_are_definitive_and_staged() {
     );
     assert!(generation.contains("ReloadGenerationOutcome::Applied(_)"));
     assert_eq!(generation.matches("reap_retired_policy_routes").count(), 1);
+}
+
+/// Acceptance: the policy-routes series scopes of two neighbors on one
+/// link-local address carry each neighbor's own `peer` value, so retiring
+/// one neighbor's policy series never touches the other's.
+#[tokio::test]
+async fn policy_routes_scopes_of_same_address_neighbors_stay_separate() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr: IpAddr = "fe80::1".parse().unwrap();
+    for (interface, scope_id, session_id) in [("eth0", 2, 1), ("eth1", 3, 2)] {
+        insert_test_scoped_managed_peer(
+            &mut mgr,
+            addr,
+            interface,
+            scope_id,
+            session_id,
+            fake_peer_handle(
+                addr,
+                SessionState::Established,
+                None,
+                Arc::new(FakePeerCounters::default()),
+            ),
+        );
+    }
+    let scopes = mgr.installed_policy_routes_reachability().peers();
+    assert_eq!(
+        scopes,
+        BTreeSet::from(["fe80::1%eth0".to_owned(), "fe80::1%eth1".to_owned()])
+    );
+    for (_, managed) in mgr.peers.drain() {
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
+    }
 }

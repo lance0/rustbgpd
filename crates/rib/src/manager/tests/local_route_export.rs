@@ -1598,7 +1598,7 @@ fn assert_walk_resumes(manager: &mut RibManager, first: &RouteExportPage) {
 fn install_prefix_limits(manager: &mut RibManager, txn: u64, peer: PeerId, ipv4: u32) {
     let config = crate::update::OutboundPrefixLimitConfig {
         neighbors: [(
-            peer.addr(),
+            peer.addr().into(),
             crate::update::OutboundPrefixLimitPair {
                 ipv4: std::num::NonZeroU32::new(ipv4),
                 ipv6: None,
@@ -1651,7 +1651,7 @@ fn conditional_set(
         }],
         attachments: attached
             .iter()
-            .map(|peer| (peer.addr(), vec![Arc::from(CONDITIONAL)]))
+            .map(|peer| (peer.addr().into(), vec![Arc::from(CONDITIONAL)]))
             .collect(),
     }
 }
@@ -2005,7 +2005,7 @@ fn unchanged_export_settings_leave_the_walk_resumable() {
     let mut unrelated = conditional_set(other_prefix(), None, &[listed]);
     unrelated
         .attachments
-        .insert(v4(9), vec![Arc::from(CONDITIONAL)]);
+        .insert(v4(9).into(), vec![Arc::from(CONDITIONAL)]);
     install_conditional(&mut manager, unrelated);
     assert_walk_resumes(&mut manager, &first);
 }

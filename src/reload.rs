@@ -9347,7 +9347,7 @@ import_policy_chain = ["origin-guard"]
                         } => {
                             let limit = config
                                 .neighbors
-                                .get(&"10.0.0.2".parse::<IpAddr>().unwrap())
+                                .get(&"10.0.0.2".parse::<IpAddr>().unwrap().into())
                                 .and_then(|pair| pair.ipv4);
                             seen.push(format!("prepare({limit:?})"));
                             let _ = reply.send(if restore_ok || seen.len() < 3 {

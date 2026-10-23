@@ -334,7 +334,7 @@ fn checksum_route_key(checksum: &mut u64, key: &RouteQueryKey) {
             checksum_bytes(checksum, &prefix.addr.octets());
         }
     }
-    match peer {
+    match peer.addr {
         IpAddr::V4(address) => {
             checksum_bytes(checksum, &[4]);
             checksum_bytes(checksum, &address.octets());

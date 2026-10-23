@@ -72,8 +72,10 @@ const PINNED_V4: NonZeroU32 = NonZeroU32::new(u32::MAX - 1).unwrap();
 const LAST_GENERATION: NonZeroU32 = NonZeroU32::new(u32::MAX - 2).unwrap();
 
 /// Where a neighbor's session runs: its transport address and, for an IPv6
-/// link-local neighbor, the interface that scopes the address.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// link-local neighbor, the interface that scopes the address. It also keys
+/// configured per-neighbor state, so two neighbors on one link-local address
+/// never share an entry. The derived order is [`Self::cmp_selection`]'s.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerEndpoint {
     /// Transport address of the neighbor.
     pub addr: IpAddr,
@@ -101,6 +103,16 @@ impl PeerEndpoint {
             let a = self.interface.as_deref().map(str::as_bytes);
             a.cmp(&other.interface.as_deref().map(str::as_bytes))
         })
+    }
+}
+
+/// A numbered (unscoped) endpoint.
+impl From<IpAddr> for PeerEndpoint {
+    fn from(addr: IpAddr) -> Self {
+        Self {
+            addr,
+            interface: None,
+        }
     }
 }
 
@@ -433,6 +445,21 @@ impl PeerId {
     pub fn addr(self) -> IpAddr {
         self.with_endpoint(|endpoint| {
             endpoint.map_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED), |endpoint| endpoint.addr)
+        })
+    }
+
+    /// The neighbor's `peer` metric label: its address, scoped to its
+    /// interface for a link-local neighbor (`fe80::1%eth0`), the value the
+    /// peer manager and the neighbor's session emit, so two neighbors on one
+    /// link-local address never share a series. A handle whose slot was
+    /// reused labels as its [`Display`](fmt::Display) form.
+    #[must_use]
+    pub fn label(self) -> String {
+        self.with_endpoint(|endpoint| match endpoint {
+            Some(endpoint) => {
+                rustbgpd_telemetry::scoped_peer_label(endpoint.addr, endpoint.interface.as_deref())
+            }
+            None => format!("peer#{}.{}", self.index, self.generation),
         })
     }
 

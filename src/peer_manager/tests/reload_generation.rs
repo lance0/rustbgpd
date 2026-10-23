@@ -4871,8 +4871,12 @@ fn relay_conditional_to_real_rib(
             match command {
                 RibUpdate::InstallConditionalAdvertisements { ref set, .. } => {
                     log.lock().unwrap().push(format!(
-                        "install {:?}",
-                        set.attachments.keys().collect::<Vec<_>>()
+                        "install [{}]",
+                        set.attachments
+                            .keys()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                     let _ = real_tx.send(command).await;
                 }
