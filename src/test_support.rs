@@ -498,3 +498,35 @@ pub(crate) async fn run_fail_stop_child(
     }
     child
 }
+
+/// Accepts every route, standing in for a session's wire encoder.
+pub(crate) struct AnyExport;
+impl rustbgpd_rib::ExactExportSnapshot for AnyExport {
+    fn owner_id(&self) -> u64 {
+        0
+    }
+    fn generation(&self) -> u64 {
+        0
+    }
+    fn probe_announcement(
+        &self,
+        _candidate: rustbgpd_rib::ExactExportCandidate<'_>,
+    ) -> Result<rustbgpd_rib::ExactExportResult, rustbgpd_rib::ExactExportError> {
+        Ok(rustbgpd_rib::ExactExportResult {
+            encoded_len: 0,
+            max_len: usize::MAX,
+            generation: 0,
+        })
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+impl rustbgpd_rib::ExactExportEncoder for AnyExport {
+    fn owner_id(&self) -> u64 {
+        0
+    }
+    fn snapshot(&self) -> Arc<dyn rustbgpd_rib::ExactExportSnapshot> {
+        Arc::new(Self)
+    }
+}

@@ -2828,38 +2828,6 @@ mod tests {
             .expect("outbound channel open")
     }
 
-    /// Accepts every route, standing in for a session's wire encoder.
-    struct AnyExport;
-    impl rustbgpd_rib::ExactExportSnapshot for AnyExport {
-        fn owner_id(&self) -> u64 {
-            0
-        }
-        fn generation(&self) -> u64 {
-            0
-        }
-        fn probe_announcement(
-            &self,
-            _candidate: rustbgpd_rib::ExactExportCandidate<'_>,
-        ) -> Result<rustbgpd_rib::ExactExportResult, rustbgpd_rib::ExactExportError> {
-            Ok(rustbgpd_rib::ExactExportResult {
-                encoded_len: 0,
-                max_len: usize::MAX,
-                generation: 0,
-            })
-        }
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-    }
-    impl rustbgpd_rib::ExactExportEncoder for AnyExport {
-        fn owner_id(&self) -> u64 {
-            0
-        }
-        fn snapshot(&self) -> Arc<dyn rustbgpd_rib::ExactExportSnapshot> {
-            Arc::new(Self)
-        }
-    }
-
     /// ADR-0092 amendment D: a route the VTEP drops at projection stays in
     /// Adj-RIB-In and is still reflected when the daemon is also a route
     /// reflector.
@@ -2884,7 +2852,7 @@ mod tests {
                 .send(RibUpdate::SetPeerExportEncoder {
                     peer: PeerId::from_addr(std::net::IpAddr::V4(peer)),
                     session_id: 0,
-                    encoder: Arc::new(AnyExport),
+                    encoder: Arc::new(crate::test_support::AnyExport),
                 })
                 .await
                 .unwrap();
