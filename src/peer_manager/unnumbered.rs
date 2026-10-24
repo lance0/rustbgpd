@@ -213,6 +213,25 @@ impl PeerManager {
             } => {
                 info!(%interface, ?previous, ?current, "unnumbered: binding changed");
                 if let Some(port) = unnumbered.ports.get_mut(&interface) {
+                    // An Established peer learned from an inbound connection
+                    // is unknown to discovery, which reports no conflict when
+                    // a second router's RA arrives: its first binding is that
+                    // router. Discovery had no binding, so this is the only
+                    // count.
+                    if previous.is_none()
+                        && port.established
+                        && let (Some(bound), Some(current)) = (&port.bound, current)
+                        && bound.address != IpAddr::V6(current.address)
+                    {
+                        warn!(
+                            %interface, bound = %bound.address, other = %current.address,
+                            reason = "multiple_routers_on_link",
+                            "unnumbered: a second router advertises on an interface-only link"
+                        );
+                        self.metrics.record_unnumbered_ra_conflict(
+                            &rustbgpd_telemetry::interface_peer_label(&interface),
+                        );
+                    }
                     port.desired = current;
                     unnumbered.reconcile_due = true;
                 }
@@ -758,7 +777,8 @@ impl PeerManager {
     }
 
     /// Refuse an inbound connection from a second router on `name`'s link,
-    /// counted as a conflict and as `unconfigured`.
+    /// counted as a conflict and as `unconfigured`. Another address while the
+    /// bound session is Established is one, with or without an RA binding.
     fn refuse_second_router(&self, name: &str) -> Option<PeerKey> {
         self.metrics
             .record_unnumbered_ra_conflict(&rustbgpd_telemetry::interface_peer_label(name));
@@ -871,20 +891,18 @@ impl PeerManager {
                     }
                 },
             };
-            match state.as_ref().map(|state| state.fsm_state) {
-                Some(SessionState::Established) => {
-                    info!(interface = %name, %address, peer = %key, "unnumbered: inbound connection while the neighbor is Established, dropping");
-                    return self.refuse_inbound();
-                }
-                Some(SessionState::OpenSent | SessionState::OpenConfirm) => {
-                    warn!(
-                        interface = %name, %address, peer = %key,
-                        reason = "multiple_routers_on_link",
-                        "unnumbered: inbound connection from a second router while the bound session is opening, dropping"
-                    );
-                    return self.refuse_second_router(name);
-                }
-                _ => {}
+            if let Some(
+                state @ (SessionState::OpenSent
+                | SessionState::OpenConfirm
+                | SessionState::Established),
+            ) = state.as_ref().map(|state| state.fsm_state)
+            {
+                warn!(
+                    interface = %name, %address, peer = %key, state = state.as_str(),
+                    reason = "multiple_routers_on_link",
+                    "unnumbered: inbound connection from a second router while the bound session is opening or Established, dropping"
+                );
+                return self.refuse_second_router(name);
             }
             if let Some(state) = state
                 .as_ref()

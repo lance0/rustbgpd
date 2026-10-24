@@ -1770,3 +1770,46 @@ async fn a_failed_endpoint_start_keeps_the_neighbors_identity_series() {
     assert_eq!(h.peers_at(ll(3)), [swp1_key(3)], "the retry binds");
     assert_eq!(down(&h), Some(1.0));
 }
+
+/// A neighbor learned from an inbound connection is unknown to discovery,
+/// so a second router seen only by RA, or only by another inbound
+/// connection, is still counted once each.
+#[tokio::test]
+async fn second_routers_beside_an_inbound_learned_session_are_counted() {
+    let conflicts = |h: &Harness| {
+        sample(
+            h,
+            "bgp_unnumbered_ra_conflicts_total",
+            &[("peer", "interface:swp1")],
+        )
+    };
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 2, 7).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
+    // No RA binding: an inbound connection from another address while
+    // Established. Mutation-red: refusing it as `unconfigured` alone leaves
+    // the counter empty.
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(conflicts(&h), Some(1.0));
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept");
+
+    // The second router's first RA: discovery had no binding, so it raises
+    // no conflict of its own. Mutation-red: without the manager's check the
+    // counter stays at 1.
+    h.bind("swp1", Some(endpoint(9, 7))).await;
+    assert_eq!(conflicts(&h), Some(2.0));
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "still kept");
+}
