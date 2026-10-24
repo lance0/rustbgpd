@@ -4922,7 +4922,12 @@ fn conditional_log(log: &Mutex<Vec<String>>) -> Vec<String> {
 }
 
 fn attach_backup(fixture: &RsFixture, toml: &str) -> Config {
-    fixture.write_toml(&toml.replacen(
+    fixture.write_toml(&attach_backup_toml(toml));
+    fixture.load()
+}
+
+fn attach_backup_toml(toml: &str) -> String {
+    toml.replacen(
         "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65012",
         "[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
          [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
@@ -4930,8 +4935,7 @@ fn attach_backup(fixture: &RsFixture, toml: &str) -> Config {
          [[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65012\n\
          conditional_advertisements = [\"backup\"]",
         1,
-    ));
-    fixture.load()
+    )
 }
 
 /// ADR-0137: a generation installs its conditional advertisements at the
@@ -5253,6 +5257,84 @@ async fn generation_removing_a_gated_neighbor_keeps_its_gate_until_teardown() {
     assert_eq!(
         conditional_log(&log).last().map(String::as_str),
         Some("install []")
+    );
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// ADR-0137: a generation that removes one of two neighbors sharing a
+/// definition and edits that definition keeps the installed definition for
+/// the removed neighbor until its session is torn down. Attaching it to the
+/// edited one first could release, to a session still registered, routes
+/// the installed definition suppresses. The edit reaches the remaining
+/// neighbor with the prune.
+#[tokio::test]
+async fn generation_removing_a_neighbor_keeps_its_definition_through_a_shared_edit() {
+    use rustbgpd_rib::ConditionalAdvertiseIf;
+    let fixture = RsFixture::new();
+    let base = fixture
+        .base_toml()
+        .replace("remote_asn = 65002", "remote_asn = 65012")
+        .replace(
+            "hold_time = 180\n",
+            "hold_time = 180\nconditional_advertisements = [\"backup\"]\n",
+        );
+    let attached = attach_backup(&fixture, &base);
+    let mut harness = GenerationHarness::new(&attached);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    fixture.write_toml(
+        &attach_backup_toml(&base)
+            .replace("advertise_if = \"absent\"", "advertise_if = \"present\""),
+    );
+    let mut edited = fixture.load();
+    edited
+        .neighbors
+        .retain(|neighbor| neighbor.address != "10.0.0.2");
+    let backup = |harness: &GenerationHarness| {
+        harness
+            .mgr
+            .conditional_advertisements
+            .definitions
+            .iter()
+            .find(|definition| &*definition.name == "backup")
+            .map(|definition| definition.advertise_if)
+    };
+    assert_eq!(backup(&harness), Some(ConditionalAdvertiseIf::Absent));
+
+    let outcome = harness.apply(&edited).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert!(
+        conditional_log(&log)
+            .iter()
+            .all(|entry| entry == "install [10.0.0.2, 10.0.0.9]"),
+        "{:?}",
+        conditional_log(&log)
+    );
+    // Mutation-red: a name-only merge attaches the removed neighbor to the
+    // edited definition before its teardown.
+    assert_eq!(
+        backup(&harness),
+        Some(ConditionalAdvertiseIf::Absent),
+        "the installed definition is kept until teardown"
+    );
+    assert!(
+        !harness
+            .mgr
+            .peers
+            .contains_key(&key("10.0.0.2".parse().unwrap()))
+    );
+    harness.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(
+        conditional_log(&log).last().map(String::as_str),
+        Some("install [10.0.0.9]")
+    );
+    assert_eq!(
+        backup(&harness),
+        Some(ConditionalAdvertiseIf::Present),
+        "the edit applies once the removed session is gone"
     );
     harness.shutdown().await;
     relay.abort();

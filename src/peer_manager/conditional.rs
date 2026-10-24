@@ -132,12 +132,14 @@ impl PeerManager {
 
     /// [`Self::conditional_set`] for the interface-only `bindings` given.
     ///
-    /// A peer whose neighbor `config` no longer configures keeps the gate
-    /// installed for it, and the definitions that gate names, while the peer
-    /// is still in the table: its session is torn down after this install,
-    /// and dropping the gate first would let the RIB export to it what the
-    /// gate suppresses. Deleting the peer asks for the reconcile that prunes
-    /// the gate.
+    /// A peer whose own neighbor `config` no longer configures keeps exactly
+    /// the gate installed for it while it is still in the table: its
+    /// attachment, and the installed definitions it names, in place of any
+    /// same-named definition `config` edits. Its session is torn down after
+    /// this install, and changing the gate first would let the RIB export
+    /// to it what the gate suppresses. Deleting the peer asks for the
+    /// reconcile that prunes the gate, which then installs `config`'s edits
+    /// for the neighbors that remain.
     pub(super) fn conditional_set_with_bindings(
         &self,
         config: &Config,
@@ -145,25 +147,29 @@ impl PeerManager {
     ) -> Result<ConditionalAdvertisementSet, crate::config::ConfigError> {
         let mut set = config.conditional_advertisement_set_with_bindings(bindings)?;
         let installed = &self.conditional_advertisements;
-        for key in self.peers.keys() {
+        for (key, peer) in &self.peers {
             let endpoint = key.rib_endpoint();
             let Some(names) = installed.attachments.get(&endpoint) else {
                 continue;
             };
-            if set.attachments.contains_key(&endpoint) || config.neighbor_record(key).is_some() {
+            if owner_configured(config, key, peer.transport_config.interface_only) {
                 continue;
             }
             for name in names {
-                if !set
+                let Some(definition) = installed
                     .definitions
                     .iter()
-                    .any(|definition| definition.name == *name)
-                    && let Some(definition) = installed
-                        .definitions
-                        .iter()
-                        .find(|definition| definition.name == *name)
+                    .find(|definition| definition.name == *name)
+                else {
+                    continue;
+                };
+                match set
+                    .definitions
+                    .iter_mut()
+                    .find(|candidate| candidate.name == *name)
                 {
-                    set.definitions.push(definition.clone());
+                    Some(candidate) => candidate.clone_from(definition),
+                    None => set.definitions.push(definition.clone()),
                 }
             }
             set.attachments.insert(endpoint, names.clone());
@@ -258,4 +264,23 @@ impl PeerManager {
             uncertain: self.conditional_install_uncertain,
         }))
     }
+}
+
+/// Whether `config` still configures the neighbor that owns the peer at
+/// `key`: its interface-only neighbor for a learned endpoint, else its
+/// static `[[neighbors]]` entry. Another kind of neighbor resolving the same
+/// key, such as an interface-only neighbor replacing a static link-local
+/// one on its interface, is a different owner.
+fn owner_configured(config: &Config, key: &PeerKey, interface_only: bool) -> bool {
+    if interface_only {
+        return key
+            .interface
+            .as_deref()
+            .is_some_and(|interface| config.neighbors.interface_only_on(interface).is_some());
+    }
+    let address = key.address.to_string();
+    config
+        .neighbors
+        .iter()
+        .any(|neighbor| neighbor.address == address && neighbor.interface == key.interface)
 }
