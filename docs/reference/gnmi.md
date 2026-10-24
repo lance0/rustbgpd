@@ -378,8 +378,9 @@ neighbors keep their bare keys. `Set` does not accept link-local neighbors.
 `state/peer-as` is the configured AS for a neighbor with a numeric
 `remote_asn`. For `remote_asn = "external"` or `"internal"` it is the AS the
 session negotiated, and the leaf is absent, never 0, while the session is not
-Established: `Get` omits it and a `SAMPLE` subscription sends no update for it
-until the session comes up. `ON_CHANGE` covers only `session-state`. An
+Established: `Get` omits it, and a `SAMPLE` subscription sends no update for
+it until the session comes up and an exact delete for it when the session goes
+down after delivering it. `ON_CHANGE` covers only `session-state`. An
 interface-only neighbor is listed once it has learned its peer's address.
 
 ## gnmic Examples
