@@ -1794,6 +1794,7 @@ impl PeerManager {
         held.latch = self.max_prefix_latches.remove(&key);
         if let Some(latch) = &mut held.latch {
             held.enabled = false;
+            self.publish_peer_admin_enabled_metric(&key, false);
             // The retiring session has left `peers`, so its late notice could
             // not read the accepted duration when it installed this latch.
             if !had_latch && latch.deadline.is_none() {

@@ -5054,11 +5054,13 @@ impl PeerManager {
         // already-reshaped members from their captured priors instead of
         // leaving earlier members on the next config (and the failing member
         // possibly deleted) while `current_config` never advanced.
+        // Interface-only bindings adopt membership through the port owner,
+        // preserving their safety state across its rebind.
         let mut seen = BTreeSet::new();
         let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
         for peer_key in affected_peers
             .into_iter()
-            .filter(|key| self.peers.contains_key(key))
+            .filter(|key| self.peers.contains_key(key) && self.unnumbered_owner_of(key).is_none())
         {
             if !seen.insert(peer_key.clone()) {
                 continue;
@@ -5230,11 +5232,13 @@ impl PeerManager {
                 .await;
         }
 
+        // Interface-only bindings adopt membership through the port owner,
+        // preserving their safety state across its rebind.
         let mut seen = BTreeSet::new();
         let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
         for peer_key in affected_peers
             .into_iter()
-            .filter(|key| self.peers.contains_key(key))
+            .filter(|key| self.peers.contains_key(key) && self.unnumbered_owner_of(key).is_none())
         {
             if !seen.insert(peer_key.clone()) {
                 continue;

@@ -162,17 +162,39 @@ async fn scoped_chain_edits_persist_and_reach_only_the_selected_binding() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "timed and indefinite late terminal notices share retirement, unbound telemetry, replacement, and deletion controls"
+)]
 async fn a_late_terminal_notice_survives_retirement_but_not_neighbor_deletion() {
-    for change in ["carrier", "recreated", "settings", "deleted"] {
+    for (change, timed) in [
+        ("carrier", true),
+        ("carrier", false),
+        ("recreated", true),
+        ("settings", true),
+        ("deleted", true),
+    ] {
         let mut h = harness_with(
             &["swp1"],
             &[("swp1", 7, true)],
-            "max_prefixes = 100\nmax_prefix_restart_seconds = 60\n",
+            if timed {
+                "max_prefixes = 100\nmax_prefix_restart_seconds = 60\n"
+            } else {
+                "max_prefixes = 100\n"
+            },
             "",
             None,
         );
         recording_launcher(&mut h.mgr);
         h.bind("swp1", Some(endpoint(2, 7))).await;
+        assert_eq!(
+            sample(
+                &h,
+                "bgp_peer_admin_enabled",
+                &[("peer", "interface:swp1"), ("interface", "swp1")]
+            ),
+            Some(1.0)
+        );
         let old = swp1_key(2);
         let session_id = h.session(&old);
         let notices = h.mgr.session_notify_tx.clone();
@@ -239,6 +261,20 @@ async fn a_late_terminal_notice_survives_retirement_but_not_neighbor_deletion() 
             }
             _ => unreachable!(),
         }
+        if change != "deleted" {
+            assert_eq!(
+                sample(
+                    &h,
+                    "bgp_peer_admin_enabled",
+                    &[("peer", "interface:swp1"), ("interface", "swp1")]
+                ),
+                Some(0.0),
+                "{change}: telemetry reflects the retained shutdown before the next binding"
+            );
+            if matches!(change, "carrier" | "recreated") {
+                assert!(!h.mgr.unbound_interface_only_infos()[0].enabled);
+            }
+        }
         h.bind(
             "swp1",
             Some(endpoint(2, if change == "recreated" { 8 } else { 7 })),
@@ -257,9 +293,10 @@ async fn a_late_terminal_notice_survives_retirement_but_not_neighbor_deletion() 
         );
         if change != "deleted" {
             assert_eq!(h.mgr.max_prefix_latches[&old].source_session_id, session_id);
-            assert!(
+            assert_eq!(
                 h.mgr.max_prefix_latches[&old].deadline.is_some(),
-                "the retiring session's timed restart survives"
+                timed,
+                "the retiring session's restart policy survives"
             );
         }
     }
@@ -841,4 +878,176 @@ async fn policy_timeout_requires_convergence(path: PolicyMutation) {
         "the member overrides the changed timer"
     );
     rib_task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_scoped_group_assignment_preserves_the_accepted_restart_policy() {
+    Box::pin(scoped_membership_restart(true)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_scoped_group_removal_preserves_the_accepted_restart_policy() {
+    Box::pin(scoped_membership_restart(false)).await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "owned and legacy membership edits share current-binding, sibling, and exact restart-deadline controls"
+)]
+async fn scoped_membership_restart(set_group: bool) {
+    let lo = nix::net::if_::if_nametoindex("lo").unwrap();
+    for owned in [true, false] {
+        for changed_duration in [false, true] {
+            let mut h = harness(&[], &[("lo", lo, true), ("swp2", 8, true)]);
+            let after_duration: u32 = if changed_duration { 600 } else { 60 };
+            let neighbor_extra = if !set_group && !changed_duration {
+                "peer_group = \"before\"\nmax_prefix_restart_seconds = 60\n"
+            } else {
+                "peer_group = \"before\"\n"
+            };
+            h.reload(config_with(&format!(
+                "[peer_groups.before]\nhold_time = 30\nmax_prefixes = 100\nmax_prefix_restart_seconds = 60\n\
+                 [peer_groups.after]\nhold_time = 45\nmax_prefixes = 100\nmax_prefix_restart_seconds = {after_duration}\n{}{}",
+                port_stanza("lo", neighbor_extra),
+                port_stanza("swp2", "")
+            )))
+            .await;
+            h.bind("lo", Some(endpoint(2, lo))).await;
+            h.bind("swp2", Some(endpoint(2, 8))).await;
+            let key = PeerKey::new(IpAddr::V6(ll(2)), Some("lo".into()));
+            let sibling = PeerKey::new(key.address, Some("swp2".into()));
+            let session = h.session(&key);
+            let sibling_session = h.session(&sibling);
+            let rib_peer = h.mgr.rib_peer_of(&key);
+            let original_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            h.mgr
+                .install_max_prefix_latch(key.clone(), session, "max-prefix".into(), Some(60));
+            let original_generation = h.mgr.max_prefix_latches[&key].generation;
+            h.mgr.peers.get_mut(&key).unwrap().enabled = false;
+            tokio::time::advance(Duration::from_secs(30)).await;
+            let (mutation, event) = if set_group {
+                (
+                    OwnedCatalogMutation::SetNeighborPeerGroup {
+                        address: key.address,
+                        interface: key.interface.clone(),
+                        peer_group: "after".into(),
+                    },
+                    ConfigEvent::SetNeighborPeerGroup {
+                        address: key.address,
+                        interface: key.interface.clone(),
+                        peer_group: "after".into(),
+                        ack: None,
+                    },
+                )
+            } else {
+                (
+                    OwnedCatalogMutation::ClearNeighborPeerGroup {
+                        address: key.address,
+                        interface: key.interface.clone(),
+                    },
+                    ConfigEvent::ClearNeighborPeerGroup {
+                        address: key.address,
+                        interface: key.interface.clone(),
+                        ack: None,
+                    },
+                )
+            };
+            if owned {
+                let (reply, response) = oneshot::channel();
+                let _ = Box::pin(h.mgr.dispatch_command(
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply },
+                ))
+                .await;
+                let outcome = response.await.unwrap();
+                assert!(
+                    matches!(outcome, OwnedCatalogMutationOutcome::Success),
+                    "{outcome:?}"
+                );
+            } else {
+                Box::pin(h.mgr.apply_peer_group_change(event, vec![key.clone()]))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                h.mgr
+                    .current_config
+                    .neighbors
+                    .interface_only_on("lo")
+                    .unwrap()
+                    .peer_group
+                    .as_deref(),
+                set_group.then_some("after")
+            );
+            assert_eq!(
+                h.mgr.max_prefix_latches[&key].deadline,
+                Some(original_deadline),
+                "membership adoption leaves the old countdown to the port owner"
+            );
+            assert_eq!(h.session(&key), session, "the port still owns its session");
+            let accepted_at = tokio::time::Instant::now();
+            h.reconcile().await;
+            let restart_seconds = if set_group {
+                Some(after_duration)
+            } else if changed_duration {
+                None
+            } else {
+                Some(60)
+            };
+            let deadline = restart_seconds.map(|seconds| {
+                if changed_duration {
+                    accepted_at + Duration::from_secs(seconds.into())
+                } else {
+                    original_deadline
+                }
+            });
+            assert_eq!(h.mgr.max_prefix_latches[&key].deadline, deadline);
+            assert_eq!(h.mgr.max_prefix_latches[&key].source_session_id, session);
+            assert_eq!(
+                h.mgr.max_prefix_latches[&key].generation == original_generation,
+                !changed_duration
+            );
+            assert_eq!(
+                h.mgr.peers[&key].max_prefix_restart_seconds,
+                restart_seconds
+            );
+            assert!(!h.mgr.peers[&key].enabled);
+            assert_ne!(
+                h.session(&key),
+                session,
+                "membership was adopted by rebinding"
+            );
+            assert_eq!(h.mgr.rib_peer_of(&key), rib_peer);
+            assert_eq!(h.session(&sibling), sibling_session);
+            let starts = Arc::new(FakePeerCounters::default());
+            let session = h.session(&key);
+            let _ = h.mgr.peers.replace_handle(
+                &key,
+                fake_peer_handle(key.address, SessionState::Idle, None, Arc::clone(&starts)),
+                session,
+            );
+            let wake_at = deadline.unwrap_or(original_deadline + Duration::from_secs(600));
+            let before_deadline = wake_at
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap()
+                .checked_sub(Duration::from_millis(1))
+                .unwrap();
+            tokio::time::advance(before_deadline).await;
+            h.mgr.handle_due_max_prefix_restarts().await;
+            assert_eq!(starts.start.load(Ordering::SeqCst), 0);
+            assert!(!h.mgr.peers[&key].enabled);
+            tokio::time::advance(Duration::from_millis(1)).await;
+            h.mgr.handle_due_max_prefix_restarts().await;
+            if deadline.is_some() {
+                wait_counter(&starts.start, 1).await;
+                assert!(h.mgr.peers[&key].enabled);
+                assert!(!h.mgr.max_prefix_latches.contains_key(&key));
+                h.mgr.handle_due_max_prefix_restarts().await;
+                assert_eq!(starts.start.load(Ordering::SeqCst), 1);
+            } else {
+                assert_eq!(starts.start.load(Ordering::SeqCst), 0);
+                assert!(!h.mgr.peers[&key].enabled);
+                assert_eq!(h.mgr.max_prefix_latches[&key].deadline, None);
+            }
+        }
+    }
 }
