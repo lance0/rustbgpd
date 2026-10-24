@@ -611,4 +611,66 @@ if [ "$(flap_count)" != "$baseline_flaps" ] \
     fail "third source or candidate expiry replaced or flapped the bound session"; exit 1
 fi
 ok "bound RA candidate expired while Established binding and FIB stayed healthy"
+
+# FRR1's link-local address changes: a new MAC on its port gives the kernel a
+# new EUI-64 address. The interface-only neighbor on eth1 binds it with
+# exactly one session down/up, keeps its peer="interface:eth1" series and
+# counts one address change.
+metric() { prom_value "$RUSTBGPD" "$1"; }
+OLD_LL1=$LL1
+established_before=$(metric 'bgp_session_established_total{peer="interface:eth1"}')
+changes_before=$(metric 'bgp_unnumbered_address_changes_total{peer="interface:eth1"}')
+eth2_flaps=$(flap_count)
+docker exec "$FRR1" sh -ec '
+    ip link set eth1 down
+    ip link set eth1 address 02:53:0b:00:00:01
+    ip link set eth1 up'
+new_ll1() {
+    local ll
+    ll=$(link_local "$FRR1" eth1 2>/dev/null) && [ "$ll" != "$OLD_LL1" ] && echo "$ll"
+}
+if ! wait_until 30 1 new_ll1 >/dev/null; then
+    fail "FRR1 eth1 did not derive a new link-local address"; dump_state; exit 1
+fi
+LL1=$(new_ll1)
+bound_new() {
+    neighbors | jq -e --arg ll "$LL1" '
+        [.neighbors[]? | select(.config.interface == "eth1" and .learnedPeerAddress == $ll
+            and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6) and .stale != true)]
+        | length == 1' >/dev/null 2>&1
+}
+if ! wait_until 45 2 bound_new; then
+    fail "eth1 neighbor did not re-establish on $LL1"; dump_state; exit 1
+fi
+wait_paths 2
+wait_kernel_route 2
+# Let any second establishment (a connection collision) show before counting.
+sleep 5
+established_after=$(metric 'bgp_session_established_total{peer="interface:eth1"}')
+changes_after=$(metric 'bgp_unnumbered_address_changes_total{peer="interface:eth1"}')
+# Both ends dial once the link returns, so FRR may also count a collision's
+# losing connection; the neighbor under test is rustbgpd's.
+if [ "$((established_after - established_before))" != 1 ]; then
+    fail "address change gave not exactly one session down/up: established $established_before->$established_after"
+    dump_state; exit 1
+fi
+if ! docker exec "$FRR1" vtysh -c 'show bgp neighbors eth1 json' \
+    | jq -e '.eth1.bgpState == "Established"' >/dev/null; then
+    fail "FRR1 did not end Established on eth1"; dump_state; exit 1
+fi
+ok "FRR1's address change from $OLD_LL1 to $LL1 gave exactly one session down/up"
+if [ "$((changes_after - ${changes_before:-0}))" != 1 ]; then
+    fail "address changes counted ${changes_before:-0}->$changes_after, expected one"; exit 1
+fi
+scrape=$(prom_scrape "$RUSTBGPD")
+if ! grep -Fqx "bgp_unnumbered_peer_address_info{address=\"$LL1\",interface=\"eth1\",peer=\"interface:eth1\"} 1" <<<"$scrape" \
+    || grep -Fq "address=\"$OLD_LL1\"" <<<"$scrape" \
+    || grep -Fq '%eth1"' <<<"$scrape"; then
+    fail "the eth1 neighbor's series did not stay peer=\"interface:eth1\" with the new address"
+    grep -F 'eth1' <<<"$scrape" >&2 || true
+    exit 1
+fi
+ok "the eth1 neighbor kept peer=\"interface:eth1\" and counted one address change"
+[ "$(flap_count)" = "$eth2_flaps" ] || { fail "FRR1's address change flapped eth2"; exit 1; }
+
 print_summary
