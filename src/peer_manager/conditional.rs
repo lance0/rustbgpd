@@ -127,7 +127,68 @@ impl PeerManager {
         &self,
         config: &Config,
     ) -> Result<ConditionalAdvertisementSet, crate::config::ConfigError> {
-        config.conditional_advertisement_set_with_bindings(&self.unnumbered_binding_endpoints())
+        self.conditional_set_with_bindings(config, &self.unnumbered_binding_endpoints())
+    }
+
+    /// [`Self::conditional_set`] for the interface-only `bindings` given.
+    ///
+    /// A peer whose own neighbor `config` no longer configures keeps the
+    /// gate installed for it while it is still in the table: its session is
+    /// torn down after this install, and dropping or changing the gate first
+    /// could let the RIB export to it what the gate suppresses. Each
+    /// definition it names stays as installed, unless `config` edits it:
+    /// the edit applies at once to every neighbor `config` attaches, and the
+    /// retiring peer is attached instead to a never-evaluated copy of the
+    /// installed definition ([`retiring_copy`]), which suppresses everything
+    /// that definition controls. Deleting the peer asks for the reconcile
+    /// that prunes the gate.
+    pub(super) fn conditional_set_with_bindings(
+        &self,
+        config: &Config,
+        bindings: &[(std::net::IpAddr, String)],
+    ) -> Result<ConditionalAdvertisementSet, crate::config::ConfigError> {
+        let mut set = config.conditional_advertisement_set_with_bindings(bindings)?;
+        let installed = &self.conditional_advertisements;
+        for (key, peer) in &self.peers {
+            let endpoint = key.rib_endpoint();
+            let Some(names) = installed.attachments.get(&endpoint) else {
+                continue;
+            };
+            if owner_configured(config, key, peer.transport_config.interface_only) {
+                continue;
+            }
+            let mut kept = Vec::with_capacity(names.len());
+            for name in names {
+                let Some(definition) = installed
+                    .definitions
+                    .iter()
+                    .find(|definition| definition.name == *name)
+                else {
+                    kept.push(Arc::clone(name));
+                    continue;
+                };
+                match set
+                    .definitions
+                    .iter()
+                    .find(|candidate| candidate.name == *name)
+                {
+                    None => {
+                        set.definitions.push(definition.clone());
+                        kept.push(Arc::clone(name));
+                    }
+                    Some(candidate) if candidate == definition => kept.push(Arc::clone(name)),
+                    Some(_) => {
+                        let copy = retiring_copy(definition, &set.definitions);
+                        kept.push(Arc::clone(&copy.name));
+                        if !set.definitions.contains(&copy) {
+                            set.definitions.push(copy);
+                        }
+                    }
+                }
+            }
+            set.attachments.insert(endpoint, kept);
+        }
+        Ok(set)
     }
 
     /// Install `candidate`'s set ahead of a mutation that commits it.
@@ -216,5 +277,48 @@ impl PeerManager {
             set: self.conditional_advertisements.clone(),
             uncertain: self.conditional_install_uncertain,
         }))
+    }
+}
+
+/// Whether `config` still configures the neighbor that owns the peer at
+/// `key`: its interface-only neighbor for a learned endpoint, else its
+/// static `[[neighbors]]` entry. Another kind of neighbor resolving the same
+/// key, such as an interface-only neighbor replacing a static link-local
+/// one on its interface, is a different owner.
+fn owner_configured(config: &Config, key: &PeerKey, interface_only: bool) -> bool {
+    if interface_only {
+        return key
+            .interface
+            .as_deref()
+            .is_some_and(|interface| config.neighbors.interface_only_on(interface).is_some());
+    }
+    let address = key.address.to_string();
+    config
+        .neighbors
+        .iter()
+        .any(|neighbor| neighbor.address == address && neighbor.interface == key.interface)
+}
+
+/// The retiring copy of an installed `definition` whose name the candidate
+/// `definitions` give an edited definition: the same content, marked
+/// `retiring`, under a name no other entry of `definitions` uses. The name is
+/// derived only from `definition` and `definitions`, so reinstalling an
+/// unchanged candidate yields the same copy and the RIB keeps its state.
+fn retiring_copy(
+    definition: &rustbgpd_rib::ConditionalAdvertisement,
+    definitions: &[rustbgpd_rib::ConditionalAdvertisement],
+) -> rustbgpd_rib::ConditionalAdvertisement {
+    let mut copy = definition.clone();
+    copy.retiring = true;
+    let mut name = format!("{} (retiring)", definition.name);
+    loop {
+        copy.name = Arc::from(name.as_str());
+        if definitions
+            .iter()
+            .all(|other| other.name != copy.name || *other == copy)
+        {
+            return copy;
+        }
+        name.push('\'');
     }
 }

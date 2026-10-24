@@ -2103,6 +2103,15 @@ impl PeerManager {
         if shutdown.joined() {
             info!(peer = %address, "peer deleted");
         }
+        // ADR-0137: a gate kept for this peer past its neighbor's removal is
+        // pruned once the session is gone.
+        if self
+            .conditional_advertisements
+            .attachments
+            .contains_key(&peer.rib_endpoint())
+        {
+            self.conditional_reconcile_pending = true;
+        }
 
         let peer_for_reap = peer.clone();
         if let Some(next_config) = next_config {

@@ -73,6 +73,12 @@ pub struct ConditionalAdvertisement {
     pub condition_policy: Option<PolicyChain>,
     /// How long a changed known observation must stay stable to apply.
     pub settle_time: Duration,
+    /// A retiring peer's copy of an installed definition that the
+    /// configuration has since edited, installed under a name of its own
+    /// until that peer's session is torn down. It is never evaluated: it
+    /// stays `pending`, so it suppresses every route its `advertise_policy`
+    /// selects, and it publishes no metrics and no status.
+    pub retiring: bool,
 }
 
 /// Observed condition of one definition.
@@ -373,6 +379,11 @@ impl RibManager {
                 continue;
             }
             let definition = Arc::new(definition);
+            if definition.retiring {
+                let state = self.retiring_state(&name, previous, definition, now);
+                next.insert(name, state);
+                continue;
+            }
             let held = definition
                 .condition_policy
                 .as_ref()
@@ -411,6 +422,7 @@ impl RibManager {
                 held,
             };
             if let Some(previous) = &previous
+                && !previous.definition.retiring
                 && previous.definition.advertise_if != state.definition.advertise_if
             {
                 self.metrics.reap_conditional_advertisement_series(
@@ -430,11 +442,13 @@ impl RibManager {
             next.insert(name, state);
         }
         for (name, state) in prior {
-            self.metrics.reap_conditional_advertisement_series(
-                &name,
-                state.definition.advertise_if.label(),
-                false,
-            );
+            if !state.definition.retiring {
+                self.metrics.reap_conditional_advertisement_series(
+                    &name,
+                    state.definition.advertise_if.label(),
+                    false,
+                );
+            }
             if state.applied != AppliedConditionalState::Pending {
                 transitions.push(name);
             }
@@ -443,6 +457,34 @@ impl RibManager {
         self.conditional_advertisements.installed = true;
         self.rebuild_conditional_index();
         (capture, transitions)
+    }
+
+    /// A retiring copy's state: `pending`, never evaluated. A configured
+    /// definition the candidate dropped may have had its name: that
+    /// definition's series go, as for any removed definition.
+    fn retiring_state(
+        &self,
+        name: &Arc<str>,
+        previous: Option<DefinitionState>,
+        definition: Arc<ConditionalAdvertisement>,
+        now: Instant,
+    ) -> DefinitionState {
+        if let Some(previous) = previous.filter(|previous| !previous.definition.retiring) {
+            self.metrics.reap_conditional_advertisement_series(
+                name,
+                previous.definition.advertise_if.label(),
+                false,
+            );
+        }
+        DefinitionState {
+            matches: Arc::new(ConditionMatches::new(definition.condition_prefixes.len())),
+            definition,
+            observed: ConditionObservation::Unknown,
+            observed_since: now,
+            deadline: None,
+            applied: AppliedConditionalState::Pending,
+            held: false,
+        }
     }
 
     fn capture_conditional_advertisements(&self) -> ConditionalAdvertisementCapture {
@@ -471,10 +513,18 @@ impl RibManager {
         self.conditional_advertisements.attachments = capture.attachments;
         self.rebuild_conditional_index();
         for (name, state) in &replaced {
-            let restored = self.conditional_advertisements.definitions.get(name);
-            if restored.is_none_or(|restored| {
-                restored.definition.advertise_if != state.definition.advertise_if
-            }) {
+            // A retiring copy publishes nothing, so restoring one in place of
+            // a published definition reaps it like a removal.
+            let restored = self
+                .conditional_advertisements
+                .definitions
+                .get(name)
+                .filter(|restored| !restored.definition.retiring);
+            if !state.definition.retiring
+                && restored.is_none_or(|restored| {
+                    restored.definition.advertise_if != state.definition.advertise_if
+                })
+            {
                 self.metrics.reap_conditional_advertisement_series(
                     name,
                     state.definition.advertise_if.label(),
@@ -817,6 +867,9 @@ impl RibManager {
     }
 
     fn arm_or_apply(&self, state: &mut DefinitionState, now: Instant, out: &mut Vec<Arc<str>>) {
+        if state.definition.retiring {
+            return;
+        }
         if state.definition.settle_time.is_zero() {
             Self::apply_observation(&self.metrics, state, out);
         } else {
@@ -842,6 +895,9 @@ impl RibManager {
         state: &mut DefinitionState,
         out: &mut Vec<Arc<str>>,
     ) {
+        if state.definition.retiring {
+            return;
+        }
         let Some(target) = Self::target(state) else {
             return;
         };
@@ -860,6 +916,9 @@ impl RibManager {
         state: &DefinitionState,
         from: AppliedConditionalState,
     ) {
+        if state.definition.retiring {
+            return;
+        }
         info!(
             definition = %state.definition.name,
             from = ?from,
@@ -877,6 +936,9 @@ impl RibManager {
     }
 
     fn publish_conditional_metrics(&self, state: &DefinitionState) {
+        if state.definition.retiring {
+            return;
+        }
         let name = &state.definition.name;
         self.metrics
             .set_conditional_advertisement_condition(name, state.observed.label());
@@ -898,6 +960,9 @@ impl RibManager {
         let tracker = &mut self.conditional_advertisements;
         tracker.by_prefix.clear();
         for (name, state) in &tracker.definitions {
+            if state.definition.retiring {
+                continue;
+            }
             for entry in &state.definition.condition_prefixes {
                 tracker
                     .by_prefix
@@ -923,6 +988,11 @@ impl RibManager {
     /// candidate (received and import-accepted, stale, losing Add-Path, or
     /// locally injected) that satisfies the condition makes it present.
     fn scan_condition(&self, definition: &ConditionalAdvertisement) -> ConditionMatches {
+        // A retiring copy is never evaluated, so no re-observation path
+        // walks its ranges or runs its `condition_policy`.
+        if definition.retiring {
+            return ConditionMatches::new(definition.condition_prefixes.len());
+        }
         let mut prefixes = BTreeSet::new();
         for entry in &definition.condition_prefixes {
             if entry.ge.is_none() && entry.le.is_none() {
@@ -1380,6 +1450,7 @@ impl RibManager {
         tracker
             .definitions
             .values()
+            .filter(|state| !state.definition.retiring)
             .map(|state| {
                 let definition = &state.definition;
                 ConditionalAdvertisementStatus {

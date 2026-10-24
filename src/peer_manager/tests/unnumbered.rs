@@ -5175,6 +5175,141 @@ async fn a_retirement_in_the_loops_reconcile_removes_its_gate_in_the_same_step()
     );
 }
 
+/// A SIGHUP that removes a bound, gated interface-only neighbor keeps its
+/// gate installed until the port reconcile tears the session down, then
+/// prunes it. Dropping the gate at the generation's config swap would let
+/// the RIB export what the gate suppresses to a session still registered.
+#[tokio::test]
+async fn a_removed_gated_neighbor_keeps_its_gate_until_its_session_is_torn_down() {
+    let mut h = harness_with(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        "",
+        CONDITIONAL,
+        None,
+    );
+    let mut candidate = config_with(&format!(
+        "{}{}{CONDITIONAL}",
+        port_stanza("swp1", "conditional_advertisements = [\"backup\"]\n"),
+        port_stanza("swp2", ""),
+    ));
+    std::mem::swap(&mut h.mgr.current_config, &mut candidate);
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))]
+    );
+
+    let removed = config_with(&format!("{}{CONDITIONAL}", port_stanza("swp2", "")));
+    let actions = crate::config::plan_reload_peer_actions(&h.mgr.current_config, &removed).unwrap();
+    let outcome = Box::pin(h.mgr.apply_reload_generation(
+        removed,
+        actions,
+        crate::config::PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            crate::peer_manager::generation::ReloadGenerationOutcome::Applied(_)
+        ),
+        "{outcome:?}"
+    );
+    // Mutation-red: the config swap's install drops the gate while the
+    // session is still registered.
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "not torn down yet");
+    while let Ok(set) = installed.try_recv() {
+        assert_eq!(attached(&set), [IpAddr::V6(ll(2))], "gate kept");
+    }
+    assert_eq!(
+        attached(&h.mgr.conditional_advertisements),
+        [IpAddr::V6(ll(2))]
+    );
+
+    // The port reconcile tears the session down, and the gate goes after it.
+    h.mgr.run_due_reconciles().await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "torn down");
+    assert!(
+        attached(&installed.try_recv().unwrap()).is_empty(),
+        "the gate is pruned once the session is gone"
+    );
+}
+
+/// A reload that replaces a gated static link-local neighbor with an
+/// interface-only neighbor on the same interface keeps the static peer's
+/// gate until its session is torn down: the new neighbor resolves the same
+/// key, but it is a different owner, and the static peer still registered
+/// must not lose its gate first.
+#[tokio::test]
+async fn a_static_neighbor_replaced_by_an_interface_only_one_keeps_its_gate_until_teardown() {
+    let static_gated = "[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"swp1\"\n\
+        remote_asn = 65002\nfamilies = [\"ipv6_unicast\"]\n\
+        conditional_advertisements = [\"backup\"]\n";
+    let mut h = harness_with(
+        &["swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        "",
+        &format!("{CONDITIONAL}{static_gated}"),
+        None,
+    );
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+    let mut static_peer = make_config(IpAddr::V6(ll(2)), 65002);
+    static_peer.interface = Some("swp1".into());
+    static_peer.scope_id = Some(7);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    let static_key = swp1_key(2);
+    assert!(h.mgr.peers.contains_key(&static_key));
+    // Startup seeds the RIB with the configured set; reconciling stands in.
+    h.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(
+        attached(&h.mgr.conditional_advertisements),
+        [IpAddr::V6(ll(2))]
+    );
+    while installed.try_recv().is_ok() {}
+
+    let candidate = config_with(&format!(
+        "{}{}{CONDITIONAL}",
+        port_stanza("swp1", ""),
+        port_stanza("swp2", ""),
+    ));
+    let actions =
+        crate::config::plan_reload_peer_actions(&h.mgr.current_config, &candidate).unwrap();
+    let outcome = Box::pin(h.mgr.apply_reload_generation(
+        candidate,
+        actions,
+        crate::config::PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            crate::peer_manager::generation::ReloadGenerationOutcome::Applied(_)
+        ),
+        "{outcome:?}"
+    );
+    // Mutation-red: treating the interface-only record at the same key as
+    // the static peer's owner drops the gate at the config swap.
+    while let Ok(set) = installed.try_recv() {
+        assert_eq!(attached(&set), [IpAddr::V6(ll(2))], "gate kept");
+    }
+    assert_eq!(
+        attached(&h.mgr.conditional_advertisements),
+        [IpAddr::V6(ll(2))],
+        "the installed set still gates the static peer"
+    );
+    assert!(!h.mgr.peers.contains_key(&static_key), "torn down");
+    assert!(
+        h.mgr.conditional_reconcile_pending,
+        "the static peer's deletion asks for the prune"
+    );
+    h.mgr.reconcile_conditional_advertisements().await;
+    assert!(
+        attached(&installed.try_recv().unwrap()).is_empty(),
+        "pruned after teardown"
+    );
+}
+
 /// A retirement whose install acknowledgement is lost leaves the RIB's
 /// gate unknown. A rebind to the same endpoint must install it again, not
 /// trust the cached set and admit an ungated session.

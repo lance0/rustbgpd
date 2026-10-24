@@ -2079,8 +2079,7 @@ impl PeerManager {
         let mut bindings = self.unnumbered_binding_endpoints();
         bindings.push((key.address, name.to_owned()));
         let set = self
-            .current_config
-            .conditional_advertisement_set_with_bindings(&bindings)
+            .conditional_set_with_bindings(&self.current_config, &bindings)
             .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
         if let Err(error) = self.install_conditional_advertisements(set, &[]).await {
             // The RIB may hold the set although its acknowledgement failed:

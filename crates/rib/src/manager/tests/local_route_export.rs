@@ -1649,6 +1649,7 @@ fn conditional_set(
             condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(condition)],
             condition_policy,
             settle_time: std::time::Duration::ZERO,
+            retiring: false,
         }],
         attachments: attached
             .iter()

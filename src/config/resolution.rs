@@ -2039,6 +2039,7 @@ impl Config {
                     condition_prefixes,
                     condition_policy,
                     settle_time: std::time::Duration::from_secs(u64::from(config.settle_time)),
+                    retiring: false,
                 });
         }
         Ok(set)
