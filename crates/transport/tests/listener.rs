@@ -610,6 +610,33 @@ mod inbound_auth {
         }
     }
 
+    /// A live raise does what `gtsm_outbound_v6` does at bind, and a later
+    /// reload's inventory replacement does not lower it again.
+    #[tokio::test]
+    async fn a_live_gtsm_outbound_raise_survives_a_reload() {
+        let (_v4_addr, v6_addr, mut accept_rx, control) =
+            bind_dual_listener(ListenerSocketOptions::default()).await;
+        assert!(spawn_gtsm_connect(v6_addr, None).await.is_err());
+        assert!(matches!(
+            control.raise_gtsm_outbound_v6().await,
+            ReloadDispatch::Replied(Ok(()))
+        ));
+        let raised = spawn_gtsm_connect(v6_addr, None)
+            .await
+            .expect("GTSM TCP handshake after the raise");
+        expect_data_flows(raised, expect_accept(&mut accept_rx).await).await;
+        assert!(matches!(
+            control
+                .replace_inbound_auth(Vec::new(), Vec::new(), || {})
+                .await,
+            ReloadDispatch::Replied(Ok(()))
+        ));
+        let reloaded = spawn_gtsm_connect(v6_addr, None)
+            .await
+            .expect("GTSM TCP handshake after a reload");
+        expect_data_flows(reloaded, expect_accept(&mut accept_rx).await).await;
+    }
+
     /// An interface-only neighbor's learned-endpoint selector (ADR-0142):
     /// installed, low-hop-limit segments from that address on that interface
     /// are dropped in the kernel while a hop-limit-255 sender's arrive; a

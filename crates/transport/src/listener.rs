@@ -331,6 +331,9 @@ enum TcpAoListenerCommand {
         selector: Option<LearnedTtlSecuritySelector>,
         reply: oneshot::Sender<std::io::Result<()>>,
     },
+    RaiseGtsmOutboundV6 {
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
 }
 
 /// Bounded control handle for listener-owned live TCP-AO rotation generations.
@@ -622,6 +625,25 @@ impl TcpAoListenerHandle {
                 reply,
             },
             "BGP listener learned GTSM selector update",
+            || {},
+        )
+        .await
+    }
+
+    /// Raise the IPv6 listener's outbound Hop Limit to 255, as
+    /// [`ListenerSocketOptions::gtsm_outbound_v6`] does at bind, so a GTSM
+    /// interface-only peer accepts its SYN-ACKs before any selector for it
+    /// is learned. Never lowered.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_learned_ttl_security`].
+    pub async fn raise_gtsm_outbound_v6(
+        &self,
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::RaiseGtsmOutboundV6 { reply },
+            "BGP listener IPv6 outbound Hop Limit raise",
             || {},
         )
         .await
@@ -1239,6 +1261,9 @@ impl BgpListener {
                 reply,
             } => {
                 let _ = reply.send(self.set_learned_ttl_security(interface, selector));
+            }
+            TcpAoListenerCommand::RaiseGtsmOutboundV6 { reply } => {
+                let _ = reply.send(self.raise_gtsm_outbound_v6());
             }
             TcpAoListenerCommand::MarkDependentFailure {
                 generation,
@@ -1940,10 +1965,15 @@ impl BgpListener {
             self.learned_ttl_security.remove(&interface);
             return Ok(());
         };
+        self.raise_gtsm_outbound_v6()?;
+        self.learned_ttl_security.insert(interface, selector);
+        Ok(())
+    }
+
+    fn raise_gtsm_outbound_v6(&self) -> std::io::Result<()> {
         for family in self.listeners.iter().filter(|family| !family.is_v4) {
             crate::socket_opts::set_gtsm_outbound(&socket2::SockRef::from(&family.socket), false)?;
         }
-        self.learned_ttl_security.insert(interface, selector);
         Ok(())
     }
 

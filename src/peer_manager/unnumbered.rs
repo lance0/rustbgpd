@@ -31,7 +31,7 @@
 //!   intervening input, so two links discovering one address cannot both be
 //!   admitted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv6Addr};
 
 use rustbgpd_api::peer_types::{PeerKey, PeerLifecycleError};
@@ -62,17 +62,25 @@ pub(crate) struct Unnumbered {
     reconcile_due: bool,
     /// A bound session did not answer its state query: reconcile again then.
     retry_at: Option<tokio::time::Instant>,
-    /// Installs a GTSM neighbor's learned-endpoint selector at the BGP
-    /// listener, which enforces it from accept.
-    gtsm: Option<LearnedGtsmUpdate>,
 }
 
-/// One learned-endpoint GTSM selector update at the listener (`None`
-/// removes the interface's selector).
+/// One GTSM change at the BGP listener for interface-only neighbors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ListenerGtsmRequest {
+    /// Install, replace or (`None`) remove the learned-endpoint selector of
+    /// the neighbor on `interface`, enforced from accept.
+    Selector {
+        interface: String,
+        selector: Option<rustbgpd_transport::LearnedTtlSecuritySelector>,
+    },
+    /// Raise the IPv6 listener's outbound Hop Limit to 255; never lowered.
+    RaiseOutboundV6,
+}
+
+/// Sends a [`ListenerGtsmRequest`] to the BGP listener.
 pub(crate) type LearnedGtsmUpdate = std::sync::Arc<
     dyn Fn(
-            String,
-            Option<rustbgpd_transport::LearnedTtlSecuritySelector>,
+            ListenerGtsmRequest,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = LearnedGtsmOutcome> + Send>>
         + Send
@@ -96,8 +104,19 @@ pub(crate) enum LearnedGtsmOutcome {
 pub(crate) struct UnnumberedRuntime {
     /// `current_config` was replaced since the port set last followed it.
     pub(crate) config_due: bool,
-    /// The discovery actor could not be started: try again then.
+    /// The discovery actor could not be started, or a listener GTSM change
+    /// failed: try again then.
     spawn_retry_at: Option<tokio::time::Instant>,
+    /// GTSM at the BGP listener. Kept here, not on [`Unnumbered`], so
+    /// discovery started by a reload or transaction has it too.
+    gtsm: Option<LearnedGtsmUpdate>,
+    /// The listener confirmed its IPv6 outbound Hop Limit is 255.
+    gtsm_outbound_raised: bool,
+    /// Interfaces whose GTSM selector the listener holds, or may: an
+    /// unanswered update counts as installed until a later one is answered.
+    /// Kept apart from the port, so a deleted neighbor's entry outlives it
+    /// until the removal is confirmed.
+    gtsm_selectors: BTreeSet<String>,
     /// Where the running interface-only set is published after each port
     /// reconcile (the host IPv6 prerequisite monitor reads it).
     running: Option<tokio::sync::watch::Sender<std::sync::Arc<Vec<crate::config::Neighbor>>>>,
@@ -125,6 +144,9 @@ impl Default for UnnumberedRuntime {
         Self {
             config_due: false,
             spawn_retry_at: None,
+            gtsm: None,
+            gtsm_outbound_raised: false,
+            gtsm_selectors: BTreeSet::new(),
             running: None,
             probe: || crate::ra_discovery::probe_raw_socket().map_err(|error| error.to_string()),
             generation_hold: None,
@@ -145,10 +167,6 @@ struct GenerationHold {
 }
 
 #[derive(Debug, Default)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent per-port flags of distinct owners: session, retirement, listener GTSM and GR retention"
-)]
 struct Port {
     /// Discovery's current binding.
     desired: Option<Endpoint>,
@@ -174,9 +192,6 @@ struct Port {
     /// still have shut the session down, which reports nothing. Settled by
     /// reading the session before the binding is trusted again.
     retire_unsettled: bool,
-    /// The listener holds a GTSM selector for this interface (or may: an
-    /// unanswered update counts as installed until a later one is answered).
-    gtsm_selector: bool,
     /// The bound session was shut down, to release the address or by a late
     /// conditional retirement. Either may follow a GR teardown, so the
     /// stopped peer keeps the address until the RIB retains nothing from it
@@ -214,24 +229,37 @@ impl Unnumbered {
             ports: BTreeMap::new(),
             reconcile_due: false,
             retry_at: None,
-            gtsm: None,
         }
     }
 
-    /// Enforce GTSM neighbors' `ttl_security` at `listener` from accept.
+    pub(super) async fn shutdown(self) {
+        self.discovery.shutdown().await;
+    }
+}
+
+impl PeerManager {
+    /// Enforce interface-only neighbors' `ttl_security` at `listener`, for
+    /// neighbors configured at startup and those a reload or transaction adds.
     #[must_use]
-    pub(crate) fn with_listener(
+    pub(crate) fn with_listener_gtsm(
         self,
         listener: Option<rustbgpd_transport::TcpAoListenerHandle>,
     ) -> Self {
         let Some(listener) = listener else {
             return self;
         };
-        self.with_gtsm_update(std::sync::Arc::new(move |interface, selector| {
+        self.with_gtsm_update(std::sync::Arc::new(move |request| {
             let listener = listener.clone();
             Box::pin(async move {
                 use rustbgpd_transport::listener::ReloadDispatch;
-                match listener.set_learned_ttl_security(interface, selector).await {
+                let dispatch = match request {
+                    ListenerGtsmRequest::Selector {
+                        interface,
+                        selector,
+                    } => listener.set_learned_ttl_security(interface, selector).await,
+                    ListenerGtsmRequest::RaiseOutboundV6 => listener.raise_gtsm_outbound_v6().await,
+                };
+                match dispatch {
                     ReloadDispatch::Replied(Ok(())) => LearnedGtsmOutcome::Applied,
                     ReloadDispatch::Replied(Err(error)) | ReloadDispatch::NotAccepted(error) => {
                         LearnedGtsmOutcome::Failed(error.to_string())
@@ -244,16 +272,10 @@ impl Unnumbered {
 
     #[must_use]
     pub(crate) fn with_gtsm_update(mut self, update: LearnedGtsmUpdate) -> Self {
-        self.gtsm = Some(update);
+        self.unnumbered_runtime.gtsm = Some(update);
         self
     }
 
-    pub(super) async fn shutdown(self) {
-        self.discovery.shutdown().await;
-    }
-}
-
-impl PeerManager {
     /// Publish the running interface-only set to `running` after every
     /// port reconcile.
     #[must_use]
@@ -893,6 +915,14 @@ impl PeerManager {
 
     /// Add, remove and rebind ports against `current_config`.
     async fn sync_unnumbered_ports(&mut self) {
+        // A GTSM peer that sends no RAs is learned from its inbound
+        // connection, which completes only once the listener's SYN-ACKs
+        // carry Hop Limit 255: raise it before any added or reconfigured
+        // neighbor can bind. A neighbor learned from its RA installs a
+        // selector, which raises it too.
+        if crate::interface_only_gtsm(&self.current_config) {
+            self.raise_gtsm_outbound_v6().await;
+        }
         let configured: BTreeMap<String, Option<BindTimeProjection>> = self
             .current_config
             .neighbors
@@ -918,6 +948,7 @@ impl PeerManager {
                 }
             }
         }
+        self.remove_stale_gtsm_selectors().await;
         let added: Vec<&String> = configured
             .keys()
             .filter(|name| !existing.contains(name))
@@ -1054,6 +1085,40 @@ impl PeerManager {
         }
         if let Some(unnumbered) = self.unnumbered.as_mut() {
             unnumbered.discovery.stop(name);
+        }
+    }
+
+    /// Remove the selectors of deleted neighbors, whose peers are gone; a
+    /// failure is retried on the reconcile timer.
+    async fn remove_stale_gtsm_selectors(&mut self) {
+        let Some(update) = self.unnumbered_runtime.gtsm.clone() else {
+            return;
+        };
+        let stale: Vec<String> = self
+            .unnumbered_runtime
+            .gtsm_selectors
+            .iter()
+            .filter(|name| {
+                self.unnumbered
+                    .as_ref()
+                    .is_none_or(|unnumbered| !unnumbered.ports.contains_key(*name))
+            })
+            .cloned()
+            .collect();
+        for name in stale {
+            let outcome = update(ListenerGtsmRequest::Selector {
+                interface: name.clone(),
+                selector: None,
+            })
+            .await;
+            if outcome == LearnedGtsmOutcome::Applied {
+                self.unnumbered_runtime.gtsm_selectors.remove(&name);
+            } else {
+                warn!(interface = %name, ?outcome, "unnumbered: could not remove a deleted neighbor's GTSM selector; retrying");
+                self.unnumbered_runtime
+                    .spawn_retry_at
+                    .get_or_insert_with(|| tokio::time::Instant::now() + RECONCILE_RETRY);
+            }
         }
     }
 
@@ -1577,6 +1642,29 @@ impl PeerManager {
         self.port_mut(name).bound.clone()
     }
 
+    /// Raise the IPv6 listener's outbound Hop Limit to 255 once; a failure
+    /// is retried on the reconcile timer.
+    async fn raise_gtsm_outbound_v6(&mut self) {
+        if self.unnumbered_runtime.gtsm_outbound_raised {
+            return;
+        }
+        let Some(update) = self.unnumbered_runtime.gtsm.clone() else {
+            return;
+        };
+        let error = match update(ListenerGtsmRequest::RaiseOutboundV6).await {
+            LearnedGtsmOutcome::Applied => {
+                self.unnumbered_runtime.gtsm_outbound_raised = true;
+                return;
+            }
+            LearnedGtsmOutcome::Failed(error) => error,
+            LearnedGtsmOutcome::Unconfirmed => "no answer".to_owned(),
+        };
+        warn!(%error, "unnumbered: could not raise the listener's IPv6 Hop Limit to 255 for GTSM; retrying");
+        self.unnumbered_runtime
+            .spawn_retry_at
+            .get_or_insert_with(|| tokio::time::Instant::now() + RECONCILE_RETRY);
+    }
+
     /// Install, replace or (`None`) remove the listener's GTSM selector for
     /// `name`'s interface-only neighbor. A neighbor without GTSM and no
     /// selector skips the listener entirely.
@@ -1585,28 +1673,33 @@ impl PeerManager {
         name: &str,
         selector: Option<rustbgpd_transport::LearnedTtlSecuritySelector>,
     ) -> Result<(), PeerLifecycleError> {
-        let Some(update) = self
-            .unnumbered
-            .as_ref()
-            .and_then(|unnumbered| unnumbered.gtsm.clone())
-        else {
+        let Some(update) = self.unnumbered_runtime.gtsm.clone() else {
             return Ok(());
         };
-        if selector.is_none() && !self.port_mut(name).gtsm_selector {
+        let installed = &mut self.unnumbered_runtime.gtsm_selectors;
+        if selector.is_none() && !installed.contains(name) {
             return Ok(());
         }
-        let outcome = update(name.to_owned(), selector).await;
-        let port = self.port_mut(name);
+        let outcome = update(ListenerGtsmRequest::Selector {
+            interface: name.to_owned(),
+            selector,
+        })
+        .await;
+        let installed = &mut self.unnumbered_runtime.gtsm_selectors;
         match outcome {
             LearnedGtsmOutcome::Applied => {
-                port.gtsm_selector = selector.is_some();
+                if selector.is_some() {
+                    installed.insert(name.to_owned());
+                } else {
+                    installed.remove(name);
+                }
                 Ok(())
             }
             LearnedGtsmOutcome::Failed(error) => Err(PeerLifecycleError::Internal(format!(
                 "the listener did not update the GTSM selector: {error}"
             ))),
             LearnedGtsmOutcome::Unconfirmed => {
-                port.gtsm_selector = true;
+                installed.insert(name.to_owned());
                 Err(PeerLifecycleError::Internal(
                     "the listener did not confirm the GTSM selector update".into(),
                 ))
@@ -1641,16 +1734,8 @@ impl PeerManager {
         let config = Self::peer_manager_config_from_resolved(resolved, true);
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
         // GTSM is in force at the listener for this endpoint before the peer
-        // can be matched for an inbound connection, and a neighbor without it
-        // leaves no selector behind.
-        let selector =
-            config
-                .ttl_security_hops
-                .map(|hops| rustbgpd_transport::LearnedTtlSecuritySelector {
-                    address: endpoint.address,
-                    ifindex: endpoint.ifindex,
-                    hops,
-                });
+        // can be matched inbound; a neighbor without it leaves no selector.
+        let selector = learned_selector(endpoint, config.ttl_security_hops);
         self.set_learned_gtsm(name, selector).await?;
         // The binding's BFD session exists before its peer, so a strict peer
         // is added withheld until BFD is Up on this endpoint (ADR-0142).
@@ -1748,4 +1833,17 @@ impl PeerManager {
         port.settings = settings;
         Ok(())
     }
+}
+
+/// The listener's GTSM selector for a neighbor bound at `endpoint`, if it
+/// runs GTSM.
+fn learned_selector(
+    endpoint: Endpoint,
+    hops: Option<std::num::NonZeroU8>,
+) -> Option<rustbgpd_transport::LearnedTtlSecuritySelector> {
+    hops.map(|hops| rustbgpd_transport::LearnedTtlSecuritySelector {
+        address: endpoint.address,
+        ifindex: endpoint.ifindex,
+        hops,
+    })
 }

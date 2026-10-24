@@ -124,7 +124,10 @@ learned-endpoint selector per interface-only neighbor, matched by address and
 arrival interface, which the binding installs before the peer is admitted and
 removes after the endpoint's peer is retired. An inbound-learned connection
 gets the same IP_MINTTL check before it reaches the session. `ttl_security_hops`
-above 1 stays rejected.
+above 1 stays rejected. The IPv6 listener's outbound Hop Limit is raised to 255
+whenever an interface-only neighbor runs GTSM, at startup or by the reload or
+transaction that introduces it, and is never lowered. Without it an RA-silent
+GTSM peer's handshake cannot complete, so it could never be learned.
 
 ### Discovery
 

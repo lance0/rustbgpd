@@ -111,6 +111,7 @@ impl Drop for Namespaces {
 
 struct Daemon {
     child: Child,
+    config: PathBuf,
     log: PathBuf,
     grpc: String,
 }
@@ -185,9 +186,28 @@ hold_time = {HOLD_TIME_SECS}
             .expect("spawn rustbgpd");
         Self {
             child,
+            config,
             log,
             grpc: format!("unix://{}/grpc.sock", runtime.display()),
         }
+    }
+
+    /// Append `toml` to the last (`veth`) neighbor's stanza and SIGHUP the
+    /// daemon, waiting until the reload completes.
+    fn reload_appending(&mut self, toml: &str) {
+        let mut config = std::fs::read_to_string(&self.config).unwrap();
+        config.push_str(toml);
+        std::fs::write(&self.config, config).unwrap();
+        let reloads = |log: &str| log.matches("config reload complete").count();
+        let before = reloads(&self.log());
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(self.child.id()).unwrap()),
+            nix::sys::signal::Signal::SIGHUP,
+        )
+        .unwrap();
+        self.wait("the reload to complete", FAILOVER_BOUND, |d| {
+            reloads(&d.log()) > before
+        });
     }
 
     fn log(&self) -> String {
@@ -419,6 +439,51 @@ fn interface_only_gtsm_refuses_hop_limit_254_and_accepts_255() {
     b.wait("B Established with A", RECOVERY_BOUND, |b| {
         b.established_with("fe80::a1")
     });
+}
+
+/// The same RA-silent GTSM peer when a reload turns on A's GTSM: until
+/// then A's listener answers at the default Hop Limit and B drops every
+/// SYN-ACK, so nothing is learned; the reload raises it to 255 before any
+/// binding exists, and A then learns B from its next connection.
+#[test]
+fn an_ra_silent_gtsm_peer_is_learned_after_a_reload_enables_gtsm() {
+    if !netns_enabled() {
+        return;
+    }
+    let ns = Namespaces::create();
+    let (dir_a, dir_b) = (private_tempdir(), private_tempdir());
+    let mut a = Daemon::start(&ns.a, dir_a.path(), 65001, "192.0.2.1");
+    let _b = Daemon::start_neighbor(
+        &ns.b,
+        dir_b.path(),
+        65002,
+        "192.0.2.2",
+        "address = \"fe80::a1\"\ninterface = \"veth\"\nremote_asn = 65001\nttl_security = true",
+    );
+    a.wait("A's neighbor listed", RECOVERY_BOUND, |a| {
+        a.veth_rows().is_some_and(|rows| rows.len() == 1)
+    });
+    // B dials repeatedly in this window; none of its handshakes completes.
+    thread::sleep(Duration::from_secs(15));
+    assert!(
+        !a.log()
+            .contains("peer address learned from an inbound connection"),
+        "nothing learned while A answers at the default Hop Limit"
+    );
+
+    // Mutation-red: without the live raise, A keeps the default Hop Limit
+    // and B's handshakes keep failing.
+    a.reload_appending("ttl_security = true\n");
+    a.wait(
+        "A Established with the RA-silent GTSM peer after the reload",
+        RECOVERY_BOUND,
+        |a| a.established_with("fe80::b1"),
+    );
+    assert!(
+        a.log()
+            .contains("peer address learned from an inbound connection"),
+        "learned from B's inbound connection, not an RA"
+    );
 }
 
 /// An RA-silent GTSM peer that dials in: B has a static link-local neighbor

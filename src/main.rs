@@ -1843,11 +1843,11 @@ async fn query_warm_checkpoint_capture(
 }
 
 /// Whether an interface-only neighbor runs GTSM (ADR-0142): the IPv6
-/// listener then answers with Hop Limit 255 from startup, so a GTSM peer that
-/// sends no RAs and dials in can complete its handshake and be learned.
-/// Adding an interface-only neighbor or changing its GTSM is restart-required,
-/// so a reload cannot make this stale.
-fn interface_only_gtsm(config: &Config) -> bool {
+/// listener then answers with Hop Limit 255, so a GTSM peer that sends no
+/// RAs and dials in can complete its handshake and be learned. Startup binds
+/// the listener that way; a reload or transaction that makes this true has
+/// the peer manager raise it live. It is never lowered.
+pub(crate) fn interface_only_gtsm(config: &Config) -> bool {
     config
         .interface_only_resolved_for_comparison()
         .is_ok_and(|resolved| {
@@ -5174,7 +5174,9 @@ async fn run<T>(
     // Advertisements and follow carrier through the link monitor; without
     // either, refuse to start rather than run them blind.
     #[cfg(target_os = "linux")]
-    let peer_mgr = peer_mgr.with_running_interface_only(running_interface_only_tx);
+    let peer_mgr = peer_mgr
+        .with_running_interface_only(running_interface_only_tx)
+        .with_listener_gtsm(tcp_ao_listener_handle.clone());
     #[cfg(target_os = "linux")]
     let peer_mgr = if config.neighbors.interface_only().is_empty() {
         peer_mgr
@@ -5184,10 +5186,9 @@ async fn run<T>(
             process::exit(1);
         }
         match ra_discovery::RaDiscovery::spawn(unnumbered_discovery_config(&config)) {
-            Ok((discovery, events)) => peer_mgr.with_unnumbered(
-                peer_manager::Unnumbered::new(discovery, events)
-                    .with_listener(tcp_ao_listener_handle.clone()),
-            ),
+            Ok((discovery, events)) => {
+                peer_mgr.with_unnumbered(peer_manager::Unnumbered::new(discovery, events))
+            }
             Err(error) => {
                 error!(%error, "interface-only neighbor discovery could not start");
                 process::exit(1);
