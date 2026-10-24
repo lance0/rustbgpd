@@ -2706,6 +2706,19 @@ impl PeerManager {
         ControlFlow::Continue(())
     }
 
+    /// The owner loop's reconciles, in dependency order. Retiring an
+    /// interface-only endpoint can ask for a conditional-advertisement
+    /// reconcile, which then runs in the same step: the loop may otherwise
+    /// wait with nothing due to wake it, leaving the retired gate installed.
+    async fn run_due_reconciles(&mut self) {
+        if self.unnumbered_reconcile_due() {
+            self.reconcile_unnumbered().await;
+        }
+        if self.conditional_reconcile_pending {
+            self.reconcile_conditional_advertisements().await;
+        }
+    }
+
     /// Run the `PeerManager` event loop until shutdown or channel close.
     #[expect(
         clippy::too_many_lines,
@@ -2758,12 +2771,7 @@ impl PeerManager {
             // Link-local BFD scope moves run after the link checks they
             // follow were dispatched, never ahead of them.
             self.run_due_bfd_scope_refresh().await;
-            if self.conditional_reconcile_pending {
-                self.reconcile_conditional_advertisements().await;
-            }
-            if self.unnumbered_reconcile_due() {
-                self.reconcile_unnumbered().await;
-            }
+            self.run_due_reconciles().await;
             let bfd_retry_at = self.bfd_retry_deadline();
             let evpn_recovery_retry_at = self.evpn_recovery_retry_at;
             let link_check_retry_at = self.link_check.retry_at;

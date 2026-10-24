@@ -4562,6 +4562,36 @@ async fn a_failed_bfd_registration_leaves_no_gate_naming_the_endpoint() {
     );
 }
 
+/// Carrier loss retires a gated binding inside the owner loop's unnumbered
+/// reconcile, which asks for a conditional reconcile. The same loop step
+/// runs it, so the retired gate is gone without waiting for another wakeup.
+#[tokio::test]
+async fn a_retirement_in_the_loops_reconcile_removes_its_gate_in_the_same_step() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))]
+    );
+
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    // Mutation-red: with the conditional reconcile ahead of the unnumbered
+    // one, this step leaves the request for a wakeup that may never come.
+    h.mgr.run_due_reconciles().await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "retired");
+    assert!(
+        attached(&installed.try_recv().unwrap()).is_empty(),
+        "the retired gate is removed in the same step"
+    );
+}
+
 /// A retirement whose install acknowledgement is lost leaves the RIB's
 /// gate unknown. A rebind to the same endpoint must install it again, not
 /// trust the cached set and admit an ungated session.
