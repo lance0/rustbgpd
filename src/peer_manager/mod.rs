@@ -118,6 +118,14 @@ mod unnumbered {
         pub(super) fn unnumbered_preflight(&self, _: &crate::config::Config) -> Result<(), String> {
             Ok(())
         }
+        pub(super) fn preflight_reload_generation(
+            &mut self,
+            _: &crate::config::Config,
+            _: std::sync::Weak<()>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        pub(super) fn release_generation_hold(&mut self) {}
         pub(super) fn unbound_interface_only_infos(
             &self,
         ) -> Vec<rustbgpd_api::peer_types::PeerInfo> {
