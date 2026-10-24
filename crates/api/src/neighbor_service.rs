@@ -15,9 +15,10 @@ use crate::health_probe::DaemonGate;
 use crate::owner_publication::dispatch_configured_owner_publication;
 use crate::peer_types::{
     ConfigEvent, ConfiguredOwnerPublicationOperation, DynamicRangeError, EnqueuedOperatorQuery,
-    NeighborCreateAddPath, OutboundRefreshError, OwnedNeighborMutation, OwnedNeighborMutationError,
-    OwnedNeighborMutationOutcome, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
-    PeerManagerOperatorQuery, PresenceAwareNeighborCreate, Rfc8212PolicyStatus,
+    NeighborCreateAddPath, NeighborDiscoveryState, OutboundRefreshError, OwnedNeighborMutation,
+    OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerInfo, PeerKey,
+    PeerLifecycleError, PeerManagerCommand, PeerManagerOperatorQuery, PresenceAwareNeighborCreate,
+    RemoteAsnMode, Rfc8212PolicyStatus,
 };
 use crate::proto;
 use crate::runtime_config_settlement::{
@@ -811,8 +812,18 @@ fn parse_presence_aware_create(
         .address
         .parse()
         .map_err(|error| Status::invalid_argument(format!("invalid address: {error}")))?;
-    if config.remote_asn == 0 {
-        return Err(Status::invalid_argument("remote_asn must be > 0"));
+    let remote_asn_mode = remote_asn_mode_from_proto(config.remote_asn_mode)?;
+    match (remote_asn_mode, config.remote_asn) {
+        (RemoteAsnMode::Numeric, 0) => {
+            return Err(Status::invalid_argument("remote_asn must be > 0"));
+        }
+        (RemoteAsnMode::External | RemoteAsnMode::Internal, asn) if asn != 0 => {
+            return Err(Status::invalid_argument(format!(
+                "remote_asn must be 0 with remote_asn_mode {}, got {asn}",
+                remote_asn_mode_name(remote_asn_mode)
+            )));
+        }
+        _ => {}
     }
     let interface = (!config.interface.trim().is_empty()).then(|| config.interface.clone());
     match (is_ipv6_link_local(address), interface.as_ref()) {
@@ -901,6 +912,7 @@ fn parse_presence_aware_create(
         address,
         interface,
         remote_asn: config.remote_asn,
+        remote_asn_mode,
         description: (!config.description.trim().is_empty()).then_some(config.description),
         peer_group: (!config.peer_group.trim().is_empty()).then_some(config.peer_group),
         hold_time,
@@ -926,6 +938,48 @@ fn parse_presence_aware_create(
     }))
 }
 
+/// `remote_asn_mode` on a create request: UNSPECIFIED is NUMERIC, and an
+/// unknown value is refused.
+fn remote_asn_mode_from_proto(value: i32) -> Result<RemoteAsnMode, Status> {
+    match proto::RemoteAsnMode::try_from(value) {
+        Ok(proto::RemoteAsnMode::Unspecified | proto::RemoteAsnMode::Numeric) => {
+            Ok(RemoteAsnMode::Numeric)
+        }
+        Ok(proto::RemoteAsnMode::External) => Ok(RemoteAsnMode::External),
+        Ok(proto::RemoteAsnMode::Internal) => Ok(RemoteAsnMode::Internal),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown remote_asn_mode {value}"
+        ))),
+    }
+}
+
+fn remote_asn_mode_to_proto(mode: RemoteAsnMode) -> proto::RemoteAsnMode {
+    match mode {
+        RemoteAsnMode::Numeric => proto::RemoteAsnMode::Numeric,
+        RemoteAsnMode::External => proto::RemoteAsnMode::External,
+        RemoteAsnMode::Internal => proto::RemoteAsnMode::Internal,
+    }
+}
+
+fn remote_asn_mode_name(mode: RemoteAsnMode) -> &'static str {
+    match mode {
+        RemoteAsnMode::Numeric => "NUMERIC",
+        RemoteAsnMode::External => "EXTERNAL",
+        RemoteAsnMode::Internal => "INTERNAL",
+    }
+}
+
+fn discovery_state_to_proto(state: NeighborDiscoveryState) -> proto::NeighborDiscoveryState {
+    match state {
+        NeighborDiscoveryState::InterfaceMissing => proto::NeighborDiscoveryState::InterfaceMissing,
+        NeighborDiscoveryState::LinkDown => proto::NeighborDiscoveryState::LinkDown,
+        NeighborDiscoveryState::AwaitingDiscovery => {
+            proto::NeighborDiscoveryState::AwaitingDiscovery
+        }
+        NeighborDiscoveryState::Bound => proto::NeighborDiscoveryState::Bound,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     clippy::items_after_statements,
@@ -939,9 +993,21 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         .collect();
 
     let config = proto::NeighborConfig {
-        address: info.address.to_string(),
+        // An interface-only neighbor is identified by its interface; its
+        // learned address is reported in learned_peer_address.
+        address: if info.interface_only.is_some() {
+            String::new()
+        } else {
+            info.address.to_string()
+        },
         interface: info.interface.clone().unwrap_or_default(),
-        remote_asn: info.remote_asn,
+        // The configured intent round-trips: a non-numeric mode reports 0,
+        // never the resolved or negotiated number.
+        remote_asn: match info.remote_asn_mode {
+            RemoteAsnMode::Numeric => info.remote_asn,
+            RemoteAsnMode::External | RemoteAsnMode::Internal => 0,
+        },
+        remote_asn_mode: remote_asn_mode_to_proto(info.remote_asn_mode).into(),
         description: info.description.clone(),
         hold_time: info.hold_time.map_or(0, u32::from),
         min_hold_time: info.min_hold_time.map(u32::from),
@@ -1051,6 +1117,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         info.negotiated_session
             .as_ref()
             .map(|negotiated| proto::NegotiatedSessionState {
+                remote_asn: info.negotiated_remote_asn,
                 local_address: negotiated.local_address.map(|address| address.to_string()),
                 hold_time_seconds: Some(u32::from(negotiated.hold_time)),
                 keepalive_interval_seconds: Some(u32::from(negotiated.keepalive_interval)),
@@ -1111,7 +1178,21 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         proto::TcpAoHealth::Unavailable
     };
 
+    let (learned_peer_address, discovery_state) = info.interface_only.as_ref().map_or(
+        (String::new(), proto::NeighborDiscoveryState::Unspecified),
+        |row| {
+            (
+                row.learned_address
+                    .map(|address| address.to_string())
+                    .unwrap_or_default(),
+                discovery_state_to_proto(row.discovery),
+            )
+        },
+    );
+
     proto::NeighborState {
+        learned_peer_address,
+        discovery_state: discovery_state.into(),
         config: Some(config),
         state: state.into(),
         uptime_seconds: info.uptime_secs,
@@ -1307,6 +1388,75 @@ fn selection_deferral_to_proto(
         .collect()
 }
 
+impl NeighborService {
+    /// The row of the interface-only neighbor on `interface`, bound or not.
+    async fn interface_only_row(&self, interface: &str) -> Result<PeerInfo, Status> {
+        let infos =
+            peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
+                PeerManagerOperatorQuery::ListPeers { reply }
+            })
+            .await?;
+        infos
+            .into_iter()
+            .find(|info| {
+                info.interface_only.is_some() && info.interface.as_deref() == Some(interface)
+            })
+            .ok_or_else(|| Status::not_found(format!("no interface-only neighbor on {interface}")))
+    }
+
+    /// ADR-0142 `GetNeighborState` selector: an empty address with an
+    /// interface selects that interface's interface-only neighbor. Bound, the
+    /// request is rewritten to its learned address and read like any other
+    /// neighbor (`None`); unbound, its configured row is the answer.
+    async fn read_interface_only_selector(
+        &self,
+        req: &mut proto::GetNeighborStateRequest,
+    ) -> Result<Option<proto::NeighborState>, Status> {
+        let interface = req.interface.trim().to_owned();
+        if !req.address.is_empty() || interface.is_empty() {
+            return Ok(None);
+        }
+        let row = self.interface_only_row(&interface).await?;
+        if let Some(learned) = row
+            .interface_only
+            .as_ref()
+            .and_then(|state| state.learned_address)
+        {
+            req.address = learned.to_string();
+            return Ok(None);
+        }
+        if !req.compare_address.is_empty() {
+            return Err(Status::failed_precondition(format!(
+                "the interface-only neighbor on {interface} has no bound address to compare"
+            )));
+        }
+        Ok(Some(peer_info_to_proto(&row)))
+    }
+
+    /// A neighbor selector as [`peer_key`] reads it, plus the ADR-0142 form:
+    /// an empty address with an interface selects that interface's
+    /// interface-only neighbor through its bound address.
+    async fn select_neighbor(&self, address: &str, interface: &str) -> Result<PeerKey, Status> {
+        let interface = interface.trim();
+        if !address.is_empty() || interface.is_empty() {
+            return peer_key(address, interface, self.roster.as_ref());
+        }
+        let row = self.interface_only_row(interface).await?;
+        let learned = row
+            .interface_only
+            .and_then(|state| state.learned_address)
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "the interface-only neighbor on {interface} has no bound address yet"
+                ))
+            })?;
+        Ok(PeerKey::new(
+            IpAddr::V6(learned),
+            Some(interface.to_owned()),
+        ))
+    }
+}
+
 /// A neighbor selector: `address` plus the structured `interface`, or a
 /// scoped `fe80::1%eth0` address (see [`crate::peer_selector`]).
 fn peer_key(
@@ -1344,7 +1494,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
+        let peer = self.select_neighbor(&req.address, &req.interface).await?;
 
         // Reserve config persistence capacity before mutating runtime state.
         // This makes DeleteNeighbor fail-fast when persistence is unavailable.
@@ -1370,11 +1520,20 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         _request: Request<proto::ListNeighborsRequest>,
     ) -> Result<Response<proto::ListNeighborsResponse>, Status> {
-        let mut infos =
+        let infos =
             peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
                 PeerManagerOperatorQuery::ListPeers { reply }
             })
             .await?;
+        // Interface-only neighbors with no bound address have no RIB
+        // identity: they follow the addressed rows, by interface.
+        let (mut unbound, mut infos): (Vec<PeerInfo>, Vec<PeerInfo>) =
+            infos.into_iter().partition(|info| {
+                info.interface_only
+                    .as_ref()
+                    .is_some_and(|state| state.discovery != NeighborDiscoveryState::Bound)
+            });
+        unbound.sort_by(|left, right| left.interface.cmp(&right.interface));
         infos.sort_by(|left, right| {
             left.address
                 .cmp(&right.address)
@@ -1427,15 +1586,23 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             keyed.sort_by_key(|(address, _)| *address);
             neighbors = keyed.into_iter().map(|(_, state)| state).collect();
         }
+        neighbors.extend(unbound.iter().map(peer_info_to_proto));
 
         Ok(Response::new(proto::ListNeighborsResponse { neighbors }))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one read keeps selection, comparison, the retained-route fallback and the RIB snapshot in order"
+    )]
     async fn get_neighbor_state(
         &self,
         request: Request<proto::GetNeighborStateRequest>,
     ) -> Result<Response<proto::NeighborState>, Status> {
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        if let Some(unbound) = self.read_interface_only_selector(&mut req).await? {
+            return Ok(Response::new(unbound));
+        }
         let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
         if req.compare_address.is_empty() && !req.compare_interface.trim().is_empty() {
             return Err(Status::invalid_argument(
@@ -1554,7 +1721,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
+        let peer = self.select_neighbor(&req.address, &req.interface).await?;
 
         crate::dampening_control::enable_peer_owned(
             self.peer_mgr_tx.clone(),
@@ -1577,7 +1744,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
+        let peer = self.select_neighbor(&req.address, &req.interface).await?;
 
         // Empty means "all configured families" — pass empty vec through.
         // Transport filters to negotiated families before sending.
@@ -1606,7 +1773,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
+        let peer = self.select_neighbor(&req.address, &req.interface).await?;
 
         peer_manager_request(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::RefreshOutbound { peer, reply }
@@ -1627,7 +1794,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
+        let peer = self.select_neighbor(&req.address, &req.interface).await?;
 
         peer_manager_request(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::ReplayOutbound { peer, reply }
@@ -1648,7 +1815,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
+        let peer = self.select_neighbor(&req.address, &req.interface).await?;
         let reason = shutdown_communication(&req.reason);
 
         peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::DisablePeer {
@@ -1670,7 +1837,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = peer_key(&req.address, &req.interface, self.roster.as_ref())?;
+        let peer = self.select_neighbor(&req.address, &req.interface).await?;
         let reason = shutdown_communication(&req.reason);
 
         peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::ResetPeer {
@@ -1804,16 +1971,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        // Empty address means broadcast to every currently-managed peer
-        // (operator running planned maintenance on the whole router).
-        let peer = if req.address.is_empty() {
+        // An empty address and interface means every currently-managed peer
+        // (planned maintenance on the whole router). Any other selector names
+        // one neighbor, including an interface-only one by its interface.
+        let peer = if req.address.is_empty() && req.interface.trim().is_empty() {
             None
         } else {
-            Some(peer_key(
-                &req.address,
-                &req.interface,
-                self.roster.as_ref(),
-            )?)
+            Some(self.select_neighbor(&req.address, &req.interface).await?)
         };
 
         peer_manager_request(&self.peer_mgr_tx, |reply| {
@@ -2529,6 +2693,355 @@ mod tests {
             assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
             assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
         }
+    }
+
+    /// `remote_asn_mode` on create: EXTERNAL and INTERNAL require a zero
+    /// `remote_asn`, the zero rejection applies only to NUMERIC/UNSPECIFIED,
+    /// and an unknown mode is refused, all before any mutation.
+    #[tokio::test]
+    async fn create_validates_remote_asn_mode_before_mutation() {
+        let config = |remote_asn: u32, mode: i32| proto::NeighborConfig {
+            address: "10.0.0.9".into(),
+            remote_asn,
+            remote_asn_mode: mode,
+            ..Default::default()
+        };
+        let external = proto::RemoteAsnMode::External as i32;
+        let internal = proto::RemoteAsnMode::Internal as i32;
+        let numeric = proto::RemoteAsnMode::Numeric as i32;
+        for (config, expected) in [
+            (
+                config(65009, external),
+                "remote_asn must be 0 with remote_asn_mode EXTERNAL",
+            ),
+            (
+                config(65009, internal),
+                "remote_asn must be 0 with remote_asn_mode INTERNAL",
+            ),
+            (config(0, numeric), "remote_asn must be > 0"),
+            (config(0, 0), "remote_asn must be > 0"),
+            (config(0, 9), "unknown remote_asn_mode 9"),
+        ] {
+            // Mutation-red: dropping the mode check sends the spec on.
+            let error = parse_presence_aware_create(proto::NeighborCreateIntent {
+                config: Some(config),
+                override_mask: Some(prost_types::FieldMask::default()),
+            })
+            .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains(expected), "{error}");
+        }
+        for (mode, expected) in [
+            (external, RemoteAsnMode::External),
+            (internal, RemoteAsnMode::Internal),
+        ] {
+            let spec = parse_presence_aware_create(proto::NeighborCreateIntent {
+                config: Some(config(0, mode)),
+                override_mask: Some(prost_types::FieldMask::default()),
+            })
+            .unwrap();
+            assert_eq!(spec.remote_asn_mode, expected);
+            assert_eq!(spec.remote_asn, 0);
+        }
+        let spec = parse_presence_aware_create(proto::NeighborCreateIntent {
+            config: Some(config(65009, 0)),
+            override_mask: Some(prost_types::FieldMask::default()),
+        })
+        .unwrap();
+        assert_eq!(spec.remote_asn_mode, RemoteAsnMode::Numeric);
+    }
+
+    /// Reads round-trip the configured intent: a non-numeric mode reports
+    /// `remote_asn` 0, never the session's number, which is reported as the
+    /// negotiated session's `remote_asn`.
+    #[test]
+    fn reads_report_the_configured_mode_and_the_negotiated_asn() {
+        let mut info = peer_info("10.0.0.9".parse().unwrap());
+        info.remote_asn = 65009; // learned from OPEN
+        info.negotiated_session = Some(rustbgpd_transport::NegotiatedSessionState {
+            local_address: None,
+            hold_time: 90,
+            keepalive_interval: 30,
+            remote_router_id: "192.0.2.9".parse().unwrap(),
+            four_octet_as: true,
+            families: Vec::new(),
+            add_path_receive_families: Vec::new(),
+            peer_route_refresh: false,
+            peer_enhanced_route_refresh: false,
+            peer_extended_message: false,
+            outbound_max_message_bytes: rustbgpd_wire::MAX_MESSAGE_LEN,
+            graceful_restart: None,
+        });
+        info.negotiated_remote_asn = Some(65009);
+        for (mode, proto_mode, asn) in [
+            (RemoteAsnMode::Numeric, proto::RemoteAsnMode::Numeric, 65009),
+            (RemoteAsnMode::External, proto::RemoteAsnMode::External, 0),
+            (RemoteAsnMode::Internal, proto::RemoteAsnMode::Internal, 0),
+        ] {
+            info.remote_asn_mode = mode;
+            let state = peer_info_to_proto(&info);
+            let config = state.config.unwrap();
+            // Mutation-red: reporting info.remote_asn for every mode leaks
+            // the session number into the configured intent.
+            assert_eq!(config.remote_asn, asn, "{mode:?}");
+            assert_eq!(config.remote_asn_mode, proto_mode as i32);
+            assert_eq!(state.negotiated_session.unwrap().remote_asn, Some(65009));
+        }
+    }
+
+    #[test]
+    fn interface_only_rows_report_identity_learned_address_and_discovery() {
+        use crate::peer_types::InterfaceOnlyState;
+        let mut bound = peer_info("fe80::2".parse().unwrap());
+        bound.interface = Some("swp1".into());
+        bound.interface_only = Some(InterfaceOnlyState {
+            discovery: NeighborDiscoveryState::Bound,
+            learned_address: Some("fe80::2".parse().unwrap()),
+        });
+        let state = peer_info_to_proto(&bound);
+        let config = state.config.unwrap();
+        assert_eq!(
+            (config.address.as_str(), config.interface.as_str()),
+            ("", "swp1")
+        );
+        assert_eq!(state.learned_peer_address, "fe80::2");
+        assert_eq!(
+            state.discovery_state,
+            proto::NeighborDiscoveryState::Bound as i32
+        );
+
+        for (discovery, expected) in [
+            (
+                NeighborDiscoveryState::InterfaceMissing,
+                proto::NeighborDiscoveryState::InterfaceMissing,
+            ),
+            (
+                NeighborDiscoveryState::LinkDown,
+                proto::NeighborDiscoveryState::LinkDown,
+            ),
+            (
+                NeighborDiscoveryState::AwaitingDiscovery,
+                proto::NeighborDiscoveryState::AwaitingDiscovery,
+            ),
+        ] {
+            let mut unbound = bound.clone();
+            unbound.interface_only = Some(InterfaceOnlyState {
+                discovery,
+                learned_address: None,
+            });
+            let state = peer_info_to_proto(&unbound);
+            assert_eq!(state.config.unwrap().address, "");
+            assert_eq!(state.learned_peer_address, "");
+            assert_eq!(state.discovery_state, expected as i32);
+        }
+        // Every other neighbor keeps its address and reports no discovery.
+        let state = peer_info_to_proto(&peer_info("10.0.0.9".parse().unwrap()));
+        assert_eq!(state.config.unwrap().address, "10.0.0.9");
+        assert_eq!(
+            state.discovery_state,
+            proto::NeighborDiscoveryState::Unspecified as i32
+        );
+    }
+
+    fn unbound_swp1() -> PeerInfo {
+        let mut info = peer_info(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
+        info.interface = Some("swp1".into());
+        info.interface_only = Some(crate::peer_types::InterfaceOnlyState {
+            discovery: NeighborDiscoveryState::AwaitingDiscovery,
+            learned_address: None,
+        });
+        info
+    }
+
+    /// An unbound interface-only neighbor has no RIB identity: it is listed
+    /// after the addressed rows and never sent to the RIB.
+    #[tokio::test]
+    async fn list_neighbors_lists_an_unbound_interface_only_neighbor_last() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let numbered = PeerId::from_addr("10.0.0.2".parse().unwrap());
+        let peer_task = tokio::spawn(async move {
+            let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
+                panic!("expected one peer snapshot");
+            };
+            reply
+                .send(vec![unbound_swp1(), peer_info(numbered.addr())])
+                .unwrap();
+        });
+        let rib_task = tokio::spawn(async move {
+            let Some(RibUpdate::QueryNeighborRibSnapshots { peers, reply, .. }) =
+                rib_rx.recv().await
+            else {
+                panic!("expected one RIB snapshot");
+            };
+            // Mutation-red: querying every row sends the unbound one too.
+            assert_eq!(peers, vec![numbered]);
+            reply
+                .send(NeighborRibSnapshotResponse {
+                    snapshots: vec![NeighborRibSnapshot {
+                        peer: numbered,
+                        advertised_count: 3,
+                        policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
+                        outbound: rustbgpd_rib::PeerOutboundState {
+                            update_group: String::new(),
+                            effective_distribution_mode: EffectiveDistributionMode::AddPath,
+                            selection_deferral: vec![],
+                            outbound_prefix_limits: vec![],
+                        },
+                        remote_asn: None,
+                        gr_retention: Vec::new(),
+                        outbound_resync: rustbgpd_rib::OutboundResyncState::default(),
+                    }],
+                    retained: Vec::new(),
+                    comparison: None,
+                })
+                .unwrap();
+        });
+        let neighbors = svc
+            .list_neighbors(Request::new(proto::ListNeighborsRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .neighbors;
+        peer_task.await.unwrap();
+        rib_task.await.unwrap();
+        let rows: Vec<(&str, &str)> = neighbors
+            .iter()
+            .map(|n| {
+                let c = n.config.as_ref().unwrap();
+                (c.address.as_str(), c.interface.as_str())
+            })
+            .collect();
+        assert_eq!(rows, [("10.0.0.2", ""), ("", "swp1")]);
+        assert_eq!(
+            neighbors[1].discovery_state,
+            proto::NeighborDiscoveryState::AwaitingDiscovery as i32
+        );
+    }
+
+    /// An empty address with an interface selects that interface's
+    /// interface-only neighbor: unbound, its row is the answer and actions
+    /// need a bound address; bound, it reads through its learned address.
+    #[tokio::test]
+    async fn an_interface_selector_selects_the_interface_only_neighbor() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (svc, _rib_rx) = read_service(peer_tx);
+        let responder = tokio::spawn(async move {
+            let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
+                panic!("expected a peer snapshot");
+            };
+            reply.send(vec![unbound_swp1()]).unwrap();
+            let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
+                panic!("expected a peer snapshot");
+            };
+            let mut bound = peer_info("fe80::2".parse().unwrap());
+            bound.interface = Some("swp1".into());
+            bound.interface_only = Some(crate::peer_types::InterfaceOnlyState {
+                discovery: NeighborDiscoveryState::Bound,
+                learned_address: Some("fe80::2".parse().unwrap()),
+            });
+            reply.send(vec![bound]).unwrap();
+            let Some(PeerManagerCommand::GetPeerState { peer, .. }) = peer_rx.recv().await else {
+                panic!("expected a lookup of the bound peer");
+            };
+            peer
+        });
+        // Mutation-red: the pre-ADR-0142 parser refuses an empty address.
+        let unbound = svc
+            .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                interface: "swp1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            unbound.discovery_state,
+            proto::NeighborDiscoveryState::AwaitingDiscovery as i32
+        );
+        let _ = svc
+            .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                interface: "swp1".into(),
+                ..Default::default()
+            }))
+            .await;
+        let looked_up = responder.await.unwrap();
+        assert_eq!(
+            looked_up,
+            PeerKey::new("fe80::2".parse().unwrap(), Some("swp1".into()))
+        );
+    }
+
+    /// An interface selector never reaches the every-peer form: an unbound
+    /// interface-only neighbor is a failed precondition, an unknown interface
+    /// is not found, and neither sends a command.
+    #[tokio::test]
+    async fn graceful_shutdown_with_an_interface_selector_never_broadcasts() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let responder = tokio::spawn(async move {
+            let mut other_commands = 0;
+            while let Some(command) = peer_rx.recv().await {
+                if let PeerManagerCommand::ListPeers { reply } = command {
+                    let _ = reply.send(vec![unbound_swp1()]);
+                } else {
+                    other_commands += 1;
+                }
+            }
+            other_commands
+        });
+        for (interface, code) in [
+            ("swp1", tonic::Code::FailedPrecondition),
+            ("swp9", tonic::Code::NotFound),
+        ] {
+            // Mutation-red: treating an empty address as every peer sends
+            // SetGracefulShutdown { peer: None }.
+            let error = svc
+                .set_graceful_shutdown(Request::new(proto::SetGracefulShutdownRequest {
+                    address: String::new(),
+                    interface: interface.into(),
+                    enabled: true,
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), code, "{interface}: {error}");
+        }
+        drop(svc);
+        assert_eq!(
+            responder.await.unwrap(),
+            0,
+            "no command reaches the manager"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_action_on_an_unbound_interface_only_neighbor_is_a_failed_precondition() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let responder = tokio::spawn(async move {
+            let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await else {
+                panic!("expected a peer snapshot");
+            };
+            reply.send(vec![unbound_swp1()]).unwrap();
+            assert!(
+                peer_rx.recv().await.is_none(),
+                "no action reaches the manager"
+            );
+        });
+        let error = svc
+            .disable_neighbor(Request::new(proto::DisableNeighborRequest {
+                interface: "swp1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        drop(svc);
+        responder.await.unwrap();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(error.message().contains("no bound address"), "{error}");
     }
 
     #[test]

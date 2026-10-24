@@ -476,6 +476,71 @@ impl PeerManager {
         })
     }
 
+    /// One row per interface-only neighbor with no bound peer, for neighbor
+    /// listings: its configured settings and where discovery stands. A bound
+    /// neighbor is listed through its peer.
+    pub(super) fn unbound_interface_only_infos(&self) -> Vec<rustbgpd_api::peer_types::PeerInfo> {
+        use rustbgpd_api::peer_types::{InterfaceOnlyState, NeighborDiscoveryState};
+        let Some(unnumbered) = self.unnumbered.as_ref() else {
+            return Vec::new();
+        };
+        let ebgp_requires_policy = self.current_config.rfc8212_posture().policy_effective;
+        unnumbered
+            .ports
+            .iter()
+            .filter(|(_, port)| port.bound.is_none())
+            .filter_map(|(name, port)| {
+                let neighbor = self.current_config.neighbors.interface_only_on(name)?;
+                let resolved = self
+                    .current_config
+                    .resolve_unbound_interface_neighbor(neighbor)
+                    .ok()?;
+                let discovery = match port.link {
+                    None | Some((_, LinkState::Removed)) => {
+                        NeighborDiscoveryState::InterfaceMissing
+                    }
+                    Some((_, LinkState::Down)) => NeighborDiscoveryState::LinkDown,
+                    Some((_, LinkState::Up | LinkState::Unknown)) => {
+                        NeighborDiscoveryState::AwaitingDiscovery
+                    }
+                };
+                let enabled = resolved.admin_down.is_none()
+                    && port.held.as_ref().is_none_or(|held| held.enabled);
+                let mut info = super::snapshot::unbound_interface_only_info(
+                    name,
+                    &resolved,
+                    enabled,
+                    ebgp_requires_policy,
+                    InterfaceOnlyState {
+                        discovery,
+                        learned_address: None,
+                    },
+                );
+                info.remote_asn_mode = match neighbor.remote_asn {
+                    crate::config::RemoteAsn::External => {
+                        rustbgpd_api::peer_types::RemoteAsnMode::External
+                    }
+                    crate::config::RemoteAsn::Internal => {
+                        rustbgpd_api::peer_types::RemoteAsnMode::Internal
+                    }
+                    crate::config::RemoteAsn::Asn(_) => {
+                        rustbgpd_api::peer_types::RemoteAsnMode::Numeric
+                    }
+                };
+                // A max-prefix shutdown held across the endpoint is still
+                // the neighbor's state: its reason and restart countdown.
+                if let Some(latch) = port.held.as_ref().and_then(|held| held.latch.as_ref()) {
+                    super::snapshot::apply_max_prefix_latch(
+                        &mut info,
+                        &latch.error,
+                        latch.deadline,
+                    );
+                }
+                Some(info)
+            })
+            .collect()
+    }
+
     pub(super) fn unnumbered_owner_of(&self, peer: &PeerKey) -> Option<&str> {
         self.unnumbered
             .as_ref()?

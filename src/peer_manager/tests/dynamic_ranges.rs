@@ -202,6 +202,7 @@ async fn runtime_create_peer_rejects_listener_enforced_group_auth() {
                     address: "10.0.0.9".parse().unwrap(),
                     interface: None,
                     remote_asn: 65009,
+                    remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
                     description: None,
                     peer_group: Some(name.to_string()),
                     hold_time: None,

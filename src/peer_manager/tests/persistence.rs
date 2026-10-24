@@ -762,6 +762,7 @@ fn presence_create_policy_event_keeps_the_neighbor_sentinel() {
         address: "10.0.0.9".parse().unwrap(),
         interface: None,
         remote_asn: 65009,
+        remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
         description: None,
         peer_group: None,
         hold_time: None,

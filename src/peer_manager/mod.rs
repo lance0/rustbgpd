@@ -114,6 +114,11 @@ mod unnumbered {
         pub(super) fn unnumbered_bindings(&self) -> Vec<(String, std::net::Ipv6Addr, u32)> {
             Vec::new()
         }
+        pub(super) fn unbound_interface_only_infos(
+            &self,
+        ) -> Vec<rustbgpd_api::peer_types::PeerInfo> {
+            Vec::new()
+        }
         pub(super) fn interface_only_port_at(&self, _: u32) -> Option<String> {
             None
         }

@@ -647,6 +647,17 @@ async fn operator_and_max_prefix_state_survive_endpoint_retirement() {
     h.links_changed(snapshot(true, &[("swp1", 7, false)]));
     h.reconcile().await;
     assert!(!h.mgr.peers.contains_key(&old));
+    // Unbound, the row still reports the shutdown and its countdown.
+    // Mutation-red: projecting only `held.enabled` drops both.
+    let rows = h.mgr.list_peers().await;
+    let unbound = rows
+        .iter()
+        .find(|info| info.interface.as_deref() == Some("swp1"))
+        .expect("the unbound row");
+    assert!(!unbound.enabled);
+    assert_eq!(unbound.last_error, "max-prefix");
+    assert_eq!(unbound.max_prefix_action, "restart");
+    assert!(unbound.max_prefix_restart_remaining_millis.is_some());
     h.links_changed(snapshot(true, &[("swp1", 7, true)]));
     h.bind("swp1", Some(endpoint(2, 7))).await;
     // Mutation-red: a fresh peer comes back enabled with no latch.
@@ -1126,6 +1137,55 @@ async fn a_staged_transaction_defers_an_ra_binding() {
     h.reconcile().await;
     assert_eq!(h.peers_at(ll(2)), []);
     assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+}
+
+/// Neighbor listings report an interface-only neighbor by its interface:
+/// a bound one through its peer with the learned address, an unbound one
+/// as a row of its own with where discovery stands, both with the
+/// configured `remote_asn` mode.
+#[tokio::test]
+async fn listed_rows_report_discovery_state_learned_address_and_mode() {
+    use rustbgpd_api::peer_types::{NeighborDiscoveryState, RemoteAsnMode};
+    let mut h = harness(
+        &["swp1", "swp2", "swp3"],
+        &[("swp1", 7, true), ("swp2", 8, false)],
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let rows = h.mgr.list_peers().await;
+    let row = |interface: &str| {
+        rows.iter()
+            .find(|info| info.interface.as_deref() == Some(interface))
+            .unwrap_or_else(|| panic!("no row for {interface}"))
+    };
+    // Mutation-red: without the unbound rows, swp2 and swp3 are absent.
+    assert_eq!(rows.len(), 3);
+    let bound = row("swp1");
+    let state = bound.interface_only.as_ref().expect("interface-only");
+    assert_eq!(state.discovery, NeighborDiscoveryState::Bound);
+    assert_eq!(state.learned_address, Some(ll(2)));
+    assert_eq!(bound.remote_asn_mode, RemoteAsnMode::External);
+    for (interface, discovery) in [
+        ("swp2", NeighborDiscoveryState::LinkDown),
+        ("swp3", NeighborDiscoveryState::InterfaceMissing),
+    ] {
+        let unbound = row(interface);
+        let state = unbound.interface_only.as_ref().expect("interface-only");
+        assert_eq!(state.discovery, discovery, "{interface}");
+        assert_eq!(state.learned_address, None);
+        assert_eq!(unbound.remote_asn_mode, RemoteAsnMode::External);
+        assert!(!unbound.stale);
+    }
+    // A link that comes up without a binding is awaiting discovery.
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, true)]));
+    let rows = h.mgr.list_peers().await;
+    let swp2 = rows
+        .iter()
+        .find(|info| info.interface.as_deref() == Some("swp2"))
+        .unwrap();
+    assert_eq!(
+        swp2.interface_only.as_ref().unwrap().discovery,
+        NeighborDiscoveryState::AwaitingDiscovery
+    );
 }
 
 /// A bound session that answers its state query with `reported`, and then,

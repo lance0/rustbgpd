@@ -388,8 +388,8 @@ _arguments "${_arguments_options[@]}" : \
         case $line[2] in
             (add)
 _arguments "${_arguments_options[@]}" : \
-'--remote-asn=[Remote AS number of the peer (the local AS is \`rbgp global\`)]:ASN:_default' \
-'--asn=[Remote AS number of the peer (the local AS is \`rbgp global\`)]:ASN:_default' \
+'--remote-asn=[Remote AS of the peer\: a number, \`external\` (any AS but the local one) or \`internal\` (the local AS, shown by \`rbgp global\`)]:ASN:_default' \
+'--asn=[Remote AS of the peer\: a number, \`external\` (any AS but the local one) or \`internal\` (the local AS, shown by \`rbgp global\`)]:ASN:_default' \
 '--description=[Description]:DESCRIPTION:_default' \
 '--hold-time=[Hold time in seconds]:HOLD_TIME:_default' \
 '--min-hold-time=[Minimum hold time accepted from the peer (3..=65535)]:MIN_HOLD_TIME:_default' \
@@ -635,8 +635,8 @@ _arguments "${_arguments_options[@]}" : \
         case $line[2] in
             (add)
 _arguments "${_arguments_options[@]}" : \
-'--remote-asn=[Remote AS number of the peer (the local AS is \`rbgp global\`)]:ASN:_default' \
-'--asn=[Remote AS number of the peer (the local AS is \`rbgp global\`)]:ASN:_default' \
+'--remote-asn=[Remote AS of the peer\: a number, \`external\` (any AS but the local one) or \`internal\` (the local AS, shown by \`rbgp global\`)]:ASN:_default' \
+'--asn=[Remote AS of the peer\: a number, \`external\` (any AS but the local one) or \`internal\` (the local AS, shown by \`rbgp global\`)]:ASN:_default' \
 '--description=[Description]:DESCRIPTION:_default' \
 '--hold-time=[Hold time in seconds]:HOLD_TIME:_default' \
 '--min-hold-time=[Minimum hold time accepted from the peer (3..=65535)]:MIN_HOLD_TIME:_default' \
