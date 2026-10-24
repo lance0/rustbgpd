@@ -2692,6 +2692,10 @@ pub enum RibUpdate {
         /// on another interface may already own. `None` reaps the bare
         /// address.
         label: Option<Arc<str>>,
+        /// Clear the RIB state but keep the metric series: an
+        /// interface-only neighbor (ADR-0142) leaving one learned endpoint
+        /// for the next, whose series name its interface and outlive it.
+        keep_series: bool,
     },
     /// Return a deleted neighbor's handle to the peer table, after the
     /// `PeerDeleted` that cleaned up its state. The peer manager sends it

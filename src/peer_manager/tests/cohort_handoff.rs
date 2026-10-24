@@ -1807,6 +1807,7 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
                 .send(RibUpdate::PeerDeleted {
                     peer: recreated,
                     label: None,
+                    keep_series: false,
                 })
                 .await
                 .unwrap();

@@ -1672,6 +1672,7 @@ fn bfd_session(peer: IpAddr) -> crate::bfd_runtime::BfdSessionParams {
         revision: 0,
         peer,
         peer_label: peer.to_string(),
+        peer_interface: String::new(),
         scope_id: None,
         destination: crate::bfd_runtime::bfd_destination(peer, None, false)
             .expect("global test peer destination"),

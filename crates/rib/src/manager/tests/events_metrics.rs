@@ -1764,13 +1764,33 @@ async fn peer_deleted_reaps_metric_series_peer_down_does_not() {
         "PeerDown must not remove the peer's label sets"
     );
 
+    // An interface-only neighbor leaving one endpoint for the next clears
+    // its RIB state but keeps its series (ADR-0142).
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer,
+        label: None,
+        keep_series: true,
+    });
+    assert!(
+        peer_series_count(&metrics, "10.0.0.2") > 0,
+        "keep_series must keep the label sets"
+    );
+
     // A deletion: the PeerDeleted marker (queued by the peer manager
     // behind the session's PeerDown) removes the label sets entirely.
-    manager.handle_update(RibUpdate::PeerDeleted { peer, label: None });
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer,
+        label: None,
+        keep_series: false,
+    });
     assert_eq!(peer_series_count(&metrics, "10.0.0.2"), 0);
 
     // Re-deleting an already-reaped peer is a no-op (no panic).
-    manager.handle_update(RibUpdate::PeerDeleted { peer, label: None });
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer,
+        label: None,
+        keep_series: false,
+    });
     assert_eq!(peer_series_count(&metrics, "10.0.0.2"), 0);
 }
 
@@ -1820,6 +1840,7 @@ async fn route_events_keep_the_scope_their_routes_were_learned_on() {
     tx.send(RibUpdate::PeerDeleted {
         peer: second_peer,
         label: Some("fe80::2%eth1".into()),
+        keep_series: false,
     })
     .await
     .unwrap();
@@ -1975,6 +1996,7 @@ async fn an_interface_move_never_misattributes_the_old_neighbors_teardown() {
     manager.handle_update(RibUpdate::PeerDeleted {
         peer: old,
         label: Some(old.label().into()),
+        keep_series: false,
     });
     assert_eq!(rib_prefixes(), [("fe80::1%eth1".to_owned(), 7)]);
     assert!(old.release() && new.release());

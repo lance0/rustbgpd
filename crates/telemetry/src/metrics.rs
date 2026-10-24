@@ -176,8 +176,17 @@ pub fn scoped_peer_label(addr: IpAddr, interface: Option<&str>) -> String {
     }
 }
 
+/// Canonical `peer` label value of an interface-only neighbor (ADR-0142):
+/// `"interface:swp1"`. It names the interface, not the learned address, so
+/// the neighbor keeps one series when its peer's address changes.
+#[must_use]
+pub fn interface_peer_label(interface: &str) -> String {
+    format!("interface:{interface}")
+}
+
 /// Every `peer` label value in `registry` that is neither the canonical
-/// [`peer_label`] form nor a scoped IPv6 link-local `addr%if` value, as
+/// [`peer_label`] form, a scoped IPv6 link-local `addr%if` value, nor an
+/// interface-only neighbor's `interface:<name>` ([`interface_peer_label`]), as
 /// `(family_name, peer_value)` pairs.
 ///
 /// An empty result means the invariant holds. Exposed (not test-only)
@@ -194,6 +203,7 @@ pub fn non_canonical_peer_labels(registry: &Registry) -> Vec<(String, String)> {
                 }
                 let value = label.value();
                 let canonical = match value.split_once('%') {
+                    None if value.starts_with("interface:") => value.len() > "interface:".len(),
                     None => value.parse::<IpAddr>().is_ok(),
                     Some((address, interface)) => {
                         !interface.is_empty()
@@ -564,6 +574,13 @@ struct BgpMetricsInner {
     dynamic_neighbor_slots_headroom: IntGauge,
     dynamic_neighbor_limit_rejections: IntCounter,
     inbound_connections_dropped: IntCounterVec,
+
+    // ── Interface-only neighbors (ADR-0142) ───────────────────────
+    unnumbered_peer_address_info: IntGaugeVec,
+    unnumbered_address_changes: IntCounterVec,
+    unnumbered_ra_conflicts: IntCounterVec,
+    unnumbered_ra_dropped: IntCounterVec,
+    unnumbered_ra_socket_open_failures: IntCounter,
 
     // ── BFD (RFC 5880, ADR-0067) ───────────────────────────────────
     bfd_session_up: IntGaugeVec,
@@ -1073,6 +1090,44 @@ impl BgpMetrics {
         for reason in crate::reason_labels::InboundConnectionDropReason::ALL {
             inbound_connections_dropped.with_label_values(&[reason.as_str()]);
         }
+
+        let unnumbered_peer_address_info = IntGaugeVec::new(
+            Opts::new(
+                "bgp_unnumbered_peer_address_info",
+                "The IPv6 link-local address bound to an interface-only neighbor (ADR-0142); always 1, one series while an address is bound.",
+            ),
+            &["peer", "interface", "address"],
+        )
+        .expect("valid metric definition");
+        let unnumbered_address_changes = IntCounterVec::new(
+            Opts::new(
+                "bgp_unnumbered_address_changes_total",
+                "Times an interface-only neighbor was bound to a different peer address than the one it last used.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+        let unnumbered_ra_conflicts = IntCounterVec::new(
+            Opts::new(
+                "bgp_unnumbered_ra_conflicts_total",
+                "A second router seen on an interface-only neighbor's link, from a Router Advertisement or an inbound connection, while another address holds the binding.",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+        let unnumbered_ra_dropped = IntCounterVec::new(
+            Opts::new(
+                "bgp_unnumbered_ra_dropped_total",
+                "Router Solicitations and Advertisements discarded by interface-only neighbor discovery, by bounded reason.",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric definition");
+        let unnumbered_ra_socket_open_failures = IntCounter::new(
+            "bgp_unnumbered_ra_socket_open_failures_total",
+            "Failed opens of an interface's raw ICMPv6 discovery socket; each is retried with backoff.",
+        )
+        .expect("valid metric definition");
 
         let notifications_sent = IntCounterVec::new(
             Opts::new(
@@ -3035,6 +3090,21 @@ impl BgpMetrics {
             .register(Box::new(inbound_connections_dropped.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(unnumbered_address_changes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(unnumbered_ra_conflicts.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(unnumbered_ra_dropped.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(unnumbered_peer_address_info.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(unnumbered_ra_socket_open_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(notifications_sent.clone()))
             .expect("metric not already registered");
         registry
@@ -3678,6 +3748,11 @@ impl BgpMetrics {
             dynamic_neighbor_slots_headroom,
             dynamic_neighbor_limit_rejections,
             inbound_connections_dropped,
+            unnumbered_peer_address_info,
+            unnumbered_address_changes,
+            unnumbered_ra_conflicts,
+            unnumbered_ra_dropped,
+            unnumbered_ra_socket_open_failures,
             bfd_session_up,
             bfd_session_flaps_total,
             gnmi_dialout_connected,
@@ -3955,6 +4030,59 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Publish the address bound to an interface-only neighbor, replacing
+    /// `previous` (the address it was bound to before, if any). `None`
+    /// removes the series: the neighbor has no bound address.
+    pub fn set_unnumbered_peer_address(
+        &self,
+        peer: &str,
+        interface: &str,
+        previous: Option<&str>,
+        address: Option<&str>,
+    ) {
+        if let Some(previous) = previous.filter(|previous| Some(*previous) != address) {
+            let _ = self
+                .0
+                .unnumbered_peer_address_info
+                .remove_label_values(&[peer, interface, previous]);
+        }
+        if let Some(address) = address {
+            self.0
+                .unnumbered_peer_address_info
+                .with_label_values(&[peer, interface, address])
+                .set(1);
+        }
+    }
+
+    /// Count an interface-only neighbor bound to a new peer address.
+    pub fn record_unnumbered_address_change(&self, peer: &str) {
+        self.0
+            .unnumbered_address_changes
+            .with_label_values(&[peer])
+            .inc();
+    }
+
+    /// Count a second router seen on an interface-only neighbor's link.
+    pub fn record_unnumbered_ra_conflict(&self, peer: &str) {
+        self.0
+            .unnumbered_ra_conflicts
+            .with_label_values(&[peer])
+            .inc();
+    }
+
+    /// Count an RS or RA discarded by discovery; `reason` is bounded.
+    pub fn record_unnumbered_ra_drop(&self, reason: &str) {
+        self.0
+            .unnumbered_ra_dropped
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    /// Count a failed open of a discovery socket.
+    pub fn record_unnumbered_ra_socket_open_failure(&self) {
+        self.0.unnumbered_ra_socket_open_failures.inc();
+    }
+
     // ── Per-peer series reaping ────────────────────────────────────
 
     /// Remove every series whose `peer` label equals `peer`, across all
@@ -4011,6 +4139,9 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.stale_timer_events, peer);
         Self::reap_peer_series_from_vec(&self.0.bfd_session_up, peer);
         Self::reap_peer_series_from_vec(&self.0.bfd_session_flaps_total, peer);
+        Self::reap_peer_series_from_vec(&self.0.unnumbered_peer_address_info, peer);
+        Self::reap_peer_series_from_vec(&self.0.unnumbered_address_changes, peer);
+        Self::reap_peer_series_from_vec(&self.0.unnumbered_ra_conflicts, peer);
         Self::reap_peer_series_from_vec(&self.0.notifications_sent, peer);
         Self::reap_peer_series_from_vec(&self.0.notifications_received, peer);
         Self::reap_peer_series_from_vec(&self.0.messages_sent, peer);
@@ -10110,6 +10241,9 @@ mod tests {
             crate::reason_labels::SessionDownReason::TransportError,
         );
         m.record_stale_timer_event(peer, "idle", "hold");
+        m.set_unnumbered_peer_address(peer, "swp1", None, Some("fe80::2"));
+        m.record_unnumbered_address_change(peer);
+        m.record_unnumbered_ra_conflict(peer);
         m.record_bfd_state(peer, true, false);
         m.record_bfd_state(peer, false, true); // bfd flap counter
         m.record_notification_sent(peer, "6", "0");
@@ -10218,10 +10352,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 79 peer-labeled series; state transitions and EVPN discard types
+        // 82 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 79);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 82);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -10231,7 +10365,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 79);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 82);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -10560,7 +10694,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 67] = [
+    const PEER_LABELED_FAMILIES: [&str; 70] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -10624,6 +10758,9 @@ mod tests {
         "bgp_session_established_total",
         "bgp_session_flaps_total",
         "bgp_session_state_transitions_total",
+        "bgp_unnumbered_address_changes_total",
+        "bgp_unnumbered_peer_address_info",
+        "bgp_unnumbered_ra_conflicts_total",
         "bgp_update_malformed_causes_total",
         "bgp_update_malformed_total",
         "bmp_source_drops_total",
@@ -10659,6 +10796,51 @@ mod tests {
             Vec::<(String, String)>::new(),
             "every peer label must be the bare address form built by peer_label()"
         );
+    }
+
+    /// An interface-only neighbor's `interface:<name>` value is canonical
+    /// in every family; an empty name or another prefix is not.
+    #[test]
+    fn interface_only_peer_labels_are_canonical() {
+        let m = BgpMetrics::with_registry(Registry::new());
+        let swp1 = interface_peer_label("swp1");
+        assert_eq!(swp1, "interface:swp1");
+        populate_all_peer_families(&m, &swp1);
+        assert_eq!(non_canonical_peer_labels(m.registry()), Vec::new());
+        // Mutation-red: accepting any prefix lets a malformed value through.
+        m.record_unnumbered_ra_conflict("interface:");
+        m.record_unnumbered_ra_conflict("iface:swp1");
+        assert_eq!(
+            non_canonical_peer_labels(m.registry()),
+            [
+                (
+                    "bgp_unnumbered_ra_conflicts_total".to_owned(),
+                    "iface:swp1".to_owned()
+                ),
+                (
+                    "bgp_unnumbered_ra_conflicts_total".to_owned(),
+                    "interface:".to_owned()
+                ),
+            ]
+        );
+    }
+
+    /// One address series per interface-only neighbor: a new address
+    /// replaces the previous one, and `None` removes it.
+    #[test]
+    fn unnumbered_peer_address_series_follows_the_binding() {
+        let m = BgpMetrics::with_registry(Registry::new());
+        let swp1 = interface_peer_label("swp1");
+        m.set_unnumbered_peer_address(&swp1, "swp1", None, Some("fe80::2"));
+        m.set_unnumbered_peer_address(&swp1, "swp1", Some("fe80::2"), Some("fe80::3"));
+        let text = gather_text(&m);
+        assert!(!text.contains(r#"address="fe80::2""#), "{text}");
+        assert!(
+            text.contains(r#"bgp_unnumbered_peer_address_info{address="fe80::3",interface="swp1",peer="interface:swp1"} 1"#),
+            "{text}"
+        );
+        m.set_unnumbered_peer_address(&swp1, "swp1", Some("fe80::3"), None);
+        assert!(!gather_text(&m).contains("bgp_unnumbered_peer_address_info{"));
     }
 
     /// Every distinct `peer` label value across the registry.

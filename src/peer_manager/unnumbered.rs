@@ -88,6 +88,7 @@ pub(crate) struct UnnumberedRuntime {
     pub(crate) spawn: Box<
         dyn FnMut(
                 DiscoveryConfig,
+                rustbgpd_telemetry::BgpMetrics,
             )
                 -> Result<(RaDiscovery, mpsc::UnboundedReceiver<DiscoveryEvent>), String>
             + Send
@@ -103,7 +104,9 @@ impl Default for UnnumberedRuntime {
             running: None,
             probe: || crate::ra_discovery::probe_raw_socket().map_err(|error| error.to_string()),
             generation_hold: None,
-            spawn: Box::new(|config| RaDiscovery::spawn(config).map_err(|error| error.to_string())),
+            spawn: Box::new(|config, metrics| {
+                RaDiscovery::spawn(config, metrics).map_err(|error| error.to_string())
+            }),
         }
     }
 }
@@ -151,6 +154,12 @@ struct Port {
     /// or a binding elsewhere is installed. A new session installed for the
     /// peer, such as an inbound reconnect, clears it.
     stopped_retained: bool,
+    /// The address the neighbor was last bound to, so a binding to another
+    /// one counts as an address change.
+    last_address: Option<Ipv6Addr>,
+    /// Why the neighbor's endpoint is being removed or added, for the
+    /// presence event of the change in progress.
+    presence_reason: Option<&'static str>,
 }
 
 /// State of an interface-only neighbor that belongs to the neighbor, not to
@@ -299,6 +308,25 @@ impl PeerManager {
             } => {
                 info!(%interface, ?previous, ?current, "unnumbered: binding changed");
                 if let Some(port) = unnumbered.ports.get_mut(&interface) {
+                    // An Established peer learned from an inbound connection
+                    // is unknown to discovery, which reports no conflict when
+                    // a second router's RA arrives: its first binding is that
+                    // router. Discovery had no binding, so this is the only
+                    // count.
+                    if previous.is_none()
+                        && port.established
+                        && let (Some(bound), Some(current)) = (&port.bound, current)
+                        && bound.address != IpAddr::V6(current.address)
+                    {
+                        warn!(
+                            %interface, bound = %bound.address, other = %current.address,
+                            reason = "multiple_routers_on_link",
+                            "unnumbered: a second router advertises on an interface-only link"
+                        );
+                        self.metrics.record_unnumbered_ra_conflict(
+                            &rustbgpd_telemetry::interface_peer_label(&interface),
+                        );
+                    }
                     port.desired = current;
                     unnumbered.reconcile_due = true;
                 }
@@ -318,6 +346,9 @@ impl PeerManager {
                     %interface, %bound, %other,
                     reason = "multiple_routers_on_link",
                     "unnumbered: a second router advertises on an interface-only link"
+                );
+                self.metrics.record_unnumbered_ra_conflict(
+                    &rustbgpd_telemetry::interface_peer_label(&interface),
                 );
             }
         }
@@ -866,7 +897,7 @@ impl PeerManager {
             .collect();
         if !added.is_empty() && self.unnumbered.is_none() {
             let config = crate::unnumbered_discovery_config(&self.current_config);
-            match (self.unnumbered_runtime.spawn)(config) {
+            match (self.unnumbered_runtime.spawn)(config, self.metrics.clone()) {
                 Ok((discovery, events)) => {
                     info!("unnumbered: starting Router Advertisement discovery");
                     self.unnumbered = Some(Box::new(Unnumbered::new(discovery, events)));
@@ -1008,7 +1039,8 @@ impl PeerManager {
 
     async fn reconcile_port(&mut self, name: &str) {
         let port = self.port_mut(name);
-        let link_down = matches!(port.link, Some((_, LinkState::Down | LinkState::Removed)));
+        let link = port.link;
+        let link_down = matches!(link, Some((_, LinkState::Down | LinkState::Removed)));
         let current_ifindex = port.link.map(|(ifindex, _)| ifindex);
         let (bound, established) = (port.bound.clone(), port.established);
         // A binding learned on an older index of a recreated interface is
@@ -1071,15 +1103,7 @@ impl PeerManager {
             if !gone && !self.bound_session_down(name, &key).await {
                 return;
             }
-            let reason = if link_down {
-                "link_down"
-            } else if recreated {
-                "interface_recreated"
-            } else if stopped {
-                "session_exited"
-            } else {
-                "peer_address_changed"
-            };
+            let reason = retire_reason(link, recreated, stopped);
             if !self.retire_bound_peer(name, key, reason, !gone).await {
                 return;
             }
@@ -1294,13 +1318,14 @@ impl PeerManager {
         &mut self,
         name: &str,
         key: PeerKey,
-        reason: &str,
+        reason: &'static str,
         unless_established: bool,
     ) -> bool {
         if unless_established && !self.shut_down_unless_established(name, &key, false).await {
             return false;
         }
         info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
+        self.port_mut(name).presence_reason = Some(reason);
         // Apply what the session already reported, such as a max-prefix
         // shutdown queued as it went Idle, before capturing the state that
         // outlives it; the deletion below would otherwise apply and discard it.
@@ -1318,7 +1343,9 @@ impl PeerManager {
                 .is_some_and(|managed| managed.advertise_graceful_shutdown),
             latch: self.max_prefix_latches.remove(&key),
         };
-        match self.delete_peer(key.clone(), false).await {
+        let deleted = self.delete_peer(key.clone(), false).await;
+        self.port_mut(name).presence_reason = None;
+        match deleted {
             // Already gone: nothing is left to clear.
             Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
             Err(error) => {
@@ -1345,6 +1372,13 @@ impl PeerManager {
         port.retire_unsettled = false;
         port.stopped_retained = false;
         port.held = Some(held);
+        let previous = port.last_address.map(|address| address.to_string());
+        self.metrics.set_unnumbered_peer_address(
+            &rustbgpd_telemetry::interface_peer_label(name),
+            name,
+            previous.as_deref(),
+            None,
+        );
         // The retired session's queued reports have been drained by
         // now; an Established among them must not outlive it.
         if let Some(unnumbered) = self.unnumbered.as_mut() {
@@ -1364,6 +1398,15 @@ impl PeerManager {
             .keys()
             .find(|name| feed.resolve_interface(name) == Some(scope_id))
             .cloned()
+    }
+
+    /// Refuse an inbound connection from a second router on `name`'s link,
+    /// counted as a conflict and as `unconfigured`. Another address while the
+    /// bound session is Established is one, with or without an RA binding.
+    fn refuse_second_router(&self, name: &str) -> Option<PeerKey> {
+        self.metrics
+            .record_unnumbered_ra_conflict(&rustbgpd_telemetry::interface_peer_label(name));
+        self.refuse_inbound()
     }
 
     /// Count a refused inbound learning attempt as `unconfigured`, as such a
@@ -1430,7 +1473,7 @@ impl PeerManager {
                 reason = "multiple_routers_on_link",
                 "unnumbered: inbound connection from a second router on an interface-only link, dropping"
             );
-            return self.refuse_inbound();
+            return self.refuse_second_router(name);
         }
         if let Some(key) = port.bound.clone()
             && key.address == IpAddr::V6(address)
@@ -1455,7 +1498,7 @@ impl PeerManager {
                     reason = "multiple_routers_on_link",
                     "unnumbered: inbound connection from a second router while the bound address has a connection pending, dropping"
                 );
-                return self.refuse_inbound();
+                return self.refuse_second_router(name);
             }
             let state = match self.peers.get(&key) {
                 None => None,
@@ -1472,20 +1515,18 @@ impl PeerManager {
                     }
                 },
             };
-            match state.as_ref().map(|state| state.fsm_state) {
-                Some(SessionState::Established) => {
-                    info!(interface = %name, %address, peer = %key, "unnumbered: inbound connection while the neighbor is Established, dropping");
-                    return self.refuse_inbound();
-                }
-                Some(SessionState::OpenSent | SessionState::OpenConfirm) => {
-                    warn!(
-                        interface = %name, %address, peer = %key,
-                        reason = "multiple_routers_on_link",
-                        "unnumbered: inbound connection from a second router while the bound session is opening, dropping"
-                    );
-                    return self.refuse_inbound();
-                }
-                _ => {}
+            if let Some(
+                state @ (SessionState::OpenSent
+                | SessionState::OpenConfirm
+                | SessionState::Established),
+            ) = state.as_ref().map(|state| state.fsm_state)
+            {
+                warn!(
+                    interface = %name, %address, peer = %key, state = state.as_str(),
+                    reason = "multiple_routers_on_link",
+                    "unnumbered: inbound connection from a second router while the bound session is opening or Established, dropping"
+                );
+                return self.refuse_second_router(name);
             }
             if let Some(state) = state
                 .as_ref()
@@ -1515,11 +1556,24 @@ impl PeerManager {
         self.port_mut(name).bound.clone()
     }
 
-    async fn bind_port(
-        &mut self,
+    /// Why `peer`'s endpoint is being removed or added, when it belongs to
+    /// an interface-only neighbor whose binding is changing.
+    pub(super) fn unnumbered_presence_reason(&self, peer: &PeerKey) -> Option<&'static str> {
+        self.unnumbered
+            .as_ref()?
+            .ports
+            .get(peer.interface.as_deref()?)?
+            .presence_reason
+    }
+
+    /// `name`'s interface-only neighbor and the peer configuration it binds
+    /// at `endpoint`.
+    fn bound_peer_config(
+        &self,
         name: &str,
         endpoint: Endpoint,
-    ) -> Result<(), PeerLifecycleError> {
+    ) -> Result<(crate::config::Neighbor, super::PeerManagerNeighborConfig), PeerLifecycleError>
+    {
         let neighbor = self
             .current_config
             .neighbors
@@ -1535,7 +1589,18 @@ impl PeerManager {
         // Restart-eligible like configured neighbors: during a planned
         // restart's window the OPEN carries R=1, so helpers keep the routes
         // they retained; after the window it carries R=0.
-        let config = Self::peer_manager_config_from_resolved(resolved, true);
+        Ok((
+            neighbor,
+            Self::peer_manager_config_from_resolved(resolved, true),
+        ))
+    }
+
+    async fn bind_port(
+        &mut self,
+        name: &str,
+        endpoint: Endpoint,
+    ) -> Result<(), PeerLifecycleError> {
+        let (neighbor, config) = self.bound_peer_config(name, endpoint)?;
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
         // The binding's BFD session exists before its peer, so a strict peer
         // is added withheld until BFD is Up on this endpoint (ADR-0142).
@@ -1605,7 +1670,10 @@ impl PeerManager {
                 ));
             }
         }
-        if let Err(error) = self.add_peer_impl(config, false, enabled, true).await {
+        self.note_binding_reason(name, endpoint.address);
+        let added = self.add_peer_impl(config, false, enabled, true).await;
+        self.port_mut(name).presence_reason = None;
+        if let Err(error) = added {
             if carried_latch {
                 self.remove_max_prefix_latch(&key);
             }
@@ -1631,6 +1699,46 @@ impl PeerManager {
         port.rib_peer = port.rib_peer.or(Some(rib_peer));
         port.bound = Some(key);
         port.settings = settings;
+        self.publish_bound_address(name, endpoint.address);
         Ok(())
+    }
+
+    /// Why `name`'s endpoint is being added, for its presence event.
+    fn note_binding_reason(&mut self, name: &str, address: Ipv6Addr) {
+        let port = self.port_mut(name);
+        port.presence_reason = Some(if port.last_address.is_some_and(|last| last != address) {
+            "peer_address_changed"
+        } else {
+            "peer_address_learned"
+        });
+    }
+
+    /// `name` is bound to `address`: count a change of address and publish
+    /// the address series.
+    fn publish_bound_address(&mut self, name: &str, address: Ipv6Addr) {
+        let previous = self.port_mut(name).last_address.replace(address);
+        let label = rustbgpd_telemetry::interface_peer_label(name);
+        if let Some(previous) = previous.filter(|previous| *previous != address) {
+            info!(interface = %name, %previous, %address, "unnumbered: peer address changed");
+            self.metrics.record_unnumbered_address_change(&label);
+        }
+        self.metrics.set_unnumbered_peer_address(
+            &label,
+            name,
+            previous.map(|previous| previous.to_string()).as_deref(),
+            Some(&address.to_string()),
+        );
+    }
+}
+
+/// Why a bound endpoint is retired, as logged and as its presence events
+/// carry it.
+fn retire_reason(link: Option<(u32, LinkState)>, recreated: bool, exited: bool) -> &'static str {
+    match link {
+        _ if recreated => "interface_removed",
+        Some((_, LinkState::Removed)) => "interface_removed",
+        Some((_, LinkState::Down)) => "link_down",
+        _ if exited => "session_exited",
+        _ => "peer_address_changed",
     }
 }
