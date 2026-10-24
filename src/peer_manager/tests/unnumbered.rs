@@ -1887,3 +1887,58 @@ async fn a_reload_enables_disables_and_reenables_bfd_on_a_bound_neighbor() {
     assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
     assert!(h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
 }
+
+/// With no link monitor, the scope poll re-resolves configured link-local
+/// BFD sessions only: it is not armed for binding-owned sessions alone, and
+/// when it runs it moves a configured session to its interface's current
+/// index while a binding-owned session keeps its binding's index.
+#[tokio::test(start_paused = true)]
+async fn the_no_monitor_scope_poll_never_moves_a_bindings_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    h.mgr.link_check.changes = None;
+    // Mutation-red: arming for any link-local member polls for nothing.
+    assert_eq!(h.mgr.bfd_scope_deadline(), None, "binding-owned only");
+
+    // A configured link-local neighbor on `lo`, at a stale index.
+    let configured: IpAddr = "fe80::9".parse().unwrap();
+    let key = PeerKey::new(configured, Some("lo".to_owned()));
+    insert_test_managed_peer_for_key(
+        &mut h.mgr,
+        &key,
+        65002,
+        fake_peer_handle(
+            configured,
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    let transport = &mut h.mgr.peers.get_mut(&key).unwrap().transport_config;
+    transport.peer_interface = Some("lo".to_owned());
+    transport.peer_scope_id = Some(4242);
+    h.mgr
+        .bfd_coupling
+        .as_mut()
+        .unwrap()
+        .configured
+        .insert(configured, session_params(configured, Some(4242)));
+    // The binding's interface now resolves elsewhere, unreported.
+    h.links.send_replace(snapshot(true, &[("swp1", 9, true)]));
+
+    let due = h
+        .mgr
+        .bfd_scope_deadline()
+        .expect("polled for the configured one");
+    tokio::time::sleep_until(due).await;
+    h.mgr.bfd_scope_retry_due();
+    h.mgr.run_due_bfd_scope_refresh().await;
+    let lo = nix::net::if_::if_nametoindex("lo").unwrap();
+    // Mutation-red: without the refresh skip the binding's session moves too.
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7)), (configured, Some(lo))]
+    );
+}
