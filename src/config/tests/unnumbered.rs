@@ -407,12 +407,16 @@ fn interface_only_conditional_advertisements_attach_at_the_binding() {
         ),
     ] {
         let config = parse(&with(&extra)).unwrap();
+        let unbound = config.conditional_advertisement_set().unwrap();
+        assert!(unbound.attachments.is_empty());
+        // Mutation-red: definitions collected from bindings only miss the
+        // startup install, and its settle time.
         assert!(
-            config
-                .conditional_advertisement_set()
-                .unwrap()
-                .attachments
-                .is_empty()
+            unbound
+                .definitions
+                .iter()
+                .any(|definition| &*definition.name == "backup"),
+            "installed before any binding"
         );
         let learned: std::net::IpAddr = "fe80::2".parse().unwrap();
         let set = config

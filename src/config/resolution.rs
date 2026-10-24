@@ -1793,15 +1793,27 @@ impl Config {
     }
 
     /// Resolve the complete conditional-advertisement install (ADR-0137):
-    /// every definition a static neighbor attaches, directly or through its
-    /// peer group, with both predicates compiled, and each attaching
-    /// neighbor's names in configured order. Unattached definitions are not
-    /// installed. Validation has already accepted every reference, so an
+    /// every definition a static or interface-only neighbor attaches,
+    /// directly or through its peer group, with both predicates compiled,
+    /// and each attaching static neighbor's names in configured order (an
+    /// interface-only neighbor's attach at its bindings). Unattached
+    /// definitions are not installed. Validation has already accepted every reference, so an
     /// error here means a broken candidate.
     pub(crate) fn conditional_advertisement_set(
         &self,
     ) -> Result<rustbgpd_rib::ConditionalAdvertisementSet, ConfigError> {
         self.conditional_advertisement_set_with_bindings(&[])
+    }
+
+    /// Every definition name an interface-only neighbor attaches, own or
+    /// inherited.
+    fn interface_only_conditional_names(&self) -> std::collections::BTreeSet<String> {
+        self.neighbors
+            .interface_only()
+            .iter()
+            .flat_map(|neighbor| self.effective_conditional_advertisements(neighbor))
+            .cloned()
+            .collect()
     }
 
     /// Each binding's endpoint with its interface-only neighbor's attached
@@ -1830,7 +1842,10 @@ impl Config {
         bindings: &[(IpAddr, String)],
     ) -> Result<rustbgpd_rib::ConditionalAdvertisementSet, ConfigError> {
         let mut set = rustbgpd_rib::ConditionalAdvertisementSet::default();
-        let mut attached = std::collections::BTreeSet::new();
+        // An interface-only neighbor's definitions are installed whether or
+        // not it is bound, so startup settle and debounce state never wait
+        // for a binding and survive its retirement.
+        let mut attached = self.interface_only_conditional_names();
         for (endpoint, effective) in self.binding_conditional_attachments(bindings) {
             attached.extend(effective.iter().cloned());
             set.attachments.insert(

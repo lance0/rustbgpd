@@ -57,8 +57,14 @@ impl PeerManager {
                 .map_err(|_| "RIB conditional-advertisement acknowledgement timed out".to_string())?
                 .map_err(|_| "RIB dropped conditional-advertisement acknowledgement".to_string())
         };
-        self.await_with_readiness(round_trip, OperatorReadAdmission::Served)
-            .await
+        let result = self
+            .await_with_readiness(round_trip, OperatorReadAdmission::Served)
+            .await;
+        // Any failure leaves the RIB's install unknown.
+        if result.is_err() {
+            self.conditional_install_uncertain = true;
+        }
+        result
     }
 
     /// Install `set` unless the RIB already holds it. `Ok(None)` means
@@ -68,7 +74,7 @@ impl PeerManager {
         set: ConditionalAdvertisementSet,
         swapping_datasets: &[String],
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
-        if set == self.conditional_advertisements {
+        if !self.conditional_install_uncertain && set == self.conditional_advertisements {
             return Ok(None);
         }
         let capture = self
@@ -78,6 +84,7 @@ impl PeerManager {
                 reply,
             })
             .await?;
+        self.conditional_install_uncertain = false;
         info!(
             definitions = set.definitions.len(),
             attached_peers = set.attachments.len(),
@@ -99,6 +106,7 @@ impl PeerManager {
         })
         .await?;
         self.conditional_advertisements = prior.set;
+        self.conditional_install_uncertain = false;
         Ok(())
     }
 

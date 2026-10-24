@@ -526,6 +526,10 @@ type CommandHook = Arc<dyn Fn(&PeerManagerCommand) + Send + Sync>;
 ///
 /// Runs as a single tokio task, receiving commands via an mpsc channel.
 /// Same single-task ownership pattern as `RibManager`.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent run-loop flags owned by different subsystems, not one state machine"
+)]
 pub struct PeerManager {
     /// Managed peers and the import roster published from them (ADR-0136).
     peers: PeerTable,
@@ -632,6 +636,10 @@ pub struct PeerManager {
     /// After a failed reconcile: when the run loop retries it, and the
     /// backoff that produced that deadline.
     conditional_reconcile_retry: Option<(tokio::time::Instant, Duration)>,
+    /// A conditional-advertisement install was dispatched without a
+    /// conclusive acknowledgement: the RIB may hold it, the cached set may
+    /// not, so the next install is sent even if it equals the cache.
+    conditional_install_uncertain: bool,
     local_forwarding_state: Arc<crate::forwarding_state::ForwardingState>,
     /// True between typed transaction staging and the controller's
     /// persist/rollback completion signal. Dynamic inbound accepts are refused
@@ -1362,6 +1370,7 @@ impl PeerManager {
                 .unwrap_or_default(),
             conditional_reconcile_pending: false,
             conditional_reconcile_retry: None,
+            conditional_install_uncertain: false,
             current_config,
             bfd_coupling: None,
             link_check: link_failover::LinkCheckDelivery::default(),

@@ -1646,6 +1646,48 @@ async fn a_bindings_conditional_advertisement_gate_follows_the_binding() {
         attached(&h.mgr.conditional_advertisements).is_empty(),
         "retired"
     );
+    assert!(
+        !h.mgr.conditional_advertisements.definitions.is_empty(),
+        "the definition, and its settle state, stay installed"
+    );
+}
+
+/// A retirement whose install acknowledgement is lost leaves the RIB's
+/// gate unknown. A rebind to the same endpoint must install it again, not
+/// trust the cached set and admit an ungated session.
+#[tokio::test]
+async fn a_lost_retirement_acknowledgement_never_admits_an_ungated_rebind() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+    );
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut installed = conditional_rib(&mut h, refuse.clone()).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))]
+    );
+
+    // The retirement's install reaches the RIB, but its acknowledgement is lost.
+    refuse.store(true, Ordering::SeqCst);
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.mgr.reconcile_conditional_advertisements().await;
+    refuse.store(false, Ordering::SeqCst);
+
+    // Mutation-red: the cached set still names the endpoint, so the rebind
+    // skips its install and the session starts ungated.
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+    assert_eq!(
+        installed.try_recv().map(|set| attached(&set)),
+        Ok(vec![IpAddr::V6(ll(2))]),
+        "the rebind installs the gate again"
+    );
 }
 
 /// No gate, no peer: when the install is not acknowledged the binding is
