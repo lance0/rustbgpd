@@ -687,6 +687,13 @@ mod inbound_auth {
             .await
             .expect("TCP handshake after the rebind");
         expect_data_flows(rebound, expect_accept(&mut accept_rx).await).await;
+        // Back on the arrival scope, so the removal below has a live
+        // selector to take away.
+        set(Some(selector(0))).await;
+        let reinstalled = spawn_connect(v6_addr, None, None, Some(254))
+            .await
+            .expect("TCP handshake with the selector reinstalled");
+        expect_data_blocked(reinstalled, expect_accept(&mut accept_rx).await).await;
         set(None).await;
         let unbound = spawn_connect(v6_addr, None, None, Some(254))
             .await

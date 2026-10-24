@@ -3623,6 +3623,62 @@ async fn deleting_a_gtsm_neighbor_removes_its_selector_after_its_peer() {
     );
 }
 
+/// A connection the listener accepted under a GTSM selector that a reload
+/// has since turned off: it was queued with the old Hop Limit minimum, and
+/// the replacement non-GTSM session must not inherit it, or a peer sending
+/// a lower Hop Limit stalls. The minimum is cleared before the session gets
+/// the connection.
+#[tokio::test]
+async fn an_accept_queued_under_a_gtsm_selector_a_reload_turned_off_is_cleared() {
+    use tokio::io::AsyncWriteExt as _;
+    let (mut h, _log) = gtsm_harness(Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Applied)));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.reload(config_with(&port_stanza("swp1", ""))).await;
+    h.reconcile().await;
+    assert_eq!(
+        h.mgr.peers[&swp1_key(2)].transport_config.ttl_security_hops,
+        None,
+        "rebound without GTSM"
+    );
+
+    let listener = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+    let (mut client, server) = (client.unwrap(), accepted.unwrap().0);
+    // As the listener's old selector set it at accept.
+    rustbgpd_transport::set_gtsm(
+        &socket2::SockRef::from(&server),
+        addr,
+        std::num::NonZeroU8::MIN,
+    )
+    .unwrap();
+    let probe = std::net::TcpStream::from(
+        std::os::fd::AsFd::as_fd(&server)
+            .try_clone_to_owned()
+            .unwrap(),
+    );
+    let source = std::net::SocketAddrV6::new(ll(2), 50179, 0, 7);
+    h.mgr
+        .handle_inbound(server, SocketAddr::V6(source), None, None)
+        .await;
+
+    // Mutation-red: with the stale minimum kept, the client's Hop Limit 64
+    // segment is dropped and never reaches the socket. The runtime is held
+    // here, so the session cannot read it first.
+    client.write_all(b"x").await.unwrap();
+    let mut byte = [0u8; 1];
+    let delivered = (0..200).any(|_| {
+        let peeked = probe.peek(&mut byte).is_ok_and(|n| n == 1);
+        if !peeked {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        peeked
+    });
+    assert!(delivered, "a lower Hop Limit reaches the non-GTSM session");
+}
+
 /// A neighbor without `ttl_security` never touches the listener.
 #[tokio::test]
 async fn a_neighbor_without_gtsm_installs_no_selector() {

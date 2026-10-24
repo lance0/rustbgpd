@@ -713,19 +713,28 @@ impl PeerManager {
             return;
         };
         // ADR-0142 GTSM: an interface-only neighbor's connection may have been
-        // accepted before the listener had its learned selector (an inbound
-        // learning, or a SYN queued across the binding), so its IP_MINTTL is
-        // set here, before the connection reaches the session.
-        if let Some(hops) = self
+        // accepted under another selector than its peer's: before the listener
+        // had one (an inbound learning, or a SYN queued across the binding), or
+        // under one a reload has since turned off. Its receive minimum is set
+        // from the peer here, before the connection reaches the session.
+        if let Some(managed) = self
             .peers
             .get(&peer_key)
             .filter(|_| self.unnumbered_owner_of(&peer_key).is_some())
-            .and_then(|managed| managed.transport_config.ttl_security_hops)
-            && let Err(error) =
-                rustbgpd_transport::set_gtsm(&socket2::SockRef::from(&stream), peer_addr, hops)
         {
-            warn!(peer = %peer_key, %error, "rejecting inbound connection: GTSM TTL policy could not be installed");
-            return;
+            let socket = socket2::SockRef::from(&stream);
+            let applied = match managed.transport_config.ttl_security_hops {
+                Some(hops) => rustbgpd_transport::set_gtsm(&socket, peer_addr, hops),
+                // Only an IPv6 socket can carry the learned minimum.
+                None if stream.local_addr().is_ok_and(|local| local.is_ipv6()) => {
+                    rustbgpd_transport::clear_gtsm_v6(&socket)
+                }
+                None => Ok(()),
+            };
+            if let Err(error) = applied {
+                warn!(peer = %peer_key, %error, "rejecting inbound connection: GTSM TTL policy could not be installed");
+                return;
+            }
         }
         let peer_addr = peer_key.address;
         if self.bfd_withholding(&peer_addr) {

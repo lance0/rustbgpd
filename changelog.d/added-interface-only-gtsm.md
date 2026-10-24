@@ -11,6 +11,8 @@
   bind, and never lowers it; a GTSM peer that sends no RAs and dials in is
   therefore learned. Turning `ttl_security` on or off reloads as a session
   settings edit, and a deleted neighbor's selector is removed after its peer.
+  A connection accepted under a selector that a reload has since turned off
+  has its Hop Limit minimum cleared before the new session takes it.
   The selector matches by address and interface, so it never applies to a
   neighbor on another link that shares the address. `ttl_security_hops` above 1 is rejected,
   since the peer is directly connected. See
