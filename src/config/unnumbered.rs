@@ -468,8 +468,13 @@ pub fn interface_only_rebinds(old: &Config, new: &Config) -> Vec<String> {
 /// running peer group is restored when the candidate drops it, as the static
 /// pin does, so the pinned candidate still validates.
 pub(crate) fn pin_reload_tcp_mss(new: &mut Config, current: &Config) -> (bool, Vec<String>) {
-    let pinned = interface_only_tcp_mss_differences(current, new);
+    let mut pinned = interface_only_tcp_mss_differences(current, new);
     let static_pinned = super::pin_tcp_mss_startup_only_runtime(new, current);
+    // And after it: a move to a new group with the same clamp differs only
+    // once the static pin clears that group's clamp.
+    pinned.extend(interface_only_tcp_mss_differences(current, new));
+    pinned.sort();
+    pinned.dedup();
     for interface in &pinned {
         let running = current.neighbors.interface_only_on(interface).cloned();
         if let Some(name) = running.as_ref().and_then(|n| n.peer_group.as_ref())

@@ -11676,6 +11676,35 @@ remote_asn = 65002
         candidate.validate().unwrap();
     }
 
+    /// A move to a new group with the same clamp differs only after the
+    /// static pin clears that group's clamp: the neighbor keeps its running
+    /// record (and its clamp) until restart instead of rebinding unclamped.
+    #[test]
+    fn a_move_to_a_new_group_with_the_same_clamp_keeps_the_running_neighbor() {
+        let member = |group: &str| {
+            format!(
+                "[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+                 peer_group = \"{group}\"\n"
+            )
+        };
+        let current = unnumbered_load(&format!("[peer_groups.a]\ntcp_mss = 1300\n{}", member("a")));
+        let mut candidate = unnumbered_load(&format!(
+            "[peer_groups.a]\ntcp_mss = 1300\n[peer_groups.b]\ntcp_mss = 1300\n{}",
+            member("b")
+        ));
+        // Mutation-red: comparing only before the static pin pins nothing,
+        // and swp1 moves to `b`, whose clamp the static pin cleared.
+        let (static_pinned, pinned) = config::pin_reload_tcp_mss(&mut candidate, &current);
+        assert!(static_pinned, "the new group's clamp is pinned");
+        assert_eq!(pinned, ["swp1"]);
+        assert_eq!(
+            candidate.neighbors.interface_only_on("swp1"),
+            current.neighbors.interface_only_on("swp1"),
+            "running record kept"
+        );
+        candidate.validate().unwrap();
+    }
+
     /// A clamped interface-only neighbor kept for restart keeps its peer
     /// group even when the candidate removes that unclamped group, so the
     /// rest of the reload still validates and applies.
