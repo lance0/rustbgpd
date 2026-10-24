@@ -1432,7 +1432,11 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   while it stays live. Discovery never ends an Established session: an
   address change takes effect only after the session fails (hold timer, BFD,
   NOTIFICATION or TCP close), and the peer then moves to the new address,
-  purging the routes learned from the old one.
+  purging the routes learned from the old one. When the address expires with
+  no replacement and the session is down, the neighbor keeps redialing it,
+  and holds it against other neighbors, only while Graceful Restart or LLGR
+  stale routes from it are retained; after that the peer is removed and the
+  address released.
 - **Carrier.** Confirmed carrier loss, admin down or removal of the interface
   ends the session at once and purges its routes; there is no Graceful
   Restart retention for them. The interface need not exist when the
