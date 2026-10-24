@@ -737,7 +737,7 @@ impl RibManager {
             }
             match transition {
                 Some(true) => warn!(
-                    %peer,
+                    peer = %peer_label,
                     family,
                     blocked,
                     "outbound prefix limit reached: net-new prefixes are being withheld \
@@ -1068,7 +1068,7 @@ impl RibManager {
         self.complete_outbound_limit_recovery(peer, afi);
         if !self.outbound_blocking(peer, afi) {
             info!(
-                %peer,
+                peer = %peer.label(),
                 family = family_label(afi),
                 "outbound prefix limit recovered: this family no longer withholds intent"
             );
