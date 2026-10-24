@@ -157,7 +157,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.26.0"
+rustbgpd-wire = "0.26.1"
 bytes = "1"
 ```
 
@@ -217,8 +217,8 @@ intentional split (ADR-0005: pure state machine, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.26.0"
-rustbgpd-fsm = "0.13.0"
+rustbgpd-wire = "0.26.1"
+rustbgpd-fsm = "0.13.1"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -281,8 +281,8 @@ wire boundary. This example resolves entirely from crates.io.
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.8.0"
-rustbgpd-wire = "0.26.0"
+rustbgpd-rpki = "0.8.1"
+rustbgpd-wire = "0.26.1"
 ```
 
 ```rust
