@@ -267,7 +267,7 @@ jobs:
         # jq drives the parity tuple comparisons (rustbgpd gRPC JSON
         # vs FRR vtysh JSON) and the policy test/stats assertions.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -374,7 +374,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -409,7 +409,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -460,7 +460,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -497,7 +497,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -534,7 +534,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -575,7 +575,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -616,7 +616,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -657,7 +657,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -702,7 +702,7 @@ jobs:
         # the direct convergence checks and `show bgp summary json`
         # for the per-step flap-detection assertion.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -777,7 +777,7 @@ jobs:
       - name: Ensure jq
         # jq drives the pmacct-msglog and gobmp-JSON oracle assertions.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -825,7 +825,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -863,7 +863,7 @@ jobs:
       - name: Ensure jq
         # jq drives the FRR vtysh / GoBGP JSON client-view assertions.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -936,7 +936,7 @@ jobs:
       - name: Ensure jq
         # jq drives the rbgp JSON client-view assertions.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1000,7 +1000,7 @@ jobs:
       - name: Ensure jq
         # jq drives the exact reconstructed-RIB and wire-receipt assertions.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1034,7 +1034,7 @@ jobs:
       - name: Ensure jq
         # jq drives the bgpctl -j and rbgp JSON client-view assertions.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1153,7 +1153,7 @@ jobs:
         # (scoped to the entry containing the test MAC); a substring
         # grep would let a malformed match slip past.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1183,7 +1183,7 @@ jobs:
         # jq is required for the strict per-prefix counting + session
         # uptime epoch comparison in test-m34.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1213,7 +1213,7 @@ jobs:
         # jq parses NeighborState.localPref + FRR's `show ip bgp` JSON
         # for the community-presence assertion.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1243,7 +1243,7 @@ jobs:
         # jq parses FRR's `show bgp ipv4 flowspec json` output for
         # the community-presence assertion.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1272,7 +1272,7 @@ jobs:
       - name: Ensure jq
         # jq pretty-prints EVPN diagnostics and parses grpcurl JSON.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1303,7 +1303,7 @@ jobs:
         # community assertions (BLACKHOLE + implicit NO_ADVERTISE
         # on tagged /32, neither on untagged /32).
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1365,7 +1365,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1398,7 +1398,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1429,7 +1429,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1487,7 +1487,7 @@ jobs:
         # grpcurl injects routes via InjectionService.AddPath; jq parses FRR's
         # `show bgp ipv4 unicast json` for the received-prefix-set assertions.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1518,7 +1518,7 @@ jobs:
         # survival-window and never-drop assertions; the Prometheus
         # counters come over plain HTTP.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1549,7 +1549,7 @@ jobs:
         # the no-IPv4-MP assertion; grpcurl injects the bidirectional
         # route-exchange prefixes and reads rustbgpd's RIB.
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1577,7 +1577,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1633,7 +1633,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1684,7 +1684,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1712,11 +1712,8 @@ jobs:
 
       - name: Ensure host raw-capture tools
         run: |
-          if ! command -v tshark >/dev/null || ! command -v nsenter >/dev/null \
-            || ! command -v jq >/dev/null; then
-            sudo apt-get update -y
-            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y tshark util-linux jq
-          fi
+          .github/scripts/apt-install.sh --command tshark --command nsenter --command jq \
+            tshark util-linux jq
           tshark --version
           nsenter --version
 
@@ -1824,7 +1821,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -1926,7 +1923,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -2007,7 +2004,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
@@ -2103,7 +2100,7 @@ jobs:
 
       - name: Ensure jq
         run: |
-          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+          .github/scripts/apt-install.sh --command jq jq
 
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
