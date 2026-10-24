@@ -381,9 +381,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [configuration reference](docs/reference/configuration.md#interface-only-neighbors).
 - Interface-only neighbors on different interfaces may now learn the same
   link-local address, for example parallel links to one device that reuses
-  its router MAC on every port. While `[bmp]` collectors are
-  configured, a learned address that another neighbor holds is still refused
-  before the session starts, now with reason `bmp_identity_conflict`, and the
+  its router MAC on every port. While a `[bmp]` collector is configured
+  without `on_identity_conflict = "exclude"`, a learned address that another
+  neighbor holds is still refused before the session starts, now with reason `bmp_identity_conflict`, and the
   neighbor admitted first keeps its session. The refused neighbor shows the
   reason as its last error in `rbgp neighbor`. See the
   [configuration reference](docs/reference/configuration.md).
@@ -442,9 +442,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer-group changes, transaction plans and RFC 9117 FlowSpec originator. An equal-route tie between them
   is broken by interface name, so the winner does not depend on
   configuration or connection order. Such neighbors may not use BFD, TCP
-  MD5, TCP-AO, differing `log_level` values or differing effective GTSM
-  (`ttl_security`, `ttl_security_hops`) settings, and no `[bmp]` collector
-  may be configured while a pair exists. See the
+  MD5 or TCP-AO. When the sharing set includes a static neighbor, they may
+  not use differing `log_level` values or differing effective GTSM
+  (`ttl_security`, `ttl_security_hops`) settings. A `[bmp]` collector is
+  refused while a pair exists unless every `[[bmp.collectors]]` entry sets
+  `on_identity_conflict = "exclude"`. See the
   [configuration reference](docs/reference/configuration.md).
 - Config diff and transaction plan output names an interface-scoped
   neighbor with its interface: `--diff` text shows `fe80::1%eth0`, the JSON
@@ -816,7 +818,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The config schema's `Neighbor` shape changes, an amendment to the pinned
   pre-v1 stable-surface inventory; the inventory is frozen at the v1.0 tag.
   `address` is no longer in the schema's `required` set (it may be omitted
-  only together with `interface`), and `remote_asn` changes type from an
+  only when `interface` is set), and `remote_asn` changes type from an
   integer to an integer or one of the strings `"external"` and `"internal"`.
   Existing configurations stay valid and behave identically. Tools that
   validate configs against
@@ -835,10 +837,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   treats an argument that is not an IP address as an interface name.
 - Configuration that binds one IPv6 link-local address to more than one
   interface, which earlier releases rejected with "not supported in this
-  release", is now accepted unless it combines that pair with a
-  `[bmp]` collector, BFD, TCP MD5, TCP-AO, differing `log_level` values or
-  differing effective GTSM settings. Those combinations are refused with an
-  error naming both neighbors.
+  release", is now accepted. BFD, TCP MD5 and TCP-AO on such a pair stay
+  refused. Differing `log_level` values or effective GTSM settings are
+  refused when the sharing set includes a static neighbor; interface-only
+  neighbors sharing a learned address may differ. A `[bmp]` collector is
+  refused while such a pair exists unless every `[[bmp.collectors]]` entry
+  sets `on_identity_conflict = "exclude"`. Each refusal names the neighbors
+  involved.
 - Tools that parse config diff or transaction plan output for an
   interface-scoped link-local neighbor see its interface: in the `--diff`
   text, in a new `interface` JSON field on neighbor diff and effective-impact

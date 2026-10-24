@@ -120,9 +120,11 @@ convention in `CONTRIBUTING.md`:
 ## Flagship operating proof
 
 Qualify the selected release candidate with the full 24-hour route-server
-management-load soak. A patch release may instead ship on its regression
-tests and main CI; record that choice in the
-[roadmap](roadmap.md#post-v051-stabilization-path). v0.70.0 shipped on the
+management-load soak. Any release may instead ship on its per-change
+regression tests and main CI, provided the
+[roadmap](roadmap.md#post-v051-stabilization-path) records that no flagship
+receipt covers it; the 24-hour soak remains the qualification for a flagship
+operating claim. v0.70.0 shipped on the
 [2026-09-12 run](../soaks/soak-rs-flagship-24h-2026-09-12.md), which failed
 only the `management_cadence` gate on a pre-release commit; its receipt records
 that release relationship. The
