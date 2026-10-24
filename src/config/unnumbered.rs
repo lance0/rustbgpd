@@ -440,18 +440,48 @@ pub fn unnumbered_settings_changed(old: &Config, new: &Config) -> bool {
     old.global.unnumbered != new.global.unnumbered
 }
 
-/// Keep `current`'s version of every interface-only neighbor whose
-/// effective `tcp_mss` (its own or its peer group's) would change: the
-/// listener and active-open sockets take the clamp only when created.
-/// Returns the interfaces kept. Run after the static `tcp_mss` pin, which
-/// already holds every peer group's `tcp_mss` at its running value.
-pub(crate) fn pin_interface_only_tcp_mss(new: &mut Config, current: &Config) -> Vec<String> {
+/// Interface-only neighbors that a reload from `old` to `new` rebinds: kept
+/// by the candidate, with different bind-time settings, directly or through
+/// their peer group. Each ends its session and starts a new one, so the
+/// diff counts it as a session reset. Pass the `tcp_mss`-pinned candidate.
+#[must_use]
+pub fn interface_only_rebinds(old: &Config, new: &Config) -> Vec<String> {
+    new.neighbors
+        .interface_only()
+        .iter()
+        .filter_map(|neighbor| {
+            let interface = neighbor.interface.as_deref()?;
+            let prior = old.neighbors.interface_only_on(interface)?;
+            (old.bind_time_settings(prior) != new.bind_time_settings(neighbor))
+                .then(|| neighbor.label())
+        })
+        .collect()
+}
+
+/// Pin every startup-only `tcp_mss` of a reload candidate, as SIGHUP and
+/// `--diff` both see it. Returns whether the static pin applied and the
+/// interfaces whose interface-only neighbor was kept at its running record.
+///
+/// The interface-only differences are read first: the static pin holds every
+/// peer group's clamp at its running value, which would hide a clamp that a
+/// new or edited group gives an interface-only member. A kept neighbor's
+/// running peer group is restored when the candidate drops it, as the static
+/// pin does, so the pinned candidate still validates.
+pub(crate) fn pin_reload_tcp_mss(new: &mut Config, current: &Config) -> (bool, Vec<String>) {
     let pinned = interface_only_tcp_mss_differences(current, new);
+    let static_pinned = super::pin_tcp_mss_startup_only_runtime(new, current);
     for interface in &pinned {
         let running = current.neighbors.interface_only_on(interface).cloned();
+        if let Some(name) = running.as_ref().and_then(|n| n.peer_group.as_ref())
+            && let Some(group) = current.peer_groups.get(name)
+        {
+            new.peer_groups
+                .entry(name.clone())
+                .or_insert_with(|| group.clone());
+        }
         new.neighbors.set_interface_only(interface, running);
     }
-    pinned
+    (static_pinned, pinned)
 }
 
 /// An interface-only neighbor's effective `tcp_mss`: its own, else its peer

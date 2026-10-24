@@ -8,10 +8,10 @@ mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
 mod unnumbered;
-pub(crate) use unnumbered::{BindTimeProjection, pin_interface_only_tcp_mss};
+pub(crate) use unnumbered::{BindTimeProjection, pin_reload_tcp_mss};
 pub use unnumbered::{
     NeighborList, RemoteAsn, UnnumberedConfig, interface_only_neighbors_changed,
-    interface_only_session_changes, unnumbered_settings_changed,
+    interface_only_rebinds, interface_only_session_changes, unnumbered_settings_changed,
 };
 mod validation;
 
@@ -2597,9 +2597,12 @@ pub struct ConfigDiff {
     /// the daemon restarts.
     pub tcp_mss_changed: bool,
     /// Interface-only `[[neighbors]]` (ADR-0142) added, removed or edited,
-    /// directly or through their peer group. Reload and transactions apply
-    /// these live.
+    /// directly or through their peer group, after the reload's `tcp_mss`
+    /// pins. Reload and transactions apply these live.
     pub interface_only_neighbors_changed: bool,
+    /// Interface-only neighbors the reload rebinds (bind-time settings
+    /// changed), by label. Each is a session reset.
+    pub interface_only_rebinds: Vec<String>,
     /// `[global.unnumbered]` changed: the RA discovery actor takes it only
     /// when it starts, so it stays restart-required.
     pub unnumbered_changed: bool,
@@ -2907,9 +2910,10 @@ impl ConfigDiff {
     /// Distinct config entries (static neighbors or dynamic ranges) whose
     /// live session(s) the classifiers say will reset when this diff is
     /// applied: changed neighbors with at least one session-reset-class
-    /// field edit, plus inheritance-driven session-reshape impacts. Counts
-    /// config entries, not live TCP sessions (a dynamic range counts once
-    /// however many sessions it currently holds).
+    /// field edit, plus inheritance-driven session-reshape impacts, plus
+    /// rebound interface-only neighbors. Counts config entries, not live TCP
+    /// sessions (a dynamic range counts once however many sessions it
+    /// currently holds; an unbound interface-only neighbor counts too).
     pub fn session_reset_entries(&self) -> usize {
         let mut addresses: std::collections::BTreeSet<&str> = self
             .neighbors
@@ -2924,6 +2928,7 @@ impl ConfigDiff {
                 .filter(|impact| !impact.kind.is_policy_chain())
                 .map(|impact| impact.address.as_str()),
         );
+        addresses.extend(self.interface_only_rebinds.iter().map(String::as_str));
         addresses.len()
     }
 }
@@ -5030,7 +5035,9 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let bfd_members_changed = bfd_member_attachments_changed(old, new);
     let mut reload_new = new.clone();
     pin_tcp_ao_startup_only_runtime(&mut reload_new, old);
-    pin_tcp_mss_startup_only_runtime(&mut reload_new, old);
+    // The same tcp_mss pins as SIGHUP, so the route and the reset summary
+    // follow execution; `tcp_mss_changed` keeps the raw difference.
+    pin_reload_tcp_mss(&mut reload_new, old);
     // Profiles stay startup-owned; member attachments remain reload-applied.
     pin_bfd_startup_only_runtime(&mut reload_new, old);
     let neighbor_diff = diff_neighbors(&old.neighbors, &reload_new.neighbors);
@@ -5147,7 +5154,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,
         tcp_mss_changed,
-        interface_only_neighbors_changed: interface_only_neighbors_changed(old, new),
+        interface_only_neighbors_changed: interface_only_neighbors_changed(old, &reload_new),
+        interface_only_rebinds: interface_only_rebinds(old, &reload_new),
         unnumbered_changed: unnumbered_settings_changed(old, new),
         bfd_changed,
         bfd_members_changed,
@@ -6746,7 +6754,7 @@ pub fn reject_unappliable_sequential_reload(
     // The reload pins startup-only `tcp_mss` before routing; `--diff` sees
     // the unpinned candidate, so pin a copy here to agree with it.
     let mut pinned = new.clone();
-    pin_tcp_mss_startup_only_runtime(&mut pinned, old);
+    pin_reload_tcp_mss(&mut pinned, old);
     let mut blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
     if interface_only_neighbors_changed(old, &pinned) {
         blocked.push("interface-only [[neighbors]]".to_string());

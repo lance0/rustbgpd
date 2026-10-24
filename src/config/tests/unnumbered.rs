@@ -585,3 +585,71 @@ fn interface_only_transactions_meet_the_family_and_external_input_guards() {
     );
     assert!(!class.is_committable());
 }
+
+/// An interface-only clamp edit together with a `[[dynamic_neighbors]]`
+/// edit: SIGHUP pins the clamp, keeping the running neighbor, and applies
+/// the range change on the sequential route. `--diff` reports that route
+/// and keeps the clamp restart-required.
+#[test]
+fn an_interface_only_clamp_edit_with_a_range_edit_routes_as_sighup_runs_it() {
+    let range = |prefix: &str| {
+        format!("[[dynamic_neighbors]]\nprefix = \"{prefix}\"\npeer_group = \"edge\"\n")
+    };
+    let group = "[peer_groups.edge]\nhold_time = 90\n";
+    let old = parse(&with(&format!("{group}{SWP1}{}", range("10.1.0.0/24")))).unwrap();
+    let new = parse(&with(&format!(
+        "{group}{SWP1}tcp_mss = 1300\n{}",
+        range("10.2.0.0/24")
+    )))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(diff.tcp_mss_changed, "the raw clamp difference is kept");
+    assert!(diff.has_restart_required_changes());
+    assert!(diff.dynamic_neighbors_reload_applied_changed);
+    // Mutation-red: routing from the raw interface-only change selects the
+    // generation family and rejects the pair.
+    assert!(!diff.interface_only_neighbors_changed);
+    assert!(
+        matches!(
+            diff.sighup_route,
+            crate::config::SighupReloadRoute::Sequential { .. }
+        ),
+        "{:?}",
+        diff.sighup_route
+    );
+}
+
+/// An interface-only bind-time edit rebinds the neighbor, directly or
+/// through its peer group, so the diff counts a session reset; a
+/// policy-only edit and a pinned clamp edit do not.
+#[test]
+fn an_interface_only_rebind_is_a_session_reset_in_the_diff() {
+    let group = |hold: u16| format!("[peer_groups.fabric]\nhold_time = {hold}\n");
+    let member = format!("{SWP1}peer_group = \"fabric\"\n");
+    let old = parse(&with(&format!("{}{member}", group(90)))).unwrap();
+    let resets = |extra: &str| {
+        let diff = diff_config(&old, &parse(&with(extra)).unwrap());
+        (diff.session_reset_entries(), format_config_diff(&diff))
+    };
+
+    // Mutation-red: leaving interface-only neighbors out of the count
+    // reports "no session resets expected" for each rebind.
+    let direct = resets(&format!(
+        "{}{}",
+        group(90),
+        member.replace("\"external\"", "65002")
+    ));
+    assert_eq!(direct.0, 1, "{}", direct.1);
+    assert!(direct.1.contains("1 session will reset"), "{}", direct.1);
+    let inherited = resets(&format!("{}{member}", group(30)));
+    assert_eq!(inherited.0, 1, "{}", inherited.1);
+
+    let policies = "[policy.definitions.deny-all]\ndefault_action = \"deny\"\n";
+    let policy_only = resets(&format!(
+        "{policies}{}{member}import_policy_chain = [\"deny-all\"]\n",
+        group(90)
+    ));
+    assert_eq!(policy_only.0, 0, "{}", policy_only.1);
+    let clamp_only = resets(&format!("{}{member}tcp_mss = 1300\n", group(90)));
+    assert_eq!(clamp_only.0, 0, "the pinned neighbor keeps running");
+}

@@ -2236,7 +2236,9 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         );
     }
     pin_unreconciled_daemon_runtime_fields(&mut new_config, current);
-    if config::pin_tcp_mss_startup_only_runtime(&mut new_config, current) {
+    let (static_mss_pinned, interface_mss_pinned) =
+        config::pin_reload_tcp_mss(&mut new_config, current);
+    if static_mss_pinned {
         error!(
             "tcp_mss differs from the live static-neighbor/listener snapshot: active-open and \
              passive-listener sockets install TCP_MAXSEG only when created. Restart rustbgpd \
@@ -2244,7 +2246,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
              keeps its startup values for this reload."
         );
     }
-    for interface in config::pin_interface_only_tcp_mss(&mut new_config, current) {
+    for interface in interface_mss_pinned {
         error!(
             interface,
             "the effective tcp_mss of the interface-only neighbor on this interface changed: \
@@ -11532,12 +11534,68 @@ remote_asn = 65002
             swp1.replace("\"external\"\n", "\"external\"\ntcp_mss = 1300\n")
         ));
         // Mutation-red: without the pin both clamps reach the running set.
-        let pinned = config::pin_interface_only_tcp_mss(&mut candidate, &current);
+        let (_, pinned) = config::pin_reload_tcp_mss(&mut candidate, &current);
         assert_eq!(pinned, ["swp1", "swp2"]);
         assert_eq!(
             candidate.neighbors.interface_only(),
             current.neighbors.interface_only()
         );
+    }
+
+    fn unnumbered_load(extra: &str) -> Config {
+        toml::from_str(&format!(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+             [global.telemetry]\nlog_format = \"json\"\n{extra}"
+        ))
+        .unwrap()
+    }
+
+    /// A new peer group's clamp reaches its first interface-only member: the
+    /// member is held until restart, as a direct clamp is, even though the
+    /// group's own clamp is pinned away.
+    #[test]
+    fn a_new_groups_clamp_holds_its_first_interface_only_member() {
+        let swp1 = "[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n";
+        let current = unnumbered_load(swp1);
+        let mut candidate = unnumbered_load(&format!(
+            "[peer_groups.clamped]\ntcp_mss = 1300\n{swp1}\
+             [[neighbors]]\ninterface = \"swp9\"\nremote_asn = \"external\"\n\
+             peer_group = \"clamped\"\n"
+        ));
+        // Mutation-red: reading the differences after the static pin, which
+        // clears the new group's clamp, admits swp9 unclamped.
+        let (static_pinned, pinned) = config::pin_reload_tcp_mss(&mut candidate, &current);
+        assert!(static_pinned, "the new group's clamp is pinned");
+        assert_eq!(pinned, ["swp9"]);
+        assert!(candidate.neighbors.interface_only_on("swp9").is_none());
+        assert_eq!(candidate.peer_groups["clamped"].tcp_mss, None);
+        candidate.validate().unwrap();
+    }
+
+    /// A clamped interface-only neighbor kept for restart keeps its peer
+    /// group even when the candidate removes that unclamped group, so the
+    /// rest of the reload still validates and applies.
+    #[test]
+    fn a_kept_interface_only_neighbor_keeps_its_removed_group() {
+        let current = unnumbered_load(
+            "[peer_groups.fabric]\nhold_time = 30\n\
+             [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+             peer_group = \"fabric\"\ntcp_mss = 1400\n",
+        );
+        let mut candidate =
+            unnumbered_load("[[neighbors]]\ninterface = \"swp2\"\nremote_asn = \"external\"\n");
+        let (static_pinned, pinned) = config::pin_reload_tcp_mss(&mut candidate, &current);
+        assert!(!static_pinned, "no group clamp changed");
+        assert_eq!(pinned, ["swp1"]);
+        // Mutation-red: without restoring the group the candidate fails to
+        // validate and the whole reload is rejected.
+        assert_eq!(
+            candidate.peer_groups["fabric"],
+            current.peer_groups["fabric"]
+        );
+        candidate.validate().unwrap();
+        assert!(candidate.neighbors.interface_only_on("swp1").is_some());
+        assert!(candidate.neighbors.interface_only_on("swp2").is_some());
     }
 
     #[tokio::test]
