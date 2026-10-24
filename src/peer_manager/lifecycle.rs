@@ -157,7 +157,7 @@ impl PeerManager {
         }
     }
 
-    fn allocate_max_prefix_latch_generation(&mut self) -> u64 {
+    pub(super) fn allocate_max_prefix_latch_generation(&mut self) -> u64 {
         let generation = self.next_max_prefix_latch_generation;
         self.next_max_prefix_latch_generation =
             self.next_max_prefix_latch_generation.wrapping_add(1);
@@ -238,22 +238,11 @@ impl PeerManager {
         peer: &PeerKey,
         restart_seconds: Option<u32>,
     ) {
-        let Some(seconds) = restart_seconds else {
-            self.invalidate_max_prefix_restart(peer);
-            return;
-        };
         let generation = self.allocate_max_prefix_latch_generation();
-        let rearmed = self.max_prefix_latches.get_mut(peer).is_some_and(|latch| {
-            if latch.deadline.is_some() {
-                latch.generation = generation;
-                latch.deadline = Some(
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(seconds.into()),
-                );
-                true
-            } else {
-                false
-            }
-        });
+        let rearmed = self
+            .max_prefix_latches
+            .get_mut(peer)
+            .is_some_and(|latch| latch.reschedule(generation, restart_seconds));
         if rearmed {
             // The rescheduled deadline may be later than the cached minimum it
             // replaces, so a full recompute is required (the cheap min-update
