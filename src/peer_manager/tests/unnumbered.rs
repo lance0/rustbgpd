@@ -5533,9 +5533,116 @@ async fn a_membership_rpc_moves_an_interface_only_neighbor_between_groups() {
     }
 }
 
+/// Interface-only neighbors that share a learned address may differ in GTSM
+/// and `log_level`: the listener's learned selector is keyed by address and
+/// arrival interface, and the level directive by the interface label. Both
+/// links bind, only `swp1`'s endpoint gets a selector, and a reload that
+/// moves GTSM to the other link passes the live preflight.
+#[tokio::test]
+async fn interface_only_neighbors_with_differing_gtsm_share_a_learned_address() {
+    type Selectors = Arc<
+        std::sync::Mutex<
+            Vec<(
+                String,
+                Option<rustbgpd_transport::LearnedTtlSecuritySelector>,
+            )>,
+        >,
+    >;
+    let selectors: Selectors = Arc::default();
+    let update: LearnedGtsmUpdate = {
+        let selectors = Arc::clone(&selectors);
+        Arc::new(move |request| {
+            if let ListenerGtsmRequest::Selector {
+                interface,
+                selector,
+            } = request
+            {
+                selectors.lock().unwrap().push((interface, selector));
+            }
+            Box::pin(async { LearnedGtsmOutcome::Applied })
+        })
+    };
+    let mut h = harness_with(
+        &[],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        "",
+        "",
+        Some(update),
+    );
+    let stanzas = |swp1: &str, swp2: &str| {
+        config_with(&format!(
+            "{}{}",
+            port_stanza("swp1", swp1),
+            port_stanza("swp2", swp2)
+        ))
+    };
+    h.reload(stanzas("ttl_security = true\nlog_level = \"debug\"\n", ""))
+        .await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    // Mutation-red: with the address-keyed refusal, swp2 is refused with
+    // `shared_address_feature`.
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2), swp2.clone()]);
+    assert_eq!(
+        selectors.lock().unwrap().as_slice(),
+        [(
+            "swp1".to_owned(),
+            Some(rustbgpd_transport::LearnedTtlSecuritySelector {
+                address: ll(2),
+                ifindex: 7,
+                hops: std::num::NonZeroU8::MIN,
+            })
+        )],
+        "only swp1's endpoint is enforced"
+    );
+    let hops = |key: &PeerKey| h.mgr.peers[key].transport_config.ttl_security_hops;
+    assert_eq!(hops(&swp1_key(2)), Some(std::num::NonZeroU8::MIN));
+    assert_eq!(hops(&swp2), None);
+
+    let candidate = stanzas("", "ttl_security = true\n");
+    h.mgr
+        .preflight_reload_generation(&candidate, std::sync::Weak::new())
+        .unwrap();
+}
+
+/// A static neighbor's GTSM selector and log directive match the bare
+/// address, so a static neighbor with GTSM beside an interface-only one at
+/// the same learned address is still refused, at runtime add and when the
+/// learned address arrives second.
+#[tokio::test]
+async fn a_static_gtsm_neighbor_still_refuses_a_shared_learned_address() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.current_config.neighbors.push(
+        toml::from_str::<crate::config::Neighbor>(
+            "address = \"fe80::2\"\ninterface = \"eth9\"\nremote_asn = 65002\n\
+                 ttl_security = true\n",
+        )
+        .unwrap(),
+    );
+    let mut static_peer = make_config(IpAddr::V6(ll(2)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    let error = h.mgr.add_peer(static_peer, false).await.unwrap_err();
+    assert!(error.to_string().contains("ttl_security"), "{error}");
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "",
+        "[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"eth9\"\nremote_asn = 65002\n\
+         ttl_security = true\n",
+        None,
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [], "the learned address is refused");
+}
+
 /// Two interface-only neighbors share a learned address. Moving one into a
-/// group with GTSM would give the pair differing GTSM policies, which the
-/// port reconcile would then refuse, dropping its working session. Both
+/// group with BFD, keyed by the bare address, would make the port
+/// reconcile refuse the pair, dropping its working session. Both
 /// membership paths refuse the move before any effect instead.
 /// Load-bearing proof: without the shared-address check the move succeeds
 /// and the reconcile retires the moved neighbor.
@@ -5545,7 +5652,8 @@ async fn a_membership_rpc_that_would_split_a_shared_address_is_refused() {
         CatalogMutationError, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
     };
     let config = config_with(&format!(
-        "[peer_groups.gtsm]\nttl_security = true\n{}{}",
+        "[[bfd_profiles]]\nname = \"fast\"\n\
+         [peer_groups.bfd]\nbfd = {{ profile = \"fast\" }}\n{}{}",
         port_stanza("swp1", ""),
         port_stanza("swp2", "")
     ));
@@ -5562,7 +5670,7 @@ async fn a_membership_rpc_that_would_split_a_shared_address_is_refused() {
     let mutation = OwnedCatalogMutation::SetNeighborPeerGroup {
         address: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
         interface: Some("swp2".into()),
-        peer_group: "gtsm".into(),
+        peer_group: "bfd".into(),
     };
     let _ = Box::pin(
         h.mgr
@@ -5576,7 +5684,7 @@ async fn a_membership_rpc_that_would_split_a_shared_address_is_refused() {
     else {
         panic!("{outcome:?}");
     };
-    assert!(message.contains("ttl_security"), "{message}");
+    assert!(message.contains("BFD"), "{message}");
     assert_eq!(h.mgr.current_config, before, "nothing changed");
 
     // The legacy path refuses it the same way.
@@ -5584,7 +5692,7 @@ async fn a_membership_rpc_that_would_split_a_shared_address_is_refused() {
         rustbgpd_api::peer_types::ConfigEvent::SetNeighborPeerGroup {
             address: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             interface: Some("swp2".into()),
-            peer_group: "gtsm".into(),
+            peer_group: "bfd".into(),
             ack: None,
         },
         vec![swp2.clone()],

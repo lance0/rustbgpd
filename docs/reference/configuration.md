@@ -1508,7 +1508,11 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   when a neighbor at that address uses BFD, TCP MD5 or TCP-AO, or a GTSM
   policy or `log_level` that differs from the other neighbors there, whose
   state is keyed by the bare address, and so is a static neighbor added at
-  runtime with one of them beside a learned address. A reload, config
+  runtime with one of them beside a learned address. Interface-only
+  neighbors alone at an address may differ in GTSM and `log_level`: each
+  one's GTSM selector matches its arrival interface as well as the address,
+  and its level matches its `interface:<name>` session label. A static
+  neighbor at the address must still agree with them. A reload, config
   transaction or peer-group RPC (`SetPeerGroup`, `SetNeighborPeerGroup`,
   `ClearNeighborPeerGroup`) that would give neighbors already sharing an
   address such a feature is refused before any effect, the RPC with

@@ -1678,8 +1678,9 @@ impl PeerManager {
 
     /// Why a neighbor at `peer` cannot share its link-local address with the
     /// neighbors the table holds or `view` configures there: a feature keyed
-    /// by the bare address (BFD, TCP MD5, TCP-AO, a differing GTSM policy or
-    /// log level). `None` when it can, or when no other neighbor is there.
+    /// by the bare address (BFD, TCP MD5, TCP-AO, or, unless every neighbor
+    /// there is interface-only, a differing GTSM policy or log level). `None`
+    /// when it can, or when no other neighbor is there.
     pub(super) fn shared_address_feature_conflict(
         &self,
         peer: &PeerKey,

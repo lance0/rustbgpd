@@ -55,6 +55,10 @@ fn ip(args: &[&str]) {
 }
 
 fn link_local(ns: &str, address: &str) {
+    link_local_on(ns, "veth", address);
+}
+
+fn link_local_on(ns: &str, dev: &str, address: &str) {
     ip(&[
         "-n",
         ns,
@@ -62,7 +66,7 @@ fn link_local(ns: &str, address: &str) {
         "replace",
         &format!("{address}/64"),
         "dev",
-        "veth",
+        dev,
         "nodad",
     ]);
 }
@@ -84,20 +88,24 @@ impl Namespaces {
             ip(&["netns", "add", ns]);
             ip(&["-n", ns, "link", "set", "lo", "up"]);
         }
-        let (a_tmp, b_tmp) = (
-            format!("iona-{}", id % 10_000),
-            format!("ionb-{}", id % 10_000),
-        );
+        this.add_link("veth", "fe80::a1", "fe80::b1");
+        this
+    }
+
+    /// A veth pair named `name` in both namespaces, with fixed link-local
+    /// addresses.
+    fn add_link(&self, name: &str, a_address: &str, b_address: &str) {
+        let id = std::process::id() % 10_000;
+        let (a_tmp, b_tmp) = (format!("iona{name}{id}"), format!("ionb{name}{id}"));
         ip(&[
             "link", "add", &a_tmp, "type", "veth", "peer", "name", &b_tmp,
         ]);
-        for (tmp, ns, address) in [(&a_tmp, &this.a, "fe80::a1"), (&b_tmp, &this.b, "fe80::b1")] {
-            ip(&["link", "set", tmp, "netns", ns, "name", "veth"]);
-            ip(&["-n", ns, "link", "set", "veth", "addrgenmode", "none"]);
-            link_local(ns, address);
-            ip(&["-n", ns, "link", "set", "veth", "up"]);
+        for (tmp, ns, address) in [(&a_tmp, &self.a, a_address), (&b_tmp, &self.b, b_address)] {
+            ip(&["link", "set", tmp, "netns", ns, "name", name]);
+            ip(&["-n", ns, "link", "set", name, "addrgenmode", "none"]);
+            link_local_on(ns, name, address);
+            ip(&["-n", ns, "link", "set", name, "up"]);
         }
-        this
     }
 }
 
@@ -232,6 +240,11 @@ hold_time = {HOLD_TIME_SECS}
     /// Neighbor rows on `veth`; `None` when the query or its parse failed,
     /// which is never the same as a successful empty list.
     fn veth_rows(&mut self) -> Option<Vec<serde_json::Value>> {
+        self.rows_on("veth")
+    }
+
+    /// [`Self::veth_rows`] for `interface`.
+    fn rows_on(&mut self, interface: &str) -> Option<Vec<serde_json::Value>> {
         if let Ok(Some(status)) = self.child.try_wait() {
             panic!("rustbgpd exited: {status}\nlog:\n{}", self.log());
         }
@@ -245,7 +258,7 @@ hold_time = {HOLD_TIME_SECS}
             .clone();
         Some(
             rows.into_iter()
-                .filter(|row| row["interface"].as_str() == Some("veth"))
+                .filter(|row| row["interface"].as_str() == Some(interface))
                 .collect(),
         )
     }
@@ -254,7 +267,12 @@ hold_time = {HOLD_TIME_SECS}
     /// (an interface-only row's own `address` is empty). An unavailable
     /// control plane is retried by the caller's poll.
     fn established_with(&mut self, address: &str) -> bool {
-        self.veth_rows().is_some_and(|rows| {
+        self.established_on("veth", address)
+    }
+
+    /// [`Self::established_with`] for `interface`.
+    fn established_on(&mut self, interface: &str, address: &str) -> bool {
+        self.rows_on(interface).is_some_and(|rows| {
             rows.len() == 1
                 && rows[0]["address"].as_str() == Some("")
                 && rows[0]["learned_peer_address"].as_str() == Some(address)
@@ -524,4 +542,81 @@ fn an_ra_silent_gtsm_peer_is_learned_from_its_inbound_connection() {
             .contains("peer address learned from an inbound connection"),
         "learned from B's inbound connection, not an RA"
     );
+}
+
+/// Two parallel links to a peer that uses one link-local address on both
+/// (`fe80::b1` on `veth` and `veth2`, as a router reusing its MAC on every
+/// port does), with GTSM on A's `veth` neighbor only. The learned-endpoint
+/// selector matches address and arrival interface, so A admits both
+/// bindings of the shared address: while B sends Hop Limit 254 and runs no
+/// GTSM, `veth2` establishes and `veth` never does; once B runs GTSM on
+/// `veth`, both sessions to `fe80::b1` are Established.
+#[test]
+fn interface_only_neighbors_with_differing_gtsm_share_a_learned_address() {
+    if !netns_enabled() {
+        return;
+    }
+    let ns = Namespaces::create();
+    ns.add_link("veth2", "fe80::a2", "fe80::b1");
+    for dev in ["veth", "veth2"] {
+        ip(&[
+            "-n",
+            &ns.b,
+            "-6",
+            "route",
+            "replace",
+            "fe80::/64",
+            "dev",
+            dev,
+            "hoplimit",
+            "254",
+        ]);
+    }
+    let neighbors = |veth: &str| {
+        format!(
+            "interface = \"veth\"\nremote_asn = \"external\"\n{veth}\n\n\
+             [[neighbors]]\nfamilies = [\"ipv6_unicast\"]\nhold_time = {HOLD_TIME_SECS}\n\
+             interface = \"veth2\"\nremote_asn = \"external\"\n"
+        )
+    };
+    let gtsm = "ttl_security = true";
+    let (dir_a, dir_b) = (private_tempdir(), private_tempdir());
+    let mut a = Daemon::start_neighbor(&ns.a, dir_a.path(), 65001, "192.0.2.1", &neighbors(gtsm));
+    let b = Daemon::start_neighbor(&ns.b, dir_b.path(), 65002, "192.0.2.2", &neighbors(""));
+
+    // Mutation-red: with the address-keyed refusal, the second link to
+    // learn fe80::b1 is refused with `shared_address_feature`.
+    a.wait(
+        "A Established with fe80::b1 on veth2",
+        RECOVERY_BOUND,
+        |a| a.established_on("veth2", "fe80::b1"),
+    );
+    a.wait("A bound to fe80::b1 on veth", RECOVERY_BOUND, |a| {
+        a.veth_binding()
+            .is_some_and(|(learned, _)| learned == "fe80::b1")
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        assert!(
+            !a.established_with("fe80::b1"),
+            "A's GTSM link established with a hop-limit-254 peer\nlog:\n{}",
+            a.log()
+        );
+        thread::sleep(Duration::from_millis(500));
+    }
+    assert!(
+        a.established_on("veth2", "fe80::b1"),
+        "the link without GTSM stays Established\nlog:\n{}",
+        a.log()
+    );
+    drop(b);
+
+    let dir_b = private_tempdir();
+    let mut b = Daemon::start_neighbor(&ns.b, dir_b.path(), 65002, "192.0.2.2", &neighbors(gtsm));
+    a.wait("A Established on both links", RECOVERY_BOUND, |a| {
+        a.established_with("fe80::b1") && a.established_on("veth2", "fe80::b1")
+    });
+    b.wait("B Established on both links", RECOVERY_BOUND, |b| {
+        b.established_with("fe80::a1") && b.established_on("veth2", "fe80::a2")
+    });
 }
