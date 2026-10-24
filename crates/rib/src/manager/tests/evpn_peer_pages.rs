@@ -263,6 +263,7 @@ fn evpn_advertised_scope_is_destination_and_mutation_version_tracks_commit() {
     manager.handle_update(RibUpdate::PeerDeleted {
         peer: source,
         label: None,
+        keep_series: false,
     });
     assert_eq!(
         page(

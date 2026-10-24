@@ -1452,14 +1452,19 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   losing the binding removes it. There is no session before a binding. With
   `strict = true` the BGP session is held until BFD is Up on the current
   binding; a BFD down tears it down as for any neighbor.
+- **Outbound maxima.** `max_prefixes_out_ipv4_unicast` and
+  `max_prefixes_out_ipv6_unicast`, on the neighbor or its peer group, apply to
+  every address learned on the interface: the limit belongs to the
+  interface, so it carries across rebinds, and a family the neighbor leaves
+  unset takes its peer group's. An edit on the neighbor or its peer group
+  reaches bound sessions on reload, and lowering one below what a bound
+  session already advertises is refused, as for any neighbor.
 - **Rejected** on an interface-only neighbor, directly or through its peer
   group: `md5_password` and `tcp_ao`, `bfd.multihop`, `ttl_security_hops` above 1,
   `fast_external_failover = false`, `conditional_advertisements`,
-  `log_level`, and explicit `[global] listen_addresses`; and on the neighbor
-  itself, `max_prefixes_out_ipv4_unicast` and `max_prefixes_out_ipv6_unicast`
-  (set them on the peer group instead). These sessions therefore have no
-  TCP-layer authentication; what protects them is the link itself, OPEN
-  validation against `remote_asn`, and optional GTSM.
+  `log_level`, and explicit `[global] listen_addresses`. These sessions
+  therefore have no TCP-layer authentication; what protects them is the link
+  itself, OPEN validation against `remote_asn`, and optional GTSM.
 - **GTSM.** `ttl_security = true` (RFC 5082) applies to the learned
   endpoint. When the neighbor binds an address, the BGP listener enforces
   Hop Limit 255 on connections from that address on that interface before

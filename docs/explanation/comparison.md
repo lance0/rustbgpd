@@ -499,7 +499,7 @@ member individually.
     RFC 8950. rustbgpd ships static interface-bound neighbors (operator supplies
     `address` + `interface`) with scoped Linux FIB install (egress `dev`),
     validated against FRR by M53 (ADR-0069). One link-local address may
-    serve several interfaces; FRR-style pure-interface autodiscovery is
+    serve several interfaces (M53c); FRR-style pure-interface autodiscovery is
     deferred. The experimental Link-Local Next Hop capability 77
     (`draft-ietf-idr-linklocal-capability-06`) is opt-in per neighbor or peer group
     (`link_local_next_hop = true`).

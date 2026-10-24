@@ -663,16 +663,6 @@ impl Config {
         // reload. A learned address is never in them, so these settings would
         // be accepted and never applied; refuse them until they are wired to
         // the binding.
-        if neighbor.max_prefixes_out_ipv4_unicast.is_some()
-            || neighbor.max_prefixes_out_ipv6_unicast.is_some()
-        {
-            return Err(invalid(
-                neighbor,
-                "max_prefixes_out_ipv4_unicast",
-                "per-neighbor outbound prefix maxima are not supported on interface-only \
-                 neighbors yet; set them on the peer group",
-            ));
-        }
         if !self
             .effective_conditional_advertisements(neighbor)
             .is_empty()
@@ -787,13 +777,19 @@ impl Config {
             .map(bind_time_projection)
     }
 
-    /// One interface-only neighbor resolved with a placeholder link-local
-    /// address and no scope, for reporting an unbound neighbor's settings.
+    /// One interface-only neighbor's settings, resolved with a placeholder
+    /// link-local address and no scope, for reporting an unbound neighbor.
+    /// No policy is compiled, so the result carries no chains: the report
+    /// reads policy presence from [`Config::explicit_policy_presence`].
     pub(crate) fn resolve_unbound_interface_neighbor(
         &self,
         neighbor: &Neighbor,
     ) -> Result<ResolvedNeighbor, ConfigError> {
-        self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
+        let mut bound = neighbor.clone();
+        bound.address = LINK_LOCAL_PLACEHOLDER.to_string();
+        let mut resolved = self.resolve_neighbor_pinned_with_store(&bound, false, None, Some(0))?;
+        resolved.transport_config.fast_external_failover = true;
+        Ok(resolved)
     }
 
     /// Interface-only neighbors resolved with a placeholder link-local
@@ -826,10 +822,11 @@ impl Config {
         let mut resolved = self.resolve_neighbor_pinned_with_store(
             &bound,
             false,
-            &mut SetStore::new(),
+            Some(&mut SetStore::new()),
             Some(ifindex),
         )?;
         resolved.transport_config.fast_external_failover = true;
+        resolved.transport_config.interface_only = true;
         Ok(resolved)
     }
 }
