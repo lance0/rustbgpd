@@ -1312,7 +1312,8 @@ pub async fn evpn_history(
         print_empty_history(json, "EVPN")?;
         return Ok(());
     }
-    for event in response.events {
+    for mut event in response.events {
+        scope_bgp_event(&mut event);
         print_bgp_event(&event, json)?;
     }
     Ok(())
