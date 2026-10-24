@@ -409,16 +409,10 @@ fn address_keyed_per_peer_settings_are_rejected_on_interface_only_neighbors() {
         condition_policy = \"transit-a\"\n";
     // Mutation-red: each setting is otherwise accepted and never applied to
     // the learned peer.
-    for (extra, expected) in [
-        (
-            format!("{conditional}{SWP1}conditional_advertisements = [\"backup\"]\n"),
-            "conditional advertisements",
-        ),
-        (format!("{SWP1}log_level = \"debug\"\n"), "log_level"),
-    ] {
-        let error = rejected(&extra);
-        assert!(error.contains(expected), "{expected}: {error}");
-    }
+    let error = rejected(&format!(
+        "{conditional}{SWP1}conditional_advertisements = [\"backup\"]\n"
+    ));
+    assert!(error.contains("conditional advertisements"), "{error}");
     // Peer-group outbound maxima reach a bound peer through its group.
     parse(&with(&format!(
         "\n[peer_groups.fabric]\nmax_prefixes_out_ipv6_unicast = 10\n{SWP1}peer_group = \"fabric\"\n"
@@ -737,4 +731,93 @@ fn a_restart_only_global_edit_is_no_interface_only_change_in_the_diff() {
         "{:?}",
         diff.sighup_route
     );
+}
+
+/// Counts the events a filter lets through.
+struct EventCount(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCount {
+    fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A per-neighbor log level on an interface-only neighbor is keyed by its
+/// `interface:<name>` span label, so it applies to the bound peer at every
+/// address the neighbor learns, and to no other interface's peer.
+#[test]
+fn interface_only_log_level_applies_to_the_bound_peer_across_rebinds() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let debug = SWP1.replace("swp1", "swp1.100");
+    // `.` is a regex wildcard in a filter value, and the match is whole.
+    let wildcard = SWP1.replace("swp1", "swp1x100");
+    let longer = SWP1.replace("swp1", "swp1.1000");
+    let config = parse(&with(&format!(
+        "{debug}log_level = \"debug\"\n{wildcard}{longer}"
+    )))
+    .unwrap();
+    let directives = config.per_peer_log_directives();
+    assert_eq!(directives, [r"[peer{peer=interface:swp1\.100}]=debug"]);
+    let mut filter = tracing_subscriber::EnvFilter::new("info");
+    for directive in &directives {
+        filter = filter.add_directive(directive.parse().unwrap());
+    }
+    let count = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(EventCount(count.clone()));
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let debug_events = |index: usize, host: u16, ifindex: u32| {
+        let neighbor = &config.neighbors.interface_only()[index];
+        let transport = config
+            .resolve_bound_interface_neighbor(
+                neighbor,
+                Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, host),
+                ifindex,
+            )
+            .unwrap()
+            .transport_config;
+        let before = count.load(Ordering::SeqCst);
+        let span = rustbgpd_transport::handle::peer_session_span(&transport);
+        let _entered = span.enter();
+        tracing::debug!("probe");
+        count.load(Ordering::SeqCst) - before
+    };
+    let index = |name: &str| {
+        config
+            .neighbors
+            .interface_only()
+            .iter()
+            .position(|neighbor| neighbor.interface.as_deref() == Some(name))
+            .unwrap()
+    };
+    // Mutation-red: an address-keyed directive misses the learned address,
+    // and an unrecorded span label never matches.
+    assert_eq!(debug_events(index("swp1.100"), 2, 7), 1, "bound peer");
+    assert_eq!(debug_events(index("swp1.100"), 3, 7), 1, "after a rebind");
+    // Mutation-red: an unescaped `.` also matches swp1x100.
+    assert_eq!(debug_events(index("swp1x100"), 2, 8), 0, "other interface");
+    assert_eq!(debug_events(index("swp1.1000"), 2, 9), 0, "longer name");
+}
+
+#[test]
+fn interface_only_log_level_needs_a_plain_interface_name() {
+    let old = parse(&with(SWP1)).unwrap();
+    let new = parse(&with(&format!("{SWP1}log_level = \"debug\"\n"))).unwrap();
+    // The level applies through the live filter, not by rebinding.
+    assert_eq!(interface_only_rebinds(&old, &new), Vec::<String>::new());
+    // A name the filter directive cannot carry would abort logging setup.
+    for name in ["swp1,x", "swp1}x", "swp1=x", "swp1]x"] {
+        let error = rejected(&format!(
+            "{}log_level = \"debug\"\n",
+            SWP1.replace("swp1", name)
+        ));
+        assert!(error.contains("log_level"), "{name}: {error}");
+    }
+    // Without a log level, the name is not part of any directive.
+    parse(&with(&SWP1.replace("swp1", "swp1,x"))).unwrap();
 }
