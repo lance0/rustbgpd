@@ -714,7 +714,18 @@ impl PeerManager {
                 continue;
             }
             let key = PeerKey::new(IpAddr::V6(address), neighbor.interface.clone());
-            if let Some(holder) = self.unnumbered_holder_of(IpAddr::V6(address), &key) {
+            // The exact key counts too: a static neighbor replacing an
+            // interface-only stanza at its learned address on the same
+            // interface would meet the still-bound peer after the effects.
+            let holder = self.unnumbered.as_ref().and_then(|unnumbered| {
+                unnumbered.ports.iter().find_map(|(name, port)| {
+                    port.bound
+                        .as_ref()
+                        .is_some_and(|bound| bound.address == IpAddr::V6(address))
+                        .then_some(name.as_str())
+                })
+            });
+            if let Some(holder) = holder {
                 return Err(format!(
                     "duplicate_link_local_address: neighbor {key} uses {address}, which the \
                      interface-only neighbor on {holder} holds; remove that neighbor first"

@@ -2296,3 +2296,34 @@ async fn a_binding_between_plan_and_stage_refuses_the_static_add() {
     drop(links_tx);
     rib.abort();
 }
+
+/// A static neighbor that replaces an interface-only stanza at its learned
+/// address on the same interface collides with the still-bound peer, whose
+/// key it shares. The preflight refuses it before any effect.
+#[tokio::test]
+async fn a_static_neighbor_at_the_bound_key_is_refused_before_any_effect() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let mut candidate = config_with("");
+    candidate.neighbors.push(
+        toml::from_str::<crate::config::Neighbor>(
+            "address = \"fe80::2\"\ninterface = \"swp1\"\nremote_asn = 65002\n",
+        )
+        .unwrap(),
+    );
+    // Mutation-red: excluding the identical key passes the preflight.
+    let error = h.mgr.unnumbered_preflight(&candidate).unwrap_err();
+    assert!(error.contains("duplicate_link_local_address"), "{error}");
+    assert!(error.contains("swp1"), "names the holder: {error}");
+    // The reload route's preflight command refuses it the same way, before
+    // either executor runs.
+    let before = h.mgr.current_config.clone();
+    let route = Arc::new(());
+    let error = h
+        .mgr
+        .preflight_reload_generation(&candidate, Arc::downgrade(&route))
+        .unwrap_err();
+    assert!(error.contains("duplicate_link_local_address"), "{error}");
+    assert_eq!(h.mgr.current_config, before);
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+}
