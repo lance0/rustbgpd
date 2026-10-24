@@ -1941,6 +1941,7 @@ async fn fake_typed_transaction_manager_actor(
                 }
             }
             InternalCommand::ReplaceConfigSnapshot { .. }
+            | InternalCommand::PreflightReloadGeneration { .. }
             | InternalCommand::ApplyReloadGeneration { .. } => {
                 panic!("unexpected internal command in transaction snapshot fake")
             }
@@ -4362,6 +4363,7 @@ families = ["ipv4_unicast"]
                     let _ = reply.send(());
                 }
                 InternalCommand::ReplaceConfigSnapshot { .. }
+                | InternalCommand::PreflightReloadGeneration { .. }
                 | InternalCommand::ApplyReloadGeneration { .. } => {
                     panic!("unexpected private command in v3 FIB harness")
                 }

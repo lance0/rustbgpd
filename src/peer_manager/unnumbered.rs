@@ -74,6 +74,8 @@ pub(crate) struct UnnumberedRuntime {
     running: Option<tokio::sync::watch::Sender<std::sync::Arc<Vec<crate::config::Neighbor>>>>,
     /// The `CAP_NET_RAW` check, run before a change that would need it.
     pub(crate) probe: fn() -> Result<(), String>,
+    /// A reload generation passed its preflight and has not applied yet.
+    generation_hold: Option<GenerationHold>,
     /// Spawn the actor.
     #[expect(
         clippy::type_complexity,
@@ -96,9 +98,21 @@ impl Default for UnnumberedRuntime {
             spawn_retry_at: None,
             running: None,
             probe: || crate::ra_discovery::probe_raw_socket().map_err(|error| error.to_string()),
+            generation_hold: None,
             spawn: Box::new(|config| RaDiscovery::spawn(config).map_err(|error| error.to_string())),
         }
     }
+}
+
+/// The static link-local addresses of a reload candidate whose preflight
+/// passed, closed to learned endpoints until its generation applies: the
+/// reload route makes effects outside the peer manager between the two, so
+/// the generation's own check must not fail on a binding made meanwhile.
+/// The route owns the strong reference; when it returns without
+/// dispatching, the hold lapses with it.
+struct GenerationHold {
+    route: std::sync::Weak<()>,
+    addresses: Vec<(Ipv6Addr, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -550,8 +564,10 @@ impl PeerManager {
     }
 
     /// Any neighbor already holding `address`: a peer in the table (bound
-    /// interface-only, static, or retained) or a configured static neighbor.
+    /// interface-only, static, or retained), a configured static neighbor,
+    /// or a static neighbor of a reload generation that passed its preflight.
     fn link_local_address_holder(&self, address: Ipv6Addr) -> Option<String> {
+        let v6 = address;
         let address = IpAddr::V6(address);
         self.peers
             .keys()
@@ -564,6 +580,56 @@ impl PeerManager {
                     .find(|neighbor| neighbor.address.parse() == Ok(address))
                     .map(crate::config::Neighbor::label)
             })
+            .or_else(|| {
+                self.generation_held(v6)
+                    .map(|label| format!("{label} (reload pending)"))
+            })
+    }
+
+    /// The pending generation's static neighbor holding `address`, while the
+    /// reload route that obtained the hold is still running.
+    fn generation_held(&self, address: Ipv6Addr) -> Option<&str> {
+        let hold = self.unnumbered_runtime.generation_hold.as_ref()?;
+        if hold.route.strong_count() == 0 {
+            return None;
+        }
+        hold.addresses
+            .iter()
+            .find_map(|(held, label)| (*held == address).then_some(label.as_str()))
+    }
+
+    /// The reload route's preflight, before its first effect outside the
+    /// peer manager. On acceptance the candidate's static link-local
+    /// addresses are held closed to learned endpoints until the generation
+    /// applies or `route` is dropped, so the generation's own preflight
+    /// cannot then fail on a binding made in between.
+    pub(super) fn preflight_reload_generation(
+        &mut self,
+        candidate: &crate::config::Config,
+        route: std::sync::Weak<()>,
+    ) -> Result<(), String> {
+        self.unnumbered_preflight(candidate)?;
+        let addresses = candidate
+            .neighbors
+            .iter()
+            .filter_map(|neighbor| match neighbor.address.parse() {
+                Ok(IpAddr::V6(address)) if address.is_unicast_link_local() => {
+                    Some((address, neighbor.label()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.unnumbered_runtime.generation_hold = Some(GenerationHold { route, addresses });
+        Ok(())
+    }
+
+    /// The held generation applied or was refused: admission sees only the
+    /// peer table and `current_config` again, and a binding the hold refused
+    /// is reconsidered.
+    pub(super) fn release_generation_hold(&mut self) {
+        if self.unnumbered_runtime.generation_hold.take().is_some() {
+            self.note_peer_removed();
+        }
     }
 
     /// Check a candidate configuration before it takes effect anywhere:
@@ -899,6 +965,11 @@ impl PeerManager {
                     reason = "duplicate_link_local_address",
                     "unnumbered: refusing a learned address another neighbor holds"
                 );
+            }
+            // A reload route that ends without dispatching its generation
+            // drops the hold silently; ask again.
+            if self.generation_held(endpoint.address).is_some() {
+                self.arm_unnumbered_retry();
             }
             return;
         }

@@ -4524,6 +4524,30 @@ impl GenerationSideEffects<'_> {
     }
 }
 
+/// Whether the peer manager's ADR-0142 preflight has anything to check in
+/// a reload from `current` to `candidate`: it adds the first interface-only
+/// neighbor (`CAP_NET_RAW` and the link monitor), or a static link-local
+/// neighbor (the learned-endpoint duplicate check).
+fn unnumbered_preflight_needed(current: &Config, candidate: &Config) -> bool {
+    let link_local = |neighbor: &&config::Neighbor| {
+        matches!(
+            neighbor.address.parse(),
+            Ok(std::net::IpAddr::V6(address)) if address.is_unicast_link_local()
+        )
+    };
+    (current.neighbors.interface_only().is_empty()
+        && !candidate.neighbors.interface_only().is_empty())
+        || candidate
+            .neighbors
+            .iter()
+            .filter(link_local)
+            .any(|neighbor| {
+                !current.neighbors.iter().any(|running| {
+                    running.address == neighbor.address && running.interface == neighbor.interface
+                })
+            })
+}
+
 /// The generation route: one resolved candidate, one owned peer-manager
 /// operation, one acknowledgement. The outbound prefix maxima and the
 /// listener inbound inventory are the only effects outside the peer manager;
@@ -4559,6 +4583,36 @@ async fn reload_generation_route(
             "peer manager generation executor unavailable".to_string(),
         );
     };
+    // ADR-0142: the peer manager accepts the candidate before the first
+    // effect outside it, so its refusal (CAP_NET_RAW, the link monitor, a
+    // duplicate learned address) leaves nothing to compensate. Learned
+    // admission stays closed to the candidate's static link-local addresses
+    // while `generation_hold` lives, which is until the generation replies.
+    let generation_hold = Arc::new(());
+    if unnumbered_preflight_needed(current, &new_config) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let preflight = InternalCommand::PreflightReloadGeneration {
+            candidate: Box::new(new_config.clone()),
+            route: Arc::downgrade(&generation_hold),
+            reply: reply_tx,
+        };
+        if peer_mgr_internal_tx.send(preflight).await.is_err() {
+            return generation_step_rejected(
+                "generation.preflight",
+                "peer manager generation executor unavailable".to_string(),
+            );
+        }
+        match reply_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return generation_step_rejected("generation.preflight", error),
+            Err(_) => {
+                return generation_step_rejected(
+                    "generation.preflight",
+                    "peer manager dropped the generation preflight reply".to_string(),
+                );
+            }
+        }
+    }
     let mut effects = GenerationSideEffects {
         limits_rib_tx: None,
         listener_prior: None,
@@ -7879,6 +7933,8 @@ hold_time = 90
     /// Scripted reply for one `ApplyReloadGeneration`.
     #[derive(Clone, Copy)]
     enum GenerationReply {
+        /// Refuse the ADR-0142 preflight that precedes the generation.
+        PreflightRejected(&'static str),
         Applied,
         RejectedNoEffect(&'static str),
         FullyCompensated(&'static str),
@@ -7908,6 +7964,18 @@ hold_time = 90
             let mut script = std::collections::VecDeque::from(script);
             let mut calls = Vec::new();
             while let Some(command) = rx.recv().await {
+                // The preflight is answered, not tagged: it has no effect.
+                if let InternalCommand::PreflightReloadGeneration { reply, .. } = command {
+                    let refusal = match script.front() {
+                        Some(GenerationReply::PreflightRejected(error)) => Some(*error),
+                        _ => None,
+                    };
+                    if refusal.is_some() {
+                        script.pop_front();
+                    }
+                    let _ = reply.send(refusal.map_or(Ok(()), |error| Err(error.to_string())));
+                    continue;
+                }
                 if let Some(tags) = &tags {
                     tags.lock().unwrap().push(internal_tag(&command));
                 }
@@ -7924,6 +7992,9 @@ hold_time = 90
                     actions.iter().filter(|action| action.kind == kind).count()
                 };
                 let outcome = match script.pop_front().unwrap_or(GenerationReply::Applied) {
+                    GenerationReply::PreflightRejected(_) => {
+                        panic!("a preflight refusal scripted for a generation")
+                    }
                     GenerationReply::Applied => {
                         drop(datasets.publish());
                         Some(ReloadGenerationOutcome::Applied(ReloadGenerationReceipt {
@@ -9465,6 +9536,85 @@ import_policy_chain = ["origin-guard"]
             }
             std::fs::remove_file(&path).ok();
         }
+    }
+
+    /// The ADR-0142 preflight runs before the generation route's first
+    /// effect outside the peer manager. Refusing the first interface-only
+    /// neighbor (no `CAP_NET_RAW`) beside an outbound-maxima change is a
+    /// clean rejection with the maxima never activated, so there is nothing
+    /// to restore and no restore failure to fence on.
+    #[tokio::test]
+    async fn reload_generation_preflight_refuses_before_outbound_prefix_limits() {
+        let candidate = format!(
+            "{}\n[[neighbors]]\ninterface = \"swp9\"\nremote_asn = \"external\"\n\
+             families = [\"ipv6_unicast\"]\n",
+            baseline_toml().replace(
+                "hold_time = 90",
+                "hold_time = 45\nmax_prefixes_out_ipv4 = 100",
+            )
+        );
+        let path = unique_temp_path("reload-generation-preflight");
+        write_tier_test_config(&path, baseline_toml());
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        write_tier_test_config(&path, &candidate);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(8);
+        let rib = tokio::spawn(async move {
+            let mut seen = 0;
+            while rib_rx.recv().await.is_some() {
+                seen += 1;
+            }
+            seen
+        });
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        let (internal_tx, generation) = spawn_generation_mock(
+            vec![GenerationReply::PreflightRejected(
+                "interface-only neighbor discovery needs CAP_NET_RAW",
+            )],
+            None,
+        );
+        let desired = Arc::new(
+            AcceptedConfigSnapshot::load_for_reload(
+                &path,
+                &AcceptedConfigSnapshot::from_config_for_test(initial.clone()),
+                &initial.policy.dataset_bindings,
+            )
+            .unwrap(),
+        );
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let outcome = reload_config_with_tcp_ao_recorded(
+            SighupReloadPlan {
+                baseline_runtime: initial.clone(),
+                desired,
+            },
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&internal_tx),
+            Some(&rib_tx),
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await;
+        drop(rib_tx);
+        drop(internal_tx);
+        // Mutation-red: with the preflight inside the generation only, the
+        // maxima are prepared and activated before the refusal.
+        assert_eq!(rib.await.unwrap(), 0, "no RIB effect");
+        assert!(generation.await.unwrap().is_empty(), "never dispatched");
+        assert!(
+            matches!(
+                &outcome,
+                SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
+                    if failure.bucket == "generation.preflight"
+                        && failure.error.to_string().contains("CAP_NET_RAW")
+            ),
+            "{outcome:?}"
+        );
+        assert!(trace.lock().unwrap().applied.is_empty());
+        std::fs::remove_file(&path).ok();
     }
 
     /// The generation route never writes: a read-only config directory

@@ -241,15 +241,33 @@ fn retains_set_name<T>(
 }
 
 impl PeerManager {
-    /// Stage BFD resources before any generation effect and publish only after settlement.
+    /// Apply one reload generation, then end the hold its preflight took
+    /// ([`PeerManager::preflight_reload_generation`]).
     pub(super) async fn apply_reload_generation(
         &mut self,
         candidate: Config,
         actions: Vec<ReloadPeerAction>,
         datasets: PreparedDatasetGeneration,
     ) -> ReloadGenerationOutcome {
+        let outcome =
+            Box::pin(self.apply_held_reload_generation(candidate, actions, datasets)).await;
+        // Applied static neighbors are now in the peer table; a refused
+        // generation adds none. Either way the preflight's hold ends here.
+        self.release_generation_hold();
+        outcome
+    }
+
+    /// Stage BFD resources before any generation effect and publish only after settlement.
+    async fn apply_held_reload_generation(
+        &mut self,
+        candidate: Config,
+        actions: Vec<ReloadPeerAction>,
+        datasets: PreparedDatasetGeneration,
+    ) -> ReloadGenerationOutcome {
         // ADR-0142: refused before any effect, naming CAP_NET_RAW or the
-        // duplicate address.
+        // duplicate address. The reload route ran the same check before its
+        // own effects; learned admission has stayed closed to the
+        // candidate's static addresses since.
         if let Err(error) = self.unnumbered_preflight(&candidate) {
             return ReloadGenerationOutcome::RejectedNoEffect(error);
         }

@@ -2049,3 +2049,190 @@ async fn a_recovered_endpoint_outlives_an_expired_discovery_binding() {
         rustbgpd_transport::StateQueryOutcome::State(_)
     ));
 }
+
+/// A static link-local neighbor on `lo`, which every host has, so a
+/// generation can add it.
+fn static_on_lo(last: u16) -> crate::config::Neighbor {
+    toml::from_str(&format!(
+        "address = \"fe80::{last:x}\"\ninterface = \"lo\"\nremote_asn = 65002\n"
+    ))
+    .unwrap()
+}
+
+/// A SIGHUP generation whose preflight passed holds its static link-local
+/// address closed to discovery until it applies: the reload route makes
+/// effects outside the peer manager in between, and the generation's own
+/// check must not fail after them. The generation then adds its static
+/// neighbor; a route that ends without dispatching lets the hold lapse.
+#[tokio::test]
+async fn a_preflighted_generation_holds_its_static_address_from_discovery() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let mut candidate = h.mgr.current_config.clone();
+    candidate.neighbors.push(static_on_lo(2));
+    let route = Arc::new(());
+    h.mgr
+        .preflight_reload_generation(&candidate, Arc::downgrade(&route))
+        .unwrap();
+    // Mutation-red: without the hold discovery binds the address here and
+    // the generation is refused after the route's effects.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [], "held for the pending generation");
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "asked again later");
+    let actions =
+        crate::config::plan_reload_peer_actions(&h.mgr.current_config, &candidate).unwrap();
+    let outcome = Box::pin(h.mgr.apply_reload_generation(
+        candidate,
+        actions,
+        crate::config::PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            crate::peer_manager::generation::ReloadGenerationOutcome::Applied(_)
+        ),
+        "{outcome:?}"
+    );
+    let static_key = PeerKey::new(IpAddr::V6(ll(2)), Some("lo".into()));
+    assert_eq!(h.peers_at(ll(2)), [static_key]);
+    drop(route);
+
+    // The route returned before dispatching: the hold lapses with it.
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let mut candidate = h.mgr.current_config.clone();
+    candidate.neighbors.push(static_on_lo(2));
+    let route = Arc::new(());
+    h.mgr
+        .preflight_reload_generation(&candidate, Arc::downgrade(&route))
+        .unwrap();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), []);
+    drop(route);
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [swp1_key(2)],
+        "bound once the hold lapsed"
+    );
+}
+
+/// Answer the RIB requests a running manager awaits; drop the rest.
+fn answer_rib(mut rib_rx: mpsc::Receiver<RibUpdate>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::PublishDampeningOwners { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::QueryUpdateGroupSnapshot { reply } => {
+                    let _ = reply.send(rustbgpd_rib::UpdateGroupSnapshot::default());
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+/// Discovery binds an address after a transaction's plan accepted a static
+/// add of the same address and before the snapshot is staged. The owner
+/// rechecks while staging, so the transaction is refused with nothing
+/// installed instead of starting earlier static peers first.
+#[tokio::test]
+async fn a_binding_between_plan_and_stage_refuses_the_static_add() {
+    let (tx, rx) = mpsc::channel(16);
+    let (internal_tx, internal_rx) = mpsc::channel(1);
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let config = harness(&["swp1"], &[]).mgr.current_config.clone();
+    let (links_tx, links_rx) = watch::channel(snapshot(true, &[("swp1", 7, true)]));
+    let (discovery, _commands) = RaDiscovery::recording();
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config.clone(),
+    )
+    .with_link_failover(links_rx)
+    .with_unnumbered(Unnumbered::new(discovery, events_rx));
+    let rib = answer_rib(rib_rx);
+    let task = tokio::spawn(mgr.run());
+
+    let mut candidate = config;
+    candidate.neighbors.push(static_on_lo(2));
+    let (reply_tx, reply_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::PlanTransactionConfig {
+            candidate: Box::new(candidate),
+            expected_runtime_snapshot_token: None,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+    let planned = reply_rx.await.unwrap().unwrap();
+    assert_eq!(
+        planned.plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable,
+        "{:?}",
+        planned.plan
+    );
+
+    // Handshake: the owner reports the bound peer before the stage is sent.
+    events_tx
+        .send(DiscoveryEvent::BindingChanged {
+            interface: "swp1".into(),
+            previous: None,
+            current: Some(endpoint(2, 7)),
+        })
+        .unwrap();
+    let peers = || async {
+        let (list_tx, list_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::ListPeers { reply: list_tx })
+            .await
+            .unwrap();
+        list_rx.await.unwrap()
+    };
+    let mut bound = false;
+    for _ in 0..1000 {
+        if peers()
+            .await
+            .iter()
+            .any(|peer| peer.address == IpAddr::V6(ll(2)))
+        {
+            bound = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(bound, "discovery bound swp1");
+
+    let (stage_tx, stage_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: planned.candidate,
+            scope: TransactionConfigScope::Full,
+            reply: stage_tx,
+        })
+        .await
+        .unwrap();
+    // Mutation-red: without the recheck the stage installs the candidate.
+    let Err(error) = stage_rx.await.unwrap() else {
+        panic!("the stage installed a duplicate address");
+    };
+    assert!(error.contains("duplicate_link_local_address"), "{error}");
+    assert!(error.contains("swp1"), "names the holder: {error}");
+    let peers = peers().await;
+    assert_eq!(peers.len(), 1, "only the learned peer: {peers:?}");
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    task.await.unwrap();
+    drop(links_tx);
+    rib.abort();
+}

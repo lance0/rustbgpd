@@ -328,6 +328,15 @@ fn debug_reconfigure_failures() -> std::collections::BTreeMap<PeerKey, u32> {
 }
 
 pub(crate) enum InternalCommand {
+    /// ADR-0142 preflight of a SIGHUP candidate, before the reload route's
+    /// first effect outside the peer manager. Acceptance holds the
+    /// candidate's static link-local addresses closed to learned endpoints
+    /// until its `ApplyReloadGeneration` or until `route` is dropped.
+    PreflightReloadGeneration {
+        candidate: Box<Config>,
+        route: std::sync::Weak<()>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Apply one complete SIGHUP candidate as an owned runtime generation.
     ApplyReloadGeneration {
         candidate: Box<Config>,
@@ -2672,6 +2681,9 @@ impl PeerManager {
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {
                     self.operator_read_seam = OperatorReadSeam::Unfenced;
                     match internal {
+                        Some(InternalCommand::PreflightReloadGeneration { candidate, route, reply }) => {
+                            let _ = reply.send(self.preflight_reload_generation(&candidate, route));
+                        }
                         Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
@@ -2785,7 +2797,13 @@ impl PeerManager {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
                             let result = match scope {
-                                TransactionConfigScope::Full => Ok(*candidate),
+                                // ADR-0142: discovery may have bound an endpoint since
+                                // the plan. Recheck in this owner turn, before the
+                                // candidate is installed; once it is staged, binding
+                                // waits for the commit or rollback.
+                                TransactionConfigScope::Full => self
+                                    .unnumbered_preflight(&candidate)
+                                    .map(|()| *candidate),
                                 TransactionConfigScope::FibTablesOnly => {
                                     let mut staged = self.current_config.clone();
                                     staged.fib_tables.clone_from(&candidate.fib_tables);
