@@ -12084,23 +12084,21 @@ async fn confirmed_live_policy_faults_are_enumerated() {
         run_confirmed_live_policy_fault_child(Path::new(&root)).await;
         return;
     }
-    let run = |baseline: &[TransactionTestActor], fault: Option<(usize, TransactionTestFault)>| {
+    // `short_budget` marks a reply that never arrives after an effect that
+    // may have happened. Only that wait needs a short budget, because the
+    // wall-clock fence is what ends it. Every other outcome follows from fault ordering
+    // alone, including a reply that never arrives to a pre-effect request:
+    // its wait ends at the pre-effect deadline in the child's paused tokio
+    // time. So it gets the schema's maximum budget, and a loaded host's
+    // slow fsync cannot fence an apply that settles cleanly. The maximum
+    // grace lets the child validate and persist its receipt after fencing.
+    let run = |baseline: &[TransactionTestActor],
+               fault: Option<(usize, TransactionTestFault)>,
+               short_budget: bool| {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let settings = root.path().join("settings.v1");
-        // Only a reply that never arrives needs the budget: its post-effect
-        // wait ends at the wall-clock fence. Its pre-effect wait ends at the
-        // pre-effect deadline in the child's paused tokio time, so the whole
-        // budget remains to settle cleanly. Every other
-        // outcome follows from fault ordering alone, so it gets the schema's
-        // maximum budget and a slow fsync on a loaded host cannot fence a
-        // clean apply. Use the maximum grace for the child to validate and
-        // persist its receipt after fencing.
-        let budget_ms = if fault.is_some_and(|(_, fault)| fault == TransactionTestFault::NoReply) {
-            10_000
-        } else {
-            60_000
-        };
+        let budget_ms = if short_budget { 10_000 } else { 60_000 };
         std::fs::write(
             &settings,
             format!("version=settlement-control-v1\nbudget_ms={budget_ms}\ngrace_ms=5000\n"),
@@ -12156,18 +12154,34 @@ async fn confirmed_live_policy_faults_are_enumerated() {
         );
         receipt
     };
-    let baseline = run(&[], None);
+    let baseline = run(&[], None, false);
     let interactions: Vec<(TransactionTestActor, String)> =
         serde_json::from_value(baseline["interactions"].clone()).unwrap();
     assert_ne!(interactions.len(), 0);
     let actors: Vec<_> = interactions.iter().map(|(actor, _)| *actor).collect();
     for index in 0..actors.len() {
+        // Whether a reply lost at this interaction leaves an effect
+        // unconfirmed, learned from the dropped reply, which fails at once
+        // where the missing one would wait. A reply that never arrives must
+        // end the same way: settled, or fenced.
+        let mut lost_reply_fences = None;
         for fault in [
             TransactionTestFault::NotAccepted,
             TransactionTestFault::DropReply,
             TransactionTestFault::NoReply,
         ] {
-            let receipt = run(&actors, Some((index, fault)));
+            let short_budget = fault == TransactionTestFault::NoReply
+                && lost_reply_fences.expect("the dropped reply runs first");
+            let receipt = run(&actors, Some((index, fault)), short_budget);
+            let fenced = Some(!receipt["fence"].is_null());
+            if fault == TransactionTestFault::DropReply {
+                lost_reply_fences = fenced;
+            }
+            let ends_alike = fault != TransactionTestFault::NoReply || fenced == lost_reply_fences;
+            assert!(
+                ends_alike,
+                "a reply lost at {index} ends alike dropped or missing"
+            );
             let observed: Vec<(TransactionTestActor, String)> =
                 serde_json::from_value(receipt["interactions"].clone()).unwrap();
             let accepted_prefix = index + usize::from(fault != TransactionTestFault::NotAccepted);
