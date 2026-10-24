@@ -49,7 +49,7 @@ dump_state() {
 # Established, non-stale neighbors bound to $LL, as "interface flapCount".
 established_rows() {
     neighbors | jq -r --arg ll "$LL" '
-        .neighbors[]? | select(.config.address == $ll
+        .neighbors[]? | select(.learnedPeerAddress == $ll
             and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6) and .stale != true)
         | "\(.config.interface) \(.flapCount // 0)"'
 }
