@@ -1433,9 +1433,18 @@ impl PeerManager {
             return;
         }
         let Some(endpoint) = desired else {
+            // A refusal with no binding behind it, such as an inbound
+            // connection from a router that sends no RAs, stands while its
+            // conflict does: a recheck or configuration change re-reads it.
+            let refusal = self.port_mut(name).refused.and_then(|address| {
+                self.learned_address_refusal(name, address)
+                    .map(|(reason, detail)| refusal_text(reason, address, &detail))
+            });
             let port = self.port_mut(name);
-            port.refused = None;
-            port.refusal = None;
+            if refusal.is_none() {
+                port.refused = None;
+            }
+            port.refusal = refusal;
             return;
         };
         if self.defer_unnumbered_while_staged() {
@@ -1471,9 +1480,7 @@ impl PeerManager {
             self.arm_unnumbered_retry();
         }
         let port = self.port_mut(name);
-        port.refusal = Some(format!(
-            "{reason}: learned address {address} refused, {detail}"
-        ));
+        port.refusal = Some(refusal_text(reason, address, detail));
         if port.refused == Some(address) {
             return;
         }
@@ -1798,10 +1805,15 @@ impl PeerManager {
     }
 
     /// Admission refuses `address` on `name`: log the refusal and count it.
-    fn inbound_address_held(&self, name: &str, address: Ipv6Addr) -> bool {
+    fn inbound_address_held(&mut self, name: &str, address: Ipv6Addr) -> bool {
         let Some((reason, detail)) = self.learned_address_refusal(name, address) else {
             return false;
         };
+        // Reported as the neighbor's last error, as an RA refusal is, until a
+        // binding is admitted or the conflict ends.
+        let port = self.port_mut(name);
+        port.refused = Some(address);
+        port.refusal = Some(refusal_text(reason, address, &detail));
         if reason == "bmp_identity_conflict" {
             self.metrics.record_bmp_identity_conflict(false);
         }
@@ -1855,7 +1867,8 @@ impl PeerManager {
             );
             return self.refuse_second_router(name);
         }
-        if let Some(key) = port.bound.clone()
+        let bound = port.bound.clone();
+        if let Some(key) = bound.clone()
             && key.address == IpAddr::V6(address)
         {
             return Some(key);
@@ -1865,7 +1878,7 @@ impl PeerManager {
         if self.inbound_address_held(name, address) {
             return None;
         }
-        if let Some(key) = port.bound.clone() {
+        if let Some(key) = bound {
             // An inbound candidate from the bound address is opening even
             // when the primary is not: that router is live on the link.
             if self
@@ -1933,7 +1946,10 @@ impl PeerManager {
             return self.refuse_inbound();
         }
         info!(interface = %name, %address, "unnumbered: peer address learned from an inbound connection");
-        self.port_mut(name).bound.clone()
+        let port = self.port_mut(name);
+        port.refused = None;
+        port.refusal = None;
+        port.bound.clone()
     }
 
     /// Raise the IPv6 listener's outbound Hop Limit to 255 once; a failure
@@ -2239,4 +2255,9 @@ fn learned_selector(
         ifindex: endpoint.ifindex,
         hops,
     })
+}
+
+/// The last error a refused binding reports: `<reason>: <detail>`.
+fn refusal_text(reason: &str, address: Ipv6Addr, detail: &str) -> String {
+    format!("{reason}: learned address {address} refused, {detail}")
 }

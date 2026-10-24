@@ -1856,6 +1856,42 @@ async fn an_inbound_connection_from_a_shared_address_binds_without_bmp() {
     assert_eq!(dropped(&h, "unconfigured"), 0.0);
 }
 
+/// An inbound-only refusal, from a router that sends no RAs, is reported as
+/// the neighbor's last error as an RA refusal is, survives a reconcile that
+/// finds the conflict still standing, and clears once the holder goes.
+/// Load-bearing proof: not recording the inbound refusal leaves the last
+/// error empty, so doctor shows discovery hints instead of the refusal.
+#[tokio::test]
+async fn an_inbound_only_refusal_is_reported_until_its_conflict_ends() {
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", BMP_COLLECTOR, None);
+    let mut static_peer = make_config(IpAddr::V6(ll(5)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    let last_error = |h: &Harness| {
+        let infos = h.mgr.unbound_interface_only_infos();
+        assert_eq!(infos.len(), 1, "swp1 is unbound");
+        infos[0].last_error.clone()
+    };
+    assert_eq!(last_error(&h), "");
+
+    let _client = inbound(&mut h, 5, 7).await;
+    assert_eq!(h.peers_at(ll(5)).len(), 1, "refused");
+    let reported = last_error(&h);
+    assert!(
+        reported.starts_with("bmp_identity_conflict: learned address fe80::5 refused"),
+        "{reported}"
+    );
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(last_error(&h), reported, "the conflict still stands");
+
+    let holder = PeerKey::new(IpAddr::V6(ll(5)), Some("eth9".into()));
+    h.mgr.delete_peer(holder, false).await.unwrap();
+    h.reconcile().await;
+    assert_eq!(last_error(&h), "", "cleared once the holder is gone");
+}
+
 /// Inbound learning admits an address through the same atomic check as an
 /// RA binding: while BMP collectors are configured, one held by a static
 /// neighbor or by another interface-only neighbor is refused with
