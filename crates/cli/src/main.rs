@@ -1357,9 +1357,10 @@ enum FibTableAction {
 enum NeighborAction {
     /// Add a new neighbor
     Add {
-        /// Remote AS number of the peer (the local AS is `rbgp global`)
-        #[arg(long = "remote-asn", visible_alias = "asn")]
-        asn: u32,
+        /// Remote AS of the peer: a number, `external` (any AS but the local
+        /// one) or `internal` (the local AS, shown by `rbgp global`)
+        #[arg(long = "remote-asn", visible_alias = "asn", value_parser = commands::neighbor::parse_remote_asn)]
+        asn: commands::neighbor::RemoteAsnArg,
         /// Description
         #[arg(long)]
         description: Option<String>,
@@ -7991,7 +7992,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         } = cli.command
         {
             assert_eq!(addr, "10.0.0.1");
-            assert_eq!(asn, 65001);
+            assert_eq!(asn, commands::neighbor::RemoteAsnArg::Number(65001));
             assert_eq!(role.as_deref(), Some("provider"));
             assert!(strict_role);
             assert_eq!(peer_group.as_deref(), Some("rs-members"));
@@ -8289,7 +8290,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             panic!("expected Neighbor Add command");
         };
         assert_eq!(address, "198.51.100.4");
-        assert_eq!(asn, 64503);
+        assert_eq!(asn, commands::neighbor::RemoteAsnArg::Number(64503));
         assert_eq!(families, ["ipv4_unicast", "ipv6_unicast"]);
         assert_eq!(max_prefixes, Some(50_000));
         assert_eq!(max_prefix_restart_seconds, Some(30));
@@ -8346,7 +8347,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             panic!("expected Neighbor Add command");
         };
         assert_eq!(address, "10.0.0.42");
-        assert_eq!(asn, 65000);
+        assert_eq!(asn, commands::neighbor::RemoteAsnArg::Number(65000));
         assert_eq!(description.as_deref(), Some("new-client"));
         assert_eq!(peer_group.as_deref(), Some("rr-clients"));
         assert!(families.is_empty());
@@ -8381,7 +8382,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             panic!("expected Neighbor Add command");
         };
         assert_eq!(address, "198.51.100.10");
-        assert_eq!(asn, 64510);
+        assert_eq!(asn, commands::neighbor::RemoteAsnArg::Number(64510));
         assert_eq!(description.as_deref(), Some("new-member"));
         assert_eq!(families, ["ipv4_unicast", "ipv6_unicast"]);
         assert_eq!(max_prefixes, Some(10_000));
@@ -8421,7 +8422,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             panic!("expected Neighbor Add command");
         };
         assert_eq!(address, "198.51.100.4");
-        assert_eq!(asn, 64503);
+        assert_eq!(asn, commands::neighbor::RemoteAsnArg::Number(64503));
         assert!(description.is_none());
         assert_eq!(families, ["ipv4_unicast", "ipv6_unicast"]);
         assert_eq!(max_prefixes, Some(50_000));
@@ -11586,7 +11587,11 @@ printf '%s\n' "${COMPREPLY[@]}"
             else {
                 panic!("expected Neighbor Add");
             };
-            assert_eq!(asn, 65001, "neighbor add {flag}");
+            assert_eq!(
+                asn,
+                commands::neighbor::RemoteAsnArg::Number(65001),
+                "neighbor add {flag}"
+            );
 
             let cli = Cli::try_parse_from([
                 "rbgp",
