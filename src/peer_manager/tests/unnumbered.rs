@@ -48,14 +48,20 @@ struct Harness {
 /// (`remote_asn = "external"`), discovery recorded, and `links` reported by
 /// the link monitor.
 fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
-    harness_with(interfaces, links, "")
+    harness_with(interfaces, links, "", "")
 }
 
 /// A configured BMP collector: admission then refuses a shared address.
 const BMP_COLLECTOR: &str = "[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n";
 
-/// [`harness`] with `extra` TOML appended to the configuration.
-fn harness_with(interfaces: &[&str], links: &[(&str, u32, bool)], extra: &str) -> Harness {
+/// [`harness`] with `neighbor_extra` added to every interface-only stanza and
+/// `extra` appended to the configuration.
+fn harness_with(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    neighbor_extra: &str,
+    extra: &str,
+) -> Harness {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -72,7 +78,7 @@ fn harness_with(interfaces: &[&str], links: &[(&str, u32, bool)], extra: &str) -
         .iter()
         .map(|name| {
             format!(
-                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n"
+                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n{neighbor_extra}"
             )
         })
         .collect::<Vec<_>>()
@@ -367,6 +373,7 @@ async fn two_links_discovering_one_address_admit_exactly_one_while_bmp_monitors(
     let mut h = harness_with(
         &["swp1", "swp2"],
         &[("swp1", 7, true), ("swp2", 8, true)],
+        "",
         BMP_COLLECTOR,
     );
     h.mgr
@@ -438,7 +445,7 @@ const STATIC_BFD_NEIGHBOR: &str = "[[bfd_profiles]]\nname = \"fast\"\n\
 /// added at runtime beside a learned one.
 #[tokio::test]
 async fn a_shared_address_refuses_an_address_keyed_feature_without_bmp() {
-    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], STATIC_BFD_NEIGHBOR);
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", STATIC_BFD_NEIGHBOR);
     h.bind("swp1", Some(endpoint(2, 7))).await;
     assert_eq!(h.peers_at(ll(2)), [], "the learned address is refused");
     assert!(
@@ -446,7 +453,7 @@ async fn a_shared_address_refuses_an_address_keyed_feature_without_bmp() {
         "a refusal is not retried"
     );
 
-    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], STATIC_BFD_NEIGHBOR);
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", STATIC_BFD_NEIGHBOR);
     h.bind("swp1", Some(endpoint(3, 7))).await;
     let mut static_peer = make_config(IpAddr::V6(ll(3)), 65002);
     static_peer.interface = Some("eth9".into());
@@ -480,6 +487,7 @@ async fn a_shared_learned_address_is_excluded_from_bmp_when_every_collector_excl
     let mut h = harness_with(
         &["swp1", "swp2"],
         &[("swp1", 7, true), ("swp2", 8, true)],
+        "",
         BMP_EXCLUDING_COLLECTORS,
     );
     let (bmp_tx, _bmp_rx) = mpsc::channel(8);
@@ -561,6 +569,7 @@ async fn one_refusing_collector_refuses_a_shared_learned_address() {
     let mut h = harness_with(
         &["swp1", "swp2"],
         &[("swp1", 7, true), ("swp2", 8, true)],
+        "",
         mixed,
     );
     h.bind("swp1", Some(endpoint(2, 7))).await;
@@ -577,7 +586,12 @@ async fn one_refusing_collector_refuses_a_shared_learned_address() {
 /// same rule: excluded when every collector excludes.
 #[tokio::test]
 async fn a_static_neighbor_at_a_learned_address_is_excluded_when_every_collector_excludes() {
-    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], BMP_EXCLUDING_COLLECTORS);
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "",
+        BMP_EXCLUDING_COLLECTORS,
+    );
     h.bind("swp1", Some(endpoint(2, 7))).await;
     let mut static_peer = make_config(IpAddr::V6(ll(2)), 65002);
     static_peer.interface = Some("eth9".into());
@@ -593,6 +607,7 @@ async fn learned_and_static_admission_refuse_each_other_while_bmp_monitors() {
     let mut h = harness_with(
         &["swp1", "swp2"],
         &[("swp1", 7, true), ("swp2", 8, true)],
+        "",
         BMP_COLLECTOR,
     );
     h.bind("swp1", Some(endpoint(2, 7))).await;
@@ -1219,6 +1234,7 @@ async fn an_inbound_connection_from_a_held_address_is_refused_while_bmp_monitors
     let mut h = harness_with(
         &["swp1", "swp2"],
         &[("swp1", 7, true), ("swp2", 8, true)],
+        "",
         BMP_COLLECTOR,
     );
     let mut static_peer = make_config(IpAddr::V6(ll(5)), 65002);
@@ -1763,6 +1779,310 @@ async fn a_recovered_endpoint_survives_a_deferred_rebind() {
     ));
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0142 "Lifecycle", BFD: an interface-only neighbor's binding registers
+// its single-hop session at runtime through the acknowledged replacement
+// path; rebinding replaces it and unbinding removes it.
+// ---------------------------------------------------------------------------
+
+/// The BFD runtime side of a [`Harness`]: every acknowledged membership the
+/// manager asks for, and the state the fake actor reports for each session.
+struct BfdSide {
+    applied: mpsc::UnboundedReceiver<crate::bfd_runtime::BfdRuntimeConfig>,
+    state: Arc<std::sync::Mutex<rustbgpd_bfd::SessionState>>,
+}
+
+impl BfdSide {
+    fn next_applied(&mut self) -> crate::bfd_runtime::BfdRuntimeConfig {
+        self.applied
+            .try_recv()
+            .expect("a membership change was acknowledged")
+    }
+
+    fn sessions(config: &crate::bfd_runtime::BfdRuntimeConfig) -> Vec<(IpAddr, Option<u32>)> {
+        let mut sessions: Vec<_> = config
+            .sessions
+            .iter()
+            .map(|params| (params.peer, params.scope_id))
+            .collect();
+        sessions.sort();
+        sessions
+    }
+}
+
+/// A harness whose interface-only neighbors run BFD (`strict` or not) with a
+/// fake BFD actor acknowledging every membership change.
+fn bfd_harness(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    strict: bool,
+) -> (Harness, BfdSide) {
+    attach_bfd(
+        harness_with(
+            interfaces,
+            links,
+            &format!("bfd = {{ profile = \"fast\", strict = {strict} }}\n"),
+            "[[bfd_profiles]]\nname = \"fast\"\n",
+        ),
+        &[],
+    )
+}
+
+/// A BFD session parameter set for `peer` (scoped when link-local).
+fn session_params(peer: IpAddr, scope: Option<u32>) -> crate::bfd_runtime::BfdSessionParams {
+    crate::bfd_runtime::BfdSessionParams {
+        revision: 1,
+        peer,
+        peer_label: peer.to_string(),
+        scope_id: scope,
+        destination: crate::bfd_runtime::bfd_destination(peer, scope, false).unwrap(),
+        desired_min_tx_us: 300_000,
+        required_min_rx_us: 300_000,
+        detect_mult: 3,
+        strict: false,
+        enabled: true,
+        multihop: false,
+        source: None,
+    }
+}
+
+/// Attach BFD coupling with a fake actor acknowledging every membership
+/// change, plus configured single-hop members at `statics` (IPv4). The IPv6
+/// and IPv4 single-hop sockets count as already open, so tests bind none.
+fn attach_bfd(h: Harness, statics: &[IpAddr]) -> (Harness, BfdSide) {
+    let Harness {
+        mgr,
+        commands,
+        links,
+        rib_rx,
+    } = h;
+    let opened: IpAddr = "fe80::ffff".parse().unwrap();
+    let mut configured = HashMap::from([(opened, session_params(opened, Some(1)))]);
+    for peer in statics {
+        configured.insert(*peer, session_params(*peer, None));
+    }
+    configured
+        .entry("192.0.2.255".parse().unwrap())
+        .or_insert_with(|| session_params("192.0.2.255".parse().unwrap(), None));
+    let (desired_tx, _desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    let mut mgr = mgr
+        .with_bfd_coupling(desired_tx, state_rx, configured)
+        .with_bfd_reload(reload_tx);
+    mgr.bfd_coupling
+        .as_mut()
+        .unwrap()
+        .configured
+        .retain(|peer, _| statics.contains(peer));
+    let state = Arc::new(std::sync::Mutex::new(rustbgpd_bfd::SessionState::Down));
+    let (applied_tx, applied) = mpsc::unbounded_channel();
+    let reported = state.clone();
+    let metrics = mgr.metrics.clone();
+    tokio::spawn(async move {
+        while let Some(command) = reload_rx.recv().await {
+            let state = *reported.lock().unwrap();
+            // As the actor does, seed each running session's gauge before
+            // acknowledging.
+            for params in command
+                .desired
+                .sessions
+                .iter()
+                .filter(|params| params.enabled)
+            {
+                let up = state == rustbgpd_bfd::SessionState::Up;
+                metrics.record_bfd_state(&params.peer_label, up, up);
+            }
+            let acks = command
+                .desired
+                .sessions
+                .iter()
+                .filter(|params| params.enabled)
+                .map(|params| crate::bfd_runtime::BfdStateChange {
+                    revision: params.revision,
+                    peer: params.peer,
+                    state,
+                    diagnostic: rustbgpd_bfd::Diagnostic::None,
+                    remote_admin_down: false,
+                    resync: true,
+                })
+                .collect();
+            let _ = applied_tx.send(command.desired);
+            let _ = command.reply.send(acks);
+        }
+    });
+    (
+        Harness {
+            mgr,
+            commands,
+            links,
+            rib_rx,
+        },
+        BfdSide { applied, state },
+    )
+}
+
+fn bfd_revision(h: &Harness, peer: Ipv6Addr) -> u64 {
+    h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(peer)].revision
+}
+
+/// No session exists before a binding; binding registers the single-hop
+/// session to the learned address on the binding's index; an address change
+/// removes it and registers the new endpoint under a fresh revision; carrier
+/// loss removes it. Every change goes through the acknowledged path.
+#[tokio::test]
+async fn a_binding_registers_replaces_and_removes_its_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+
+    // Mutation-red: without registration the bound peer runs no BFD.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7))]
+    );
+    let first = bfd_revision(&h, ll(2));
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(3)), Some(7))]
+    );
+    assert!(bfd_revision(&h, ll(3)) > first, "a fresh revision");
+
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().bound.is_empty());
+}
+
+/// A strict neighbor is added withheld and released only by BFD Up for the
+/// current binding's revision; an Up for a retired binding never releases
+/// the new one.
+#[tokio::test]
+async fn a_strict_binding_waits_for_bfd_up_on_its_own_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let peer = IpAddr::V6(ll(2));
+    // Mutation-red: registering after the peer is added starts it unheld.
+    assert!(h.mgr.bfd_withholding(&peer), "held until BFD is Up");
+    let old = bfd_revision(&h, ll(2));
+
+    // The address changes before BFD came up.
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    bfd.next_applied();
+    bfd.next_applied();
+    let new_peer = IpAddr::V6(ll(3));
+    assert!(h.mgr.bfd_withholding(&new_peer));
+    let up = |peer, revision| crate::bfd_runtime::BfdStateChange {
+        revision,
+        peer,
+        state: rustbgpd_bfd::SessionState::Up,
+        diagnostic: rustbgpd_bfd::Diagnostic::None,
+        remote_admin_down: false,
+        resync: false,
+    };
+    h.mgr.handle_bfd_state_change(up(new_peer, old)).await;
+    assert!(
+        h.mgr.bfd_withholding(&new_peer),
+        "a stale revision never releases"
+    );
+    h.mgr
+        .handle_bfd_state_change(up(new_peer, bfd_revision(&h, ll(3))))
+        .await;
+    assert!(!h.mgr.bfd_withholding(&new_peer), "released by its own Up");
+}
+
+/// BFD down is a session-down input for a bound peer: its BGP session gets
+/// `BfdDown` and is held until BFD permits BGP again.
+#[tokio::test]
+async fn bfd_down_tears_down_a_bound_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    *bfd.state.lock().unwrap() = rustbgpd_bfd::SessionState::Up;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    h.replace_session(
+        &swp1_key(2),
+        PeerHandle::from_parts(tx, tokio::spawn(std::future::pending())),
+    );
+    let peer = IpAddr::V6(ll(2));
+    h.mgr
+        .handle_bfd_state_change(crate::bfd_runtime::BfdStateChange {
+            revision: bfd_revision(&h, ll(2)),
+            peer,
+            state: rustbgpd_bfd::SessionState::Down,
+            diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
+            remote_admin_down: false,
+            resync: false,
+        })
+        .await;
+    assert!(matches!(rx.try_recv(), Ok(PeerCommand::BfdDown)));
+    assert!(h.mgr.bfd_withholding(&peer));
+}
+
+/// A reload rebuilds BFD membership from configuration, which has no
+/// address for an interface-only neighbor: the binding's session is carried
+/// over unchanged.
+#[tokio::test]
+async fn a_reload_keeps_a_bindings_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let revision = bfd_revision(&h, ll(2));
+    let candidate = h.mgr.current_config.clone();
+    // Mutation-red: without the carry-over the reload drops the session.
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7))]
+    );
+    assert_eq!(bfd_revision(&h, ll(2)), revision, "unchanged");
+
+    // A profile edit applies to the binding's session on reload.
+    let mut candidate = h.mgr.current_config.clone();
+    candidate.bfd_profiles[0].multiplier = 5;
+    // Mutation-red: carrying the old session over ignores the edit.
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    bfd.next_applied();
+    let session = &h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(ll(2))];
+    assert_eq!((session.detect_mult, session.scope_id), (5, Some(7)));
+    assert_ne!(session.revision, revision, "replaced");
+}
+
+/// A recreated interface moves a binding's session only by rebinding it,
+/// never through the configured link-local scope refresh: one mechanism
+/// owns each session.
+#[tokio::test]
+async fn a_recreated_interface_moves_a_bindings_bfd_session_only_by_rebinding() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+
+    h.links_changed(snapshot(true, &[("swp1", 9, true)]));
+    h.mgr.run_due_bfd_scope_refresh().await;
+    // Mutation-red: the scope refresh would move it to index 9 itself.
+    assert!(bfd.applied.try_recv().is_err(), "no refresh replacement");
+    assert_eq!(
+        h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(ll(2))].scope_id,
+        Some(7)
+    );
+
+    h.reconcile().await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [], "retired");
+    h.bind("swp1", Some(endpoint(2, 9))).await;
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(9))],
+        "rebound on the new index"
+    );
+}
+
 /// The same recovery when discovery still points at the new address as the
 /// exited peer is retired: the replacement is deferred by a staged
 /// transaction, discovery's binding then expires before it clears, and the
@@ -1798,4 +2118,226 @@ async fn a_recovered_endpoint_outlives_an_expired_discovery_binding() {
             .await,
         rustbgpd_transport::StateQueryOutcome::State(_)
     ));
+}
+
+/// A neighbor deleted through the runtime API leaves its BFD member
+/// drained. A binding's membership change must not publish it enabled again,
+/// on bind or on unbind.
+#[tokio::test]
+async fn a_binding_change_never_restarts_a_deleted_neighbors_bfd_session() {
+    let deleted: IpAddr = "192.0.2.9".parse().unwrap();
+    let (mut h, mut bfd) = attach_bfd(
+        harness_with(
+            &["swp1"],
+            &[("swp1", 7, true)],
+            "bfd = { profile = \"fast\" }\n",
+            "[[bfd_profiles]]\nname = \"fast\"\n",
+        ),
+        &[deleted],
+    );
+    insert_test_managed_peer(
+        &mut h.mgr,
+        deleted,
+        fake_peer_handle(
+            deleted,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    h.mgr
+        .delete_peer_runtime(PeerKey::new(deleted, None), false)
+        .await
+        .unwrap();
+    let drained = |config: &crate::bfd_runtime::BfdRuntimeConfig| {
+        config
+            .sessions
+            .iter()
+            .find(|params| params.peer == deleted)
+            .is_some_and(|params| !params.enabled)
+    };
+
+    // Mutation-red: rebuilding the disabled set from live peers only
+    // re-enables the deleted neighbor's session.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(drained(&bfd.next_applied()), "still drained after a bind");
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(
+        drained(&bfd.next_applied()),
+        "still drained after an unbind"
+    );
+}
+
+/// Prepare and commit the BFD side of a reload to `candidate`, then adopt it.
+async fn reload(h: &mut Harness, candidate: crate::config::Config) {
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    h.mgr.current_config = candidate;
+}
+
+/// Inherited BFD enabled, disabled and enabled again by peer-group reloads
+/// reaches an interface-only neighbor that is already bound, without a
+/// rebind: the session is registered (and a strict one holds BGP until Up),
+/// removed, and registered again.
+#[tokio::test]
+async fn a_reload_enables_disables_and_reenables_bfd_on_a_bound_neighbor() {
+    let (mut h, mut bfd) = attach_bfd(
+        harness_with(
+            &["swp1"],
+            &[("swp1", 7, true)],
+            "peer_group = \"fabric\"\n",
+            "[[bfd_profiles]]\nname = \"fast\"\n[peer_groups.fabric]\n",
+        ),
+        &[],
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(bfd.applied.try_recv().is_err(), "no BFD configured yet");
+    let peer = IpAddr::V6(ll(2));
+    let with_bfd = |h: &Harness, bfd: Option<&str>| {
+        let mut candidate = h.mgr.current_config.clone();
+        candidate.peer_groups.get_mut("fabric").unwrap().bfd =
+            bfd.map(|bfd| toml::from_str::<crate::config::BfdConfig>(bfd).unwrap());
+        candidate
+    };
+
+    // Mutation-red: rebuilding only existing sessions never adds one.
+    let enabled = with_bfd(&h, Some("profile = \"fast\"\nstrict = true"));
+    reload(&mut h, enabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
+    assert!(h.mgr.bfd_withholding(&peer), "strict holds BGP until Up");
+
+    let disabled = with_bfd(&h, None);
+    reload(&mut h, disabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert!(!h.mgr.bfd_withholding(&peer), "released with its session");
+    assert!(!h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
+
+    let enabled = with_bfd(&h, Some("profile = \"fast\""));
+    reload(&mut h, enabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
+}
+
+/// With no link monitor, the scope poll re-resolves configured link-local
+/// BFD sessions only: it is not armed for binding-owned sessions alone, and
+/// when it runs it moves a configured session to its interface's current
+/// index while a binding-owned session keeps its binding's index.
+#[tokio::test(start_paused = true)]
+async fn the_no_monitor_scope_poll_never_moves_a_bindings_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    h.mgr.link_check.changes = None;
+    // Mutation-red: arming for any link-local member polls for nothing.
+    assert_eq!(h.mgr.bfd_scope_deadline(), None, "binding-owned only");
+
+    // A configured link-local neighbor on `lo`, at a stale index.
+    let configured: IpAddr = "fe80::9".parse().unwrap();
+    let key = PeerKey::new(configured, Some("lo".to_owned()));
+    insert_test_managed_peer_for_key(
+        &mut h.mgr,
+        &key,
+        65002,
+        fake_peer_handle(
+            configured,
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    let transport = &mut h.mgr.peers.get_mut(&key).unwrap().transport_config;
+    transport.peer_interface = Some("lo".to_owned());
+    transport.peer_scope_id = Some(4242);
+    h.mgr
+        .bfd_coupling
+        .as_mut()
+        .unwrap()
+        .configured
+        .insert(configured, session_params(configured, Some(4242)));
+    // The binding's interface now resolves elsewhere, unreported.
+    h.links.send_replace(snapshot(true, &[("swp1", 9, true)]));
+
+    let due = h
+        .mgr
+        .bfd_scope_deadline()
+        .expect("polled for the configured one");
+    tokio::time::sleep_until(due).await;
+    h.mgr.bfd_scope_retry_due();
+    h.mgr.run_due_bfd_scope_refresh().await;
+    let lo = nix::net::if_::if_nametoindex("lo").unwrap();
+    // Mutation-red: without the refresh skip the binding's session moves too.
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7)), (configured, Some(lo))]
+    );
+}
+
+fn bfd_session_up(h: &Harness, peer: &str) -> Option<f64> {
+    h.mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bfd_session_up")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer)
+                    .then(|| metric.get_gauge().get_value())
+            })
+        })
+}
+
+/// A non-strict binding whose remote never answers BFD keeps its
+/// `bfd_session_up 0` series: the registration's own Down acknowledgement,
+/// which arrives before the bound peer exists, is not a deletion, and the
+/// series survives a reconcile.
+#[tokio::test]
+async fn an_unanswered_bindings_bfd_gauge_stays_at_zero() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    // Mutation-red: reaping for a peer that is only awaiting insertion
+    // drops the series the actor just seeded.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let label = format!("{}%swp1", ll(2));
+    assert_eq!(bfd_session_up(&h, &label), Some(0.0));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(bfd_session_up(&h, &label), Some(0.0), "after a reconcile");
+}
+
+/// A rejected reload preparation stages nothing: the next unrelated
+/// membership commit must not publish a stale binding-owned set.
+#[tokio::test]
+async fn a_rejected_reload_preparation_leaves_no_staged_bindings() {
+    let (mut h, mut bfd) = bfd_harness(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        false,
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    // A candidate without BFD on the interface-only neighbors, with an
+    // addressed neighbor naming a missing profile: preparation fails after
+    // the binding sessions are rebuilt.
+    let candidate: crate::config::Config = toml::from_str(
+        "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+         [global.telemetry]\nlog_format = \"json\"\n\
+         [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n\
+         [[neighbors]]\ninterface = \"swp2\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n\
+         [[neighbors]]\naddress = \"192.0.2.7\"\nremote_asn = 65002\nbfd = { profile = \"missing\" }\n",
+    )
+    .unwrap();
+    assert!(h.mgr.prepare_bfd_reload(&candidate).is_err());
+
+    // Mutation-red: a stage left by the rejection overwrites this commit's
+    // binding-owned set.
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    bfd.next_applied();
+    let bound = &h.mgr.bfd_coupling.as_ref().unwrap().bound;
+    assert!(bound.contains(&IpAddr::V6(ll(2))) && bound.contains(&IpAddr::V6(ll(3))));
 }

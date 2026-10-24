@@ -105,6 +105,12 @@ mod unnumbered {
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
+        pub(super) fn unnumbered_bound_addresses(&self) -> std::collections::HashSet<IpAddr> {
+            std::collections::HashSet::new()
+        }
+        pub(super) fn unnumbered_bindings(&self) -> Vec<(String, std::net::Ipv6Addr, u32)> {
+            Vec::new()
+        }
         pub(super) fn unbound_interface_only_infos(
             &self,
         ) -> Vec<rustbgpd_api::peer_types::PeerInfo> {

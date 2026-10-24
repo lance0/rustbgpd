@@ -379,6 +379,28 @@ assert_outbound() {
     ok "both FRR peers received IPv4 with RFC 8950 link-local next hops"
 }
 
+# Single-hop BFD on the eth1 binding: rustbgpd registers the session on the
+# learned endpoint, and both sides report it Up.
+assert_bound_bfd_up() {
+    for _ in $(seq 1 30); do
+        if grpcurl_call -d '{}' "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions 2>/dev/null \
+            | jq -e --arg ll "$LL1" '
+                [.sessions[]? | select(.peerAddress == $ll and .peerInterface == "eth1"
+                    and .state == "BFD_SESSION_STATE_UP" and (.multihop // false) == false)]
+                | length == 1' >/dev/null \
+            && docker exec "$FRR1" vtysh -c 'show bfd peers json' \
+            | jq -e '[.[]? | select(.interface == "eth1" and .status == "up")] | length == 1' >/dev/null; then
+            ok "BFD is Up on the bound eth1 endpoint $LL1 on both sides"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "BFD did not come Up on the bound eth1 endpoint"
+    grpcurl_call -d '{}' "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions >&2 || true
+    docker exec "$FRR1" vtysh -c 'show bfd peers' >&2 || true
+    return 1
+}
+
 # FRR3 sends no RAs and dials rustbgpd through a static link-local neighbor,
 # so the eth3 interface-only neighbor can only be learned from that inbound
 # connection (ADR-0142 secondary discovery).
@@ -461,6 +483,7 @@ wait_established 2
 wait_paths 2
 wait_kernel_route 2
 assert_outbound
+assert_bound_bfd_up || exit 1
 assert_inbound_learning || exit 1
 
 carrier_start=$(python3 -c 'import time; print(time.monotonic_ns())')

@@ -19,6 +19,9 @@ metric = 200
 families = ["ipv4_unicast", "ipv6_unicast"]
 maximum_paths = 2
 
+[[bfd_profiles]]
+name = "fabric"
+
 # Interface-only peers discover the FRR link-local endpoints from RAs.
 [[neighbors]]
 interface = "eth1"
@@ -27,6 +30,8 @@ description = "frr1-interface-only"
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
 link_local_next_hop = true
+# Single-hop BFD runs on the learned endpoint once it is bound.
+bfd = { profile = "fabric" }
 
 [[neighbors]]
 interface = "eth2"
