@@ -1558,9 +1558,21 @@ fn attach_bfd(h: Harness, statics: &[IpAddr]) -> (Harness, BfdSide) {
     let state = Arc::new(std::sync::Mutex::new(rustbgpd_bfd::SessionState::Down));
     let (applied_tx, applied) = mpsc::unbounded_channel();
     let reported = state.clone();
+    let metrics = mgr.metrics.clone();
     tokio::spawn(async move {
         while let Some(command) = reload_rx.recv().await {
             let state = *reported.lock().unwrap();
+            // As the actor does, seed each running session's gauge before
+            // acknowledging.
+            for params in command
+                .desired
+                .sessions
+                .iter()
+                .filter(|params| params.enabled)
+            {
+                let up = state == rustbgpd_bfd::SessionState::Up;
+                metrics.record_bfd_state(&params.peer_label, up, up);
+            }
             let acks = command
                 .desired
                 .sessions
@@ -1941,4 +1953,71 @@ async fn the_no_monitor_scope_poll_never_moves_a_bindings_bfd_session() {
         BfdSide::sessions(&bfd.next_applied()),
         [(IpAddr::V6(ll(2)), Some(7)), (configured, Some(lo))]
     );
+}
+
+fn bfd_session_up(h: &Harness, peer: &str) -> Option<f64> {
+    h.mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bfd_session_up")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer)
+                    .then(|| metric.get_gauge().get_value())
+            })
+        })
+}
+
+/// A non-strict binding whose remote never answers BFD keeps its
+/// `bfd_session_up 0` series: the registration's own Down acknowledgement,
+/// which arrives before the bound peer exists, is not a deletion, and the
+/// series survives a reconcile.
+#[tokio::test]
+async fn an_unanswered_bindings_bfd_gauge_stays_at_zero() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    // Mutation-red: reaping for a peer that is only awaiting insertion
+    // drops the series the actor just seeded.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let label = format!("{}%swp1", ll(2));
+    assert_eq!(bfd_session_up(&h, &label), Some(0.0));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(bfd_session_up(&h, &label), Some(0.0), "after a reconcile");
+}
+
+/// A rejected reload preparation stages nothing: the next unrelated
+/// membership commit must not publish a stale binding-owned set.
+#[tokio::test]
+async fn a_rejected_reload_preparation_leaves_no_staged_bindings() {
+    let (mut h, mut bfd) = bfd_harness(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        false,
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    // A candidate without BFD on the interface-only neighbors, with an
+    // addressed neighbor naming a missing profile: preparation fails after
+    // the binding sessions are rebuilt.
+    let candidate: crate::config::Config = toml::from_str(
+        "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+         [global.telemetry]\nlog_format = \"json\"\n\
+         [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n\
+         [[neighbors]]\ninterface = \"swp2\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n\
+         [[neighbors]]\naddress = \"192.0.2.7\"\nremote_asn = 65002\nbfd = { profile = \"missing\" }\n",
+    )
+    .unwrap();
+    assert!(h.mgr.prepare_bfd_reload(&candidate).is_err());
+
+    // Mutation-red: a stage left by the rejection overwrites this commit's
+    // binding-owned set.
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    bfd.next_applied();
+    let bound = &h.mgr.bfd_coupling.as_ref().unwrap().bound;
+    assert!(bound.contains(&IpAddr::V6(ll(2))) && bound.contains(&IpAddr::V6(ll(3))));
 }

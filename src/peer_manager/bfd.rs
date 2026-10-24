@@ -156,7 +156,7 @@ impl PeerManager {
         let Some(coupling) = self.bfd_coupling.as_mut() else {
             return Ok(None);
         };
-        coupling.pending_bound = Some(bound.iter().map(|params| params.peer).collect());
+        let pending_bound = bound.iter().map(|params| params.peer).collect();
         let mut desired =
             BfdRuntimeConfig::from_reload(candidate, &self.current_config, &coupling.configured)
                 .map_err(|error| error.to_string())?;
@@ -193,6 +193,8 @@ impl PeerManager {
                 .map(|params| (params.peer, params))
                 .collect(),
         );
+        // Staged only once preparation succeeds: a rejected one stages nothing.
+        coupling.pending_bound = Some(pending_bound);
         coupling.reloading = true;
         coupling.rollback_lookup = false;
         Ok(prepared)
@@ -920,6 +922,7 @@ impl PeerManager {
             .checked_add(1)
             .ok_or("BFD session revision exhausted")?;
         coupling.bound = bound;
+        coupling.pending_bound = None;
         coupling.prior_held.clone_from(&coupling.held_down);
         coupling
             .prior_initially_withheld
@@ -1028,7 +1031,13 @@ impl PeerManager {
             // here makes removal the last word. A merely disabled peer
             // still exists (`peer_keys_for_address` non-empty) and keeps
             // its series.
-            if self.peer_keys_for_address(peer).is_empty() {
+            // A binding registers its session before its peer exists; the
+            // registration's own acknowledgement is not a deletion.
+            let awaiting_binding = self
+                .bfd_coupling
+                .as_ref()
+                .is_some_and(|c| c.bound.contains(&peer));
+            if self.peer_keys_for_address(peer).is_empty() && !awaiting_binding {
                 // The session's own value: scoped for a link-local neighbor.
                 let label = self
                     .bfd_coupling
