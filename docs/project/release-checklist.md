@@ -932,11 +932,12 @@ After the tag publishes:
 13. **Freeze the released stable-role fixtures.** Under a new directory for
     the tag in `tests/fixtures/v1-stable/`, copy the tagged
     `examples/route-server/config.toml` and `hygiene.rpol` into `route-server`,
-    and the tagged `examples/route-reflector/config.toml` into
-    `route-reflector`. Nothing else is needed: the existing fixture parse test
-    walks that root, and `scripts/check-v1-stable-surface.py` fails until the
-    copies match the tag byte for byte and every role the tag carries is
-    present. The next release's consecutive upgrade exercise consumes the
+    and the tagged `config.toml` of `examples/route-reflector/`,
+    `examples/rr-evpn-fabric/` and `examples/flowspec-controller/` into
+    directories of the same names. Nothing else is needed: the existing
+    fixture parse test walks that root, and `scripts/check-v1-stable-surface.py`
+    fails until the copies match the tag byte for byte and every role the tag
+    carries is present. The next release's consecutive upgrade exercise consumes the
     `route-server` fixture.
 
     In the same commit, freeze the tag's root config-schema manifest beside

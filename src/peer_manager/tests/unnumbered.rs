@@ -1701,3 +1701,40 @@ async fn endpoint_presence_events_carry_the_reason() {
         ]
     );
 }
+
+/// The same recovery when discovery still points at the new address as the
+/// exited peer is retired: the replacement is deferred by a staged
+/// transaction, discovery's binding then expires before it clears, and the
+/// retry still recreates the session at the recovered endpoint.
+#[tokio::test(start_paused = true)]
+async fn a_recovered_endpoint_outlives_an_expired_discovery_binding() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let (release, released) = oneshot::channel();
+    let (exited_tx, exited) = oneshot::channel();
+    h.replace_session(
+        &swp1_key(2),
+        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+    );
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    release.send(()).unwrap();
+    exited.await.unwrap();
+
+    h.mgr.config_snapshot_staged = true;
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [], "exited peer retired");
+    assert_eq!(h.peers_at(ll(3)), [], "replacement deferred");
+    h.bind("swp1", None).await;
+    h.mgr.config_snapshot_staged = false;
+    // Mutation-red: recovering only when discovery has no binding leaves
+    // nothing to reconnect to once that binding expires.
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "recreated on retry");
+    assert!(matches!(
+        h.mgr.peers[&swp1_key(2)]
+            .handle()
+            .query_state_outcome(Duration::from_secs(1))
+            .await,
+        rustbgpd_transport::StateQueryOutcome::State(_)
+    ));
+}
