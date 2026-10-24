@@ -1833,9 +1833,13 @@ impl PeerManager {
             .current_config
             .conditional_advertisement_set_with_bindings(&bindings)
             .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
-        self.install_conditional_advertisements(set, &[])
-            .await
-            .map_err(PeerLifecycleError::Internal)?;
+        if let Err(error) = self.install_conditional_advertisements(set, &[]).await {
+            // The RIB may hold the set although its acknowledgement failed:
+            // reconcile it against the live bindings, or a binding that ends
+            // before the retry leaves the gate at an endpoint with no peer.
+            self.conditional_reconcile_pending = true;
+            return Err(PeerLifecycleError::Internal(error));
+        }
         Ok(true)
     }
 

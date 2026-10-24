@@ -4194,6 +4194,59 @@ async fn a_bindings_conditional_advertisement_gate_follows_the_binding() {
     );
 }
 
+/// The RIB installs a binding's gate but its acknowledgement is lost, so
+/// the binding is not admitted; the binding then expires before any retry.
+/// The uncertain install is reconciled against the live bindings, so no gate
+/// is left naming an endpoint without a peer.
+#[tokio::test]
+async fn a_lost_gate_acknowledgement_leaves_no_gate_once_the_binding_expires() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    // The RIB's installed set, and whether it acknowledges the next install.
+    let held = Arc::new(std::sync::Mutex::new(
+        None::<rustbgpd_rib::ConditionalAdvertisementSet>,
+    ));
+    let drop_ack = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let capture = super::wait_sites::conditional_capture().await;
+    let mut rib_rx = std::mem::replace(&mut h.rib_rx, mpsc::channel(1).1);
+    let (rib_held, rib_drop) = (Arc::clone(&held), Arc::clone(&drop_ack));
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::InstallConditionalAdvertisements { set, reply, .. } = update {
+                *rib_held.lock().unwrap() = Some(set);
+                if !rib_drop.swap(false, Ordering::SeqCst) {
+                    let _ = reply.send(capture.clone());
+                }
+            }
+        }
+    });
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "not admitted");
+    let installed = held.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        attached(&installed),
+        [IpAddr::V6(ll(2))],
+        "the RIB holds the gate"
+    );
+    h.bind("swp1", None).await;
+    // Mutation-red: without the reconcile request the run loop leaves the
+    // gate installed at an endpoint with no peer.
+    if h.mgr.conditional_reconcile_pending {
+        h.mgr.reconcile_conditional_advertisements().await;
+    }
+    let installed = held.lock().unwrap().clone().unwrap();
+    assert!(
+        attached(&installed).is_empty(),
+        "no gate names the endpoint"
+    );
+}
+
 /// A binding whose BFD registration fails after its conditional-advertisement
 /// gate was installed is not admitted, and that gate is reconciled away: no
 /// gate is left naming an endpoint without a peer.
