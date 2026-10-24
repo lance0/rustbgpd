@@ -4898,7 +4898,9 @@ log_format = "json"
             // +1: the unspecified set_next_hop reload test writes its candidate.
             // +2: the generation preflight test writes its prior and candidate.
             // +2: the same-address BMP reload test writes both of its files.
-            (concat!("write_tier", "_test_config("), 40),
+            // +3: the interface-only maxima test writes its prior, raise and
+            // lowering.
+            (concat!("write_tier", "_test_config("), 43),
             (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
@@ -9336,6 +9338,220 @@ import_policy_chain = ["origin-guard"]
                 other => panic!("expected a fence: {other:?}"),
             }
         }
+    }
+
+    /// `peer`'s live IPv6-unicast outbound maximum row in the real RIB,
+    /// once its usage reaches `usage`.
+    async fn ipv6_outbound_row(
+        rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+        peer: rustbgpd_rib::PeerId,
+        usage: u64,
+    ) -> rustbgpd_rib::OutboundPrefixLimitFamilyState {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let (reply, rx) = tokio::sync::oneshot::channel();
+                rib_tx
+                    .send(rustbgpd_rib::RibUpdate::QueryPeerOutboundState { peer, reply })
+                    .await
+                    .unwrap();
+                let row = rx
+                    .await
+                    .unwrap()
+                    .outbound_prefix_limits
+                    .into_iter()
+                    .find(|row| row.family == "ipv6_unicast")
+                    .expect("a registered peer reports IPv6 unicast");
+                if row.usage == usage {
+                    return row;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the bound peer's IPv6 usage settles")
+    }
+
+    /// Register `peer` with the real RIB as an IPv6-unicast session that
+    /// accepts every route; the receiver must stay alive.
+    async fn register_ipv6_rib_peer(
+        rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+        peer: rustbgpd_rib::PeerId,
+        peer_asn: u32,
+        is_ebgp: bool,
+    ) -> mpsc::Receiver<rustbgpd_rib::OutboundRouteUpdate> {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        rib_tx
+            .send(rustbgpd_rib::RibUpdate::SetPeerExportEncoder {
+                peer,
+                session_id: 0,
+                encoder: Arc::new(crate::test_support::AnyExport),
+            })
+            .await
+            .unwrap();
+        rib_tx
+            .send(rustbgpd_rib::RibUpdate::PeerUp {
+                peer,
+                session_id: 0,
+                peer_asn,
+                peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
+                outbound_tx,
+                export_policy: None,
+                sendable_families: vec![(rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast)],
+                is_ebgp,
+                route_reflector_client: false,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: Vec::new(),
+                add_path_send_max: 0,
+                negotiated_orf_recv: Vec::new(),
+                negotiated_llgr_families: Vec::new(),
+            })
+            .await
+            .unwrap();
+        outbound_rx
+    }
+
+    /// Announce `2001:db8:<block>::/48` for each block from the eBGP
+    /// `source` into the real RIB.
+    async fn announce_ipv6_blocks(
+        rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+        source: &str,
+        blocks: std::ops::RangeInclusive<u16>,
+    ) {
+        let source: IpAddr = source.parse().unwrap();
+        let announced = blocks
+            .map(|block| {
+                crate::test_support::route_from_peer(
+                    rustbgpd_wire::Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+                        std::net::Ipv6Addr::new(0x2001, 0xdb8, block, 0, 0, 0, 0, 0),
+                        48,
+                    )),
+                    "2001:db8::2".parse().unwrap(),
+                    rustbgpd_rib::RouteOrigin::Ebgp,
+                    0,
+                    source,
+                )
+            })
+            .collect();
+        rib_tx
+            .send(rustbgpd_rib::RibUpdate::RoutesReceived {
+                peer: rustbgpd_rib::PeerId::from_addr(source),
+                session_id: 0,
+                announced,
+                withdrawn: Vec::new(),
+                flowspec_announced: Vec::new(),
+                flowspec_withdrawn: Vec::new(),
+                evpn_announced: Vec::new(),
+                evpn_withdrawn: Vec::new(),
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// ADR-0142 + ADR-0113: a SIGHUP edit to a bound interface-only
+    /// neighbor's own outbound maximum reaches the RIB through its interface
+    /// entry. A raise applies and fills the new capacity; a lowering below
+    /// the bound peer's usage is refused before any effect.
+    #[tokio::test]
+    async fn sighup_edits_a_bound_interface_only_neighbors_own_outbound_maximum() {
+        use rustbgpd_rib::{PeerEndpoint, PeerId};
+
+        let config_with = |cap: u32| {
+            format!(
+                "{}\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+                 families = [\"ipv6_unicast\"]\nmax_prefixes_out_ipv6_unicast = {cap}\n",
+                baseline_toml()
+            )
+        };
+        let path = unique_temp_path("reload-interface-only-maxima");
+        write_tier_test_config(&path, &config_with(2));
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let (_query_tx, query_rx) = mpsc::channel(1);
+        let rib = tokio::spawn(
+            rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
+        );
+        apply_outbound_prefix_limits(&rib_tx, &initial)
+            .await
+            .unwrap();
+        let source = PeerId::from_addr("10.0.0.2".parse().unwrap());
+        let bound = PeerId::allocate_interface_only(PeerEndpoint::new(
+            "fe80::2".parse().unwrap(),
+            Some("swp1"),
+        ));
+        // The source is eBGP so its routes reach an iBGP peer; that peer
+        // needs no export policy (RFC 8212).
+        let _outbound = [
+            register_ipv6_rib_peer(&rib_tx, source, 65002, true).await,
+            register_ipv6_rib_peer(&rib_tx, bound, 65001, false).await,
+        ];
+        announce_ipv6_blocks(&rib_tx, "10.0.0.2", 1..=3).await;
+        // Mutation-red: without the interface entry the bound peer is
+        // unlimited and takes all three.
+        let row = ipv6_outbound_row(&rib_tx, bound, 2).await;
+        assert_eq!((row.limit, row.blocking), (Some(2), true));
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+        write_tier_test_config(&path, &config_with(3));
+        let outcome = reload_config_generation(
+            path.to_str().unwrap(),
+            &initial,
+            None,
+            None,
+            &peer_mgr_tx,
+            &internal_tx,
+            Some(&rib_tx),
+            None,
+        )
+        .await;
+        let SighupReloadOutcome::Acknowledged(_) = outcome else {
+            panic!("the raise must apply: {outcome:?}");
+        };
+        let row = ipv6_outbound_row(&rib_tx, bound, 3).await;
+        assert_eq!((row.limit, row.blocking), (Some(3), false));
+
+        let raised = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        write_tier_test_config(&path, &config_with(1));
+        let outcome = reload_config_generation(
+            path.to_str().unwrap(),
+            &raised,
+            None,
+            None,
+            &peer_mgr_tx,
+            &internal_tx,
+            Some(&rib_tx),
+            None,
+        )
+        .await;
+        let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = &outcome
+        else {
+            panic!("the lowering must be refused: {outcome:?}");
+        };
+        assert_eq!(failure.bucket, "prefix_limit.prepare");
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("fe80::2 ipv6_unicast advertises 3"),
+            "the refusal names the bound peer: {}",
+            failure.error
+        );
+        let row = ipv6_outbound_row(&rib_tx, bound, 3).await;
+        assert_eq!(row.limit, Some(3), "the live maximum is unchanged");
+
+        drop(internal_tx);
+        assert_eq!(
+            generation.await.unwrap().len(),
+            1,
+            "only the raise reached the generation"
+        );
+        drop(rib_tx);
+        rib.await.unwrap();
+        std::fs::remove_file(&path).ok();
     }
 
     /// Outbound prefix maxima are the only effect outside the peer manager

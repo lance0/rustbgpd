@@ -157,6 +157,15 @@ Or filter via `RUST_LOG` using the per-peer tracing span:
 RUST_LOG='info,[peer{peer_addr=10.0.0.1}]=debug' rustbgpd /etc/rustbgpd/config.toml
 ```
 
+An interface-only neighbor's session span also carries its stable label,
+`peer=interface:<name>`, which stays the same when the learned address
+changes. Its `log_level` uses that field, and so can `RUST_LOG`; the value is
+a regular expression, so escape a `.` in the interface name:
+
+```bash
+RUST_LOG='info,[peer{peer=interface:swp1\.100}]=debug' rustbgpd /etc/rustbgpd/config.toml
+```
+
 The span directive needs the square brackets. `RUST_LOG` is parsed one
 comma-separated directive at a time: a directive that does not parse, such as
 the unbracketed `peer{peer_addr=10.0.0.1}=debug`, is dropped and the valid
