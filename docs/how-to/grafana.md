@@ -70,12 +70,13 @@ Template variables:
   `bgp_rib_outbound_registered_peers` (always exported, even at zero).
 - **Peer** (`$peer`) — the `peer` label, populated from
   `bgp_peer_admin_enabled`, so configured peers appear even before their first
-  FSM transition. Every exported metric family
-  identifies a peer the same way, by its bare neighbor address
-  (`192.0.2.1`, `2001:db8::1`) or, for an IPv6 link-local neighbor, its
-  scoped address (`fe80::1%eth0`), so one selector drives every per-peer panel
-  and `by (peer)` joins across families match. Supports multiple values
-  and All. The selector value stays that address; the member's ASN,
+  FSM transition. Per-peer metric families use the same identity: a bare
+  neighbor address (`192.0.2.1`, `2001:db8::1`), a scoped address for a static
+  IPv6 link-local neighbor (`fe80::1%eth0`), or a stable `interface:<name>`
+  label for an interface-only neighbor. Its learned address is separate
+  `bgp_unnumbered_peer_address_info` metadata. One selector drives every
+  per-peer panel and `by (peer)` joins across families match. Supports multiple
+  values and All. The selector value stays that neighbor's label; the member's ASN,
   description, and peer group live on the
   `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` identity
   metric, and the **Peer identity** row joins it onto session truth with

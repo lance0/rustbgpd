@@ -69,7 +69,7 @@ releases rather than carried forward from older measurements.
 | Confederation (RFC 5065) | Yes | No | |
 | Extended Messages (RFC 8654) | Yes | Yes | GoBGP upstream support was added in v4.7.0; no rustbgpd/GoBGP interop receipt is claimed here |
 | Extended Nexthop (RFC 8950) | Yes | Yes | IPv4 unicast over IPv6 next hop |
-| BGP unnumbered (interface-scoped IPv6 link-local) | Yes | Yes | Both carry IPv4 unicast over RFC 8950 on link-local interface neighbors. GoBGP uses interface autodiscovery (`neighbor-interface`, derives the peer from the link-local); rustbgpd v1 uses static `address` + `interface` (FRR-style autodiscovery deferred) and additionally installs the scoped Linux FIB next-hop with the egress `dev`. M53 validates rustbgpd against FRR. ADR-0069 |
+| BGP unnumbered (interface-scoped IPv6 link-local) | Yes | Yes | Both carry IPv4 unicast over RFC 8950 on link-local interface neighbors. GoBGP uses interface autodiscovery (`neighbor-interface`, derives the peer from the link-local); rustbgpd supports static `address` + `interface` and Linux interface-only neighbors discovered through Router Advertisements or inbound BGP connections. Scoped Linux FIB next-hops carry the egress `dev`. M53 covers static neighbors, M53b interface-only discovery, and M53c a shared address on separate links. ADR-0069 / ADR-0142; interface-only behavior remains alpha |
 | Admin Shutdown Comm (RFC 9003, obsoletes 8203) | Yes | Yes | Reason text in NOTIFICATION |
 | BGP Roles + Only-to-Customer (RFC 9234) | No | Yes | rustbgpd negotiates the OPEN Role capability, applies §5 strict-mode rejection on mismatch, and enforces OTC ingress / egress rules per §6, reported through the `bgp_otc_routes_blocked_total{peer, reason}` counter, the per-peer scalar, and log lines. GoBGP does not implement RFC 9234 (no Role capability in `bgp.go`; open feature request osrg/gobgp#3244). ADR-0071, M55. |
 
@@ -173,7 +173,7 @@ releases rather than carried forward from older measurements.
 | TCP MD5 (RFC 2385) | Yes | Yes | |
 | TCP-AO (RFC 5925) | Yes (v4.10.0) | Partial live rotation | GoBGP [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0) added a TCP-AO keychain configuration API, config-file keychains and HMAC-SHA256 profiles, but bound no keychain to a session. [v4.10.0](https://github.com/osrg/gobgp/releases/tag/v4.10.0) adds per-peer and peer-group TCP-AO configuration and state to the API, `gobgp` CLI commands, and commit [`15e9be9`](https://github.com/osrg/gobgp/commit/15e9be9198ae51abad50b3d9b42aa63c3b462834), which installs a peer's keychain on matching listening sockets and outbound connections ([`server.go`](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/server/server.go#L3720-L3741)). Keychain key additions and deletions propagate to listeners and established connections on a best-effort basis ([`server.go`](https://github.com/osrg/gobgp/blob/v4.10.0/pkg/server/server.go#L5790-L5867)); attaching, removing or changing a peer's keychain restarts the session (upstream source reading, not an interoperability receipt). rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
-| BFD (RFC 5880/5881/5882/5883) | Yes | Yes | GoBGP documents native single-hop async BFD for BGP neighbors. rustbgpd ships single-hop and multihop async BFD for static neighbors with inspection, metrics/events, and strict + non-strict RFC 5882 coupling. M51 and M108 validate the respective modes against FRR `bfdd`. Deferred: echo/demand, authentication, dynamic-neighbor BFD, and interface-neighbor autodiscovery |
+| BFD (RFC 5880/5881/5882/5883) | Yes | Yes | GoBGP documents native single-hop async BFD for BGP neighbors. rustbgpd ships single-hop and multihop async BFD for static neighbors, plus single-hop BFD on an interface-only neighbor's learned binding, with inspection, metrics/events, and strict + non-strict RFC 5882 coupling. M51 and M108 validate static single-hop and multihop against FRR `bfdd`. Deferred: echo/demand, authentication, and dynamic-neighbor BFD |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
 | Private AS removal | Yes | Yes | Three modes: `remove`, `all`, `replace` (ADR-0045) |
 | LLGR_STALE stripping (RFC 9494 §4.6) | N/A | Yes | Strip `LLGR_STALE` from exports to non-LLGR peers |
@@ -286,11 +286,12 @@ BGP unnumbered, scoped link-local FIB installs, ECMP / weighted multipath, BFD,
 gNMI / OpenConfig, and EVPN RR / VTEP work make this a first-class deployment
 target. Remaining gaps are narrower:
 
-1. **BGP unnumbered autodiscovery** — rustbgpd v1 requires static
-   `address` + `interface`; FRR-style `neighbor IFACE interface remote-as
-   external` remains deferred.
-2. **BFD for interface-neighbor autodiscovery** — static scoped IPv6 link-local
-   single-hop sessions ship; autodiscovered interface neighbors remain deferred.
+1. ~~**BGP unnumbered autodiscovery**~~ — *shipped on Linux (ADR-0142).*
+   Configure `interface` without `address`; Router Advertisements or inbound
+   BGP connections supply the peer's link-local address. Static `address` +
+   `interface` neighbors remain supported.
+2. ~~**BFD for interface-neighbor autodiscovery**~~ — *shipped.* Single-hop
+   BFD follows an interface-only neighbor's learned binding.
 3. ~~**Config transaction / diff UX**~~ — *shipped in v0.35.0 (ADR-0076),
    on the `DiffRuntimeConfig` baseline from v0.22.0.* `ConfigService` plans,
    applies, confirms, and aborts runtime config transactions under the shared

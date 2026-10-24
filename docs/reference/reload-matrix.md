@@ -330,9 +330,11 @@ kept:
   interface. Delete that neighbor in an earlier change first.
 - Adding a static link-local neighbor at an address a learned endpoint holds
   while a BMP collector refuses identity conflicts (`bmp_identity_conflict`).
-- Giving neighbors that share a link-local address BFD, TCP MD5, TCP-AO, or a
-  GTSM policy or `log_level` that differs between them; the error names the
-  feature.
+- Giving neighbors that share a link-local address BFD, TCP MD5 or TCP-AO;
+  the error names the feature. Differing GTSM policies or `log_level` values
+  are also refused when the sharing set includes a static neighbor.
+  Interface-only neighbors sharing an address may differ in GTSM and
+  `log_level` because those settings use their interface-scoped identities.
 
 A SIGHUP checks them before its first effect, including an outbound prefix
 maximum or listener authentication change, and discovery cannot bind a

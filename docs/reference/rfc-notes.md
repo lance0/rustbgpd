@@ -919,9 +919,11 @@ negotiate the extension; duplicate valid copies are idempotent.
   hop. This scope check applies to every session, including peers that did
   not negotiate capability 77.
 
-Interface autodiscovery is not implemented. Operators using graceful restart
-should keep link-local addresses stable across restarts; this feature does
-not add a neighbor-discovery monitor or make stale next hops reachable.
+[Interface-only neighbors](configuration.md#interface-only-neighbors) discover
+their IPv6 link-local peer through Router Advertisements or inbound BGP
+connections on Linux. Operators using graceful restart should still keep
+link-local addresses stable across restarts: discovering a replacement address
+does not make retained routes' stale next hops reachable.
 
 ---
 
