@@ -1813,9 +1813,8 @@ Environment=RUST_LOG=info,[peer{peer_addr=10.0.0.1}]=debug
 
 Per-peer verbosity also comes from `[[neighbors]] log_level = "debug"`.
 Restart required for the global setting; per-peer log_level is **live** —
-re-applied on SIGHUP via a tracing reload handle that rebuilds the filter
-(base level plus every per-peer directive), so a level edit takes effect
-without a restart (see the [reload matrix](../reference/reload-matrix.md)).
+replaced on SIGHUP, so a level edit reaches running sessions without a
+restart (see the [reload matrix](../reference/reload-matrix.md)).
 
 ## Related
 
