@@ -3209,13 +3209,40 @@ fn set_gtsm_v4(socket: &Socket, hops: NonZeroU8) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+fn set_gtsm_v6(socket: &Socket, hops: NonZeroU8) -> io::Result<()> {
+    set_min_hop_count_v6(socket, libc::c_int::from(gtsm_min_ttl(hops)))?;
+    set_gtsm_outbound(socket, false)?;
+    Ok(())
+}
+
+/// Clear an IPv6 socket's GTSM receive minimum (`IPV6_MINHOPCOUNT` 0), as
+/// for a connection accepted under a selector its neighbor no longer has.
+///
+/// # Errors
+///
+/// Returns the `setsockopt` error.
+#[cfg(target_os = "linux")]
+pub fn clear_gtsm_v6(socket: &Socket) -> io::Result<()> {
+    set_min_hop_count_v6(socket, 0)
+}
+
+/// Nothing to clear where GTSM cannot be installed.
+///
+/// # Errors
+///
+/// Never.
+#[cfg(not(target_os = "linux"))]
+pub fn clear_gtsm_v6(_socket: &Socket) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 #[allow(
     unsafe_code,
     clippy::cast_possible_truncation,
     reason = "IPv6 GTSM requires raw Linux socket options and socklen_t casts"
 )]
-fn set_gtsm_v6(socket: &Socket, hops: NonZeroU8) -> io::Result<()> {
-    let min_hops = libc::c_int::from(gtsm_min_ttl(hops));
+fn set_min_hop_count_v6(socket: &Socket, min_hops: libc::c_int) -> io::Result<()> {
     let fd = socket.as_raw_fd();
 
     let ret = unsafe {
@@ -3230,7 +3257,6 @@ fn set_gtsm_v6(socket: &Socket, hops: NonZeroU8) -> io::Result<()> {
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
-    set_gtsm_outbound(socket, false)?;
     Ok(())
 }
 

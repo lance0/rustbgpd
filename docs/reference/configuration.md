@@ -1460,11 +1460,25 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   reaches bound sessions on reload, and lowering one below what a bound
   session already advertises is refused, as for any neighbor.
 - **Rejected** on an interface-only neighbor, directly or through its peer
-  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), `bfd.multihop`,
+  group: `md5_password` and `tcp_ao`, `bfd.multihop`, `ttl_security_hops` above 1,
   `fast_external_failover = false`, `conditional_advertisements`,
-  `log_level`, and explicit `[global] listen_addresses`. These sessions therefore have no TCP-layer
-  authentication and no GTSM yet; what protects them is the link itself and
-  OPEN validation against `remote_asn`.
+  `log_level`, and explicit `[global] listen_addresses`. These sessions
+  therefore have no TCP-layer authentication; what protects them is the link
+  itself, OPEN validation against `remote_asn`, and optional GTSM.
+- **GTSM.** `ttl_security = true` (RFC 5082) applies to the learned
+  endpoint. When the neighbor binds an address, the BGP listener enforces
+  Hop Limit 255 on connections from that address on that interface before
+  the peer can be matched, and the selector is removed only after that
+  endpoint's peer is retired. A connection learned from an inbound SYN gets
+  the same check, and active opens send Hop Limit 255. When any
+  interface-only neighbor runs GTSM, the IPv6 listener answers with Hop Limit
+  255, from startup or from the reload or config transaction that introduces
+  it, before the neighbor can bind; it is never lowered. A GTSM peer that
+  sends no Router Advertisements and dials in therefore completes its
+  handshake and is learned. The selector is matched by address and interface,
+  so it never applies to a neighbor on another link that shares the address.
+  Turning `ttl_security` on or off reloads like any other session-settings
+  edit (see **Reload** below).
 - **Same address on two links.** Until the RIB keys neighbors by scope, a
   learned address that another neighbor already holds is refused with
   `duplicate_link_local_address`. Parallel links to one device that reuse a

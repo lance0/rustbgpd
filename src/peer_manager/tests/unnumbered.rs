@@ -50,16 +50,18 @@ struct Harness {
 /// (`remote_asn = "external"`), discovery recorded, and `links` reported by
 /// the link monitor.
 fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
-    harness_with(interfaces, links, "", "")
+    harness_with(interfaces, links, "", "", None)
 }
 
-/// [`harness`] with `neighbor_extra` added to every interface-only stanza and
-/// `extra` appended to the configuration.
+/// [`harness`] with `neighbor_extra` added to every interface-only stanza,
+/// `extra` appended to the configuration, and `gtsm` standing in for the
+/// listener's learned-selector update.
 fn harness_with(
     interfaces: &[&str],
     links: &[(&str, u32, bool)],
     neighbor_extra: &str,
     extra: &str,
+    gtsm: Option<LearnedGtsmUpdate>,
 ) -> Harness {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel(64);
@@ -91,6 +93,10 @@ fn harness_with(
     let (links_tx, links_rx) = watch::channel(snapshot(true, links));
     let (discovery, commands) = RaDiscovery::recording();
     let (_events_tx, events_rx) = mpsc::unbounded_channel();
+    let mgr = match gtsm {
+        Some(update) => mgr.with_gtsm_update(update),
+        None => mgr,
+    };
     let mgr = mgr
         .with_link_failover(links_rx)
         .with_unnumbered(Unnumbered::new(discovery, events_rx));
@@ -2758,6 +2764,7 @@ fn bfd_harness(
             links,
             &format!("bfd = {{ profile = \"fast\", strict = {strict} }}\n"),
             "[[bfd_profiles]]\nname = \"fast\"\n",
+            None,
         ),
         &[],
     )
@@ -3033,6 +3040,7 @@ async fn a_binding_change_never_restarts_a_deleted_neighbors_bfd_session() {
             &[("swp1", 7, true)],
             "bfd = { profile = \"fast\" }\n",
             "[[bfd_profiles]]\nname = \"fast\"\n",
+            None,
         ),
         &[deleted],
     );
@@ -3090,6 +3098,7 @@ async fn a_reload_enables_disables_and_reenables_bfd_on_a_bound_neighbor() {
             &[("swp1", 7, true)],
             "peer_group = \"fabric\"\n",
             "[[bfd_profiles]]\nname = \"fast\"\n[peer_groups.fabric]\n",
+            None,
         ),
         &[],
     );
@@ -3479,6 +3488,338 @@ async fn an_explain_or_retention_edit_keeps_bound_interface_only_sessions() {
         h.reload(config_with(&format!("{stanza}{policy}"))).await;
         assert_eq!(h.session(&swp1_key(2)), session, "kept: {policy}");
     }
+}
+
+/// The listener's learned-selector updates, in order, each with whether the
+/// RIB had already been told the previous endpoint was deleted.
+use crate::peer_manager::unnumbered::{LearnedGtsmOutcome, LearnedGtsmUpdate, ListenerGtsmRequest};
+
+type GtsmLog = Arc<std::sync::Mutex<Vec<(String, Option<Ipv6Addr>, bool)>>>;
+
+/// A GTSM neighbor's harness whose listener answers `outcome` and logs
+/// each update; the harness's RIB receiver is shared with the log so an
+/// update can record what the RIB had seen when it arrived.
+fn gtsm_harness(outcome: Arc<std::sync::Mutex<LearnedGtsmOutcome>>) -> (Harness, GtsmLog) {
+    let log: GtsmLog = Arc::default();
+    let rib: Arc<std::sync::Mutex<Option<mpsc::Receiver<RibUpdate>>>> = Arc::default();
+    let update: LearnedGtsmUpdate = {
+        let (log, rib) = (Arc::clone(&log), Arc::clone(&rib));
+        Arc::new(move |request| {
+            let ListenerGtsmRequest::Selector {
+                interface,
+                selector,
+            } = request
+            else {
+                return Box::pin(async { LearnedGtsmOutcome::Applied });
+            };
+            let deleted = rib.lock().unwrap().as_mut().is_some_and(|rib| {
+                std::iter::from_fn(|| rib.try_recv().ok())
+                    .any(|update| matches!(update, RibUpdate::PeerDeleted { .. }))
+            });
+            log.lock().unwrap().push((
+                interface,
+                selector.map(|selector| selector.address),
+                deleted,
+            ));
+            let outcome = outcome.lock().unwrap().clone();
+            Box::pin(async move { outcome })
+        })
+    };
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "ttl_security = true\n",
+        "",
+        Some(update),
+    );
+    let (_tx, placeholder) = mpsc::channel(1);
+    *rib.lock().unwrap() = Some(std::mem::replace(&mut h.rib_rx, placeholder));
+    (h, log)
+}
+
+/// ADR-0142 GTSM: the learned endpoint's selector is installed before the
+/// peer exists, so no inbound connection is matched without it, and a
+/// selector the listener did not apply leaves the neighbor unbound.
+#[tokio::test]
+async fn a_gtsm_neighbor_binds_only_once_the_listener_has_its_selector() {
+    let outcome = Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Failed(
+        "listener gone".into(),
+    )));
+    let (mut h, log) = gtsm_harness(Arc::clone(&outcome));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // Mutation-red: adding the peer first admits it without the selector.
+    assert_eq!(h.peers_at(ll(2)), [], "refused while unapplied");
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        [("swp1".into(), Some(ll(2)), false)]
+    );
+
+    *outcome.lock().unwrap() = LearnedGtsmOutcome::Applied;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    let hops = h.mgr.peers[&swp1_key(2)].transport_config.ttl_security_hops;
+    assert_eq!(
+        hops,
+        Some(std::num::NonZeroU8::MIN),
+        "active opens use TTL 255"
+    );
+}
+
+/// A rebind removes the old endpoint's selector only after that peer is
+/// deleted, then installs the new one before the new peer; a carrier loss
+/// removes it after the peer is gone.
+#[tokio::test]
+async fn a_rebind_replaces_the_gtsm_selector_after_the_old_peer_is_retired() {
+    let (mut h, log) = gtsm_harness(Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Applied)));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(3)), []);
+    // Mutation-red: removing before the deletion leaves the old peer
+    // matchable without its selector (`false` in the third field).
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        [
+            ("swp1".into(), Some(ll(2)), false),
+            ("swp1".into(), None, true),
+            ("swp1".into(), Some(ll(3)), false),
+            ("swp1".into(), None, true),
+        ]
+    );
+}
+
+/// Deleting a bound GTSM neighbor removes its selector only once its peer
+/// is gone, and a removal the listener did not apply is retried: a later
+/// neighbor at that address on that interface must not inherit GTSM.
+#[tokio::test(start_paused = true)]
+async fn deleting_a_gtsm_neighbor_removes_its_selector_after_its_peer() {
+    let outcome = Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Applied));
+    let (mut h, log) = gtsm_harness(Arc::clone(&outcome));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    *outcome.lock().unwrap() = LearnedGtsmOutcome::Failed("listener busy".into());
+    // Mutation-red: a deletion that skips the selector leaves it enforced.
+    h.reload(config_with("")).await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "session ended");
+    let removal = ("swp1".to_owned(), None, true);
+    assert_eq!(log.lock().unwrap()[1..], *std::slice::from_ref(&removal));
+
+    *outcome.lock().unwrap() = LearnedGtsmOutcome::Applied;
+    let retry = h
+        .mgr
+        .unnumbered_retry_at()
+        .expect("a failed removal is retried");
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(
+        log.lock().unwrap()[1..],
+        [removal, ("swp1".to_owned(), None, false)],
+        "retried once, then settled"
+    );
+}
+
+/// A connection the listener accepted under a GTSM selector that a reload
+/// has since turned off: it was queued with the old Hop Limit minimum, and
+/// the replacement non-GTSM session must not inherit it, or a peer sending
+/// a lower Hop Limit stalls. The minimum is cleared before the session gets
+/// the connection.
+#[tokio::test]
+async fn an_accept_queued_under_a_gtsm_selector_a_reload_turned_off_is_cleared() {
+    use tokio::io::AsyncWriteExt as _;
+    let (mut h, _log) = gtsm_harness(Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Applied)));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.reload(config_with(&port_stanza("swp1", ""))).await;
+    h.reconcile().await;
+    assert_eq!(
+        h.mgr.peers[&swp1_key(2)].transport_config.ttl_security_hops,
+        None,
+        "rebound without GTSM"
+    );
+
+    let listener = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+    let (mut client, server) = (client.unwrap(), accepted.unwrap().0);
+    // As the listener's old selector set it at accept.
+    rustbgpd_transport::set_gtsm(
+        &socket2::SockRef::from(&server),
+        addr,
+        std::num::NonZeroU8::MIN,
+    )
+    .unwrap();
+    let probe = std::net::TcpStream::from(
+        std::os::fd::AsFd::as_fd(&server)
+            .try_clone_to_owned()
+            .unwrap(),
+    );
+    let source = std::net::SocketAddrV6::new(ll(2), 50179, 0, 7);
+    h.mgr
+        .handle_inbound(server, SocketAddr::V6(source), None, None)
+        .await;
+
+    // Mutation-red: with the stale minimum kept, the client's Hop Limit 64
+    // segment is dropped and never reaches the socket. The runtime is held
+    // here, so the session cannot read it first.
+    client.write_all(b"x").await.unwrap();
+    let mut byte = [0u8; 1];
+    let delivered = (0..200).any(|_| {
+        let peeked = probe.peek(&mut byte).is_ok_and(|n| n == 1);
+        if !peeked {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        peeked
+    });
+    assert!(delivered, "a lower Hop Limit reaches the non-GTSM session");
+}
+
+/// A neighbor without `ttl_security` never touches the listener.
+#[tokio::test]
+async fn a_neighbor_without_gtsm_installs_no_selector() {
+    let log: GtsmLog = Arc::default();
+    let update: LearnedGtsmUpdate = {
+        let log = Arc::clone(&log);
+        Arc::new(move |request| {
+            let ListenerGtsmRequest::Selector {
+                interface,
+                selector,
+            } = request
+            else {
+                panic!("no Hop Limit raise without GTSM");
+            };
+            log.lock()
+                .unwrap()
+                .push((interface, selector.map(|selector| selector.address), false));
+            Box::pin(async { LearnedGtsmOutcome::Applied })
+        })
+    };
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", "", Some(update));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(log.lock().unwrap().as_slice(), []);
+}
+
+/// Listener GTSM requests: a raise of the IPv6 Hop Limit (with the number of
+/// discovery actors launched when it arrived, answered from `outcome`) or a
+/// selector update (applied).
+type RaiseLog = Arc<std::sync::Mutex<Vec<String>>>;
+
+fn raise_recorder(
+    launched: &Launched,
+    outcome: Arc<std::sync::Mutex<LearnedGtsmOutcome>>,
+) -> (LearnedGtsmUpdate, RaiseLog) {
+    let raises: RaiseLog = Arc::default();
+    let (log, launched) = (Arc::clone(&raises), Arc::clone(launched));
+    let update: LearnedGtsmUpdate = Arc::new(move |request| {
+        let ListenerGtsmRequest::Selector { interface, .. } = request else {
+            let count = launched.lock().unwrap().len();
+            log.lock().unwrap().push(format!("raise, {count} launched"));
+            let outcome = outcome.lock().unwrap().clone();
+            return Box::pin(async move { outcome });
+        };
+        log.lock().unwrap().push(format!("selector {interface}"));
+        Box::pin(async { LearnedGtsmOutcome::Applied })
+    });
+    (update, raises)
+}
+
+/// A reload that adds an interface-only GTSM neighbor raises the listener's
+/// IPv6 Hop Limit before discovery starts for it, so an RA-silent GTSM peer
+/// can complete an inbound handshake and be learned; a failed raise is
+/// retried, and a confirmed one is not repeated.
+#[tokio::test(start_paused = true)]
+async fn a_reload_that_adds_interface_only_gtsm_raises_the_listener_hop_limit() {
+    let launched: Launched = Arc::default();
+    let outcome = Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Failed(
+        "listener busy".into(),
+    )));
+    let (update, raises) = raise_recorder(&launched, Arc::clone(&outcome));
+    let mut h = harness_with(&[], &[("swp1", 7, true)], "", "", Some(update));
+    h.mgr.unnumbered = None;
+    let sink = Arc::clone(&launched);
+    h.mgr.unnumbered_runtime.spawn = Box::new(move |_, _| {
+        let (discovery, commands) = RaDiscovery::recording();
+        sink.lock().unwrap().push(commands);
+        Ok((discovery, mpsc::unbounded_channel().1))
+    });
+
+    // Mutation-red: without the raise in the port-set pass the listener
+    // keeps the default Hop Limit until an RA installs a selector.
+    h.reload(config_with(&port_stanza("swp1", "ttl_security = true\n")))
+        .await;
+    assert_eq!(
+        raises.lock().unwrap().as_slice(),
+        ["raise, 0 launched"],
+        "before discovery starts"
+    );
+    assert_eq!(
+        drain_launched(&launched)[0],
+        Command::Start("swp1".into()),
+        "a failed raise still adds the neighbor"
+    );
+
+    *outcome.lock().unwrap() = LearnedGtsmOutcome::Applied;
+    let retry = h
+        .mgr
+        .unnumbered_retry_at()
+        .expect("a failed raise is retried");
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(raises.lock().unwrap().len(), 2, "retried");
+    h.reload(config_with(&port_stanza("swp1", "ttl_security = true\n")))
+        .await;
+    assert_eq!(
+        raises.lock().unwrap().len(),
+        2,
+        "not repeated once confirmed"
+    );
+
+    // Discovery started by the reload still reaches the listener: the
+    // binding installs its selector before the peer is added.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    assert_eq!(raises.lock().unwrap()[2], "selector swp1");
+}
+
+/// A config transaction that turns on GTSM for a configured interface-only
+/// neighbor raises the listener's IPv6 Hop Limit once the stage commits,
+/// before the neighbor can bind under the committed settings.
+#[tokio::test]
+async fn a_committed_transaction_that_enables_interface_only_gtsm_raises_the_listener_hop_limit() {
+    let outcome = Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Applied));
+    let (update, raises) = raise_recorder(&Launched::default(), outcome);
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", "", Some(update));
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert!(raises.lock().unwrap().is_empty(), "no GTSM, no raise");
+    let mut candidate = h.mgr.current_config.clone();
+    candidate.neighbors = config_with(&port_stanza("swp1", "ttl_security = true\n")).neighbors;
+
+    // As `StageTransactionConfig` installs a full-scope candidate.
+    h.mgr.replace_current_config(candidate);
+    h.mgr.config_snapshot_staged = true;
+    h.reconcile().await;
+    assert!(raises.lock().unwrap().is_empty(), "held while staged");
+
+    // Mutation-red: without the raise the committed neighbor waits for an
+    // RA while its RA-silent GTSM peer's handshakes fail.
+    let (reply, committed) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::CommitConfigSnapshotStage { reply }),
+    )
+    .await;
+    committed.await.unwrap();
+    h.reconcile().await;
+    assert_eq!(raises.lock().unwrap().len(), 1, "raised at commit");
 }
 
 /// Every `peer` value exported for `interface`'s neighbor family `name`.

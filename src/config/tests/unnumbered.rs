@@ -187,8 +187,8 @@ fn interface_only_rules_are_enforced() {
             "TCP-AO",
         ),
         (
-            &format!("{SWP1}ttl_security = true\n"),
-            "GTSM (ttl_security)",
+            &format!("{SWP1}ttl_security = true\nttl_security_hops = 2\n"),
+            "ttl_security_hops must be 1",
         ),
         (
             &format!("{SWP1}fast_external_failover = false\n"),
@@ -200,6 +200,35 @@ fn interface_only_rules_are_enforced() {
         let error = rejected(extra);
         assert!(error.contains(expected), "{expected}: {error}");
     }
+}
+
+/// GTSM on an interface-only neighbor, directly or from its peer group,
+/// resolves to one hop, so active opens to the learned endpoint use TTL 255.
+#[test]
+fn interface_only_gtsm_is_accepted_at_one_hop() {
+    for extra in [
+        format!("{SWP1}ttl_security = true\n"),
+        format!("{SWP1}ttl_security = true\nttl_security_hops = 1\n"),
+        format!(
+            "\n[peer_groups.fabric]\nttl_security = true\n{}peer_group = \"fabric\"\n",
+            SWP1.trim_end_matches('\n').to_owned() + "\n"
+        ),
+    ] {
+        let config = parse(&with(&extra)).unwrap_or_else(|error| panic!("{extra}: {error}"));
+        let neighbor = &config.neighbors.interface_only()[0];
+        let resolved = config
+            .resolve_bound_interface_neighbor(neighbor, "fe80::2".parse().unwrap(), 7)
+            .unwrap();
+        assert_eq!(
+            resolved.transport_config.ttl_security_hops,
+            Some(std::num::NonZeroU8::MIN),
+            "{extra}"
+        );
+    }
+    let error = rejected(&format!(
+        "\n[peer_groups.fabric]\nttl_security = true\nttl_security_hops = 3\n{SWP1}peer_group = \"fabric\"\n"
+    ));
+    assert!(error.contains("ttl_security_hops must be 1"), "{error}");
 }
 
 #[test]
