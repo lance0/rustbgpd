@@ -638,16 +638,6 @@ impl Config {
         // reload. A learned address is never in them, so these settings would
         // be accepted and never applied; refuse them until they are wired to
         // the binding.
-        if neighbor.max_prefixes_out_ipv4_unicast.is_some()
-            || neighbor.max_prefixes_out_ipv6_unicast.is_some()
-        {
-            return Err(invalid(
-                neighbor,
-                "max_prefixes_out_ipv4_unicast",
-                "per-neighbor outbound prefix maxima are not supported on interface-only \
-                 neighbors yet; set them on the peer group",
-            ));
-        }
         if !self
             .effective_conditional_advertisements(neighbor)
             .is_empty()

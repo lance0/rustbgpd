@@ -21,10 +21,11 @@
   missing. Single-hop BFD runs on the learned endpoint, created when an
   address is bound, replaced when it changes and removed when the binding
   ends; strict mode holds BGP until BFD is Up on the current binding.
-  TCP-AO, MD5, GTSM (`ttl_security`), multihop BFD, conditional
-  advertisements, per-neighbor `log_level` and outbound prefix maxima, and
-  explicit `listen_addresses` are rejected on these neighbors (peer-group
-  outbound maxima apply). Adding, removing or editing one, or
+  Outbound prefix maxima, on the neighbor or its peer group, apply to every
+  address learned on the interface. TCP-AO, MD5, GTSM (`ttl_security`),
+  multihop BFD, conditional advertisements, per-neighbor `log_level` and
+  explicit `listen_addresses` are rejected on these neighbors. Adding,
+  removing or editing one, or
   `[global.unnumbered]`, is restart-required. Operator deletion of a
   discovery-owned peer is refused with `FAILED_PRECONDITION`.
 - `remote_asn` accepts `"external"` (any ASN except `global.asn`) and
