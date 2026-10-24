@@ -1535,12 +1535,14 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   `[global.unnumbered]` and a change to the neighbor's effective `tcp_mss`
   still take a restart. See the
   [reload matrix](reload-matrix.md#interface-only-neighbors). A runtime
-  `SetPeerGroup` that would change such a neighbor's session settings is
-  refused with `FAILED_PRECONDITION`; make that edit in the file and reload.
+  `SetPeerGroup` edit also rebinds interface-only members whose session
+  settings change; unchanged members keep their sessions.
   Inbound sessions are accepted only from the learned address.
-- **Operator removal.** The session belongs to the neighbor's configuration:
-  `rbgp neighbor <address> delete` and `DeleteNeighbor` refuse it with
-  `FAILED_PRECONDITION`. Remove the `interface` stanza and reload instead.
+- **Operator removal.** Delete the configured neighbor live, bound or unbound,
+  with `rbgp neighbor swp1 delete`, or `DeleteNeighbor` with an empty address
+  and `interface = "swp1"`. Deleting only its learned endpoint by scoped
+  address, such as `fe80::2%swp1`, is refused with `FAILED_PRECONDITION`.
+  Removing the `interface` stanza and reloading also works.
 
 ### Administrative down (`admin_down`)
 
