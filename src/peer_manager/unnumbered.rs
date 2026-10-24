@@ -14,9 +14,11 @@
 //! - Reconciliation compares the binding with the peer table. Confirmed
 //!   carrier loss or removal deletes the peer, which purges its routes. A new
 //!   address replaces the peer, under the same neighbor, only while its
-//!   session is not Established. A lost binding with the link up keeps the
-//!   peer: session liveness belongs to the hold timer, and the peer keeps
-//!   its address reserved.
+//!   session is not Established. A lost binding with the link up keeps an
+//!   Established peer (session liveness belongs to the hold timer), and keeps
+//!   a peer that is down only while the RIB retains its GR or LLGR stale
+//!   routes. Once that retention ends the peer is removed, which ends its
+//!   redial and releases the address it reserved.
 //! - Admission refuses an address that another neighbor holds
 //!   (`duplicate_link_local_address`) until the scoped RIB identity lands.
 //!   The check and the insertion run in this single owner without an
@@ -35,10 +37,12 @@ use crate::ra_discovery::{DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaDisc
 
 use super::PeerManager;
 
-/// How long reconciliation waits for a bound session to report its state.
+/// How long reconciliation waits for a bound session, or the RIB, to answer.
 const BOUND_STATE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 /// How soon a reconcile is retried after a bound session did not answer.
 const RECONCILE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// How soon retained routes with no RIB timer armed are checked again.
+const RETENTION_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The discovery actor, its events, and one entry per interface-only
 /// neighbor, by interface name.
@@ -74,10 +78,12 @@ struct Port {
     /// still have shut the session down, which reports nothing. Settled by
     /// reading the session before the binding is trusted again.
     retire_unsettled: bool,
-    /// The endpoint of a session found exited, to rebind when discovery has
-    /// no binding. Kept across retries until a replacement is installed; it
-    /// is not a discovery binding and confirmed carrier loss drops it.
-    recover: Option<Endpoint>,
+    /// The bound session was shut down, to release the address or by a late
+    /// conditional retirement. Either may follow a GR teardown, so the
+    /// stopped peer keeps the address until the RIB retains nothing from it
+    /// or a binding elsewhere is installed. A new session installed for the
+    /// peer, such as an inbound reconnect, clears it.
+    stopped_retained: bool,
 }
 
 /// State of an interface-only neighbor that belongs to the neighbor, not to
@@ -320,7 +326,14 @@ impl PeerManager {
     /// gone). An Established session is kept and reported to discovery. An
     /// unanswered command keeps the binding and retries: it may still run
     /// later, and the retry's command then finds the session gone.
-    async fn shut_down_unless_established(&mut self, name: &str, key: &PeerKey) -> bool {
+    /// `spare_handshake` also keeps an `OpenSent` or `OpenConfirm` session,
+    /// decided in the same session turn; its outcome reports itself.
+    async fn shut_down_unless_established(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        spare_handshake: bool,
+    ) -> bool {
         let Some(managed) = self.peers.get(key) else {
             return true;
         };
@@ -334,16 +347,29 @@ impl PeerManager {
             self.arm_unnumbered_retry();
             return false;
         }
-        match managed
-            .handle()
-            .shutdown_unless_established_timeout(BOUND_STATE_QUERY_TIMEOUT)
-            .await
-        {
+        let handle = managed.handle();
+        let outcome = if spare_handshake {
+            handle
+                .shutdown_unless_connected_timeout(BOUND_STATE_QUERY_TIMEOUT)
+                .await
+        } else {
+            handle
+                .shutdown_unless_established_timeout(BOUND_STATE_QUERY_TIMEOUT)
+                .await
+        };
+        match outcome {
             Ok(true)
             | Err(
                 rustbgpd_transport::PeerCommandError::SessionExited
                 | rustbgpd_transport::PeerCommandError::ReplyDropped,
             ) => true,
+            Ok(false) if spare_handshake => {
+                info!(interface = %name, peer = %key, "unnumbered: bound session is connected; keeping it");
+                // A handshake that fails in OpenSent falls back to Active,
+                // which reports nothing: check it again.
+                self.arm_unnumbered_retry();
+                false
+            }
             Ok(false) => {
                 info!(interface = %name, peer = %key, "unnumbered: bound session became Established; keeping it");
                 if let Some(unnumbered) = self.unnumbered.as_mut() {
@@ -364,9 +390,8 @@ impl PeerManager {
     /// Whether an unanswered retirement ended the bound session since: the
     /// read queues behind that command, so it settles the outcome. `false`
     /// with nothing unsettled, and on a `lost` link, which ends the session
-    /// unconditionally without reading it (it may never answer) or recovering
-    /// its endpoint (the index is gone). `None` (retry armed) when still
-    /// unanswered.
+    /// unconditionally without reading it (it may never answer). `None`
+    /// (retry armed) when still unanswered.
     async fn settle_retirement(&mut self, name: &str, peer: &PeerKey, lost: bool) -> Option<bool> {
         if lost || !self.port_mut(name).retire_unsettled {
             return Some(false);
@@ -397,13 +422,16 @@ impl PeerManager {
         self.unnumbered.as_ref()?.retry_at
     }
 
-    /// Reconcile again after [`RECONCILE_RETRY`]; an armed deadline is kept,
-    /// which bounds the retry rate.
+    /// Reconcile again after [`RECONCILE_RETRY`]; an earlier armed deadline
+    /// is kept, which bounds the retry rate.
     fn arm_unnumbered_retry(&mut self) {
+        self.arm_unnumbered_retry_at(tokio::time::Instant::now() + RECONCILE_RETRY);
+    }
+
+    /// Reconcile again by `at`, or at the earlier deadline already armed.
+    fn arm_unnumbered_retry_at(&mut self, at: tokio::time::Instant) {
         if let Some(unnumbered) = self.unnumbered.as_mut() {
-            unnumbered
-                .retry_at
-                .get_or_insert_with(|| tokio::time::Instant::now() + RECONCILE_RETRY);
+            unnumbered.retry_at = Some(unnumbered.retry_at.map_or(at, |armed| armed.min(at)));
         }
     }
 
@@ -437,6 +465,17 @@ impl PeerManager {
                     .is_some_and(|bound| bound.address == address && bound != peer)
                     .then_some(name.as_str())
             })
+    }
+
+    /// Whether `peer` is an interface-only neighbor's stopped peer, whose
+    /// session task has exited while its address waits on retention.
+    pub(super) fn unnumbered_stopped(&self, peer: &PeerKey) -> bool {
+        self.unnumbered.as_ref().is_some_and(|unnumbered| {
+            unnumbered
+                .ports
+                .values()
+                .any(|port| port.stopped_retained && port.bound.as_ref() == Some(peer))
+        })
     }
 
     /// Every live binding: its interface, learned address and the index its
@@ -590,14 +629,11 @@ impl PeerManager {
         let link_down = matches!(port.link, Some((_, LinkState::Down | LinkState::Removed)));
         let current_ifindex = port.link.map(|(ifindex, _)| ifindex);
         let (bound, established) = (port.bound.clone(), port.established);
-        if link_down {
-            port.recover = None;
-        }
         // A binding learned on an older index of a recreated interface is
         // stale: the link monitor may report the recreation as Up then Up.
-        let current = |endpoint: &Endpoint| current_ifindex.is_none_or(|i| i == endpoint.ifindex);
-        let recover = port.recover.filter(current);
-        let mut desired = port.desired.filter(current).or(recover);
+        let desired = port
+            .desired
+            .filter(|endpoint| current_ifindex.is_none_or(|i| i == endpoint.ifindex));
 
         if let Some(key) = bound {
             let bound_scope = self
@@ -607,30 +643,41 @@ impl PeerManager {
             // Level-triggered: the bound peer's scope against the interface's
             // index now. A mismatch means the interface it ran on is gone.
             let recreated = current_ifindex.is_some_and(|ifindex| bound_scope != Some(ifindex));
-            // A session that an unanswered retirement ended is replaced, at
-            // the same endpoint when the binding no longer points elsewhere.
-            let Some(exited) = self
-                .settle_retirement(name, &key, link_down || recreated)
-                .await
-            else {
+            // A session that an unanswered retirement ended is a stopped
+            // peer: it may have failed with GR before its late shutdown ran.
+            // A binding elsewhere replaces it, purging that retention; with
+            // none, its address waits on the retention.
+            let lost = link_down || recreated;
+            let Some(exited) = self.settle_retirement(name, &key, lost).await else {
                 return;
             };
-            // Kept even when discovery points elsewhere: that binding may
-            // expire before a deferred replacement is installed.
-            if exited && let (IpAddr::V6(address), Some(ifindex)) = (key.address, bound_scope) {
-                let endpoint = Endpoint { address, ifindex };
-                self.port_mut(name).recover = Some(endpoint);
-                desired = desired.or(Some(endpoint));
+            if exited && !lost {
+                self.port_mut(name).stopped_retained = true;
+            }
+            if !lost && !self.confirm_still_stopped(name, &key).await {
+                return;
             }
             let same_endpoint = desired.is_some_and(|endpoint| {
                 key.address == IpAddr::V6(endpoint.address) && bound_scope == Some(endpoint.ifindex)
             });
+            // A stopped peer is no session to keep at a returning binding.
+            let stopped = self.port_mut(name).stopped_retained && desired.is_some();
+            // Its replacement binds from `current_config`, so a staged
+            // transaction defers it: keep the stopped peer, and the retention
+            // its replacement would purge, until the stage clears. A binding
+            // that expires meanwhile leaves it to the retention.
+            if stopped && !lost && self.defer_unnumbered_while_staged() {
+                return;
+            }
             // A lost binding keeps the peer; a new one never displaces an
             // Established session; confirmed carrier loss or interface
             // recreation always ends it.
-            let gone = link_down || recreated || exited;
+            let gone = lost || stopped;
             let keep = !gone && (desired.is_none() || same_endpoint || established);
             if keep {
+                if desired.is_none() && !established {
+                    self.release_unless_retained(name, key).await;
+                }
                 return;
             }
             // Replacing the endpoint binds from `current_config`; wait out a
@@ -639,29 +686,14 @@ impl PeerManager {
                 return;
             }
             // Level-triggered check of what the edge events claimed.
-            if !gone {
-                match self.bound_session_established(&key).await {
-                    Some(true) => {
-                        if let Some(unnumbered) = self.unnumbered.as_mut() {
-                            unnumbered.discovery.session_established(name);
-                        }
-                        self.port_mut(name).established = true;
-                        return;
-                    }
-                    // No answer: keep the session, claim nothing to
-                    // discovery, and ask again shortly.
-                    None => {
-                        self.arm_unnumbered_retry();
-                        return;
-                    }
-                    Some(false) => {}
-                }
+            if !gone && !self.bound_session_down(name, &key).await {
+                return;
             }
             let reason = if link_down {
                 "link_down"
             } else if recreated {
                 "interface_recreated"
-            } else if exited {
+            } else if stopped {
                 "session_exited"
             } else {
                 "peer_address_changed"
@@ -702,6 +734,167 @@ impl PeerManager {
         }
     }
 
+    /// Whether the bound session is down, read from the session itself. An
+    /// Established session is recorded and reported to discovery. No answer
+    /// keeps it, claims nothing to discovery, and asks again shortly.
+    async fn bound_session_down(&mut self, name: &str, key: &PeerKey) -> bool {
+        match self.bound_session_established(key).await {
+            Some(true) => {
+                if let Some(unnumbered) = self.unnumbered.as_mut() {
+                    unnumbered.discovery.session_established(name);
+                }
+                self.port_mut(name).established = true;
+                false
+            }
+            None => {
+                self.arm_unnumbered_retry();
+                false
+            }
+            Some(false) => true,
+        }
+    }
+
+    /// ADR-0142: an unbound neighbor whose session is down keeps its last
+    /// address reserved only while the RIB retains GR or LLGR stale routes
+    /// from it. Once that retention ends, by a purge or its timers, the peer
+    /// is removed: the redial ends and the address is released. Retained, it
+    /// is checked again at the RIB's next timer, which sweeps the routes or
+    /// promotes them to LLGR.
+    async fn release_unless_retained(&mut self, name: &str, key: PeerKey) {
+        if !self.port_mut(name).stopped_retained {
+            if !self.bound_session_quiet(name, &key).await {
+                return;
+            }
+            // The session answered the read only after sending its
+            // teardown's GR or PeerDown to the RIB, so this query, queued
+            // behind it, sees the retention that teardown left.
+            if self.retained_until_next_check(name, &key).await {
+                return;
+            }
+            if !self.shut_down_unless_established(name, &key, true).await {
+                return;
+            }
+            // The session may have established and failed with GR between
+            // the check and the shutdown; the second query, queued behind
+            // that teardown, sees it.
+            self.port_mut(name).stopped_retained = true;
+        }
+        if self.retained_until_next_check(name, &key).await {
+            return;
+        }
+        self.retire_bound_peer(name, key, "binding_expired", false)
+            .await;
+    }
+
+    /// Whether the bound session has no connection past TCP: Idle, Connect,
+    /// Active or gone. An Established session is recorded and reported to
+    /// discovery. An `OpenSent` or `OpenConfirm` session is a live router mid-
+    /// handshake, such as an inbound connection learned without an RA; its
+    /// outcome reports itself. No answer retries shortly.
+    async fn bound_session_quiet(&mut self, name: &str, key: &PeerKey) -> bool {
+        let Some(managed) = self.peers.get(key) else {
+            return true;
+        };
+        match managed
+            .handle()
+            .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
+            .await
+        {
+            rustbgpd_transport::StateQueryOutcome::State(state) => match state.fsm_state {
+                SessionState::Established => {
+                    if let Some(unnumbered) = self.unnumbered.as_mut() {
+                        unnumbered.discovery.session_established(name);
+                    }
+                    self.port_mut(name).established = true;
+                    false
+                }
+                // A handshake that fails in OpenSent falls back to Active,
+                // which reports nothing: check it again.
+                SessionState::OpenSent | SessionState::OpenConfirm => {
+                    self.arm_unnumbered_retry();
+                    false
+                }
+                _ => true,
+            },
+            rustbgpd_transport::StateQueryOutcome::SessionGone => true,
+            rustbgpd_transport::StateQueryOutcome::TimedOut => {
+                self.arm_unnumbered_retry();
+                false
+            }
+        }
+    }
+
+    /// A stopped peer stays stopped until a new session is installed for
+    /// it, such as an inbound reconnect: a session that answers clears the
+    /// mark, and the ordinary checks then apply to it. `false` (retry
+    /// armed) when the session did not answer.
+    async fn confirm_still_stopped(&mut self, name: &str, key: &PeerKey) -> bool {
+        if !self.port_mut(name).stopped_retained {
+            return true;
+        }
+        let Some(managed) = self.peers.get(key) else {
+            return true;
+        };
+        match managed
+            .handle()
+            .query_state_outcome(BOUND_STATE_QUERY_TIMEOUT)
+            .await
+        {
+            rustbgpd_transport::StateQueryOutcome::State(_) => {
+                self.port_mut(name).stopped_retained = false;
+                true
+            }
+            rustbgpd_transport::StateQueryOutcome::SessionGone => true,
+            rustbgpd_transport::StateQueryOutcome::TimedOut => {
+                self.arm_unnumbered_retry();
+                false
+            }
+        }
+    }
+
+    /// Whether the RIB still retains the bound peer's GR or LLGR routes.
+    /// Retained, the next check is armed at the RIB's next timer, which
+    /// sweeps them or promotes them to LLGR; no answer retries shortly.
+    async fn retained_until_next_check(&mut self, name: &str, key: &PeerKey) -> bool {
+        let Some(retention) = self.bound_peer_retention(key).await else {
+            self.arm_unnumbered_retry();
+            return true;
+        };
+        if retention.stale_routes == 0 {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        let at = retention
+            .next_deadline
+            .unwrap_or(now + RETENTION_RECHECK)
+            .max(now + RECONCILE_RETRY);
+        debug!(interface = %name, peer = %key, stale_routes = retention.stale_routes, "unnumbered: unbound neighbor keeps its address while its routes are retained");
+        self.arm_unnumbered_retry_at(at);
+        true
+    }
+
+    /// The RIB's GR/LLGR retention for the bound peer's identity; `None`
+    /// when the RIB did not answer in time.
+    pub(super) async fn bound_peer_retention(
+        &mut self,
+        key: &PeerKey,
+    ) -> Option<rustbgpd_rib::PeerRetention> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let request = rustbgpd_rib::RibUpdate::QueryPeerRetention {
+            peer: self.rib_peer_of(key),
+            reply,
+        };
+        let rib_tx = self.rib_tx.clone();
+        let round_trip = tokio::time::timeout(BOUND_STATE_QUERY_TIMEOUT, async move {
+            rib_tx.send(request).await.ok()?;
+            response.await.ok()
+        });
+        self.await_with_readiness(round_trip, super::OperatorReadAdmission::Served)
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// End the bound peer's session and clear the binding, keeping the
     /// neighbor's operator and safety state for its next endpoint. `false`
     /// when the peer could not be removed; the binding is then unchanged.
@@ -717,7 +910,7 @@ impl PeerManager {
         reason: &str,
         unless_established: bool,
     ) -> bool {
-        if unless_established && !self.shut_down_unless_established(name, &key).await {
+        if unless_established && !self.shut_down_unless_established(name, &key, false).await {
             return false;
         }
         info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
@@ -755,6 +948,7 @@ impl PeerManager {
         port.bound = None;
         port.established = false;
         port.retire_unsettled = false;
+        port.stopped_retained = false;
         port.held = Some(held);
         // The retired session's queued reports have been drained by
         // now; an Established among them must not outlive it.
@@ -1031,7 +1225,6 @@ impl PeerManager {
         let port = self.port_mut(name);
         port.rib_peer = port.rib_peer.or(Some(rib_peer));
         port.bound = Some(key);
-        port.recover = None;
         Ok(())
     }
 }

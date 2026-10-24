@@ -3890,6 +3890,27 @@ impl RibManager {
         });
         let _ = reply.send(retained);
     }
+    /// ADR-0142: the peer's retained stale routes and its earliest GR or
+    /// LLGR deadline. Keyed lookups only, never a route scan.
+    pub(super) fn handle_query_peer_retention(
+        &mut self,
+        peer: PeerId,
+        reply: tokio::sync::oneshot::Sender<crate::update::PeerRetention>,
+    ) {
+        let stale_routes = self.ribs.get(&peer).map_or(0, |rib| {
+            usize::try_from(rib.retained_stale_count()).unwrap_or(usize::MAX)
+        });
+        let next_deadline = rustbgpd_wire::CONFIGURED_FAMILIES
+            .iter()
+            .filter_map(|&(_, afi, safi)| self.llgr_stale_deadlines.get(&(peer, afi, safi)))
+            .chain(self.gr_stale_deadlines.get(&peer))
+            .copied()
+            .min();
+        let _ = reply.send(crate::update::PeerRetention {
+            stale_routes,
+            next_deadline,
+        });
+    }
     pub(super) fn handle_query_bmp_peer_stats(
         &mut self,
         reply: tokio::sync::oneshot::Sender<crate::update::BmpPeerStats>,

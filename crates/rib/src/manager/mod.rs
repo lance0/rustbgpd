@@ -4514,6 +4514,9 @@ impl RibManager {
             RibUpdate::QueryPeerRetainedStale { peer, reply } => {
                 self.handle_query_peer_retained_stale(peer, reply);
             }
+            RibUpdate::QueryPeerRetention { peer, reply } => {
+                self.handle_query_peer_retention(peer, reply);
+            }
             RibUpdate::QueryNeighborPolicyStats { peer, reply } => {
                 self.handle_query_neighbor_policy_stats(peer, reply);
             }
