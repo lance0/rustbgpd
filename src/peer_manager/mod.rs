@@ -138,6 +138,39 @@ mod unnumbered {
             Ok(())
         }
         pub(super) fn release_generation_hold(&mut self) {}
+        pub(super) async fn apply_interface_only_policy_deltas(
+            &mut self,
+            _: &crate::config::Config,
+        ) -> Result<
+            Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>,
+            super::policy::PolicySnapshotFailure,
+        > {
+            Ok(Vec::new())
+        }
+        pub(super) async fn restore_interface_only_policies(
+            &mut self,
+            _: Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>,
+        ) -> bool {
+            true
+        }
+        pub(super) fn add_interface_only_neighbor(
+            &mut self,
+            _: Box<rustbgpd_api::peer_types::PresenceAwareNeighborCreate>,
+        ) -> Result<(), rustbgpd_api::peer_types::PeerLifecycleError> {
+            Err(rustbgpd_api::peer_types::PeerLifecycleError::Invalid(
+                "interface-only neighbors need Linux".to_string(),
+            ))
+        }
+        pub(super) fn delete_interface_only_neighbor(
+            &mut self,
+            interface: &str,
+        ) -> Result<(), rustbgpd_api::peer_types::PeerLifecycleError> {
+            Err(
+                rustbgpd_api::peer_types::PeerLifecycleError::InterfaceOnlyNotFound(
+                    interface.to_owned(),
+                ),
+            )
+        }
         pub(super) fn unbound_interface_only_infos(
             &self,
         ) -> Vec<rustbgpd_api::peer_types::PeerInfo> {
@@ -1724,6 +1757,14 @@ impl PeerManager {
                             ),
                         }
                     }
+                    OwnedNeighborMutation::DeleteInterfaceOnly(interface) => {
+                        match self.delete_interface_only_neighbor(&interface) {
+                            Ok(()) => OwnedNeighborMutationOutcome::Success,
+                            Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                OwnedNeighborMutationError::Peer(error),
+                            ),
+                        }
+                    }
                     OwnedNeighborMutation::DynamicAdd {
                         prefix,
                         peer_group,
@@ -1766,10 +1807,9 @@ impl PeerManager {
                         };
                         if self.peer_group_policy_only_update(&name, &definition) {
                             self.apply_policy_change_owned(event, None).await
-                        } else if let Err(error) = self.refuse_interface_only_session_change(&event)
-                        {
-                            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
                         } else {
+                            // Static members are reshaped here; interface-only
+                            // members rebind on the port reconcile that follows.
                             let affected = self.peer_group_member_keys(&name);
                             self.apply_peer_group_change_owned(event, affected).await
                         }
@@ -2042,7 +2082,7 @@ impl PeerManager {
                         OperatorReadAdmission::Served,
                     )
                     .await
-                    .map_err(|failure| failure.message);
+                    .map_err(policy::PolicySnapshotFailure::into_apply_error);
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ApplyPolicyImpactSnapshot {
@@ -2517,9 +2557,9 @@ impl PeerManager {
                 };
                 let result = if self.peer_group_policy_only_update(&name, &definition) {
                     self.apply_policy_change(event, None).await
-                } else if let Err(error) = self.refuse_interface_only_session_change(&event) {
-                    Err(error)
                 } else {
+                    // Static members are reshaped here; interface-only members
+                    // rebind on the port reconcile that follows.
                     let affected = self.peer_group_member_keys(&name);
                     self.apply_peer_group_change(event, affected).await
                 };

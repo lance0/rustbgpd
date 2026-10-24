@@ -1387,6 +1387,7 @@ fn take_config_event_ack(event: &mut ConfigEvent) -> Option<ConfigPersistAck> {
         | ConfigEvent::NeighborAdded { ack, .. }
         | ConfigEvent::PresenceAwareNeighborAdded { ack, .. }
         | ConfigEvent::NeighborDeleted { ack, .. }
+        | ConfigEvent::InterfaceOnlyNeighborDeleted { ack, .. }
         | ConfigEvent::DynamicNeighborAdded { ack, .. }
         | ConfigEvent::DynamicNeighborDeleted { ack, .. }
         | ConfigEvent::ConfigTransactionCommitted { ack, .. }

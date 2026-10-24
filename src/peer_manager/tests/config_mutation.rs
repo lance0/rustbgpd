@@ -19,7 +19,7 @@ async fn runtime_create_rejects_an_omitted_listen_family_before_mutation() {
         Some(vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
     let before = mgr.current_config.neighbors.clone();
     let spec = rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
-        address: "2001:db8::2".parse().unwrap(),
+        address: Some("2001:db8::2".parse().unwrap()),
         interface: None,
         remote_asn: 65002,
         remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
@@ -75,7 +75,7 @@ async fn runtime_create_keeps_the_remote_asn_mode() {
             None,
         );
         let spec = rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
-            address: "10.0.0.9".parse().unwrap(),
+            address: Some("10.0.0.9".parse().unwrap()),
             interface: None,
             remote_asn: 0,
             remote_asn_mode: mode,

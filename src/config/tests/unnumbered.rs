@@ -762,6 +762,22 @@ fn a_restart_only_global_edit_is_no_interface_only_change_in_the_diff() {
     );
 }
 
+/// No interface name holds whitespace: a padded or spaced name is rejected
+/// for an interface-only and for a static link-local neighbor, as the
+/// selectors that trim would never reach it.
+#[test]
+fn an_interface_name_with_whitespace_is_rejected() {
+    for interface in [" swp1", "swp1 ", "sw p1"] {
+        let error = rejected(&SWP1.replace("\"swp1\"", &format!("{interface:?}")));
+        assert!(error.contains("whitespace"), "{interface:?}: {error}");
+    }
+    // Mutation-red: only an empty name was refused.
+    let error = rejected(
+        "[[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth 0\"\nremote_asn = 65002\n",
+    );
+    assert!(error.contains("whitespace"), "{error}");
+}
+
 /// Counts the events a filter lets through.
 struct EventCount(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 

@@ -620,7 +620,10 @@ impl PeerManager {
         spec: Box<PresenceAwareNeighborCreate>,
         mut failure_effect: Option<&mut RuntimeCreatePeerFailureEffect>,
     ) -> Result<(), PeerLifecycleError> {
-        let peer = PeerKey::new(spec.address, spec.interface.clone());
+        let Some(address) = spec.address else {
+            return self.add_interface_only_neighbor(spec);
+        };
+        let peer = PeerKey::new(address, spec.interface.clone());
         if self.peers.contains_key(&peer) {
             return Err(PeerLifecycleError::AlreadyExists(peer));
         }
@@ -659,6 +662,10 @@ impl PeerManager {
                  for md5_password/ttl_security, or restart for tcp_mss"
             )));
         }
+        // ADR-0142: a static link-local add is refused before any effect
+        // when a learned endpoint holds its address, bound or reserved.
+        self.unnumbered_preflight(&next_config)
+            .map_err(PeerLifecycleError::Precondition)?;
 
         let previous_config = self.replace_current_config(next_config);
         match self.add_peer(config, false).await {
@@ -963,10 +970,9 @@ impl PeerManager {
         // ADR-0142: discovery owns an interface-only neighbor's peer; deleting
         // it here would only leave discovery bound to a session that is gone.
         if let Some(interface) = self.unnumbered_owner_of(&peer) {
-            return Err(PeerLifecycleError::RestartRequired(format!(
-                "peer {peer} belongs to the interface-only neighbor on {interface}; remove its \
-                 `[[neighbors]] interface = \"{interface}\"` stanza from the configuration and \
-                 restart rustbgpd"
+            return Err(PeerLifecycleError::Precondition(format!(
+                "peer {peer} belongs to the interface-only neighbor on {interface}; delete that \
+                 neighbor by its interface (empty address, interface \"{interface}\")"
             )));
         }
         if self.peers.get(&peer).is_some_and(|managed| {

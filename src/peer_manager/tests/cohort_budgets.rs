@@ -1361,6 +1361,15 @@ async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
         "{}",
         failure.message
     );
+    // The transaction reply keeps the classification across the actor
+    // boundary (mutation-red: flattening it reports every failure clean).
+    assert_eq!(
+        matches!(
+            failure.into_apply_error(),
+            rustbgpd_api::peer_types::PolicySnapshotApplyError::CompensationAmbiguous(_)
+        ),
+        reject_first_restore
+    );
     for peer in [first, second] {
         let restored = manager.peers.get(&key(peer)).unwrap();
         assert_eq!(

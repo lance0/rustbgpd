@@ -5945,11 +5945,12 @@ async fn dataset_generation_long_export_keeps_clean_state_retry_window() {
     proxy.await.unwrap();
 }
 
-/// Runtime `SetPeerGroup` on a group a bound interface-only peer uses: an
-/// edit that changes its session settings is refused before any effect, and
-/// a policy-only edit reaches the bound session in place.
+/// Runtime `SetPeerGroup` on a group a bound interface-only peer uses: a
+/// policy-only edit reaches the bound session in place, and an edit that
+/// changes its session settings is accepted on both catalog paths; the port
+/// reconcile rebinds the member (`a_peer_group_rpc_rebinds_only_the_changed_members`).
 #[tokio::test]
-async fn set_peer_group_refuses_session_edits_and_applies_policy_to_a_bound_peer() {
+async fn set_peer_group_accepts_session_edits_and_applies_policy_to_a_bound_peer() {
     let fixture = RsFixture::new();
     fixture.write_toml(&format!(
         "{}\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
@@ -5964,36 +5965,47 @@ async fn set_peer_group_refuses_session_edits_and_applies_policy_to_a_bound_peer
     let group = crate::policy_admin::config_peer_group_to_api(
         &harness.mgr.current_config.peer_groups["members"],
     );
-    let before = harness.mgr.current_config.clone();
 
-    // Session knob and policy together. Mutation-red: without the refusal
-    // the group commits and the bound peer keeps its old settings.
-    let mut mixed = group.clone();
-    mixed.hold_time = Some(60);
-    mixed.export_policy_chain = vec!["alt".to_string()];
+    // Policy only: applies to the bound peer live, without a flap.
+    let mut policy_only = group.clone();
+    policy_only.export_policy_chain = vec!["alt".to_string()];
     let (reply, outcome) = oneshot::channel();
     let _ = Box::pin(
         harness
             .mgr
             .dispatch_command(PeerManagerCommand::SetPeerGroup {
                 name: "members".to_string(),
-                definition: mixed,
+                definition: policy_only.clone(),
                 reply,
             }),
     )
     .await;
-    let error = outcome.await.unwrap().expect_err("refused");
-    assert!(
-        matches!(error, CatalogMutationError::RestartRequired(_)),
-        "{error:?}"
-    );
-    assert!(harness.mgr.current_config == before, "no effect");
-    assert_eq!(harness.export_med_of(&bound), Some(10));
+    outcome.await.unwrap().expect("policy-only edit applies");
+    assert_eq!(harness.mgr.peers[&bound].session_id(), session, "no flap");
+    assert_eq!(harness.export_med_of(&bound), Some(30));
 
-    // The owned catalog path refuses it the same way.
-    let mut mixed = group.clone();
-    mixed.hold_time = Some(60);
-    mixed.export_policy_chain = vec!["alt".to_string()];
+    // A session knob. Mutation-red: with the old refusal both paths reject.
+    let mut session_edit = policy_only.clone();
+    session_edit.hold_time = Some(60);
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        harness
+            .mgr
+            .dispatch_command(PeerManagerCommand::SetPeerGroup {
+                name: "members".to_string(),
+                definition: session_edit,
+                reply,
+            }),
+    )
+    .await;
+    outcome.await.unwrap().expect("session edit accepted");
+    assert_eq!(
+        harness.mgr.current_config.peer_groups["members"].hold_time,
+        Some(60)
+    );
+
+    let mut session_edit = policy_only;
+    session_edit.hold_time = Some(45);
     let (reply, outcome) = oneshot::channel();
     let _ = Box::pin(
         harness
@@ -6001,7 +6013,7 @@ async fn set_peer_group_refuses_session_edits_and_applies_policy_to_a_bound_peer
             .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
                 mutation: rustbgpd_api::peer_types::OwnedCatalogMutation::SetPeerGroup {
                     name: "members".to_string(),
-                    definition: Box::new(mixed),
+                    definition: Box::new(session_edit),
                 },
                 reply,
             }),
@@ -6011,30 +6023,13 @@ async fn set_peer_group_refuses_session_edits_and_applies_policy_to_a_bound_peer
     assert!(
         matches!(
             outcome,
-            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::RejectedNoEffect(
-                CatalogMutationError::RestartRequired(_)
-            )
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
         ),
         "{outcome:?}"
     );
-    assert!(harness.mgr.current_config == before, "no effect");
-
-    // Policy only: applies to the bound peer live, without a flap.
-    let mut policy_only = group;
-    policy_only.export_policy_chain = vec!["alt".to_string()];
-    let (reply, outcome) = oneshot::channel();
-    let _ = Box::pin(
-        harness
-            .mgr
-            .dispatch_command(PeerManagerCommand::SetPeerGroup {
-                name: "members".to_string(),
-                definition: policy_only,
-                reply,
-            }),
-    )
-    .await;
-    outcome.await.unwrap().expect("policy-only edit applies");
-    assert_eq!(harness.mgr.peers[&bound].session_id(), session, "no flap");
-    assert_eq!(harness.export_med_of(&bound), Some(30));
+    assert_eq!(
+        harness.mgr.current_config.peer_groups["members"].hold_time,
+        Some(45)
+    );
     harness.shutdown().await;
 }
