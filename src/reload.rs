@@ -2701,7 +2701,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     let admission_hold = Arc::new(());
     if !matches!(route, config::SighupReloadRoute::Rejected { .. })
         && let Some(internal_tx) = peer_mgr_internal_tx
-        && unnumbered_preflight_needed(current, &new_config)
+        && unnumbered_preflight_needed(&new_config)
         && let Some(outcome) =
             unnumbered_reload_preflight(internal_tx, &new_config, &admission_hold).await
     {
@@ -4482,27 +4482,17 @@ impl GenerationSideEffects<'_> {
 }
 
 /// Whether the peer manager's ADR-0142 preflight has anything to check in
-/// a reload from `current` to `candidate`: it adds the first interface-only
-/// neighbor (`CAP_NET_RAW` and the link monitor), or a static link-local
-/// neighbor (the shared-address check).
-fn unnumbered_preflight_needed(current: &Config, candidate: &Config) -> bool {
-    let link_local = |neighbor: &&config::Neighbor| {
-        matches!(
-            neighbor.address.parse(),
-            Ok(std::net::IpAddr::V6(address)) if address.is_unicast_link_local()
-        )
-    };
-    (current.neighbors.interface_only().is_empty()
-        && !candidate.neighbors.interface_only().is_empty())
+/// a reload to `candidate`: a neighbor with an interface, interface-only or
+/// static link-local, which needs `CAP_NET_RAW` and the link monitor if it is
+/// the first interface-only one, or may share its address with a live
+/// endpoint. Any edit can change what such neighbors may share (a feature on
+/// the neighbor or its peer group), so an unchanged neighbor counts too.
+fn unnumbered_preflight_needed(candidate: &Config) -> bool {
+    !candidate.neighbors.interface_only().is_empty()
         || candidate
             .neighbors
             .iter()
-            .filter(link_local)
-            .any(|neighbor| {
-                !current.neighbors.iter().any(|running| {
-                    running.address == neighbor.address && running.interface == neighbor.interface
-                })
-            })
+            .any(|neighbor| neighbor.interface.is_some())
 }
 
 /// ADR-0142: the peer manager accepts the candidate before either
@@ -9579,94 +9569,106 @@ import_policy_chain = ["origin-guard"]
         std::fs::remove_file(&path).ok();
     }
 
-    /// The ADR-0142 preflight also precedes the sequential route: a static
-    /// link-local add that a learned endpoint holds, beside an MD5 change on
-    /// another neighbor (which keeps the sequential route), is refused before
-    /// the listener authentication swap or any peer mutation.
+    /// The ADR-0142 preflight also precedes the sequential route, which an
+    /// MD5 change keeps: a static link-local add a learned endpoint holds,
+    /// beside an MD5 change on another neighbor, and MD5 enabled on a static
+    /// link-local neighbor that was already running, which may share its
+    /// address with a learned one, are both refused before the listener
+    /// authentication swap or any peer mutation.
     #[tokio::test]
     async fn sequential_reload_refuses_a_duplicate_link_local_add_before_listener_auth() {
-        let current = load_config_from_toml("seq-preflight-prior", baseline_toml());
-        let desired = load_config_from_toml(
-            "seq-preflight-desired",
-            &format!(
-                "{}\n[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"lo\"\nremote_asn = 65003\n",
-                baseline_toml().replace(
-                    "hold_time = 90",
-                    "hold_time = 90\nmd5_password = \"secret\""
-                )
+        let link_local =
+            "\n[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"lo\"\nremote_asn = 65003\n";
+        let md5 = |toml: &str, after: &str| {
+            toml.replace(after, &format!("{after}\nmd5_password = \"secret\""))
+        };
+        let with_link_local = format!("{}{link_local}", baseline_toml());
+        // Mutation-red: with the preflight only for an added static
+        // neighbor, the second case swaps listener authentication first.
+        for (prior, desired) in [
+            (
+                baseline_toml().to_string(),
+                md5(&with_link_local, "hold_time = 90"),
             ),
-        );
-        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(8);
-        let peer_task = tokio::spawn(async move {
-            let mut tags = Vec::new();
-            while let Some(command) = peer_rx.recv().await {
-                tags.push(cmd_tag(&command));
-            }
-            tags
-        });
-        let (internal_tx, generation) = spawn_generation_mock(
-            vec![GenerationReply::PreflightRejected(
-                "duplicate_link_local_address: neighbor fe80::2%lo uses fe80::2, which the \
+            (
+                with_link_local.clone(),
+                md5(&with_link_local, "remote_asn = 65003"),
+            ),
+        ] {
+            let current = load_config_from_toml("seq-preflight-prior", &prior);
+            let desired = load_config_from_toml("seq-preflight-desired", &desired);
+            let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(8);
+            let peer_task = tokio::spawn(async move {
+                let mut tags = Vec::new();
+                while let Some(command) = peer_rx.recv().await {
+                    tags.push(cmd_tag(&command));
+                }
+                tags
+            });
+            let (internal_tx, generation) = spawn_generation_mock(
+                vec![GenerationReply::PreflightRejected(
+                    "duplicate_link_local_address: neighbor fe80::2%lo uses fe80::2, which the \
                  interface-only neighbor on swp1 holds",
-            )],
-            None,
-        );
-        let (accept_tx, _accept_rx) = mpsc::channel(1);
-        let listener =
-            rustbgpd_transport::BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
-                .await
-                .unwrap();
-        let handle = listener.tcp_ao_rotation_handle();
-        let listener_task = tokio::spawn(listener.run());
-        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            reload_config_with_tcp_ao_recorded(
-                SighupReloadPlan {
-                    baseline_runtime: current,
-                    desired: AcceptedConfigSnapshot::from_config_for_test(desired),
-                },
+                )],
                 None,
-                None,
-                &peer_tx,
-                Some(&internal_tx),
-                None,
-                None,
-                None,
-                Some(&handle),
-                None,
-                Some(Arc::clone(&trace)),
-            ),
-        )
-        .await
-        .expect("the reload settles");
-        drop(internal_tx);
-        drop(peer_tx);
-        assert!(generation.await.unwrap().is_empty(), "no generation");
-        listener_task.abort();
-        let _ = listener_task.await;
-        let tags = peer_task.await.unwrap();
-        // Mutation-red: with the preflight on the generation route only, the
-        // sequential route swaps listener authentication first.
-        assert!(
-            matches!(
-                &outcome,
-                SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
-                    if failure.bucket == "unnumbered.preflight"
-                        && failure.error.to_string().contains("duplicate_link_local_address")
-            ),
-            "{outcome:?}"
-        );
-        assert!(tags.is_empty(), "no peer mutation: {tags:?}");
-        let trace = trace.lock().unwrap();
-        assert!(
-            !trace
-                .applied
-                .iter()
-                .any(|effect| effect.bucket == "listener_auth.apply"),
-            "listener authentication unchanged"
-        );
-        assert!(trace.applied.is_empty(), "no effect at all");
+            );
+            let (accept_tx, _accept_rx) = mpsc::channel(1);
+            let listener =
+                rustbgpd_transport::BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+                    .await
+                    .unwrap();
+            let handle = listener.tcp_ao_rotation_handle();
+            let listener_task = tokio::spawn(listener.run());
+            let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reload_config_with_tcp_ao_recorded(
+                    SighupReloadPlan {
+                        baseline_runtime: current,
+                        desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                    },
+                    None,
+                    None,
+                    &peer_tx,
+                    Some(&internal_tx),
+                    None,
+                    None,
+                    None,
+                    Some(&handle),
+                    None,
+                    Some(Arc::clone(&trace)),
+                ),
+            )
+            .await
+            .expect("the reload settles");
+            drop(internal_tx);
+            drop(peer_tx);
+            assert!(generation.await.unwrap().is_empty(), "no generation");
+            listener_task.abort();
+            let _ = listener_task.await;
+            let tags = peer_task.await.unwrap();
+            // Mutation-red: with the preflight on the generation route only, the
+            // sequential route swaps listener authentication first.
+            assert!(
+                matches!(
+                    &outcome,
+                    SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
+                        if failure.bucket == "unnumbered.preflight"
+                            && failure.error.to_string().contains("duplicate_link_local_address")
+                ),
+                "{outcome:?}"
+            );
+            assert!(tags.is_empty(), "no peer mutation: {tags:?}");
+            let trace = trace.lock().unwrap();
+            assert!(
+                !trace
+                    .applied
+                    .iter()
+                    .any(|effect| effect.bucket == "listener_auth.apply"),
+                "listener authentication unchanged"
+            );
+            assert!(trace.applied.is_empty(), "no effect at all");
+        }
     }
 
     /// The generation route never writes: a read-only config directory

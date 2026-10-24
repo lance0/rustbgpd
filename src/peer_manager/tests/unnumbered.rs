@@ -995,6 +995,44 @@ async fn a_reload_enabling_bfd_on_a_shared_address_is_refused_with_no_effect() {
     assert_eq!(h.peers_at(ll(2)).len(), 2);
 }
 
+/// Every reload route runs the preflight, the sequential one included, so a
+/// change giving neighbors that share a link-local address a feature keyed by
+/// the bare address is refused before the route's first effect: TCP MD5 on a
+/// static neighbor already beside a learned one, or a static neighbor with
+/// BFD added beside it.
+#[tokio::test]
+async fn the_route_preflight_refuses_an_address_keyed_feature_on_a_shared_address() {
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", STATIC_PLAIN_NEIGHBOR);
+    let mut static_peer = make_config(IpAddr::V6(ll(2)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)).len(), 2, "the pair shares fe80::2");
+
+    let mut md5 = h.mgr.current_config.clone();
+    eth9_record(&mut md5).md5_password = Some("secret".into());
+    let mut bfd = h.mgr.current_config.clone();
+    bfd.neighbors.push(
+        toml::from_str::<crate::config::Neighbor>(
+            "address = \"fe80::2\"\ninterface = \"lo\"\nremote_asn = 65003\n\
+             bfd = { profile = \"fast\" }\n",
+        )
+        .unwrap(),
+    );
+    for (feature, candidate) in [("MD5", md5), ("BFD", bfd)] {
+        let route = Arc::new(());
+        // Mutation-red: grouping only the live endpoints passes the BFD add,
+        // whose static neighbor is not yet in the table.
+        let error = h
+            .mgr
+            .preflight_reload_generation(&candidate, Arc::downgrade(&route))
+            .unwrap_err();
+        assert!(error.contains(feature), "{feature}: {error}");
+        assert_eq!(h.peers_at(ll(2)).len(), 2, "{feature}");
+    }
+}
+
 /// A learned address refused for a static neighbor's BFD binds once a
 /// reload removes that BFD: the configuration swap rechecks refused ports.
 #[tokio::test]
