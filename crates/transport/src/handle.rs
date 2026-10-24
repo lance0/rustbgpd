@@ -412,6 +412,25 @@ impl SessionNotificationReceiver {
     }
 }
 
+/// The `peer` span a session runs in. An interface-only neighbor also
+/// records `peer = interface:<name>`, its stable label, so a per-neighbor
+/// log level keyed by that label applies whatever address the neighbor
+/// binds; for other neighbors the field stays empty and is not logged.
+#[must_use]
+pub fn peer_session_span(config: &TransportConfig) -> tracing::Span {
+    let span = tracing::info_span!(
+        "peer",
+        peer_addr = %config.remote_addr.ip(),
+        remote_asn = config.peer.remote_asn,
+        peer_group = %config.peer_group.as_deref().unwrap_or_default(),
+        peer = tracing::field::Empty,
+    );
+    if config.interface_only {
+        span.record("peer", tracing::field::display(config.peer_label()));
+    }
+    span
+}
+
 /// Create the intentionally unbounded lossless session-notification lane.
 #[must_use]
 pub fn session_notification_channel(
@@ -1555,10 +1574,7 @@ impl PeerHandle {
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let (import_publication, import_policy_counters) = watch::channel(None);
-        let peer_addr = config.remote_addr.ip();
-        let remote_asn = config.peer.remote_asn;
-        let peer_group = config.peer_group.clone().unwrap_or_default();
-        let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
+        let span = peer_session_span(&config);
         let task = tokio::spawn(
             async move {
                 let mut session = PeerSession::new_at_tcp_ao_generation(
@@ -1732,10 +1748,7 @@ impl PeerHandle {
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let (import_publication, import_policy_counters) = watch::channel(None);
-        let peer_addr = config.remote_addr.ip();
-        let remote_asn = config.peer.remote_asn;
-        let peer_group = config.peer_group.clone().unwrap_or_default();
-        let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
+        let span = peer_session_span(&config);
         let task = tokio::spawn(
             async move {
                 let mut session = PeerSession::new_inbound_with_identity_and_lifecycle(

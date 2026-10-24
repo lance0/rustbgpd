@@ -284,7 +284,7 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `remove_private_as` | live | Applied to every outbound advertisement; the next distribution pass picks up the new value. |
 | `discard_path_attributes` | live (purge session reset) | Effective-list changes purge-reset the primary and any inbound collision candidate before rebuilding the static peer. Ordinary GR retention is bypassed: Cease/4 is sent normally, or RFC 8538 Cease/9 wraps Administrative Reset when Notification GR is negotiated. Previously accepted routes disappear before the replacement session can relearn them. None and an explicit empty list are effective-equivalent. |
 | `add_path` | live (effective next session) | RFC 7911 Add-Path send/receive modes and experimental Paths-Limit `receive_max` are negotiated in OPEN. On SIGHUP the reconciler rebuilds the session immediately; a lowered receive cap starts with fresh path accounting on the replacement session. |
-| `log_level` | live | Per-peer tracing filter, re-applied on SIGHUP via the tracing [`reload`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/reload/index.html) handle: the reload rebuilds the full `EnvFilter` (the `RUST_LOG` base level plus every per-peer directive) and swaps it into the running subscriber, so a level edit takes effect without a restart. The global base level stays restart-required (read once from `RUST_LOG`). |
+| `log_level` | live | Per-peer tracing filter, re-applied on SIGHUP via the tracing [`reload`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/reload/index.html) handle: the reload rebuilds the full `EnvFilter` (the `RUST_LOG` base level plus every per-peer directive) and swaps it into the running subscriber without a restart. The filter matches a session's span when the span is created, so an edit applies to sessions that start or rebind after the reload, not to a session already running; any reload also drops a running session's existing override until that session restarts. The global base level stays restart-required (read once from `RUST_LOG`). |
 | `import_policy` | live | Inline import statements; re-evaluated against all received routes on reconcile. When `[global] ebgp_requires_policy` is on, an edit that moves this direction between explicit policy and the ADR-0112 reserved deny is a *policy-presence transition*: every affected peer is qualified for Route Refresh before any peer is modified, and one Established peer without the capability — or one down peer whose GR/LLGR stale routes the RIB still holds — rejects the whole edit with nothing mutated. |
 | `export_policy` | live | Inline export statements; re-evaluated against the Adj-RIB-Out on next distribution. |
 | `import_policy_chain` | live | Named-chain reference; same re-evaluation behavior, including the policy-presence qualification above. |
@@ -296,10 +296,14 @@ that rebuild sessions still require fresh scope resolution during planning.
 
 An `[[neighbors]]` entry with `interface` and no `address`
 ([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)) is keyed by
-its interface. SIGHUP and config transactions add, delete and edit these
-neighbors without a restart. A SIGHUP carries the change as one owned
-generation; a candidate that would take the sequential route is rejected.
-A transaction stages the full candidate, and nothing happens until the commit.
+its interface. SIGHUP, config transactions and the neighbor and peer-group
+RPCs add, delete and edit these neighbors without a restart. A SIGHUP carries
+the change as one owned generation; a candidate that would take the
+sequential route is rejected. A transaction stages the full candidate, and
+nothing happens until the commit. `AddNeighbor` and `DeleteNeighbor` select
+the neighbor by an empty address and its `interface`, and a `SetPeerGroup`
+edit reaches its members as a reload does (see the
+[API reference](api.md#interface-only-neighbors)).
 
 The peer manager then brings each interface's state in line with the running
 configuration:
@@ -307,7 +311,7 @@ configuration:
 | Change | Effect |
 |---|---|
 | Neighbor added | Discovery starts on the interface. Adding the first interface-only neighbor also starts the discovery actor. A peer is created once an address is learned, as at startup. |
-| Neighbor deleted | Its session ends, its Adj-RIB-In (including retained Graceful Restart and LLGR routes) is purged, and its RIB identity is released. This also releases the learned address it held or reserved, so another neighbor may take that address. Discovery stops on the interface, after a final Router Advertisement with lifetime 0 when it was advertising. Deleting the last interface-only neighbor stops the discovery actor and closes its raw sockets. |
+| Neighbor deleted | Its session ends, its Adj-RIB-In (including retained Graceful Restart and LLGR routes) is purged, and its RIB identity is released. This also releases the learned address it held or reserved, so another neighbor may take that address. Discovery stops on the interface, after a final Router Advertisement with lifetime 0 when it was advertising, and its `peer="interface:<name>"` metric series, including `bgp_unnumbered_*`, are removed, bound or not. Deleting the last interface-only neighbor stops the discovery actor and closes its raw sockets. |
 | Session settings edited, directly or through the peer group (`remote_asn`, including `"external"`/`"internal"`, `peer_group` membership, timers, families, `admin_down`, max-prefix settings, `description`, and so on) | A bound peer is rebound at once to the same learned address under the new settings, including an address learned from an inbound connection. This resets the session and keeps the neighbor's RIB identity and a max-prefix shutdown. A changed `admin_down` takes effect; otherwise an operator's enable or disable is kept, as for a static neighbor. An unbound neighbor uses the new settings when it next binds. `rustbgpd --diff` counts the neighbor as a session reset. |
 | `ttl_security`, directly or through the peer group | A session-settings edit, rebound as above. When the change gives an interface-only neighbor GTSM, the IPv6 listener's outbound Hop Limit is raised to 255 before the neighbor can bind, so an RA-silent GTSM peer that dials in is learned. It is never lowered. A deleted or rebound neighbor's listener selector is removed after its peer. |
 | Policy-only edit (`import_policy*`, `export_policy*`, policy definitions) | Live, as for a static neighbor; the session is kept. A config transaction applies it to the bound peer through the live-policy executor, which restores the prior chains if persistence fails. |
@@ -329,6 +333,8 @@ A SIGHUP checks them before its first effect, including an outbound prefix
 maximum or listener authentication change, and discovery cannot bind the
 added static address until the reload has applied. A config transaction
 checks them when it plans and again when it stages the snapshot.
+`AddNeighbor` checks them before it changes the running configuration and
+returns `FAILED_PRECONDITION`.
 
 `[global.unnumbered]` stays restart-required (see `[global]`).
 
@@ -422,7 +428,7 @@ static neighbors.
 | `remove_private_as` | live | |
 | `discard_path_attributes` | live (purge session reset) | Inherited by route-server clients. Static inheritors are purged and rebuilt. Enabled accepted dynamic inheritors are purge-reset in every collision generation and re-accept under the committed group value; a signaling failure is surfaced rather than reported as a clean replacement. Disabled/down dynamic peers take the value on their next accepted connection. |
 | `add_path` | live (effective next session) | |
-| `log_level` | live | Same as neighbor — inherited per-peer tracing filter, re-applied on SIGHUP via the tracing reload handle. |
+| `log_level` | live | Same as neighbor — inherited per-peer tracing filter, re-applied on SIGHUP via the tracing reload handle; it reaches sessions that start or rebind after the reload, not a session already running. |
 | `import_policy` | live | Inline import statements inherited by peers that do not set their own import policy / chain. |
 | `export_policy` | live | Inline export statements inherited by peers that do not set their own export policy / chain. |
 | `import_policy_chain` | live | Named-chain reference inherited by peers that do not set their own import policy / chain; inheriting peers take the same ADR-0112 policy-presence qualification. |

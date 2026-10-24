@@ -348,6 +348,16 @@ pub enum PeerLifecycleError {
     /// Operation requires daemon/session reconstruction outside this hot path
     /// (gRPC callers map to `FAILED_PRECONDITION`).
     RestartRequired(String),
+    /// A precondition outside the request is not met, such as a missing
+    /// host capability or an address another neighbor holds; nothing changed
+    /// (gRPC callers map to `FAILED_PRECONDITION`).
+    Precondition(String),
+    /// An interface-only neighbor (ADR-0142) is already configured on this
+    /// interface (gRPC callers map to `ALREADY_EXISTS`).
+    InterfaceOnlyExists(String),
+    /// No interface-only neighbor is configured on this interface (gRPC
+    /// callers map to `NOT_FOUND`).
+    InterfaceOnlyNotFound(String),
     /// Session, RIB, restore, or internal snapshot failure (gRPC callers map
     /// to `INTERNAL`).
     Internal(String),
@@ -364,9 +374,19 @@ impl std::fmt::Display for PeerLifecycleError {
         match self {
             Self::AlreadyExists(peer) => write!(f, "peer {peer} already exists"),
             Self::NotFound(peer) => write!(f, "peer {peer} not found"),
-            Self::Invalid(message) | Self::RestartRequired(message) | Self::Internal(message) => {
-                f.write_str(message)
+            Self::InterfaceOnlyExists(interface) => {
+                write!(
+                    f,
+                    "an interface-only neighbor on {interface} already exists"
+                )
             }
+            Self::InterfaceOnlyNotFound(interface) => {
+                write!(f, "no interface-only neighbor on {interface}")
+            }
+            Self::Invalid(message)
+            | Self::RestartRequired(message)
+            | Self::Precondition(message)
+            | Self::Internal(message) => f.write_str(message),
         }
     }
 }
@@ -471,12 +491,16 @@ impl std::error::Error for CatalogMutationError {}
 impl From<PeerLifecycleError> for CatalogMutationError {
     fn from(error: PeerLifecycleError) -> Self {
         match error {
-            PeerLifecycleError::RestartRequired(message) => Self::RestartRequired(message),
+            PeerLifecycleError::RestartRequired(message)
+            | PeerLifecycleError::Precondition(message) => Self::RestartRequired(message),
             PeerLifecycleError::NotFound(peer) => Self::NotFound(format!("peer {peer} not found")),
-            PeerLifecycleError::Invalid(message) => Self::Invalid(message),
-            error @ (PeerLifecycleError::AlreadyExists(_) | PeerLifecycleError::Internal(_)) => {
-                Self::Internal(error.to_string())
+            error @ PeerLifecycleError::InterfaceOnlyNotFound(_) => {
+                Self::NotFound(error.to_string())
             }
+            PeerLifecycleError::Invalid(message) => Self::Invalid(message),
+            error @ (PeerLifecycleError::AlreadyExists(_)
+            | PeerLifecycleError::InterfaceOnlyExists(_)
+            | PeerLifecycleError::Internal(_)) => Self::Internal(error.to_string()),
         }
     }
 }
@@ -678,6 +702,27 @@ pub struct ResolvedPeerPolicy {
     pub import_policy: Option<PolicyChain>,
     /// Resolved export chain to apply (`None` clears the peer's export policy).
     pub export_policy: Option<PolicyChain>,
+}
+
+/// A failed [`PeerManagerCommand::ApplyResolvedPolicySnapshot`] or
+/// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`], classified by what it
+/// left on the live sessions, so the caller can settle without parsing text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicySnapshotApplyError {
+    /// No session effect remains: rejected before any effect, or every peer
+    /// already changed was restored.
+    NoEffect(String),
+    /// A restore of a peer already changed failed: a live session may still
+    /// run the requested chains.
+    CompensationAmbiguous(String),
+}
+
+impl std::fmt::Display for PolicySnapshotApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoEffect(message) | Self::CompensationAmbiguous(message) => f.write_str(message),
+        }
+    }
 }
 
 /// Reply payload of [`PeerManagerCommand::RuntimeConfigSnapshot`]: the
@@ -986,7 +1031,7 @@ pub enum PeerManagerCommand {
         /// Resolved chains to apply, one entry per concrete live peer.
         targets: Vec<ResolvedPeerPolicy>,
         /// Reply returns the captured prior chains (the rollback token).
-        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
+        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError>>,
     },
     /// Apply resolved import/export policy chains for a live-impact
     /// transaction that may include static neighbors and dynamic ranges.
@@ -1003,7 +1048,7 @@ pub enum PeerManagerCommand {
         /// Dynamic-range selectors to expand against live dynamic peers.
         dynamic_ranges: Vec<DynamicRangeTarget>,
         /// Reply returns the captured prior chains (the rollback token).
-        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
+        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError>>,
     },
     /// Gracefully reset the live dynamic sessions accepted by the given
     /// `[[dynamic_neighbors]]` ranges so they re-accept under the committed
@@ -1581,6 +1626,9 @@ pub enum PeerManagerCommand {
 pub enum OwnedNeighborMutation {
     Add(Box<PresenceAwareNeighborCreate>),
     Delete(PeerKey),
+    /// Delete the interface-only neighbor (ADR-0142) configured on this
+    /// interface, bound or not.
+    DeleteInterfaceOnly(String),
     /// Add a dynamic-neighbor range.
     DynamicAdd {
         /// IP prefix range.
@@ -2106,9 +2154,11 @@ pub struct NeighborCreateAddPath {
 /// Raw, presence-preserving runtime neighbor-create intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresenceAwareNeighborCreate {
-    /// Remote peer IP address.
-    pub address: IpAddr,
-    /// Optional interface for an IPv6 link-local peer.
+    /// Remote peer IP address; `None` for an interface-only neighbor
+    /// (ADR-0142), which `interface` identifies and discovery binds.
+    pub address: Option<IpAddr>,
+    /// Interface of an IPv6 link-local peer, or of an interface-only
+    /// neighbor.
     pub interface: Option<String>,
     /// Remote autonomous system number; 0 with a non-numeric mode.
     pub remote_asn: u32,
@@ -2498,6 +2548,14 @@ pub enum ConfigEvent {
     NeighborDeleted {
         /// Peer identity that was deleted.
         peer: PeerKey,
+        /// Optional persistence acknowledgement (see `NeighborAdded`).
+        ack: Option<ConfigPersistAck>,
+    },
+    /// The interface-only neighbor (ADR-0142) on `interface` was deleted at
+    /// runtime.
+    InterfaceOnlyNeighborDeleted {
+        /// Interface whose `[[neighbors]] interface = ...` stanza was removed.
+        interface: String,
         /// Optional persistence acknowledgement (see `NeighborAdded`).
         ack: Option<ConfigPersistAck>,
     },

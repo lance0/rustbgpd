@@ -279,10 +279,13 @@ mod tests {
     /// `per_peer_log_directives` emits, against the exact
     /// `info_span!("peer", peer_addr=...)` span the transport layer creates
     /// — so this pins the string format that actually flips a real span.
+    /// Every emit creates a fresh span, so this covers spans created after
+    /// a reload only: `EnvFilter` matches span fields at span creation, and
+    /// a span that outlives a reload keeps no per-peer override.
     /// (The unbracketed `peer{...}=level` form does NOT parse — that latent
     /// boot-abort bug is exactly what this test would have caught.)
     #[test]
-    fn per_peer_directive_reload_flips_span_level_and_keeps_base() {
+    fn per_peer_directive_reload_flips_new_span_level_and_keeps_base() {
         let base = EnvFilter::new("info");
         let (filter_layer, handle) = reload::Layer::new(base);
         let count = Arc::new(AtomicUsize::new(0));
