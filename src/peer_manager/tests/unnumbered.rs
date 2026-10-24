@@ -412,7 +412,7 @@ async fn retention_left_after_the_check() -> (
                         SessionState::Active,
                     ));
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => {
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => {
                     *flip.lock().unwrap() = PeerRetention {
                         stale_routes: 3,
                         next_deadline: Some(deadline),
@@ -522,7 +522,7 @@ async fn a_late_release_shutdown_after_a_gr_teardown_keeps_the_retention() {
                         SessionState::Active,
                     ));
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => {
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => {
                     if let Some(released) = released.take() {
                         let _ = released.await;
                     }
@@ -635,10 +635,10 @@ async fn a_handshake_that_starts_during_the_retention_query_is_kept() {
                     let _ = reply.send(policy_test_peer_state(IpAddr::V6(ll(2)), now));
                     continue;
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     (reply, now == SessionState::Established)
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => (
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => (
                     reply,
                     matches!(
                         now,
@@ -697,7 +697,7 @@ async fn a_handshake_that_fails_after_the_state_read_releases_the_address() {
                 PeerCommand::QueryState { reply } => {
                     let _ = reply.send(policy_test_peer_state(IpAddr::V6(ll(2)), now));
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => {
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => {
                     let quiet = !matches!(
                         now,
                         SessionState::OpenSent
@@ -2338,7 +2338,7 @@ fn establishes_after_its_state_query(
                     let _ = reply.send(policy_test_peer_state(peer_addr, state));
                     state = SessionState::Established;
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     let shut_down = state != SessionState::Established;
                     let _ = reply.send(shut_down);
                     if shut_down {
@@ -2454,7 +2454,7 @@ fn retirement_answered_after_release(
                 PeerCommand::QueryState { reply } => {
                     let _ = reply.send(policy_test_peer_state(peer_addr, SessionState::Active));
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     if let Some(release) = release.take() {
                         let _ = release.await;
                     }

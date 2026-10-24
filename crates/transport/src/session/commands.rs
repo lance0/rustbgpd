@@ -1388,14 +1388,25 @@ impl PeerSession {
                 self.handle_check_links().await;
                 ControlFlow::Continue(())
             }
-            PeerCommand::ShutdownUnlessEstablished { reply }
-            | PeerCommand::ShutdownUnlessConnected { reply }
+            // The guard claims the ticket. A caller whose wait ended has
+            // withdrawn it, so a late command does nothing; once claimed, the
+            // arms below decide and reply in this turn.
+            PeerCommand::ShutdownUnlessEstablished { ticket, .. }
+            | PeerCommand::ShutdownUnlessConnected { ticket, .. }
+            | PeerCommand::CollisionDumpUnlessEstablished { ticket, .. }
+                if !ticket.claim() =>
+            {
+                info!(peer = %self.peer_label, "conditional retirement withdrawn by its caller; ignoring it");
+                ControlFlow::Continue(())
+            }
+            PeerCommand::ShutdownUnlessEstablished { reply, .. }
+            | PeerCommand::ShutdownUnlessConnected { reply, .. }
                 if self.fsm.state() == SessionState::Established =>
             {
                 let _ = reply.send(false);
                 ControlFlow::Continue(())
             }
-            PeerCommand::ShutdownUnlessConnected { reply }
+            PeerCommand::ShutdownUnlessConnected { reply, .. }
                 if matches!(
                     self.fsm.state(),
                     SessionState::OpenSent | SessionState::OpenConfirm
@@ -1404,8 +1415,8 @@ impl PeerSession {
                 let _ = reply.send(false);
                 ControlFlow::Continue(())
             }
-            PeerCommand::ShutdownUnlessEstablished { reply }
-            | PeerCommand::ShutdownUnlessConnected { reply } => {
+            PeerCommand::ShutdownUnlessEstablished { reply, .. }
+            | PeerCommand::ShutdownUnlessConnected { reply, .. } => {
                 // Shutdown's own path for a session that is not Established,
                 // decided in this turn: nothing further is read, so the
                 // session cannot reach Established after the check.
@@ -1882,43 +1893,56 @@ impl PeerSession {
                 let _ = reply.send(self.claim_collision_promotion());
                 ControlFlow::Continue(())
             }
-            PeerCommand::CollisionDump => {
-                self.stop_requested = true;
-                self.reconnect_timer = None;
-                // Send Cease/7 NOTIFICATION
-                let notif = rustbgpd_wire::NotificationMessage::new(
-                    NotificationCode::Cease,
-                    cease_subcode::CONNECTION_COLLISION_RESOLUTION,
-                    bytes::Bytes::new(),
-                );
-                self.log_notification(SessionNotificationDirection::Sent, &notif, None);
-                self.session_telemetry_metric_lease.latch_down_reason(
-                    rustbgpd_telemetry::reason_labels::SessionDownReason::LocalNotification,
-                );
-                self.emit_notification_event(SessionNotificationDirection::Sent, &notif, None);
-                let _ = self.enqueue_priority(&Message::Notification(notif));
-                self.config.neighbor_counters.record_notification_sent();
-                self.metrics.record_notification_sent(
-                    &self.peer_label,
-                    &NotificationCode::Cease.as_u8().to_string(),
-                    &cease_subcode::CONNECTION_COLLISION_RESOLUTION.to_string(),
-                );
-                // Clean up RIB if Established
-                if self.fsm.state() == SessionState::Established {
-                    self.session_telemetry_metric_lease.record_down();
-                    let _ = self
-                        .rib_tx
-                        .send(RibUpdate::PeerDown {
-                            peer: self.rib_peer(),
-                            session_id: self.session_identity.id,
-                        })
-                        .await;
-                }
-                self.close_tcp();
-                self.timers.stop_all();
-                ControlFlow::Break(())
+            PeerCommand::CollisionDumpUnlessEstablished { reply, .. }
+                if self.fsm.state() == SessionState::Established =>
+            {
+                let _ = reply.send(false);
+                ControlFlow::Continue(())
             }
+            PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
+                let _ = reply.send(true);
+                self.collision_dump().await
+            }
+            PeerCommand::CollisionDump => self.collision_dump().await,
         }
+    }
+
+    /// Send Cease/7 (Connection Collision Resolution) and tear down.
+    async fn collision_dump(&mut self) -> ControlFlow<()> {
+        self.stop_requested = true;
+        self.reconnect_timer = None;
+        // Send Cease/7 NOTIFICATION
+        let notif = rustbgpd_wire::NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::CONNECTION_COLLISION_RESOLUTION,
+            bytes::Bytes::new(),
+        );
+        self.log_notification(SessionNotificationDirection::Sent, &notif, None);
+        self.session_telemetry_metric_lease.latch_down_reason(
+            rustbgpd_telemetry::reason_labels::SessionDownReason::LocalNotification,
+        );
+        self.emit_notification_event(SessionNotificationDirection::Sent, &notif, None);
+        let _ = self.enqueue_priority(&Message::Notification(notif));
+        self.config.neighbor_counters.record_notification_sent();
+        self.metrics.record_notification_sent(
+            &self.peer_label,
+            &NotificationCode::Cease.as_u8().to_string(),
+            &cease_subcode::CONNECTION_COLLISION_RESOLUTION.to_string(),
+        );
+        // Clean up RIB if Established
+        if self.fsm.state() == SessionState::Established {
+            self.session_telemetry_metric_lease.record_down();
+            let _ = self
+                .rib_tx
+                .send(RibUpdate::PeerDown {
+                    peer: self.rib_peer(),
+                    session_id: self.session_identity.id,
+                })
+                .await;
+        }
+        self.close_tcp();
+        self.timers.stop_all();
+        ControlFlow::Break(())
     }
 
     /// Re-derive the statement-level trace for one resolved explain
