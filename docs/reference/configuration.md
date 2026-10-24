@@ -1442,8 +1442,14 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   restart hold-down expires or the neighbor is enabled.
 - **One per interface.** Each interface has at most one interface-only
   neighbor, and none if it already has a static link-local neighbor.
+- **BFD.** Single-hop BFD (`bfd = { profile = "..." }`, own or inherited) runs
+  on the learned endpoint: binding an address creates the session to it on
+  the interface, a new address or a recreated interface replaces it, and
+  losing the binding removes it. There is no session before a binding. With
+  `strict = true` the BGP session is held until BFD is Up on the current
+  binding; a BFD down tears it down as for any neighbor.
 - **Rejected** on an interface-only neighbor, directly or through its peer
-  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), BFD,
+  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), `bfd.multihop`,
   `fast_external_failover = false`, `conditional_advertisements`,
   `log_level`, and explicit `[global] listen_addresses`; and on the neighbor
   itself, `max_prefixes_out_ipv4_unicast` and `max_prefixes_out_ipv6_unicast`
