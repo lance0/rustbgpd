@@ -492,6 +492,22 @@ jobs:
           topology: tests/interop/m53c-same-address-frr.clab.yml
           script: tests/interop/scripts/test-m53c-same-address-frr.sh
 
+  m53d:
+    needs: [prime_dev_image]
+    name: M53d — interface-only neighbors sharing one learned address on two links (FRR 10.7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+        id: dataplane
+      - name: Run M53d (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M53d
+          topology: tests/interop/m53d-interface-only-shared-address-frr.clab.yml
+          script: tests/interop/scripts/test-m53d-interface-only-shared-address-frr.sh
+
   m51:
     needs: [prime_dev_image]
     name: M51 — ADR-0067 single-hop BFD + RFC 5882 coupling (FRR 10.7.1)
@@ -1122,14 +1138,14 @@ jobs:
     if: ${{ always() }}
     needs: [classify_changes, bird3_archive, prime_dev_image, m36,
       m37, m37-ip, m38, m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42, m50, m52,
-      m58, m53, m53b, m53c, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
+      m58, m53, m53b, m53c, m53d, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, m121, m123, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
         classify_changes bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
-        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m53b m53c m51 m108 m43 m47
+        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m53b m53c m53d m51 m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 m121 m123 netns
     steps:
       - name: Aggregate required Kernel Dataplane result

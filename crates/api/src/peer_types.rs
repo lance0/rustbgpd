@@ -2893,6 +2893,10 @@ pub struct PeerInfo {
     /// configured duration. Clears when the queue drains and on session
     /// teardown.
     pub slow_peer: bool,
+    /// The neighbor's session reports nothing to BMP: another BMP-monitored
+    /// neighbor held its address when it was admitted, and every collector
+    /// sets `on_identity_conflict = "exclude"` (ADR-0142).
+    pub bmp_identity_excluded: bool,
     /// ADR-0112 RFC 8212 explicit-policy status for the import direction,
     /// read from the chain installed on this peer.
     pub rfc8212_import_policy: Rfc8212PolicyStatus,

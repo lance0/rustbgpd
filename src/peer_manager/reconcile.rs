@@ -320,8 +320,8 @@ impl PeerManager {
     }
 
     /// The v1 section classification, plus the ADR-0142 preflight: the first
-    /// interface-only neighbor needs `CAP_NET_RAW`, and a static link-local
-    /// add must not take a learned endpoint's address. A refusal is an
+    /// interface-only neighbor needs `CAP_NET_RAW`, and neighbors that would
+    /// share a link-local address must be able to. A refusal is an
     /// unsupported section, so the plan is rejected before any effect.
     fn classify_config_transaction(
         &self,

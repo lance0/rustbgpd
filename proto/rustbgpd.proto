@@ -903,6 +903,10 @@ message NeighborState {
   // Interface-only neighbor discovery state; UNSPECIFIED for every other
   // neighbor.
   NeighborDiscoveryState discovery_state = 67;
+  // The session reports nothing to BMP: another BMP-monitored neighbor held
+  // its link-local address when it was admitted, and every collector sets
+  // on_identity_conflict = "exclude". Kept for the life of the session.
+  bool bmp_identity_excluded = 68;
 }
 
 // Stale routes one family of a neighbor still holds for GR or LLGR.

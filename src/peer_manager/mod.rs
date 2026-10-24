@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::ControlFlow;
@@ -100,15 +100,12 @@ mod unnumbered {
             _: rustbgpd_fsm::SessionState,
         ) {
         }
-        pub(super) fn note_peer_removed(&mut self) {}
+        pub(super) fn recheck_refused_bindings(&mut self) {}
         pub(super) fn note_unnumbered_session_idle(&mut self, _: &PeerKey) {}
         pub(super) fn unnumbered_retry_at(&self) -> Option<tokio::time::Instant> {
             None
         }
         pub(super) fn unnumbered_retry_due(&mut self) {}
-        pub(super) fn unnumbered_holder_of(&self, _: IpAddr, _: &PeerKey) -> Option<&str> {
-            None
-        }
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
@@ -130,8 +127,11 @@ mod unnumbered {
         pub(super) fn unnumbered_bound_peer(&self, _: &str) -> Option<PeerKey> {
             None
         }
-        pub(super) fn unnumbered_preflight(&self, _: &crate::config::Config) -> Result<(), String> {
-            Ok(())
+        pub(super) fn unnumbered_preflight(
+            &self,
+            candidate: &crate::config::Config,
+        ) -> Result<(), String> {
+            self.validate_live_shared_addresses(candidate)
         }
         pub(super) fn preflight_reload_generation(
             &mut self,
@@ -610,6 +610,10 @@ pub struct PeerManager {
     /// config reconciliation until explicit enable or one configured restart
     /// attempt reaches its deadline; a failed attempt remains latched down.
     max_prefix_latches: HashMap<PeerKey, MaxPrefixLatch>,
+    /// Neighbors admitted at an address another neighbor holds while every
+    /// BMP collector is set to `on_identity_conflict = "exclude"`: their
+    /// sessions report nothing to BMP. Kept until the neighbor's peer goes.
+    pub(super) bmp_excluded: BTreeSet<PeerKey>,
     /// Cached earliest deadline, recomputed only when latch state mutates so
     /// ordinary actor traffic does not scan every disabled peer.
     next_max_prefix_restart_deadline: Option<tokio::time::Instant>,
@@ -1384,6 +1388,7 @@ impl PeerManager {
             configured_owners: configured_owners::ConfiguredOwners::new(&current_config),
             dampening_control_failed: false,
             max_prefix_latches: HashMap::new(),
+            bmp_excluded: BTreeSet::new(),
             next_max_prefix_restart_deadline: None,
             next_max_prefix_latch_generation: 1,
             retiring_sessions: HashMap::new(),
@@ -1650,8 +1655,155 @@ impl PeerManager {
             .then(|| CatalogMutationError::NotFound(format!("neighbor {key} not found")))
     }
 
-    /// Whether any managed neighbor uses `address`: every neighbor on a
-    /// link-local address that several interfaces share counts.
+    /// The configured BMP collectors' combined choice for a neighbor at an
+    /// address another neighbor holds, `None` without collectors. Configured
+    /// collectors decide, connected or not, so a collector reconnecting
+    /// never changes admission.
+    pub(super) fn bmp_identity_conflict(&self) -> Option<crate::config::BmpIdentityConflict> {
+        self.current_config.bmp_identity_conflict()
+    }
+
+    /// The other managed neighbors at `peer`'s address. Only a link-local
+    /// address can be shared, so a numbered peer never searches the table.
+    pub(super) fn peers_sharing_address(&self, peer: &PeerKey) -> Vec<PeerKey> {
+        if !matches!(peer.address, IpAddr::V6(v6) if v6.is_unicast_link_local()) {
+            return Vec::new();
+        }
+        self.peers
+            .keys()
+            .filter(|key| key.address == peer.address && *key != peer)
+            .cloned()
+            .collect()
+    }
+
+    /// Why a neighbor at `peer` cannot share its link-local address with the
+    /// neighbors the table holds or `view` configures there: a feature keyed
+    /// by the bare address (BFD, TCP MD5, TCP-AO, a differing GTSM policy or
+    /// log level). `None` when it can, or when no other neighbor is there.
+    pub(super) fn shared_address_feature_conflict(
+        &self,
+        peer: &PeerKey,
+        view: &crate::config::Config,
+    ) -> Option<String> {
+        if !matches!(peer.address, IpAddr::V6(v6) if v6.is_unicast_link_local()) {
+            return None;
+        }
+        let mut keys = self.peers_sharing_address(peer);
+        let address = peer.address.to_string();
+        for neighbor in &view.neighbors {
+            if neighbor.address == address {
+                let key = PeerKey::new(peer.address, neighbor.interface.clone());
+                if key != *peer && !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+        if keys.is_empty() {
+            return None;
+        }
+        let records: Vec<_> = keys
+            .iter()
+            .chain(std::iter::once(peer))
+            .filter_map(|key| view.neighbor_record(key))
+            .collect();
+        if records.len() < 2 {
+            return None;
+        }
+        let records: Vec<&crate::config::Neighbor> =
+            records.iter().map(std::borrow::Cow::as_ref).collect();
+        view.validate_shared_address_features(&records)
+            .err()
+            .map(|error| error.to_string())
+    }
+
+    /// Refuse a candidate configuration under which the neighbors at one
+    /// link-local address, the live endpoints there plus the candidate's
+    /// static neighbors, could not share it: a new static neighbor beside a
+    /// live one while a BMP collector refuses identity conflicts
+    /// (`bmp_identity_conflict`), or a feature keyed by the bare address,
+    /// such as a reload enabling BFD on a static neighbor beside a learned
+    /// one. Checked before any effect, on every reload and transaction route.
+    pub(super) fn validate_live_shared_addresses(
+        &self,
+        candidate: &crate::config::Config,
+    ) -> Result<(), String> {
+        let link_local =
+            |address: &IpAddr| matches!(address, IpAddr::V6(v6) if v6.is_unicast_link_local());
+        let mut by_address: BTreeMap<IpAddr, BTreeSet<PeerKey>> = BTreeMap::new();
+        for key in self.peers.keys().filter(|key| link_local(&key.address)) {
+            by_address
+                .entry(key.address)
+                .or_default()
+                .insert(key.clone());
+        }
+        for neighbor in &candidate.neighbors {
+            if let Ok(address) = neighbor.address.parse::<IpAddr>()
+                && link_local(&address)
+            {
+                by_address
+                    .entry(address)
+                    .or_default()
+                    .insert(PeerKey::new(address, neighbor.interface.clone()));
+            }
+        }
+        let refuse =
+            self.bmp_identity_conflict() == Some(crate::config::BmpIdentityConflict::Refuse);
+        for keys in by_address.values().filter(|keys| keys.len() > 1) {
+            // Configuration validation refuses two static neighbors at one
+            // address under a refusing collector, so the new one meets a
+            // live endpoint here.
+            if refuse
+                && let Some(new) = keys.iter().find(|key| !self.peers.contains_key(key))
+                && let Some(holder) = keys.iter().find(|key| self.peers.contains_key(key))
+            {
+                return Err(format!(
+                    "bmp_identity_conflict: neighbor {new} uses {}, which {holder} holds, \
+                     and BMP collectors cannot tell the two sessions apart",
+                    new.address
+                ));
+            }
+            let records: Vec<_> = keys
+                .iter()
+                .filter_map(|key| candidate.neighbor_record(key))
+                .collect();
+            if records.len() < 2 {
+                continue;
+            }
+            let records: Vec<&crate::config::Neighbor> =
+                records.iter().map(std::borrow::Cow::as_ref).collect();
+            candidate
+                .validate_shared_address_features(&records)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Of the neighbors `sharing` an address, one that BMP monitors, by
+    /// label: a managed peer not itself left out of BMP. Configured
+    /// collectors see every such peer, so the two would be
+    /// indistinguishable.
+    pub(super) fn bmp_identity_holder_of(&self, sharing: &[PeerKey]) -> Option<String> {
+        sharing
+            .iter()
+            .find(|key| !self.bmp_excluded.contains(*key))
+            .map(PeerKey::label)
+    }
+
+    pub(super) fn publish_bmp_excluded_metric(&self) {
+        self.metrics
+            .set_bmp_identity_excluded_neighbors(self.bmp_excluded.len());
+    }
+
+    /// The BMP event sender for `peer`'s session: none for a neighbor left
+    /// out of BMP for an identity conflict.
+    pub(super) fn session_bmp_tx(&self, peer: &PeerKey) -> Option<mpsc::Sender<BmpEvent>> {
+        if self.bmp_excluded.contains(peer) {
+            None
+        } else {
+            self.bmp_tx.clone()
+        }
+    }
+
     /// The configured members of peer group `name`, each by its own key.
     pub(super) fn peer_group_member_keys(&self, name: &str) -> Vec<PeerKey> {
         self.current_config
@@ -1667,6 +1819,8 @@ impl PeerManager {
             .collect()
     }
 
+    /// Whether any managed neighbor uses `address`: every neighbor on a
+    /// link-local address that several interfaces share counts.
     pub(super) fn has_peer_address(&self, address: IpAddr) -> bool {
         self.peers.keys().any(|key| key.address == address)
     }

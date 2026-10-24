@@ -1973,6 +1973,7 @@ mod tests {
             tcp_ao_rotation_phase: "tcp_ao_rotation_phase-value".to_string(),
             tcp_ao_rotation_error: "tcp_ao_rotation_error-value".to_string(),
             slow_peer: true,
+            bmp_identity_excluded: true,
             graceful_shutdown_advertise_intent: Some(false),
             max_prefix_action: "max_prefix_action-value".to_string(),
             max_prefix_restart_remaining_millis: Some(139),

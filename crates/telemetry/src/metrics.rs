@@ -574,6 +574,8 @@ struct BgpMetricsInner {
     dynamic_neighbor_slots_headroom: IntGauge,
     dynamic_neighbor_limit_rejections: IntCounter,
     inbound_connections_dropped: IntCounterVec,
+    bmp_identity_conflicts: IntCounterVec,
+    bmp_identity_excluded_neighbors: IntGauge,
 
     // ── Interface-only neighbors (ADR-0142) ───────────────────────
     unnumbered_peer_address_info: IntGaugeVec,
@@ -1074,6 +1076,23 @@ impl BgpMetrics {
         let dynamic_neighbor_limit_rejections = IntCounter::new(
             "bgp_dynamic_neighbor_limit_rejections_total",
             "Inbound dynamic-neighbor connections dropped because the process-global admission limit was reached.",
+        )
+        .expect("valid metric definition");
+
+        let bmp_identity_conflicts = IntCounterVec::new(
+            Opts::new(
+                "bgp_bmp_identity_conflicts_total",
+                "Neighbors admitted at an address another BMP-monitored neighbor holds (link-local neighbors on different interfaces), by outcome: refused before the session starts, or excluded from BMP because every collector sets on_identity_conflict = \"exclude\".",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        for outcome in ["refused", "excluded"] {
+            bmp_identity_conflicts.with_label_values(&[outcome]);
+        }
+        let bmp_identity_excluded_neighbors = IntGauge::new(
+            "bgp_bmp_identity_excluded_neighbors",
+            "Neighbors whose sessions currently report nothing to BMP because another monitored neighbor holds their address.",
         )
         .expect("valid metric definition");
 
@@ -3105,6 +3124,12 @@ impl BgpMetrics {
             .register(Box::new(unnumbered_ra_socket_open_failures.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(bmp_identity_conflicts.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(bmp_identity_excluded_neighbors.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(notifications_sent.clone()))
             .expect("metric not already registered");
         registry
@@ -3753,6 +3778,8 @@ impl BgpMetrics {
             unnumbered_ra_conflicts,
             unnumbered_ra_dropped,
             unnumbered_ra_socket_open_failures,
+            bmp_identity_conflicts,
+            bmp_identity_excluded_neighbors,
             bfd_session_up,
             bfd_session_flaps_total,
             gnmi_dialout_connected,
@@ -4015,6 +4042,22 @@ impl BgpMetrics {
     /// Record an inbound dynamic-neighbor drop caused by slot saturation.
     pub fn record_dynamic_neighbor_limit_rejection(&self) {
         self.0.dynamic_neighbor_limit_rejections.inc();
+    }
+
+    /// Record a BMP identity conflict at admission: `excluded` when every
+    /// collector excludes, otherwise `refused`.
+    pub fn record_bmp_identity_conflict(&self, excluded: bool) {
+        self.0
+            .bmp_identity_conflicts
+            .with_label_values(&[if excluded { "excluded" } else { "refused" }])
+            .inc();
+    }
+
+    /// Publish how many neighbors are currently left out of BMP.
+    pub fn set_bmp_identity_excluded_neighbors(&self, count: usize) {
+        self.0
+            .bmp_identity_excluded_neighbors
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
     }
 
     /// Record an accept-path inbound connection drop by bounded reason

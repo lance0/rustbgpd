@@ -92,10 +92,15 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
             .current_dir(root)
             .output()
             .expect("run production config loader");
-        // The unprivileged core-test runner cannot open M53b's raw ICMPv6
-        // discovery socket. Its dedicated hosted lab exercises this config
-        // with CAP_NET_RAW; only that exact probe failure is exempt here.
-        let raw_socket_unavailable = name == "rustbgpd-m53b-interface-only.toml"
+        // The unprivileged core-test runner cannot open the raw ICMPv6
+        // discovery socket of M53b and M53d. Their dedicated hosted labs
+        // exercise these configs with CAP_NET_RAW; only that exact probe
+        // failure is exempt here.
+        let raw_socket_unavailable = matches!(
+            name,
+            "rustbgpd-m53b-interface-only.toml"
+                | "rustbgpd-m53d-interface-only-shared-address.toml"
+        )
             && output.status.code() == Some(1)
             && String::from_utf8_lossy(&output.stderr).starts_with(
                 "error: interface-only neighbor discovery needs CAP_NET_RAW to open a raw ICMPv6 socket:",
@@ -108,7 +113,7 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         );
         configs.insert(name.to_owned());
     }
-    assert_eq!(configs.len(), 38, "classify the changed config inventory");
+    assert_eq!(configs.len(), 39, "classify the changed config inventory");
 
     let mut topologies = BTreeSet::new();
     let mut mounted = BTreeSet::new();
@@ -151,7 +156,7 @@ fn active_dataplane_interop_is_tier_authenticated_end_to_end() {
         unmounted,
         BTreeSet::from(["rustbgpd-m47-teardown.toml".into()])
     );
-    assert_eq!(topologies.len(), 31, "topology inventory changed");
+    assert_eq!(topologies.len(), 32, "topology inventory changed");
 
     let standalone = ["m38-evpn-df-election"];
     for topology in &topologies {

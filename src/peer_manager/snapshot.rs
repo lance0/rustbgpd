@@ -263,6 +263,7 @@ fn manager_peer_info(
         accepted_dynamic_range: accepted_dynamic_range_snapshot(managed),
         stale: true,
         slow_peer: false,
+        bmp_identity_excluded: false,
         rfc8212_import_policy,
         rfc8212_export_policy,
         // The configured mode comes from the neighbor record; see
@@ -361,6 +362,7 @@ pub(super) fn unbound_interface_only_info(
         // No session can be stale; there is none.
         stale: false,
         slow_peer: false,
+        bmp_identity_excluded: false,
         rfc8212_import_policy: rfc8212_presence_status(enforced, policy_present.0),
         rfc8212_export_policy: rfc8212_presence_status(enforced, policy_present.1),
         remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
@@ -787,6 +789,7 @@ impl PeerManager {
             session_state.as_ref(),
             self.current_config.rfc8212_posture().policy_effective,
         );
+        info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
         if let Some(latch) = self.max_prefix_latches.get(peer) {
             apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
         }
@@ -817,6 +820,7 @@ impl PeerManager {
                 session_state,
                 self.current_config.rfc8212_posture().policy_effective,
             );
+            info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
             if let Some(latch) = self.max_prefix_latches.get(peer) {
                 apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
             }
@@ -935,6 +939,7 @@ impl PeerManager {
                     info: {
                         let mut info = manager_peer_info(peer, managed, ebgp_requires_policy);
                         self.apply_configured_identity(&mut info, peer, &modes);
+                        info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
                         info
                     },
                     md5_configured: managed.transport_config.md5_password.is_some(),
@@ -1104,6 +1109,10 @@ impl PeerManager {
             self.emit_loc_rib_bmp_stats(bmp_tx, per_family);
         }
         for (peer, managed) in &self.peers {
+            // Left out of BMP for an identity conflict: no Peer Up was sent.
+            if self.bmp_excluded.contains(peer) {
+                continue;
+            }
             let peer_addr = peer.address;
             let rib_peer = self.rib_peer_of(peer);
             let state = match states.get(peer) {

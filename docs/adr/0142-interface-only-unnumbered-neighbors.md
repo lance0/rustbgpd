@@ -437,6 +437,38 @@ Once the duplicate-address rule is lifted, two further rules apply:
   `rbgp doctor` and metrics. Identities are never merged.
 - **MRT.** The peer index allows duplicate-address entries.
 
+Implementation note (2026-10-24): the duplicate-address rule is lifted.
+Neighbors on different interfaces may bind the same learned address, and the
+RIB keys each by its own identity. While `[bmp]` collectors are configured, a
+learned address another neighbor holds, including a retained reservation, is
+refused before the session starts with `bmp_identity_conflict`, through the
+same atomic admission check; a static neighbor added at runtime is checked the
+same way, and configuration refuses a static same-address pair outright.
+`[bmp]` is restart-only, so configured collectors decide admission whether or
+not they are connected, and no reload can refuse a running session. When every
+collector sets `on_identity_conflict = "exclude"`, the neighbor is admitted
+instead and its session gets no BMP sender, so it emits no Peer Up, route
+monitoring, statistics or Peer Down; any `refuse` collector refuses. Only a
+monitored neighbor counts as holding an address, so an excluded neighbor never
+causes the first one to be excluded on its next admission. The exclusion is
+reported in `NeighborState.bmp_identity_excluded`, `rbgp doctor` and
+`bgp_bmp_identity_excluded_neighbors`, and admissions are counted in
+`bgp_bmp_identity_conflicts_total{outcome}`. A static same-address pair is
+accepted only under the same all-`exclude` rule. The MRT peer index already
+lists same-address neighbors as separate entries.
+
+Whatever BMP does, state keyed by the bare address (BFD, the TCP MD5, TCP-AO
+and GTSM listener policy, a per-neighbor log level) cannot serve two
+neighbors, so a learned or runtime neighbor that would put such a feature on
+a shared address is refused with `shared_address_feature`. The reload and
+transaction preflight checks a candidate against the live endpoints: a static
+neighbor it adds at a learned address under a refusing collector, or a
+feature it gives neighbors already sharing an address, refuses the whole
+change before any effect, and the reload route's hold keeps discovery from
+binding a static address of the candidate until the generation applies. A
+static neighbor at a bound or reserved learned endpoint's own key, its address
+on the same interface, is still refused with `duplicate_link_local_address`.
+
 ### Operator surfaces
 
 - **`rbgp neighbor`** shows the identity `swp1`, the learned address (or `-`)

@@ -25,11 +25,14 @@
 //!   a neighbor whose bind-time settings changed is rebound under them. This
 //!   runs on the owner loop after the mutating command, never under a staged
 //!   transaction snapshot.
-//! - Admission refuses an address that another neighbor holds
-//!   (`duplicate_link_local_address`) until the scoped RIB identity lands.
-//!   The check and the insertion run in this single owner without an
-//!   intervening input, so two links discovering one address cannot both be
-//!   admitted.
+//! - Neighbors on different interfaces may share a learned address: the
+//!   RIB keys each by its own identity. While BMP collectors are configured,
+//!   admission refuses an address another neighbor holds
+//!   (`bmp_identity_conflict`), because a collector cannot tell the two
+//!   sessions apart; a feature keyed by the bare address refuses it too
+//!   (`shared_address_feature`). The check and the insertion run in this
+//!   single owner without an intervening input, so two links discovering one
+//!   address cannot both be admitted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv6Addr};
@@ -181,6 +184,9 @@ struct Port {
     established: bool,
     /// The address last refused, so the refusal is logged once.
     refused: Option<Ipv6Addr>,
+    /// Why the current binding is refused (`<reason>: <detail>`), reported
+    /// as the unbound neighbor's last error.
+    refusal: Option<String>,
     /// Operator and safety state carried from a retired endpoint to the next.
     held: Option<HeldState>,
     /// The neighbor's RIB identity, allocated at its first binding and kept
@@ -660,28 +666,15 @@ impl PeerManager {
         }
     }
 
-    /// A peer left the table: a refused binding may now be admissible.
-    pub(super) fn note_peer_removed(&mut self) {
+    /// A peer left the table, or the configuration changed what may share
+    /// an address: a refused binding may now be admissible, and nothing else
+    /// re-raises it (refreshed RAs emit no binding change).
+    pub(super) fn recheck_refused_bindings(&mut self) {
         if let Some(unnumbered) = self.unnumbered.as_mut()
             && unnumbered.ports.values().any(|port| port.refused.is_some())
         {
             unnumbered.reconcile_due = true;
         }
-    }
-
-    /// The interface-only neighbor whose bound peer holds `address`, other
-    /// than `peer` itself. Static admission refuses such an address.
-    pub(super) fn unnumbered_holder_of(&self, address: IpAddr, peer: &PeerKey) -> Option<&str> {
-        self.unnumbered
-            .as_ref()?
-            .ports
-            .iter()
-            .find_map(|(name, port)| {
-                port.bound
-                    .as_ref()
-                    .is_some_and(|bound| bound.address == address && bound != peer)
-                    .then_some(name.as_str())
-            })
     }
 
     /// Every live binding's learned address and interface.
@@ -796,6 +789,13 @@ impl PeerManager {
                         learned_address: None,
                     },
                 );
+                // A refused binding is where discovery stands: an address
+                // was learned and admission turned it away.
+                if discovery == NeighborDiscoveryState::AwaitingDiscovery
+                    && let Some(refusal) = &port.refusal
+                {
+                    refusal.clone_into(&mut info.last_error);
+                }
                 info.remote_asn_mode = match neighbor.remote_asn {
                     crate::config::RemoteAsn::External => {
                         rustbgpd_api::peer_types::RemoteAsnMode::External
@@ -829,11 +829,15 @@ impl PeerManager {
             .find_map(|(name, port)| (port.bound.as_ref() == Some(peer)).then_some(name.as_str()))
     }
 
-    /// Any neighbor already holding `address`: a peer in the table (bound
-    /// interface-only, static, or retained), a configured static neighbor,
-    /// or a static neighbor of a reload generation that passed its preflight.
-    fn link_local_address_holder(&self, address: Ipv6Addr) -> Option<String> {
-        let v6 = address;
+    /// While a BMP collector refuses identity conflicts, any neighbor
+    /// already holding `address`: a peer in the table (bound interface-only,
+    /// static, or retained) or a configured static neighbor. Without BMP,
+    /// neighbors on different interfaces may share an address; when every
+    /// collector excludes, admission excludes the newcomer from BMP instead.
+    fn bmp_identity_holder(&self, address: Ipv6Addr) -> Option<String> {
+        if self.bmp_identity_conflict() != Some(crate::config::BmpIdentityConflict::Refuse) {
+            return None;
+        }
         let address = IpAddr::V6(address);
         self.peers
             .keys()
@@ -845,10 +849,6 @@ impl PeerManager {
                     .iter()
                     .find(|neighbor| neighbor.address.parse() == Ok(address))
                     .map(crate::config::Neighbor::label)
-            })
-            .or_else(|| {
-                self.generation_held(v6)
-                    .map(|label| format!("{label} (reload pending)"))
             })
     }
 
@@ -1041,15 +1041,16 @@ impl PeerManager {
     /// is reconsidered.
     pub(super) fn release_generation_hold(&mut self) {
         if self.unnumbered_runtime.generation_hold.take().is_some() {
-            self.note_peer_removed();
+            self.recheck_refused_bindings();
         }
     }
 
     /// Check a candidate configuration before it takes effect anywhere:
     /// the first interface-only neighbor needs the link monitor and
-    /// `CAP_NET_RAW` (ADR-0142 "Privilege"), and a static link-local neighbor
-    /// it adds must not take an address a learned endpoint holds, bound or
-    /// reserved ("Same-address neighbors"). The error names the cause.
+    /// `CAP_NET_RAW` (ADR-0142 "Privilege"), a static link-local neighbor
+    /// must not take the key of a learned endpoint, bound or reserved, and
+    /// neighbors that would share a link-local address must be able to
+    /// ("Same-address neighbors"). The error names the cause.
     pub(super) fn unnumbered_preflight(
         &self,
         candidate: &crate::config::Config,
@@ -1058,28 +1059,18 @@ impl PeerManager {
             let Ok(IpAddr::V6(address)) = neighbor.address.parse::<IpAddr>() else {
                 continue;
             };
-            if !address.is_unicast_link_local() {
-                continue;
-            }
             let key = PeerKey::new(IpAddr::V6(address), neighbor.interface.clone());
-            // The exact key counts too: a static neighbor replacing an
-            // interface-only stanza at its learned address on the same
-            // interface would meet the still-bound peer after the effects.
-            let holder = self.unnumbered.as_ref().and_then(|unnumbered| {
-                unnumbered.ports.iter().find_map(|(name, port)| {
-                    port.bound
-                        .as_ref()
-                        .is_some_and(|bound| bound.address == IpAddr::V6(address))
-                        .then_some(name.as_str())
-                })
-            });
-            if let Some(holder) = holder {
+            // A static neighbor replacing an interface-only stanza at its
+            // learned address on the same interface would meet the
+            // still-bound peer, whose key it shares, after the effects.
+            if let Some(holder) = self.unnumbered_owner_of(&key) {
                 return Err(format!(
-                    "duplicate_link_local_address: neighbor {key} uses {address}, which the \
+                    "duplicate_link_local_address: neighbor {key} is the endpoint the \
                      interface-only neighbor on {holder} holds; remove that neighbor first"
                 ));
             }
         }
+        self.validate_live_shared_addresses(candidate)?;
         if self.current_config.neighbors.interface_only().is_empty()
             && !candidate.neighbors.interface_only().is_empty()
         {
@@ -1442,37 +1433,87 @@ impl PeerManager {
             return;
         }
         let Some(endpoint) = desired else {
+            // A refusal with no binding behind it, such as an inbound
+            // connection from a router that sends no RAs, stands while its
+            // conflict does: a recheck or configuration change re-reads it.
+            let refusal = self.port_mut(name).refused.and_then(|address| {
+                self.learned_address_refusal(name, address)
+                    .map(|(reason, detail)| refusal_text(reason, address, &detail))
+            });
+            let port = self.port_mut(name);
+            if refusal.is_none() {
+                port.refused = None;
+            }
+            port.refusal = refusal;
             return;
         };
         if self.defer_unnumbered_while_staged() {
             return;
         }
-        if let Some(holder) = self.link_local_address_holder(endpoint.address) {
-            let port = self.port_mut(name);
-            if port.refused != Some(endpoint.address) {
-                port.refused = Some(endpoint.address);
-                warn!(
-                    interface = %name,
-                    address = %endpoint.address,
-                    holder = %holder,
-                    reason = "duplicate_link_local_address",
-                    "unnumbered: refusing a learned address another neighbor holds"
-                );
-            }
-            // A reload route that ends without dispatching its generation
-            // drops the hold silently; ask again.
-            if self.generation_held(endpoint.address).is_some() {
-                self.arm_unnumbered_retry();
-            }
+        if let Some((reason, detail)) = self.learned_address_refusal(name, endpoint.address) {
+            self.refuse_learned_address(name, endpoint.address, reason, &detail);
             return;
         }
-        self.port_mut(name).refused = None;
+        let port = self.port_mut(name);
+        port.refused = None;
+        port.refusal = None;
         if let Err(error) = self.bind_port(name, endpoint).await {
             // Nothing else re-raises this binding (refreshed RAs and an
             // unchanged link emit no event), so retry on the timer.
             warn!(interface = %name, address = %endpoint.address, %error, "unnumbered: could not add the bound peer; retrying");
             self.arm_unnumbered_retry();
         }
+    }
+
+    /// Refuse a learned address for `reason`, logging it and counting a BMP
+    /// identity conflict once per address.
+    fn refuse_learned_address(
+        &mut self,
+        name: &str,
+        address: Ipv6Addr,
+        reason: &'static str,
+        detail: &str,
+    ) {
+        // A reload route that ends without dispatching its generation drops
+        // the hold silently; ask again.
+        if reason == "reload_pending" {
+            self.arm_unnumbered_retry();
+        }
+        let port = self.port_mut(name);
+        port.refusal = Some(refusal_text(reason, address, detail));
+        if port.refused == Some(address) {
+            return;
+        }
+        port.refused = Some(address);
+        if reason == "bmp_identity_conflict" {
+            self.metrics.record_bmp_identity_conflict(false);
+        }
+        warn!(
+            interface = %name, %address, %detail, reason,
+            "unnumbered: refusing a learned address another neighbor holds"
+        );
+    }
+
+    /// Why the interface-only neighbor on `name` may not bind `address`:
+    /// a BMP-monitored holder while a collector refuses identity conflicts
+    /// (`bmp_identity_conflict`), a neighbor there using a feature keyed by
+    /// the bare address (`shared_address_feature`), or a static neighbor of
+    /// a reload generation that passed its preflight (`reload_pending`).
+    fn learned_address_refusal(
+        &self,
+        name: &str,
+        address: Ipv6Addr,
+    ) -> Option<(&'static str, String)> {
+        if let Some(holder) = self.bmp_identity_holder(address) {
+            return Some(("bmp_identity_conflict", format!("held by {holder}")));
+        }
+        let key = PeerKey::new(IpAddr::V6(address), Some(name.to_owned()));
+        self.shared_address_feature_conflict(&key, &self.current_config)
+            .map(|reason| ("shared_address_feature", reason))
+            .or_else(|| {
+                self.generation_held(address)
+                    .map(|label| ("reload_pending", format!("held by {label}, reload pending")))
+            })
     }
 
     /// Whether the bound session is down, read from the session itself. An
@@ -1763,14 +1804,21 @@ impl PeerManager {
         None
     }
 
-    /// Another neighbor holds `address`: log the refusal and count it.
-    fn inbound_address_held(&self, name: &str, address: Ipv6Addr) -> bool {
-        let Some(holder) = self.link_local_address_holder(address) else {
+    /// Admission refuses `address` on `name`: log the refusal and count it.
+    fn inbound_address_held(&mut self, name: &str, address: Ipv6Addr) -> bool {
+        let Some((reason, detail)) = self.learned_address_refusal(name, address) else {
             return false;
         };
+        // Reported as the neighbor's last error, as an RA refusal is, until a
+        // binding is admitted or the conflict ends.
+        let port = self.port_mut(name);
+        port.refused = Some(address);
+        port.refusal = Some(refusal_text(reason, address, &detail));
+        if reason == "bmp_identity_conflict" {
+            self.metrics.record_bmp_identity_conflict(false);
+        }
         warn!(
-            interface = %name, %address, %holder,
-            reason = "duplicate_link_local_address",
+            interface = %name, %address, %detail, reason,
             "unnumbered: refusing an inbound address another neighbor holds"
         );
         self.refuse_inbound();
@@ -1789,8 +1837,8 @@ impl PeerManager {
     /// session past TCP establishment or a pending inbound candidate holds a
     /// different address (a second router on a link defined to have one),
     /// while the bound session is Established or held by NOTIFICATION
-    /// backoff, and when another neighbor holds the address
-    /// (`duplicate_link_local_address`). A bound session that has not
+    /// backoff, and, while BMP collectors are configured, when another
+    /// neighbor holds the address (`bmp_identity_conflict`). A bound session that has not
     /// reached `OpenSent` is retired: the peer moved address.
     pub(super) async fn learn_inbound_endpoint(
         &mut self,
@@ -1819,7 +1867,8 @@ impl PeerManager {
             );
             return self.refuse_second_router(name);
         }
-        if let Some(key) = port.bound.clone()
+        let bound = port.bound.clone();
+        if let Some(key) = bound.clone()
             && key.address == IpAddr::V6(address)
         {
             return Some(key);
@@ -1829,7 +1878,7 @@ impl PeerManager {
         if self.inbound_address_held(name, address) {
             return None;
         }
-        if let Some(key) = port.bound.clone() {
+        if let Some(key) = bound {
             // An inbound candidate from the bound address is opening even
             // when the primary is not: that router is live on the link.
             if self
@@ -1897,7 +1946,10 @@ impl PeerManager {
             return self.refuse_inbound();
         }
         info!(interface = %name, %address, "unnumbered: peer address learned from an inbound connection");
-        self.port_mut(name).bound.clone()
+        let port = self.port_mut(name);
+        port.refused = None;
+        port.refusal = None;
+        port.bound.clone()
     }
 
     /// Raise the IPv6 listener's outbound Hop Limit to 255 once; a failure
@@ -2203,4 +2255,9 @@ fn learned_selector(
         ifindex: endpoint.ifindex,
         hops,
     })
+}
+
+/// The last error a refused binding reports: `<reason>: <detail>`.
+fn refusal_text(reason: &str, address: Ipv6Addr, detail: &str) -> String {
+    format!("{reason}: learned address {address} refused, {detail}")
 }

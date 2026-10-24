@@ -154,6 +154,28 @@ fn assert_pair_refused(toml: &str, field: &str, needle: &str) {
 fn same_address_neighbors_refuse_bmp() {
     let bmp = "[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n";
     assert_pair_refused(&same_address_pair("", bmp), "bmp", "BMP");
+
+    // Collector modes combine strictly: one refusing collector refuses.
+    let exclude = "[[bmp.collectors]]\naddress = \"127.0.0.1:11020\"\n\
+                   on_identity_conflict = \"exclude\"\n";
+    let mixed = format!("[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n{exclude}");
+    assert_pair_refused(
+        &same_address_pair("", &mixed),
+        "bmp",
+        "on_identity_conflict",
+    );
+
+    // Every collector excludes: the pair is accepted.
+    let excluding = format!(
+        "[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n\
+         on_identity_conflict = \"exclude\"\n{exclude}"
+    );
+    let config = parse(&same_address_pair("", &excluding)).unwrap();
+    assert_eq!(
+        config.bmp_identity_conflict(),
+        Some(BmpIdentityConflict::Exclude)
+    );
+    assert!(parse(&same_address_pair("", "[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\non_identity_conflict = \"merge\"\n")).is_err());
 }
 
 /// BFD, TCP MD5, TCP-AO and a differing per-neighbor `log_level` are each

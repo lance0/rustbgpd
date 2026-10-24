@@ -1921,6 +1921,8 @@ name it.
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
 | `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, or `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait). All four series are exported at 0 from startup |
+| `bgp_bmp_identity_conflicts_total{outcome}` | Neighbors admitted at a link-local address another BMP-monitored neighbor holds: `refused` before the session starts, or `excluded` from BMP when every collector sets `on_identity_conflict = "exclude"`. Both series are exported at 0 from startup |
+| `bgp_bmp_identity_excluded_neighbors` | Neighbors whose sessions currently report nothing to BMP for an identity conflict |
 | `bgp_max_prefix_usage{peer,family,stage}` | Live session-actor max-prefix enforcement count. `family` is `aggregate`, `ipv4_unicast`, `ipv6_unicast`, or a non-unicast family (`l3vpn_ipv4_unicast`, `l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, `l2vpn_evpn`, `ipv4_flowspec`, `ipv6_flowspec`, `rtc`); `stage` is `accepted` (after import policy) or `received` (before import policy, unicast only). Series are absent while the session is down, and the `received` and non-unicast family series are absent while their bound is unset |
 | `bgp_max_prefix_limit{peer,family,stage}` | Effective finite bound for the same family and stage; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,family,stage}` | Saturating `limit - usage` for a finite bound; absent when unlimited or disconnected |
@@ -3055,6 +3057,12 @@ by interface:
   the peer cannot discover this router unless another router advertises on
   the link. A bound neighbor's session is checked as
   `peer.<learned>%<if>.*`, like any other peer.
+- `interface_only.<if>.bmp` is yellow when the neighbor's session reports
+  nothing to BMP (`bmp_identity_excluded`), or when its learned address was
+  refused with `bmp_identity_conflict` because another BMP-monitored
+  neighbor holds it. `interface_only.<if>.admission` is yellow when the
+  address was refused with `shared_address_feature`. Either refusal replaces
+  the discovery hints: an address was learned.
 - `interface_only.<if>.multiple_routers` is yellow when
   `bgp_unnumbered_ra_conflicts_total` shows a second router on the link since
   the daemon started.

@@ -324,14 +324,20 @@ kept:
 
 - Adding the first interface-only neighbor when the daemon lacks
   `CAP_NET_RAW` (the error names it) or the link monitor is not running.
-- Adding a static link-local neighbor whose address an interface-only
-  neighbor's learned endpoint holds or still reserves. The error is
-  `duplicate_link_local_address` and names the interface. Delete that
-  neighbor in an earlier change first.
+- Adding a static link-local neighbor at an interface-only neighbor's
+  learned endpoint, its address on the same interface, bound or still
+  reserved. The error is `duplicate_link_local_address` and names the
+  interface. Delete that neighbor in an earlier change first.
+- Adding a static link-local neighbor at an address a learned endpoint holds
+  while a BMP collector refuses identity conflicts (`bmp_identity_conflict`).
+- Giving neighbors that share a link-local address BFD, TCP MD5, TCP-AO, or a
+  GTSM policy or `log_level` that differs between them; the error names the
+  feature.
 
 A SIGHUP checks them before its first effect, including an outbound prefix
-maximum or listener authentication change, and discovery cannot bind the
-added static address until the reload has applied. A config transaction
+maximum or listener authentication change, and discovery cannot bind a
+static link-local address of the new configuration until the reload has
+applied. A config transaction
 checks them when it plans and again when it stages the snapshot.
 `AddNeighbor` checks them before it changes the running configuration and
 returns `FAILED_PRECONDITION`.

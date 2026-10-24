@@ -12,11 +12,13 @@ use super::parse::{
     resolve_chain_with_store,
 };
 use super::schema::{
+    BmpIdentityConflict, OrrVantage, parse_orr_vantage, validate_orr_vantage_address,
+};
+use super::schema::{
     MAX_POLICY_CACHE_ENTRIES, ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig,
     ManagedNetdevsConfig, ManagedSvdVxlanNetdevConfig, ManagedVlanUpperNetdevConfig,
     ManagedVrfNetdevConfig, ManagedVxlanNetdevConfig, Rfc8212PolicySource,
 };
-use super::schema::{OrrVantage, parse_orr_vantage, validate_orr_vantage_address};
 use super::{
     ChunkedSetStore, Config, ConfigError, DEFAULT_HOLD_TIME, InboundAdmissionConfig, Neighbor,
     PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
@@ -517,37 +519,38 @@ impl Config {
     }
 
     fn validate_same_address_group(&self, group: &[&Neighbor]) -> Result<(), ConfigError> {
+        if self.bmp_identity_conflict() == Some(BmpIdentityConflict::Refuse) {
+            let names = same_address_names(group);
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: names.clone(),
+                field: "bmp".to_string(),
+                reason: format!(
+                    "neighbors {names} share one IPv6 link-local address, and BMP \
+                     collectors cannot tell their sessions apart; set \
+                     on_identity_conflict = \"exclude\" on every [[bmp.collectors]] \
+                     entry, remove the collectors, or give each neighbor a distinct \
+                     link-local address"
+                ),
+            });
+        }
+        self.validate_shared_address_features(group)
+    }
+
+    /// The features a group of neighbors sharing one link-local address may
+    /// not use, because their state is keyed by the bare address: BFD, TCP
+    /// MD5 and TCP-AO, and a differing `log_level` or GTSM policy. Also
+    /// checked at runtime admission, where a learned address joins the group.
+    pub(crate) fn validate_shared_address_features(
+        &self,
+        group: &[&Neighbor],
+    ) -> Result<(), ConfigError> {
         {
-            let names = group
-                .iter()
-                .map(|neighbor| {
-                    format!(
-                        "{}%{}",
-                        neighbor.address,
-                        neighbor.interface.as_deref().unwrap_or_default()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" and ");
+            let names = same_address_names(group);
             let refuse = |field: &str, reason: String| ConfigError::InvalidNeighborConfig {
                 address: names.clone(),
                 field: field.to_string(),
                 reason,
             };
-            if self
-                .bmp
-                .as_ref()
-                .is_some_and(|bmp| !bmp.collectors.is_empty())
-            {
-                return Err(refuse(
-                    "bmp",
-                    format!(
-                        "neighbors {names} share one IPv6 link-local address, and BMP \
-                         collectors cannot tell their sessions apart; remove the [bmp] \
-                         collectors or give each neighbor a distinct link-local address"
-                    ),
-                ));
-            }
             for neighbor in group {
                 let group_config = self.peer_group_for_neighbor(neighbor)?;
                 let bfd = neighbor
@@ -613,6 +616,26 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// How BMP treats two monitored neighbors at one address: `None`
+    /// without collectors, `Exclude` only when every collector excludes,
+    /// otherwise `Refuse`.
+    pub(crate) fn bmp_identity_conflict(&self) -> Option<BmpIdentityConflict> {
+        let collectors = &self.bmp.as_ref()?.collectors;
+        if collectors.is_empty() {
+            return None;
+        }
+        Some(
+            if collectors
+                .iter()
+                .all(|collector| collector.on_identity_conflict == BmpIdentityConflict::Exclude)
+            {
+                BmpIdentityConflict::Exclude
+            } else {
+                BmpIdentityConflict::Refuse
+            },
+        )
     }
 
     /// A neighbor's effective GTSM hop limit, `None` when GTSM is off,
@@ -4176,4 +4199,19 @@ pub(super) fn parse_exact_unicast_prefix(prefix: &str) -> Result<(IpAddr, u8), S
         ));
     }
     Ok(key)
+}
+
+/// `fe80::1%eth0 and fe80::1%eth1`: the neighbors of a same-address group.
+fn same_address_names(group: &[&Neighbor]) -> String {
+    group
+        .iter()
+        .map(|neighbor| {
+            format!(
+                "{}%{}",
+                neighbor.address,
+                neighbor.interface.as_deref().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
 }

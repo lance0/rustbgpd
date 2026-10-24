@@ -89,6 +89,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M53c: two neighbors that share one EUI-64 link-local address on parallel
   links to the same FRR router, with scoped route refresh, carrier loss and
   neighbor deletion on one link.
+- M53d: two interface-only neighbors that learn one EUI-64 link-local
+  address on parallel links to the same FRR router.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
 - M108: RFC 5883 multihop BFD + RFC 5882 coupling against FRR `bfdd` over
   routed /32 loopbacks.

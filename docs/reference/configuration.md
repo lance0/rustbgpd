@@ -1125,8 +1125,10 @@ bytewise, so the same one wins whatever the configuration or connection
 order. Some features still key their state by the bare address and are
 refused on neighbors that share one:
 
-- BMP: any `[bmp]` collector is refused while such a pair exists, because a
-  collector cannot tell the two sessions apart;
+- BMP: a `[bmp]` collector is refused while such a pair exists, because a
+  collector cannot tell the two sessions apart, unless every collector sets
+  `on_identity_conflict = "exclude"`; the second neighbor admitted then
+  reports nothing to BMP (see [identity conflicts](#identity-conflicts-on_identity_conflict));
 - BFD (`bfd`, directly or inherited);
 - TCP MD5 (`md5_password`) and TCP-AO (`tcp_ao`), which the passive listener
   keys by peer address;
@@ -1488,11 +1490,37 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   so it never applies to a neighbor on another link that shares the address.
   Turning `ttl_security` on or off reloads like any other session-settings
   edit (see **Reload** below).
-- **Same address on two links.** Until the RIB keys neighbors by scope, a
-  learned address that another neighbor already holds is refused with
-  `duplicate_link_local_address`. Parallel links to one device that reuse a
-  router MAC on every port, or `fe80::1` on every port, therefore bring up
-  only the first link admitted.
+- **Same address on two links.** Neighbors on different interfaces may
+  learn the same address, for example parallel links to one device that
+  reuses a router MAC on every port, or `fe80::1` on every port. Each is its
+  own neighbor with its own routes. While `[bmp]` collectors are configured,
+  a collector cannot tell such sessions apart, so a learned address that
+  another neighbor already holds (bound, retained by Graceful Restart, or a
+  static neighbor) is refused before the session starts, logged with reason
+  `bmp_identity_conflict`; the neighbor admitted first keeps its session,
+  and a reload or transaction adding a static neighbor at an address a
+  learned neighbor holds is refused before any effect.
+  When every collector sets `on_identity_conflict = "exclude"`, the link
+  establishes instead and reports nothing to BMP (see
+  [identity conflicts](#identity-conflicts-on_identity_conflict)). After a
+  restart, which link is admitted first depends on timing. Whether or not BMP
+  is configured, a learned address is also refused (`shared_address_feature`)
+  when a neighbor at that address uses BFD, TCP MD5 or TCP-AO, or a GTSM
+  policy or `log_level` that differs from the other neighbors there, whose
+  state is keyed by the bare address, and so is a static neighbor added at
+  runtime with one of them beside a learned address. A reload, config
+  transaction or peer-group RPC (`SetPeerGroup`, `SetNeighborPeerGroup`,
+  `ClearNeighborPeerGroup`) that would give neighbors already sharing an
+  address such a feature is refused before any effect, the RPC with
+  `FAILED_PRECONDITION`, and one that removes it rechecks the refused links.
+  A refused neighbor, whether the address came from an RA or from an inbound
+  connection, reports the reason as its last error in `rbgp neighbor`, and
+  `rbgp doctor` reports it as `interface_only.<if>.bmp` or
+  `interface_only.<if>.admission`; the report clears once a binding is
+  admitted or the conflict ends. A refusal is not sticky: once the holder's
+  peer goes, the refused link is admitted on its next binding.
+  Collectors count while disconnected, and `[bmp]` takes a restart to
+  change, so a running session is never refused later.
 - **Reload.** SIGHUP and config transactions add, remove and edit
   interface-only neighbors without a restart, and the other neighbors keep
   their sessions. A removed neighbor's session ends, its routes are purged and
@@ -4272,6 +4300,33 @@ monitor = ["rib_in_pre", "rib_out_post"]   # + RFC 8671 Adj-RIB-Out
 | `reconnect_interval` | u64   | no       | 30      | Seconds between reconnect attempts    |
 | `monitor`            | array  | no       | `["rib_in_pre"]` | Route-monitoring streams: `rib_in_pre` (RFC 7854 pre-policy Adj-RIB-In), `rib_out_post` (RFC 8671 post-policy Adj-RIB-Out), and/or `loc_rib` (RFC 9069 Loc-RIB instance with collector-connect table sync) |
 | `version`            | u8     | no       | 3       | BMP wire version framed for this collector: `3` (RFC 7854) or `4` (BMPv4 TLV framing, see below) |
+| `on_identity_conflict` | string | no     | `"refuse"` | What a neighbor does whose link-local address another monitored neighbor already holds (see below): `"refuse"` or `"exclude"` |
+
+### Identity conflicts (`on_identity_conflict`)
+
+A BMP per-peer header names a neighbor by address, so a collector cannot
+tell apart two neighbors that share a link-local address on different
+interfaces. Identities are never merged. Collectors decide together, and
+count whether or not they are connected:
+
+- If any collector is `"refuse"` (the default), a neighbor at an address
+  another neighbor already holds is refused before its session starts,
+  with reason `bmp_identity_conflict`, and a static same-address pair in
+  the configuration is rejected. The neighbor admitted first keeps its
+  session.
+- If every collector is `"exclude"`, the neighbor establishes and forwards
+  normally, but its session reports nothing to BMP: no Peer Up, route
+  monitoring, statistics or Peer Down. The neighbor admitted first stays
+  monitored. The exclusion lasts for the excluded neighbor's peer, and is
+  reported in neighbor state (`bmp_identity_excluded`), in `rbgp doctor`
+  (`peer.<neighbor>.bmp`, or `interface_only.<if>.bmp` for an
+  interface-only neighbor) and in `bgp_bmp_identity_excluded_neighbors`.
+
+`bgp_bmp_identity_conflicts_total{outcome="refused"|"excluded"}` counts the
+admissions. After a restart, which neighbor is admitted first depends on
+timing. `[bmp]` is restart-only, so a reload never refuses or excludes a
+running session; a reload file whose collectors would refuse a configured
+same-address pair is refused before any effect.
 
 ### BMPv4 framing (`version = 4`)
 

@@ -265,7 +265,7 @@ impl PeerManager {
         datasets: PreparedDatasetGeneration,
     ) -> ReloadGenerationOutcome {
         // ADR-0142: refused before any effect, naming CAP_NET_RAW or the
-        // duplicate address. The reload route ran the same check before its
+        // shared-address conflict. The reload route ran the same check before its
         // own effects; learned admission has stayed closed to the
         // candidate's static addresses since.
         if let Err(error) = self.unnumbered_preflight(&candidate) {

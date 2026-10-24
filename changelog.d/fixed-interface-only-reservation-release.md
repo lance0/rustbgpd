@@ -8,5 +8,5 @@
   link may admit the address
   ([ADR-0142](../docs/adr/0142-interface-only-unnumbered-neighbors.md)).
   **Operator-visible:** a silent peer on a link that stays up no longer keeps
-  a parallel link to the same device down with `duplicate_link_local_address`
-  after its retained routes are gone.
+  a parallel link to the same device refused after its retained routes are
+  gone.

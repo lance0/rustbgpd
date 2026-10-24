@@ -1295,6 +1295,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         tcp_ao_rotation_phase: info.tcp_ao_rotation.phase.as_str().to_string(),
         tcp_ao_rotation_error: info.tcp_ao_rotation.last_error.clone().unwrap_or_default(),
         slow_peer: info.slow_peer,
+        bmp_identity_excluded: info.bmp_identity_excluded,
         graceful_shutdown_advertise_intent: Some(info.graceful_shutdown_advertise_intent),
         max_prefix_action: info.max_prefix_action.clone(),
         max_prefix_restart_remaining_millis: info.max_prefix_restart_remaining_millis,

@@ -663,9 +663,15 @@ impl PeerManager {
             )));
         }
         // ADR-0142: a static link-local add is refused before any effect
-        // when a learned endpoint holds its address, bound or reserved.
-        self.unnumbered_preflight(&next_config)
-            .map_err(PeerLifecycleError::Precondition)?;
+        // when a learned endpoint holds its address, bound or reserved. This
+        // RPC is the admission, so a BMP identity refusal is counted here;
+        // the read-only plan and reload preflights never count one.
+        self.unnumbered_preflight(&next_config).map_err(|error| {
+            if error.starts_with("bmp_identity_conflict:") {
+                self.metrics.record_bmp_identity_conflict(false);
+            }
+            PeerLifecycleError::Precondition(error)
+        })?;
 
         let previous_config = self.replace_current_config(next_config);
         match self.add_peer(config, false).await {
@@ -720,15 +726,41 @@ impl PeerManager {
         if self.peers.contains_key(&peer_key) {
             return Err(PeerLifecycleError::AlreadyExists(peer_key));
         }
-        // ADR-0142 admission: until the RIB keys peers by scope, a link-local
-        // address an interface-only neighbor holds is refused to any other.
-        if let Some(holder) = self.unnumbered_holder_of(config.address, &peer_key) {
-            return Err(PeerLifecycleError::Invalid(format!(
-                "duplicate_link_local_address: peer {peer_key} uses {}, which the \
-                 interface-only neighbor on {holder} holds",
-                config.address
-            )));
-        }
+        // ADR-0142 admission: a BMP collector cannot tell two sessions at
+        // one address apart. While collectors are configured, a neighbor at
+        // an address another monitored neighbor holds is refused, or, when
+        // every collector sets `on_identity_conflict = "exclude"`, admitted
+        // with its session left out of BMP. The neighbor admitted first
+        // keeps its session and its monitoring.
+        // Only a link-local address can be shared, so a numbered add never
+        // searches the table.
+        let sharing = self.peers_sharing_address(&peer_key);
+        let bmp_policy = if sharing.is_empty() {
+            None
+        } else {
+            self.bmp_identity_conflict()
+        };
+        let bmp_excluded = match (
+            bmp_policy,
+            bmp_policy.and_then(|_| self.bmp_identity_holder_of(&sharing)),
+        ) {
+            (Some(crate::config::BmpIdentityConflict::Refuse), Some(holder)) => {
+                self.metrics.record_bmp_identity_conflict(false);
+                return Err(PeerLifecycleError::Invalid(format!(
+                    "bmp_identity_conflict: peer {peer_key} uses {}, which {holder} \
+                     holds, and BMP collectors cannot tell the two sessions apart",
+                    config.address
+                )));
+            }
+            (Some(crate::config::BmpIdentityConflict::Exclude), Some(holder)) => {
+                warn!(
+                    peer = %peer_key, %holder, reason = "bmp_identity_conflict",
+                    "admitting a neighbor at an address another BMP-monitored neighbor holds; its session reports nothing to BMP"
+                );
+                true
+            }
+            _ => false,
+        };
         if let Some(interface) = &config.interface
             && config.scope_id.is_none()
             && let Err(error) = nix::net::if_::if_nametoindex(interface.as_str())
@@ -783,6 +815,17 @@ impl PeerManager {
                 )
             };
 
+        // Whatever BMP does, state keyed by the bare address (BFD, the TCP
+        // MD5/TCP-AO and GTSM listener policy, a per-neighbor log level)
+        // cannot serve two neighbors at one address: refuse a learned or
+        // runtime neighbor that would put such a feature on a shared address.
+        if let Some(reason) = self.shared_address_feature_conflict(
+            &peer_key,
+            next_config.as_ref().unwrap_or(&self.current_config),
+        ) {
+            return Err(PeerLifecycleError::Invalid(reason));
+        }
+
         transport.neighbor_counters = self.neighbor_counters_for(&peer_key);
         transport.interface_only = self.interface_only_owns(peer_key.interface.as_deref());
         transport.dampening_admission = self
@@ -827,7 +870,11 @@ impl PeerManager {
             Some(self.session_notify_tx.clone()),
             Some(self.session_notification_event_tx.clone()),
             Some(self.session_lifecycle_tx.clone()),
-            self.bmp_tx.clone(),
+            if bmp_excluded {
+                None
+            } else {
+                self.bmp_tx.clone()
+            },
             self.validation_rx.clone(),
             false,
             SessionIdentity::primary(session_id),
@@ -865,6 +912,13 @@ impl PeerManager {
         };
 
         info!(peer = %address, %remote_asn, "peer added dynamically");
+        if bmp_excluded {
+            self.metrics.record_bmp_identity_conflict(true);
+            self.bmp_excluded.insert(peer_key.clone());
+        } else {
+            self.bmp_excluded.remove(&peer_key);
+        }
+        self.publish_bmp_excluded_metric();
         let tcp_ao_protected = transport.tcp_ao.is_some();
         self.peers.insert(
             peer_key.clone(),
@@ -2005,6 +2059,9 @@ impl PeerManager {
             .remove(&peer)
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?
             .into_parts();
+        if self.bmp_excluded.remove(&peer) {
+            self.publish_bmp_excluded_metric();
+        }
         let removed_config = Self::removed_peer_config(&peer, &managed);
         self.retiring_sessions
             .insert(primary_session_id, peer.clone());
@@ -2063,7 +2120,7 @@ impl PeerManager {
             self.reap_deleted_peer_metric_series_for_key(&peer_for_reap)
                 .await;
         }
-        self.note_peer_removed();
+        self.recheck_refused_bindings();
         Ok(removed_config)
     }
 

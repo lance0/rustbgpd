@@ -583,6 +583,13 @@ config). It clears when the queue drains and on session teardown, and
 mirrors the `bgp_peer_slow{peer}` gauge. See the "Slow peers" section
 in `OPERATIONS.md` for interpretation.
 
+`NeighborState.bmp_identity_excluded` is `true` while the neighbor's session
+reports nothing to BMP: another BMP-monitored neighbor held its link-local
+address when it was admitted, and every collector sets
+`on_identity_conflict = "exclude"`. It lasts for the session's peer and
+mirrors `bgp_bmp_identity_excluded_neighbors`; see the configuration
+reference's BMP identity conflicts.
+
 `NeighborState.rejected_routes_retained` is the actor-authoritative size of
 that exact peer session's bounded retained-reject store. Presence distinguishes
 a current fresh snapshot, including an explicit zero, from an older daemon or a
@@ -1254,10 +1261,14 @@ runtime, with the same effect as a SIGHUP reload of the stanza (see the
   `ALREADY_EXISTS`.
 - The first interface-only neighbor needs `CAP_NET_RAW` and the link monitor.
   Without them `AddNeighbor` returns `FAILED_PRECONDITION`, naming the cause,
-  with nothing changed. A static link-local `AddNeighbor` whose address an
-  interface-only neighbor holds or still reserves also returns
-  `FAILED_PRECONDITION` (`duplicate_link_local_address`, naming the
-  interface).
+  with nothing changed. A static link-local `AddNeighbor` at an
+  interface-only neighbor's learned endpoint, its address on the same
+  interface, bound or still reserved, returns `ALREADY_EXISTS`. One at that
+  address on another interface returns `FAILED_PRECONDITION` with
+  `bmp_identity_conflict`, naming the interface, while a BMP collector
+  refuses identity conflicts, or naming the address-keyed feature that
+  cannot be shared (see
+  [same address on two links](configuration.md#interface-only-neighbors)).
 - `DeleteNeighbor` with an empty address and an `interface` deletes that
   interface's interface-only neighbor, bound or not: its session ends, its
   routes are purged, and the learned address it held or reserved is released.

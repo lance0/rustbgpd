@@ -585,6 +585,27 @@ pub struct BmpCollector {
     /// pre-IANA; Path Marking awaits a non-colliding assignment).
     #[serde(default = "default_bmp_version")]
     pub version: u8,
+    /// What a neighbor whose address another monitored neighbor already
+    /// holds (link-local neighbors on different interfaces) does while this
+    /// collector is configured, since the collector cannot tell the two
+    /// sessions apart. `refuse` (default) keeps it down; `exclude` lets it
+    /// establish without being reported to BMP. Any `refuse` collector
+    /// refuses; the neighbor is excluded only when every collector says
+    /// `exclude`.
+    #[serde(default)]
+    pub on_identity_conflict: BmpIdentityConflict,
+}
+
+/// A BMP collector's choice for a neighbor it could not tell apart from
+/// another monitored neighbor at the same address.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BmpIdentityConflict {
+    /// Refuse the conflicting session before it establishes.
+    #[default]
+    Refuse,
+    /// Let the session establish, left out of BMP.
+    Exclude,
 }
 
 /// A BMP route-monitoring stream selection (per collector).

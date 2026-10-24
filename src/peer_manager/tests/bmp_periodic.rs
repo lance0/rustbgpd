@@ -11,6 +11,7 @@ fn enable_loc_rib_stats(manager: &mut PeerManager) {
             reconnect_interval: 30,
             monitor: vec![crate::config::BmpMonitorView::LocRib],
             version: 3,
+            on_identity_conflict: crate::config::BmpIdentityConflict::Refuse,
         }],
     });
 }
@@ -436,4 +437,58 @@ async fn periodic_reports_preserve_order_selection_and_output_drop_counters() {
         drop(manager);
         rib.await.unwrap();
     }
+}
+
+/// A neighbor left out of BMP for an identity conflict never sent a Peer
+/// Up, so it gets no periodic statistics report either.
+#[tokio::test(start_paused = true)]
+async fn periodic_reports_skip_a_neighbor_excluded_from_bmp() {
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(4);
+    let mut manager = test_peer_manager();
+    manager.rib_tx = rib_tx;
+    manager.bmp_tx = Some(bmp_tx);
+    enable_loc_rib_stats(&mut manager);
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        fake_peer_handle(
+            peer,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    manager.bmp_excluded.insert(key(peer));
+    let rib = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::QueryBmpPeerStats { reply } => {
+                    let _ = reply.send(rustbgpd_rib::BmpPeerStats {
+                        adj_rib_out_post: HashMap::new(),
+                        rpki_adj_rib_in_post: None,
+                    });
+                }
+                RibUpdate::QueryBmpLocRibStats { reply } => {
+                    let _ = reply.send(vec![(1, 1, 42)]);
+                }
+                _ => panic!("unexpected RIB input during statistics sampling"),
+            }
+        }
+    });
+    tokio::time::timeout(PEER_QUERY_TIMEOUT, manager.emit_periodic_bmp_stats())
+        .await
+        .unwrap();
+    assert!(matches!(
+        bmp_rx.try_recv(),
+        Ok(BmpEvent::LocRibStats { .. })
+    ));
+    assert!(
+        bmp_rx.try_recv().is_err(),
+        "no report for the excluded neighbor"
+    );
+    drop(manager);
+    rib.await.unwrap();
 }

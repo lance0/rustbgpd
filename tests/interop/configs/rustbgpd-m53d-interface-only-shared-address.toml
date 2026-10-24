@@ -1,0 +1,42 @@
+[global]
+asn = 65001
+router_id = "10.53.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast", "ipv6_unicast"]
+maximum_paths = 2
+
+# FRR shares one MAC across both links, so both interface-only neighbors
+# learn the same EUI-64 address (02:53:0d:00:00:01 -> fe80::53:dff:fe00:1).
+[[neighbors]]
+interface = "eth1"
+remote_asn = "external"
+description = "frr1-m53d-eth1"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[[neighbors]]
+interface = "eth2"
+remote_asn = "external"
+description = "frr1-m53d-eth2"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
