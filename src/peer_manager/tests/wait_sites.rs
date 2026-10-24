@@ -1439,7 +1439,8 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::ApiPolicyImpact => manager
             .apply_policy_impact_snapshot(targets, Vec::new())
             .await
-            .map(drop),
+            .map(drop)
+            .map_err(|error| error.to_string()),
         Drive::HonorGracefulShutdown => manager.set_honor_graceful_shutdown(true).await,
         Drive::HonorBlackhole => manager.set_honor_blackhole(true).await,
         Drive::CatalogPolicyRefresh => {
