@@ -1,0 +1,71 @@
+# Containerlab topology: rustbgpd ↔ FRR over two parallel links with
+# interface-only neighbors on both ends (M53d — one learned link-local
+# address on two interfaces)
+#
+# FRR gives both of its fabric interfaces the same MAC address, so the kernel
+# generates the same EUI-64 link-local address on each and FRR's Router
+# Advertisements carry it as the source on both links. rustbgpd runs one
+# interface-only neighbor per link, learns that one address on both, and
+# keeps two neighbors.
+#
+#   * no IPv4 addresses on the fabric links;
+#   * both interface-only neighbors bind the same learned address and
+#     establish;
+#   * IPv4 routes arrive over RFC 8950 Extended Next Hop on both sessions and
+#     install as two-way ECMP through the same gateway on two devices;
+#   * carrier loss on one link removes only that neighbor and its path;
+#   * the best path's neighbor follows the interface name, whichever session
+#     came up first.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m53d-interface-only-shared-address-frr.clab.yml
+#   bash tests/interop/scripts/test-m53d-interface-only-shared-address-frr.sh
+#   containerlab destroy -t tests/interop/m53d-interface-only-shared-address-frr.clab.yml --cleanup
+
+name: m53d-interface-only-shared-address-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m53d-interface-only-shared-address.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip -4 addr flush dev eth2
+        - ip link set eth1 addrgenmode eui64
+        - ip link set eth2 addrgenmode eui64
+        - ip link set eth1 up
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info,rustbgpd::ra_discovery=debug
+
+    frr1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m53d.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip -4 addr flush dev eth1
+        - ip -4 addr flush dev eth2
+        - ip link set eth1 down
+        - ip link set eth2 down
+        - ip link set eth1 address 02:53:0d:00:00:01
+        - ip link set eth2 address 02:53:0d:00:00:01
+        - ip -6 addr flush dev eth1 scope link
+        - ip -6 addr flush dev eth2 scope link
+        - ip link set eth1 addrgenmode eui64
+        - ip link set eth2 addrgenmode eui64
+        - ip link set eth1 up
+        - ip link set eth2 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr1:eth2"]
