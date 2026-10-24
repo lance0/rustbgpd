@@ -6,5 +6,6 @@
   refused with `duplicate_link_local_address`. While `[bmp]` collectors are
   configured, a learned address that another neighbor holds is still refused
   before the session starts, now with reason `bmp_identity_conflict`, and the
-  neighbor admitted first keeps its session. See the
+  neighbor admitted first keeps its session. The refused neighbor shows the
+  reason as its last error in `rbgp neighbor`. See the
   [configuration reference](../docs/reference/configuration.md).

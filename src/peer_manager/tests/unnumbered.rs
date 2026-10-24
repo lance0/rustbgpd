@@ -864,6 +864,17 @@ async fn two_links_discovering_one_address_admit_exactly_one_while_bmp_monitors(
     h.reconcile().await;
     // Mutation-red: removing the admission check admits both.
     assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    // The refused neighbor reports why as its last error, which
+    // `rbgp neighbor` and `rbgp doctor` show.
+    let refused = h.mgr.unbound_interface_only_infos();
+    assert_eq!(refused.len(), 1);
+    assert!(
+        refused[0]
+            .last_error
+            .starts_with("bmp_identity_conflict: learned address fe80::2 refused"),
+        "{}",
+        refused[0].last_error
+    );
 
     // No sticky refusal: once the admitted link loses carrier, the other is
     // admitted.

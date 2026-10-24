@@ -137,6 +137,9 @@ struct Port {
     established: bool,
     /// The address last refused, so the refusal is logged once.
     refused: Option<Ipv6Addr>,
+    /// Why the current binding is refused (`<reason>: <detail>`), reported
+    /// as the unbound neighbor's last error.
+    refusal: Option<String>,
     /// Operator and safety state carried from a retired endpoint to the next.
     held: Option<HeldState>,
     /// The neighbor's RIB identity, allocated at its first binding and kept
@@ -686,6 +689,13 @@ impl PeerManager {
                         learned_address: None,
                     },
                 );
+                // A refused binding is where discovery stands: an address
+                // was learned and admission turned it away.
+                if discovery == NeighborDiscoveryState::AwaitingDiscovery
+                    && let Some(refusal) = &port.refusal
+                {
+                    refusal.clone_into(&mut info.last_error);
+                }
                 info.remote_asn_mode = match neighbor.remote_asn {
                     crate::config::RemoteAsn::External => {
                         rustbgpd_api::peer_types::RemoteAsnMode::External
@@ -1093,6 +1103,9 @@ impl PeerManager {
             return;
         }
         let Some(endpoint) = desired else {
+            let port = self.port_mut(name);
+            port.refused = None;
+            port.refusal = None;
             return;
         };
         if self.defer_unnumbered_while_staged() {
@@ -1102,7 +1115,9 @@ impl PeerManager {
             self.refuse_learned_address(name, endpoint.address, reason, &detail);
             return;
         }
-        self.port_mut(name).refused = None;
+        let port = self.port_mut(name);
+        port.refused = None;
+        port.refusal = None;
         if let Err(error) = self.bind_port(name, endpoint).await {
             // Nothing else re-raises this binding (refreshed RAs and an
             // unchanged link emit no event), so retry on the timer.
@@ -1126,6 +1141,9 @@ impl PeerManager {
             self.arm_unnumbered_retry();
         }
         let port = self.port_mut(name);
+        port.refusal = Some(format!(
+            "{reason}: learned address {address} refused, {detail}"
+        ));
         if port.refused == Some(address) {
             return;
         }
