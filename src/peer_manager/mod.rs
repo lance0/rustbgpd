@@ -108,6 +108,9 @@ mod unnumbered {
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
+        pub(super) fn unnumbered_stopped(&self, _: &PeerKey) -> bool {
+            false
+        }
         pub(super) fn interface_only_port_at(&self, _: u32) -> Option<String> {
             None
         }

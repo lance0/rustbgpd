@@ -365,6 +365,9 @@ impl PeerManager {
             ) => true,
             Ok(false) if spare_handshake => {
                 info!(interface = %name, peer = %key, "unnumbered: bound session is connected; keeping it");
+                // A handshake that fails in OpenSent falls back to Active,
+                // which reports nothing: check it again.
+                self.arm_unnumbered_retry();
                 false
             }
             Ok(false) => {
@@ -462,6 +465,17 @@ impl PeerManager {
                     .is_some_and(|bound| bound.address == address && bound != peer)
                     .then_some(name.as_str())
             })
+    }
+
+    /// Whether `peer` is an interface-only neighbor's stopped peer, whose
+    /// session task has exited while its address waits on retention.
+    pub(super) fn unnumbered_stopped(&self, peer: &PeerKey) -> bool {
+        self.unnumbered.as_ref().is_some_and(|unnumbered| {
+            unnumbered
+                .ports
+                .values()
+                .any(|port| port.stopped_retained && port.bound.as_ref() == Some(peer))
+        })
     }
 
     /// The interface whose interface-only neighbor owns `peer`.
@@ -703,7 +717,12 @@ impl PeerManager {
                     self.port_mut(name).established = true;
                     false
                 }
-                SessionState::OpenSent | SessionState::OpenConfirm => false,
+                // A handshake that fails in OpenSent falls back to Active,
+                // which reports nothing: check it again.
+                SessionState::OpenSent | SessionState::OpenConfirm => {
+                    self.arm_unnumbered_retry();
+                    false
+                }
                 _ => true,
             },
             rustbgpd_transport::StateQueryOutcome::SessionGone => true,

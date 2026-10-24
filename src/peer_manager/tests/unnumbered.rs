@@ -651,6 +651,89 @@ async fn a_handshake_that_starts_during_the_retention_query_is_kept() {
     tokio::join!(h.bind("swp1", None), handshake);
     assert_eq!(shut_down.load(Ordering::SeqCst), 0, "the handshake is kept");
     assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+
+    // The handshake then fails in OpenSent, back to Active, which reports
+    // nothing. Mutation-red: with no retry armed the address stays held.
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "checked again");
+    *state.lock().unwrap() = SessionState::Active;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [], "released after the failed handshake");
+}
+
+/// A session found mid-handshake by the release's state read is kept and
+/// checked again: a failure in `OpenSent` falls back to Active silently, and
+/// the next check releases the address.
+#[tokio::test(start_paused = true)]
+async fn a_handshake_that_fails_after_the_state_read_releases_the_address() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let state = Arc::new(std::sync::Mutex::new(SessionState::OpenSent));
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let session_state = Arc::clone(&state);
+    let task = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            let now = *session_state.lock().unwrap();
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(IpAddr::V6(ll(2)), now));
+                }
+                PeerCommand::ShutdownUnlessConnected { reply } => {
+                    let quiet = !matches!(
+                        now,
+                        SessionState::OpenSent
+                            | SessionState::OpenConfirm
+                            | SessionState::Established
+                    );
+                    let _ = reply.send(quiet);
+                    if quiet {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    h.replace_session(&key, PeerHandle::from_parts(tx, task));
+
+    h.bind("swp1", None).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        std::slice::from_ref(&key),
+        "kept mid-handshake"
+    );
+    // Mutation-red: with no retry armed nothing checks the session again.
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "checked again");
+    *state.lock().unwrap() = SessionState::Active;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [], "released after the failed handshake");
+}
+
+/// A stopped peer kept for its retention has no session task: disable and
+/// enable still apply, and a binding that returns carries the state to the
+/// peer that replaces it.
+#[tokio::test(start_paused = true)]
+async fn disable_and_enable_apply_to_a_stopped_retained_peer() {
+    let (mut h, _retention, _) = retention_left_after_the_check().await;
+    let key = swp1_key(2);
+    // Mutation-red: requiring the exited task to answer Stop or Start fails
+    // both and leaves the neighbor disabled.
+    h.mgr.disable_peer(key.clone(), None).await.unwrap();
+    assert!(!h.mgr.peers[&key].enabled);
+    h.mgr.enable_peer(key.clone()).await.unwrap();
+    assert!(h.mgr.peers[&key].enabled);
+    h.mgr.disable_peer(key.clone(), None).await.unwrap();
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+    assert!(
+        !h.mgr.peers[&key].enabled,
+        "the disable carries to the replacement"
+    );
 }
 
 /// Without retained routes the address is released as soon as the session
