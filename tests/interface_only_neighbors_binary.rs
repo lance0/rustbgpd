@@ -122,6 +122,17 @@ impl Daemon {
 
     /// [`Self::start`] with `extra` TOML on the `veth` neighbor.
     fn start_with(ns: &str, dir: &Path, asn: u32, router_id: &str, extra: &str) -> Self {
+        Self::start_neighbor(
+            ns,
+            dir,
+            asn,
+            router_id,
+            &format!("interface = \"veth\"\nremote_asn = \"external\"\n{extra}"),
+        )
+    }
+
+    /// A daemon whose one `veth` neighbor is `neighbor` (TOML keys).
+    fn start_neighbor(ns: &str, dir: &Path, asn: u32, router_id: &str, neighbor: &str) -> Self {
         let runtime = dir.join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -153,11 +164,9 @@ path = "{runtime}/grpc.sock"
 principal = "rustbgpd://operator/ion-test"
 
 [[neighbors]]
-interface = "veth"
-remote_asn = "external"
 families = ["ipv6_unicast"]
 hold_time = {HOLD_TIME_SECS}
-{extra}
+{neighbor}
 "#,
                 runtime = runtime.display()
             ),
@@ -405,4 +414,44 @@ fn interface_only_gtsm_refuses_hop_limit_254_and_accepts_255() {
     b.wait("B Established with A", RECOVERY_BOUND, |b| {
         b.established_with("fe80::a1")
     });
+}
+
+/// An RA-silent GTSM peer that dials in: B has a static link-local neighbor
+/// toward A with `ttl_security` and no interface-only neighbor, so it sends no
+/// RAs and A can learn it only from B's inbound connection. B's socket drops
+/// any SYN-ACK below Hop Limit 255, so A's listener must send 255 before any
+/// binding exists; A then learns B, installs its selector and establishes.
+#[test]
+fn an_ra_silent_gtsm_peer_is_learned_from_its_inbound_connection() {
+    if !netns_enabled() {
+        return;
+    }
+    let ns = Namespaces::create();
+    let (dir_a, dir_b) = (private_tempdir(), private_tempdir());
+    let mut a = Daemon::start_with(
+        &ns.a,
+        dir_a.path(),
+        65001,
+        "192.0.2.1",
+        "ttl_security = true",
+    );
+    let _b = Daemon::start_neighbor(
+        &ns.b,
+        dir_b.path(),
+        65002,
+        "192.0.2.2",
+        "address = \"fe80::a1\"\ninterface = \"veth\"\nremote_asn = 65001\nttl_security = true",
+    );
+    // Mutation-red: without the listener's startup Hop Limit, B never
+    // completes a handshake and A never learns it.
+    a.wait(
+        "A Established with the RA-silent GTSM peer",
+        RECOVERY_BOUND,
+        |a| a.established_with("fe80::b1"),
+    );
+    assert!(
+        a.log()
+            .contains("peer address learned from an inbound connection"),
+        "learned from B's inbound connection, not an RA"
+    );
 }

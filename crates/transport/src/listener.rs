@@ -186,6 +186,11 @@ pub struct ListenerSocketOptions {
     pub md5_keys: Vec<Md5ListenerKey>,
     /// GTSM selectors applied to accepted children.
     pub ttl_security: Vec<TtlSecurityListenerPolicy>,
+    /// Send Hop Limit 255 from the IPv6 listener from the start, before any
+    /// selector asks for it: an interface-only neighbor with GTSM may be
+    /// learned from its own inbound connection, and that peer drops a
+    /// SYN-ACK below 255, so the handshake would never reach accept.
+    pub gtsm_outbound_v6: bool,
     /// TCP maximum segment size clamp (`TCP_MAXSEG`) applied to IPv4
     /// listener sockets before listen; accepted IPv4 children inherit it.
     pub tcp_mss_v4: Option<u16>,
@@ -2736,6 +2741,9 @@ where
         debug!(peer = %key.peer, prefix_len = key.prefix_len, "TCP MD5 listener key configured");
     }
     enable_listener_gtsm_outbound(&socket, addr.is_ipv4(), &options.ttl_security)?;
+    if options.gtsm_outbound_v6 && addr.is_ipv6() {
+        crate::socket_opts::set_gtsm_outbound(&socket, false)?;
+    }
     // Listener-wide by construction: the clamp is negotiated in the SYN-ACK,
     // so it must precede listen() and cannot be scoped per accepted peer.
     // Partitioned by address family so IPv4 tunnel constraints do not

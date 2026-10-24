@@ -588,6 +588,28 @@ mod inbound_auth {
         expect_data_flows(compliant, accepted).await;
     }
 
+    /// With `gtsm_outbound_v6` and no selector yet, the IPv6 listener's
+    /// SYN-ACK carries Hop Limit 255, so a GTSM client that dials in (an
+    /// interface-only neighbor learned from its inbound connection) completes
+    /// its handshake; without it the client drops the SYN-ACK.
+    #[tokio::test]
+    async fn gtsm_outbound_v6_lets_a_gtsm_client_complete_its_handshake() {
+        for (outbound, completes) in [(true, true), (false, false)] {
+            let options = ListenerSocketOptions {
+                gtsm_outbound_v6: outbound,
+                ..ListenerSocketOptions::default()
+            };
+            let (_v4_addr, v6_addr, mut accept_rx, _control) = bind_dual_listener(options).await;
+            let connected = spawn_gtsm_connect(v6_addr, None).await;
+            // Mutation-red: without the startup Hop Limit the GTSM client
+            // never sees an acceptable SYN-ACK.
+            assert_eq!(connected.is_ok(), completes, "gtsm_outbound_v6={outbound}");
+            if completes {
+                expect_data_flows(connected.unwrap(), expect_accept(&mut accept_rx).await).await;
+            }
+        }
+    }
+
     /// An interface-only neighbor's learned-endpoint selector (ADR-0142):
     /// installed, low-hop-limit segments from that address on that interface
     /// are dropped in the kernel while a hop-limit-255 sender's arrive; a
