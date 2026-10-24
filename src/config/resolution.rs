@@ -600,6 +600,8 @@ impl Config {
         external_pinned: bool,
         store: &mut SetStore,
     ) -> Result<EffectivePolicyChains, ConfigError> {
+        #[cfg(test)]
+        POLICY_RESOLUTIONS.with(|count| count.set(count.get() + 1));
         let global_import = self.import_chain_with_store(store)?;
         let global_export = self.export_chain_with_store(store)?;
         let group_import = if let Some(group) = group {
@@ -712,8 +714,12 @@ impl Config {
         // empty name list, so an empty field that fell through to the next
         // level never counts. A permit-all chain still counts — RFC 8212 wants
         // a deliberate policy, not a particular filtering strategy.
-        let import_explicit = import.is_some();
-        let export_explicit = export.is_some();
+        let (import_explicit, export_explicit) = self.explicit_policy_in(neighbor, group);
+        debug_assert_eq!(
+            (import_explicit, export_explicit),
+            (import.is_some(), export.is_some()),
+            "presence read from configuration matches the resolved chains"
+        );
 
         // RFC 8326 §4 / RFC 7999 receiver behavior: append implicit rules to
         // the end of the EBGP import chain when the corresponding honor knob
@@ -789,6 +795,39 @@ impl Config {
             export_explicit,
             external,
         })
+    }
+
+    /// Whether an operator policy is configured in each direction (import,
+    /// export): on the neighbor, its peer group, or globally, read from the
+    /// configuration without compiling a chain. A non-empty chain or inline
+    /// policy always resolves to a chain, so this is the ADR-0112 explicit
+    /// provenance the resolved chains report.
+    pub(crate) fn explicit_policy_presence(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<(bool, bool), ConfigError> {
+        let group = self.peer_group_for_neighbor(neighbor)?;
+        Ok(self.explicit_policy_in(neighbor, group))
+    }
+
+    fn explicit_policy_in(
+        &self,
+        neighbor: &Neighbor,
+        group: Option<&PeerGroupConfig>,
+    ) -> (bool, bool) {
+        let import = !neighbor.import_policy_chain.is_empty()
+            || !neighbor.import_policy.is_empty()
+            || group.is_some_and(|group| {
+                !group.import_policy_chain.is_empty() || !group.import_policy.is_empty()
+            })
+            || !self.policy.import_chain.is_empty();
+        let export = !neighbor.export_policy_chain.is_empty()
+            || !neighbor.export_policy.is_empty()
+            || group.is_some_and(|group| {
+                !group.export_policy_chain.is_empty() || !group.export_policy.is_empty()
+            })
+            || !self.policy.export_chain.is_empty();
+        (import, export)
     }
 
     pub(super) fn resolved_families(
@@ -879,7 +918,7 @@ impl Config {
         external_pinned: bool,
     ) -> Result<ResolvedNeighbor, ConfigError> {
         let mut store = SetStore::new();
-        self.resolve_neighbor_pinned_with_store(neighbor, external_pinned, &mut store, None)
+        self.resolve_neighbor_pinned_with_store(neighbor, external_pinned, Some(&mut store), None)
     }
 
     /// Configuration comparison only: the placeholder scope must never be
@@ -889,7 +928,7 @@ impl Config {
         neighbor: &Neighbor,
         store: &mut SetStore,
     ) -> Result<ResolvedNeighbor, ConfigError> {
-        self.resolve_neighbor_pinned_with_store(neighbor, false, store, Some(0))
+        self.resolve_neighbor_pinned_with_store(neighbor, false, Some(store), Some(0))
     }
 
     /// Project fields for a `HotUpdatePeer` payload only. A hot update never
@@ -922,7 +961,7 @@ impl Config {
         self.resolve_neighbor_pinned_with_store(
             neighbor,
             false,
-            &mut SetStore::new(),
+            Some(&mut SetStore::new()),
             accepted.peer_scope_id,
         )
     }
@@ -931,11 +970,14 @@ impl Config {
         clippy::too_many_lines,
         reason = "neighbor resolution centralizes inheritance, validation, and transport projection"
     )]
+    /// With no `store`, no policy is compiled: the result carries the
+    /// neighbor's settings and RFC 8212 classification but no chains, for a
+    /// report that needs only [`Self::explicit_policy_presence`].
     pub(super) fn resolve_neighbor_pinned_with_store(
         &self,
         neighbor: &Neighbor,
         external_pinned: bool,
-        store: &mut SetStore,
+        store: Option<&mut SetStore>,
         scope_override: Option<u32>,
     ) -> Result<ResolvedNeighbor, ConfigError> {
         let router_id: Ipv4Addr = self
@@ -1242,8 +1284,22 @@ impl Config {
             .as_ref()
             .is_some_and(|rpki| rpki.local_revalidation);
 
-        let policy =
-            self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, store)?;
+        let policy = match store {
+            Some(store) => self.effective_policy_for_neighbor_with_store(
+                neighbor,
+                group,
+                external_pinned,
+                store,
+            )?,
+            None => EffectivePolicyChains {
+                import: None,
+                export: None,
+                import_explicit: false,
+                export_explicit: false,
+                external: external_pinned
+                    || self.rfc8212_external_asn(neighbor.remote_asn.resolve(self.global.asn)),
+            },
+        };
 
         let admin_down = neighbor
             .admin_down
@@ -1405,7 +1461,7 @@ impl Config {
                 resolved.push(self.resolve_neighbor_pinned_with_store(
                     neighbor,
                     false,
-                    &mut store,
+                    Some(&mut store),
                     scope_override,
                 )?);
             }
@@ -1508,6 +1564,24 @@ impl Config {
                     ))
                 })
                 .collect(),
+            interfaces: self
+                .neighbors
+                .interface_only()
+                .iter()
+                .filter(|neighbor| {
+                    neighbor.max_prefixes_out_ipv4_unicast.is_some()
+                        || neighbor.max_prefixes_out_ipv6_unicast.is_some()
+                })
+                .filter_map(|neighbor| {
+                    Some((
+                        neighbor.interface.clone()?,
+                        pair(
+                            neighbor.max_prefixes_out_ipv4_unicast,
+                            neighbor.max_prefixes_out_ipv6_unicast,
+                        ),
+                    ))
+                })
+                .collect(),
             groups: self
                 .peer_groups
                 .iter()
@@ -1576,17 +1650,37 @@ pub fn outbound_prefix_limits_loosen(rollback: &Config, candidate: &Config) -> b
             group.max_prefixes_out_ipv6_unicast,
         )
     });
+    let neighbor_loosens = |prior: Option<&Neighbor>, neighbor: &Neighbor| {
+        let Some(prior) = prior else {
+            return false;
+        };
+        let (prior_v4, prior_v6) = effective(rollback, prior);
+        let (v4, v6) = effective(candidate, neighbor);
+        looser(prior_v4, v4) || looser(prior_v6, v6)
+    };
     groups_loosen
         || candidate.neighbors.iter().any(|neighbor| {
-            let Some(prior) = rollback.neighbors.iter().find(|prior| {
-                prior.address == neighbor.address && prior.interface == neighbor.interface
-            }) else {
-                return false;
-            };
-            let (prior_v4, prior_v6) = effective(rollback, prior);
-            let (v4, v6) = effective(candidate, neighbor);
-            looser(prior_v4, v4) || looser(prior_v6, v6)
+            neighbor_loosens(
+                rollback.neighbors.iter().find(|prior| {
+                    prior.address == neighbor.address && prior.interface == neighbor.interface
+                }),
+                neighbor,
+            )
         })
+        // Interface-only neighbors are matched by interface (ADR-0142).
+        || candidate
+            .neighbors
+            .interface_only()
+            .iter()
+            .any(|neighbor| {
+                neighbor_loosens(
+                    neighbor
+                        .interface
+                        .as_deref()
+                        .and_then(|interface| rollback.neighbors.interface_only_on(interface)),
+                    neighbor,
+                )
+            })
 }
 
 #[derive(Clone)]
@@ -1729,6 +1823,12 @@ impl UnpolicedEbgpBoundary {
             (false, false) => "",
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Effective-policy resolutions (chain compilations) on this thread.
+    pub(crate) static POLICY_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Resolved policy chains for one neighbor plus the ADR-0112 directional

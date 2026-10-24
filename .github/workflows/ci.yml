@@ -14,6 +14,8 @@ permissions:
 
 # Feature branches without a PR must use a draft PR or the local quartet;
 # hosted push CI is intentionally main-only to avoid duplicating PR runs.
+# This core CI runs on drafts; the Interop and Kernel Dataplane labs run once
+# the PR is marked ready for review.
 on:
   push:
     branches: [main]

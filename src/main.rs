@@ -2176,7 +2176,7 @@ fn zero_static_peer_summary(dynamic_range_count: usize) -> String {
 /// `[global.unnumbered]` as the discovery engine takes it; validation has
 /// already bounded `ra_interval_secs`.
 #[cfg(target_os = "linux")]
-fn unnumbered_discovery_config(config: &Config) -> ra_discovery::DiscoveryConfig {
+pub(crate) fn unnumbered_discovery_config(config: &Config) -> ra_discovery::DiscoveryConfig {
     let unnumbered = config.global.unnumbered.clone().unwrap_or_default();
     ra_discovery::DiscoveryConfig {
         send: unnumbered.router_advertisements.unwrap_or(true),
@@ -5094,10 +5094,15 @@ async fn run<T>(
         .is_some()
         .then(|| watch::channel(Arc::clone(&accepted)));
 
+    // The interface-only neighbors the peer manager runs, published as its
+    // ports follow reloads; the host IPv6 monitor inspects their interfaces.
+    #[cfg(target_os = "linux")]
+    let (running_interface_only_tx, running_interface_only_rx) =
+        watch::channel(Arc::new(config.neighbors.interface_only().to_vec()));
     #[cfg(target_os = "linux")]
     let _host_ipv6_monitor = accepted_watch
         .as_ref()
-        .map(|(_, rx)| host_ipv6_runtime::spawn(rx.clone()));
+        .map(|(_, rx)| host_ipv6_runtime::spawn(rx.clone(), running_interface_only_rx.clone()));
 
     let peer_mgr = PeerManager::new_with_config(
         peer_mgr_rx,
@@ -5153,6 +5158,8 @@ async fn run<T>(
     // Advertisements and follow carrier through the link monitor; without
     // either, refuse to start rather than run them blind.
     #[cfg(target_os = "linux")]
+    let peer_mgr = peer_mgr.with_running_interface_only(running_interface_only_tx);
+    #[cfg(target_os = "linux")]
     let peer_mgr = if config.neighbors.interface_only().is_empty() {
         peer_mgr
     } else {
@@ -5160,7 +5167,10 @@ async fn run<T>(
             error!("interface-only neighbors need the netlink link monitor, which did not start");
             process::exit(1);
         }
-        match ra_discovery::RaDiscovery::spawn(unnumbered_discovery_config(&config)) {
+        match ra_discovery::RaDiscovery::spawn(
+            unnumbered_discovery_config(&config),
+            metrics.clone(),
+        ) {
             Ok((discovery, events)) => {
                 peer_mgr.with_unnumbered(peer_manager::Unnumbered::new(discovery, events))
             }

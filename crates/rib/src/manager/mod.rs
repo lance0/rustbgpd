@@ -4035,7 +4035,11 @@ impl RibManager {
                     }
                 }
             }
-            RibUpdate::PeerDeleted { peer, label } => self.handle_peer_deleted(peer, label),
+            RibUpdate::PeerDeleted {
+                peer,
+                label,
+                keep_series,
+            } => self.handle_peer_deleted(peer, label, keep_series),
             RibUpdate::ReleasePeer { peer } => {
                 if !peer.release() {
                     debug!(%peer, "release of a handle that was not live");
@@ -4513,6 +4517,9 @@ impl RibManager {
             }
             RibUpdate::QueryPeerRetainedStale { peer, reply } => {
                 self.handle_query_peer_retained_stale(peer, reply);
+            }
+            RibUpdate::QueryPeerRetention { peer, reply } => {
+                self.handle_query_peer_retention(peer, reply);
             }
             RibUpdate::QueryNeighborPolicyStats { peer, reply } => {
                 self.handle_query_neighbor_policy_stats(peer, reply);

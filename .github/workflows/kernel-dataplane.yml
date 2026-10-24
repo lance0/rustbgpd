@@ -19,7 +19,10 @@ on:
     paths-ignore:
       - "**/*.md"
       - "docs/**"
+  # A draft runs no labs (`classify_changes` reports `run_labs=false`), so
+  # marking it ready reruns the workflow on the same head with the labs.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -49,6 +52,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
         run: python3 scripts/classify_heavy_ci_paths.py
 
   # This job gates exactly one scenario, m43. Its host is a third party:
@@ -463,6 +467,22 @@ jobs:
           label: M53b
           topology: tests/interop/m53b-interface-only-frr.clab.yml
           script: tests/interop/scripts/test-m53b-interface-only-frr.sh
+
+  m53c:
+    needs: [prime_dev_image]
+    name: M53c — one link-local address on two parallel links (FRR 10.7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+        id: dataplane
+      - name: Run M53c (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M53c
+          topology: tests/interop/m53c-same-address-frr.clab.yml
+          script: tests/interop/scripts/test-m53c-same-address-frr.sh
 
   m51:
     needs: [prime_dev_image]
@@ -1094,14 +1114,14 @@ jobs:
     if: ${{ always() }}
     needs: [classify_changes, bird3_archive, prime_dev_image, m36,
       m37, m37-ip, m38, m39, m39b, m109, m117, m110, m48, m60, m61, m62, m40, m42, m50, m52,
-      m58, m53, m53b, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
+      m58, m53, m53b, m53c, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, m121, m123, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
         classify_changes bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
-        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m53b m51 m108 m43 m47
+        m39b m109 m117 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m53b m53c m51 m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 m121 m123 netns
     steps:
       - name: Aggregate required Kernel Dataplane result

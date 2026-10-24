@@ -733,6 +733,7 @@ async fn grace_deadlines_use_the_cached_deadline_map() {
     manager.handle_update(RibUpdate::PeerDeleted {
         peer: UPSTREAM,
         label: None,
+        keep_series: false,
     });
     assert!(manager.eor_grace_deadlines.is_stale());
     assert_eq!(manager.next_eor_hold_deadline(), Some(start + WINDOW * 2));

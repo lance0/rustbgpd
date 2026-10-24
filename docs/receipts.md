@@ -150,7 +150,8 @@ proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 | M109 | EVPN L2 over an IPv6-only VXLAN underlay: IPv6 VTEP addresses and BGP transport, 16-octet EVPN next hops, and kernel FDB rows toward an IPv6 remote VTEP | FRR 10.7.1 |
 | M110 | EVPN symmetric Interface-less IRB (Type 5 / L3VNI) over an IPv6-only VXLAN underlay, with kernel route, neighbor, and FDB evidence | FRR 10.7.1 |
 | M53 | ADR-0069 BGP unnumbered / IPv6 link-local peering + scoped FIB | FRR 10.7.1 ×2 |
-| M53b | ADR-0142 interface-only discovery (RA and inbound connection), RFC 8950 ECMP and carrier recovery | FRR 10.7.1 ×3 |
+| M53b | ADR-0142 interface-only discovery (RA and inbound connection), RFC 8950 ECMP, carrier recovery and a peer address change | FRR 10.7.1 ×3 |
+| M53c | One link-local address on two interfaces: separate neighbors, ECMP through one gateway on two devices, scoped refresh, carrier loss and delete | FRR 10.7.1 |
 | M58 | ADR-0061 runtime `[[fib_tables]]` CRUD over gRPC/CLI | FRR 10.7.1 |
 | M60 / M61 / M62 | Kill-and-restart reaping/re-adoption for FDB and EVPN L3 marker sweeps; M62 additionally pins exact durable BLACKHOLE receipt authority and preservation of an unreceipted marker row | FRR 10.7.1 |
 | M65 | ADR-0083 single-active failover blackout measurement | GoBGP 3.x ×2 |

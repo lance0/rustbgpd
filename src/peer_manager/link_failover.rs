@@ -107,10 +107,10 @@ impl PeerManager {
         if self.link_check.bfd_retry_at.is_none()
             && self.link_check.changes.is_none()
             && self.bfd_coupling.as_ref().is_some_and(|coupling| {
-                coupling
-                    .configured
-                    .values()
-                    .any(|params| params.scope_id.is_some())
+                // A binding's session follows its binding, never this poll.
+                coupling.configured.values().any(|params| {
+                    params.scope_id.is_some() && !coupling.bound.contains(&params.peer)
+                })
             })
         {
             self.link_check.bfd_retry_at = Some(tokio::time::Instant::now() + BFD_SCOPE_POLL);

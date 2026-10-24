@@ -82,6 +82,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         remote_addr: addr,
         local_address: None,
         peer_interface: None,
+        interface_only: false,
         accepted_dynamic_range: None,
         dampening_admission: None,
         peer_scope_id: None,

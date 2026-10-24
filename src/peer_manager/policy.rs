@@ -529,7 +529,7 @@ impl PeerManager {
         let mut snapshot = InstalledPolicyRoutesReachability::default();
         for (peer, managed) in &self.peers {
             // The neighbor's own value, as the transport and RIB emit it.
-            let peer_label = peer.label();
+            let peer_label = self.peer_metric_label(peer);
             for (direction, chain, clean) in [
                 (
                     "import",
@@ -2316,9 +2316,23 @@ impl PeerManager {
     /// rollback-capable resolved-policy snapshot path.
     pub(super) async fn apply_policy_impact_snapshot(
         &mut self,
-        mut static_targets: Vec<ResolvedPeerPolicy>,
+        static_targets: Vec<ResolvedPeerPolicy>,
         dynamic_ranges: Vec<DynamicRangeTarget>,
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+        // ADR-0142: an interface-only neighbor's target names its interface
+        // with an unspecified address; it applies to the bound peer, and an
+        // unbound neighbor takes the chains when it binds.
+        let mut static_targets: Vec<ResolvedPeerPolicy> = static_targets
+            .into_iter()
+            .filter_map(|mut target| {
+                if !target.address.is_unspecified() {
+                    return Some(target);
+                }
+                let bound = self.unnumbered_bound_peer(target.interface.as_deref()?)?;
+                target.address = bound.address;
+                Some(target)
+            })
+            .collect();
         let mut dynamic_targets = self.resolve_dynamic_policy_targets(&dynamic_ranges)?;
         static_targets.append(&mut dynamic_targets);
         self.apply_resolved_policy_snapshot_with_prestage_reads(

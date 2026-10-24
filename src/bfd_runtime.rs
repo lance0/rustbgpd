@@ -45,6 +45,10 @@ pub struct BfdSessionParams {
     /// and reaps its series with it, so a retired session never writes to
     /// a replacement on another interface.
     pub(crate) peer_label: String,
+    /// The neighbor's interface, reported as the session's `peer_interface`;
+    /// empty for an unscoped neighbor. Never parsed from `peer_label`, which
+    /// names only the interface for an interface-only neighbor.
+    pub(crate) peer_interface: String,
     /// Linux interface index for an IPv6 link-local peer. Global IPv4/IPv6
     /// sessions are deliberately unscoped (`None`). This stays inside the
     /// daemon runtime and is not part of the public BFD status identity.
@@ -396,6 +400,7 @@ impl BfdRuntimeConfig {
                     neighbor.interface.clone(),
                 )
                 .label(),
+                peer_interface: neighbor.interface.clone().unwrap_or_default(),
                 scope_id,
                 destination,
                 desired_min_tx_us: profile.min_tx_interval.saturating_mul(1000),
@@ -411,6 +416,55 @@ impl BfdRuntimeConfig {
         }
         Ok(BfdRuntimeConfig { sessions })
     }
+}
+
+/// The single-hop BFD session an interface-only neighbor's binding runs, from
+/// its own or its peer group's `bfd` (ADR-0142 "Lifecycle"): the learned
+/// address scoped to the binding's interface index. `None` when the neighbor
+/// configures no enabled BFD. Configuration validation rejects multihop here.
+pub(crate) fn bound_session_params(
+    config: &Config,
+    neighbor: &crate::config::Neighbor,
+    interface: &str,
+    address: std::net::Ipv6Addr,
+    ifindex: u32,
+) -> Result<Option<BfdSessionParams>, BfdRuntimeConfigError> {
+    let Some(bfd) = resolve_bfd(
+        neighbor.bfd.as_ref(),
+        neighbor.peer_group.as_deref(),
+        config,
+    )
+    .filter(|bfd| bfd.enabled) else {
+        return Ok(None);
+    };
+    let profile = config
+        .bfd_profiles
+        .iter()
+        .find(|p| p.name == bfd.profile)
+        .ok_or_else(|| {
+            BfdRuntimeConfigError(format!(
+                "interface-only neighbor on {interface:?}: configured BFD profile {:?} is missing",
+                bfd.profile
+            ))
+        })?;
+    let peer = IpAddr::V6(address);
+    Ok(Some(BfdSessionParams {
+        revision: 0,
+        peer,
+        // The neighbor's `peer` value, which names its interface at every
+        // learned endpoint.
+        peer_label: rustbgpd_telemetry::interface_peer_label(interface),
+        peer_interface: interface.to_owned(),
+        scope_id: Some(ifindex),
+        destination: bfd_destination(peer, Some(ifindex), false)?,
+        desired_min_tx_us: profile.min_tx_interval.saturating_mul(1000),
+        required_min_rx_us: profile.min_rx_interval.saturating_mul(1000),
+        detect_mult: u8::try_from(profile.multiplier).unwrap_or(u8::MAX),
+        strict: bfd.strict,
+        enabled: true,
+        multihop: false,
+        source: None,
+    }))
 }
 
 fn is_ipv6_link_local(peer: IpAddr) -> bool {
@@ -812,6 +866,8 @@ mod linux {
         peer: IpAddr,
         /// See [`BfdSessionParams::peer_label`].
         peer_label: String,
+        /// See [`BfdSessionParams::peer_interface`].
+        peer_interface: String,
         /// Required receive/transmit interface for an IPv6 link-local peer.
         /// Global IPv4/IPv6 sessions remain unscoped.
         scope_id: Option<u32>,
@@ -1107,6 +1163,7 @@ mod linux {
                 session,
                 peer: params.peer,
                 peer_label: params.peer_label.clone(),
+                peer_interface: params.peer_interface.clone(),
                 scope_id: params.scope_id,
                 destination: params.destination,
                 strict: params.strict,
@@ -1382,10 +1439,13 @@ mod linux {
                                 "BFD remote AdminDown flip without local transition");
                         } else {
                             info!(peer = %peer, ?old, ?new, ?diagnostic, "BFD state change");
-                            let peer_label = self
-                                .sessions
-                                .get(&peer)
-                                .map_or_else(|| peer.to_string(), |entry| entry.peer_label.clone());
+                            let (peer_label, peer_interface) =
+                                self.sessions.get(&peer).map_or_else(
+                                    || (peer.to_string(), String::new()),
+                                    |entry| {
+                                        (entry.peer_label.clone(), entry.peer_interface.clone())
+                                    },
+                                );
                             metrics.record_bfd_state(
                                 &peer_label,
                                 new == SessionState::Up,
@@ -1396,10 +1456,7 @@ mod linux {
                             // subscribers — expected and ignorable.
                             let _ = self.event_tx.send(BfdRuntimeEvent {
                                 peer,
-                                peer_interface: rustbgpd_api::peer_types::PeerKey::label_interface(
-                                    Some(&peer_label),
-                                )
-                                .to_string(),
+                                peer_interface,
                                 old_state: old,
                                 new_state: new,
                                 diagnostic,
@@ -1500,10 +1557,7 @@ mod linux {
                 .values()
                 .map(|e| BfdStatus {
                     peer: e.peer,
-                    peer_interface: rustbgpd_api::peer_types::PeerKey::label_interface(Some(
-                        &e.peer_label,
-                    ))
-                    .to_string(),
+                    peer_interface: e.peer_interface.clone(),
                     state: e.session.state(),
                     diagnostic: e.last_diagnostic,
                     strict: e.strict,
@@ -1871,6 +1925,7 @@ mod linux {
                 revision,
                 peer,
                 peer_label: peer.to_string(),
+                peer_interface: String::new(),
                 scope_id: None,
                 destination: SocketAddr::new(peer, 9),
                 desired_min_tx_us: 300_000,
@@ -2006,6 +2061,79 @@ mod linux {
             assert!(has_series(), "re-added member seeds a new gauge");
         }
 
+        /// An interface-only neighbor's session is labelled `interface:eth1`,
+        /// which carries no `%`: its status row and its transitions still name
+        /// the interface, as `GetBfdSessions` and the event stream report it.
+        #[tokio::test]
+        async fn an_interface_only_session_reports_its_interface() {
+            use super::*;
+            let metrics = BgpMetrics::new();
+            let (status_tx, status_rx) = watch::channel(Vec::new());
+            let (event_tx, mut event_rx) = broadcast::channel(8);
+            let (state_change_tx, _state_rx) = super::super::state_change_channel();
+            let mut actor = Actor {
+                configured_peers: HashSet::new(),
+                sessions: BTreeMap::new(),
+                discriminators: DiscriminatorAllocator::new(),
+                by_discriminator: HashMap::new(),
+                timers: BinaryHeap::new(),
+                tx_v4: None,
+                tx_v6: None,
+                multihop_tx_v4: None,
+                multihop_tx_v6: None,
+                event_tx,
+                state_change_tx,
+                jitter_state: 1,
+            };
+            let mut bound = reload_params("fe80::1", 1);
+            bound.scope_id = Some(7);
+            bound.peer_label = rustbgpd_telemetry::interface_peer_label("eth1");
+            bound.peer_interface = "eth1".to_string();
+            let peer = bound.peer;
+            actor
+                .reconcile(
+                    &BfdRuntimeConfig {
+                        sessions: vec![bound],
+                    },
+                    &metrics,
+                    &status_tx,
+                )
+                .await;
+            // Mutation-red: parsing the label for its `%` scope reports "".
+            let interfaces: Vec<String> = status_rx
+                .borrow()
+                .iter()
+                .map(|status| status.peer_interface.clone())
+                .collect();
+            assert_eq!(interfaces, ["eth1"]);
+            let local = actor.sessions[&peer].local_discriminator;
+            let actions =
+                actor
+                    .sessions
+                    .get_mut(&peer)
+                    .unwrap()
+                    .session
+                    .handle(Event::PacketReceived(ControlPacket {
+                        diagnostic: Diagnostic::None,
+                        state: SessionState::Init,
+                        poll: false,
+                        final_bit: false,
+                        control_plane_independent: false,
+                        auth_present: false,
+                        demand: false,
+                        multipoint: false,
+                        detect_mult: 3,
+                        my_discriminator: 77,
+                        your_discriminator: local,
+                        desired_min_tx_interval: 300_000,
+                        required_min_rx_interval: 300_000,
+                        required_min_echo_rx_interval: 0,
+                    }));
+            actor.apply(peer, actions, &metrics).await;
+            let up = event_rx.try_recv().expect("the Up transition is broadcast");
+            assert_eq!(up.peer_interface, "eth1");
+        }
+
         /// A link-local member moves from eth0 to eth1 in one reload while its
         /// BFD session is Up. The retired session's final Up→AdminDown must
         /// count against its own value, never the replacement's, and that
@@ -2038,6 +2166,7 @@ mod linux {
             let mut old = reload_params("fe80::1", 1);
             old.scope_id = Some(1);
             old.peer_label = "fe80::1%eth0".to_string();
+            old.peer_interface = "eth0".to_string();
             let peer = old.peer;
             actor
                 .reconcile(
@@ -2094,6 +2223,7 @@ mod linux {
             replacement.revision = 2;
             replacement.scope_id = Some(2);
             replacement.peer_label = "fe80::1%eth1".to_string();
+            replacement.peer_interface = "eth1".to_string();
             actor
                 .reconcile(
                     &BfdRuntimeConfig {
@@ -2435,6 +2565,7 @@ mod linux {
                     revision: 0,
                     peer: "fe80::2".parse().unwrap(),
                     peer_label: "fe80::2".to_string(),
+                    peer_interface: String::new(),
                     scope_id: None,
                     destination: "[fe80::2]:3784".parse().unwrap(),
                     desired_min_tx_us: 300_000,
@@ -2717,6 +2848,7 @@ mod linux {
                     revision: 0,
                     peer: "127.0.0.9".parse().expect("ip"),
                     peer_label: "127.0.0.9".to_string(),
+                    peer_interface: String::new(),
                     scope_id: None,
                     destination: "127.0.0.9:3784".parse().expect("socket address"),
                     desired_min_tx_us: 100_000,
@@ -3098,6 +3230,7 @@ bfd = { profile = "p" }
         // The metric value names the configured interface; only the
         // resolved index is retained from the accepted session.
         session.peer_label = "fe80::5%rustbgpd-no-such-interface".to_string();
+        session.peer_interface = "rustbgpd-no-such-interface".to_string();
         let mut candidate = config.clone();
         candidate.neighbors[0].description = Some("unrelated edit".into());
         let retained = BfdRuntimeConfig::from_reload(&candidate, &config, &accepted)
@@ -3903,6 +4036,7 @@ bfd = {{ profile = "p" }}
                     revision: 0,
                     peer: peer_ip,
                     peer_label: peer_ip.to_string(),
+                    peer_interface: String::new(),
                     scope_id: None,
                     destination: "127.0.0.2:3784".parse().unwrap(),
                     desired_min_tx_us: 100_000,
@@ -4067,6 +4201,7 @@ bfd = {{ profile = "p" }}
                         revision: 0,
                         peer: peer_ip,
                         peer_label: peer_ip.to_string(),
+                        peer_interface: String::new(),
                         scope_id: None,
                         destination: format!("{PEER_ADDR}:{MULTIHOP_PORT}").parse().unwrap(),
                         desired_min_tx_us: 100_000,
@@ -4081,6 +4216,7 @@ bfd = {{ profile = "p" }}
                         revision: 0,
                         peer: bystander_ip,
                         peer_label: bystander_ip.to_string(),
+                        peer_interface: String::new(),
                         scope_id: None,
                         destination: format!("{SINGLE_HOP_BYSTANDER_ADDR}:{PORT}")
                             .parse()
@@ -4240,6 +4376,7 @@ bfd = {{ profile = "p" }}
                     revision: 0,
                     peer: peer_ip,
                     peer_label: peer_ip.to_string(),
+                    peer_interface: String::new(),
                     scope_id: Some(actor_scope),
                     destination: SocketAddr::V6(SocketAddrV6::new(
                         LL_PEER_ADDR.parse().unwrap(),

@@ -2293,6 +2293,16 @@ pub struct OutboundResyncState {
     pub recovery_fallback: Option<&'static str>,
 }
 
+/// A peer's GR/LLGR stale-route retention, as `QueryPeerRetention` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerRetention {
+    /// Routes still held GR- or LLGR-stale.
+    pub stale_routes: usize,
+    /// The peer's earliest GR or LLGR timer: expiry sweeps the stale routes
+    /// or promotes them to LLGR. `None` when no timer is armed.
+    pub next_deadline: Option<tokio::time::Instant>,
+}
+
 /// Helper-side retention phase of one family's stale routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrRetentionPhase {
@@ -2390,9 +2400,9 @@ impl OutboundPrefixLimitPair {
 
 /// The resolver tables an outbound prefix-limit edit installs.
 ///
-/// The RIB manager resolves each live peer itself — a neighbor entry
-/// overrides its peer group, an absent neighbor entry inherits, and an
-/// absent effective value is unlimited — so an accepted dynamic child
+/// The RIB manager resolves each live peer itself — per family, a neighbor
+/// entry overrides its peer group and a family it leaves unset inherits the
+/// group's, and an absent effective value is unlimited — so an accepted dynamic child
 /// inherits the same effective values as a static member of its group
 /// without the caller enumerating live sessions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2401,6 +2411,10 @@ pub struct OutboundPrefixLimitConfig {
     /// address and, for a link-local neighbor, interface (configuration
     /// compares equal across reloads; handles are runtime).
     pub neighbors: HashMap<PeerEndpoint, OutboundPrefixLimitPair>,
+    /// Per-neighbor overrides of interface-only neighbors, keyed by
+    /// interface name: such a neighbor has no configured address, so each
+    /// endpoint it learns on the interface takes this entry (ADR-0142).
+    pub interfaces: HashMap<String, OutboundPrefixLimitPair>,
     /// Peer-group defaults, keyed by group name.
     pub groups: HashMap<String, OutboundPrefixLimitPair>,
 }
@@ -2682,6 +2696,10 @@ pub enum RibUpdate {
         /// on another interface may already own. `None` reaps the bare
         /// address.
         label: Option<Arc<str>>,
+        /// Clear the RIB state but keep the metric series: an
+        /// interface-only neighbor (ADR-0142) leaving one learned endpoint
+        /// for the next, whose series name its interface and outlive it.
+        keep_series: bool,
     },
     /// Return a deleted neighbor's handle to the peer table, after the
     /// `PeerDeleted` that cleaned up its state. The peer manager sends it
@@ -3356,6 +3374,18 @@ pub enum RibUpdate {
         peer: PeerId,
         /// Response channel.
         reply: oneshot::Sender<usize>,
+    },
+    /// Query: whether a peer's Adj-RIB-In still retains GR or LLGR stale
+    /// routes, and when the RIB next acts on them.
+    ///
+    /// ADR-0142 keeps an unbound interface-only neighbor's last address
+    /// reserved until this retention ends; the deadline tells the peer
+    /// manager when to ask again instead of polling.
+    QueryPeerRetention {
+        /// The target peer.
+        peer: PeerId,
+        /// Response channel.
+        reply: oneshot::Sender<PeerRetention>,
     },
     /// Query: return aggregate route-policy counters for a specific peer.
     QueryNeighborPolicyStats {

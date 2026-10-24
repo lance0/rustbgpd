@@ -159,8 +159,10 @@ The recipes intentionally expose their direct commands:
   own recipes; `bench/README.md` lists them. No `gate` recipe runs a
   benchmark.
 
-Hosted checks remain authoritative. `just gate-ci` covers the `ci.yml`
-checks that need no privileges; these stay CI-only:
+Hosted checks remain authoritative. A draft pull request runs core CI
+(`ci.yml`) but skips the Interop and Kernel Dataplane labs, which run on the
+same head once the pull request is marked ready for review. `just gate-ci`
+covers the `ci.yml` checks that need no privileges; these stay CI-only:
 
 - the exact v0.64 migration test, which runs only when
   `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64 binary that CI

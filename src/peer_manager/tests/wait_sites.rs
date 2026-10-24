@@ -153,6 +153,9 @@ enum Drive {
     DampeningDisable,
     /// Peer removal queues the RIB's `PeerDeleted` reap marker.
     PeerRemoval,
+    /// An unbound interface-only neighbor's reconcile asks the RIB whether
+    /// its GR or LLGR routes are still retained.
+    UnboundRetention,
 }
 
 #[derive(Clone, Copy)]
@@ -282,6 +285,10 @@ fn is_conditional_install(update: &RibUpdate) -> bool {
 
 fn is_rib_barrier(update: &RibUpdate) -> bool {
     matches!(update, RibUpdate::QueryLocRibCount { .. })
+}
+
+fn is_peer_retention(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::QueryPeerRetention { .. })
 }
 
 fn is_update_group_snapshot(update: &RibUpdate) -> bool {
@@ -834,6 +841,17 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
+        site: "unnumbered.rs::bound_peer_retention",
+        awaits: "RibUpdate::QueryPeerRetention reply (unbound interface-only reconcile)",
+        drive: Drive::UnboundRetention,
+        rib: RibHold::Reply(is_peer_retention),
+        session: answer_all,
+        additional_entry: None,
+        window: Duration::from_millis(250),
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
         site: "update_group_plan.rs::query_update_group_snapshot",
         awaits: "RibUpdate::QueryUpdateGroupSnapshot reply (config transaction planning)",
         drive: Drive::UpdateGroupSnapshot,
@@ -1006,6 +1024,12 @@ fn answer_rib(
         }
         RibUpdate::QueryUpdateGroupSnapshot { reply } => {
             let _ = reply.send(rustbgpd_rib::UpdateGroupSnapshot::default());
+        }
+        RibUpdate::QueryPeerRetention { reply, .. } => {
+            let _ = reply.send(rustbgpd_rib::PeerRetention {
+                stale_routes: 0,
+                next_deadline: None,
+            });
         }
         _ => {}
     }
@@ -1397,7 +1421,8 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         | Drive::UpdateGroupSnapshot
         | Drive::ReplacePrimary
         | Drive::DampeningDisable
-        | Drive::PeerRemoval => (Vec::new(), false),
+        | Drive::PeerRemoval
+        | Drive::UnboundRetention => (Vec::new(), false),
     };
     match drive {
         Drive::ForwardCohort { .. }
@@ -1593,6 +1618,11 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             .await
             .map_err(|error| error.to_string()),
         Drive::UpdateGroupSnapshot => manager.query_update_group_snapshot().await.map(drop),
+        Drive::UnboundRetention => manager
+            .bound_peer_retention(&key(peers[0]))
+            .await
+            .map(drop)
+            .ok_or_else(|| "the RIB did not report the retention".to_owned()),
         Drive::ReplacePrimary => {
             manager.replace_unstoppable_primary(&key(peers[0])).await;
             Ok(())
@@ -1642,6 +1672,7 @@ fn bfd_session(peer: IpAddr) -> crate::bfd_runtime::BfdSessionParams {
         revision: 0,
         peer,
         peer_label: peer.to_string(),
+        peer_interface: String::new(),
         scope_id: None,
         destination: crate::bfd_runtime::bfd_destination(peer, None, false)
             .expect("global test peer destination"),
@@ -1884,7 +1915,8 @@ async fn run(row: &WaitSite) {
         | Drive::DampeningRetirement
         | Drive::UpdateGroupSnapshot
         | Drive::ReplacePrimary
-        | Drive::PeerRemoval => {}
+        | Drive::PeerRemoval
+        | Drive::UnboundRetention => {}
         Drive::BfdReload => {
             manager = attach_held_bfd_actor(manager, first, gate.clone());
         }

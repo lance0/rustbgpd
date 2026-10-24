@@ -559,3 +559,42 @@ async fn shutdown_unless_established_decides_in_one_actor_turn() {
     assert_eq!(flow, std::ops::ControlFlow::Continue(()));
     assert_eq!(session.fsm.state(), SessionState::Established, "kept");
 }
+
+/// `ShutdownUnlessConnected` also keeps a session mid-handshake, in the same
+/// actor turn, and shuts down one with no connection past TCP.
+/// Load-bearing proof: sparing only Established shuts the `OpenConfirm`
+/// session down.
+#[tokio::test]
+async fn shutdown_unless_connected_keeps_a_handshake() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(notification_gr_open(false)))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+    let (reply, shut_down) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ShutdownUnlessConnected { reply })
+        .await;
+    assert!(!shut_down.await.unwrap(), "OpenConfirm is kept");
+    assert_eq!(flow, std::ops::ControlFlow::Continue(()));
+    assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.drive_fsm(Event::ManualStart).await;
+    assert!(matches!(
+        session.fsm.state(),
+        SessionState::Connect | SessionState::Active
+    ));
+    let (reply, shut_down) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::ShutdownUnlessConnected { reply })
+        .await;
+    assert!(
+        shut_down.await.unwrap(),
+        "no connection past TCP is shut down"
+    );
+    assert_eq!(flow, std::ops::ControlFlow::Break(()));
+}

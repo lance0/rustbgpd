@@ -3084,7 +3084,11 @@ async fn aborted_registration_reaps_only_its_own_staged_source_context() {
             if registered {
                 assert_eq!(manager.live_sessions[&peer][0].session_id, 99);
             }
-            manager.handle_update(RibUpdate::PeerDeleted { peer, label: None });
+            manager.handle_update(RibUpdate::PeerDeleted {
+                peer,
+                label: None,
+                keep_series: false,
+            });
             assert!(manager.pending_peer_source_context.is_empty());
             assert!(manager.pending_peer_policy_context.is_empty());
         }
