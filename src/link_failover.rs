@@ -280,7 +280,7 @@ mod linux {
     ) -> (Vec<Observation>, bool) {
         let mut batch = Vec::new();
         let mut overrun = false;
-        let mut next = first;
+        let mut next = first.or_else(|| messages.try_recv().ok().map(|(message, _)| message));
         while let Some(message) = next {
             match message.payload {
                 NetlinkPayload::InnerMessage(inner) => batch.extend(observation(&inner)),
@@ -412,6 +412,73 @@ mod linux {
             prefix,
             prefix_len: message.header.prefix_len,
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use rtnetlink::packet_core::NetlinkHeader;
+
+        fn link_message(lower_up: bool) -> NetlinkMessage<RouteNetlinkMessage> {
+            let mut link = LinkMessage::default();
+            link.header.index = 4;
+            link.header.flags = LinkFlags::Up;
+            if lower_up {
+                link.header.flags |= LinkFlags::LowerUp;
+            }
+            link.attributes.push(LinkAttribute::IfName("eth0".into()));
+            RouteNetlinkMessage::NewLink(link).into()
+        }
+
+        #[test]
+        fn resync_drains_queued_recovery_and_overrun() {
+            let (sender, mut messages) = futures::channel::mpsc::unbounded();
+            let address = rtnetlink::sys::SocketAddr::new(0, 0);
+            sender
+                .unbounded_send((link_message(true), address))
+                .unwrap();
+            sender
+                .unbounded_send((
+                    NetlinkMessage::new(
+                        NetlinkHeader::default(),
+                        NetlinkPayload::Overrun(Vec::new()),
+                    ),
+                    address,
+                ))
+                .unwrap();
+
+            let (batch, overrun) = drain(None, &mut messages);
+            assert_eq!(
+                batch,
+                [Observation::Link {
+                    ifindex: 4,
+                    name: Some("eth0".into()),
+                    admin_up: true,
+                    lower_up: true,
+                }]
+            );
+            assert!(overrun, "a second overrun during the dump invalidates it");
+            assert!(messages.try_recv().is_err());
+        }
+
+        #[test]
+        fn first_notification_precedes_queued_recovery() {
+            let (sender, mut messages) = futures::channel::mpsc::unbounded();
+            sender
+                .unbounded_send((link_message(true), rtnetlink::sys::SocketAddr::new(0, 0)))
+                .unwrap();
+
+            let (batch, overrun) = drain(Some(link_message(false)), &mut messages);
+            let states: Vec<_> = batch
+                .iter()
+                .map(|event| match event {
+                    Observation::Link { lower_up, .. } => *lower_up,
+                    _ => panic!("expected link notification"),
+                })
+                .collect();
+            assert_eq!(states, [false, true]);
+            assert!(!overrun);
+        }
     }
 }
 
