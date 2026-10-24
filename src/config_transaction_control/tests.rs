@@ -12013,6 +12013,50 @@ async fn enumerated_transaction_persister(
 
 #[cfg(debug_assertions)]
 const TRANSACTION_FAULT_CHILD: &str = "RUSTBGPD_TEST_TRANSACTION_FAULT_CHILD";
+/// The fault child's end of the debug-build `RUSTBGPD_TEST_FAIL_STOP_HOLD`
+/// seam, in its root.
+const TRANSACTION_FAULT_HOLD: &str = "fail-stop.sock";
+
+/// Serve the watchdog's fail-stop hold for this child. The watchdog asks
+/// before starting the fence grace and again before its exit: the first is
+/// released at once, the second only once `persisted` reports the validated
+/// receipt, so the exit can never pre-empt it. A failed check never reports,
+/// and the exit stays held while the test harness fails the child. The
+/// returned receiver completes once the fence has passed through the hold,
+/// which the watchdog reaches only after making the fence visible.
+#[cfg(debug_assertions)]
+fn serve_fault_child_fail_stop_hold(
+    root: &Path,
+    persisted: std::sync::mpsc::Receiver<()>,
+) -> tokio::sync::oneshot::Receiver<()> {
+    use std::io::{Read as _, Write as _};
+
+    let listener =
+        std::os::unix::net::UnixListener::bind(root.join(TRANSACTION_FAULT_HOLD)).unwrap();
+    let (held, fence_held) = tokio::sync::oneshot::channel();
+    let mut held = Some(held);
+    std::thread::spawn(move || {
+        for marker in [0u8, 1] {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Marker byte, then the u128 grace-elapsed nanoseconds.
+            let mut frame = [0u8; 17];
+            if stream.read_exact(&mut frame).is_err() || frame[0] != marker {
+                return;
+            }
+            if marker == 0 {
+                if let Some(held) = held.take() {
+                    let _ = held.send(());
+                }
+            } else if persisted.recv().is_err() {
+                return;
+            }
+            let _ = stream.write_all(&[1]);
+        }
+    });
+    fence_held
+}
 
 #[expect(
     clippy::too_many_lines,
@@ -12028,6 +12072,8 @@ async fn run_confirmed_live_policy_fault_child(root: &Path) {
     // longer races the budget fence on a loaded host. Waits after an effect
     // are bounded only by the budget and still end at the real fence.
     tokio::time::pause();
+    let (persisted, receipt_persisted) = std::sync::mpsc::channel();
+    let fence_held = serve_fault_child_fail_stop_hold(root, receipt_persisted);
     let (baseline, fault): (
         Vec<TransactionTestActor>,
         Option<(usize, TransactionTestFault)>,
@@ -12190,11 +12236,17 @@ async fn run_confirmed_live_policy_fault_child(root: &Path) {
         assert!(controller.deps.lock.acquire().await.is_err());
     }
     assert!(fault.is_none() || schedule.injected.load(Ordering::SeqCst));
+    // A handshake, not a sample: the fence reaches the hold just after it
+    // becomes visible, so wait for it before claiming it.
+    let fail_stop_held = fence.is_some()
+        && std::env::var_os("RUSTBGPD_TEST_FAIL_STOP_HOLD").is_some()
+        && fence_held.await.is_ok();
     let receipt = serde_json::json!({
         "interactions": *schedule.interactions.lock().unwrap(),
         "outstanding": outstanding,
         "fence": fence,
         "locator": locator.exists(),
+        "fail_stop_held": fail_stop_held,
     });
     std::fs::write(
         root.join("receipt.json"),
@@ -12202,10 +12254,42 @@ async fn run_confirmed_live_policy_fault_child(root: &Path) {
     )
     .unwrap();
     if fence.is_some() {
-        // Exercise the real independent fail-stop action; the parent checks
-        // exit 70 plus this already-validated receipt and then boot-reverts.
+        // Exercise the real independent fail-stop action, released only now
+        // that the receipt is persisted; the parent checks exit 70 plus this
+        // already-validated receipt and then boot-reverts.
+        let _ = persisted.send(());
         std::future::pending::<()>().await;
     }
+}
+
+/// A fenced fault child exited only after its validated receipt, and its
+/// unconfirmed apply boot-reverts to the prior configuration.
+#[cfg(debug_assertions)]
+fn assert_fenced_fault_child_reverts(
+    root: &Path,
+    fault: Option<(usize, TransactionTestFault)>,
+    receipt: &serde_json::Value,
+) {
+    assert_eq!(
+        receipt["fail_stop_held"], true,
+        "fault {fault:?}: the fence bypassed the fail-stop hold"
+    );
+    let config_path = root.join("config/rustbgpd.toml");
+    let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
+    assert_eq!(
+        launch
+            .boot_revert_check()
+            .unwrap()
+            .unwrap()
+            .notice
+            .confirm_id,
+        "enumerated"
+    );
+    assert_snapshot_matches_config(
+        &std::fs::read_to_string(config_path).unwrap(),
+        &live_policy_toml("permit"),
+    );
+    assert!(!launch.locator_path().exists());
 }
 
 #[tokio::test]
@@ -12251,6 +12335,10 @@ async fn confirmed_live_policy_faults_are_enumerated() {
             ])
             .env(TRANSACTION_FAULT_CHILD, root.path())
             .env("RUSTBGPD_TEST_SETTLEMENT_CONTROL_DIR", root.path())
+            .env(
+                "RUSTBGPD_TEST_FAIL_STOP_HOLD",
+                root.path().join(TRANSACTION_FAULT_HOLD),
+            )
             .output()
             .unwrap();
         let bytes = std::fs::read(root.path().join("receipt.json")).unwrap_or_else(|error| {
@@ -12264,22 +12352,7 @@ async fn confirmed_live_policy_faults_are_enumerated() {
             "fault {fault:?}: {output:?}"
         );
         if fenced {
-            let config_path = root.path().join("config/rustbgpd.toml");
-            let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
-            assert_eq!(
-                launch
-                    .boot_revert_check()
-                    .unwrap()
-                    .unwrap()
-                    .notice
-                    .confirm_id,
-                "enumerated"
-            );
-            assert_snapshot_matches_config(
-                &std::fs::read_to_string(config_path).unwrap(),
-                &live_policy_toml("permit"),
-            );
-            assert!(!launch.locator_path().exists());
+            assert_fenced_fault_child_reverts(root.path(), fault, &receipt);
         }
         eprintln!(
             "fault={fault:?} exit={} receipt={receipt}",
