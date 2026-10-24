@@ -3198,6 +3198,8 @@ async fn recreation_never_rebinds_an_exited_session_at_the_old_index() {
 struct BfdSide {
     applied: mpsc::UnboundedReceiver<crate::bfd_runtime::BfdRuntimeConfig>,
     state: Arc<std::sync::Mutex<rustbgpd_bfd::SessionState>>,
+    /// The actor takes the next membership change but never acknowledges it.
+    unanswered: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BfdSide {
@@ -3290,8 +3292,15 @@ fn attach_bfd(h: Harness, statics: &[IpAddr]) -> (Harness, BfdSide) {
     let (applied_tx, applied) = mpsc::unbounded_channel();
     let reported = state.clone();
     let metrics = mgr.metrics.clone();
+    let unanswered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let unanswer = Arc::clone(&unanswered);
     tokio::spawn(async move {
+        let mut held_replies = Vec::new();
         while let Some(command) = reload_rx.recv().await {
+            if unanswer.swap(false, Ordering::SeqCst) {
+                held_replies.push(command.reply);
+                continue;
+            }
             let state = *reported.lock().unwrap();
             // As the actor does, seed each running session's gauge before
             // acknowledging.
@@ -3330,7 +3339,11 @@ fn attach_bfd(h: Harness, statics: &[IpAddr]) -> (Harness, BfdSide) {
             rib_rx,
             retention_queries,
         },
-        BfdSide { applied, state },
+        BfdSide {
+            applied,
+            state,
+            unanswered,
+        },
     )
 }
 
@@ -5865,6 +5878,56 @@ async fn deleting_a_bound_bfd_neighbor_removes_its_registration() {
     );
     assert!(!coupling.bound.contains(&peer));
     assert!(!h.mgr.bfd_withholding(&peer), "no strict hold left");
+    let mut last = None;
+    while let Ok(applied) = bfd.applied.try_recv() {
+        last = Some(applied);
+    }
+    assert_eq!(
+        BfdSide::sessions(&last.expect("the removal was acknowledged")),
+        []
+    );
+}
+
+/// A bind whose BFD acknowledgement times out leaves its registration with
+/// no peer. Deleting the neighbor then removes it, through an acknowledged
+/// change, so the deleted neighbor's session stops.
+/// Load-bearing proof: cleaning up only a bound peer's registration leaves
+/// this one installed.
+#[tokio::test(start_paused = true)]
+async fn deleting_a_neighbor_removes_the_registration_of_a_timed_out_bind() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    let peer = IpAddr::V6(ll(2));
+    bfd.unanswered.store(true, Ordering::SeqCst);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(h.mgr.peers.is_empty(), "the bind failed on the timeout");
+    let coupling = h.mgr.bfd_coupling.as_ref().unwrap();
+    assert!(coupling.configured.contains_key(&peer), "registration left");
+    assert!(coupling.bound.contains(&peer));
+    assert!(bfd.applied.try_recv().is_err(), "never acknowledged");
+
+    let outcome = h
+        .owned_neighbor(
+            rustbgpd_api::peer_types::OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    let coupling = h.mgr.bfd_coupling.as_ref().unwrap();
+    assert!(
+        !coupling.configured.contains_key(&peer),
+        "registration removed"
+    );
+    assert!(!coupling.bound.contains(&peer));
+    assert!(
+        h.mgr.unbound_interface_only_infos().is_empty(),
+        "port removed"
+    );
     let mut last = None;
     while let Ok(applied) = bfd.applied.try_recv() {
         last = Some(applied);

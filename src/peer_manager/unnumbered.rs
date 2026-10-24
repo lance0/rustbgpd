@@ -1270,15 +1270,19 @@ impl PeerManager {
             if self.max_prefix_latches.contains_key(&key) {
                 self.remove_max_prefix_latch(&key);
             }
-            // The deletion only disabled the binding's BFD session. Remove
-            // the registration before the address is released, so a later
-            // neighbor there neither inherits it nor is held by a strict one.
-            // The port stays, and the removal is retried.
-            if let Err(error) = self.set_bound_bfd_session(key.address, None).await {
-                warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the deleted neighbor's BFD session; retrying");
-                self.arm_unnumbered_retry();
-                return;
-            }
+        }
+        // The deletion only disabled a bound binding's BFD session, and a bind
+        // whose BFD acknowledgement timed out left its registration with no
+        // peer at all. Remove whatever the interface registered before the
+        // address is released, so a later neighbor there neither inherits it
+        // nor is held by a strict one. The port stays, and the removal is
+        // retried.
+        if let Some(address) = self.bound_bfd_registration_on(name)
+            && let Err(error) = self.set_bound_bfd_session(address, None).await
+        {
+            warn!(interface = %name, %address, %error, "unnumbered: could not remove the deleted neighbor's BFD session; retrying");
+            self.arm_unnumbered_retry();
+            return;
         }
         let Some(port) = self
             .unnumbered
