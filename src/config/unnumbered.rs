@@ -362,8 +362,8 @@ impl JsonSchema for NeighborList {
 /// Interface-only neighbors whose own record is unchanged but whose resolved
 /// bind-time settings differ, through a peer-group edit for example
 /// (transport knobs, `admin_down`, max-prefix restart). A bound peer takes
-/// them only when it binds, so these are restart-required for that
-/// neighbor; policy chains still follow live.
+/// them only when it binds, so the port reconcile rebinds it; policy chains
+/// still follow live.
 #[must_use]
 pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<&'a str> {
     let session = |config: &Config, neighbor: &Neighbor| config.bind_time_settings(neighbor);
@@ -391,6 +391,31 @@ pub(crate) type BindTimeProjection = (
     Option<String>,
     bool,
 );
+
+/// GTSM is enforced on the learned endpoint (the listener's learned selector
+/// and the inbound match); the peer is directly connected, so it is one hop
+/// away.
+fn validate_interface_only_gtsm(
+    neighbor: &Neighbor,
+    group: Option<&super::PeerGroupConfig>,
+) -> Result<(), ConfigError> {
+    if neighbor
+        .ttl_security
+        .or_else(|| group.and_then(|group| group.ttl_security))
+        .unwrap_or(false)
+        && neighbor
+            .ttl_security_hops
+            .or_else(|| group.and_then(|group| group.ttl_security_hops))
+            .is_some_and(|hops| hops.get() > 1)
+    {
+        return Err(invalid(
+            neighbor,
+            "ttl_security_hops",
+            "an interface-only neighbor is directly connected: ttl_security_hops must be 1",
+        ));
+    }
+    Ok(())
+}
 
 fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
     let ResolvedNeighbor {
@@ -589,6 +614,15 @@ impl Config {
                     "interface must not be empty",
                 ));
             }
+            // As for a static link-local neighbor: discovery and the
+            // selectors would never match a padded name.
+            if interface.contains(char::is_whitespace) {
+                return Err(invalid(
+                    neighbor,
+                    "interface",
+                    "interface must not contain whitespace",
+                ));
+            }
             if !seen.insert(interface) {
                 return Err(invalid(
                     neighbor,
@@ -648,32 +682,28 @@ impl Config {
                 "conditional advertisements are not supported on interface-only neighbors yet",
             ));
         }
+        // The level is keyed by the `interface:<name>` span label, which the
+        // filter directive can carry only for plain interface names.
         if neighbor
             .log_level
             .as_deref()
             .or_else(|| group.and_then(|group| group.log_level.as_deref()))
             .is_some()
+            && !neighbor
+                .interface
+                .as_deref()
+                .unwrap_or_default()
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
         {
             return Err(invalid(
                 neighbor,
                 "log_level",
-                "a per-neighbor log_level is not supported on interface-only neighbors yet",
+                "a per-neighbor log_level needs an interface name of ASCII letters, \
+                 digits, '.', '-' and '_'",
             ));
         }
-        // GTSM is enforced by the listener's per-peer IP_MINTTL selectors,
-        // built from configured addresses at startup and reload; a learned
-        // address is not in that inventory, so it would go unprotected.
-        if neighbor
-            .ttl_security
-            .or_else(|| group.and_then(|group| group.ttl_security))
-            .unwrap_or(false)
-        {
-            return Err(invalid(
-                neighbor,
-                "ttl_security",
-                "GTSM (ttl_security) is not supported on interface-only neighbors yet",
-            ));
-        }
+        validate_interface_only_gtsm(neighbor, group)?;
         // The shared profile-reference check walks addressed neighbors only.
         if let Some(bfd) = &neighbor.bfd
             && !self

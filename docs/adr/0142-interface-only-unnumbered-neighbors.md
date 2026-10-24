@@ -119,6 +119,16 @@ GTSM selectors are built from configured addresses, so a learned address
 would otherwise be accepted without the check. Optional GTSM returns when the
 learned endpoint is installed in that inventory.
 
+Implementation note (2026-10-24): optional GTSM is back. The listener keeps a
+learned-endpoint selector per interface-only neighbor, matched by address and
+arrival interface, which the binding installs before the peer is admitted and
+removes after the endpoint's peer is retired. An inbound-learned connection
+gets the same IP_MINTTL check before it reaches the session. `ttl_security_hops`
+above 1 stays rejected. The IPv6 listener's outbound Hop Limit is raised to 255
+whenever an interface-only neighbor runs GTSM, at startup or by the reload or
+transaction that introduces it, and is never lowered. Without it an RA-silent
+GTSM peer's handshake cannot complete, so it could never be learned.
+
 ### Discovery
 
 - **Primary: Router Advertisements.** One raw ICMPv6 socket receives RAs on

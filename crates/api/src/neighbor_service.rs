@@ -629,7 +629,14 @@ pub(crate) fn peer_lifecycle_error_status(error: PeerLifecycleError) -> Status {
         }
         PeerLifecycleError::NotFound(peer) => Status::not_found(format!("peer {peer} not found")),
         PeerLifecycleError::Invalid(message) => Status::invalid_argument(message),
-        PeerLifecycleError::RestartRequired(message) => Status::failed_precondition(message),
+        PeerLifecycleError::RestartRequired(message)
+        | PeerLifecycleError::Precondition(message) => Status::failed_precondition(message),
+        error @ PeerLifecycleError::InterfaceOnlyExists(_) => {
+            Status::already_exists(error.to_string())
+        }
+        error @ PeerLifecycleError::InterfaceOnlyNotFound(_) => {
+            Status::not_found(error.to_string())
+        }
         PeerLifecycleError::Internal(message) => Status::internal(message),
     }
 }
@@ -808,10 +815,21 @@ fn parse_presence_aware_create(
         ));
     }
 
-    let address: IpAddr = config
-        .address
-        .parse()
-        .map_err(|error| Status::invalid_argument(format!("invalid address: {error}")))?;
+    // Trimmed as the delete and membership selectors trim it, so all three
+    // name the same neighbor.
+    let interface = Some(config.interface.trim().to_owned()).filter(|name| !name.is_empty());
+    // ADR-0142: an empty address with an interface is an interface-only
+    // neighbor; discovery learns its address.
+    let address: Option<IpAddr> = if config.address.is_empty() && interface.is_some() {
+        None
+    } else {
+        Some(
+            config
+                .address
+                .parse()
+                .map_err(|error| Status::invalid_argument(format!("invalid address: {error}")))?,
+        )
+    };
     let remote_asn_mode = remote_asn_mode_from_proto(config.remote_asn_mode)?;
     match (remote_asn_mode, config.remote_asn) {
         (RemoteAsnMode::Numeric, 0) => {
@@ -825,16 +843,16 @@ fn parse_presence_aware_create(
         }
         _ => {}
     }
-    let interface = (!config.interface.trim().is_empty()).then(|| config.interface.clone());
-    match (is_ipv6_link_local(address), interface.as_ref()) {
-        (true, None) => {
+    match (address.map(is_ipv6_link_local), interface.as_ref()) {
+        (Some(true), None) => {
             return Err(Status::invalid_argument(
                 "interface is required for IPv6 link-local neighbors",
             ));
         }
-        (false, Some(_)) => {
+        (Some(false), Some(_)) => {
             return Err(Status::invalid_argument(
-                "interface is only valid for IPv6 link-local neighbors",
+                "interface is only valid for IPv6 link-local neighbors, or with an empty \
+                 address for an interface-only neighbor",
             ));
         }
         _ => {}
@@ -1551,21 +1569,38 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(status);
         }
         let req = request.into_inner();
-        let peer = self.select_neighbor(&req.address, &req.interface).await?;
+        // ADR-0142: an empty address with an interface deletes that
+        // interface's interface-only neighbor, bound or not.
+        let interface = req.interface.trim();
+        let (mutation, persisted) = if req.address.is_empty() && !interface.is_empty() {
+            let interface = interface.to_owned();
+            (
+                OwnedNeighborMutation::DeleteInterfaceOnly(interface.clone()),
+                Err(interface),
+            )
+        } else {
+            let peer = self.select_neighbor(&req.address, &req.interface).await?;
+            (OwnedNeighborMutation::Delete(peer.clone()), Ok(peer))
+        };
 
         // Reserve config persistence capacity before mutating runtime state.
         // This makes DeleteNeighbor fail-fast when persistence is unavailable.
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
 
-        let persisted_peer = peer.clone();
         self.execute_owned_neighbor_mutation(
             RuntimeConfigOperationKind::NeighborDelete,
             "NeighborService.DeleteNeighbor",
-            OwnedNeighborMutation::Delete(peer),
+            mutation,
             persist_permit,
-            |ack| ConfigEvent::NeighborDeleted {
-                peer: persisted_peer,
-                ack: Some(ack),
+            |ack| match persisted {
+                Ok(peer) => ConfigEvent::NeighborDeleted {
+                    peer,
+                    ack: Some(ack),
+                },
+                Err(interface) => ConfigEvent::InterfaceOnlyNeighborDeleted {
+                    interface,
+                    ack: Some(ack),
+                },
             },
         )
         .await?;
@@ -2640,7 +2675,7 @@ mod tests {
                 mutation: OwnedNeighborMutation::Add(spec),
                 reply,
             } => {
-                assert_eq!(spec.address.to_string(), "10.0.0.9");
+                assert_eq!(spec.address.unwrap().to_string(), "10.0.0.9");
                 assert_eq!(spec.remote_asn, 65009);
                 reply.send(OwnedNeighborMutationOutcome::Success).unwrap();
             }
@@ -2806,6 +2841,135 @@ mod tests {
         })
         .unwrap();
         assert_eq!(spec.remote_asn_mode, RemoteAsnMode::Numeric);
+    }
+
+    /// ADR-0142: an empty address with an interface creates an
+    /// interface-only neighbor, carrying its `remote_asn_mode`; an empty
+    /// address without one is still refused.
+    #[test]
+    fn an_empty_address_with_an_interface_creates_an_interface_only_neighbor() {
+        let config = |address: &str, interface: &str| proto::NeighborConfig {
+            address: address.into(),
+            interface: interface.into(),
+            remote_asn_mode: proto::RemoteAsnMode::External as i32,
+            ..Default::default()
+        };
+        // Mutation-red: parsing the address unconditionally refuses it.
+        let spec = parse_presence_aware_create(proto::NeighborCreateIntent {
+            config: Some(config("", "swp1")),
+            override_mask: Some(prost_types::FieldMask::default()),
+        })
+        .unwrap();
+        assert_eq!(spec.address, None);
+        assert_eq!(spec.interface.as_deref(), Some("swp1"));
+        assert_eq!(spec.remote_asn_mode, RemoteAsnMode::External);
+        let error = parse_presence_aware_create(proto::NeighborCreateIntent {
+            config: Some(config("", "")),
+            override_mask: Some(prost_types::FieldMask::default()),
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        let error = parse_presence_aware_create(proto::NeighborCreateIntent {
+            config: Some(config("10.0.0.9", "swp1")),
+            override_mask: Some(prost_types::FieldMask::default()),
+        })
+        .unwrap_err();
+        assert!(error.message().contains("interface-only"), "{error}");
+    }
+
+    /// A create's interface is trimmed, as the delete and membership
+    /// selectors trim theirs, so all three name the same neighbor.
+    #[test]
+    fn a_create_trims_its_interface_like_the_selectors() {
+        let spec = parse_presence_aware_create(proto::NeighborCreateIntent {
+            config: Some(proto::NeighborConfig {
+                interface: " swp1 ".into(),
+                remote_asn_mode: proto::RemoteAsnMode::External as i32,
+                ..Default::default()
+            }),
+            override_mask: Some(prost_types::FieldMask::default()),
+        })
+        .unwrap();
+        // Mutation-red: storing the raw value keeps the padding.
+        assert_eq!(spec.interface.as_deref(), Some("swp1"));
+        assert_eq!(spec.address, None);
+    }
+
+    /// `DeleteNeighbor` with an empty address and an interface deletes that
+    /// interface's interface-only neighbor, bound or not: the stanza removal
+    /// is staged first, then the owned mutation names the interface. No
+    /// bound address is looked up.
+    #[tokio::test]
+    async fn delete_neighbor_by_interface_deletes_the_interface_only_neighbor() {
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, mut config_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_mgr_tx,
+            rib_tx,
+            Some(config_tx),
+        );
+        let call = tokio::spawn(async move {
+            svc.delete_neighbor(Request::new(proto::DeleteNeighborRequest {
+                address: String::new(),
+                interface: "swp1".into(),
+            }))
+            .await
+        });
+        // Mutation-red: selecting the bound address first asks for the
+        // neighbor rows instead of staging the stanza removal.
+        let staged = match config_rx.recv().await.unwrap() {
+            ConfigEvent::InterfaceOnlyNeighborDeleted { interface, ack } => {
+                assert_eq!(interface, "swp1");
+                ack.unwrap()
+            }
+            _ => panic!("expected InterfaceOnlyNeighborDeleted"),
+        };
+        let staged = tokio::spawn(staged.accept());
+        acknowledge_owner_publication(&mut peer_mgr_rx, ConfiguredOwnerPublicationOperation::Begin)
+            .await;
+        match peer_mgr_rx.recv().await.unwrap() {
+            PeerManagerCommand::OwnedNeighborMutation {
+                mutation: OwnedNeighborMutation::DeleteInterfaceOnly(interface),
+                reply,
+            } => {
+                assert_eq!(interface, "swp1");
+                assert!(reply.send(OwnedNeighborMutationOutcome::Success).is_ok());
+            }
+            _ => panic!("expected the interface-only delete"),
+        }
+        assert!(staged.await.unwrap(), "the staged write must be committed");
+        acknowledge_owner_publication(
+            &mut peer_mgr_rx,
+            ConfiguredOwnerPublicationOperation::Publish(
+                crate::peer_types::ConfiguredOwnerPublicationReceipt(1),
+            ),
+        )
+        .await;
+        call.await.unwrap().unwrap();
+    }
+
+    /// The interface-only lifecycle refusals keep their status codes.
+    #[test]
+    fn interface_only_lifecycle_errors_map_to_their_status_codes() {
+        for (error, code) in [
+            (
+                PeerLifecycleError::Precondition("needs CAP_NET_RAW".into()),
+                tonic::Code::FailedPrecondition,
+            ),
+            (
+                PeerLifecycleError::InterfaceOnlyExists("swp1".into()),
+                tonic::Code::AlreadyExists,
+            ),
+            (
+                PeerLifecycleError::InterfaceOnlyNotFound("swp1".into()),
+                tonic::Code::NotFound,
+            ),
+        ] {
+            assert_eq!(peer_lifecycle_error_status(error).code(), code);
+        }
     }
 
     /// Reads round-trip the configured intent: a non-numeric mode reports

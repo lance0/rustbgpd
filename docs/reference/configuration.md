@@ -1461,12 +1461,32 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   unset takes its peer group's. An edit on the neighbor or its peer group
   reaches bound sessions on reload, and lowering one below what a bound
   session already advertises is refused, as for any neighbor.
+- **Log level.** `log_level`, on the neighbor or its peer group, applies to
+  the session at every address learned on the interface: its filter matches
+  the session span's `peer=interface:<name>` field, not the learned address.
+  It needs an interface name of ASCII letters, digits, `.`, `-` and `_`. As
+  for every neighbor, an edit reaches sessions that start or rebind after the
+  reload, not a session already running.
 - **Rejected** on an interface-only neighbor, directly or through its peer
-  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), `bfd.multihop`,
-  `fast_external_failover = false`, `conditional_advertisements`,
-  `log_level`, and explicit `[global] listen_addresses`. These sessions therefore have no TCP-layer
-  authentication and no GTSM yet; what protects them is the link itself and
-  OPEN validation against `remote_asn`.
+  group: `md5_password` and `tcp_ao`, `bfd.multihop`, `ttl_security_hops` above 1,
+  `fast_external_failover = false`, `conditional_advertisements`, and
+  explicit `[global] listen_addresses`. These sessions
+  therefore have no TCP-layer authentication; what protects them is the link
+  itself, OPEN validation against `remote_asn`, and optional GTSM.
+- **GTSM.** `ttl_security = true` (RFC 5082) applies to the learned
+  endpoint. When the neighbor binds an address, the BGP listener enforces
+  Hop Limit 255 on connections from that address on that interface before
+  the peer can be matched, and the selector is removed only after that
+  endpoint's peer is retired. A connection learned from an inbound SYN gets
+  the same check, and active opens send Hop Limit 255. When any
+  interface-only neighbor runs GTSM, the IPv6 listener answers with Hop Limit
+  255, from startup or from the reload or config transaction that introduces
+  it, before the neighbor can bind; it is never lowered. A GTSM peer that
+  sends no Router Advertisements and dials in therefore completes its
+  handshake and is learned. The selector is matched by address and interface,
+  so it never applies to a neighbor on another link that shares the address.
+  Turning `ttl_security` on or off reloads like any other session-settings
+  edit (see **Reload** below).
 - **Same address on two links.** Neighbors on different interfaces may
   learn the same address, for example parallel links to one device that
   reuses a router MAC on every port, or `fe80::1` on every port. Each is its
@@ -1482,10 +1502,10 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   [identity conflicts](#identity-conflicts-on_identity_conflict)). After a
   restart, which link is admitted first depends on timing. Whether or not BMP
   is configured, a learned address is also refused (`shared_address_feature`)
-  when a neighbor at that address uses BFD, TCP MD5, TCP-AO, GTSM or a
-  per-neighbor `log_level`, whose state is keyed by the bare address, and so
-  is a static neighbor added at runtime with one of them beside a learned
-  address. A reload or config transaction that would give neighbors already
+  when a neighbor at that address uses BFD, TCP MD5 or TCP-AO, or a GTSM
+  policy or `log_level` that differs from the other neighbors there, whose
+  state is keyed by the bare address, and so is a static neighbor added at
+  runtime with one of them beside a learned address. A reload or config transaction that would give neighbors already
   sharing an address such a feature is refused before any effect, and one
   that removes it rechecks the refused links. A refused neighbor reports the
   reason as its last error in `rbgp neighbor`, and `rbgp doctor` reports it

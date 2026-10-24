@@ -3,8 +3,8 @@ use crate::config::FibTableConfig;
 use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
 use crate::test_support::{assert_tier_authorized_test_config, tier_authorized_uds_test_config};
 use rustbgpd_api::peer_types::{
-    CatalogMutationError, ConfigPersistError, FibTableSnapshot, RuntimeConfigDiff,
-    RuntimeConfigTransactionCandidate, RuntimeConfigTransactionPlan,
+    CatalogMutationError, ConfigPersistError, FibTableSnapshot, PolicySnapshotApplyError,
+    RuntimeConfigDiff, RuntimeConfigTransactionCandidate, RuntimeConfigTransactionPlan,
     RuntimeConfigTransactionPlanError,
 };
 use rustbgpd_api::rib_service::FibTableControlError;
@@ -2453,7 +2453,7 @@ async fn fake_live_policy_peer_manager(
     mut rx: mpsc::Receiver<PeerManagerCommand>,
     plan: RuntimeConfigTransactionPlan,
     snapshot_toml: Arc<Mutex<String>>,
-    apply_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
+    apply_results: Arc<Mutex<VecDeque<Result<(), PolicySnapshotApplyError>>>>,
     captured_priors: Arc<Mutex<VecDeque<Vec<ResolvedPeerPolicy>>>>,
     apply_calls: Arc<Mutex<Vec<Vec<ResolvedPeerPolicy>>>>,
     dynamic_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
@@ -6678,6 +6678,137 @@ async fn confirmed_live_policy_replan_loss_after_commit_retains_revert_authority
     assert!(state.pending.is_none());
 }
 
+/// A confirmed live-policy apply whose policy-impact command fails with
+/// `apply_error`, against a real controller and confirm journal. Returns the
+/// controller, its result, the snapshot, and whether the revert locator is
+/// still on disk.
+async fn confirmed_live_policy_apply_failing_with(
+    apply_error: PolicySnapshotApplyError,
+) -> (
+    ConfigTransactionController,
+    ConfigTransactionApplyError,
+    String,
+    bool,
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let state_dir = root.path().join("state");
+    for dir in [&config_dir, &state_dir] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let previous_toml = live_policy_toml("permit");
+    let candidate_toml = live_policy_toml("deny");
+    let config_path = config_dir.join("rustbgpd.toml");
+    std::fs::write(&config_path, &previous_toml).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+    let internal_tx = spawn_typed_transaction_manager(snapshot_toml.clone(), live_impact_plan());
+    let (peer_tx, peer_rx) = mpsc::channel(8);
+    tokio::spawn(fake_live_policy_peer_manager(
+        peer_rx,
+        live_impact_plan(),
+        snapshot_toml.clone(),
+        Arc::new(Mutex::new(VecDeque::from([Err(apply_error)]))),
+        Arc::new(Mutex::new(VecDeque::new())),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+    ));
+    let (config_tx, config_rx) = mpsc::channel(8);
+    spawn_accepting_persister(config_rx);
+    let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
+    let locator = launch.locator_path();
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            confirm_journal_path: Some(state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME)),
+            ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(internal_tx)
+    .with_confirm_v3_launch(launch);
+    let error = controller
+        .clone()
+        .apply(confirmed_dynamic_request(
+            candidate_toml,
+            "live-policy-apply-failed",
+            60,
+        ))
+        .await
+        .expect_err("a failed policy-impact apply cannot report success");
+    let snapshot = snapshot_toml.lock().await.clone();
+    (controller, error, snapshot, locator.exists())
+}
+
+/// The policy-impact command's own restore failed: a session may still run
+/// the candidate chain, so the apply fences as known divergence, keeps its
+/// revert authority, and refuses the next mutation instead of rolling back
+/// to a clean failure.
+#[tokio::test]
+async fn live_policy_impact_apply_with_an_ambiguous_restore_fences() {
+    let (controller, error, snapshot, locator) = confirmed_live_policy_apply_failing_with(
+        PolicySnapshotApplyError::CompensationAmbiguous("peer restore rejected".to_string()),
+    )
+    .await;
+    // Mutation-red: flattening the reply to an internal error rolls back and
+    // settles clean.
+    assert!(
+        matches!(
+            &error,
+            ConfigTransactionApplyError::RecoveryRequired {
+                reason: RuntimeConfigFenceReason::KnownDivergence,
+                message,
+            } if message.contains("peer restore rejected")
+        ),
+        "{error:?}"
+    );
+    assert!(locator, "the revert authority survives the unknown effect");
+    assert_snapshot_matches_config(&snapshot, &live_policy_toml("deny"));
+    assert_eq!(
+        controller
+            .state
+            .lock()
+            .await
+            .ambiguous_failure_confirm_id
+            .as_deref(),
+        Some("live-policy-apply-failed")
+    );
+    let refused = controller
+        .reject_if_pending("next mutation")
+        .await
+        .expect_err("the next mutation is refused");
+    assert!(refused.to_string().contains("is blocked"), "{refused}");
+}
+
+/// Every peer the command changed was restored: the apply rolls the staged
+/// snapshot back and settles as a clean failure, admitting the next mutation.
+#[tokio::test]
+async fn live_policy_impact_apply_with_a_compensated_restore_is_clean() {
+    let (controller, error, snapshot, locator) = confirmed_live_policy_apply_failing_with(
+        PolicySnapshotApplyError::NoEffect("peer apply rejected".to_string()),
+    )
+    .await;
+    assert!(
+        matches!(&error, ConfigTransactionApplyError::Internal(message) if message.contains("peer apply rejected")),
+        "{error:?}"
+    );
+    assert!(!locator, "a clean failure releases the revert authority");
+    assert_snapshot_matches_config(&snapshot, &live_policy_toml("permit"));
+    assert!(
+        controller
+            .state
+            .lock()
+            .await
+            .ambiguous_failure_confirm_id
+            .is_none()
+    );
+    controller.reject_if_pending("next mutation").await.unwrap();
+}
+
 #[tokio::test]
 async fn apply_commits_dynamic_range_live_policy_impact_after_persist_ack() {
     let previous_toml = dynamic_live_policy_toml("permit");
@@ -7915,7 +8046,7 @@ async fn live_policy_impact_mid_fanout_failure_rolls_back_snapshot() {
     // The apply itself fails; the peer-manager command self-heals its live
     // mutations, so the executor only rolls back the snapshot.
     let apply_results = Arc::new(Mutex::new(VecDeque::from([Err(
-        "peer apply failed".to_string()
+        PolicySnapshotApplyError::NoEffect("peer apply failed".to_string()),
     )])));
     let captured_priors = Arc::new(Mutex::new(VecDeque::new()));
     let apply_calls = Arc::new(Mutex::new(Vec::new()));
@@ -8057,7 +8188,9 @@ async fn live_policy_impact_compound_rollback_failure_reports_internal() {
     // commit apply succeeds; the rollback restore apply FAILS too.
     let apply_results = Arc::new(Mutex::new(VecDeque::from([
         Ok(()),
-        Err("restore failed".to_string()),
+        Err(PolicySnapshotApplyError::NoEffect(
+            "restore failed".to_string(),
+        )),
     ])));
     let apply_calls = Arc::new(Mutex::new(Vec::new()));
     let dynamic_calls = Arc::new(Mutex::new(Vec::new()));
@@ -12084,23 +12217,21 @@ async fn confirmed_live_policy_faults_are_enumerated() {
         run_confirmed_live_policy_fault_child(Path::new(&root)).await;
         return;
     }
-    let run = |baseline: &[TransactionTestActor], fault: Option<(usize, TransactionTestFault)>| {
+    // `short_budget` marks a reply that never arrives after an effect that
+    // may have happened. Only that wait needs a short budget, because the
+    // wall-clock fence is what ends it. Every other outcome follows from fault ordering
+    // alone, including a reply that never arrives to a pre-effect request:
+    // its wait ends at the pre-effect deadline in the child's paused tokio
+    // time. So it gets the schema's maximum budget, and a loaded host's
+    // slow fsync cannot fence an apply that settles cleanly. The maximum
+    // grace lets the child validate and persist its receipt after fencing.
+    let run = |baseline: &[TransactionTestActor],
+               fault: Option<(usize, TransactionTestFault)>,
+               short_budget: bool| {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let settings = root.path().join("settings.v1");
-        // Only a reply that never arrives needs the budget: its post-effect
-        // wait ends at the wall-clock fence. Its pre-effect wait ends at the
-        // pre-effect deadline in the child's paused tokio time, so the whole
-        // budget remains to settle cleanly. Every other
-        // outcome follows from fault ordering alone, so it gets the schema's
-        // maximum budget and a slow fsync on a loaded host cannot fence a
-        // clean apply. Use the maximum grace for the child to validate and
-        // persist its receipt after fencing.
-        let budget_ms = if fault.is_some_and(|(_, fault)| fault == TransactionTestFault::NoReply) {
-            10_000
-        } else {
-            60_000
-        };
+        let budget_ms = if short_budget { 10_000 } else { 60_000 };
         std::fs::write(
             &settings,
             format!("version=settlement-control-v1\nbudget_ms={budget_ms}\ngrace_ms=5000\n"),
@@ -12156,18 +12287,34 @@ async fn confirmed_live_policy_faults_are_enumerated() {
         );
         receipt
     };
-    let baseline = run(&[], None);
+    let baseline = run(&[], None, false);
     let interactions: Vec<(TransactionTestActor, String)> =
         serde_json::from_value(baseline["interactions"].clone()).unwrap();
     assert_ne!(interactions.len(), 0);
     let actors: Vec<_> = interactions.iter().map(|(actor, _)| *actor).collect();
     for index in 0..actors.len() {
+        // Whether a reply lost at this interaction leaves an effect
+        // unconfirmed, learned from the dropped reply, which fails at once
+        // where the missing one would wait. A reply that never arrives must
+        // end the same way: settled, or fenced.
+        let mut lost_reply_fences = None;
         for fault in [
             TransactionTestFault::NotAccepted,
             TransactionTestFault::DropReply,
             TransactionTestFault::NoReply,
         ] {
-            let receipt = run(&actors, Some((index, fault)));
+            let short_budget = fault == TransactionTestFault::NoReply
+                && lost_reply_fences.expect("the dropped reply runs first");
+            let receipt = run(&actors, Some((index, fault)), short_budget);
+            let fenced = Some(!receipt["fence"].is_null());
+            if fault == TransactionTestFault::DropReply {
+                lost_reply_fences = fenced;
+            }
+            let ends_alike = fault != TransactionTestFault::NoReply || fenced == lost_reply_fences;
+            assert!(
+                ends_alike,
+                "a reply lost at {index} ends alike dropped or missing"
+            );
             let observed: Vec<(TransactionTestActor, String)> =
                 serde_json::from_value(receipt["interactions"].clone()).unwrap();
             let accepted_prefix = index + usize::from(fault != TransactionTestFault::NotAccepted);

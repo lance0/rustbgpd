@@ -1682,12 +1682,17 @@ message DeletePeerGroupResponse {}
 message SetNeighborPeerGroupRequest {
   string address = 1;
   string peer_group = 2;
+  // With an empty address, selects the interface-only neighbor on this
+  // interface (ADR-0142); with a link-local address, its scope.
+  string interface = 3;
 }
 
 message SetNeighborPeerGroupResponse {}
 
 message ClearNeighborPeerGroupRequest {
   string address = 1;
+  // As SetNeighborPeerGroupRequest.interface.
+  string interface = 2;
 }
 
 message ClearNeighborPeerGroupResponse {}

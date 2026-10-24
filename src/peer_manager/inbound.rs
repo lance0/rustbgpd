@@ -712,6 +712,30 @@ impl PeerManager {
             warn!(peer = %peer_ip, "inbound peer lookup missing before BFD gate, dropping");
             return;
         };
+        // ADR-0142 GTSM: an interface-only neighbor's connection may have been
+        // accepted under another selector than its peer's: before the listener
+        // had one (an inbound learning, or a SYN queued across the binding), or
+        // under one a reload has since turned off. Its receive minimum is set
+        // from the peer here, before the connection reaches the session.
+        if let Some(managed) = self
+            .peers
+            .get(&peer_key)
+            .filter(|_| self.unnumbered_owner_of(&peer_key).is_some())
+        {
+            let socket = socket2::SockRef::from(&stream);
+            let applied = match managed.transport_config.ttl_security_hops {
+                Some(hops) => rustbgpd_transport::set_gtsm(&socket, peer_addr, hops),
+                // Only an IPv6 socket can carry the learned minimum.
+                None if stream.local_addr().is_ok_and(|local| local.is_ipv6()) => {
+                    rustbgpd_transport::clear_gtsm_v6(&socket)
+                }
+                None => Ok(()),
+            };
+            if let Err(error) = applied {
+                warn!(peer = %peer_key, %error, "rejecting inbound connection: GTSM TTL policy could not be installed");
+                return;
+            }
+        }
         let peer_addr = peer_key.address;
         if self.bfd_withholding(&peer_addr) {
             info!(peer = %peer_addr, "BFD — dropping inbound connection while BGP is held");
