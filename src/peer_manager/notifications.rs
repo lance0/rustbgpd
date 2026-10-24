@@ -336,7 +336,7 @@ impl PeerManager {
                             .as_ref()
                             .is_some_and(|admission| admission.owner.records_wire_history())
                             && let Err(error) = self
-                                .dampening_retirement_barrier(peer_addr, &retired_sessions)
+                                .dampening_retirement_barrier(&peer_key, &retired_sessions)
                                 .await
                         {
                             tracing::error!(peer = %peer_addr, %error, "dynamic dampening retirement barrier failed; retaining disabled peer");

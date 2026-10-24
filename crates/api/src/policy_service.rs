@@ -1077,11 +1077,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "PolicyService.SetNeighborImportChain",
             OwnedCatalogMutation::SetNeighborImportChain {
                 address,
-                interface,
+                interface: interface.clone(),
                 policy_names: policy_names.clone(),
             },
             ConfigEvent::SetNeighborImportChain {
                 address,
+                interface,
                 policy_names,
                 ack: None,
             },
@@ -1114,11 +1115,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             "PolicyService.SetNeighborExportChain",
             OwnedCatalogMutation::SetNeighborExportChain {
                 address,
-                interface,
+                interface: interface.clone(),
                 policy_names: policy_names.clone(),
             },
             ConfigEvent::SetNeighborExportChain {
                 address,
+                interface,
                 policy_names,
                 ack: None,
             },
@@ -1148,8 +1150,15 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         self.execute_owned_policy_mutation(
             RuntimeConfigOperationKind::NeighborImportChainClear,
             "PolicyService.ClearNeighborImportChain",
-            OwnedCatalogMutation::ClearNeighborImportChain { address, interface },
-            ConfigEvent::ClearNeighborImportChain { address, ack: None },
+            OwnedCatalogMutation::ClearNeighborImportChain {
+                address,
+                interface: interface.clone(),
+            },
+            ConfigEvent::ClearNeighborImportChain {
+                address,
+                interface,
+                ack: None,
+            },
             persist_permit,
         )
         .await?;
@@ -1176,8 +1185,15 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         self.execute_owned_policy_mutation(
             RuntimeConfigOperationKind::NeighborExportChainClear,
             "PolicyService.ClearNeighborExportChain",
-            OwnedCatalogMutation::ClearNeighborExportChain { address, interface },
-            ConfigEvent::ClearNeighborExportChain { address, ack: None },
+            OwnedCatalogMutation::ClearNeighborExportChain {
+                address,
+                interface: interface.clone(),
+            },
+            ConfigEvent::ClearNeighborExportChain {
+                address,
+                interface,
+                ack: None,
+            },
             persist_permit,
         )
         .await?;
@@ -1890,13 +1906,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     peer_address: chain
                         .peer
                         .map_or_else(|| "global".to_string(), |peer| peer.to_string()),
-                    // The RIB's export map is keyed by bare address; the
-                    // duplicate-address guard makes the managed peer at that
-                    // address unique, so its key supplies the scope.
+                    // The chain's own neighbor handle supplies the scope, so
+                    // neighbors sharing a link-local address stay apart.
                     peer_interface: chain
                         .peer
-                        .and_then(|peer| roster.unique_peer(peer.addr()))
-                        .and_then(|peer| peer.key.interface.clone())
+                        .and_then(rustbgpd_rib::PeerId::endpoint)
+                        .and_then(|endpoint| endpoint.interface)
+                        .map(|interface| interface.to_string())
                         .unwrap_or_default(),
                     direction: "export".to_string(),
                     routes_evaluated: chain.evals,
@@ -4047,10 +4063,12 @@ mod tests {
         match config_rx.recv().await {
             Some(ConfigEvent::SetNeighborImportChain {
                 address,
+                interface,
                 policy_names,
                 ack,
             }) => {
                 assert_eq!(address.to_string(), "10.0.0.2");
+                assert_eq!(interface, None);
                 assert_eq!(policy_names, vec!["tag-internal".to_string()]);
                 ack.expect("persisted mutation must carry an ack")
                     .fail_write("disk full");
@@ -5874,6 +5892,51 @@ policy client-x {
         assert_eq!(dataset.path, "/var/lib/rustbgpd/datasets/customers.list");
     }
 
+    /// Export rows of neighbors that share a link-local address name each
+    /// neighbor's interface from the chain's own handle.
+    #[tokio::test]
+    async fn get_policy_stats_scopes_same_address_export_rows() {
+        let chain = stats_export_chain();
+        let link_local = "fe80::1".parse().unwrap();
+        let handles = ["eth0", "eth1"].map(|interface| {
+            PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(link_local, Some(interface)))
+        });
+        let mut export = ExportRosterPublisher::new();
+        export.publish(
+            handles
+                .iter()
+                .map(|&peer| (peer, Some(Arc::clone(chain.hit_counters()))))
+                .collect(),
+            None,
+        );
+        let (roster, _publication) = stats_roster();
+        let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
+        let resp = PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                allow_partial: false,
+                peer_address: String::new(),
+                direction: "export".to_string(),
+            }),
+        )
+        .await
+        .expect("stats query succeeds")
+        .into_inner();
+        let mut rows = resp
+            .chains
+            .iter()
+            .map(|chain| (chain.peer_address.as_str(), chain.peer_interface.as_str()))
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        assert_eq!(rows, [("fe80::1", "eth0"), ("fe80::1", "eth1")]);
+        for handle in handles {
+            assert!(handle.release());
+        }
+    }
+
     /// The import direction reads the session's published counters and
     /// reports the install generation, so a replaced chain (counters back to
     /// zero, generation advanced) is never presented as continuous history.
@@ -7282,13 +7345,12 @@ policy client-x {
             Vec::new(),
         );
         let export_chain = stats_export_chain();
+        // The RIB publishes a scoped neighbor's chain under its own handle.
+        let scoped = PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(link_local(), Some("eth0")));
         let mut export = ExportRosterPublisher::new();
         export.publish(
             vec![
-                (
-                    PeerId::from_addr(link_local()),
-                    Some(Arc::clone(export_chain.hit_counters())),
-                ),
+                (scoped, Some(Arc::clone(export_chain.hit_counters()))),
                 (
                     PeerId::from_addr("10.0.0.2".parse().unwrap()),
                     Some(Arc::clone(export_chain.hit_counters())),
@@ -7328,6 +7390,7 @@ policy client-x {
                 ("import", LINK_LOCAL, "eth0"),
             ]
         );
+        assert!(scoped.release());
     }
 
     /// `GetPolicyStats` selects from the one roster snapshot it parsed the

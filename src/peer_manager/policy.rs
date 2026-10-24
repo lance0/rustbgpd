@@ -663,7 +663,7 @@ impl PeerManager {
             }
             StateQueryOutcome::SessionGone => {
                 let retained = self
-                    .query_peer_retained_stale(peer_key.address, rib_budget, operator_reads)
+                    .query_peer_retained_stale(peer_key, rib_budget, operator_reads)
                     .await?;
                 if retained == 0 {
                     return Ok(false);
@@ -697,7 +697,7 @@ impl PeerManager {
         }
 
         let retained = self
-            .query_peer_retained_stale(peer_key.address, rib_budget, operator_reads)
+            .query_peer_retained_stale(peer_key, rib_budget, operator_reads)
             .await?;
         if retained > 0 {
             return Err(PolicyApplyFailure {
@@ -725,7 +725,7 @@ impl PeerManager {
     /// single inline qualification, which keeps [`super::RIB_REPLY_TIMEOUT`].
     pub(super) async fn query_peer_retained_stale(
         &mut self,
-        peer: IpAddr,
+        peer: &PeerKey,
         rib_budget: Option<&mut LazyRibBudget>,
         operator_reads: OperatorReadAdmission,
     ) -> Result<usize, PolicyApplyFailure> {
@@ -738,7 +738,7 @@ impl PeerManager {
             || tokio::time::Instant::now() + allowance,
             LazyRibBudget::deadline,
         );
-        let rib_peer = self.rib_peer_at(peer);
+        let rib_peer = self.rib_peer_of(peer);
         let failed = |detail: &str| PolicyApplyFailure {
             code: RuntimeConfigPolicyFailureCode::StateRibQueryFailed,
             message: format!(
@@ -1635,7 +1635,7 @@ impl PeerManager {
         } else {
             let (reply_tx, reply_rx) = oneshot::channel();
             let rib_tx = self.rib_tx.clone();
-            let peer = self.rib_peer_at(targets[0].address);
+            let peer = self.rib_peer_of(&peer_keys[0]);
             let export_policy = targets[0].export_policy.clone();
             let round_trip = async move {
                 if rib_tx
@@ -1939,7 +1939,7 @@ impl PeerManager {
         let replacements: Vec<_> = targets
             .iter()
             .map(|target| PeerExportPolicyReplacement {
-                peer: self.rib_peer_at(target.address),
+                peer: self.rib_peer_of(&PeerKey::new(target.address, target.interface.clone())),
                 export_policy: target.export_policy.clone(),
             })
             .collect();
@@ -2163,7 +2163,7 @@ impl PeerManager {
         let _ = self
             .send_rib_update(
                 RibUpdate::DiscardPreparedExportPolicyDestination {
-                    peer: self.rib_peer_at(target.address),
+                    peer: self.rib_peer_of(&PeerKey::new(target.address, target.interface.clone())),
                     export_policy: target.export_policy.clone(),
                 },
                 OperatorReadAdmission::Fenced {
@@ -2253,7 +2253,7 @@ impl PeerManager {
     /// single-peer inline operation and keeps [`super::RIB_REPLY_TIMEOUT`].
     pub(super) async fn replace_peer_export_policy_in_rib(
         &mut self,
-        peer: IpAddr,
+        peer: &PeerKey,
         export_policy: Option<PolicyChain>,
         rib_budget: Option<&mut LazyRibBudget>,
         operator_reads: OperatorReadAdmission,
@@ -2263,7 +2263,7 @@ impl PeerManager {
             || tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT,
             LazyRibBudget::deadline,
         );
-        let rib_peer = self.rib_peer_at(peer);
+        let rib_peer = self.rib_peer_of(peer);
         let timed_out = || {
             RibCommandError::internal(if shared {
                 format!(
@@ -3197,7 +3197,7 @@ impl PeerManager {
                 }
             }
             if *export {
-                export_peers.push(peer_key.address);
+                export_peers.push(peer_key.clone());
             }
             refreshed += 1;
         }
@@ -3351,7 +3351,7 @@ impl PeerManager {
                 // The existing RFC 8212 presence-change preflight uses the
                 // same RIB proof: actor-local emptiness alone misses GR/LLGR.
                 let retained = self
-                    .query_peer_retained_stale(peer.address, Some(&mut *rib_budget), operator_reads)
+                    .query_peer_retained_stale(peer, Some(&mut *rib_budget), operator_reads)
                     .await
                     .map_err(|error| error.message)?;
                 if retained != 0 {
@@ -3385,7 +3385,7 @@ impl PeerManager {
     /// bounds a RIB that never answers, and a dropped reply is ambiguous.
     pub(super) async fn reevaluate_dataset_exports(
         &mut self,
-        peers: Vec<IpAddr>,
+        peers: Vec<PeerKey>,
         operator_reads: OperatorReadAdmission,
         swaps: Option<Vec<rustbgpd_rib::DatasetSwap>>,
     ) -> Result<(), DatasetRefreshFailure> {
@@ -3394,7 +3394,7 @@ impl PeerManager {
         }
         let rib_peers: Vec<PeerId> = peers
             .into_iter()
-            .map(|peer| self.rib_peer_at(peer))
+            .map(|peer| self.rib_peer_of(&peer))
             .collect();
         let rib_tx = self.rib_tx.clone();
         let capacity_deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
@@ -3496,11 +3496,11 @@ impl PeerManager {
         for (dependent, is_established) in dependents.iter().zip(&established) {
             if dependent.export {
                 if *is_established {
-                    exports.push(dependent.peer.address);
+                    exports.push(dependent.peer.clone());
                 } else {
                     let export_started = tokio::time::Instant::now();
                     self.reevaluate_dataset_exports(
-                        vec![dependent.peer.address],
+                        vec![dependent.peer.clone()],
                         operator_reads,
                         None,
                     )
@@ -4025,7 +4025,7 @@ impl PeerManager {
             // fail-closed: it cannot show which session took the edit.
             let rib_outcome = self
                 .replace_peer_export_policy_in_rib(
-                    address,
+                    &peer_key,
                     export_policy,
                     rib_budget,
                     operator_reads,
@@ -4191,7 +4191,7 @@ impl PeerManager {
     pub(super) async fn apply_policy_change(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Option<Vec<IpAddr>>,
+        affected_peers: Option<Vec<PeerKey>>,
     ) -> Result<(), CatalogMutationError> {
         if let ConfigEvent::DeletePolicy { name, .. } = &event {
             let refs = policy_references(&self.current_config, name);
@@ -4239,7 +4239,7 @@ impl PeerManager {
     pub(super) async fn apply_policy_change_owned(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Option<Vec<IpAddr>>,
+        affected_peers: Option<Vec<PeerKey>>,
     ) -> OwnedCatalogMutationOutcome {
         if let ConfigEvent::DeletePolicy { name, .. } = &event {
             let refs = policy_references(&self.current_config, name);
@@ -4435,7 +4435,7 @@ impl PeerManager {
     async fn refresh_policies_for_config(
         &mut self,
         next_config: Config,
-        affected_peers: Option<Vec<IpAddr>>,
+        affected_peers: Option<Vec<PeerKey>>,
     ) -> Result<usize, CatalogMutationError> {
         self.refresh_policies_for_config_classified(next_config, affected_peers, false)
             .await
@@ -4445,7 +4445,7 @@ impl PeerManager {
     async fn refresh_policies_for_config_classified(
         &mut self,
         next_config: Config,
-        affected_peers: Option<Vec<IpAddr>>,
+        affected_peers: Option<Vec<PeerKey>>,
         require_clean_convergence: bool,
     ) -> Result<usize, PolicySnapshotFailure> {
         let peers: Vec<PeerKey> = affected_peers.map_or_else(
@@ -4453,7 +4453,7 @@ impl PeerManager {
             |peers| {
                 peers
                     .into_iter()
-                    .flat_map(|address| self.peer_keys_for_address(address))
+                    .filter(|key| self.peers.contains_key(key))
                     .collect()
             },
         );
@@ -4944,7 +4944,7 @@ impl PeerManager {
     pub(super) async fn apply_peer_group_change(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> Result<(), CatalogMutationError> {
         // The body clones the running configuration onto its own stack frame;
         // boxing it keeps every caller's future under clippy's size ceiling.
@@ -4958,7 +4958,7 @@ impl PeerManager {
     async fn apply_peer_group_change_inner(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> Result<(), CatalogMutationError> {
         if let ConfigEvent::DeletePeerGroup { name, .. } = &event {
             let refs = peer_group_references(&self.current_config, name);
@@ -5040,7 +5040,7 @@ impl PeerManager {
         let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
         for peer_key in affected_peers
             .into_iter()
-            .flat_map(|address| self.peer_keys_for_address(address))
+            .filter(|key| self.peers.contains_key(key))
         {
             if !seen.insert(peer_key.clone()) {
                 continue;
@@ -5100,7 +5100,7 @@ impl PeerManager {
     pub(super) async fn apply_peer_group_change_owned(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> OwnedCatalogMutationOutcome {
         // See `apply_peer_group_change`: boxed for the same stack-size reason.
         let batch = self.peers.begin_batch();
@@ -5117,7 +5117,7 @@ impl PeerManager {
     async fn apply_peer_group_change_owned_inner(
         &mut self,
         event: ConfigEvent,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> OwnedCatalogMutationOutcome {
         if let ConfigEvent::DeletePeerGroup { name, .. } = &event {
             let refs = peer_group_references(&self.current_config, name);
@@ -5193,7 +5193,7 @@ impl PeerManager {
         let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
         for peer_key in affected_peers
             .into_iter()
-            .flat_map(|address| self.peer_keys_for_address(address))
+            .filter(|key| self.peers.contains_key(key))
         {
             if !seen.insert(peer_key.clone()) {
                 continue;
@@ -5315,7 +5315,7 @@ impl PeerManager {
         event: ConfigEvent,
         next_config: Config,
         group: &str,
-        affected_peers: Vec<IpAddr>,
+        affected_peers: Vec<PeerKey>,
     ) -> Result<(), CatalogMutationError> {
         let cohort = self.peer_group_hot_cohort(&next_config, group, &affected_peers)?;
         let members = cohort.len();
@@ -5370,21 +5370,18 @@ impl PeerManager {
         &self,
         next_config: &Config,
         group: &str,
-        affected_peers: &[IpAddr],
+        affected_peers: &[PeerKey],
     ) -> Result<Vec<(PeerManagerNeighborConfig, PeerManagerNeighborConfig)>, CatalogMutationError>
     {
         // (next config, captured live prior) per member, in apply order.
         let mut cohort: Vec<(PeerManagerNeighborConfig, PeerManagerNeighborConfig)> = Vec::new();
         let mut seen = BTreeSet::new();
 
-        for peer_key in affected_peers
-            .iter()
-            .flat_map(|address| self.peer_keys_for_address(*address))
-        {
-            if seen.contains(&peer_key) {
+        for peer_key in affected_peers {
+            if seen.contains(peer_key) {
                 continue;
             }
-            let Some(managed) = self.peers.get(&peer_key) else {
+            let Some(managed) = self.peers.get(peer_key) else {
                 continue;
             };
             // Dynamic peers at an affected address are swept below off their
@@ -5394,8 +5391,8 @@ impl PeerManager {
                 continue;
             }
             seen.insert(peer_key.clone());
-            let prior = Self::removed_peer_config(&peer_key, managed);
-            let Some(neighbor) = next_config.neighbor_record(&peer_key) else {
+            let prior = Self::removed_peer_config(peer_key, managed);
+            let Some(neighbor) = next_config.neighbor_record(peer_key) else {
                 return Err(CatalogMutationError::internal(format!(
                     "static peer {peer_key} affected by the peer-group change has no neighbor \
                      record in the updated config; refusing to hot-apply against an inconsistent \

@@ -1092,12 +1092,13 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the peer snapshot (None if not found).
         reply: oneshot::Sender<Option<PeerInfo>>,
     },
-    /// Check whether one unique managed peer owns an address without querying
-    /// its session task. This includes accepted dynamic peers.
+    /// Check whether any managed peer uses an address, without querying its
+    /// session task. This includes accepted dynamic peers, and every neighbor
+    /// on a link-local address that several interfaces share.
     HasPeerAddress {
         /// Peer address to resolve.
         address: IpAddr,
-        /// Reply channel; false also covers an ambiguous scoped address.
+        /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
     /// Explicit enable retained by the existing runtime-config settlement owner.
@@ -1750,7 +1751,7 @@ pub enum PeerManagerOperatorQuery {
         peer: PeerKey,
         reply: oneshot::Sender<Option<PeerInfo>>,
     },
-    /// Resolve one unique managed peer address, including dynamic peers.
+    /// Whether any managed peer uses an address, including dynamic peers.
     HasPeerAddress {
         address: IpAddr,
         reply: oneshot::Sender<bool>,
@@ -2595,6 +2596,9 @@ pub enum ConfigEvent {
     SetNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2604,6 +2608,9 @@ pub enum ConfigEvent {
     SetNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2613,6 +2620,9 @@ pub enum ConfigEvent {
     ClearNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },
@@ -2620,6 +2630,9 @@ pub enum ConfigEvent {
     ClearNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },
@@ -2643,6 +2656,9 @@ pub enum ConfigEvent {
     SetNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Peer-group name.
         peer_group: String,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2652,6 +2668,9 @@ pub enum ConfigEvent {
     ClearNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },

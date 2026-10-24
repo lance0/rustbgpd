@@ -1343,7 +1343,7 @@ impl PeerManager {
             let addr = peer.address;
             match self
                 .refresh_peer_outbound_in_rib(
-                    addr,
+                    &peer,
                     OperatorReadAdmission::Fenced {
                         reason: "session knobs changed but manager metadata awaits refresh acknowledgement",
                     },
@@ -2119,25 +2119,6 @@ impl PeerManager {
             .map_or(PeerId::UNASSIGNED, |slot| slot.current(peer.address))
     }
 
-    /// The RIB handle of the managed neighbor at `address`, or
-    /// [`PeerId::UNASSIGNED`] while it has none, which names no RIB state.
-    /// Address-keyed callers resolve through it; the duplicate-address guard
-    /// keeps the address unique among managed neighbors.
-    /// A neighbor removed from the table but not yet reaped (a retiring
-    /// dynamic neighbor) still resolves through its retained slot.
-    pub(super) fn rib_peer_at(&self, address: std::net::IpAddr) -> PeerId {
-        let retained = self
-            .rib_peers
-            .range(PeerKey::new(address, None)..)
-            .next()
-            .map(|(key, _)| key)
-            .filter(|key| key.address == address)
-            .cloned();
-        retained
-            .or_else(|| self.peer_keys_for_address(address).into_iter().next())
-            .map_or(PeerId::UNASSIGNED, |key| self.rib_peer_of(&key))
-    }
-
     /// Release a handle the RIB never learned of (a refused add). Queued
     /// behind anything a session might have sent, like a deletion's release.
     async fn release_unused_rib_peer(&mut self, peer: PeerId) {
@@ -2444,7 +2425,7 @@ impl PeerManager {
             // registered for outbound (newly added, not Established
             // yet) — that's fine, the next PeerUp will emit fresh.
             match self
-                .refresh_peer_outbound_in_rib(addr, OperatorReadAdmission::Served)
+                .refresh_peer_outbound_in_rib(peer, OperatorReadAdmission::Served)
                 .await
             {
                 Err(error) => {
@@ -2498,11 +2479,11 @@ impl PeerManager {
     /// result: callers retain their existing partial-effect semantics.
     async fn refresh_peer_outbound_in_rib(
         &mut self,
-        peer: std::net::IpAddr,
+        peer: &PeerKey,
         admission: OperatorReadAdmission,
     ) -> Result<Result<(), RibCommandError>, String> {
         let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
-        let rib_peer = self.rib_peer_at(peer);
+        let rib_peer = self.rib_peer_of(peer);
         let timed_out = || {
             format!(
                 "outbound refresh for peer {peer} timed out after {:?}",
@@ -2552,7 +2533,7 @@ impl PeerManager {
         }
 
         match self
-            .refresh_peer_outbound_in_rib(peer.address, OperatorReadAdmission::Served)
+            .refresh_peer_outbound_in_rib(&peer, OperatorReadAdmission::Served)
             .await
             .map_err(OutboundRefreshError::Internal)?
         {
