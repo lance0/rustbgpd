@@ -639,6 +639,10 @@ impl PeerManager {
                     .current_config
                     .resolve_unbound_interface_neighbor(neighbor)
                     .ok()?;
+                let policy_present = self
+                    .current_config
+                    .explicit_policy_presence(neighbor)
+                    .ok()?;
                 let discovery = match port.link {
                     None | Some((_, LinkState::Removed)) => {
                         NeighborDiscoveryState::InterfaceMissing
@@ -653,6 +657,7 @@ impl PeerManager {
                 let mut info = super::snapshot::unbound_interface_only_info(
                     name,
                     &resolved,
+                    policy_present,
                     enabled,
                     ebgp_requires_policy,
                     InterfaceOnlyState {
