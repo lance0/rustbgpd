@@ -48,6 +48,14 @@ struct Harness {
 /// (`remote_asn = "external"`), discovery recorded, and `links` reported by
 /// the link monitor.
 fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
+    harness_with(interfaces, links, "")
+}
+
+/// A configured BMP collector: admission then refuses a shared address.
+const BMP_COLLECTOR: &str = "[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n";
+
+/// [`harness`] with `extra` TOML appended to the configuration.
+fn harness_with(interfaces: &[&str], links: &[(&str, u32, bool)], extra: &str) -> Harness {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -71,7 +79,7 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
         .concat();
     let config: crate::config::Config = toml::from_str(&format!(
         "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
-         [global.telemetry]\nlog_format = \"json\"\n{neighbors}"
+         [global.telemetry]\nlog_format = \"json\"\n{neighbors}{extra}"
     ))
     .unwrap();
     mgr.current_config = config;
@@ -127,8 +135,11 @@ impl Harness {
             .set_link_local_scope(scope.unwrap());
     }
 
+    /// The peers at `address`, in key order.
     fn peers_at(&self, address: Ipv6Addr) -> Vec<PeerKey> {
-        self.mgr.peer_keys_for_address(IpAddr::V6(address))
+        let mut keys = self.mgr.peer_keys_for_address(IpAddr::V6(address));
+        keys.sort();
+        keys
     }
 }
 
@@ -333,9 +344,31 @@ async fn confirmed_carrier_loss_removes_the_peer_and_an_invalid_snapshot_does_no
     );
 }
 
+/// Without BMP, two links that discover one address each bind their own
+/// neighbor: the RIB keys each by its own identity.
 #[tokio::test]
-async fn two_links_discovering_one_address_admit_exactly_one() {
+async fn two_links_discovering_one_address_admit_both_without_bmp() {
     let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2), swp2.clone()]);
+
+    // Carrier loss on one link removes only that neighbor's peer.
+    h.links_changed(snapshot(true, &[("swp1", 7, false), ("swp2", 8, true)]));
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp2]);
+}
+
+/// While BMP collectors are configured, a collector could not tell two
+/// sessions at one address apart: exactly one link is admitted.
+#[tokio::test]
+async fn two_links_discovering_one_address_admit_exactly_one_while_bmp_monitors() {
+    let mut h = harness_with(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        BMP_COLLECTOR,
+    );
     h.mgr
         .handle_discovery_event(DiscoveryEvent::BindingChanged {
             interface: "swp1".into(),
@@ -362,9 +395,45 @@ async fn two_links_discovering_one_address_admit_exactly_one() {
     );
 }
 
+/// Without BMP, a static neighbor and an interface-only neighbor on other
+/// interfaces may share an address in either order.
 #[tokio::test]
-async fn learned_and_static_admission_refuse_each_other_duplicate_link_local_address() {
+async fn learned_and_static_neighbors_share_an_address_without_bmp() {
     let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let mut static_peer = make_config(IpAddr::V6(ll(2)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    assert_eq!(
+        h.peers_at(ll(2)),
+        [
+            PeerKey::new(IpAddr::V6(ll(2)), Some("eth9".into())),
+            swp1_key(2)
+        ]
+    );
+
+    let mut static_peer = make_config(IpAddr::V6(ll(5)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    h.bind("swp2", Some(endpoint(5, 8))).await;
+    assert_eq!(
+        h.peers_at(ll(5)),
+        [
+            PeerKey::new(IpAddr::V6(ll(5)), Some("eth9".into())),
+            PeerKey::new(IpAddr::V6(ll(5)), Some("swp2".into()))
+        ]
+    );
+}
+
+#[tokio::test]
+async fn learned_and_static_admission_refuse_each_other_while_bmp_monitors() {
+    let mut h = harness_with(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        BMP_COLLECTOR,
+    );
     h.bind("swp1", Some(endpoint(2, 7))).await;
 
     // Static admission against a bound learned address.
@@ -373,7 +442,7 @@ async fn learned_and_static_admission_refuse_each_other_duplicate_link_local_add
     static_peer.scope_id = Some(9);
     let error = h.mgr.add_peer(static_peer, false).await.unwrap_err();
     assert!(
-        error.to_string().contains("duplicate_link_local_address"),
+        error.to_string().contains("bmp_identity_conflict"),
         "{error}"
     );
 
@@ -949,12 +1018,37 @@ async fn an_inbound_connection_keeps_the_existing_gates() {
     assert_eq!(dropped(&h, "unconfigured"), 2.0);
 }
 
-/// Inbound learning admits an address through the same atomic check as an
-/// RA binding: one held by a static neighbor or by another interface-only
-/// neighbor is refused with `duplicate_link_local_address`.
+/// Without BMP, inbound learning binds an address another neighbor on
+/// another interface holds.
 #[tokio::test]
-async fn an_inbound_connection_from_a_held_address_is_refused() {
+async fn an_inbound_connection_from_a_shared_address_binds_without_bmp() {
     let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    let mut static_peer = make_config(IpAddr::V6(ll(5)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    let _client = inbound(&mut h, 5, 7).await;
+    assert_eq!(
+        h.peers_at(ll(5)),
+        [
+            PeerKey::new(IpAddr::V6(ll(5)), Some("eth9".into())),
+            swp1_key(5)
+        ]
+    );
+    assert_eq!(dropped(&h, "unconfigured"), 0.0);
+}
+
+/// Inbound learning admits an address through the same atomic check as an
+/// RA binding: while BMP collectors are configured, one held by a static
+/// neighbor or by another interface-only neighbor is refused with
+/// `bmp_identity_conflict`.
+#[tokio::test]
+async fn an_inbound_connection_from_a_held_address_is_refused_while_bmp_monitors() {
+    let mut h = harness_with(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        BMP_COLLECTOR,
+    );
     let mut static_peer = make_config(IpAddr::V6(ll(5)), 65002);
     static_peer.interface = Some("eth9".into());
     static_peer.scope_id = Some(9);

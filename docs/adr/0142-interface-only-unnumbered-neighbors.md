@@ -389,6 +389,19 @@ Once the duplicate-address rule is lifted, two further rules apply:
   `rbgp doctor` and metrics. Identities are never merged.
 - **MRT.** The peer index allows duplicate-address entries.
 
+Implementation note (2026-10-24): the duplicate-address rule is lifted.
+Neighbors on different interfaces may bind the same learned address, and the
+RIB keys each by its own identity. While `[bmp]` collectors are configured, a
+learned address another neighbor holds, including a retained reservation, is
+refused before the session starts with `bmp_identity_conflict`, through the
+same atomic admission check; a static neighbor added at runtime is checked the
+same way, and configuration refuses a static same-address pair outright.
+`[bmp]` is restart-only, so configured collectors decide admission whether or
+not they are connected, and no reload can refuse a running session. The
+per-station `on_identity_conflict = "exclude"` opt-in is not implemented yet:
+every collector refuses. The MRT peer index already lists same-address
+neighbors as separate entries.
+
 ### Operator surfaces
 
 - **`rbgp neighbor`** shows the identity `swp1`, the learned address (or `-`)

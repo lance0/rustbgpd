@@ -1450,11 +1450,19 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   (set them on the peer group instead). These sessions therefore have no TCP-layer
   authentication and no GTSM yet; what protects them is the link itself and
   OPEN validation against `remote_asn`.
-- **Same address on two links.** Until the RIB keys neighbors by scope, a
-  learned address that another neighbor already holds is refused with
-  `duplicate_link_local_address`. Parallel links to one device that reuse a
-  router MAC on every port, or `fe80::1` on every port, therefore bring up
-  only the first link admitted.
+- **Same address on two links.** Neighbors on different interfaces may
+  learn the same address, for example parallel links to one device that
+  reuses a router MAC on every port, or `fe80::1` on every port. Each is its
+  own neighbor with its own routes. While `[bmp]` collectors are configured,
+  a collector cannot tell such sessions apart, so a learned address that
+  another neighbor already holds (bound, retained by Graceful Restart, or a
+  static neighbor) is refused before the session starts, logged with reason
+  `bmp_identity_conflict`; the neighbor admitted first keeps its session.
+  After a restart, which link is admitted first depends on timing. A
+  refusal is not sticky: once the holder's peer goes, the refused link is
+  admitted on its next binding. Collectors count while disconnected, and
+  `[bmp]` takes a restart to change, so a running session is never refused
+  later.
 - **Restart-required.** Adding, removing or editing an interface-only
   neighbor, `[global.unnumbered]`, or a peer-group setting that changes the
   neighbor's session (its policy chains still follow a reload) takes a

@@ -498,9 +498,10 @@ member individually.
 [^unnum]: Interface-scoped BGP over IPv6 link-local carrying IPv4 unicast via
     RFC 8950. rustbgpd ships static interface-bound neighbors (operator supplies
     `address` + `interface`) with scoped Linux FIB install (egress `dev`),
-    validated against FRR by M53 (ADR-0069). One link-local address may
-    serve several interfaces; FRR-style pure-interface autodiscovery is
-    deferred. The experimental Link-Local Next Hop capability 77
+    validated against FRR by M53 (ADR-0069), and interface-only neighbors
+    that learn the peer's address from Router Advertisements or its inbound
+    connection, validated by M53b (ADR-0142). One link-local address may
+    serve several interfaces. The experimental Link-Local Next Hop capability 77
     (`draft-ietf-idr-linklocal-capability-06`) is opt-in per neighbor or peer group
     (`link_local_next_hop = true`).
     FRR (`neighbor IFACE interface`), GoBGP (`neighbor-interface`),

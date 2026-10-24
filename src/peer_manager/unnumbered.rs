@@ -17,11 +17,13 @@
 //!   session is not Established. A lost binding with the link up keeps the
 //!   peer: session liveness belongs to the hold timer, and the peer keeps
 //!   its address reserved.
-//! - Admission refuses an address that another neighbor holds
-//!   (`duplicate_link_local_address`) until the scoped RIB identity lands.
-//!   The check and the insertion run in this single owner without an
-//!   intervening input, so two links discovering one address cannot both be
-//!   admitted.
+//! - Neighbors on different interfaces may share a learned address: the
+//!   RIB keys each by its own identity. While BMP collectors are configured,
+//!   admission refuses an address another neighbor holds
+//!   (`bmp_identity_conflict`), because a collector cannot tell the two
+//!   sessions apart. The check and the insertion run in this single owner
+//!   without an intervening input, so two links discovering one address
+//!   cannot both be admitted.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv6Addr};
@@ -425,7 +427,8 @@ impl PeerManager {
     }
 
     /// The interface-only neighbor whose bound peer holds `address`, other
-    /// than `peer` itself. Static admission refuses such an address.
+    /// than `peer` itself. While BMP collectors are configured, static
+    /// admission refuses such an address.
     pub(super) fn unnumbered_holder_of(&self, address: IpAddr, peer: &PeerKey) -> Option<&str> {
         self.unnumbered
             .as_ref()?
@@ -458,9 +461,14 @@ impl PeerManager {
             .find_map(|(name, port)| (port.bound.as_ref() == Some(peer)).then_some(name.as_str()))
     }
 
-    /// Any neighbor already holding `address`: a peer in the table (bound
-    /// interface-only, static, or retained) or a configured static neighbor.
-    fn link_local_address_holder(&self, address: Ipv6Addr) -> Option<String> {
+    /// While BMP collectors are configured, any neighbor already holding
+    /// `address`: a peer in the table (bound interface-only, static, or
+    /// retained) or a configured static neighbor. Without BMP, neighbors on
+    /// different interfaces may share an address.
+    fn bmp_identity_holder(&self, address: Ipv6Addr) -> Option<String> {
+        if !self.bmp_monitors_neighbors() {
+            return None;
+        }
         let address = IpAddr::V6(address);
         self.peers
             .keys()
@@ -589,7 +597,7 @@ impl PeerManager {
         if self.defer_unnumbered_while_staged() {
             return;
         }
-        if let Some(holder) = self.link_local_address_holder(endpoint.address) {
+        if let Some(holder) = self.bmp_identity_holder(endpoint.address) {
             let port = self.port_mut(name);
             if port.refused != Some(endpoint.address) {
                 port.refused = Some(endpoint.address);
@@ -597,8 +605,8 @@ impl PeerManager {
                     interface = %name,
                     address = %endpoint.address,
                     holder = %holder,
-                    reason = "duplicate_link_local_address",
-                    "unnumbered: refusing a learned address another neighbor holds"
+                    reason = "bmp_identity_conflict",
+                    "unnumbered: refusing a learned address another BMP-monitored neighbor holds"
                 );
             }
             return;
@@ -691,15 +699,16 @@ impl PeerManager {
         None
     }
 
-    /// Another neighbor holds `address`: log the refusal and count it.
+    /// Another BMP-monitored neighbor holds `address`: log the refusal and
+    /// count it.
     fn inbound_address_held(&self, name: &str, address: Ipv6Addr) -> bool {
-        let Some(holder) = self.link_local_address_holder(address) else {
+        let Some(holder) = self.bmp_identity_holder(address) else {
             return false;
         };
         warn!(
             interface = %name, %address, %holder,
-            reason = "duplicate_link_local_address",
-            "unnumbered: refusing an inbound address another neighbor holds"
+            reason = "bmp_identity_conflict",
+            "unnumbered: refusing an inbound address another BMP-monitored neighbor holds"
         );
         self.refuse_inbound();
         true
@@ -717,8 +726,8 @@ impl PeerManager {
     /// session past TCP establishment or a pending inbound candidate holds a
     /// different address (a second router on a link defined to have one),
     /// while the bound session is Established or held by NOTIFICATION
-    /// backoff, and when another neighbor holds the address
-    /// (`duplicate_link_local_address`). A bound session that has not
+    /// backoff, and, while BMP collectors are configured, when another
+    /// neighbor holds the address (`bmp_identity_conflict`). A bound session that has not
     /// reached `OpenSent` is retired: the peer moved address.
     pub(super) async fn learn_inbound_endpoint(
         &mut self,

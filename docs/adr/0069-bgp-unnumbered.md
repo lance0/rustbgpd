@@ -295,6 +295,9 @@ apply to the other's routes), BFD, TCP MD5 and TCP-AO on the passive
 listener, differing per-neighbor `log_level` values, and differing effective
 GTSM policies, which the listener also selects by address. Dynamic neighbors
 are never link-local, so their address-keyed bookkeeping cannot collide.
+Interface-only neighbors (ADR-0142) may likewise learn one address on several
+interfaces; while BMP collectors are configured, admission refuses a learned
+address another neighbor holds with `bmp_identity_conflict`.
 
 ## References
 

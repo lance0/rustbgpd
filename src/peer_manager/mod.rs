@@ -1558,6 +1558,15 @@ impl PeerManager {
 
     /// Whether any managed neighbor uses `address`: every neighbor on a
     /// link-local address that several interfaces share counts.
+    /// Whether BMP collectors are configured. Configured collectors decide,
+    /// connected or not, so a collector reconnecting never changes admission.
+    pub(super) fn bmp_monitors_neighbors(&self) -> bool {
+        self.current_config
+            .bmp
+            .as_ref()
+            .is_some_and(|bmp| !bmp.collectors.is_empty())
+    }
+
     /// The configured members of peer group `name`, each by its own key.
     pub(super) fn peer_group_member_keys(&self, name: &str) -> Vec<PeerKey> {
         self.current_config

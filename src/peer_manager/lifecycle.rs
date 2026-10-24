@@ -706,12 +706,16 @@ impl PeerManager {
         if self.peers.contains_key(&peer_key) {
             return Err(PeerLifecycleError::AlreadyExists(peer_key));
         }
-        // ADR-0142 admission: until the RIB keys peers by scope, a link-local
+        // ADR-0142 admission: a BMP collector cannot tell two sessions at
+        // one address apart, so while collectors are configured a link-local
         // address an interface-only neighbor holds is refused to any other.
-        if let Some(holder) = self.unnumbered_holder_of(config.address, &peer_key) {
+        if self.bmp_monitors_neighbors()
+            && let Some(holder) = self.unnumbered_holder_of(config.address, &peer_key)
+        {
             return Err(PeerLifecycleError::Invalid(format!(
-                "duplicate_link_local_address: peer {peer_key} uses {}, which the \
-                 interface-only neighbor on {holder} holds",
+                "bmp_identity_conflict: peer {peer_key} uses {}, which the \
+                 interface-only neighbor on {holder} holds, and BMP collectors \
+                 cannot tell the two sessions apart",
                 config.address
             )));
         }
