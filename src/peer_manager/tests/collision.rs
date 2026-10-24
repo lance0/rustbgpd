@@ -201,6 +201,11 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                     dumps.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
+                PeerCommand::CollisionDumpUnlessEstablished { reply } => {
+                    let _ = reply.send(true);
+                    dumps.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
                 PeerCommand::Shutdown => break,
                 _ => {}
             }
@@ -1815,6 +1820,77 @@ async fn collision_primary_established_keeps_primary_even_when_remote_id_higher(
             .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
         "an Established primary must survive a late candidate OPEN"
+    );
+}
+
+/// RFC 4271 §6.8 race: the primary reports `OpenConfirm` when the
+/// candidate's OPEN is resolved, and the remote's higher identifier picks
+/// the candidate, but the primary's peer KEEPALIVE lands before the dump
+/// reaches it. The primary, now Established, wins: it is kept and the
+/// claimed candidate is closed with Cease/7.
+/// Load-bearing proof: dumping the primary unconditionally after the claim
+/// replaces the Established primary with the candidate.
+#[tokio::test]
+async fn collision_primary_established_during_resolution_keeps_primary() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let primary = Arc::new(FakePeerCounters::default());
+    primary
+        .established_before_dump
+        .store(true, Ordering::SeqCst);
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            primary.clone(),
+        ),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id: 2,
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
+    })
+    .await;
+
+    wait_counter(&pending.collision_dump, 1).await;
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+    assert_eq!(primary.shutdown.load(Ordering::SeqCst), 0);
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
+        "the primary that established during resolution stays the session"
     );
 }
 

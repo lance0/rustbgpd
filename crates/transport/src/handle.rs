@@ -690,6 +690,16 @@ pub enum PeerCommand {
     },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
+    /// [`Self::CollisionDump`] unless the session is Established, deciding in
+    /// one actor turn so no KEEPALIVE can land between the check and the
+    /// dump. RFC 4271 §6.8: an Established connection wins a collision, so a
+    /// primary that established while the manager resolved the collision is
+    /// kept. Replies `false` and keeps running when Established; otherwise
+    /// replies `true` and ends as [`Self::CollisionDump`] does.
+    CollisionDumpUnlessEstablished {
+        /// Whether the session was dumped.
+        reply: oneshot::Sender<bool>,
+    },
     /// ADR-0073: query this session's import-decision cache. Read-only
     /// — must not mutate session state or counters. `path_id = None`
     /// returns every cached path for the prefix (Add-Path
@@ -1926,6 +1936,26 @@ impl PeerHandle {
     pub async fn collision_dump_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
         self.send_simple_command_timeout(PeerCommand::CollisionDump, "collision_dump", deadline)
             .await
+    }
+
+    /// Dump the session as a collision loser unless it is Established
+    /// ([`PeerCommand::CollisionDumpUnlessEstablished`]). Outcomes as for
+    /// [`Self::shutdown_unless_established_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, drops the reply, or
+    /// does not answer within `deadline`.
+    pub async fn collision_dump_unless_established_timeout(
+        &self,
+        deadline: Duration,
+    ) -> Result<bool, PeerCommandError> {
+        self.conditional_shutdown(
+            |reply| PeerCommand::CollisionDumpUnlessEstablished { reply },
+            "collision_dump_unless_established",
+            deadline,
+        )
+        .await
     }
 
     /// Reserve an inbound collision candidate for promotion.

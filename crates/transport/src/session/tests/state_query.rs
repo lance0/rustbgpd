@@ -560,6 +560,54 @@ async fn shutdown_unless_established_decides_in_one_actor_turn() {
     assert_eq!(session.fsm.state(), SessionState::Established, "kept");
 }
 
+/// `CollisionDumpUnlessEstablished` decides in one actor turn (RFC 4271
+/// §6.8): an `OpenConfirm` collision loser sends Cease/7 and ends the task,
+/// and an Established session keeps running with nothing sent.
+/// Load-bearing proof: dumping without the Established check closes the
+/// Established session with Cease/7.
+#[tokio::test]
+async fn collision_dump_unless_established_keeps_an_established_session() {
+    async fn open_confirm_session() -> (
+        PeerSession,
+        tokio::net::TcpStream,
+        mpsc::Receiver<RibUpdate>,
+    ) {
+        let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        session.drive_fsm(Event::ManualStart).await;
+        session
+            .drive_fsm(Event::OpenReceived(notification_gr_open(false)))
+            .await;
+        assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+        (session, server, rib_rx)
+    }
+
+    let (mut session, _server, _rib_rx) = open_confirm_session().await;
+    let (reply, dumped) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::CollisionDumpUnlessEstablished { reply })
+        .await;
+    assert!(dumped.await.unwrap(), "OpenConfirm is dumped");
+    assert_eq!(flow, std::ops::ControlFlow::Break(()), "the task ends");
+    assert!(session.stop_requested, "dumped as a collision loser");
+
+    let (mut session, _server, _rib_rx) = open_confirm_session().await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    let (reply, dumped) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::CollisionDumpUnlessEstablished { reply })
+        .await;
+    assert!(!dumped.await.unwrap(), "Established is kept");
+    assert_eq!(flow, std::ops::ControlFlow::Continue(()));
+    assert_eq!(session.fsm.state(), SessionState::Established, "kept");
+    assert!(
+        !session.stop_requested,
+        "no Cease/7 for the Established session"
+    );
+}
+
 /// `ShutdownUnlessConnected` also keeps a session mid-handshake, in the same
 /// actor turn, and shuts down one with no connection past TCP.
 /// Load-bearing proof: sparing only Established shuts the `OpenConfirm`

@@ -935,12 +935,11 @@ impl PeerManager {
                     rule = "identifier_comparison",
                     "collision: remote wins, replacing with inbound"
                 );
-                if let Some(promoted) = self.claim_pending_inbound(&peer_key).await {
+                if let Some(promoted) = self.claim_pending_inbound(&peer_key, true).await {
                     self.finish_inbound_promotion(
                         &peer_key,
                         promoted,
                         "remote-wins collision loser",
-                        true,
                         primary_notification_failures,
                     )
                     .await;
@@ -1172,6 +1171,7 @@ impl PeerManager {
     async fn claim_pending_inbound(
         &mut self,
         peer_key: &PeerKey,
+        collision_dump: bool,
     ) -> Option<(PeerHandle, u64, u64)> {
         self.drain_before_candidate_promotion(peer_key).await;
         let claim = match self.sync_promotion_candidate(peer_key).await {
@@ -1190,7 +1190,16 @@ impl PeerManager {
             }
         };
         let collision_dump = match claim {
-            Ok(true) => return self.promote_pending_inbound_handle(peer_key),
+            Ok(true)
+                if self
+                    .retire_primary_for_promotion(peer_key, collision_dump)
+                    .await =>
+            {
+                return self.promote_pending_inbound_handle(peer_key);
+            }
+            // RFC 4271 §6.8: the primary established while this collision
+            // was resolved, so it wins and the claimed candidate is closed.
+            Ok(true) => true,
             Ok(false) => {
                 info!(peer = %peer_key.address, "collision candidate fell to Idle before promotion; keeping the primary");
                 false
@@ -1213,6 +1222,68 @@ impl PeerManager {
             )
             .await;
         None
+    }
+
+    /// End the primary before its claimed candidate replaces it, unless it is
+    /// Established: the primary's state was read when the candidate's OPEN
+    /// arrived, and its peer's KEEPALIVE can land during the claim. The
+    /// session decides in one actor turn, sending Cease/7 when
+    /// `collision_dump`, so an Established primary is never dumped. `true`
+    /// when the primary is gone; `false` keeps it, including when it did not
+    /// answer, since a wedged primary may be Established.
+    async fn retire_primary_for_promotion(
+        &mut self,
+        peer_key: &PeerKey,
+        collision_dump: bool,
+    ) -> bool {
+        let Some(session_id) = self
+            .peers
+            .get(peer_key)
+            .map(super::peer_table::ManagedPeer::session_id)
+        else {
+            return false;
+        };
+        // Its teardown notifications belong to a retiring session, as they
+        // would after the handle swap.
+        self.retiring_sessions.insert(session_id, peer_key.clone());
+        let Some(handle) = self
+            .peers
+            .get(peer_key)
+            .map(super::peer_table::ManagedPeer::handle)
+        else {
+            return false;
+        };
+        let retired = if collision_dump {
+            handle
+                .collision_dump_unless_established_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await
+        } else {
+            handle
+                .shutdown_unless_established_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await
+        };
+        match retired {
+            Ok(true)
+            | Err(
+                rustbgpd_transport::PeerCommandError::SessionExited
+                | rustbgpd_transport::PeerCommandError::ReplyDropped,
+            ) => true,
+            Ok(false) => {
+                info!(
+                    peer = %peer_key.address,
+                    primary_state = "established",
+                    rule = "primary_established",
+                    "collision: primary established before promotion, dropping inbound"
+                );
+                self.retiring_sessions.remove(&session_id);
+                false
+            }
+            Err(error) => {
+                warn!(peer = %peer_key.address, %error, "collision: primary did not confirm it can be replaced; keeping the primary");
+                self.retiring_sessions.remove(&session_id);
+                false
+            }
+        }
     }
 
     /// The candidate copied the managed policies and session knobs when it
@@ -1271,14 +1342,13 @@ impl PeerManager {
         peer_key: &PeerKey,
         primary_notification_failures: u32,
     ) -> bool {
-        let Some(promoted) = self.claim_pending_inbound(peer_key).await else {
+        let Some(promoted) = self.claim_pending_inbound(peer_key, false).await else {
             return false;
         };
         self.finish_inbound_promotion(
             peer_key,
             promoted,
             "promote pending inbound old primary",
-            false,
             primary_notification_failures,
         )
         .await;
@@ -1287,23 +1357,18 @@ impl PeerManager {
 
     /// Retire the old primary returned by [`Self::promote_pending_inbound_handle`]
     /// as `(old_handle, old_session_id, new_session_id)`, then activate the
-    /// promoted session with the old primary's NOTIFICATION streak.
+    /// promoted session with the old primary's NOTIFICATION streak. The claim
+    /// already ended the old primary's session (with Cease/7 for a collision
+    /// loser); this joins its task.
     async fn finish_inbound_promotion(
         &mut self,
         peer_key: &PeerKey,
         (old_handle, old_session_id, new_session_id): (PeerHandle, u64, u64),
         context: &'static str,
-        collision_dump: bool,
         primary_notification_failures: u32,
     ) {
         let _ = self
-            .quiesce_retiring_session(
-                peer_key,
-                old_session_id,
-                old_handle,
-                context,
-                collision_dump,
-            )
+            .quiesce_retiring_session(peer_key, old_session_id, old_handle, context, false)
             .await;
         self.activate_promoted_max_prefix_metrics(
             peer_key,
