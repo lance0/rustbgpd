@@ -132,14 +132,16 @@ impl PeerManager {
 
     /// [`Self::conditional_set`] for the interface-only `bindings` given.
     ///
-    /// A peer whose own neighbor `config` no longer configures keeps exactly
-    /// the gate installed for it while it is still in the table: its
-    /// attachment, and the installed definitions it names, in place of any
-    /// same-named definition `config` edits. Its session is torn down after
-    /// this install, and changing the gate first would let the RIB export
-    /// to it what the gate suppresses. Deleting the peer asks for the
-    /// reconcile that prunes the gate, which then installs `config`'s edits
-    /// for the neighbors that remain.
+    /// A peer whose own neighbor `config` no longer configures keeps the
+    /// gate installed for it while it is still in the table: its session is
+    /// torn down after this install, and dropping or changing the gate first
+    /// could let the RIB export to it what the gate suppresses. Each
+    /// definition it names stays as installed, unless `config` edits it:
+    /// the edit applies at once to every neighbor `config` attaches, and the
+    /// retiring peer is attached instead to a never-evaluated copy of the
+    /// installed definition ([`retiring_copy`]), which suppresses everything
+    /// that definition controls. Deleting the peer asks for the reconcile
+    /// that prunes the gate.
     pub(super) fn conditional_set_with_bindings(
         &self,
         config: &Config,
@@ -155,24 +157,36 @@ impl PeerManager {
             if owner_configured(config, key, peer.transport_config.interface_only) {
                 continue;
             }
+            let mut kept = Vec::with_capacity(names.len());
             for name in names {
                 let Some(definition) = installed
                     .definitions
                     .iter()
                     .find(|definition| definition.name == *name)
                 else {
+                    kept.push(Arc::clone(name));
                     continue;
                 };
                 match set
                     .definitions
-                    .iter_mut()
+                    .iter()
                     .find(|candidate| candidate.name == *name)
                 {
-                    Some(candidate) => candidate.clone_from(definition),
-                    None => set.definitions.push(definition.clone()),
+                    None => {
+                        set.definitions.push(definition.clone());
+                        kept.push(Arc::clone(name));
+                    }
+                    Some(candidate) if candidate == definition => kept.push(Arc::clone(name)),
+                    Some(_) => {
+                        let copy = retiring_copy(definition, &set.definitions);
+                        kept.push(Arc::clone(&copy.name));
+                        if !set.definitions.contains(&copy) {
+                            set.definitions.push(copy);
+                        }
+                    }
                 }
             }
-            set.attachments.insert(endpoint, names.clone());
+            set.attachments.insert(endpoint, kept);
         }
         Ok(set)
     }
@@ -283,4 +297,28 @@ fn owner_configured(config: &Config, key: &PeerKey, interface_only: bool) -> boo
         .neighbors
         .iter()
         .any(|neighbor| neighbor.address == address && neighbor.interface == key.interface)
+}
+
+/// The retiring copy of an installed `definition` whose name the candidate
+/// `definitions` give an edited definition: the same content, marked
+/// `retiring`, under a name no other entry of `definitions` uses. The name is
+/// derived only from `definition` and `definitions`, so reinstalling an
+/// unchanged candidate yields the same copy and the RIB keeps its state.
+fn retiring_copy(
+    definition: &rustbgpd_rib::ConditionalAdvertisement,
+    definitions: &[rustbgpd_rib::ConditionalAdvertisement],
+) -> rustbgpd_rib::ConditionalAdvertisement {
+    let mut copy = definition.clone();
+    copy.retiring = true;
+    let mut name = format!("{} (retiring)", definition.name);
+    loop {
+        copy.name = Arc::from(name.as_str());
+        if definitions
+            .iter()
+            .all(|other| other.name != copy.name || *other == copy)
+        {
+            return copy;
+        }
+        name.push('\'');
+    }
 }

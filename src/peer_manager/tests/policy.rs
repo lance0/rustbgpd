@@ -902,6 +902,7 @@ async fn dataset_refresh_discovers_conditional_advertisement_predicates() {
             )],
             condition_policy: Some(dataset_chain("primary")),
             settle_time: Duration::from_secs(5),
+            retiring: false,
         }],
         attachments: [(attached.into(), vec![Arc::from("backup")])]
             .into_iter()

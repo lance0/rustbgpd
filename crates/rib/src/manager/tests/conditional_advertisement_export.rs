@@ -91,6 +91,7 @@ fn definition(
         )],
         condition_policy: None,
         settle_time: SETTLE,
+        retiring: false,
     }
 }
 

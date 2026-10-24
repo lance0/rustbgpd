@@ -79,6 +79,7 @@ fn definition(
         condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(condition())],
         condition_policy,
         settle_time,
+        retiring: false,
     }
 }
 
@@ -1261,6 +1262,7 @@ async fn status_reports_conditions_applied_state_settle_and_attachments() {
         ],
         condition_policy: Some(med_guard()),
         settle_time: Duration::ZERO,
+        retiring: false,
     };
     let _ = manager.handle_install_conditional_advertisements(
         crate::ConditionalAdvertisementSet {
@@ -1392,6 +1394,7 @@ fn ranged(name: &str, entries: Vec<PrefixSetEntry>, settle: Duration) -> Conditi
         condition_prefixes: entries,
         condition_policy: None,
         settle_time: settle,
+        retiring: false,
     }
 }
 
@@ -1814,4 +1817,52 @@ async fn status_names_same_address_attachments_by_interface() {
     assert_eq!(backup.attached_neighbors, [scoped("eth0"), scoped("eth1")]);
     let address: std::net::IpAddr = "fe80::1".parse().unwrap();
     assert_eq!(backup.attached_peers, [address, address]);
+}
+
+/// A retiring copy, which the peer manager installs for a peer still
+/// registered after the configuration edited the definition it names, is
+/// never evaluated. It stays `pending`, so it suppresses what it controls
+/// even while its condition says advertise, across a later install and
+/// condition changes, and it publishes no metric series and no status.
+#[tokio::test(start_paused = true)]
+async fn a_retiring_copy_stays_pending_and_unpublished() {
+    const COPY: &str = "backup (retiring)";
+    let metrics = BgpMetrics::new();
+    let mut manager = manager_with(&metrics);
+    let mut copy = absent_if(Duration::ZERO);
+    copy.name = Arc::from(COPY);
+    copy.retiring = true;
+    let copy_applied = |manager: &RibManager| {
+        manager
+            .conditional_advertisement_state(COPY)
+            .expect("the copy is installed")
+            .1
+    };
+    let _ =
+        manager.install_conditional_advertisements(vec![absent_if(Duration::ZERO), copy.clone()]);
+    // The condition is absent: the configured definition advertises at once.
+    assert_eq!(applied(&manager), AppliedConditionalState::Advertise);
+    // Mutation-red: evaluating the copy like any definition advertises too.
+    assert_eq!(copy_applied(&manager), AppliedConditionalState::Pending);
+
+    let _ = manager.install_conditional_advertisements(vec![absent_if(Duration::ZERO), copy]);
+    inject(&mut manager, prefix(1), None);
+    withdraw_injected(&mut manager, prefix(1));
+    settle(&mut manager, SETTLE).await;
+    assert_eq!(applied(&manager), AppliedConditionalState::Advertise);
+    assert_eq!(copy_applied(&manager), AppliedConditionalState::Pending);
+
+    let labelled = metrics.registry().gather().iter().any(|family| {
+        family
+            .get_metric()
+            .iter()
+            .any(|metric| metric.get_label().iter().any(|label| label.value() == COPY))
+    });
+    assert!(!labelled, "no metric series names the copy");
+    let names: Vec<String> = manager
+        .conditional_advertisement_status()
+        .iter()
+        .map(|status| status.name.to_string())
+        .collect();
+    assert_eq!(names, [NAME]);
 }

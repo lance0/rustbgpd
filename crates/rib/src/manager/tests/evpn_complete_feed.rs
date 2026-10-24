@@ -2243,6 +2243,7 @@ fn review2_conditional_attachment_removal_preserves_complete_sparse_handoff() {
         ))],
         condition_policy: None,
         settle_time: Duration::ZERO,
+        retiring: false,
     };
     let _ = manager.handle_install_conditional_advertisements(
         crate::ConditionalAdvertisementSet {

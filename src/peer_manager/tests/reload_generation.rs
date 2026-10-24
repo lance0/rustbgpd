@@ -4856,6 +4856,23 @@ peer_group = "edge"
 fn relay_conditional_to_real_rib(
     harness: &mut GenerationHarness,
 ) -> (Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let (log, _sets, task) = relay_conditional_sets_to_real_rib(harness);
+    (log, task)
+}
+
+/// Installed conditional-advertisement sets, in order.
+type InstalledSets = Arc<Mutex<Vec<rustbgpd_rib::ConditionalAdvertisementSet>>>;
+
+/// [`relay_conditional_to_real_rib`], also keeping each installed set.
+fn relay_conditional_sets_to_real_rib(
+    harness: &mut GenerationHarness,
+) -> (
+    Arc<Mutex<Vec<String>>>,
+    InstalledSets,
+    tokio::task::JoinHandle<()>,
+) {
+    let sets = InstalledSets::default();
+    let sink = Arc::clone(&sets);
     let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
     let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
     let (real_tx, real_rx) = mpsc::channel::<RibUpdate>(64);
@@ -4870,6 +4887,7 @@ fn relay_conditional_to_real_rib(
         while let Some(command) = rx.recv().await {
             match command {
                 RibUpdate::InstallConditionalAdvertisements { ref set, .. } => {
+                    sink.lock().unwrap().push(set.clone());
                     log.lock().unwrap().push(format!(
                         "install [{}]",
                         set.attachments
@@ -4909,7 +4927,7 @@ fn relay_conditional_to_real_rib(
         drop(real_tx);
         let _ = real.await;
     });
-    (recorded, task)
+    (recorded, sets, task)
 }
 
 fn conditional_log(log: &Mutex<Vec<String>>) -> Vec<String> {
@@ -5262,15 +5280,42 @@ async fn generation_removing_a_gated_neighbor_keeps_its_gate_until_teardown() {
     relay.abort();
 }
 
+/// Each attachment of `set`, by neighbor address, as `name=advertise_if`
+/// with `(retiring)` copies marked by the RIB flag rather than the name.
+fn attachment_semantics(set: &rustbgpd_rib::ConditionalAdvertisementSet) -> Vec<String> {
+    set.attachments
+        .iter()
+        .flat_map(|(endpoint, names)| {
+            names.iter().map(move |name| {
+                let definition = set
+                    .definitions
+                    .iter()
+                    .find(|definition| definition.name == *name)
+                    .expect("every attached definition is installed");
+                format!(
+                    "{}={}{}",
+                    endpoint.addr,
+                    definition.advertise_if.label(),
+                    if definition.retiring { " retiring" } else { "" }
+                )
+            })
+        })
+        .collect()
+}
+
+/// `attach_backup`'s definition edited from `absent` to `present`.
+fn edit_backup_to_present(toml: &str) -> String {
+    attach_backup_toml(toml).replace("advertise_if = \"absent\"", "advertise_if = \"present\"")
+}
+
 /// ADR-0137: a generation that removes one of two neighbors sharing a
-/// definition and edits that definition keeps the installed definition for
-/// the removed neighbor until its session is torn down. Attaching it to the
-/// edited one first could release, to a session still registered, routes
-/// the installed definition suppresses. The edit reaches the remaining
-/// neighbor with the prune.
+/// definition and edits that definition gives the remaining neighbor the
+/// edit at the config swap, and the removed neighbor, until its session is
+/// torn down, a retiring copy of the installed definition that suppresses
+/// what it controls. No session is ever gated by a definition its own
+/// configuration does not give it.
 #[tokio::test]
-async fn generation_removing_a_neighbor_keeps_its_definition_through_a_shared_edit() {
-    use rustbgpd_rib::ConditionalAdvertiseIf;
+async fn generation_shared_edit_gates_the_remaining_neighbor_by_its_candidate_definition() {
     let fixture = RsFixture::new();
     let base = fixture
         .base_toml()
@@ -5281,45 +5326,35 @@ async fn generation_removing_a_neighbor_keeps_its_definition_through_a_shared_ed
         );
     let attached = attach_backup(&fixture, &base);
     let mut harness = GenerationHarness::new(&attached);
-    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
-    fixture.write_toml(
-        &attach_backup_toml(&base)
-            .replace("advertise_if = \"absent\"", "advertise_if = \"present\""),
-    );
+    let (_log, sets, relay) = relay_conditional_sets_to_real_rib(&mut harness);
+    fixture.write_toml(&edit_backup_to_present(&base));
     let mut edited = fixture.load();
     edited
         .neighbors
         .retain(|neighbor| neighbor.address != "10.0.0.2");
-    let backup = |harness: &GenerationHarness| {
-        harness
-            .mgr
-            .conditional_advertisements
-            .definitions
-            .iter()
-            .find(|definition| &*definition.name == "backup")
-            .map(|definition| definition.advertise_if)
-    };
-    assert_eq!(backup(&harness), Some(ConditionalAdvertiseIf::Absent));
 
     let outcome = harness.apply(&edited).await;
     assert!(
         matches!(outcome, ReloadGenerationOutcome::Applied(_)),
         "{outcome:?}"
     );
-    assert!(
-        conditional_log(&log)
-            .iter()
-            .all(|entry| entry == "install [10.0.0.2, 10.0.0.9]"),
-        "{:?}",
-        conditional_log(&log)
-    );
-    // Mutation-red: a name-only merge attaches the removed neighbor to the
-    // edited definition before its teardown.
-    assert_eq!(
-        backup(&harness),
-        Some(ConditionalAdvertiseIf::Absent),
-        "the installed definition is kept until teardown"
-    );
+    let during: Vec<_> = sets
+        .lock()
+        .unwrap()
+        .iter()
+        .map(attachment_semantics)
+        .collect();
+    // Mutation-red: keeping the installed definition under its own name
+    // leaves 10.0.0.9 on `absent`; a name-only merge moves 10.0.0.2 to
+    // `present` before its teardown.
+    assert!(!during.is_empty(), "the config swap installed the edit");
+    for semantics in &during {
+        assert_eq!(
+            semantics,
+            &["10.0.0.2=absent retiring", "10.0.0.9=present"],
+            "{during:?}"
+        );
+    }
     assert!(
         !harness
             .mgr
@@ -5328,13 +5363,74 @@ async fn generation_removing_a_neighbor_keeps_its_definition_through_a_shared_ed
     );
     harness.mgr.reconcile_conditional_advertisements().await;
     assert_eq!(
-        conditional_log(&log).last().map(String::as_str),
-        Some("install [10.0.0.9]")
+        attachment_semantics(&harness.mgr.conditional_advertisements),
+        ["10.0.0.9=present"]
     );
     assert_eq!(
-        backup(&harness),
-        Some(ConditionalAdvertiseIf::Present),
-        "the edit applies once the removed session is gone"
+        harness.mgr.conditional_advertisements.definitions.len(),
+        1,
+        "the retiring copy is pruned with its peer"
+    );
+    harness.shutdown().await;
+    relay.abort();
+}
+
+/// The same edit while the generation also adds a neighbor attached to the
+/// edited definition: the new session is gated by the candidate
+/// definition from its registration, never by the removed neighbor's
+/// installed one.
+#[tokio::test]
+async fn generation_shared_edit_gates_an_added_neighbor_by_its_candidate_definition() {
+    let fixture = RsFixture::new();
+    let base = fixture
+        .base_toml()
+        .replace("remote_asn = 65002", "remote_asn = 65012");
+    let attached = attach_backup(&fixture, &base);
+    let mut harness = GenerationHarness::new(&attached);
+    let (_log, sets, relay) = relay_conditional_sets_to_real_rib(&mut harness);
+    fixture.write_toml(&format!(
+        "{}\n[[neighbors]]\naddress = \"10.0.0.20\"\nremote_asn = 65020\n\
+         conditional_advertisements = [\"backup\"]\n",
+        edit_backup_to_present(&base)
+    ));
+    let mut edited = fixture.load();
+    edited
+        .neighbors
+        .retain(|neighbor| neighbor.address != "10.0.0.2");
+
+    let outcome = harness.apply(&edited).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert!(
+        harness
+            .mgr
+            .peers
+            .contains_key(&key("10.0.0.20".parse().unwrap())),
+        "added"
+    );
+    let during: Vec<_> = sets
+        .lock()
+        .unwrap()
+        .iter()
+        .map(attachment_semantics)
+        .collect();
+    // Mutation-red: keeping the installed definition under its own name
+    // registers 10.0.0.20 under `absent`, which its configuration does not
+    // give it.
+    assert!(!during.is_empty(), "the config swap installed the edit");
+    for semantics in &during {
+        assert_eq!(
+            semantics,
+            &["10.0.0.2=absent retiring", "10.0.0.20=present"],
+            "{during:?}"
+        );
+    }
+    harness.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(
+        attachment_semantics(&harness.mgr.conditional_advertisements),
+        ["10.0.0.20=present"]
     );
     harness.shutdown().await;
     relay.abort();

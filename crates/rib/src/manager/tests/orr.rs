@@ -2487,6 +2487,7 @@ async fn conditional_advertisement_gates_the_orr_winner_after_earlier_gates() {
             ))],
             condition_policy: None,
             settle_time: Duration::ZERO,
+            retiring: false,
         }],
         attachments: [(client.addr().into(), vec![Arc::from("backup")])]
             .into_iter()
