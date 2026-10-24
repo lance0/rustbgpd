@@ -784,13 +784,8 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(status);
         }
         let req = request.into_inner();
-        let key = crate::peer_selector::require_neighbor(
-            "address",
-            &req.address,
-            "",
-            self.roster.as_ref(),
-        )?;
-        let (address, interface) = (key.address, key.interface);
+        let (address, interface) =
+            membership_selector(&req.address, &req.interface, self.roster.as_ref())?;
         if req.peer_group.trim().is_empty() {
             return Err(Status::invalid_argument("peer_group is required"));
         }
@@ -819,13 +814,8 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
             return Err(status);
         }
         let req = request.into_inner();
-        let key = crate::peer_selector::require_neighbor(
-            "address",
-            &req.address,
-            "",
-            self.roster.as_ref(),
-        )?;
-        let (address, interface) = (key.address, key.interface);
+        let (address, interface) =
+            membership_selector(&req.address, &req.interface, self.roster.as_ref())?;
 
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         self.execute_owned_peer_group_mutation(
@@ -838,6 +828,27 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
 
         Ok(Response::new(proto::ClearNeighborPeerGroupResponse {}))
     }
+}
+
+/// The neighbor a membership request selects. ADR-0142: an empty address
+/// with an interface selects that interface's interface-only neighbor,
+/// carried as the unspecified address with the interface, as live-policy
+/// targets name it; otherwise the address, scoped by the interface when
+/// link-local.
+fn membership_selector(
+    address: &str,
+    interface: &str,
+    roster: Option<&crate::import_roster::ImportRosterReader>,
+) -> Result<(std::net::IpAddr, Option<String>), Status> {
+    let interface = interface.trim();
+    if address.is_empty() && !interface.is_empty() {
+        return Ok((
+            std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            Some(interface.to_owned()),
+        ));
+    }
+    let key = crate::peer_selector::require_neighbor("address", address, interface, roster)?;
+    Ok((key.address, key.interface))
 }
 
 #[cfg(test)]
@@ -1685,6 +1696,7 @@ mod tests {
             Request::new(proto::SetNeighborPeerGroupRequest {
                 address: "10.0.0.2".into(),
                 peer_group: "rs-clients".into(),
+                interface: String::new(),
             }),
         )
         .await
@@ -1695,6 +1707,7 @@ mod tests {
             &svc,
             Request::new(proto::ClearNeighborPeerGroupRequest {
                 address: "10.0.0.2".into(),
+                interface: String::new(),
             }),
         )
         .await
@@ -1873,6 +1886,7 @@ mod tests {
                 Request::new(proto::SetNeighborPeerGroupRequest {
                     address: "10.0.0.2".into(),
                     peer_group: "rs-clients".into(),
+                    interface: String::new(),
                 }),
             )
             .await
@@ -1905,6 +1919,63 @@ mod tests {
             memberships.lock().await.is_empty(),
             "a rejected membership change must not bounce the session"
         );
+    }
+
+    /// ADR-0142: an empty address with an interface selects that
+    /// interface's interface-only neighbor for a membership change, carried
+    /// as the unspecified address with the interface.
+    #[test]
+    fn a_membership_selector_names_an_interface_only_neighbor_by_interface() {
+        // Mutation-red: requiring an address refuses the interface selector.
+        assert_eq!(
+            membership_selector("", "swp1", None).unwrap(),
+            (
+                std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                Some("swp1".to_string())
+            )
+        );
+        assert_eq!(
+            membership_selector("10.0.0.2", "", None).unwrap(),
+            ("10.0.0.2".parse().unwrap(), None)
+        );
+        assert_eq!(
+            membership_selector("", "", None).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    /// The interface selector reaches the persisted membership change.
+    #[tokio::test]
+    async fn clear_neighbor_peer_group_by_interface_stages_the_interface_only_change() {
+        let (peer_tx, _peer_rx) = mpsc::channel(8);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let call = tokio::spawn(async move {
+            PeerGroupServiceRpc::clear_neighbor_peer_group(
+                &svc,
+                Request::new(proto::ClearNeighborPeerGroupRequest {
+                    address: String::new(),
+                    interface: "swp1".into(),
+                }),
+            )
+            .await
+        });
+        match config_rx.recv().await {
+            Some(ConfigEvent::ClearNeighborPeerGroup {
+                address,
+                interface,
+                ack,
+            }) => {
+                assert!(address.is_unspecified(), "{address}");
+                assert_eq!(interface.as_deref(), Some("swp1"));
+                ack.expect("persisted mutation must carry an ack")
+                    .fail_write("disk full");
+            }
+            Some(_) => panic!("unexpected config event"),
+            None => panic!("missing config event"),
+        }
+        let error = call.await.unwrap().expect_err("the write failed");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     }
 
     async fn staged_delete_call(

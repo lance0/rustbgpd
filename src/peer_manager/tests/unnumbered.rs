@@ -885,13 +885,13 @@ async fn operator_deletion_of_a_discovery_owned_peer_is_refused() {
     assert!(
         matches!(
             error,
-            rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(_)
+            rustbgpd_api::peer_types::PeerLifecycleError::Precondition(_)
         ),
         "{error}"
     );
     assert!(
-        error.to_string().contains("interface = \"swp1\""),
-        "{error}"
+        error.to_string().contains("by its interface") && error.to_string().contains("swp1"),
+        "names the interface selector: {error}"
     );
     assert!(h.mgr.peers.contains_key(&swp1_key(2)));
 }
@@ -3440,6 +3440,284 @@ async fn a_binding_between_plan_and_stage_refuses_the_static_add() {
     rib.abort();
 }
 
+// ---------------------------------------------------------------------------
+// The neighbor and peer-group RPCs: an owned mutation of `current_config`,
+// then the same port reconcile as a reload.
+// ---------------------------------------------------------------------------
+
+/// An `AddNeighbor` create for the interface-only neighbor on `interface`.
+fn interface_only_create(
+    interface: &str,
+    mode: rustbgpd_api::peer_types::RemoteAsnMode,
+) -> Box<rustbgpd_api::peer_types::PresenceAwareNeighborCreate> {
+    Box::new(rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
+        address: None,
+        interface: Some(interface.into()),
+        remote_asn: 0,
+        remote_asn_mode: mode,
+        description: None,
+        peer_group: None,
+        hold_time: None,
+        min_hold_time: None,
+        send_hold_time: None,
+        max_prefixes: None,
+        max_prefix_restart_seconds: None,
+        remove_private_as: None,
+        discard_path_attributes: None,
+        local_role: None,
+        families: Some(vec![(
+            rustbgpd_wire::Afi::Ipv6,
+            rustbgpd_wire::Safi::Unicast,
+        )]),
+        required_families: None,
+        route_server_client: None,
+        per_client_best: None,
+        strict_role: None,
+        add_path: None,
+    })
+}
+
+impl Harness {
+    async fn owned_neighbor(
+        &mut self,
+        mutation: rustbgpd_api::peer_types::OwnedNeighborMutation,
+    ) -> rustbgpd_api::peer_types::OwnedNeighborMutationOutcome {
+        let (reply, outcome) = oneshot::channel();
+        let _ = Box::pin(
+            self.mgr
+                .dispatch_command(PeerManagerCommand::OwnedNeighborMutation { mutation, reply }),
+        )
+        .await;
+        outcome.await.unwrap()
+    }
+}
+
+fn refused(
+    outcome: rustbgpd_api::peer_types::OwnedNeighborMutationOutcome,
+) -> rustbgpd_api::peer_types::PeerLifecycleError {
+    match outcome {
+        rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::RejectedNoEffect(
+            rustbgpd_api::peer_types::OwnedNeighborMutationError::Peer(error),
+        ) => error,
+        other => panic!("expected a refusal with no effect, got {other:?}"),
+    }
+}
+
+/// `AddNeighbor` of an interface-only neighbor installs it in the running
+/// configuration with its `remote_asn` mode; the reconcile starts discovery
+/// and a binding creates its peer. A second add on the interface exists.
+#[tokio::test]
+async fn an_rpc_add_starts_discovery_and_carries_the_remote_asn_mode() {
+    use rustbgpd_api::peer_types::{OwnedNeighborMutation, OwnedNeighborMutationOutcome};
+    let (mut h, launched) = Harness::without_discovery(&[("swp1", 7, true)]);
+    h.mgr.unnumbered_runtime.probe = || Ok(());
+    let internal = rustbgpd_api::peer_types::RemoteAsnMode::Internal;
+    let outcome = h
+        .owned_neighbor(OwnedNeighborMutation::Add(interface_only_create(
+            "swp1", internal,
+        )))
+        .await;
+    assert!(
+        matches!(outcome, OwnedNeighborMutationOutcome::Success),
+        "{outcome:?}"
+    );
+    let neighbor = h
+        .mgr
+        .current_config
+        .neighbors
+        .interface_only_on("swp1")
+        .expect("configured");
+    assert_eq!(neighbor.remote_asn, crate::config::RemoteAsn::Internal);
+    // Mutation-red: without installing the neighbor no discovery starts.
+    h.reconcile().await;
+    assert_eq!(launched.lock().unwrap().len(), 1, "discovery started");
+    assert_eq!(
+        drain_launched(&launched).first(),
+        Some(&Command::Start("swp1".into()))
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+
+    let again = h
+        .owned_neighbor(OwnedNeighborMutation::Add(interface_only_create(
+            "swp1", internal,
+        )))
+        .await;
+    assert!(
+        matches!(
+            refused(again),
+            rustbgpd_api::peer_types::PeerLifecycleError::InterfaceOnlyExists(_)
+        ),
+        "already configured"
+    );
+}
+
+/// The first interface-only neighbor added without `CAP_NET_RAW` is
+/// refused as a failed precondition naming it, with nothing changed: no
+/// configuration, port, discovery actor or peer.
+#[tokio::test]
+async fn a_refused_rpc_add_changes_nothing() {
+    use rustbgpd_api::peer_types::OwnedNeighborMutation;
+    let (mut h, launched) = Harness::without_discovery(&[("swp1", 7, true)]);
+    h.mgr.unnumbered_runtime.probe = || {
+        Err(
+            "interface-only neighbor discovery needs CAP_NET_RAW to open a raw ICMPv6 socket"
+                .into(),
+        )
+    };
+    let before = h.mgr.current_config.clone();
+    // Mutation-red: without the preflight the add is installed.
+    let error = refused(
+        h.owned_neighbor(OwnedNeighborMutation::Add(interface_only_create(
+            "swp1",
+            rustbgpd_api::peer_types::RemoteAsnMode::External,
+        )))
+        .await,
+    );
+    let rustbgpd_api::peer_types::PeerLifecycleError::Precondition(message) = &error else {
+        panic!("{error:?}");
+    };
+    assert!(message.contains("CAP_NET_RAW"), "{message}");
+    assert_eq!(h.mgr.current_config, before, "running config untouched");
+    h.reconcile().await;
+    assert!(launched.lock().unwrap().is_empty(), "no discovery");
+    assert!(h.mgr.unnumbered.is_none(), "no port");
+    assert!(h.mgr.peers.is_empty(), "no peer");
+}
+
+/// A static link-local `AddNeighbor` whose address a learned endpoint
+/// holds, bound or reserved, is a failed precondition with nothing changed.
+#[tokio::test]
+async fn an_rpc_static_add_against_a_learned_address_changes_nothing() {
+    use rustbgpd_api::peer_types::OwnedNeighborMutation;
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let mut create = interface_only_create("lo", rustbgpd_api::peer_types::RemoteAsnMode::Numeric);
+    create.address = Some(IpAddr::V6(ll(2)));
+    create.remote_asn = 65002;
+    for state in ["bound", "reserved"] {
+        if state == "reserved" {
+            h.bind("swp1", None).await;
+        }
+        let before = h.mgr.current_config.clone();
+        // Mutation-red: without the preflight the add replaces the config,
+        // fails admission and is reported as compensated.
+        let error = refused(
+            h.owned_neighbor(OwnedNeighborMutation::Add(create.clone()))
+                .await,
+        );
+        let rustbgpd_api::peer_types::PeerLifecycleError::Precondition(message) = &error else {
+            panic!("{state}: {error:?}");
+        };
+        assert!(
+            message.contains("duplicate_link_local_address"),
+            "{state}: {message}"
+        );
+        assert!(
+            message.contains("swp1"),
+            "{state}: names the holder: {message}"
+        );
+        assert_eq!(h.mgr.current_config, before, "{state}");
+        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "{state}");
+    }
+}
+
+/// `DeleteNeighbor` by interface ends a bound interface-only neighbor's
+/// session through the reconcile, stops discovery on it, keeps the other
+/// neighbor's session, and refuses an interface with no such neighbor.
+#[tokio::test]
+async fn an_rpc_delete_ends_a_bound_interface_only_neighbor() {
+    use rustbgpd_api::peer_types::{OwnedNeighborMutation, OwnedNeighborMutationOutcome};
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let swp2_session = h.session(&swp2);
+    h.drain();
+    let outcome = h
+        .owned_neighbor(OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()))
+        .await;
+    assert!(
+        matches!(outcome, OwnedNeighborMutationOutcome::Success),
+        "{outcome:?}"
+    );
+    assert!(
+        h.mgr
+            .current_config
+            .neighbors
+            .interface_only_on("swp1")
+            .is_none()
+    );
+    // Mutation-red: without removing the stanza the session survives.
+    h.reconcile().await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "session ended");
+    assert_eq!(h.drain(), [Command::Stop("swp1".into())]);
+    assert_eq!(h.session(&swp2), swp2_session, "the other neighbor is kept");
+
+    let missing = refused(
+        h.owned_neighbor(OwnedNeighborMutation::DeleteInterfaceOnly("swp9".into()))
+            .await,
+    );
+    assert!(
+        matches!(
+            missing,
+            rustbgpd_api::peer_types::PeerLifecycleError::InterfaceOnlyNotFound(_)
+        ),
+        "{missing:?}"
+    );
+}
+
+/// A `SetPeerGroup` session edit that reaches an interface-only member is
+/// applied: the member rebinds under the new settings on the reconcile,
+/// and a neighbor of another group keeps its session.
+#[tokio::test]
+async fn a_peer_group_rpc_rebinds_only_the_changed_members() {
+    let groups = config_with(&format!(
+        "[peer_groups.fabric]\nhold_time = 9\n[peer_groups.other]\nhold_time = 90\n{}{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\n"),
+        port_stanza("swp2", "peer_group = \"other\"\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.reload(groups).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let (swp1_session, swp2_session) = (h.session(&swp1_key(2)), h.session(&swp2));
+
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.hold_time = Some(30);
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: rustbgpd_api::peer_types::OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
+    .await;
+    // Mutation-red: with the old refusal the edit is rejected.
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    assert_ne!(
+        h.session(&swp1_key(2)),
+        swp1_session,
+        "fabric member rebound"
+    );
+    assert_eq!(h.mgr.peers[&swp1_key(2)].hold_time, Some(30));
+    assert_eq!(h.session(&swp2), swp2_session, "other group untouched");
+}
+
 /// A static neighbor that replaces an interface-only stanza at its learned
 /// address on the same interface collides with the still-bound peer, whose
 /// key it shares. The preflight refuses it before any effect.
@@ -4396,5 +4674,622 @@ async fn a_compensated_restore_keeps_a_lost_acknowledgements_doubt() {
         installed.try_recv().map(|set| attached(&set)),
         Ok(vec![IpAddr::V6(ll(2))]),
         "the rebind installs the gate again"
+    );
+}
+
+/// One SIGHUP generation to `candidate`, through the real executor, then
+/// the owner loop's port reconcile.
+async fn sighup(h: &mut Harness, candidate: crate::config::Config) {
+    let actions =
+        crate::config::plan_reload_peer_actions(&h.mgr.current_config, &candidate).unwrap();
+    let outcome = Box::pin(h.mgr.apply_reload_generation(
+        candidate,
+        actions,
+        crate::config::PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            crate::peer_manager::generation::ReloadGenerationOutcome::Applied(_)
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+}
+
+/// SIGHUP enables BFD on a bound interface-only neighbor, moves it to
+/// another profile, toggles strict mode and disables it. Each generation
+/// creates, updates, holds, releases and finally removes the single-hop
+/// session for the binding's `fe80::2%7`, and the BGP session is kept
+/// throughout: BFD membership is not a bind-time setting. Strict mode
+/// (ADR-0067) withholds BGP while BFD is not Up and releases it when strict
+/// is turned off.
+#[tokio::test]
+async fn sighup_bfd_edits_on_a_bound_interface_only_neighbor_keep_its_session() {
+    let profiles = "[[bfd_profiles]]\nname = \"fast\"\n\
+                    [[bfd_profiles]]\nname = \"slow\"\nmultiplier = 5\n";
+    let (mut h, mut bfd) = attach_bfd(
+        harness_with(&["swp1"], &[("swp1", 7, true)], "", profiles, None),
+        &[],
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(bfd.applied.try_recv().is_err(), "no BFD configured yet");
+    let key = swp1_key(2);
+    let peer = IpAddr::V6(ll(2));
+    let session = h.session(&key);
+    let with_bfd = |h: &Harness, bfd: Option<&str>| {
+        let mut candidate = h.mgr.current_config.clone();
+        let mut neighbor = candidate
+            .neighbors
+            .interface_only_on("swp1")
+            .unwrap()
+            .clone();
+        neighbor.bfd = bfd.map(|bfd| toml::from_str::<crate::config::BfdConfig>(bfd).unwrap());
+        candidate
+            .neighbors
+            .set_interface_only("swp1", Some(neighbor));
+        candidate
+    };
+    let detect_mult =
+        |h: &Harness| h.mgr.bfd_coupling.as_ref().unwrap().configured[&peer].detect_mult;
+
+    // Mutation-red: a bind-time BFD setting rebinds the neighbor instead.
+    let enabled = with_bfd(&h, Some("profile = \"fast\""));
+    sighup(&mut h, enabled).await;
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(peer, Some(7))],
+        "created"
+    );
+    assert_eq!(h.session(&key), session, "kept on enable");
+    assert!(!h.mgr.bfd_withholding(&peer));
+    let created = bfd_revision(&h, ll(2));
+
+    let moved = with_bfd(&h, Some("profile = \"slow\""));
+    sighup(&mut h, moved).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
+    assert_eq!(detect_mult(&h), 5, "updated to the new profile");
+    assert_ne!(bfd_revision(&h, ll(2)), created, "a replaced session");
+    assert_eq!(h.session(&key), session, "kept on a profile change");
+
+    let strict = with_bfd(&h, Some("profile = \"slow\"\nstrict = true"));
+    sighup(&mut h, strict).await;
+    bfd.next_applied();
+    assert!(
+        h.mgr.bfd_withholding(&peer),
+        "strict holds BGP until BFD is Up"
+    );
+    assert_eq!(h.session(&key), session, "kept when strict is enabled");
+
+    let relaxed = with_bfd(&h, Some("profile = \"slow\""));
+    sighup(&mut h, relaxed).await;
+    bfd.next_applied();
+    assert!(!h.mgr.bfd_withholding(&peer), "released when strict is off");
+    assert_eq!(h.session(&key), session, "kept when strict is disabled");
+
+    let disabled = with_bfd(&h, None);
+    sighup(&mut h, disabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [], "removed");
+    assert!(!h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
+    assert_eq!(h.session(&key), session, "kept on disable");
+}
+
+/// Every exported series whose `peer` label is `label`, by family.
+fn series_for(h: &Harness, label: &str) -> Vec<String> {
+    let mut families: Vec<String> = h
+        .mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| {
+            family.get_metric().iter().any(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|pair| pair.name() == "peer" && pair.value() == label)
+            })
+        })
+        .map(|family| family.name().to_owned())
+        .collect();
+    families.sort();
+    families
+}
+
+/// Deleting an interface-only neighbor through `DeleteNeighbor` ends every
+/// series labelled `peer="interface:<name>"`, including `bgp_unnumbered_*`,
+/// for a bound neighbor and for one whose binding was lost, which has no
+/// peer to delete. The deletion of the bound one tells the RIB the same
+/// label, so its teardown emissions are reaped after them.
+#[tokio::test]
+async fn an_rpc_delete_reaps_the_neighbors_interface_labelled_series() {
+    use rustbgpd_api::peer_types::OwnedNeighborMutation;
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    // swp2 is then unbound: its identity series stay with the neighbor.
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
+    h.reconcile().await;
+    h.mgr.handle_discovery_event(DiscoveryEvent::Conflict {
+        interface: "swp1".into(),
+        bound: ll(2),
+        other: ll(9),
+    });
+    for label in ["interface:swp1", "interface:swp2"] {
+        assert!(
+            series_for(&h, label)
+                .iter()
+                .any(|family| family == "bgp_peer_admin_enabled"),
+            "{label} exported before the delete: {:?}",
+            series_for(&h, label)
+        );
+    }
+    assert!(
+        series_for(&h, "interface:swp1")
+            .iter()
+            .any(|family| family.starts_with("bgp_unnumbered_"))
+    );
+    while h.rib_rx.try_recv().is_ok() {}
+
+    for interface in ["swp1", "swp2"] {
+        let outcome = h
+            .owned_neighbor(OwnedNeighborMutation::DeleteInterfaceOnly(interface.into()))
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+            ),
+            "{outcome:?}"
+        );
+    }
+    h.reconcile().await;
+    // Mutation-red: without the reap both neighbors' series survive.
+    assert_eq!(series_for(&h, "interface:swp1"), Vec::<String>::new());
+    assert_eq!(series_for(&h, "interface:swp2"), Vec::<String>::new());
+    let reaped_in_rib: Vec<_> = std::iter::from_fn(|| h.rib_rx.try_recv().ok())
+        .filter_map(|update| match update {
+            RibUpdate::PeerDeleted {
+                label, keep_series, ..
+            } => Some((label.map(|label| label.to_string()), keep_series)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reaped_in_rib,
+        [
+            (Some("interface:swp1".to_string()), false),
+            (Some("interface:swp2".to_string()), false)
+        ],
+        "the RIB reaps each neighbor's series under its interface label"
+    );
+}
+
+/// `SetNeighborPeerGroup` and `ClearNeighborPeerGroup` select an
+/// interface-only neighbor by interface: the member rebinds into and out of
+/// the group on the reconcile, and the other neighbor keeps its session.
+#[tokio::test]
+async fn a_membership_rpc_moves_an_interface_only_neighbor_between_groups() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[peer_groups.fabric]\nhold_time = 30\n{}{}",
+        port_stanza("swp1", ""),
+        port_stanza("swp2", "")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.reload(config).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let swp1_session = h.session(&swp1_key(2));
+    let selector = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+    for (mutation, hold) in [
+        (
+            OwnedCatalogMutation::SetNeighborPeerGroup {
+                address: selector,
+                interface: Some("swp2".into()),
+                peer_group: "fabric".into(),
+            },
+            Some(30),
+        ),
+        (
+            OwnedCatalogMutation::ClearNeighborPeerGroup {
+                address: selector,
+                interface: Some("swp2".into()),
+            },
+            Some(90),
+        ),
+    ] {
+        let session = h.session(&swp2);
+        let (reply, outcome) = oneshot::channel();
+        let _ = Box::pin(
+            h.mgr
+                .dispatch_command(PeerManagerCommand::OwnedCatalogMutation { mutation, reply }),
+        )
+        .await;
+        let outcome = outcome.await.unwrap();
+        assert!(
+            matches!(outcome, OwnedCatalogMutationOutcome::Success),
+            "{outcome:?}"
+        );
+        h.reconcile().await;
+        assert_ne!(h.session(&swp2), session, "swp2 rebound");
+        assert_eq!(h.mgr.peers[&swp2].hold_time, hold);
+        assert_eq!(h.session(&swp1_key(2)), swp1_session, "swp1 kept");
+    }
+}
+
+/// A group edit that changes a session knob and the export chain: a member
+/// that overrides the knob keeps its bind-time settings, so it is not
+/// rebound, and takes the new chain live on both peer-group paths, keeping
+/// its session.
+#[tokio::test]
+async fn a_combined_group_edit_applies_the_policy_to_a_member_that_does_not_rebind() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [peer_groups.fabric]\nhold_time = 30\n{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\nhold_time = 60\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let session = h.session(&key);
+    assert!(h.mgr.peers[&key].export_policy.is_none());
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.hold_time = Some(45);
+    definition.export_policy_chain = vec!["alt".to_string()];
+
+    // Mutation-red: without the live delta the member keeps no chain.
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition.clone()),
+                },
+                reply,
+            }),
+    )
+    .await;
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::Success),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    assert_eq!(h.session(&key), session, "not rebound");
+    assert!(
+        h.mgr.peers[&key].export_policy.is_some(),
+        "new chain installed"
+    );
+
+    // The legacy path: back to no chain, with another knob.
+    definition.hold_time = Some(50);
+    definition.export_policy_chain = Vec::new();
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(h.mgr.dispatch_command(PeerManagerCommand::SetPeerGroup {
+        name: "fabric".to_string(),
+        definition,
+        reply,
+    }))
+    .await;
+    outcome.await.unwrap().expect("applied");
+    h.reconcile().await;
+    assert_eq!(h.session(&key), session, "not rebound");
+    assert!(h.mgr.peers[&key].export_policy.is_none(), "chain removed");
+}
+
+/// The live chain of a member that does not rebind fails and so does its
+/// restore: the group edit is ambiguous, so settlement keeps mutations
+/// fenced, and the candidate config is not adopted.
+#[tokio::test]
+async fn a_failed_member_policy_restore_reports_the_group_edit_ambiguous() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [peer_groups.fabric]\nhold_time = 30\n{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\nhold_time = 60\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let session = h.session(&key);
+    // The session can take neither the new chain nor the restore.
+    let _ = h
+        .mgr
+        .peers
+        .replace_handle(&key, closed_peer_handle(), session);
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.hold_time = Some(45);
+    definition.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
+    .await;
+    // Mutation-red: flattening the failure reports it compensated.
+    let outcome = outcome.await.unwrap();
+    let OwnedCatalogMutationOutcome::CompensationAmbiguous(error) = &outcome else {
+        panic!("an unrestored member must fence: {outcome:?}");
+    };
+    assert_eq!(
+        error.to_string(),
+        rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode::RollbackSessionRejected
+            .as_str()
+    );
+    assert_eq!(
+        h.mgr.current_config.peer_groups["fabric"].hold_time,
+        Some(30),
+        "the candidate is not adopted"
+    );
+}
+
+/// A hot group edit (a limit and the export chain) gives a member that
+/// overrides the limit its new chain live; a static member's hot apply then
+/// fails, and the interface-only member gets its prior chain back.
+#[tokio::test]
+async fn a_failed_hot_group_edit_restores_the_member_policy() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [peer_groups.fabric]\nmax_prefixes = 10\n\
+         [[neighbors]]\naddress = \"192.0.2.7\"\nremote_asn = 65002\npeer_group = \"fabric\"\n{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\nmax_prefixes = 50\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config).await;
+    let static_peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    insert_test_managed_peer(&mut h.mgr, static_peer, closed_peer_handle(), false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    assert!(h.mgr.peers[&key].export_policy.is_none());
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.max_prefixes = Some(20);
+    definition.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
+    .await;
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            OwnedCatalogMutationOutcome::CompensationAmbiguous(_)
+        ),
+        "{outcome:?}"
+    );
+    // Mutation-red: discarding the priors leaves the member on the
+    // uncommitted chain.
+    assert!(
+        h.mgr.peers[&key].export_policy.is_none(),
+        "member chain restored"
+    );
+    assert_eq!(
+        h.mgr.current_config.peer_groups["fabric"].max_prefixes,
+        Some(10)
+    );
+}
+
+/// A combined group edit reshapes the static members and gives a member that
+/// overrides the session knob its new chain live. The static reshape is
+/// ambiguous (the second member fails, the first's restore fails): the edit
+/// stays ambiguous and the interface-only member still gets its prior chain.
+#[tokio::test]
+async fn an_ambiguous_static_reshape_restores_the_member_policy() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [peer_groups.fabric]\nhold_time = 30\n\
+         [[neighbors]]\naddress = \"192.0.2.7\"\nremote_asn = 65002\npeer_group = \"fabric\"\n\
+         [[neighbors]]\naddress = \"192.0.2.8\"\nremote_asn = 65002\npeer_group = \"fabric\"\n{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\nhold_time = 60\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config.clone()).await;
+    for resolved in config.resolved_neighbors().unwrap() {
+        h.mgr
+            .add_peer(
+                PeerManager::peer_manager_config_from_resolved(resolved, false),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    let first = key(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)));
+    let second = key(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8)));
+    h.mgr.inject_reconfigure_failures.insert(second, 0);
+    h.mgr.inject_reconfigure_failures.insert(first, 1);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let member = swp1_key(2);
+    assert!(h.mgr.peers[&member].export_policy.is_none());
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.hold_time = Some(45);
+    definition.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
+    .await;
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            OwnedCatalogMutationOutcome::CompensationAmbiguous(_)
+        ),
+        "{outcome:?}"
+    );
+    // Mutation-red: returning on the ambiguous reshape leaves the member
+    // on the uncommitted chain.
+    assert!(
+        h.mgr.peers[&member].export_policy.is_none(),
+        "member chain restored"
+    );
+    assert_eq!(
+        h.mgr.current_config.peer_groups["fabric"].hold_time,
+        Some(30)
+    );
+}
+
+/// Deleting a bound BFD neighbor removes its binding's registration before
+/// the address is released, so nothing at that address inherits the session
+/// or a strict hold.
+#[tokio::test]
+async fn deleting_a_bound_bfd_neighbor_removes_its_registration() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let peer = IpAddr::V6(ll(2));
+    assert!(h.mgr.bfd_withholding(&peer), "strict, held until Up");
+    let outcome = h
+        .owned_neighbor(
+            rustbgpd_api::peer_types::OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    // Mutation-red: the deletion only disables it; the registration stays.
+    let coupling = h.mgr.bfd_coupling.as_ref().unwrap();
+    assert!(
+        !coupling.configured.contains_key(&peer),
+        "registration removed"
+    );
+    assert!(!coupling.bound.contains(&peer));
+    assert!(!h.mgr.bfd_withholding(&peer), "no strict hold left");
+    let mut last = None;
+    while let Ok(applied) = bfd.applied.try_recv() {
+        last = Some(applied);
+    }
+    assert_eq!(
+        BfdSide::sessions(&last.expect("the removal was acknowledged")),
+        []
+    );
+}
+
+/// A binding lost before the delete left a `PeerDeleted { keep_series }`
+/// queued for the RIB. The removal queues a final deletion behind it under
+/// the interface label, so nothing that one emits outlives the neighbor.
+#[tokio::test]
+async fn an_unbound_neighbors_removal_queues_a_final_rib_deletion() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    while h.rib_rx.try_recv().is_ok() {}
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    // The RIB has not processed the retirement yet: the delete runs behind it.
+    let outcome = h
+        .owned_neighbor(
+            rustbgpd_api::peer_types::OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    let queued: Vec<_> = std::iter::from_fn(|| h.rib_rx.try_recv().ok())
+        .filter_map(|update| match update {
+            RibUpdate::PeerDeleted {
+                label, keep_series, ..
+            } => Some(format!(
+                "deleted({}, keep={keep_series})",
+                label.as_deref().unwrap_or("-")
+            )),
+            RibUpdate::ReleasePeer { .. } => Some("released".to_string()),
+            _ => None,
+        })
+        .collect();
+    // Mutation-red: without the final deletion the retirement's kept
+    // series are the last word.
+    assert_eq!(
+        queued,
+        [
+            "deleted(interface:swp1, keep=true)",
+            "deleted(interface:swp1, keep=false)",
+            "released"
+        ]
+    );
+}
+
+/// A discovery conflict queued before the neighbor's deletion arrives
+/// after it, while another neighbor's port keeps discovery running: it is
+/// ignored and recreates no series for the deleted neighbor.
+#[tokio::test]
+async fn a_late_conflict_for_a_deleted_neighbor_recreates_no_series() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let outcome = h
+        .owned_neighbor(
+            rustbgpd_api::peer_types::OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    h.mgr.handle_discovery_event(DiscoveryEvent::Conflict {
+        interface: "swp1".into(),
+        bound: ll(2),
+        other: ll(9),
+    });
+    // Mutation-red: counting it recreates `ra_conflicts{peer="interface:swp1"}`.
+    assert_eq!(series_for(&h, "interface:swp1"), Vec::<String>::new());
+    h.mgr.handle_discovery_event(DiscoveryEvent::Conflict {
+        interface: "swp2".into(),
+        bound: ll(3),
+        other: ll(9),
+    });
+    assert_eq!(
+        sample(
+            &h,
+            "bgp_unnumbered_ra_conflicts_total",
+            &[("peer", "interface:swp2")]
+        ),
+        Some(1.0),
+        "the remaining neighbor is still counted"
     );
 }
