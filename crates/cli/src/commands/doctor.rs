@@ -1207,10 +1207,16 @@ fn inbound_prefix_bound_check(
     local_asn: Option<u32>,
 ) -> Option<Check> {
     let config = neighbor.config.as_ref()?;
-    let local_asn = local_asn?;
-    if neighbor.stale
+    // `remote_asn = "internal"` reads remote_asn 0 with its mode; a numeric
+    // neighbor (or an older daemon without the mode) is iBGP on the local AS.
+    let ibgp = match crate::proto::RemoteAsnMode::try_from(config.remote_asn_mode) {
+        Ok(crate::proto::RemoteAsnMode::Internal) => true,
+        Ok(crate::proto::RemoteAsnMode::External) => false,
+        _ => config.remote_asn == local_asn?,
+    };
+    if ibgp
+        || neighbor.stale
         || neighbor.state != crate::proto::SessionState::Established as i32
-        || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
         || has_inbound_bound(neighbor, "aggregate")
@@ -5213,6 +5219,19 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 "case {case}"
             );
         }
+
+        // `remote_asn = "internal"` reads remote_asn 0 with its mode: iBGP,
+        // not an unbounded eBGP session. Mutation-red: deciding iBGP from the
+        // number alone warns here.
+        let mut internal = peer.clone();
+        let config = internal.config.as_mut().unwrap();
+        config.remote_asn = 0;
+        config.remote_asn_mode = crate::proto::RemoteAsnMode::Internal as i32;
+        assert!(inbound_prefix_bound_check("fe80::1%eth0", &internal, Some(65001)).is_none());
+        let mut external = internal.clone();
+        external.config.as_mut().unwrap().remote_asn_mode =
+            crate::proto::RemoteAsnMode::External as i32;
+        assert!(inbound_prefix_bound_check("fe80::1%eth0", &external, Some(65001)).is_some());
     }
 
     #[test]
