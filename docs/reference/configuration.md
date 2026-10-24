@@ -1487,8 +1487,11 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   is a static neighbor added at runtime with one of them beside a learned
   address. A reload or config transaction that would give neighbors already
   sharing an address such a feature is refused before any effect, and one
-  that removes it rechecks the refused links. A refusal is not sticky: once
-  the holder's peer goes, the refused link is admitted on its next binding.
+  that removes it rechecks the refused links. A refused neighbor reports the
+  reason as its last error in `rbgp neighbor`, and `rbgp doctor` reports it
+  as `interface_only.<if>.bmp` or `interface_only.<if>.admission`. A
+  refusal is not sticky: once the holder's peer goes, the refused link is
+  admitted on its next binding.
   Collectors count while disconnected, and `[bmp]` takes a restart to
   change, so a running session is never refused later.
 - **Reload.** SIGHUP and config transactions add, remove and edit
@@ -4289,7 +4292,8 @@ count whether or not they are connected:
   monitoring, statistics or Peer Down. The neighbor admitted first stays
   monitored. The exclusion lasts for the excluded neighbor's peer, and is
   reported in neighbor state (`bmp_identity_excluded`), in `rbgp doctor`
-  (`peer.<neighbor>.bmp`) and in `bgp_bmp_identity_excluded_neighbors`.
+  (`peer.<neighbor>.bmp`, or `interface_only.<if>.bmp` for an
+  interface-only neighbor) and in `bgp_bmp_identity_excluded_neighbors`.
 
 `bgp_bmp_identity_conflicts_total{outcome="refused"|"excluded"}` counts the
 admissions. After a restart, which neighbor is admitted first depends on

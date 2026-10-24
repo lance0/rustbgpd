@@ -3047,6 +3047,12 @@ by interface:
   the peer cannot discover this router unless another router advertises on
   the link. A bound neighbor's session is checked as
   `peer.<learned>%<if>.*`, like any other peer.
+- `interface_only.<if>.bmp` is yellow when the neighbor's session reports
+  nothing to BMP (`bmp_identity_excluded`), or when its learned address was
+  refused with `bmp_identity_conflict` because another BMP-monitored
+  neighbor holds it. `interface_only.<if>.admission` is yellow when the
+  address was refused with `shared_address_feature`. Either refusal replaces
+  the discovery hints: an address was learned.
 - `interface_only.<if>.multiple_routers` is yellow when
   `bgp_unnumbered_ra_conflicts_total` shows a second router on the link since
   the daemon started.

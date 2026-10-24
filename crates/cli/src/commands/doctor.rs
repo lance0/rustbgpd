@@ -994,9 +994,14 @@ fn outbound_registration_check(
 /// A neighbor left out of BMP because another monitored neighbor held its
 /// link-local address when it was admitted (ADR-0142, every collector
 /// set to `on_identity_conflict = "exclude"`). `None` for a monitored one.
-fn bmp_identity_exclusion_check(identity: &str, n: &crate::proto::NeighborState) -> Option<Check> {
+/// `name` is `peer.<neighbor>.bmp`, or `interface_only.<if>.bmp`.
+fn bmp_identity_exclusion_check(
+    name: String,
+    identity: &str,
+    n: &crate::proto::NeighborState,
+) -> Option<Check> {
     n.bmp_identity_excluded.then(|| Check {
-        name: format!("peer.{identity}.bmp"),
+        name,
         status: CheckStatus::Warn,
         detail: format!(
             "peer {identity} reports nothing to BMP: another BMP-monitored neighbor held its \
@@ -1418,18 +1423,53 @@ fn last_event_on_interface(events: &[serde_json::Value], interface: &str) -> Opt
 }
 
 /// `interface_only.<if>.*`: where an interface-only neighbor's discovery
-/// stands and whether a second router shares its link. A bound neighbor's
-/// session is checked like any other peer's.
+/// stands, whether admission refused the address it learned, and whether a
+/// second router shares its link. `last_error` is the unbound neighbor's,
+/// which names a refusal. A bound neighbor's session is checked like any
+/// other peer's.
 fn interface_only_checks(
     interface: &str,
     discovery: &str,
+    last_error: &str,
     last_event_unix: Option<u64>,
     evidence: &UnnumberedEvidence<'_>,
     now: u64,
 ) -> Vec<Check> {
     let name = |what: &str| format!("interface_only.{interface}.{what}");
     let mut checks = Vec::new();
+    // An address was learned and admission turned it away: discovery itself
+    // worked, so the refusal replaces the discovery hints.
+    let refusal = (discovery == "awaiting_discovery")
+        .then(|| {
+            if last_error.starts_with("bmp_identity_conflict:") {
+                Some((
+                    "bmp",
+                    format!(
+                        "interface-only neighbor on {interface}: {last_error}. Another BMP-monitored neighbor holds that address and a BMP collector cannot tell the two sessions apart; set on_identity_conflict = \"exclude\" on every collector to admit it without BMP"
+                    ),
+                ))
+            } else if last_error.starts_with("shared_address_feature:") {
+                Some((
+                    "admission",
+                    format!(
+                        "interface-only neighbor on {interface}: {last_error}. BFD, TCP MD5, TCP-AO, GTSM and log_level state is keyed by the bare address and cannot serve two neighbors"
+                    ),
+                ))
+            } else {
+                None
+            }
+        })
+        .flatten();
+    let refused = refusal.is_some();
+    if let Some((what, detail)) = refusal {
+        checks.push(Check {
+            name: name(what),
+            status: CheckStatus::Warn,
+            detail,
+        });
+    }
     let discovery_check = match discovery {
+        _ if refused => None,
         "interface_missing" => Some((
             CheckStatus::Fail,
             format!(
@@ -4112,6 +4152,7 @@ async fn run_with_deadlines(
                             for check in interface_only_checks(
                                 &config.interface,
                                 discovery,
+                                &n.last_error,
                                 last_event_on_interface(&session_events, &config.interface),
                                 &unnumbered,
                                 now,
@@ -4144,7 +4185,16 @@ async fn run_with_deadlines(
                                     ))
                                     .chain(inbound_prefix_bound_check(&identity, n, local_asn))
                                     .chain(outbound_resync_check(&identity, n))
-                                    .chain(bmp_identity_exclusion_check(&identity, n))
+                                    .chain(bmp_identity_exclusion_check(
+                                        match (discovery, cfg) {
+                                            (Some(_), Some(config)) => {
+                                                format!("interface_only.{}.bmp", config.interface)
+                                            }
+                                            _ => format!("peer.{identity}.bmp"),
+                                        },
+                                        &identity,
+                                        n,
+                                    ))
                             {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
@@ -5688,7 +5738,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     #[test]
     fn interface_only_checks_report_discovery_and_conflicts() {
         let checks = |discovery, last_event, evidence: &UnnumberedEvidence<'_>, now| {
-            interface_only_checks("swp1", discovery, last_event, evidence, now)
+            interface_only_checks("swp1", discovery, "", last_event, evidence, now)
                 .into_iter()
                 .map(|check| (check.name, check.status, check.detail))
                 .collect::<Vec<_>>()
@@ -5719,6 +5769,30 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 .contains("router_advertisements = false")
         );
         assert_eq!(checks("bound", None, &quiet, 2_000), []);
+        let refused = |last_error| {
+            interface_only_checks(
+                "swp1",
+                "awaiting_discovery",
+                last_error,
+                Some(1_900),
+                &quiet,
+                2_000,
+            )
+        };
+        let bmp = refused("bmp_identity_conflict: learned address fe80::2 refused, held by swp2");
+        assert_eq!(bmp.len(), 1, "the refusal replaces the discovery hints");
+        assert_eq!(
+            (bmp[0].name.as_str(), bmp[0].status),
+            ("interface_only.swp1.bmp", CheckStatus::Warn)
+        );
+        assert!(bmp[0].detail.contains("on_identity_conflict"));
+        let feature = refused("shared_address_feature: learned address fe80::2 refused, BFD");
+        assert_eq!(feature[0].name, "interface_only.swp1.admission");
+        // Another last error (a held max-prefix shutdown) is not a refusal.
+        assert_eq!(
+            refused("max prefix exceeded")[0].name,
+            "interface_only.swp1.discovery"
+        );
 
         let metrics = "bgp_unnumbered_ra_conflicts_total{peer=\"interface:swp1\"} 2\n\
                        bgp_unnumbered_ra_socket_open_failures_total 3\n";
@@ -5728,7 +5802,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(bound[0].0, "interface_only.swp1.multiple_routers");
         assert!(bound[0].2.contains("2 times"), "{bound:?}");
         assert_eq!(
-            interface_only_checks("swp2", "bound", None, &conflicted, 2_000).len(),
+            interface_only_checks("swp2", "bound", "", None, &conflicted, 2_000).len(),
             0
         );
         let socket = ra_socket_check(&conflicted).unwrap();
@@ -6881,9 +6955,10 @@ paths = ["x"]
     #[test]
     fn bmp_identity_exclusion_check_warns_only_for_an_excluded_neighbor() {
         let mut n = crate::proto::NeighborState::default();
-        assert!(bmp_identity_exclusion_check("fe80::1%eth1", &n).is_none());
+        let name = || "peer.fe80::1%eth1.bmp".to_string();
+        assert!(bmp_identity_exclusion_check(name(), "fe80::1%eth1", &n).is_none());
         n.bmp_identity_excluded = true;
-        let check = bmp_identity_exclusion_check("fe80::1%eth1", &n).unwrap();
+        let check = bmp_identity_exclusion_check(name(), "fe80::1%eth1", &n).unwrap();
         assert_eq!(check.name, "peer.fe80::1%eth1.bmp");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(
@@ -9361,9 +9436,15 @@ paths = ["x"]
             row
         };
         use rustbgpd_api::proto::NeighborDiscoveryState as D;
+        let mut excluded = interface_only("swp1", "fe80::2", 6, D::Bound);
+        excluded.bmp_identity_excluded = true;
+        let mut refused = interface_only("swp3", "", 1, D::AwaitingDiscovery);
+        refused.last_error =
+            "bmp_identity_conflict: learned address fe80::2 refused, held by swp1".to_string();
         *server.state.list_neighbors_response.lock().await = vec![
-            interface_only("swp1", "fe80::2", 6, D::Bound),
+            excluded,
             interface_only("swp2", "", 1, D::AwaitingDiscovery),
+            refused,
         ];
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
@@ -9403,6 +9484,19 @@ paths = ["x"]
             !names
                 .iter()
                 .any(|name| name.contains("swp2") && name.ends_with(".session")),
+            "{names:?}"
+        );
+        // ADR-0142 BMP exclusions are reported with the neighbor's other
+        // interface-only findings: the excluded bound neighbor, and the one
+        // whose learned address was refused, in place of discovery hints.
+        // Mutation-red: naming the exclusion by the endpoint reports
+        // `peer.fe80::2%swp1.bmp`, and ignoring the refusal reports swp3 as
+        // waiting for an RA.
+        assert!(names.contains(&"interface_only.swp1.bmp"), "{names:?}");
+        assert!(!names.contains(&"peer.fe80::2%swp1.bmp"), "{names:?}");
+        assert!(names.contains(&"interface_only.swp3.bmp"), "{names:?}");
+        assert!(
+            !names.contains(&"interface_only.swp3.discovery"),
             "{names:?}"
         );
     }
