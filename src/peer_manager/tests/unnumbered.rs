@@ -6275,3 +6275,380 @@ async fn a_late_conflict_for_a_deleted_neighbor_recreates_no_series() {
         "the remaining neighbor is still counted"
     );
 }
+
+#[tokio::test]
+async fn deleting_a_never_bound_neighbor_retires_its_startup_eor_grace() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    assert!(
+        h.mgr.peers.is_empty() && h.mgr.rib_peers.is_empty(),
+        "neighbor never allocated a peer handle"
+    );
+    h.rib_sent();
+    h.reload(config_with("")).await;
+    assert!(
+        h.rib_sent().iter().any(|update| matches!(
+            update,
+            RibUpdate::RetireEorGraceInterface { interface } if interface.as_ref() == "swp1"
+        )),
+        "deletion retires the interface target even before a peer handle exists"
+    );
+}
+
+async fn bfd_removal_timeout(initially_bound: bool, readd: bool) {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    if !initially_bound {
+        bfd.unanswered.store(true, Ordering::SeqCst);
+    }
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    if initially_bound {
+        bfd.next_applied();
+    }
+    assert_eq!(h.mgr.peers.contains_key(&swp1_key(2)), initially_bound);
+    let original = h.mgr.current_config.clone();
+    let peer = IpAddr::V6(ll(2));
+    bfd.unanswered.store(true, Ordering::SeqCst);
+    h.rib_sent();
+    let mut removed = original.clone();
+    removed.neighbors.set_interface_only("swp1", None);
+    h.reload(removed).await;
+    let coupling = h.mgr.bfd_coupling.as_ref().unwrap();
+    assert!(
+        !coupling.configured.contains_key(&peer) && !coupling.bound.contains(&peer),
+        "local membership still commits before the acknowledgement"
+    );
+    assert!(
+        h.mgr.unnumbered.is_some(),
+        "port owns the uncertain removal"
+    );
+    assert!(
+        h.mgr.peers.is_empty(),
+        "failed cleanup cannot rebind in the same turn"
+    );
+    assert!(
+        bfd.applied.try_recv().is_err(),
+        "the first removal was not acknowledged"
+    );
+    assert!(
+        h.rib_sent().iter().any(|update| matches!(update,
+            RibUpdate::RetireEorGraceInterface { interface } if interface.as_ref() == "swp1"
+        )),
+        "startup grace is retired before uncertain BFD cleanup completes"
+    );
+    let retry = h
+        .mgr
+        .unnumbered_retry_at()
+        .expect("existing backoff is armed");
+    if readd {
+        h.reload(original).await;
+    } else {
+        tokio::time::sleep_until(retry).await;
+        h.mgr.unnumbered_retry_due();
+        h.reconcile().await;
+    }
+    let acknowledged = bfd
+        .applied
+        .try_recv()
+        .expect("removal retry was acknowledged");
+    assert_eq!(
+        BfdSide::sessions(&acknowledged),
+        [],
+        "acknowledged set excludes the retired session"
+    );
+    if readd {
+        assert_eq!(
+            BfdSide::sessions(&bfd.next_applied()),
+            [(peer, Some(7))],
+            "new binding follows acknowledged cleanup"
+        );
+        assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+    } else {
+        assert!(
+            h.mgr.unnumbered.is_none(),
+            "port released only after actor acknowledgement"
+        );
+        assert!(h.mgr.unbound_interface_only_infos().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bound_bfd_removal_ack_timeout_keeps_cleanup_ownership() {
+    Box::pin(bfd_removal_timeout(true, false)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn unbound_bfd_removal_ack_timeout_keeps_cleanup_ownership() {
+    Box::pin(bfd_removal_timeout(false, false)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_readded_interface_settles_uncertain_bfd_removal_before_binding() {
+    for initially_bound in [true, false] {
+        Box::pin(bfd_removal_timeout(initially_bound, true)).await;
+    }
+}
+
+async fn retirement_bfd_removal_timeout(rebind: bool) {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    bfd.unanswered.store(true, Ordering::SeqCst);
+    if rebind {
+        h.bind("swp1", Some(endpoint(3, 7))).await;
+    } else {
+        h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+        h.reconcile().await;
+    }
+    assert!(
+        h.mgr
+            .current_config
+            .neighbors
+            .interface_only_on("swp1")
+            .is_some(),
+        "the configured neighbor remains"
+    );
+    assert!(
+        h.mgr.peers.is_empty(),
+        "uncertain retirement cannot start a replacement"
+    );
+    assert!(
+        h.mgr.unnumbered_retry_at().is_some(),
+        "cleanup retry remains owned"
+    );
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+    assert!(
+        bfd.applied.try_recv().is_err(),
+        "the first removal was not acknowledged"
+    );
+    let retry = h
+        .mgr
+        .unnumbered_retry_at()
+        .expect("existing backoff is armed");
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    let acknowledged = bfd
+        .applied
+        .try_recv()
+        .expect("retirement removal retry was acknowledged");
+    assert_eq!(BfdSide::sessions(&acknowledged), []);
+    if rebind {
+        assert_eq!(
+            BfdSide::sessions(&bfd.next_applied()),
+            [(IpAddr::V6(ll(3)), Some(7))]
+        );
+        assert!(h.mgr.peers.contains_key(&swp1_key(3)));
+    } else {
+        assert!(
+            h.mgr.peers.is_empty(),
+            "carrier remains down without a rebind"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_carrier_loss_retries_uncertain_bfd_removal_without_a_rebind() {
+    retirement_bfd_removal_timeout(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_bfd_removal_blocks_endpoint_rebinding_until_ack() {
+    retirement_bfd_removal_timeout(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bfd_removal_admission_timeout_retries_the_current_roster() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let prior = bfd.next_applied();
+    let retired = IpAddr::V6(ll(2));
+    let (reload_tx, mut reload_rx) = mpsc::channel(1);
+    h.mgr = h.mgr.with_bfd_reload(reload_tx.clone());
+    let (reply, _old_reply) = oneshot::channel();
+    reload_tx
+        .try_send(crate::bfd_runtime::BfdReloadCommand {
+            prepared: None,
+            desired: prior,
+            reply,
+        })
+        .unwrap_or_else(|_| panic!("the actor mailbox starts empty"));
+    let mut removed = h.mgr.current_config.clone();
+    removed.neighbors.set_interface_only("swp1", None);
+    h.reload(removed).await;
+    assert!(
+        h.mgr.unnumbered.is_some(),
+        "unadmitted removal keeps its owner"
+    );
+    assert!(
+        !h.mgr
+            .bfd_coupling
+            .as_ref()
+            .unwrap()
+            .configured
+            .contains_key(&retired)
+    );
+    let queued = reload_rx.try_recv().unwrap();
+    assert!(
+        queued
+            .desired
+            .sessions
+            .iter()
+            .any(|params| params.peer == retired),
+        "the timed-out removal never entered the full actor mailbox"
+    );
+    drop(queued);
+
+    let other: IpAddr = "192.0.2.9".parse().unwrap();
+    h.mgr
+        .bfd_coupling
+        .as_mut()
+        .unwrap()
+        .configured
+        .insert(other, session_params(other, None));
+    h.mgr.set_bfd_peer_disabled(other, true);
+    let (observed, receipt) = oneshot::channel();
+    let actor = tokio::spawn(async move {
+        let command = reload_rx.recv().await.unwrap();
+        assert!(!command.desired.sessions.iter().any(|params| params.enabled));
+        let _ = observed.send(command.desired);
+        command.reply.send(vec![]).unwrap();
+    });
+    let retry = h
+        .mgr
+        .unnumbered_retry_at()
+        .expect("existing backoff is armed");
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    let current = tokio::time::timeout(Duration::from_secs(1), receipt)
+        .await
+        .expect("current removal roster acknowledgement arrived")
+        .expect("current removal roster was acknowledged");
+    assert_eq!(current.sessions.len(), 1);
+    assert_eq!(
+        current.sessions[0].peer, other,
+        "retry preserves current membership"
+    );
+    assert!(
+        !current.sessions[0].enabled,
+        "retry preserves the current admin overlay"
+    );
+    assert!(
+        h.mgr.unnumbered.is_none(),
+        "owner retires after exact acknowledgement"
+    );
+    actor.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deleted_neighbor_drops_held_state_while_bfd_cleanup_is_pending() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let key = swp1_key(2);
+    let session = h.mgr.peers[&key].session_id();
+    h.mgr
+        .install_max_prefix_latch(key.clone(), session, "old shutdown".into(), Some(60));
+    let managed = h.mgr.peers.get_mut(&key).unwrap();
+    managed.enabled = false;
+    managed.advertise_graceful_shutdown = true;
+    managed.transport_config.neighbor_counters.record_flap();
+    let original = h.mgr.current_config.clone();
+    bfd.unanswered.store(true, Ordering::SeqCst);
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    let old = h
+        .mgr
+        .list_peers()
+        .await
+        .into_iter()
+        .find(|info| info.interface.as_deref() == Some("swp1"))
+        .unwrap();
+    assert!(
+        !old.enabled && old.last_error == "old shutdown",
+        "ordinary retirement retains the old neighbor's state"
+    );
+
+    bfd.unanswered.store(true, Ordering::SeqCst);
+    let mut removed = original.clone();
+    removed.neighbors.set_interface_only("swp1", None);
+    h.reload(removed).await;
+    assert!(
+        h.mgr.unnumbered.is_some(),
+        "cleanup ownership remains until acknowledgement"
+    );
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.reload(original).await;
+    let managed = &h.mgr.peers[&key];
+    assert!(
+        managed.enabled,
+        "new stanza does not inherit the operator disable"
+    );
+    assert!(
+        !h.mgr.max_prefix_latches.contains_key(&key),
+        "new stanza does not inherit the old max-prefix latch"
+    );
+    assert!(!managed.advertise_graceful_shutdown);
+    assert_eq!(
+        managed.transport_config.neighbor_counters.flaps(),
+        0,
+        "new stanza starts fresh lifetime counters"
+    );
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [],
+        "old cleanup was acknowledged first"
+    );
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7))]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn inbound_learning_waits_for_uncertain_bfd_removal_acknowledgement() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    assert_eq!(
+        h.mgr.learn_inbound_endpoint("swp1", ll(2), 7).await,
+        Some(swp1_key(2))
+    );
+    bfd.next_applied();
+    bfd.unanswered.store(true, Ordering::SeqCst);
+    assert!(
+        h.mgr
+            .learn_inbound_endpoint("swp1", ll(3), 7)
+            .await
+            .is_none(),
+        "new endpoint waits for the old removal acknowledgement"
+    );
+    assert!(h.mgr.peers.is_empty());
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+    assert!(bfd.applied.try_recv().is_err());
+    assert!(
+        h.mgr
+            .learn_inbound_endpoint("swp1", ll(4), 7)
+            .await
+            .is_none(),
+        "an inbound arrival during pending cleanup is refused before BFD registration"
+    );
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+    let retry = h
+        .mgr
+        .unnumbered_retry_at()
+        .expect("existing backoff is armed");
+    tokio::time::sleep_until(retry).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [],
+        "old cleanup acknowledged"
+    );
+    assert_eq!(
+        h.mgr.learn_inbound_endpoint("swp1", ll(3), 7).await,
+        Some(swp1_key(3))
+    );
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(3)), Some(7))]
+    );
+}

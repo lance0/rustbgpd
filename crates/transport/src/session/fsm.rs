@@ -433,7 +433,7 @@ impl PeerSession {
     /// GR/LLGR: if that connection's interface is down now, purge them rather
     /// than wait for retention to expire.
     async fn purge_retained_if_link_down(&mut self, snapshot: &crate::link::LinkSnapshot) {
-        let Some(retained) = self.gr_retained_connection.as_mut() else {
+        let Some(mut retained) = self.gr_retained_connection.get() else {
             return;
         };
         if !retained.ebgp {
@@ -446,6 +446,7 @@ impl PeerSession {
         {
             retained.connection.carrier = Some(carrier);
         }
+        self.gr_retained_connection.set(Some(retained));
         let connection = retained.connection;
         let Some(down) =
             snapshot.connection_down(connection.local, connection.remote, connection.carrier)
@@ -459,13 +460,13 @@ impl PeerSession {
             reason = down.cause.as_str(),
             "fast external failover: interface down, purging routes retained from the lost connection"
         );
-        self.gr_retained_connection = None;
+        self.gr_retained_connection.set(None);
         self.last_error = down.teardown_cause();
         let _ = self
             .rib_tx
             .send(RibUpdate::PeerDown {
                 peer: self.rib_peer(),
-                session_id: self.session_identity.id,
+                session_id: retained.session_id,
             })
             .await;
     }
@@ -950,7 +951,7 @@ impl PeerSession {
                 }
                 Action::SessionEstablished(legacy_negotiated) => {
                     // The new session takes over from any GR-retained one.
-                    self.gr_retained_connection = None;
+                    self.gr_retained_connection.set(None);
                     let negotiated = if let Some(shared) = self.fsm.negotiated_shared() {
                         debug_assert_eq!(shared.as_ref(), legacy_negotiated.as_ref());
                         drop(legacy_negotiated);
@@ -1407,10 +1408,14 @@ impl PeerSession {
                     // from, so a confirmed interface-down that arrives after
                     // this transport loss can still purge them.
                     let ebgp = self.peer_is_ebgp();
-                    self.gr_retained_connection = gr_update
-                        .as_ref()
-                        .and(self.connection)
-                        .map(|connection| super::RetainedConnection { connection, ebgp });
+                    self.gr_retained_connection
+                        .set(gr_update.as_ref().and(self.connection).map(|connection| {
+                            super::RetainedConnection {
+                                connection,
+                                ebgp,
+                                session_id: self.session_identity.id,
+                            }
+                        }));
 
                     self.negotiated = None;
                     self.ipv6_unicast_withheld = false;

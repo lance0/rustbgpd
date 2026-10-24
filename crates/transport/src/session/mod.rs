@@ -615,7 +615,7 @@ pub(crate) struct PeerSession {
     /// The previous connection while its routes are retained under GR/LLGR,
     /// so a confirmed interface-down that arrives after the TCP loss can
     /// still purge them.
-    gr_retained_connection: Option<RetainedConnection>,
+    pub(crate) gr_retained_connection: crate::handle::RetainedConnectionState,
     /// The FSM reached `OpenConfirm` or `Established`: judge the connection once
     /// against the current link state at the top of the next run-loop turn.
     link_check_due: bool,
@@ -921,9 +921,10 @@ impl ConnectionStamp {
 /// The connection whose routes the RIB is holding under GR/LLGR after an
 /// ordinary transport loss, and whether that session was eBGP.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct RetainedConnection {
+pub(crate) struct RetainedConnection {
     pub(super) connection: ConnectionStamp,
     pub(super) ebgp: bool,
+    pub(super) session_id: u64,
 }
 
 /// The writer's RFC 9687 `SendHoldTime` for this session, as a
@@ -2342,7 +2343,7 @@ impl PeerSession {
             sent_hard_reset: false,
             suppress_gr_retention: false,
             connection,
-            gr_retained_connection: None,
+            gr_retained_connection: crate::handle::RetainedConnectionState::default(),
             link_check_due: false,
             import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
