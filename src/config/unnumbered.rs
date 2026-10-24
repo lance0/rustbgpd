@@ -407,6 +407,13 @@ fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
     // `[[fib_tables]]`) follows a reload without a rebind, as
     // `compute_effective_neighbor_impact` treats it.
     transport_config.local_forwarding_state = None;
+    // `[policy.explain]` and `[policy.reject_retention]` apply to sessions
+    // created after the reload and leave live ones untouched, as for a
+    // static neighbor; a rebind for another reason takes them.
+    transport_config.explain_enabled = false;
+    transport_config.explain_cache_size = 0;
+    transport_config.reject_retention_enabled = false;
+    transport_config.reject_retention_capacity = 0;
     (
         transport_config,
         admin_down,

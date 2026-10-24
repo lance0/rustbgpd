@@ -2327,3 +2327,22 @@ async fn a_static_neighbor_at_the_bound_key_is_refused_before_any_effect() {
     assert_eq!(h.mgr.current_config, before);
     assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
 }
+
+/// `[policy.explain]` and `[policy.reject_retention]` apply to sessions
+/// created later and leave a bound interface-only session in place, as for
+/// a static neighbor.
+#[tokio::test]
+async fn an_explain_or_retention_edit_keeps_bound_interface_only_sessions() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let session = h.session(&swp1_key(2));
+    let stanza = port_stanza("swp1", "");
+    for policy in [
+        "[policy.explain]\nenabled = true\ncache_size = 64\n",
+        "[policy.reject_retention]\nenabled = false\n",
+    ] {
+        // Mutation-red: projecting these transport fields rebinds swp1.
+        h.reload(config_with(&format!("{stanza}{policy}"))).await;
+        assert_eq!(h.session(&swp1_key(2)), session, "kept: {policy}");
+    }
+}
