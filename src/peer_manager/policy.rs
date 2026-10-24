@@ -4970,6 +4970,11 @@ impl PeerManager {
         }
         reject_peer_group_tcp_mss_change(&self.current_config, &next_config)?;
         reject_peer_group_bfd_change(&self.current_config, &next_config)?;
+        // ADR-0142: a group edit or move must not give neighbors that share
+        // a link-local address a feature they cannot share; the port
+        // reconcile would otherwise retire and refuse a working session.
+        self.validate_live_shared_addresses(&next_config)
+            .map_err(CatalogMutationError::FailedPrecondition)?;
         let purge_dynamic_group = match &event {
             ConfigEvent::SetPeerGroup { name, .. } => {
                 let old = self.current_config.peer_groups.get(name).and_then(|group| {
@@ -5153,6 +5158,11 @@ impl PeerManager {
         }
         if let Err(error) = reject_peer_group_bfd_change(&self.current_config, &next_config) {
             return OwnedCatalogMutationOutcome::RejectedNoEffect(error);
+        }
+        if let Err(error) = self.validate_live_shared_addresses(&next_config) {
+            return OwnedCatalogMutationOutcome::RejectedNoEffect(
+                CatalogMutationError::FailedPrecondition(error),
+            );
         }
         let purge_dynamic_group = match &event {
             ConfigEvent::SetPeerGroup { name, .. } => {

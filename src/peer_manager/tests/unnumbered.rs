@@ -5455,6 +5455,79 @@ async fn a_membership_rpc_moves_an_interface_only_neighbor_between_groups() {
     }
 }
 
+/// Two interface-only neighbors share a learned address. Moving one into a
+/// group with GTSM would give the pair differing GTSM policies, which the
+/// port reconcile would then refuse, dropping its working session. Both
+/// membership paths refuse the move before any effect instead.
+/// Load-bearing proof: without the shared-address check the move succeeds
+/// and the reconcile retires the moved neighbor.
+#[tokio::test]
+async fn a_membership_rpc_that_would_split_a_shared_address_is_refused() {
+    use rustbgpd_api::peer_types::{
+        CatalogMutationError, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
+    };
+    let config = config_with(&format!(
+        "[peer_groups.gtsm]\nttl_security = true\n{}{}",
+        port_stanza("swp1", ""),
+        port_stanza("swp2", "")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.reload(config).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2), swp2.clone()]);
+    let sessions = (h.session(&swp1_key(2)), h.session(&swp2));
+    let before = h.mgr.current_config.clone();
+
+    let (reply, outcome) = oneshot::channel();
+    let mutation = OwnedCatalogMutation::SetNeighborPeerGroup {
+        address: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        interface: Some("swp2".into()),
+        peer_group: "gtsm".into(),
+    };
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation { mutation, reply }),
+    )
+    .await;
+    let outcome = outcome.await.unwrap();
+    let OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::FailedPrecondition(
+        message,
+    )) = &outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert!(message.contains("ttl_security"), "{message}");
+    assert_eq!(h.mgr.current_config, before, "nothing changed");
+
+    // The legacy path refuses it the same way.
+    let error = Box::pin(h.mgr.apply_peer_group_change(
+        rustbgpd_api::peer_types::ConfigEvent::SetNeighborPeerGroup {
+            address: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            interface: Some("swp2".into()),
+            peer_group: "gtsm".into(),
+            ack: None,
+        },
+        vec![swp2.clone()],
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, CatalogMutationError::FailedPrecondition(_)),
+        "{error:?}"
+    );
+    assert_eq!(h.mgr.current_config, before);
+
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2), swp2.clone()], "both kept");
+    assert_eq!(
+        (h.session(&swp1_key(2)), h.session(&swp2)),
+        sessions,
+        "neither session was replaced"
+    );
+}
+
 /// A group edit that changes a session knob and the export chain: a member
 /// that overrides the knob keeps its bind-time settings, so it is not
 /// rebound, and takes the new chain live on both peer-group paths, keeping
