@@ -4730,6 +4730,61 @@ async fn a_failed_member_policy_restore_reports_the_group_edit_ambiguous() {
     );
 }
 
+/// A hot group edit (a limit and the export chain) gives a member that
+/// overrides the limit its new chain live; a static member's hot apply then
+/// fails, and the interface-only member gets its prior chain back.
+#[tokio::test]
+async fn a_failed_hot_group_edit_restores_the_member_policy() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [peer_groups.fabric]\nmax_prefixes = 10\n\
+         [[neighbors]]\naddress = \"192.0.2.7\"\nremote_asn = 65002\npeer_group = \"fabric\"\n{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\nmax_prefixes = 50\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config).await;
+    let static_peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    insert_test_managed_peer(&mut h.mgr, static_peer, closed_peer_handle(), false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    assert!(h.mgr.peers[&key].export_policy.is_none());
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.max_prefixes = Some(20);
+    definition.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
+    .await;
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            OwnedCatalogMutationOutcome::CompensationAmbiguous(_)
+        ),
+        "{outcome:?}"
+    );
+    // Mutation-red: discarding the priors leaves the member on the
+    // uncommitted chain.
+    assert!(
+        h.mgr.peers[&key].export_policy.is_none(),
+        "member chain restored"
+    );
+    assert_eq!(
+        h.mgr.current_config.peer_groups["fabric"].max_prefixes,
+        Some(10)
+    );
+}
+
 /// Deleting a bound BFD neighbor removes its binding's registration before
 /// the address is released, so nothing at that address inherits the session
 /// or a strict hold.

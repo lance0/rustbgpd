@@ -5179,16 +5179,24 @@ impl PeerManager {
             && crate::config::peer_group_change_hot_applicable(old_group, new_group)
         {
             let name = name.clone();
-            if let Err(failure) = self.apply_interface_only_policy_deltas(&next_config).await {
-                return failure.into_owned_outcome();
-            }
-            return match self
-                .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
-                .await
-            {
-                Ok(()) => OwnedCatalogMutationOutcome::Success,
-                Err(error) => OwnedCatalogMutationOutcome::CompensationAmbiguous(error),
+            let policy_priors = match self.apply_interface_only_policy_deltas(&next_config).await {
+                Ok(priors) => priors,
+                Err(failure) => return failure.into_owned_outcome(),
             };
+            let result = self
+                .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
+                .await;
+            let Err(error) = result else {
+                return OwnedCatalogMutationOutcome::Success;
+            };
+            // The hot cohort's own restore is best-effort, so the edit stays
+            // ambiguous; the interface-only members still get their priors.
+            if !self.restore_interface_only_policies(policy_priors).await {
+                warn!(
+                    "interface-only policy chains could not be restored after the peer-group change failed"
+                );
+            }
+            return OwnedCatalogMutationOutcome::CompensationAmbiguous(error);
         }
 
         let mut seen = BTreeSet::new();
