@@ -2044,10 +2044,11 @@ async fn an_unanswered_bindings_bfd_gauge_stays_at_zero() {
     // drops the series the actor just seeded.
     h.bind("swp1", Some(endpoint(2, 7))).await;
     bfd.next_applied();
-    let label = format!("{}%swp1", ll(2));
-    assert_eq!(bfd_session_up(&h, &label), Some(0.0));
+    // The neighbor's series name its interface (ADR-0142 metrics).
+    let label = "interface:swp1";
+    assert_eq!(bfd_session_up(&h, label), Some(0.0));
     h.bind("swp1", Some(endpoint(2, 7))).await;
-    assert_eq!(bfd_session_up(&h, &label), Some(0.0), "after a reconcile");
+    assert_eq!(bfd_session_up(&h, label), Some(0.0), "after a reconcile");
 }
 
 /// A rejected reload preparation stages nothing: the next unrelated

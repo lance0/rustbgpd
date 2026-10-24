@@ -446,8 +446,9 @@ pub(crate) fn bound_session_params(
     Ok(Some(BfdSessionParams {
         revision: 0,
         peer,
-        peer_label: rustbgpd_api::peer_types::PeerKey::new(peer, Some(interface.to_owned()))
-            .label(),
+        // The neighbor's `peer` value, which names its interface at every
+        // learned endpoint.
+        peer_label: rustbgpd_telemetry::interface_peer_label(interface),
         scope_id: Some(ifindex),
         destination: bfd_destination(peer, Some(ifindex), false)?,
         desired_min_tx_us: profile.min_tx_interval.saturating_mul(1000),
