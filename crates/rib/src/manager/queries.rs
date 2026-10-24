@@ -3827,7 +3827,7 @@ impl RibManager {
     }
     pub(super) fn handle_query_evpn_route_event_history(
         &mut self,
-        peer: Option<IpAddr>,
+        peer: Option<(IpAddr, Option<&str>)>,
         route_type: Option<u8>,
         rd: Option<rustbgpd_wire::RouteDistinguisher>,
         event_types: &std::collections::BTreeSet<RouteEventType>,
@@ -3850,7 +3850,7 @@ impl RibManager {
             .filter(|event| rd.is_none_or(|rd| crate::event::evpn_key_rd(&event.key) == Some(rd)))
             .filter(|event| event_types.is_empty() || event_types.contains(&event.event_type))
             .filter(|event| match peer {
-                Some(peer) => event.peer == Some(peer) || event.previous_peer == Some(peer),
+                Some((peer, interface)) => event.involves(peer, interface),
                 None => true,
             })
             .take(limit)

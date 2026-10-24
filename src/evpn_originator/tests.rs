@@ -2391,6 +2391,8 @@ fn evpn_event_macip(
         previous_best: None,
         peer: Some(ipa(peer_addr)),
         previous_peer,
+        peer_interface: None,
+        previous_peer_interface: None,
         timestamp_unix_ms: 0,
     }
 }
@@ -2606,6 +2608,8 @@ async fn handle_evpn_event_lower_seq_different_rd_does_not_displace_winner() {
         previous_best: None,
         peer: Some(ipa("10.0.0.3")),
         previous_peer: None,
+        peer_interface: None,
+        previous_peer_interface: None,
         timestamp_unix_ms: 0,
     };
 
@@ -2672,6 +2676,8 @@ async fn handle_evpn_event_non_winning_withdrawn_keeps_winning_view() {
         previous_best: Some(pe_b_prior),
         peer: None,
         previous_peer: Some(ipa("10.0.0.3")),
+        peer_interface: None,
+        previous_peer_interface: None,
         timestamp_unix_ms: 0,
     };
 
@@ -2729,6 +2735,8 @@ async fn handle_evpn_event_non_macip_does_not_repoll() {
         previous_best: None,
         peer: Some(ipa("10.0.0.2")),
         previous_peer: None,
+        peer_interface: None,
+        previous_peer_interface: None,
         timestamp_unix_ms: 0,
     };
 
@@ -2870,6 +2878,8 @@ async fn handle_evpn_event_withdrawn_clears_remote_view_when_rib_empty() {
         previous_best: Some(prior),
         peer: None,
         previous_peer: Some(ipa("10.0.0.2")),
+        peer_interface: None,
+        previous_peer_interface: None,
         timestamp_unix_ms: 0,
     };
 
@@ -5754,6 +5764,8 @@ async fn ip_owner_sequence_actor_services_local_control_and_poll_during_irreleva
         previous_best: None,
         peer: None,
         previous_peer: None,
+        peer_interface: None,
+        previous_peer_interface: None,
         timestamp_unix_ms: 0,
     });
     let flood_tx = events_tx.clone();

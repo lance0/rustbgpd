@@ -346,6 +346,7 @@ neighbor; the interface is empty for a numbered neighbor:
 |---------|------------------|
 | `Route` (received, best, advertised and explain rows) | `peer_interface` |
 | `RouteEvent` | `peer_interface`, `previous_peer_interface`, `target_peer_interface` |
+| `EvpnRouteEvent` | `peer_interface`, `previous_peer_interface` |
 | `RouteSourceIdentity` | `peer_interface` |
 | `ExplainAdvertisedRouteResponse` | `peer_interface` (target), `route_peer_interface` (selected route's source) |
 | `OrrExplainCandidate` | `peer_interface` |
@@ -371,10 +372,10 @@ Routes retained across a Graceful Restart and the history of a deleted
 neighbor keep the interface they had. A `BgpEvent` envelope's
 `peer_address`, `previous_peer_address` and `target_peer_address` are bare IP
 literals in every category; the interfaces are in its payload (`RouteEvent`,
-`SessionEvent`, `NotificationEvent`, `PolicyEvent`, `BfdSessionEvent` or
-`DataplaneRouteEvent`) and are not repeated on the envelope. Session,
-notification, policy and BFD events and BFD sessions report the interface of
-the neighbor they name. FIB and blackhole rows, FIB route events and
+`SessionEvent`, `NotificationEvent`, `PolicyEvent`, `BfdSessionEvent`,
+`DataplaneRouteEvent` or `EvpnRouteEvent`) and are not repeated on the envelope.
+Session, notification, policy and BFD events and BFD sessions report the
+interface of the neighbor they name. FIB and blackhole rows, FIB route events and
 `TestPolicy` samples take the interface recorded with the route they describe,
 and FIB owned state keeps it across a daemon restart. `PolicyChainStats` rows
 report the interface of the neighbor whose chain they count. Export rows are
@@ -384,12 +385,12 @@ comes from the peer manager's roster, read separately. A reload that moves a
 link-local neighbor to another interface while the call runs can therefore
 report export counters under the wrong interface.
 
-EVPN, VPN, labeled, RTC, BGP-LS and FlowSpec route entries and EVPN route
-events still report a bare address with no interface: those route types do
-not yet record the receiving session's interface. Each link-local address can
-belong to only one configured neighbor in this release (see the
-[configuration reference](configuration.md#scoped-neighbor-identity)), so that
-bare address names one neighbor.
+EVPN route events retain both peers' interfaces when recorded, including after
+a neighbor moves or is deleted. Scoped event filters match that recorded
+identity; dataplane and BFD filters use the interface in their payload.
+EVPN, VPN, labeled, RTC, BGP-LS and FlowSpec route entries still report a bare
+address with no interface. Those entries do not distinguish neighbors sharing
+an address; use a scoped peer view when selecting one neighbor.
 
 **Selectors.** Every request field that selects a neighbor by address requires
 the scope of a link-local address: `fe80::1%eth0` in the address field, or the
@@ -413,6 +414,11 @@ this API's contract, not a standards requirement.
 
 The scope is part of a page token's identity. A token issued for
 `fe80::1%eth0` is refused for `fe80::1%eth1` or for a numbered selector.
+
+History reads (`ListRouteEvents`, `ListSessionEvents`, `ListPolicyEvents` and
+`ListEvpnEvents`) validate the selector's syntax and explicit link-local scope,
+then match recorded event identities. The selected neighbor need not remain
+in the current roster, even when another interface now uses its address.
 
 ---
 

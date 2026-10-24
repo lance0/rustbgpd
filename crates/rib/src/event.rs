@@ -106,7 +106,7 @@ impl RouteEvent {
 /// daemon's local-MAC originator — need the full new best to build a
 /// `RemoteMacView` without a follow-up RIB query. Carrying the full
 /// [`EvpnRibRoute`] on the event side keeps the consumer's hot path
-/// allocation-free: the 400 B event is allocated once, then the
+/// allocation-free: the 432 B event is allocated once, then the
 /// history and live broadcast share that allocation through `Arc`.
 /// Each subscriber clone copies one `Arc`; nested path attributes
 /// remain shared, and the hot path still avoids a follow-up query.
@@ -143,9 +143,25 @@ pub struct EvpnRouteEvent {
     /// Address of the peer that previously held best (`None` for `Added`);
     /// `previous_best`'s address, like `peer`.
     pub previous_peer: Option<IpAddr>,
+    /// Interface of `peer` when the event was built, retained independently
+    /// of a handle that can subsequently move or be released.
+    pub peer_interface: Option<Arc<str>>,
+    /// Event-time interface of `previous_peer`.
+    pub previous_peer_interface: Option<Arc<str>>,
     /// Event time in Unix epoch milliseconds, captured when the event is
     /// built (see [`unix_time_ms_now`]).
     pub timestamp_unix_ms: i64,
+}
+
+impl EvpnRouteEvent {
+    /// Whether the current or previous best belongs to this neighbor,
+    /// using only the identity recorded with the event.
+    #[must_use]
+    pub fn involves(&self, address: IpAddr, interface: Option<&str>) -> bool {
+        (self.peer == Some(address) && self.peer_interface.as_deref() == interface)
+            || (self.previous_peer == Some(address)
+                && self.previous_peer_interface.as_deref() == interface)
+    }
 }
 
 /// Return the RD embedded in an EVPN route key.

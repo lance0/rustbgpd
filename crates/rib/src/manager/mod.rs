@@ -4493,6 +4493,7 @@ impl RibManager {
             }
             RibUpdate::QueryEvpnRouteEventHistory {
                 peer,
+                peer_interface,
                 route_type,
                 rd,
                 event_types,
@@ -4500,7 +4501,7 @@ impl RibManager {
                 reply,
             } => {
                 self.handle_query_evpn_route_event_history(
-                    peer,
+                    peer.map(|peer| (peer, peer_interface.as_deref())),
                     route_type,
                     rd,
                     &event_types,

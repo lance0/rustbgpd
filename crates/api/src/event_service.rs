@@ -501,10 +501,11 @@ impl proto::event_service_server::EventService for EventService {
         &self,
         request: Request<proto::ListEvpnEventsRequest>,
     ) -> Result<Response<proto::ListEvpnEventsResponse>, Status> {
-        let filter = parse_list_evpn_events_filter(&request.into_inner(), self.roster.as_ref())?;
+        let filter = parse_list_evpn_events_filter(&request.into_inner())?;
         let events = rib_manager_read(&self.rib_tx, |reply| {
             RibUpdate::QueryEvpnRouteEventHistory {
-                peer: filter.peer,
+                peer: filter.peer.as_ref().map(|peer| peer.address),
+                peer_interface: filter.peer.and_then(|peer| peer.interface).map(Arc::from),
                 route_type: filter.route_type,
                 rd: filter.rd,
                 event_types: filter.event_types,
@@ -522,7 +523,7 @@ impl proto::event_service_server::EventService for EventService {
         &self,
         request: Request<proto::ListSessionEventsRequest>,
     ) -> Result<Response<proto::ListSessionEventsResponse>, Status> {
-        let filter = parse_list_session_events_filter(&request.into_inner(), self.roster.as_ref())?;
+        let filter = parse_list_session_events_filter(&request.into_inner())?;
         let events = peer_manager_read(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::QuerySessionEventHistory {
                 peer: filter.peer,
@@ -544,7 +545,7 @@ impl proto::event_service_server::EventService for EventService {
         &self,
         request: Request<proto::ListPolicyEventsRequest>,
     ) -> Result<Response<proto::ListPolicyEventsResponse>, Status> {
-        let filter = parse_list_policy_events_filter(&request.into_inner(), self.roster.as_ref())?;
+        let filter = parse_list_policy_events_filter(&request.into_inner())?;
         let events = peer_manager_read(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::QueryPolicyEventHistory {
                 peer: filter.peer,
@@ -1508,17 +1509,18 @@ mod tests {
     /// (prost oneof sized by its largest variant). Shrinking the never-used
     /// FIB (4096-slot) and BFD (1024-slot) proto rings to 1-slot placeholders
     /// removes 4095 + 1023 = 5118 slots of eager payload capacity per daemon:
-    /// 5118 × 968 B = 4,954,224 B of slot payload, before per-slot metadata.
+    /// 5118 × 1016 B = 5,199,888 B of slot payload, before per-slot metadata.
     /// The boxed optional Prefix-SID and SMET views add 32 B to the earlier
     /// 944 B layout: 64 B across unused placeholders, or 163,840 B with both
     /// actors enabled. SMET adds 16 B per slot instead of 160 B unboxed.
     /// Removing the envelope `event_id` took 16 B back out of each slot, and
     /// the envelope's typed `timestamp_unix_ms` added 8 B.
+    /// The two event-time EVPN interface strings add 48 B per slot.
     /// Populated views allocate their boxes and retained attribute data
     /// outside this payload.
     #[test]
     fn watch_events_ring_slot_payload_size_pin() {
-        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 968);
+        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 1016);
     }
 
     #[test]
@@ -1715,6 +1717,207 @@ mod tests {
             event.payload,
             Some(proto::bgp_event::Payload::Session(_))
         ));
+    }
+
+    fn replacement_roster() -> crate::import_roster::ImportRosterPublisher {
+        use crate::import_roster::{ImportRosterPeer, test_support::publisher};
+        publisher(
+            vec![ImportRosterPeer {
+                key: crate::peer_types::PeerKey::new(
+                    "fe80::1".parse().unwrap(),
+                    Some("eth1".into()),
+                ),
+                session_id: 2,
+                publication: tokio::sync::watch::channel(None).1,
+                rib_peer: rustbgpd_transport::RibPeerSlot::default(),
+            }],
+            Vec::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn retained_session_history_survives_scope_replacement() {
+        let peer = "fe80::1".parse().unwrap();
+        let roster = replacement_roster();
+        let session = |interface: &str| {
+            let mut event = lifecycle_event(peer, SessionLifecycleEventType::PeerRemoved);
+            event.peer_label = Some(format!("fe80::1%{interface}"));
+            event
+        };
+        let (rib_tx, _) = spawn_fake_rib();
+        let service = EventService::new(
+            rib_tx,
+            spawn_fake_peer_manager_with_history(vec![session("eth0"), session("eth1")]),
+        )
+        .with_peer_roster(roster.reader());
+        let response = service
+            .list_session_events(Request::new(proto::ListSessionEventsRequest {
+                neighbor_address: "fe80::1%eth0".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let [event] = response.events.as_slice() else {
+            panic!("only the retained eth0 event matches")
+        };
+        let Some(proto::bgp_event::Payload::Session(event)) = &event.payload else {
+            panic!("session event")
+        };
+        assert_eq!(event.peer_interface, "eth0");
+        let error = service
+            .list_session_events(Request::new(proto::ListSessionEventsRequest {
+                neighbor_address: "fe80::1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        // Live selection still validates membership in the current roster.
+        assert_eq!(
+            service
+                .watch_events(Request::new(proto::WatchEventsRequest {
+                    neighbor_address: "fe80::1%eth0".into(),
+                    ..Default::default()
+                }))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_policy_history_survives_scope_replacement() {
+        let peer = "fe80::1".parse().unwrap();
+        let roster = replacement_roster();
+        let policy = |interface: &str| {
+            let mut event = policy_event(Some(peer));
+            event.peer_label = Some(format!("fe80::1%{interface}"));
+            event
+        };
+        let (rib_tx, _) = spawn_fake_rib();
+        let service = EventService::new(
+            rib_tx,
+            spawn_fake_peer_manager_with_policy_history(vec![policy("eth0"), policy("eth1")]),
+        )
+        .with_peer_roster(roster.reader());
+        let response = service
+            .list_policy_events(Request::new(proto::ListPolicyEventsRequest {
+                neighbor_address: "fe80::1%eth0".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let [event] = response.events.as_slice() else {
+            panic!("only the retained eth0 event matches")
+        };
+        let Some(proto::bgp_event::Payload::Policy(event)) = &event.payload else {
+            panic!("policy event")
+        };
+        assert_eq!(event.peer_interface, "eth0");
+        let error = service
+            .list_policy_events(Request::new(proto::ListPolicyEventsRequest {
+                neighbor_address: "fe80::1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn retained_evpn_history_matches_the_previous_scoped_peer() {
+        let peer = "fe80::1".parse().unwrap();
+        let mut changed = evpn_event(RouteEventType::BestChanged, Some(peer), Some(peer));
+        changed.peer_interface = Some("eth1".into());
+        changed.previous_peer_interface = Some("eth0".into());
+        let mut sibling = evpn_event(RouteEventType::Added, Some(peer), None);
+        sibling.peer_interface = Some("eth1".into());
+        let rib_tx = spawn_fake_rib_with_evpn_history(vec![sibling, changed]);
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let roster = replacement_roster();
+        let service = EventService::new(rib_tx, peer_tx).with_peer_roster(roster.reader());
+        let response = service
+            .list_evpn_events(Request::new(proto::ListEvpnEventsRequest {
+                neighbor_address: "fe80::1%eth0".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let [event] = response.events.as_slice() else {
+            panic!("only the previous eth0 source matches")
+        };
+        let Some(proto::bgp_event::Payload::Evpn(event)) = &event.payload else {
+            panic!("EVPN event")
+        };
+        assert_eq!(event.peer_interface, "eth1");
+        assert_eq!(event.previous_peer_interface, "eth0");
+        let error = service
+            .list_evpn_events(Request::new(proto::ListEvpnEventsRequest {
+                neighbor_address: "fe80::1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn retained_route_history_survives_scope_replacement() {
+        use crate::proto::rib_service_server::RibService as _;
+        let roster = replacement_roster();
+        let (rib_tx, mut rib_rx) = tokio::sync::mpsc::channel(1);
+        let (peer_tx, _, _) = spawn_fake_peer_manager();
+        let service = crate::rib_service::RibService::new(rib_tx.clone()).with_known_peer_queries(
+            crate::actor_read::KnownPeerQueries {
+                peer_manager: peer_tx,
+                operator_lane: None,
+                rib: rib_tx,
+                daemon_gate: crate::health_probe::DaemonGate::new(),
+                roster: Some(roster.reader()),
+            },
+        );
+        tokio::spawn(async move {
+            let Some(RibUpdate::QueryRouteEventHistory {
+                peer,
+                peer_interface,
+                reply,
+                ..
+            }) = rib_rx.recv().await
+            else {
+                panic!("history query")
+            };
+            assert_eq!(peer, Some("fe80::1".parse().unwrap()));
+            assert_eq!(peer_interface.as_deref(), Some("eth0"));
+            let prefix = Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24));
+            let mut event = route_event(prefix, peer.unwrap());
+            event.peer_scope = rustbgpd_rib::route::AspaContextId::intern_scoped(
+                rustbgpd_wire::AspaValidationContext::default(),
+                Some("eth0"),
+            );
+            reply.send(vec![event]).unwrap();
+        });
+        let response = service
+            .list_route_events(Request::new(proto::ListRouteEventsRequest {
+                neighbor_address: "fe80::1%eth0".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.events[0].peer_interface, "eth0");
+        let error = service
+            .list_route_events(Request::new(proto::ListRouteEventsRequest {
+                neighbor_address: "fe80::1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]

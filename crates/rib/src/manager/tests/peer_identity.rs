@@ -257,6 +257,7 @@ async fn route_event_history_keeps_the_endpoint_each_event_recorded() {
             let (reply, response) = oneshot::channel();
             tx.send(RibUpdate::QueryEvpnRouteEventHistory {
                 peer: Some(address),
+                peer_interface: None,
                 route_type: None,
                 rd: None,
                 event_types: std::collections::BTreeSet::new(),
@@ -299,6 +300,84 @@ async fn route_event_history_keeps_the_endpoint_each_event_recorded() {
     drop(tx);
     actor.await.unwrap();
     assert!(peer.release());
+}
+
+/// Current and previous interfaces survive peer deletion and handle release;
+/// history filters never resolve an old event through a current handle.
+#[tokio::test]
+async fn evpn_event_history_keeps_current_and_previous_scopes_after_release() {
+    let (tx, actor) = spawn_manager();
+    let eth0 = scoped("fe80::1", "eth0");
+    let eth1 = scoped("fe80::1", "eth1");
+    for peer in [eth0, eth1] {
+        let mut route = make_evpn_imet(Ipv4Addr::new(192, 0, 2, 1), 7);
+        route.peer = peer;
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 1,
+            peer,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![route],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+    }
+    for peer in [eth0, eth1] {
+        tx.send(RibUpdate::PeerDeleted {
+            peer,
+            label: None,
+            keep_series: false,
+        })
+        .await
+        .unwrap();
+        tx.send(RibUpdate::ReleasePeer { peer }).await.unwrap();
+    }
+    for (interface, expected) in [
+        (
+            "eth0",
+            vec![RouteEventType::Added, RouteEventType::BestChanged],
+        ),
+        (
+            "eth1",
+            vec![RouteEventType::BestChanged, RouteEventType::Withdrawn],
+        ),
+        ("eth2", vec![]),
+    ] {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::QueryEvpnRouteEventHistory {
+            peer: Some("fe80::1".parse().unwrap()),
+            peer_interface: Some(interface.into()),
+            route_type: None,
+            rd: None,
+            event_types: BTreeSet::new(),
+            limit: 0,
+            reply,
+        })
+        .await
+        .unwrap();
+        let events = response.await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for event in events {
+            assert!(event.involves("fe80::1".parse().unwrap(), Some(interface)));
+            if event.event_type == RouteEventType::BestChanged {
+                assert_eq!(event.peer_interface.as_deref(), Some("eth1"));
+                assert_eq!(event.previous_peer_interface.as_deref(), Some("eth0"));
+            }
+        }
+    }
+    assert!(!eth0.is_live() && !eth1.is_live());
+    drop(tx);
+    actor.await.unwrap();
 }
 
 /// Acceptance: an MRT snapshot lists two neighbors on one link-local

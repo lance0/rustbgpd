@@ -694,6 +694,14 @@ impl RibManager {
                 };
                 let previous_peer = previous_best.as_ref().map(|r| r.peer.addr());
                 let peer = new_best.as_ref().map(|r| r.peer.addr());
+                let peer_interface = new_best
+                    .as_ref()
+                    .and_then(|route| route.peer.endpoint())
+                    .and_then(|endpoint| endpoint.interface);
+                let previous_peer_interface = previous_best
+                    .as_ref()
+                    .and_then(|route| route.peer.endpoint())
+                    .and_then(|endpoint| endpoint.interface);
                 if rustbgpd_wire::is_dataplane_route_type(key.route_type()) {
                     match (previous_best.is_some(), new_best.is_some()) {
                         (false, true) => {
@@ -718,6 +726,8 @@ impl RibManager {
                     previous_best,
                     peer,
                     previous_peer,
+                    peer_interface,
+                    previous_peer_interface,
                     timestamp_unix_ms: crate::event::unix_time_ms_now(),
                 });
                 changed_keys.insert(*key);

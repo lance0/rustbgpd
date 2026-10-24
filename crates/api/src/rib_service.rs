@@ -2962,8 +2962,8 @@ impl proto::rib_service_server::RibService for RibService {
         let req = request.into_inner();
         let afi = route_event_afi_filter(req.afi_safi)?;
         let prefix = parse_route_event_prefix_filter(&req.prefix, req.prefix_length, afi)?;
-        let key =
-            parse_optional_peer_filter("neighbor_address", &req.neighbor_address, self.roster())?;
+        // Historical scope need not belong to a neighbor in the current roster.
+        let key = parse_optional_peer_filter("neighbor_address", &req.neighbor_address, None)?;
         let peer = key.as_ref().map(|key| key.address);
         let peer_interface = key
             .and_then(|key| key.interface)

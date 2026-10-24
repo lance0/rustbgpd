@@ -3245,6 +3245,8 @@ fn evpn_history_and_live_broadcast_share_arc() {
         key: route.key(),
         peer: Some(route.peer.addr()),
         previous_peer: None,
+        peer_interface: None,
+        previous_peer_interface: None,
         best: Some(route),
         previous_best: None,
         timestamp_unix_ms: 1_000,
@@ -3281,6 +3283,9 @@ async fn query_evpn_event_history(
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryEvpnRouteEventHistory {
         peer: peer.map(PeerId::addr),
+        peer_interface: peer
+            .and_then(PeerId::endpoint)
+            .and_then(|endpoint| endpoint.interface),
         route_type,
         rd,
         event_types,
