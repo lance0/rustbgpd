@@ -86,6 +86,26 @@ pub(crate) fn parse_neighbor(
     parse_neighbor_in(field, value, interface, roster.as_deref())
 }
 
+/// The address and interface of a well-formed scoped link-local selector
+/// (`fe80::x%IF`, or the bare address with a structured interface), `None`
+/// for anything else; [`parse_neighbor`] reports what is wrong with it.
+pub(crate) fn scoped_link_local(value: &str, interface: &str) -> Option<PeerKey> {
+    let interface = interface.trim();
+    let (literal, zone) = match value.split_once('%') {
+        Some((literal, zone)) => (literal, Some(zone)),
+        None => (value, None),
+    };
+    let scope = match (zone, interface) {
+        (None, "") => return None,
+        (None, interface) => interface,
+        (Some(zone), interface) if interface.is_empty() || zone == interface => zone,
+        (Some(_), _) => return None,
+    };
+    let address: IpAddr = literal.parse().ok()?;
+    (is_scoped_address(address) && valid_interface_name(scope))
+        .then(|| PeerKey::new(address, Some(scope.to_owned())))
+}
+
 /// [`parse_neighbor`] against a roster snapshot the caller already holds,
 /// so selection and the data it reads come from one publication.
 pub(crate) fn parse_neighbor_in(

@@ -1391,21 +1391,52 @@ fn selection_deferral_to_proto(
 impl NeighborService {
     /// The row of the interface-only neighbor on `interface`, bound or not.
     async fn interface_only_row(&self, interface: &str) -> Result<PeerInfo, Status> {
+        self.find_interface_only_row(interface)
+            .await?
+            .ok_or_else(|| Status::not_found(format!("no interface-only neighbor on {interface}")))
+    }
+
+    /// [`Self::interface_only_row`], `None` when `interface` has none.
+    async fn find_interface_only_row(&self, interface: &str) -> Result<Option<PeerInfo>, Status> {
         let infos =
             peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
                 PeerManagerOperatorQuery::ListPeers { reply }
             })
             .await?;
-        infos
-            .into_iter()
-            .find(|info| {
-                info.interface_only.is_some() && info.interface.as_deref() == Some(interface)
-            })
-            .ok_or_else(|| Status::not_found(format!("no interface-only neighbor on {interface}")))
+        Ok(infos.into_iter().find(|info| {
+            info.interface_only.is_some() && info.interface.as_deref() == Some(interface)
+        }))
+    }
+
+    /// ADR-0142: `fe80::x%IF` selects the interface-only neighbor on `IF`
+    /// for any `x`, because the interface owns at most one neighbor. Only a
+    /// scoped selector that no managed neighbor has exactly consults the
+    /// interface-only inventory, so a static neighbor's exact key keeps
+    /// selecting it and an ordinary read pays no extra round trip. `None`
+    /// when the selector is not scoped link-local, a neighbor has exactly
+    /// that key, or `IF` has no interface-only neighbor.
+    async fn scoped_interface_only_row(
+        &self,
+        address: &str,
+        interface: &str,
+    ) -> Result<Option<PeerInfo>, Status> {
+        let Some(key) = crate::peer_selector::scoped_link_local(address, interface) else {
+            return Ok(None);
+        };
+        // A standalone service has no inventory to consult.
+        let Some(roster) = &self.roster else {
+            return Ok(None);
+        };
+        if roster.load().peers().iter().any(|peer| peer.key == key) {
+            return Ok(None);
+        }
+        let scope = key.interface.as_deref().unwrap_or_default();
+        self.find_interface_only_row(scope).await
     }
 
     /// ADR-0142 `GetNeighborState` selector: an empty address with an
-    /// interface selects that interface's interface-only neighbor. Bound, the
+    /// interface, or a scoped `fe80::x%IF` that no neighbor has exactly,
+    /// selects that interface's interface-only neighbor. Bound, the
     /// request is rewritten to its learned address and read like any other
     /// neighbor (`None`); unbound, its configured row is the answer.
     async fn read_interface_only_selector(
@@ -1413,16 +1444,28 @@ impl NeighborService {
         req: &mut proto::GetNeighborStateRequest,
     ) -> Result<Option<proto::NeighborState>, Status> {
         let interface = req.interface.trim().to_owned();
-        if !req.address.is_empty() || interface.is_empty() {
-            return Ok(None);
-        }
-        let row = self.interface_only_row(&interface).await?;
+        let row = if req.address.is_empty() {
+            if interface.is_empty() {
+                return Ok(None);
+            }
+            self.interface_only_row(&interface).await?
+        } else {
+            match self
+                .scoped_interface_only_row(&req.address, &interface)
+                .await?
+            {
+                Some(row) => row,
+                None => return Ok(None),
+            }
+        };
+        let interface = row.interface.clone().unwrap_or(interface);
         if let Some(learned) = row
             .interface_only
             .as_ref()
             .and_then(|state| state.learned_address)
         {
             req.address = learned.to_string();
+            req.interface = interface;
             return Ok(None);
         }
         if !req.compare_address.is_empty() {
@@ -1433,15 +1476,28 @@ impl NeighborService {
         Ok(Some(peer_info_to_proto(&row)))
     }
 
-    /// A neighbor selector as [`peer_key`] reads it, plus the ADR-0142 form:
-    /// an empty address with an interface selects that interface's
-    /// interface-only neighbor through its bound address.
+    /// A neighbor selector as [`peer_key`] reads it, plus the ADR-0142
+    /// forms: an empty address with an interface, or a scoped `fe80::x%IF`
+    /// that no neighbor has exactly, selects that interface's interface-only
+    /// neighbor through its bound address.
     async fn select_neighbor(&self, address: &str, interface: &str) -> Result<PeerKey, Status> {
         let interface = interface.trim();
-        if !address.is_empty() || interface.is_empty() {
-            return peer_key(address, interface, self.roster.as_ref());
-        }
-        let row = self.interface_only_row(interface).await?;
+        let row = if address.is_empty() {
+            if interface.is_empty() {
+                return peer_key(address, interface, self.roster.as_ref());
+            }
+            self.interface_only_row(interface).await?
+        } else {
+            match self.scoped_interface_only_row(address, interface).await? {
+                Some(row) => row,
+                None => return peer_key(address, interface, self.roster.as_ref()),
+            }
+        };
+        let interface = row
+            .interface
+            .clone()
+            .unwrap_or_else(|| interface.to_owned());
+        let interface = interface.as_str();
         let learned = row
             .interface_only
             .and_then(|state| state.learned_address)
@@ -3014,6 +3070,167 @@ mod tests {
             0,
             "no command reaches the manager"
         );
+    }
+
+    /// A service whose roster holds `keys`, and a peer manager that answers
+    /// every `ListPeers` with `rows` and reports each other command's
+    /// selected neighbor.
+    fn scoped_selector_service(
+        keys: &[(&str, &str)],
+        rows: Vec<PeerInfo>,
+    ) -> (
+        NeighborService,
+        crate::import_roster::ImportRosterPublisher,
+        tokio::task::JoinHandle<(usize, Vec<PeerKey>)>,
+    ) {
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let publisher = crate::import_roster::test_support::publisher(
+            keys.iter()
+                .map(
+                    |(address, interface)| crate::import_roster::ImportRosterPeer {
+                        key: PeerKey::new(address.parse().unwrap(), Some((*interface).into())),
+                        session_id: 1,
+                        publication: tokio::sync::watch::channel(None).1,
+                        rib_peer: rustbgpd_transport::RibPeerSlot::default(),
+                    },
+                )
+                .collect(),
+            Vec::new(),
+        );
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None)
+            .with_peer_roster(publisher.reader());
+        let responder = tokio::spawn(async move {
+            let (mut snapshots, mut selected) = (0, Vec::new());
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::ListPeers { reply } => {
+                        snapshots += 1;
+                        let _ = reply.send(rows.clone());
+                    }
+                    PeerManagerCommand::DisablePeer { peer, reply, .. } => {
+                        selected.push(peer);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::GetPeerState { peer, reply } => {
+                        selected.push(peer);
+                        let _ = reply.send(None);
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+            (snapshots, selected)
+        });
+        (svc, publisher, responder)
+    }
+
+    fn bound_swp1(learned: &str) -> PeerInfo {
+        let mut info = peer_info(learned.parse().unwrap());
+        info.interface = Some("swp1".into());
+        info.interface_only = Some(crate::peer_types::InterfaceOnlyState {
+            discovery: NeighborDiscoveryState::Bound,
+            learned_address: Some(learned.parse().unwrap()),
+        });
+        info
+    }
+
+    fn disable(address: &str, interface: &str) -> Request<proto::DisableNeighborRequest> {
+        Request::new(proto::DisableNeighborRequest {
+            address: address.into(),
+            interface: interface.into(),
+            ..Default::default()
+        })
+    }
+
+    /// ADR-0142: `fe80::x%swp1` selects swp1's interface-only neighbor for
+    /// any `x`, bound to another address or not bound at all, in both the
+    /// address and the structured interface forms. A selector that a
+    /// neighbor has exactly never consults the interface-only inventory.
+    #[tokio::test]
+    async fn a_scoped_selector_selects_the_interface_only_neighbor_for_any_address() {
+        let bound = PeerKey::new("fe80::2".parse().unwrap(), Some("swp1".into()));
+        let (svc, _roster, responder) =
+            scoped_selector_service(&[("fe80::2", "swp1")], vec![bound_swp1("fe80::2")]);
+        // Mutation-red: building the key exactly targets fe80::3%swp1.
+        svc.disable_neighbor(disable("fe80::3%swp1", ""))
+            .await
+            .unwrap();
+        svc.disable_neighbor(disable("fe80::3", "swp1"))
+            .await
+            .unwrap();
+        let _ = svc
+            .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                address: "fe80::3%swp1".into(),
+                ..Default::default()
+            }))
+            .await;
+        // The learned address itself is an exact key: no inventory lookup.
+        svc.disable_neighbor(disable("fe80::2%swp1", ""))
+            .await
+            .unwrap();
+        drop(svc);
+        let (snapshots, selected) = responder.await.unwrap();
+        assert_eq!(selected, vec![bound.clone(); 4]);
+        assert_eq!(snapshots, 3, "only the three missed selectors consult it");
+    }
+
+    #[tokio::test]
+    async fn a_scoped_selector_reads_an_unbound_interface_only_neighbor() {
+        let (svc, _roster, responder) = scoped_selector_service(&[], vec![unbound_swp1()]);
+        let state = svc
+            .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                address: "fe80::3%swp1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            state.discovery_state,
+            proto::NeighborDiscoveryState::AwaitingDiscovery as i32
+        );
+        let error = svc
+            .disable_neighbor(disable("fe80::3%swp1", ""))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        drop(svc);
+        assert_eq!(responder.await.unwrap(), (2, Vec::new()));
+    }
+
+    /// A static link-local neighbor keeps its exact selector, even when the
+    /// inventory names an interface-only neighbor on the same interface;
+    /// one on an interface without an interface-only neighbor is unchanged;
+    /// and a bare link-local selector is still refused.
+    #[tokio::test]
+    async fn a_scoped_selector_prefers_an_exact_static_neighbor() {
+        let exact = PeerKey::new("fe80::7".parse().unwrap(), Some("swp1".into()));
+        let other = PeerKey::new("fe80::5".parse().unwrap(), Some("eth9".into()));
+        let missing = PeerKey::new("fe80::6".parse().unwrap(), Some("eth9".into()));
+        let (svc, _roster, responder) = scoped_selector_service(
+            &[("fe80::7", "swp1"), ("fe80::5", "eth9")],
+            vec![bound_swp1("fe80::2")],
+        );
+        // Mutation-red: consulting the inventory first selects fe80::2%swp1.
+        svc.disable_neighbor(disable("fe80::7%swp1", ""))
+            .await
+            .unwrap();
+        svc.disable_neighbor(disable("fe80::5%eth9", ""))
+            .await
+            .unwrap();
+        // eth9 has no interface-only neighbor: the exact key is used.
+        svc.disable_neighbor(disable("fe80::6%eth9", ""))
+            .await
+            .unwrap();
+        let error = svc
+            .disable_neighbor(disable("fe80::7", ""))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        drop(svc);
+        let (snapshots, selected) = responder.await.unwrap();
+        assert_eq!(selected, vec![exact, other, missing]);
+        assert_eq!(snapshots, 1, "only the missed fe80::6%eth9 consults it");
     }
 
     #[tokio::test]
