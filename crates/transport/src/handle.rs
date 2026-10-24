@@ -1254,18 +1254,38 @@ pub struct WarmCheckpointSessionState {
 
 /// Link provenance of routes retained under GR/LLGR after this actor's TCP loss.
 /// Keep a clone through actor shutdown, then transfer its final value before
-/// starting a replacement. Collision candidates keep independent state.
+/// an untouched replacement progresses. Collision candidates keep independent state.
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
-pub struct RetainedConnectionState(Arc<Mutex<Option<crate::session::RetainedConnection>>>);
+pub struct RetainedConnectionState(Arc<Mutex<RetainedConnectionValue>>);
+
+#[derive(Debug, Default)]
+struct RetainedConnectionValue {
+    retained: Option<crate::session::RetainedConnection>,
+    /// Even clearing retention is actor progress that inheritance must preserve.
+    session_written: bool,
+}
 
 impl RetainedConnectionState {
     pub(crate) fn get(&self) -> Option<crate::session::RetainedConnection> {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retained
     }
 
     pub(crate) fn set(&self, retained: Option<crate::session::RetainedConnection>) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = retained;
+        let mut current = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        current.retained = retained;
+        current.session_written = true;
+    }
+
+    fn inherit(&self, previous: &Self) {
+        let retained = previous.get();
+        let mut current = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !current.session_written {
+            current.retained = retained;
+        }
     }
 }
 
@@ -1817,11 +1837,11 @@ impl PeerHandle {
         self.gr_retained_connection.clone()
     }
 
-    /// Transfer provenance after the old actor has stopped, before this
-    /// replacement is started or receives a link check.
+    /// Seed provenance after the old actor has stopped, preserving any
+    /// retention state this actor already wrote while promotion was delayed.
     #[doc(hidden)]
     pub fn inherit_retained_connection(&self, previous: &RetainedConnectionState) {
-        self.gr_retained_connection.set(previous.get());
+        self.gr_retained_connection.inherit(previous);
     }
 
     /// Send a Start command to begin the BGP handshake.
