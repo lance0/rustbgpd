@@ -159,8 +159,9 @@ RUST_LOG='info,[peer{peer_addr=10.0.0.1}]=debug' rustbgpd /etc/rustbgpd/config.t
 
 An interface-only neighbor's session span also carries its stable label,
 `peer=interface:<name>`, which stays the same when the learned address
-changes. Its `log_level` uses that field, and so can `RUST_LOG`; the value is
-a regular expression, so escape a `.` in the interface name:
+changes. Its `log_level` uses that field, and so can `RUST_LOG`. In a
+`RUST_LOG` span directive the value is a regular expression, so escape a `.`
+in the interface name:
 
 ```bash
 RUST_LOG='info,[peer{peer=interface:swp1\.100}]=debug' rustbgpd /etc/rustbgpd/config.toml
@@ -171,8 +172,8 @@ comma-separated directive at a time: a directive that does not parse, such as
 the unbracketed `peer{peer_addr=10.0.0.1}=debug`, is dropped and the valid
 directives are kept. The dropped directives are reported with their parse
 errors in one `warning: ignoring unparseable RUST_LOG directive(s), ...` line
-on stderr at startup and whenever a successful SIGHUP reload rebuilds the log
-filter; the reload also logs that line as a `warn` event. Only a `RUST_LOG`
+on stderr at startup and whenever a successful SIGHUP reload re-applies the
+per-peer levels; the reload also logs that line as a `warn` event. Only a `RUST_LOG`
 with no valid directive falls back to `info`. An empty, comma-only or
 whitespace-only `RUST_LOG` is treated as unset.
 

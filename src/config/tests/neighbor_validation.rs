@@ -1422,33 +1422,31 @@ fn inbound_admission_defaults_off_and_validates_bounds() {
     );
 }
 
-/// Regression guard for the directive format itself: every string
-/// `per_peer_log_directives` emits must actually parse as an `EnvFilter`
-/// directive. The original `peer{peer_addr=X}=level` form (no brackets)
-/// did NOT parse — `init_logging` rejected it and aborted daemon boot the
-/// moment any neighbor set a `log_level`, so the per-peer knob was inert
-/// *and* boot-fatal. The bracketed `[peer{peer_addr=X}]=level` form parses;
-/// this pins it so the format can't silently regress into a boot-abort.
+/// Per-peer levels are keyed by the address a session span records as
+/// `peer_addr`, which is canonical however the neighbor's address is
+/// written, and every level parses as a `tracing` level.
 #[test]
-fn per_peer_log_directives_parse_as_env_filter() {
-    use tracing_subscriber::filter::Directive;
-
-    // Appends `log_level` onto the fixture's single 10.0.0.2 neighbor.
-    let config = parse(&format!("{}log_level = \"debug\"\n", valid_toml())).unwrap();
-    let directives = config.per_peer_log_directives();
-    assert_eq!(directives.len(), 1, "one neighbor carries a log_level");
-    assert!(
-        directives[0].starts_with("[peer{"),
-        "span directive must be bracketed, got {:?}",
-        directives[0]
+fn per_peer_log_levels_key_the_canonical_span_address() {
+    let config = parse(&format!(
+        "{}log_level = \"debug\"\n\n[[neighbors]]\naddress = \"2001:DB8:0::0002\"\n\
+         remote_asn = 65003\nlog_level = \"trace\"\n",
+        valid_toml()
+    ))
+    .unwrap();
+    let levels = config.per_peer_log_levels();
+    // Mutation-red: the configured spelling never equals the span's
+    // `2001:db8::2`.
+    assert_eq!(
+        levels,
+        [
+            ("10.0.0.2".to_owned(), "debug".to_owned()),
+            ("2001:db8::2".to_owned(), "trace".to_owned()),
+        ]
     );
-    for directive in &directives {
-        directive.parse::<Directive>().unwrap_or_else(|e| {
-            panic!(
-                "per_peer_log_directives emitted {directive:?} which EnvFilter \
-                 rejects ({e}) — init_logging would abort daemon boot"
-            )
-        });
+    for (_, level) in &levels {
+        level
+            .parse::<tracing_subscriber::filter::LevelFilter>()
+            .unwrap();
     }
 }
 

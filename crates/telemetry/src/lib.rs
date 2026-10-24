@@ -22,7 +22,9 @@ pub mod logging;
 pub mod metrics;
 pub mod reason_labels;
 
-pub use logging::{LoggingError, init_logging, reload_per_peer_directives};
+pub use logging::{
+    LoggingError, PeerLevelHandle, init_logging, peer_level_layer, reload_per_peer_levels,
+};
 pub use metrics::{
     BgpMetrics, evpn_es_auto_esi_states, evpn_es_core_isolation_states, interface_peer_label,
     non_canonical_peer_labels, peer_label, scoped_peer_label,

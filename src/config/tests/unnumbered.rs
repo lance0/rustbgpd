@@ -830,81 +830,92 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCount {
 }
 
 /// A per-neighbor log level on an interface-only neighbor is keyed by its
-/// `interface:<name>` span label, so it applies to the bound peer at every
-/// address the neighbor learns, and to no other interface's peer.
+/// `interface:<name>` span label: a reload reaches the bound session's
+/// running span, follows every address the neighbor binds, keeps the level
+/// on an unchanged reload, and selects no other session, including a static
+/// neighbor's session at the same learned address.
 #[test]
-fn interface_only_log_level_applies_to_the_bound_peer_across_rebinds() {
+fn interface_only_log_level_reaches_the_running_bound_session() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tracing_subscriber::layer::SubscriberExt;
 
+    // Interface names are keys, not patterns: `.` and `,` are literal.
     let debug = SWP1.replace("swp1", "swp1.100");
-    // `.` is a regex wildcard in a filter value, and the match is whole.
     let wildcard = SWP1.replace("swp1", "swp1x100");
-    let longer = SWP1.replace("swp1", "swp1.1000");
+    let odd = SWP1.replace("swp1", "swp1,x");
+    let unlevelled = parse(&with(&format!("{debug}{wildcard}{odd}"))).unwrap();
     let config = parse(&with(&format!(
-        "{debug}log_level = \"debug\"\n{wildcard}{longer}"
+        "{debug}log_level = \"debug\"\n{wildcard}{odd}log_level = \"trace\"\n\
+         \n[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"lo\"\nremote_asn = 65009\n"
     )))
     .unwrap();
-    let directives = config.per_peer_log_directives();
-    assert_eq!(directives, [r"[peer{peer=interface:swp1\.100}]=debug"]);
-    let mut filter = tracing_subscriber::EnvFilter::new("info");
-    for directive in &directives {
-        filter = filter.add_directive(directive.parse().unwrap());
-    }
-    let count = Arc::new(AtomicUsize::new(0));
-    let subscriber = tracing_subscriber::registry()
-        .with(filter)
-        .with(EventCount(count.clone()));
-    let _guard = tracing::subscriber::set_default(subscriber);
+    // The level applies through the live filter, not by rebinding.
+    assert_eq!(
+        interface_only_rebinds(&unlevelled, &config),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        config.per_peer_log_levels(),
+        [
+            ("interface:swp1.100".to_owned(), "debug".to_owned()),
+            ("interface:swp1,x".to_owned(), "trace".to_owned()),
+        ]
+    );
 
-    let debug_events = |index: usize, host: u16, ifindex: u32| {
-        let neighbor = &config.neighbors.interface_only()[index];
+    let count = Arc::new(AtomicUsize::new(0));
+    let (layer, levels) = rustbgpd_telemetry::peer_level_layer(
+        EventCount(count.clone()),
+        tracing_subscriber::EnvFilter::new("info"),
+    );
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let session = |name: &str, host: u16| {
+        let neighbor = config.neighbors.interface_only_on(name).unwrap();
         let transport = config
             .resolve_bound_interface_neighbor(
                 neighbor,
                 Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, host),
-                ifindex,
+                7,
             )
             .unwrap()
             .transport_config;
+        rustbgpd_transport::handle::peer_session_span(&transport)
+    };
+    let debug_events = |span: &tracing::Span| {
         let before = count.load(Ordering::SeqCst);
-        let span = rustbgpd_transport::handle::peer_session_span(&transport);
-        let _entered = span.enter();
-        tracing::debug!("probe");
+        span.in_scope(|| tracing::debug!("probe"));
         count.load(Ordering::SeqCst) - before
     };
-    let index = |name: &str| {
-        config
-            .neighbors
-            .interface_only()
-            .iter()
-            .position(|neighbor| neighbor.interface.as_deref() == Some(name))
+    // Sessions that are already running when the levels load.
+    let bound = session("swp1.100", 2);
+    let wildcard = session("swp1x100", 3);
+    let static_session = rustbgpd_transport::handle::peer_session_span(
+        &config
+            .resolve_neighbor(&config.neighbors[0])
             .unwrap()
-    };
-    // Mutation-red: an address-keyed directive misses the learned address,
-    // and an unrecorded span label never matches.
-    assert_eq!(debug_events(index("swp1.100"), 2, 7), 1, "bound peer");
-    assert_eq!(debug_events(index("swp1.100"), 3, 7), 1, "after a rebind");
-    // Mutation-red: an unescaped `.` also matches swp1x100.
-    assert_eq!(debug_events(index("swp1x100"), 2, 8), 0, "other interface");
-    assert_eq!(debug_events(index("swp1.1000"), 2, 9), 0, "longer name");
-}
+            .transport_config,
+    );
+    assert_eq!(debug_events(&bound), 0, "base info");
 
-#[test]
-fn interface_only_log_level_needs_a_plain_interface_name() {
-    let old = parse(&with(SWP1)).unwrap();
-    let new = parse(&with(&format!("{SWP1}log_level = \"debug\"\n"))).unwrap();
-    // The level applies through the live filter, not by rebinding.
-    assert_eq!(interface_only_rebinds(&old, &new), Vec::<String>::new());
-    // A name the filter directive cannot carry would abort logging setup.
-    for name in ["swp1,x", "swp1}x", "swp1=x", "swp1]x"] {
-        let error = rejected(&format!(
-            "{}log_level = \"debug\"\n",
-            SWP1.replace("swp1", name)
-        ));
-        assert!(error.contains("log_level"), "{name}: {error}");
-    }
-    // Without a log level, the name is not part of any directive.
-    parse(&with(&SWP1.replace("swp1", "swp1,x"))).unwrap();
+    // Mutation-red: a level matched only when a span is created never
+    // reaches `bound`; an address key misses its learned address.
+    levels.replace(&config.per_peer_log_levels()).unwrap();
+    assert_eq!(debug_events(&bound), 1, "running bound session");
+    assert_eq!(debug_events(&session("swp1.100", 4)), 1, "after a rebind");
+    levels.replace(&config.per_peer_log_levels()).unwrap();
+    assert_eq!(debug_events(&bound), 1, "unchanged reload keeps it");
+    assert_eq!(debug_events(&wildcard), 0, "other interface");
+    assert_eq!(debug_events(&session("swp1,x", 5)), 1, "a literal comma");
+
+    // A static neighbor's address-keyed level does not select a bound
+    // session that learned the same address.
+    levels
+        .replace(&[("fe80::2".to_owned(), "debug".to_owned())])
+        .unwrap();
+    assert_eq!(debug_events(&static_session), 1, "the static neighbor");
+    assert_eq!(debug_events(&bound), 0, "not the bound fe80::2 session");
+
+    levels.replace(&[]).unwrap();
+    assert_eq!(debug_events(&static_session), 0, "removed");
 }
