@@ -224,9 +224,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   moves an interface-only neighbor between groups. See
   [interface-only neighbors](docs/reference/api.md#interface-only-neighbors).
   **Operator-visible:** the first interface-only neighbor added without
-  `CAP_NET_RAW` or the link monitor, and a static link-local add whose
-  address a learned endpoint holds, return `FAILED_PRECONDITION` with nothing
-  changed. Deleting an interface-only neighbor's bound peer by address now
+  `CAP_NET_RAW` or the link monitor returns `FAILED_PRECONDITION` with nothing
+  changed. A static link-local add at an interface-only neighbor's learned
+  endpoint, its address on the same interface, bound or still reserved,
+  returns `ALREADY_EXISTS`. One at that address on another interface is
+  accepted unless the pair hits a shared-address restriction, which returns
+  `FAILED_PRECONDITION`: `bmp_identity_conflict` while a BMP collector
+  refuses identity conflicts, or the name of the address-keyed feature that
+  cannot be shared. Deleting an interface-only neighbor's bound peer by address now
   returns `FAILED_PRECONDITION` naming the interface selector, instead of
   asking for a restart. A neighbor `interface` containing whitespace is now
   rejected when the configuration loads, and the RPCs trim the interface they
@@ -304,8 +309,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with a scoped selector returns only the session on that interface. `rbgp`
   prints these rows' neighbors in the scoped `fe80::1%eth0` form, and the
   birdwatcher adapter example sends the scoped selector for link-local
-  neighbors. EVPN, VPN, labeled, RTC, BGP-LS and FlowSpec route entries and
-  EVPN route events still report a bare address. See
+  neighbors. EVPN, VPN, labeled, RTC, BGP-LS and FlowSpec route entries
+  still report a bare address. See
   [scoped neighbor identity](docs/reference/api.md#scoped-neighbor-identity).
 - `rbgp policy check` reports compiler-stage finding codes (`lex-error`,
   `parse-error`, `resolve-error`, `typecheck-error`, `lower-error`) and the
