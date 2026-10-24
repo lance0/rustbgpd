@@ -672,16 +672,6 @@ impl Config {
         // reload. A learned address is never in them, so these settings would
         // be accepted and never applied; refuse them until they are wired to
         // the binding.
-        if !self
-            .effective_conditional_advertisements(neighbor)
-            .is_empty()
-        {
-            return Err(invalid(
-                neighbor,
-                "conditional_advertisements",
-                "conditional advertisements are not supported on interface-only neighbors yet",
-            ));
-        }
         // The level is keyed by the `interface:<name>` span label, which the
         // filter directive can carry only for plain interface names.
         if neighbor

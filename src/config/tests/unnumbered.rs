@@ -430,23 +430,65 @@ fn diff_json_keeps_remote_asn_an_integer_and_names_the_mode() {
 }
 
 #[test]
-fn address_keyed_per_peer_settings_are_rejected_on_interface_only_neighbors() {
-    let conditional = "\n[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
-        [policy.definitions.transit-a]\ndefault_action = \"permit\"\n\n\
-        [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
-        advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\
-        condition_policy = \"transit-a\"\n";
-    // Mutation-red: each setting is otherwise accepted and never applied to
-    // the learned peer.
-    let error = rejected(&format!(
-        "{conditional}{SWP1}conditional_advertisements = [\"backup\"]\n"
-    ));
-    assert!(error.contains("conditional advertisements"), "{error}");
+fn address_keyed_per_peer_settings_are_accepted_on_interface_only_neighbors() {
+    // Mutation-red: restoring the refusal of either setting fails its parse.
+    parse(&with(&format!("{SWP1}log_level = \"debug\"\n"))).unwrap();
+    parse(&with(&format!(
+        "{CONDITIONAL}{SWP1}conditional_advertisements = [\"backup\"]\n"
+    )))
+    .unwrap();
     // Peer-group outbound maxima reach a bound peer through its group.
     parse(&with(&format!(
         "\n[peer_groups.fabric]\nmax_prefixes_out_ipv6_unicast = 10\n{SWP1}peer_group = \"fabric\"\n"
     )))
     .unwrap();
+}
+
+const CONDITIONAL: &str = "\n[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
+    [policy.definitions.transit-a]\ndefault_action = \"permit\"\n\n\
+    [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
+    advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\
+    condition_policy = \"transit-a\"\n";
+
+/// Conditional advertisements, own or inherited, are accepted on an
+/// interface-only neighbor and attach at each live binding's endpoint.
+#[test]
+fn interface_only_conditional_advertisements_attach_at_the_binding() {
+    for extra in [
+        format!("{CONDITIONAL}{SWP1}conditional_advertisements = [\"backup\"]\n"),
+        format!(
+            "{CONDITIONAL}[peer_groups.fabric]\nconditional_advertisements = [\"backup\"]\n\
+             {SWP1}peer_group = \"fabric\"\n"
+        ),
+    ] {
+        let config = parse(&with(&extra)).unwrap();
+        let unbound = config.conditional_advertisement_set().unwrap();
+        assert!(unbound.attachments.is_empty());
+        // Mutation-red: definitions collected from bindings only miss the
+        // startup install, and its settle time.
+        assert!(
+            unbound
+                .definitions
+                .iter()
+                .any(|definition| &*definition.name == "backup"),
+            "installed before any binding"
+        );
+        let learned: std::net::IpAddr = "fe80::2".parse().unwrap();
+        let set = config
+            .conditional_advertisement_set_with_bindings(&[(learned, "swp1".to_owned())])
+            .unwrap();
+        assert_eq!(
+            set.attachments
+                .get(&rustbgpd_rib::PeerEndpoint::new(learned, Some("swp1")))
+                .map(Vec::len),
+            Some(1)
+        );
+        assert!(
+            set.definitions
+                .iter()
+                .any(|definition| &*definition.name == "backup")
+        );
+    }
 }
 
 /// An interface-only neighbor's own outbound maxima are keyed by its
