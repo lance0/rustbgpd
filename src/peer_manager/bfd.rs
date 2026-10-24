@@ -933,6 +933,18 @@ impl PeerManager {
         self.commit_bfd_reload(prepared).await
     }
 
+    /// The address of the binding registration owned by the interface-only
+    /// neighbor on `interface`, whether or not its peer was ever added.
+    pub(super) fn bound_bfd_registration_on(&self, interface: &str) -> Option<IpAddr> {
+        let coupling = self.bfd_coupling.as_ref()?;
+        coupling.bound.iter().copied().find(|member| {
+            coupling
+                .configured
+                .get(member)
+                .is_some_and(|params| params.peer_interface == interface)
+        })
+    }
+
     fn schedule_bfd_scope_retry(&mut self) {
         self.link_check.bfd_retry_at.get_or_insert_with(|| {
             tokio::time::Instant::now() + super::link_failover::BFD_SCOPE_RETRY
