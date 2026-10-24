@@ -1574,6 +1574,7 @@ fn session_params(peer: IpAddr, scope: Option<u32>) -> crate::bfd_runtime::BfdSe
         revision: 1,
         peer,
         peer_label: peer.to_string(),
+        peer_interface: String::new(),
         scope_id: scope,
         destination: crate::bfd_runtime::bfd_destination(peer, scope, false).unwrap(),
         desired_min_tx_us: 300_000,
