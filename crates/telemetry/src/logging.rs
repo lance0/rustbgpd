@@ -1,5 +1,6 @@
 //! Structured JSON or human-readable text logging via `tracing`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::IsTerminal as _;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
@@ -47,7 +48,12 @@ type SharedPeerLevels = Arc<RwLock<PeerLevels>>;
 static PEER_LEVELS: OnceLock<SharedPeerLevels> = OnceLock::new();
 
 /// A `peer` span's key into [`PeerLevels`], kept in its extensions.
-struct PeerKey(String);
+struct PeerKey(Arc<str>);
+
+thread_local! {
+    /// The keys of the `peer` spans entered on this thread, innermost last.
+    static PEER_SCOPE: RefCell<Vec<Arc<str>>> = const { RefCell::new(Vec::new()) };
+}
 
 #[derive(Default)]
 struct PeerKeyVisitor {
@@ -75,14 +81,80 @@ impl Visit for PeerKeyVisitor {
     }
 }
 
+/// Enables every `peer` span, for [`PeerSpanTracker`] alone: the registry
+/// then records a session span even when `RUST_LOG` and the per-peer
+/// levels in force when it starts would not, so a later reload can still
+/// reach it.
+struct PeerSpans;
+
+impl<S> Filter<S> for PeerSpans {
+    fn enabled(&self, meta: &Metadata<'_>, _: &Context<'_, S>) -> bool {
+        meta.is_span() && meta.name() == "peer"
+    }
+
+    fn callsite_enabled(&self, meta: &'static Metadata<'static>) -> Interest {
+        if meta.is_span() && meta.name() == "peer" {
+            Interest::always()
+        } else {
+            Interest::never()
+        }
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::INFO)
+    }
+}
+
+/// Keeps each `peer` span's key in its extensions and the entered keys in
+/// [`PEER_SCOPE`], which [`PeerLevelFilter`] reads.
+struct PeerSpanTracker;
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for PeerSpanTracker {
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, cx: Context<'_, S>) {
+        let mut visitor = PeerKeyVisitor::default();
+        attrs.record(&mut visitor);
+        if let (Some(key), Some(span)) = (visitor.peer.or(visitor.peer_addr), cx.span(id)) {
+            span.extensions_mut().insert(PeerKey(key.into()));
+        }
+    }
+
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, cx: Context<'_, S>) {
+        let mut visitor = PeerKeyVisitor::default();
+        values.record(&mut visitor);
+        if let (Some(peer), Some(span)) = (visitor.peer, cx.span(id)) {
+            span.extensions_mut().replace(PeerKey(peer.into()));
+        }
+    }
+
+    fn on_enter(&self, id: &span::Id, cx: Context<'_, S>) {
+        if let Some(PeerKey(key)) = cx.span(id).and_then(|span| {
+            span.extensions()
+                .get::<PeerKey>()
+                .map(|PeerKey(key)| PeerKey(Arc::clone(key)))
+        }) {
+            PEER_SCOPE.with(|scope| scope.borrow_mut().push(key));
+        }
+    }
+
+    fn on_exit(&self, id: &span::Id, cx: Context<'_, S>) {
+        if cx
+            .span(id)
+            .is_some_and(|span| span.extensions().get::<PeerKey>().is_some())
+        {
+            PEER_SCOPE.with(|scope| scope.borrow_mut().pop());
+        }
+    }
+}
+
 /// Enables events inside a `peer` session span at that peer's configured
 /// level, read from the live map on every event so a reload reaches spans
 /// that already exist. Combined with the `RUST_LOG` filter by `or`: a
 /// per-peer level adds verbosity and never hides what `RUST_LOG` enables,
-/// as the span directives it replaces did.
+/// as the span directives it replaces did. A `peer` span itself is shown
+/// whenever some per-peer level is at least its own, as before.
 ///
-/// ponytail: one read lock and a scope walk per event while any per-peer
-/// level is set; a lock-free swap if that shows up in a profile.
+/// ponytail: one read lock per event while any per-peer level is set; a
+/// lock-free swap if that shows up in a profile.
 struct PeerLevelFilter(SharedPeerLevels);
 
 impl PeerLevelFilter {
@@ -91,8 +163,8 @@ impl PeerLevelFilter {
     }
 }
 
-impl<S: Subscriber + for<'a> LookupSpan<'a>> Filter<S> for PeerLevelFilter {
-    fn enabled(&self, meta: &Metadata<'_>, cx: &Context<'_, S>) -> bool {
+impl<S> Filter<S> for PeerLevelFilter {
+    fn enabled(&self, meta: &Metadata<'_>, _: &Context<'_, S>) -> bool {
         let peers = self.0.read().unwrap_or_else(PoisonError::into_inner);
         let Some(max) = peers.max else {
             return false;
@@ -103,18 +175,13 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Filter<S> for PeerLevelFilter {
         if meta.is_span() {
             return meta.name() == "peer";
         }
-        let Some(current) = cx.lookup_current() else {
-            return false;
-        };
-        current
-            .scope()
-            .find_map(|span| {
-                span.extensions()
-                    .get::<PeerKey>()
-                    .map(|PeerKey(key)| peers.levels.get(key).copied())
-            })
-            .flatten()
-            .is_some_and(|level| meta.level() <= &level)
+        PEER_SCOPE.with(|scope| {
+            scope
+                .borrow()
+                .last()
+                .and_then(|key| peers.levels.get(&**key))
+                .is_some_and(|level| meta.level() <= level)
+        })
     }
 
     fn callsite_enabled(&self, meta: &'static Metadata<'static>) -> Interest {
@@ -125,29 +192,14 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Filter<S> for PeerLevelFilter {
         }
     }
 
+    /// At least `INFO`, the `peer` span's level, so a session span is
+    /// recorded under a quieter `RUST_LOG`: the combined layer reports the
+    /// output filter's hint, not [`PeerSpans`]'.
     fn max_level_hint(&self) -> Option<LevelFilter> {
-        Some(self.max().unwrap_or(LevelFilter::OFF))
-    }
-
-    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, cx: Context<'_, S>) {
-        if attrs.metadata().name() != "peer" {
-            return;
-        }
-        let mut visitor = PeerKeyVisitor::default();
-        attrs.record(&mut visitor);
-        if let (Some(key), Some(span)) = (visitor.peer.or(visitor.peer_addr), cx.span(id)) {
-            span.extensions_mut().insert(PeerKey(key));
-        }
-    }
-
-    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, cx: Context<'_, S>) {
-        let mut visitor = PeerKeyVisitor::default();
-        values.record(&mut visitor);
-        if let (Some(peer), Some(span)) = (visitor.peer, cx.span(id))
-            && span.metadata().name() == "peer"
-        {
-            span.extensions_mut().replace(PeerKey(peer));
-        }
+        Some(
+            self.max()
+                .map_or(LevelFilter::INFO, |max| max.max(LevelFilter::INFO)),
+        )
     }
 }
 
@@ -231,7 +283,7 @@ fn escape_controls(s: &str) -> String {
         .collect()
 }
 
-/// Replaces the per-peer levels of a [`peer_level_filter`], as
+/// Replaces the per-peer levels of a [`peer_level_layer`], as
 /// [`reload_per_peer_levels`] does for the installed subscriber.
 pub struct PeerLevelHandle(SharedPeerLevels);
 
@@ -249,18 +301,30 @@ impl PeerLevelHandle {
     }
 }
 
-/// `base` or the per-peer levels, the daemon's output filter, with a handle
-/// to its levels (none at first): for tests that drive a real session span.
+/// `output` filtered by `base` or the per-peer levels, as the daemon's
+/// output is, with a handle to its levels (none at first): for tests that
+/// drive a real session span.
 #[must_use]
-pub fn peer_level_filter<S>(base: EnvFilter) -> (impl Filter<S>, PeerLevelHandle)
+pub fn peer_level_layer<S, L>(output: L, base: EnvFilter) -> (impl Layer<S>, PeerLevelHandle)
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
+    L: Layer<S>,
 {
     let peers = SharedPeerLevels::default();
     (
-        base.or(PeerLevelFilter(Arc::clone(&peers))),
+        with_peer_levels(output, base, Arc::clone(&peers)),
         PeerLevelHandle(peers),
     )
+}
+
+fn with_peer_levels<S, L>(output: L, base: EnvFilter, peers: SharedPeerLevels) -> impl Layer<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    L: Layer<S>,
+{
+    PeerSpanTracker
+        .with_filter(PeerSpans)
+        .and_then(output.with_filter(base.or(PeerLevelFilter(peers))))
 }
 
 /// The daemon's one output layer: JSON or text on `writer`, filtered by
@@ -280,12 +344,12 @@ where
         .with_target(true)
         .with_thread_ids(false)
         .with_thread_names(false);
-    let filter = env.or(PeerLevelFilter(peers));
-    if json {
-        layer.json().with_filter(filter).boxed()
+    let output = if json {
+        layer.json().boxed()
     } else {
-        layer.with_ansi(ansi).with_filter(filter).boxed()
-    }
+        layer.with_ansi(ansi).boxed()
+    };
+    with_peer_levels(output, env, peers).boxed()
 }
 
 /// Initialize the global tracing subscriber with JSON output (or
@@ -408,12 +472,36 @@ mod tests {
         }
     }
 
-    fn levels(pairs: &[(&str, &str)]) -> PeerLevels {
-        let pairs: Vec<(String, String)> = pairs
+    fn pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
             .iter()
             .map(|(key, level)| ((*key).to_owned(), (*level).to_owned()))
-            .collect();
-        PeerLevels::parse(&pairs).unwrap()
+            .collect()
+    }
+
+    /// A counting subscriber filtered by `base` or the per-peer levels, as
+    /// the daemon's output is.
+    fn counting(
+        base: &str,
+    ) -> (
+        impl Subscriber + Send + Sync,
+        PeerLevelHandle,
+        Arc<AtomicUsize>,
+    ) {
+        let count = Arc::new(AtomicUsize::new(0));
+        let (layer, handle) = peer_level_layer(CountLayer(count.clone()), EnvFilter::new(base));
+        (tracing_subscriber::registry().with(layer), handle, count)
+    }
+
+    fn emitted(count: &AtomicUsize, span: &tracing::Span, level: tracing::Level) -> usize {
+        let before = count.load(Ordering::SeqCst);
+        span.in_scope(|| match level {
+            tracing::Level::ERROR => tracing::error!("probe"),
+            tracing::Level::WARN => tracing::warn!("probe"),
+            tracing::Level::INFO => tracing::info!("probe"),
+            _ => tracing::debug!("probe"),
+        });
+        count.load(Ordering::SeqCst) - before
     }
 
     /// A per-peer level edit reaches a session span that already exists,
@@ -423,65 +511,69 @@ mod tests {
     /// override at the next one.
     #[test]
     fn per_peer_level_reload_reaches_live_spans_and_keeps_base() {
-        let live: SharedPeerLevels = Arc::default();
-        let count = Arc::new(AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(
-            CountLayer(count.clone())
-                .with_filter(EnvFilter::new("info").or(PeerLevelFilter(Arc::clone(&live)))),
-        );
+        let (subscriber, handle, count) = counting("info");
         let _guard = tracing::subscriber::set_default(subscriber);
         let session = tracing::info_span!("peer", peer_addr = "10.0.0.9");
         let other = tracing::info_span!("peer", peer_addr = "10.0.0.8");
-        let emitted = |span: &tracing::Span, level: tracing::Level| {
-            let before = count.load(Ordering::SeqCst);
-            span.in_scope(|| {
-                if level == tracing::Level::DEBUG {
-                    tracing::debug!("probe");
-                } else {
-                    tracing::info!("probe");
-                }
-            });
-            count.load(Ordering::SeqCst) - before
-        };
+        let emitted = |span, level| emitted(&count, span, level);
         assert_eq!(emitted(&session, tracing::Level::DEBUG), 0, "base info");
         assert_eq!(emitted(&session, tracing::Level::INFO), 1, "base info");
 
         // Mutation-red: a level captured when the span is created never
         // reaches this live span.
-        install_levels(&live, levels(&[("10.0.0.9", "debug")]));
+        handle.replace(&pairs(&[("10.0.0.9", "debug")])).unwrap();
         assert_eq!(emitted(&session, tracing::Level::DEBUG), 1, "live span");
         assert_eq!(emitted(&other, tracing::Level::DEBUG), 0, "other peer");
-        install_levels(&live, levels(&[("10.0.0.9", "debug")]));
+        handle.replace(&pairs(&[("10.0.0.9", "debug")])).unwrap();
         assert_eq!(emitted(&session, tracing::Level::DEBUG), 1, "unchanged");
 
-        install_levels(&live, levels(&[]));
+        handle.replace(&[]).unwrap();
         assert_eq!(emitted(&session, tracing::Level::DEBUG), 0, "removed");
         assert_eq!(emitted(&session, tracing::Level::INFO), 1, "base kept");
+    }
+
+    /// Above an `info` base a session span is still recorded, so a level
+    /// set later, or one below the span's own level, reaches it.
+    #[test]
+    fn a_quieter_base_still_lets_a_reload_reach_the_session() {
+        for (base, level, event) in [
+            ("warn", "debug", tracing::Level::DEBUG),
+            ("error", "warn", tracing::Level::WARN),
+        ] {
+            let (subscriber, handle, count) = counting(base);
+            let _guard = tracing::subscriber::set_default(subscriber);
+            let session = tracing::info_span!("peer", peer_addr = "10.0.0.9");
+            assert_eq!(emitted(&count, &session, event), 0, "{base} base");
+            // Mutation-red: a span neither filter enabled when it started
+            // keeps no key for the reload to find.
+            handle.replace(&pairs(&[("10.0.0.9", level)])).unwrap();
+            assert_eq!(emitted(&count, &session, event), 1, "{base} base, {level}");
+        }
     }
 
     /// A recorded `peer` field, an interface-only session's stable label,
     /// is its key; its learned `peer_addr` no longer selects it.
     #[test]
     fn a_recorded_peer_label_keys_the_session() {
-        let live: SharedPeerLevels = Arc::default();
-        let count = Arc::new(AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(
-            CountLayer(count.clone())
-                .with_filter(EnvFilter::new("info").or(PeerLevelFilter(Arc::clone(&live)))),
-        );
+        let (subscriber, handle, count) = counting("info");
         let _guard = tracing::subscriber::set_default(subscriber);
         let session =
             tracing::info_span!("peer", peer_addr = "fe80::2", peer = tracing::field::Empty);
         session.record("peer", "interface:swp1");
-        let debug_events = || {
-            let before = count.load(Ordering::SeqCst);
-            session.in_scope(|| tracing::debug!("probe"));
-            count.load(Ordering::SeqCst) - before
-        };
-        install_levels(&live, levels(&[("fe80::2", "debug")]));
-        assert_eq!(debug_events(), 0, "an address-keyed level does not match");
-        install_levels(&live, levels(&[("interface:swp1", "debug")]));
-        assert_eq!(debug_events(), 1, "the label matches");
+        handle.replace(&pairs(&[("fe80::2", "debug")])).unwrap();
+        assert_eq!(
+            emitted(&count, &session, tracing::Level::DEBUG),
+            0,
+            "an address-keyed level does not match"
+        );
+        handle
+            .replace(&pairs(&[("interface:swp1", "debug")]))
+            .unwrap();
+        assert_eq!(
+            emitted(&count, &session, tracing::Level::DEBUG),
+            1,
+            "the label matches"
+        );
     }
 
     /// A `Vec` behind a lock, as a `fmt` writer.
@@ -540,38 +632,56 @@ mod tests {
     /// timestamp.
     #[test]
     fn output_matches_the_env_filter_subscriber() {
+        // (RUST_LOG, per-peer level, lines the sample yields)
+        let cases = [
+            ("info", Some("debug"), 6),
+            ("info", None, 5),
+            ("warn", Some("debug"), 4),
+            ("warn", None, 2),
+        ];
         for json in [true, false] {
-            let old = Buffer::default();
-            let builder = fmt()
-                .with_writer(old.clone())
-                .with_env_filter(
-                    EnvFilter::new("info")
-                        .add_directive("[peer{peer_addr=10.0.0.9}]=debug".parse().unwrap()),
-                )
-                .with_target(true)
-                .with_thread_ids(false)
-                .with_thread_names(false)
-                .with_ansi(false);
-            if json {
-                tracing::subscriber::with_default(builder.json().finish(), emit_log_sample);
-            } else {
-                tracing::subscriber::with_default(builder.finish(), emit_log_sample);
+            for (base, level, lines) in cases {
+                let mut filter = EnvFilter::new(base);
+                if let Some(level) = level {
+                    filter = filter.add_directive(
+                        format!("[peer{{peer_addr=10.0.0.9}}]={level}")
+                            .parse()
+                            .unwrap(),
+                    );
+                }
+                let old = Buffer::default();
+                let builder = fmt()
+                    .with_writer(old.clone())
+                    .with_env_filter(filter)
+                    .with_target(true)
+                    .with_thread_ids(false)
+                    .with_thread_names(false)
+                    .with_ansi(false);
+                if json {
+                    tracing::subscriber::with_default(builder.json().finish(), emit_log_sample);
+                } else {
+                    tracing::subscriber::with_default(builder.finish(), emit_log_sample);
+                }
+
+                let new = Buffer::default();
+                let peer_levels = level.map_or_else(Vec::new, |level| {
+                    vec![("10.0.0.9".to_owned(), level.to_owned())]
+                });
+                let live = Arc::new(RwLock::new(PeerLevels::parse(&peer_levels).unwrap()));
+                let subscriber = tracing_subscriber::registry().with(output_layer(
+                    json,
+                    false,
+                    new.clone(),
+                    EnvFilter::new(base),
+                    live,
+                ));
+                tracing::subscriber::with_default(subscriber, emit_log_sample);
+
+                let (old, new) = (untimed(&old, json), untimed(&new, json));
+                let case = format!("json={json} base={base} level={level:?}");
+                assert_eq!(new.lines().count(), lines, "{case}: {new}");
+                assert_eq!(new, old, "{case}");
             }
-
-            let new = Buffer::default();
-            let live = Arc::new(RwLock::new(levels(&[("10.0.0.9", "debug")])));
-            let subscriber = tracing_subscriber::registry().with(output_layer(
-                json,
-                false,
-                new.clone(),
-                EnvFilter::new("info"),
-                live,
-            ));
-            tracing::subscriber::with_default(subscriber, emit_log_sample);
-
-            let (old, new) = (untimed(&old, json), untimed(&new, json));
-            assert_eq!(new.lines().count(), 6, "{new}");
-            assert_eq!(new, old, "json={json}");
         }
     }
 

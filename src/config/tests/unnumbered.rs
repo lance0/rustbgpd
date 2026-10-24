@@ -780,7 +780,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCount {
 fn interface_only_log_level_reaches_the_running_bound_session() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tracing_subscriber::layer::{Layer, SubscriberExt};
+    use tracing_subscriber::layer::SubscriberExt;
 
     // Interface names are keys, not patterns: `.` and `,` are literal.
     let debug = SWP1.replace("swp1", "swp1.100");
@@ -806,10 +806,11 @@ fn interface_only_log_level_reaches_the_running_bound_session() {
     );
 
     let count = Arc::new(AtomicUsize::new(0));
-    let (filter, levels) =
-        rustbgpd_telemetry::peer_level_filter(tracing_subscriber::EnvFilter::new("info"));
-    let subscriber =
-        tracing_subscriber::registry().with(EventCount(count.clone()).with_filter(filter));
+    let (layer, levels) = rustbgpd_telemetry::peer_level_layer(
+        EventCount(count.clone()),
+        tracing_subscriber::EnvFilter::new("info"),
+    );
+    let subscriber = tracing_subscriber::registry().with(layer);
     let _guard = tracing::subscriber::set_default(subscriber);
     let session = |name: &str, host: u16| {
         let neighbor = config.neighbors.interface_only_on(name).unwrap();
