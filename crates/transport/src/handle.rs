@@ -3,7 +3,7 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -249,6 +249,22 @@ impl Default for SessionIdentity {
 }
 
 /// Lossless notifications sent from a peer session to the `PeerManager` for
+/// Settles a conditional retirement command between the session and the
+/// caller waiting for its reply. Whichever side claims it first decides: a
+/// session that claims it acts and replies; a caller whose wait ended claims
+/// it to withdraw the command, so a session that reaches it later does
+/// nothing. A reply timeout then proves the command never acts.
+#[derive(Clone, Debug, Default)]
+pub struct CommandTicket(Arc<AtomicBool>);
+
+impl CommandTicket {
+    /// Claim the ticket; `true` for the first claimant only.
+    #[must_use]
+    pub fn claim(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+}
+
 /// TCP collision coordination.
 ///
 /// This path is intentionally unbounded so collision decisions never block or
@@ -680,6 +696,9 @@ pub enum PeerCommand {
     ShutdownUnlessEstablished {
         /// Whether the task was shut down.
         reply: oneshot::Sender<bool>,
+        /// Withdrawn by a caller whose wait ended: the command is then a
+        /// no-op.
+        ticket: CommandTicket,
     },
     /// Like [`Self::ShutdownUnlessEstablished`], but also keeps a session in
     /// `OpenSent` or `OpenConfirm`: only an Idle, Connect or Active session,
@@ -687,6 +706,9 @@ pub enum PeerCommand {
     ShutdownUnlessConnected {
         /// Whether the task was shut down.
         reply: oneshot::Sender<bool>,
+        /// Withdrawn by a caller whose wait ended: the command is then a
+        /// no-op.
+        ticket: CommandTicket,
     },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
@@ -699,6 +721,9 @@ pub enum PeerCommand {
     CollisionDumpUnlessEstablished {
         /// Whether the session was dumped.
         reply: oneshot::Sender<bool>,
+        /// Withdrawn by a caller whose wait ended: the command is then a
+        /// no-op.
+        ticket: CommandTicket,
     },
     /// ADR-0073: query this session's import-decision cache. Read-only
     /// — must not mutate session state or counters. `path_id = None`
@@ -1951,7 +1976,7 @@ impl PeerHandle {
         deadline: Duration,
     ) -> Result<bool, PeerCommandError> {
         self.conditional_shutdown(
-            |reply| PeerCommand::CollisionDumpUnlessEstablished { reply },
+            |reply, ticket| PeerCommand::CollisionDumpUnlessEstablished { reply, ticket },
             "collision_dump_unless_established",
             deadline,
         )
@@ -1995,9 +2020,10 @@ impl PeerHandle {
     /// ([`PeerCommand::ShutdownUnlessEstablished`]).
     ///
     /// `Ok(false)` means the session is Established and keeps running;
-    /// `Ok(true)` means it was shut down and can no longer establish. On a
-    /// timeout the outcome is unknown: the command may still be handled
-    /// later, so the caller must re-check rather than assume either.
+    /// `Ok(true)` means it was shut down and can no longer establish. A
+    /// timeout means the session never acted and never will: the command is
+    /// withdrawn ([`CommandTicket`]), and the session keeps running in its
+    /// current state, which the caller must re-check.
     ///
     /// # Errors
     ///
@@ -2008,7 +2034,7 @@ impl PeerHandle {
         deadline: Duration,
     ) -> Result<bool, PeerCommandError> {
         self.conditional_shutdown(
-            |reply| PeerCommand::ShutdownUnlessEstablished { reply },
+            |reply, ticket| PeerCommand::ShutdownUnlessEstablished { reply, ticket },
             "shutdown_unless_established",
             deadline,
         )
@@ -2028,35 +2054,45 @@ impl PeerHandle {
         deadline: Duration,
     ) -> Result<bool, PeerCommandError> {
         self.conditional_shutdown(
-            |reply| PeerCommand::ShutdownUnlessConnected { reply },
+            |reply, ticket| PeerCommand::ShutdownUnlessConnected { reply, ticket },
             "shutdown_unless_connected",
             deadline,
         )
         .await
     }
 
+    /// Send a conditional retirement and wait for its outcome. A command
+    /// still queued at `deadline` is withdrawn, so `TimedOut` means it never
+    /// acts; one the session already claimed has decided in that turn, and
+    /// its reply is awaited.
     async fn conditional_shutdown(
         &self,
-        command: impl FnOnce(oneshot::Sender<bool>) -> PeerCommand,
+        command: impl FnOnce(oneshot::Sender<bool>, CommandTicket) -> PeerCommand,
         operation: &'static str,
         deadline: Duration,
     ) -> Result<bool, PeerCommandError> {
+        let ticket = CommandTicket::default();
+        let (reply, mut shut_down) = oneshot::channel();
+        let command = command(reply, ticket.clone());
         let commands = self.commands.clone();
-        match tokio::time::timeout(deadline, async move {
-            let (reply, shut_down) = oneshot::channel();
+        let outcome = tokio::time::timeout(deadline, async {
             commands
-                .send(command(reply))
+                .send(command)
                 .await
                 .map_err(|_| PeerCommandError::SessionExited)?;
-            shut_down.await.map_err(|_| PeerCommandError::ReplyDropped)
+            (&mut shut_down)
+                .await
+                .map_err(|_| PeerCommandError::ReplyDropped)
         })
-        .await
-        {
+        .await;
+        match outcome {
             Ok(result) => result,
-            Err(_elapsed) => Err(PeerCommandError::TimedOut {
+            Err(_elapsed) if ticket.claim() => Err(PeerCommandError::TimedOut {
                 operation,
                 deadline,
             }),
+            // The session claimed it first and replies in the same turn.
+            Err(_elapsed) => shut_down.await.map_err(|_| PeerCommandError::ReplyDropped),
         }
     }
 
@@ -3634,6 +3670,46 @@ mod tests {
             elapsed, deadline,
             "stop_timeout must return exactly at its deadline"
         );
+    }
+
+    /// A conditional retirement still queued at its deadline is withdrawn,
+    /// so the session reading it later does nothing; one the session claimed
+    /// first reports its real outcome even if the reply is late.
+    /// Load-bearing proof: returning `TimedOut` without claiming the ticket
+    /// leaves the late command live, and returning it after the session
+    /// claimed the ticket loses the outcome.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_conditional_retirement_is_withdrawn() {
+        let deadline = Duration::from_millis(50);
+        let (tx, mut rx) = mpsc::channel::<PeerCommand>(1);
+        let handle = PeerHandle::from_parts(tx, tokio::spawn(async { Ok(()) }));
+        let result = handle
+            .collision_dump_unless_established_timeout(deadline)
+            .await;
+        assert!(
+            matches!(result, Err(PeerCommandError::TimedOut { .. })),
+            "{result:?}"
+        );
+        let Some(PeerCommand::CollisionDumpUnlessEstablished { ticket, .. }) = rx.recv().await
+        else {
+            panic!("the command was queued");
+        };
+        assert!(!ticket.claim(), "the late command is withdrawn");
+
+        let (tx, mut rx) = mpsc::channel::<PeerCommand>(1);
+        let handle = PeerHandle::from_parts(tx, tokio::spawn(async { Ok(()) }));
+        let session = tokio::spawn(async move {
+            let Some(PeerCommand::ShutdownUnlessEstablished { reply, ticket }) = rx.recv().await
+            else {
+                panic!("the command was queued");
+            };
+            assert!(ticket.claim(), "the session claims it first");
+            tokio::time::sleep(deadline * 2).await;
+            let _ = reply.send(true);
+        });
+        let result = handle.shutdown_unless_established_timeout(deadline).await;
+        assert!(matches!(result, Ok(true)), "{result:?}");
+        session.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

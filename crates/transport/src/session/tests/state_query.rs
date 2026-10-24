@@ -543,7 +543,10 @@ async fn shutdown_unless_established_decides_in_one_actor_turn() {
     let (mut session, _server, _rib_rx) = open_confirm_session().await;
     let (reply, shut_down) = oneshot::channel();
     let flow = session
-        .handle_command(PeerCommand::ShutdownUnlessEstablished { reply })
+        .handle_command(PeerCommand::ShutdownUnlessEstablished {
+            reply,
+            ticket: crate::handle::CommandTicket::default(),
+        })
         .await;
     assert!(shut_down.await.unwrap(), "OpenConfirm is shut down");
     assert_eq!(flow, std::ops::ControlFlow::Break(()), "the task ends");
@@ -553,7 +556,10 @@ async fn shutdown_unless_established_decides_in_one_actor_turn() {
     assert_eq!(session.fsm.state(), SessionState::Established);
     let (reply, shut_down) = oneshot::channel();
     let flow = session
-        .handle_command(PeerCommand::ShutdownUnlessEstablished { reply })
+        .handle_command(PeerCommand::ShutdownUnlessEstablished {
+            reply,
+            ticket: crate::handle::CommandTicket::default(),
+        })
         .await;
     assert!(!shut_down.await.unwrap(), "Established is refused");
     assert_eq!(flow, std::ops::ControlFlow::Continue(()));
@@ -586,7 +592,10 @@ async fn collision_dump_unless_established_keeps_an_established_session() {
     let (mut session, _server, _rib_rx) = open_confirm_session().await;
     let (reply, dumped) = oneshot::channel();
     let flow = session
-        .handle_command(PeerCommand::CollisionDumpUnlessEstablished { reply })
+        .handle_command(PeerCommand::CollisionDumpUnlessEstablished {
+            reply,
+            ticket: crate::handle::CommandTicket::default(),
+        })
         .await;
     assert!(dumped.await.unwrap(), "OpenConfirm is dumped");
     assert_eq!(flow, std::ops::ControlFlow::Break(()), "the task ends");
@@ -597,7 +606,10 @@ async fn collision_dump_unless_established_keeps_an_established_session() {
     assert_eq!(session.fsm.state(), SessionState::Established);
     let (reply, dumped) = oneshot::channel();
     let flow = session
-        .handle_command(PeerCommand::CollisionDumpUnlessEstablished { reply })
+        .handle_command(PeerCommand::CollisionDumpUnlessEstablished {
+            reply,
+            ticket: crate::handle::CommandTicket::default(),
+        })
         .await;
     assert!(!dumped.await.unwrap(), "Established is kept");
     assert_eq!(flow, std::ops::ControlFlow::Continue(()));
@@ -606,6 +618,39 @@ async fn collision_dump_unless_established_keeps_an_established_session() {
         !session.stop_requested,
         "no Cease/7 for the Established session"
     );
+}
+
+/// A conditional retirement whose caller stopped waiting is withdrawn: the
+/// session reaching it later neither dumps nor shuts down, whatever its
+/// state, and keeps running.
+/// Load-bearing proof: ignoring the ticket dumps the `OpenConfirm` session.
+#[tokio::test]
+async fn a_withdrawn_conditional_retirement_is_a_no_op() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::ManualStart).await;
+    session
+        .drive_fsm(Event::OpenReceived(notification_gr_open(false)))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+    let withdrawn = || {
+        let ticket = crate::handle::CommandTicket::default();
+        assert!(ticket.claim(), "the caller withdraws it");
+        ticket
+    };
+    for command in [
+        |reply, ticket| PeerCommand::CollisionDumpUnlessEstablished { reply, ticket },
+        |reply, ticket| PeerCommand::ShutdownUnlessEstablished { reply, ticket },
+        |reply, ticket| PeerCommand::ShutdownUnlessConnected { reply, ticket },
+    ] {
+        let (reply, outcome) = oneshot::channel();
+        let flow = session.handle_command(command(reply, withdrawn())).await;
+        assert_eq!(flow, std::ops::ControlFlow::Continue(()), "keeps running");
+        assert!(outcome.await.is_err(), "no outcome is reported");
+        assert!(!session.stop_requested);
+        assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+    }
 }
 
 /// `ShutdownUnlessConnected` also keeps a session mid-handshake, in the same
@@ -624,7 +669,10 @@ async fn shutdown_unless_connected_keeps_a_handshake() {
     assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
     let (reply, shut_down) = oneshot::channel();
     let flow = session
-        .handle_command(PeerCommand::ShutdownUnlessConnected { reply })
+        .handle_command(PeerCommand::ShutdownUnlessConnected {
+            reply,
+            ticket: crate::handle::CommandTicket::default(),
+        })
         .await;
     assert!(!shut_down.await.unwrap(), "OpenConfirm is kept");
     assert_eq!(flow, std::ops::ControlFlow::Continue(()));
@@ -638,7 +686,10 @@ async fn shutdown_unless_connected_keeps_a_handshake() {
     ));
     let (reply, shut_down) = oneshot::channel();
     let flow = session
-        .handle_command(PeerCommand::ShutdownUnlessConnected { reply })
+        .handle_command(PeerCommand::ShutdownUnlessConnected {
+            reply,
+            ticket: crate::handle::CommandTicket::default(),
+        })
         .await;
     assert!(
         shut_down.await.unwrap(),

@@ -1230,7 +1230,9 @@ impl PeerManager {
     /// session decides in one actor turn, sending Cease/7 when
     /// `collision_dump`, so an Established primary is never dumped. `true`
     /// when the primary is gone; `false` keeps it, including when it did not
-    /// answer, since a wedged primary may be Established.
+    /// answer, since a wedged primary may be Established. A timed-out command
+    /// is withdrawn ([`rustbgpd_transport::CommandTicket`]), so a primary that
+    /// reads it later keeps running instead of leaving the peer without one.
     async fn retire_primary_for_promotion(
         &mut self,
         peer_key: &PeerKey,

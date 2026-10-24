@@ -201,7 +201,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                     dumps.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
-                PeerCommand::CollisionDumpUnlessEstablished { reply } => {
+                PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
                     let _ = reply.send(true);
                     dumps.fetch_add(1, Ordering::SeqCst);
                     break;
@@ -1891,6 +1891,97 @@ async fn collision_primary_established_during_resolution_keeps_primary() {
             .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
         "the primary that established during resolution stays the session"
+    );
+}
+
+/// The primary is busy past the manager's reply deadline for the dump. The
+/// manager keeps it and closes the candidate, and the timed-out dump must
+/// then never act: a primary that reads it later keeps running, so the
+/// enabled peer is not left without a session to redial.
+/// Load-bearing proof: not withdrawing the command on timeout lets the late
+/// dump end the kept primary.
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_collision_dump_never_ends_the_kept_primary() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let primary = Arc::new(FakePeerCounters::default());
+    primary.hold_retirement.store(true, Ordering::SeqCst);
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            primary.clone(),
+        ),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id: 2,
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
+    })
+    .await;
+    wait_counter(&pending.collision_dump, 1).await;
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
+        "the unanswering primary is kept"
+    );
+
+    // The primary reads the dump only now, after the deadline.
+    primary.release_retirement.notify_one();
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        primary.collision_dump.load(Ordering::SeqCst),
+        0,
+        "late dump did nothing"
+    );
+    let managed = mgr.peers.get(&key(peer_addr)).unwrap();
+    assert!(
+        !managed.handle().is_finished(),
+        "the kept primary still runs"
+    );
+    assert!(
+        matches!(
+            managed
+                .handle()
+                .query_state_outcome(Duration::from_secs(1))
+                .await,
+            rustbgpd_transport::StateQueryOutcome::State(_)
+        ),
+        "and answers"
     );
 }
 
