@@ -594,16 +594,11 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
         rows.field(0, "Learned Address", learned);
         rows.field(0, "Discovery", discovery);
     }
-    let remote_asn = cfg.map(output::remote_asn_label).unwrap_or_default();
-    let negotiated_asn = n
-        .negotiated_session
-        .as_ref()
-        .and_then(|negotiated| negotiated.remote_asn)
-        .filter(|asn| remote_asn != asn.to_string());
-    match negotiated_asn {
-        Some(asn) => rows.field(0, "Remote ASN", format!("{remote_asn} (session {asn})")),
-        None => rows.field(0, "Remote ASN", remote_asn),
-    }
+    rows.field(
+        0,
+        "Remote ASN",
+        output::remote_asn_with_session(n).unwrap_or_default(),
+    );
     rows.field(
         0,
         "Description",
