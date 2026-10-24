@@ -807,6 +807,53 @@ class EvpnReflectorFixtureTests(unittest.TestCase):
         self.rejected(f"{self.TAG}/rr-evpn-fabric/config.toml does not match")
 
 
+class FlowspecControllerFixtureTests(unittest.TestCase):
+    """The first release carrying the flowspec-controller example owes its fixture.
+
+    No tag carries it yet, so the tag lookup is simulated: the archived v0.79.0
+    tree plus the working-tree example as if v0.79.0 had shipped it.
+    """
+
+    TAG = "v0.79.0"
+    EXAMPLE = "examples/flowspec-controller/config.toml"
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        shutil.copytree(checker.ROOT / checker.FIXTURES_ROOT / self.TAG, self.root / self.TAG)
+        self.example = (checker.ROOT / self.EXAMPLE).read_bytes()
+        self.fixture = self.root / self.TAG / "flowspec-controller" / "config.toml"
+
+    def carried(self, tag, path):
+        return self.example if path == self.EXAMPLE else checker.tagged_file(tag, path)
+
+    def archive(self, data):
+        self.fixture.parent.mkdir()
+        self.fixture.write_bytes(data)
+
+    def rejected(self, expected):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            checker.check_archived_fixture_directories(self.root, set(), self.carried)
+        self.assertIn(expected, stderr.getvalue())
+
+    def test_example_carries_only_flowspec_neighbor_families(self):
+        self.assertIn(b'families = ["ipv4_flowspec", "ipv6_flowspec"]', self.example)
+        self.assertNotIn(b"[flowspec]", self.example)
+
+    def test_archived_example_passes(self):
+        self.archive(self.example)
+        checker.check_archived_fixture_directories(self.root, set(), self.carried)
+
+    def test_missing_fixture_fails(self):
+        self.rejected(f"{self.TAG} carries {self.EXAMPLE} but")
+
+    def test_edited_fixture_fails(self):
+        self.archive(self.example.replace(b"ipv6_flowspec", b"ipv6_unicast"))
+        self.rejected(f"{self.TAG}/flowspec-controller/config.toml does not match")
+
+
 class NestedExperimentalJsonFieldTests(unittest.TestCase):
     """Nested JSON shapes may mark keys experimental, but never also pin them."""
 
