@@ -1866,3 +1866,63 @@ async fn a_retiring_copy_stays_pending_and_unpublished() {
         .collect();
     assert_eq!(names, [NAME]);
 }
+
+/// Every series of `name`, of any conditional-advertisement metric.
+fn series_named(metrics: &BgpMetrics, name: &str) -> usize {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .flat_map(|family| family.get_metric().iter())
+        .filter(|metric| metric.get_label().iter().any(|label| label.value() == name))
+        .count()
+}
+
+/// A retiring copy that takes the name of a published definition, at an
+/// install or by a rollback, reaps that definition's series, and no full
+/// re-observation (here the restore's) scans a retiring copy's condition.
+#[tokio::test(start_paused = true)]
+async fn a_retiring_copy_reaps_a_published_namesake_and_is_never_scanned() {
+    const COPY: &str = "backup (retiring)";
+    let metrics = BgpMetrics::new();
+    let mut manager = manager_with(&metrics);
+    let named = |retiring: bool| {
+        let mut definition = absent_if(Duration::ZERO);
+        definition.name = Arc::from(COPY);
+        definition.retiring = retiring;
+        definition
+    };
+    let _ = manager.install_conditional_advertisements(vec![named(false)]);
+    assert!(
+        series_named(&metrics, COPY) > 0,
+        "the configured definition publishes"
+    );
+    // Mutation-red: inserting the copy without reaping its namesake keeps
+    // the configured definition's series.
+    let _ = manager.install_conditional_advertisements(vec![named(true)]);
+    assert_eq!(
+        series_named(&metrics, COPY),
+        0,
+        "replaced by a retiring copy"
+    );
+
+    let (capture, _) = manager.install_conditional_advertisements(vec![named(false)]);
+    assert!(series_named(&metrics, COPY) > 0);
+    // Mutation-red: a restore that counts the retiring copy as a restored
+    // namesake keeps the series.
+    let _ = manager.restore_conditional_advertisements(capture);
+    assert_eq!(
+        series_named(&metrics, COPY),
+        0,
+        "rolled back to the retiring copy"
+    );
+
+    // The restore re-observes every definition; the copy's condition is
+    // present, but it is not scanned. Mutation-red: scanning it sees present.
+    inject(&mut manager, prefix(1), None);
+    let (capture, _) = manager.install_conditional_advertisements(Vec::new());
+    let _ = manager.restore_conditional_advertisements(capture);
+    let (observed, applied, _) = manager.conditional_advertisement_state(COPY).unwrap();
+    assert_eq!(applied, AppliedConditionalState::Pending);
+    assert_ne!(observed, ConditionObservation::Present, "never scanned");
+}
