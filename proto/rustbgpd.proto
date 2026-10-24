@@ -651,6 +651,40 @@ message NeighborConfig {
   // Effective canonical inbound path-attribute type codes discarded for this
   // route-server client. Empty means no configured discard.
   repeated uint32 discard_path_attributes = 22;
+  // How remote_asn is matched against the ASN in the peer's OPEN.
+  // UNSPECIFIED means NUMERIC. With EXTERNAL or INTERNAL, remote_asn is 0 on
+  // reads and must be 0 on create requests; the ASN the peer actually sent
+  // is NegotiatedSessionState.remote_asn.
+  RemoteAsnMode remote_asn_mode = 23;
+}
+
+// A neighbor's remote ASN matching mode (TOML remote_asn = a number,
+// "external" or "internal").
+enum RemoteAsnMode {
+  // NUMERIC, the behavior before this field existed.
+  REMOTE_ASN_MODE_UNSPECIFIED = 0;
+  // remote_asn is the ASN the peer must send.
+  REMOTE_ASN_MODE_NUMERIC = 1;
+  // Any ASN except the local ASN (eBGP). Never the dynamic-neighbor
+  // wildcard: an iBGP OPEN is refused.
+  REMOTE_ASN_MODE_EXTERNAL = 2;
+  // The local ASN (iBGP).
+  REMOTE_ASN_MODE_INTERNAL = 3;
+}
+
+// Discovery state of an interface-only neighbor (ADR-0142), which names an
+// interface and learns its peer's IPv6 link-local address.
+enum NeighborDiscoveryState {
+  // Not an interface-only neighbor, or a daemon that does not report it.
+  NEIGHBOR_DISCOVERY_STATE_UNSPECIFIED = 0;
+  // The interface does not exist yet.
+  NEIGHBOR_DISCOVERY_STATE_INTERFACE_MISSING = 1;
+  // The interface is down (carrier loss or administratively down).
+  NEIGHBOR_DISCOVERY_STATE_LINK_DOWN = 2;
+  // The link is up and no peer address is bound yet.
+  NEIGHBOR_DISCOVERY_STATE_AWAITING_DISCOVERY = 3;
+  // A learned peer address is bound; learned_peer_address names it.
+  NEIGHBOR_DISCOVERY_STATE_BOUND = 4;
 }
 
 message PathsLimitState {
@@ -862,10 +896,17 @@ message NeighborState {
   // not the routes the peer is known to hold. Absence means an older daemon.
   // Update-group internal; explicitly unstable.
   optional bool prefixes_sent_pending = 65;
+  // Interface-only neighbor (config.address empty, config.interface set):
+  // the IPv6 link-local address bound to it, without a scope. Empty until
+  // an address is bound, and for every other neighbor.
+  string learned_peer_address = 66;
+  // Interface-only neighbor discovery state; UNSPECIFIED for every other
+  // neighbor.
+  NeighborDiscoveryState discovery_state = 67;
   // The session reports nothing to BMP: another BMP-monitored neighbor held
   // its link-local address when it was admitted, and every collector sets
   // on_identity_conflict = "exclude". Kept for the life of the session.
-  bool bmp_identity_excluded = 66;
+  bool bmp_identity_excluded = 68;
 }
 
 // Stale routes one family of a neighbor still holds for GR or LLGR.
@@ -1002,6 +1043,10 @@ message NegotiatedSessionState {
   optional string local_address = 10;
   // Negotiated KEEPALIVE cadence, including present zero when Hold Time is 0.
   optional uint32 keepalive_interval_seconds = 11;
+  // The ASN the peer sent in its OPEN (the four-octet AS capability when
+  // present). For a neighbor configured with REMOTE_ASN_MODE_EXTERNAL this is
+  // the only place the session's actual ASN appears.
+  optional uint32 remote_asn = 12;
 }
 
 message NegotiatedGracefulRestartState {
@@ -1183,7 +1228,8 @@ message ListNeighborsRequest {}
 
 message ListNeighborsResponse {
   // Ordered numerically by IP (IPv4 before IPv6), then lexicographically by
-  // interface (absent before present).
+  // interface (absent before present). Interface-only neighbors with no bound
+  // address follow, ordered by interface.
   repeated NeighborState neighbors = 1;
 }
 

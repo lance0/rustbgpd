@@ -202,6 +202,10 @@ duplicates; multiplicity is compared):
 
 - `peer` / `peer_asn`: the member the route is advertised **to** (must
   match the daemon's configured neighbor and ASN for a live comparison).
+  A neighbor configured with `remote_asn = "external"` or `"internal"` is
+  compared against the AS its session negotiated, and is incomparable while
+  that session is down. An interface-only neighbor is matched at its learned
+  link-local address (`fe80::2%swp1`) and is incomparable until it has one.
 - `prefix`: `addr/len`; the family is inferred from the address.
 - `origin`: 0 = IGP, 1 = EGP, 2 = INCOMPLETE. Omit when absent.
 - `as_path`: flat ASN list (compared as one `AS_SEQUENCE`). Omit or `[]`

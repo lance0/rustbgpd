@@ -1217,7 +1217,10 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
     ) -> Result<Response<server_proto::NeighborState>, Status> {
         *self.state.last_get_neighbor_state.lock().await = Some(request.into_inner());
         let mut response = server_proto::NeighborState {
+            learned_peer_address: String::new(),
+            discovery_state: 0,
             config: Some(server_proto::NeighborConfig {
+                remote_asn_mode: 0,
                 min_hold_time: None,
                 address: "10.0.0.2".to_string(),
                 interface: String::new(),
@@ -1299,6 +1302,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             prefixes_received_ipv6: 0,
             negotiation_available: Some(true),
             negotiated_session: Some(server_proto::NegotiatedSessionState {
+                remote_asn: Some(65002),
                 local_address: Some("127.0.0.1".to_string()),
                 hold_time_seconds: Some(87),
                 keepalive_interval_seconds: Some(29),

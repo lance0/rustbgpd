@@ -1198,6 +1198,55 @@ query against the current matcher: deleting or editing that range does not
 rewrite the answer for an already-live session. The nested message is absent
 for static peers and from older daemons.
 
+### Remote ASN mode and the session ASN
+
+`NeighborConfig.remote_asn_mode` carries how `remote_asn` matches the ASN in
+the peer's OPEN, as the configuration's `remote_asn = <number>`,
+`"external"` or `"internal"` does:
+
+| Mode | Meaning | `remote_asn` |
+|------|---------|--------------|
+| `REMOTE_ASN_MODE_UNSPECIFIED` | `NUMERIC`, the behavior before the field existed | the configured ASN, non-zero |
+| `REMOTE_ASN_MODE_NUMERIC` | the peer must send exactly `remote_asn` | the configured ASN, non-zero |
+| `REMOTE_ASN_MODE_EXTERNAL` | any ASN except the local one; an iBGP OPEN is refused | `0` |
+| `REMOTE_ASN_MODE_INTERNAL` | the local ASN | `0` |
+
+- On `AddNeighbor`, `EXTERNAL` or `INTERNAL` with a non-zero `remote_asn` is
+  `INVALID_ARGUMENT`. `remote_asn = 0` is rejected only for `NUMERIC` and
+  `UNSPECIFIED`, and an unknown mode is rejected.
+- `ListNeighbors` and `GetNeighborState` return the configured mode with
+  `remote_asn = 0` for a non-numeric mode, so the configured intent round-trips
+  and is never replaced by a resolved or negotiated number. `EXTERNAL` is not
+  the dynamic-neighbor wildcard.
+- The ASN the peer actually sent (the four-octet AS capability when present)
+  is session state: `NegotiatedSessionState.remote_asn`, present while the
+  session is Established.
+
+### Interface-only neighbors
+
+An interface-only neighbor
+([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)) is reported
+with an empty `NeighborConfig.address` and its `interface`:
+
+- `NeighborState.learned_peer_address` is the IPv6 link-local address bound to
+  it, without a scope, and is empty until an address is bound.
+- `NeighborState.discovery_state` is `INTERFACE_MISSING`, `LINK_DOWN`,
+  `AWAITING_DISCOVERY` or `BOUND`, and `UNSPECIFIED` for every other neighbor.
+- `ListNeighbors` lists a neighbor with no bound address after the addressed
+  rows, ordered by interface. It has no session or RIB counters yet.
+- A selector with an empty address and an `interface` selects that interface's
+  interface-only neighbor. `GetNeighborState` answers for it bound or not.
+  Actions that need a session (enable, disable, reset, soft reset, refresh,
+  replay) return `FAILED_PRECONDITION` until an address is bound.
+  `DeleteNeighbor` returns `FAILED_PRECONDITION` for an interface-only
+  neighbor, bound or not: remove its stanza from the configuration instead.
+  `SetGracefulShutdown` applies to every peer only when both the address and
+  the interface are empty; an interface alone selects that interface's
+  neighbor like any other action.
+- Peer-scoped RIB and explain requests take the learned address with its
+  scope, `fe80::2%swp1`, not the interface alone. gNMI lists an
+  interface-only neighbor once it has a learned address.
+
 ### Add a neighbor
 
 `AddNeighborRequest.intent` is field 2 and carries an inner `NeighborConfig`

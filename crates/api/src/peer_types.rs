@@ -2110,8 +2110,10 @@ pub struct PresenceAwareNeighborCreate {
     pub address: IpAddr,
     /// Optional interface for an IPv6 link-local peer.
     pub interface: Option<String>,
-    /// Remote autonomous system number.
+    /// Remote autonomous system number; 0 with a non-numeric mode.
     pub remote_asn: u32,
+    /// How `remote_asn` matches the peer's OPEN.
+    pub remote_asn_mode: RemoteAsnMode,
     /// Optional operator description.
     pub description: Option<String>,
     /// Optional peer-group reference.
@@ -2842,6 +2844,49 @@ pub struct PeerInfo {
     pub rfc8212_import_policy: Rfc8212PolicyStatus,
     /// ADR-0112 RFC 8212 explicit-policy status for the export direction.
     pub rfc8212_export_policy: Rfc8212PolicyStatus,
+    /// How the configured `remote_asn` matches the peer's OPEN. Reads report
+    /// `remote_asn` = 0 for a non-numeric mode.
+    pub remote_asn_mode: RemoteAsnMode,
+    /// The ASN the peer sent in its OPEN, while a session is Established.
+    pub negotiated_remote_asn: Option<u32>,
+    /// Set for an interface-only neighbor (ADR-0142): its discovery state
+    /// and the address bound to it.
+    pub interface_only: Option<InterfaceOnlyState>,
+}
+
+/// How a neighbor's `remote_asn` matches the ASN in the peer's OPEN.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RemoteAsnMode {
+    /// The configured number (the only mode before ADR-0142).
+    #[default]
+    Numeric,
+    /// Any ASN except the local ASN.
+    External,
+    /// The local ASN.
+    Internal,
+}
+
+/// Discovery state of an interface-only neighbor (ADR-0142).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeighborDiscoveryState {
+    /// The interface does not exist.
+    InterfaceMissing,
+    /// The interface is down.
+    LinkDown,
+    /// The link is up and no peer address is bound.
+    AwaitingDiscovery,
+    /// A learned peer address is bound.
+    Bound,
+}
+
+/// What an interface-only neighbor's row reports beyond an ordinary
+/// neighbor's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceOnlyState {
+    /// Where discovery stands.
+    pub discovery: NeighborDiscoveryState,
+    /// The bound IPv6 link-local address, without a scope.
+    pub learned_address: Option<std::net::Ipv6Addr>,
 }
 
 /// RFC 8212 explicit-policy status for one direction of one session

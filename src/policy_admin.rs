@@ -510,7 +510,11 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         tcp_mss: None,
         address: raw.address.to_string(),
         interface: raw.interface.clone(),
-        remote_asn: raw.remote_asn.into(),
+        remote_asn: match raw.remote_asn_mode {
+            rustbgpd_api::peer_types::RemoteAsnMode::Numeric => raw.remote_asn.into(),
+            rustbgpd_api::peer_types::RemoteAsnMode::External => crate::config::RemoteAsn::External,
+            rustbgpd_api::peer_types::RemoteAsnMode::Internal => crate::config::RemoteAsn::Internal,
+        },
         description: raw.description.clone(),
         peer_group: raw.peer_group.clone(),
         // Runtime neighbor creation has no admin-state field; the peer
@@ -1067,6 +1071,7 @@ remote_asn = 65002
             address: "192.0.2.1".parse().unwrap(),
             interface: None,
             remote_asn: 65_001,
+            remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
             description: None,
             peer_group: None,
             hold_time: None,

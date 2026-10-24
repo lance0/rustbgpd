@@ -167,6 +167,11 @@ pub(super) fn build_peer_info(
 
 /// The manager half of one neighbor row: every field the manager owns, with
 /// the stale placeholders a missing session observation reports.
+/// Non-numeric `remote_asn` modes by (address, interface); see
+/// [`PeerManager::non_numeric_remote_asn_modes`].
+pub(super) type RemoteAsnModes =
+    std::collections::HashMap<(String, Option<String>), rustbgpd_api::peer_types::RemoteAsnMode>;
+
 fn manager_peer_info(
     peer: &PeerKey,
     managed: &ManagedPeerState,
@@ -261,6 +266,113 @@ fn manager_peer_info(
         bmp_identity_excluded: false,
         rfc8212_import_policy,
         rfc8212_export_policy,
+        // The configured mode comes from the neighbor record; see
+        // `PeerManager::apply_configured_identity`.
+        remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
+        negotiated_remote_asn: None,
+        interface_only: None,
+    }
+}
+
+/// The row of an interface-only neighbor with no bound peer (ADR-0142): its
+/// configured settings, resolved as they would be at binding, with no
+/// session. `address` is unspecified and the API reports none.
+pub(super) fn unbound_interface_only_info(
+    interface: &str,
+    resolved: &crate::config::ResolvedNeighbor,
+    enabled: bool,
+    ebgp_requires_policy: bool,
+    state: rustbgpd_api::peer_types::InterfaceOnlyState,
+) -> PeerInfo {
+    let tc = &resolved.transport_config;
+    let enforced = ebgp_requires_policy && resolved.rfc8212_external;
+    PeerInfo {
+        address: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        interface: Some(interface.to_owned()),
+        remote_asn: tc.peer.remote_asn,
+        description: resolved.label.clone(),
+        peer_group: resolved.peer_group.clone(),
+        state: SessionState::Idle,
+        enabled,
+        graceful_shutdown_advertise_intent: false,
+        prefix_count: 0,
+        rejected_routes_retained: None,
+        prefix_count_ipv4: 0,
+        prefix_count_ipv6: 0,
+        inbound_prefix_limits: Vec::new(),
+        hold_time: Some(tc.peer.hold_time),
+        min_hold_time: tc.peer.min_hold_time,
+        send_hold_time: tc.peer.send_hold_time,
+        max_prefixes: tc.max_prefixes,
+        max_prefix_action: if resolved.max_prefix_restart_seconds.is_some()
+            && tc.max_prefix_action == rustbgpd_transport::MaxPrefixAction::Shutdown
+        {
+            "restart"
+        } else {
+            tc.max_prefix_action.as_str()
+        }
+        .to_string(),
+        max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
+        max_prefix_restart_remaining_millis: None,
+        families: tc.peer.families.clone(),
+        required_families: tc.peer.required_families.clone(),
+        negotiated_session: None,
+        remove_private_as: tc.remove_private_as,
+        discard_path_attributes: tc.discard_path_attributes.clone(),
+        route_server_client: tc.route_server_client,
+        per_client_best: tc.per_client_best,
+        next_hop_ownership_strict_peer: tc.next_hop_ownership_strict_peer,
+        interpret_rfc1997: tc.interpret_rfc1997,
+        rs_control_communities: tc.rs_control_communities,
+        orr_vantage: tc.orr_vantage,
+        local_role: tc.peer.local_role,
+        strict_role: tc.peer.strict_role,
+        remote_role: None,
+        role_negotiated: false,
+        add_path_receive: tc.peer.add_path_receive,
+        add_path_send: tc.peer.add_path_send,
+        add_path_send_max: tc.peer.add_path_send_max,
+        paths_limit_receive_max: tc.peer.paths_limit_receive_max,
+        peer_paths_limits: Vec::new(),
+        effective_add_path_send_limits: Vec::new(),
+        updates_received: 0,
+        updates_sent: 0,
+        notifications_received: 0,
+        notifications_sent: 0,
+        messages_received: 0,
+        messages_sent: 0,
+        route_reflector_client: tc.route_reflector_client,
+        otc_routes_blocked: 0,
+        import_policy_routes_permitted: 0,
+        import_policy_routes_denied: 0,
+        export_policy_routes_permitted: 0,
+        export_policy_routes_denied: 0,
+        flap_count: 0,
+        uptime_secs: 0,
+        reconnect_in_secs: 0,
+        last_error: String::new(),
+        authentication: authentication_label(false, false).to_string(),
+        tcp_ao_info: None,
+        tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
+        is_dynamic: false,
+        accepted_dynamic_range: None,
+        // No session can be stale; there is none.
+        stale: false,
+        slow_peer: false,
+        bmp_identity_excluded: false,
+        rfc8212_import_policy: rfc8212_status(
+            enforced,
+            resolved.import_policy.as_ref(),
+            RFC8212_MISSING_IMPORT_POLICY,
+        ),
+        rfc8212_export_policy: rfc8212_status(
+            enforced,
+            resolved.export_policy.as_ref(),
+            RFC8212_MISSING_EXPORT_POLICY,
+        ),
+        remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
+        negotiated_remote_asn: None,
+        interface_only: Some(state),
     }
 }
 
@@ -278,6 +390,12 @@ fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSe
     info.inbound_prefix_limits = inbound_prefix_limit_rows(state);
     info.negotiated_session
         .clone_from(&state.negotiated_session);
+    // The ASN the peer sent belongs to the session, not the configuration.
+    info.negotiated_remote_asn = state
+        .negotiated_session
+        .as_ref()
+        .and(state.peer_asn)
+        .filter(|asn| *asn != 0);
     info.remote_role = state.remote_role;
     info.role_negotiated = state.role_negotiated;
     info.peer_paths_limits.clone_from(&state.peer_paths_limits);
@@ -304,7 +422,7 @@ fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSe
 
 /// A manager-owned max-prefix latch overrides the session's error and action.
 /// The remaining hold-down is computed when the row is completed.
-fn apply_max_prefix_latch(
+pub(super) fn apply_max_prefix_latch(
     info: &mut PeerInfo,
     error: &str,
     deadline: Option<tokio::time::Instant>,
@@ -669,6 +787,7 @@ impl PeerManager {
         if let Some(latch) = self.max_prefix_latches.get(peer) {
             apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
         }
+        self.apply_configured_identity(&mut info, peer, &self.non_numeric_remote_asn_modes());
         Some(info)
     }
 
@@ -682,6 +801,7 @@ impl PeerManager {
         // sender (the sender is `Clone`; the handle proper is not).
         let states = collect_session_states(&self.peers).await;
 
+        let modes = self.non_numeric_remote_asn_modes();
         let mut infos = Vec::with_capacity(self.peers.len());
         for (peer, managed) in &self.peers {
             let session_state = states.get(peer).and_then(|outcome| match outcome {
@@ -698,9 +818,67 @@ impl PeerManager {
             if let Some(latch) = self.max_prefix_latches.get(peer) {
                 apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
             }
+            self.apply_configured_identity(&mut info, peer, &modes);
             infos.push(info);
         }
+        infos.extend(self.unbound_interface_only_infos());
         infos
+    }
+
+    /// The configured neighbors whose `remote_asn` is `external` or
+    /// `internal`, keyed by address (empty for an interface-only neighbor)
+    /// and interface: one pass over the configuration per snapshot, and
+    /// empty for an all-numeric route-server inventory.
+    pub(super) fn non_numeric_remote_asn_modes(&self) -> RemoteAsnModes {
+        use rustbgpd_api::peer_types::RemoteAsnMode;
+        self.current_config
+            .neighbors
+            .all()
+            .filter_map(|neighbor| {
+                let mode = match neighbor.remote_asn {
+                    crate::config::RemoteAsn::External => RemoteAsnMode::External,
+                    crate::config::RemoteAsn::Internal => RemoteAsnMode::Internal,
+                    crate::config::RemoteAsn::Asn(_) => return None,
+                };
+                Some(((neighbor.address.clone(), neighbor.interface.clone()), mode))
+            })
+            .collect()
+    }
+
+    /// Fill the parts of a row the configuration owns: the `remote_asn` mode
+    /// from `modes` (numeric for a dynamic neighbor), and the discovery state
+    /// of an interface-only neighbor's bound peer.
+    pub(super) fn apply_configured_identity(
+        &self,
+        info: &mut PeerInfo,
+        peer: &PeerKey,
+        modes: &RemoteAsnModes,
+    ) {
+        use rustbgpd_api::peer_types::{InterfaceOnlyState, NeighborDiscoveryState, RemoteAsnMode};
+        // A bound interface-only peer's stanza has no address; no static
+        // neighbor may share its interface.
+        info.remote_asn_mode = if modes.is_empty() {
+            RemoteAsnMode::Numeric
+        } else {
+            modes
+                .get(&(peer.address.to_string(), peer.interface.clone()))
+                .or_else(|| {
+                    peer.interface
+                        .as_ref()
+                        .and_then(|interface| modes.get(&(String::new(), Some(interface.clone()))))
+                })
+                .copied()
+                .unwrap_or(RemoteAsnMode::Numeric)
+        };
+        if self.unnumbered_owner_of(peer).is_some() {
+            info.interface_only = Some(InterfaceOnlyState {
+                discovery: NeighborDiscoveryState::Bound,
+                learned_address: match peer.address {
+                    IpAddr::V6(address) => Some(address),
+                    IpAddr::V4(_) => None,
+                },
+            });
+        }
     }
 
     /// Serve a `ListPeers` admitted at a transaction wait without holding the
@@ -747,25 +925,37 @@ impl PeerManager {
             reserved.push((peer, managed, permit));
         }
         let ebgp_requires_policy = self.current_config.rfc8212_posture().policy_effective;
-        let rows = reserved
-            .into_iter()
-            .map(|(peer, managed, permit)| DetachedPeerRow {
-                info: PeerInfo {
-                    bmp_identity_excluded: self.bmp_excluded.contains(peer),
-                    ..manager_peer_info(peer, managed, ebgp_requires_policy)
-                },
-                md5_configured: managed.transport_config.md5_password.is_some(),
-                latch: self
-                    .max_prefix_latches
-                    .get(peer)
-                    .map(|latch| (latch.error.clone(), latch.deadline)),
-                state: permit.map(|permit| {
-                    let (state_tx, state_rx) = oneshot::channel();
-                    permit.send(PeerCommand::QueryState { reply: state_tx });
-                    state_rx
-                }),
-            })
-            .collect();
+        let modes = self.non_numeric_remote_asn_modes();
+        let rows =
+            reserved
+                .into_iter()
+                .map(|(peer, managed, permit)| DetachedPeerRow {
+                    info: {
+                        let mut info = manager_peer_info(peer, managed, ebgp_requires_policy);
+                        self.apply_configured_identity(&mut info, peer, &modes);
+                        info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
+                        info
+                    },
+                    md5_configured: managed.transport_config.md5_password.is_some(),
+                    latch: self
+                        .max_prefix_latches
+                        .get(peer)
+                        .map(|latch| (latch.error.clone(), latch.deadline)),
+                    state: permit.map(|permit| {
+                        let (state_tx, state_rx) = oneshot::channel();
+                        permit.send(PeerCommand::QueryState { reply: state_tx });
+                        state_rx
+                    }),
+                })
+                .chain(self.unbound_interface_only_infos().into_iter().map(|info| {
+                    DetachedPeerRow {
+                        info,
+                        md5_configured: false,
+                        latch: None,
+                        state: None,
+                    }
+                }))
+                .collect();
         self.detached_list_peers
             .spawn(complete_detached_list_peers(rows, reply, deadline));
         Ok(())

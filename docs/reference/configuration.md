@@ -2987,7 +2987,11 @@ values and unknown table keys are rejected.
 and RFC 8956 IPv6 destination constraints. Infeasible received candidates remain
 available for diagnostics but cannot be newly selected or advertised. Local API
 injection remains trusted origination; it does not claim received-route validation.
-There are no per-peer exemptions or destinationless-rule bypass settings. See
+There are no per-peer exemptions or destinationless-rule bypass settings.
+Without an `ORIGINATOR_ID`, the originator is the advertising neighbor's
+address, and a link-local originator is compared together with its interface,
+so neighbors that share a link-local address on different interfaces are
+different originators. See
 [ADR-0135](../adr/0135-flowspec-feasibility.md) for the exact validation and
 revalidation semantics.
 

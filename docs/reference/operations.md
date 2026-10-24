@@ -3310,6 +3310,14 @@ rbgp neighbor 203.0.113.2 add --remote-asn 65002 --role provider --strict-role
 The peer is persisted to the config file automatically. `--role` enables RFC
 9234 BGP Roles / OTC route-leak protection for static eBGP peers; the optional
 `--strict-role` flag rejects peers that do not advertise a compatible Role.
+`--remote-asn` also takes `external` (any AS except the local one) or
+`internal` (the local AS), as `remote_asn` does in the configuration file;
+`rbgp neighbor <addr>` then shows the mode with the session's AS beside it,
+for example `external (session 65009)`.
+
+An interface-only neighbor is selected by its interface name, as in
+`rbgp neighbor swp1`; the table lists it as `swp1 (fe80::2)`, or `swp1 (-)`
+until its peer's address is learned.
 
 ### Remove a peer
 
