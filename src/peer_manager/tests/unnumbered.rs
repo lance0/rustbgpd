@@ -2412,6 +2412,15 @@ async fn a_static_add_is_refused_against_a_learned_endpoint_before_any_effect() 
             assert!(h.mgr.peers.contains_key(&swp1_key(2)));
         }
         let before = h.mgr.current_config.clone();
+        let refused_before = bmp_identity_conflict_metric(&h.mgr.metrics, "refused");
+        // The reload route's preflight refuses it first.
+        let route = Arc::new(());
+        let error = h
+            .mgr
+            .preflight_reload_generation(&candidate, Arc::downgrade(&route))
+            .unwrap_err();
+        assert!(error.contains("bmp_identity_conflict"), "{state}: {error}");
+        drop(route);
         // Mutation-red: without the static check the generation adds it.
         let outcome = Box::pin(h.mgr.apply_reload_generation(
             candidate.clone(),
@@ -2428,6 +2437,12 @@ async fn a_static_add_is_refused_against_a_learned_endpoint_before_any_effect() 
         assert!(error.contains("swp1"), "{state}: names the holder: {error}");
         assert_eq!(h.mgr.current_config, before, "{state}");
         assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "{state}");
+        // Reload preflights are read-only: neither counts an admission.
+        assert_eq!(
+            bmp_identity_conflict_metric(&h.mgr.metrics, "refused"),
+            refused_before,
+            "{state}"
+        );
     }
 }
 
@@ -4064,6 +4079,8 @@ async fn an_rpc_static_add_against_a_learned_address_changes_nothing() {
         }
         for interface in ["lo", "swp1"] {
             let before = h.mgr.current_config.clone();
+            let refused_before =
+                bmp_identity_conflict_metric(&h.mgr.metrics, "refused").unwrap_or(0.0);
             // Mutation-red: without the preflight the add replaces the
             // config, fails admission and is reported as compensated.
             let error = refused(
@@ -4076,9 +4093,21 @@ async fn an_rpc_static_add_against_a_learned_address_changes_nothing() {
                         message.contains("bmp_identity_conflict") && message.contains("swp1"),
                         "{state}: names the reason and the holder: {message}"
                     );
+                    // Mutation-red: the RPC admission refuses it without
+                    // counting the identity conflict.
+                    assert_eq!(
+                        bmp_identity_conflict_metric(&h.mgr.metrics, "refused"),
+                        Some(refused_before + 1.0),
+                        "{state}: counted once"
+                    );
                 }
                 (rustbgpd_api::peer_types::PeerLifecycleError::AlreadyExists(key), "swp1") => {
                     assert_eq!(*key, swp1_key(2), "{state}");
+                    assert_eq!(
+                        bmp_identity_conflict_metric(&h.mgr.metrics, "refused"),
+                        Some(refused_before),
+                        "{state}: not an identity conflict"
+                    );
                 }
                 _ => panic!("{state} {interface}: {error:?}"),
             }

@@ -663,9 +663,15 @@ impl PeerManager {
             )));
         }
         // ADR-0142: a static link-local add is refused before any effect
-        // when a learned endpoint holds its address, bound or reserved.
-        self.unnumbered_preflight(&next_config)
-            .map_err(PeerLifecycleError::Precondition)?;
+        // when a learned endpoint holds its address, bound or reserved. This
+        // RPC is the admission, so a BMP identity refusal is counted here;
+        // the read-only plan and reload preflights never count one.
+        self.unnumbered_preflight(&next_config).map_err(|error| {
+            if error.starts_with("bmp_identity_conflict:") {
+                self.metrics.record_bmp_identity_conflict(false);
+            }
+            PeerLifecycleError::Precondition(error)
+        })?;
 
         let previous_config = self.replace_current_config(next_config);
         match self.add_peer(config, false).await {
