@@ -816,9 +816,10 @@ impl PeerManager {
             };
 
         // Whatever BMP does, state keyed by the bare address (BFD, the TCP
-        // MD5/TCP-AO and GTSM listener policy, a per-neighbor log level)
-        // cannot serve two neighbors at one address: refuse a learned or
-        // runtime neighbor that would put such a feature on a shared address.
+        // MD5/TCP-AO listener keys, and beside a static neighbor the GTSM
+        // listener policy and a per-neighbor log level) cannot serve two
+        // neighbors at one address: refuse a learned or runtime neighbor
+        // that would put such a feature on a shared address.
         if let Some(reason) = self.shared_address_feature_conflict(
             &peer_key,
             next_config.as_ref().unwrap_or(&self.current_config),

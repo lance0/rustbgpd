@@ -460,7 +460,12 @@ lists same-address neighbors as separate entries.
 Whatever BMP does, state keyed by the bare address (BFD, the TCP MD5, TCP-AO
 and GTSM listener policy, a per-neighbor log level) cannot serve two
 neighbors, so a learned or runtime neighbor that would put such a feature on
-a shared address is refused with `shared_address_feature`. The reload and
+a shared address is refused with `shared_address_feature`. GTSM and the log
+level are exempt when every neighbor at the address is interface-only: the
+learned-endpoint GTSM selector is keyed by address and arrival interface, and
+the level directive by the `interface:<name>` label, so neither reaches
+another link. A static neighbor's selector and directive match the bare
+address, so a group with one keeps both refusals. The reload and
 transaction preflight checks a candidate against the live endpoints: a static
 neighbor it adds at a learned address under a refusing collector, or a
 feature it gives neighbors already sharing an address, refuses the whole

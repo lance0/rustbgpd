@@ -502,6 +502,10 @@ impl Config {
     /// - GTSM: the passive listener selects its TTL-security policy by peer
     ///   address, so the pair must agree on the effective `ttl_security`
     ///   and `ttl_security_hops`.
+    ///
+    /// Interface-only neighbors bound at one learned address are keyed by
+    /// interface for the last two, so a group of only those may differ
+    /// there (`validate_shared_address_features`).
     fn validate_same_address_neighbors(&self) -> Result<(), ConfigError> {
         let mut by_address: std::collections::BTreeMap<IpAddr, Vec<&Neighbor>> =
             std::collections::BTreeMap::new();
@@ -540,6 +544,13 @@ impl Config {
     /// not use, because their state is keyed by the bare address: BFD, TCP
     /// MD5 and TCP-AO, and a differing `log_level` or GTSM policy. Also
     /// checked at runtime admission, where a learned address joins the group.
+    ///
+    /// When every member is an interface-only neighbor bound at the learned
+    /// address, `log_level` and GTSM may differ: its level directive matches
+    /// the session's `interface:<name>` label, and its GTSM is the
+    /// listener's learned-endpoint selector, keyed by address and arrival
+    /// interface. A static member's selector and directive match the bare
+    /// address, so any group with one keeps both refusals.
     pub(crate) fn validate_shared_address_features(
         &self,
         group: &[&Neighbor],
@@ -579,6 +590,12 @@ impl Config {
                         ),
                     ));
                 }
+            }
+            if group
+                .iter()
+                .all(|neighbor| self.is_bound_interface_only(neighbor))
+            {
+                return Ok(());
             }
             let level = |neighbor: &Neighbor| {
                 let group = self.peer_group_for_neighbor(neighbor).ok().flatten();
@@ -636,6 +653,18 @@ impl Config {
                 BmpIdentityConflict::Refuse
             },
         )
+    }
+
+    /// Whether `record` is an interface-only neighbor bound at a learned
+    /// address, as [`Config::neighbor_record`] returns it, rather than a
+    /// static `[[neighbors]]` entry.
+    fn is_bound_interface_only(&self, record: &Neighbor) -> bool {
+        !self.neighbors.iter().any(|neighbor| {
+            neighbor.address == record.address && neighbor.interface == record.interface
+        }) && record
+            .interface
+            .as_deref()
+            .is_some_and(|interface| self.neighbors.interface_only_on(interface).is_some())
     }
 
     /// A neighbor's effective GTSM hop limit, `None` when GTSM is off,
