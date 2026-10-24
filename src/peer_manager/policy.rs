@@ -336,6 +336,22 @@ impl PolicySnapshotFailure {
         }
     }
 
+    /// The settlement outcome this failure reports to an owned caller.
+    pub(super) fn into_owned_outcome(self) -> OwnedCatalogMutationOutcome {
+        let error = self.closed_catalog_error();
+        match self.kind {
+            PolicySnapshotFailureKind::RejectedNoEffect => {
+                OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+            }
+            PolicySnapshotFailureKind::FullyCompensated => {
+                OwnedCatalogMutationOutcome::FullyCompensated(error)
+            }
+            PolicySnapshotFailureKind::CompensationAmbiguous => {
+                OwnedCatalogMutationOutcome::CompensationAmbiguous(error)
+            }
+        }
+    }
+
     fn closed_catalog_error(&self) -> CatalogMutationError {
         match self.kind {
             PolicySnapshotFailureKind::RejectedNoEffect => {
@@ -502,40 +518,6 @@ fn record_import_validation_refresh_metrics(
         metric_count(skipped_state_unknown),
     );
     metrics.record_validation_import_refresh(dependency_label, "failed", metric_count(failed));
-}
-
-impl PeerManager {
-    /// ADR-0142: a bound interface-only peer takes its session settings only
-    /// when it binds. A runtime catalog edit that would change them (a
-    /// peer-group transport knob, `admin_down`, max-prefix restart) cannot
-    /// reach its running session, so it is refused before any effect rather
-    /// than applied to every other member and silently skipped for it.
-    /// Policy-only edits never reach here: they apply to bound peers live.
-    pub(super) fn refuse_interface_only_session_change(
-        &self,
-        event: &ConfigEvent,
-    ) -> Result<(), CatalogMutationError> {
-        if self.current_config.neighbors.interface_only().is_empty() {
-            return Ok(());
-        }
-        let mut candidate = self.current_config.clone();
-        // An event that does not apply is reported by the change path itself.
-        if apply_config_event(&mut candidate, event).is_err() {
-            return Ok(());
-        }
-        let changed =
-            crate::config::interface_only_session_changes(&self.current_config, &candidate);
-        if changed.is_empty() {
-            Ok(())
-        } else {
-            Err(CatalogMutationError::RestartRequired(format!(
-                "this change alters the session settings of the interface-only neighbor on {}, \
-                 which a bound peer takes only when it binds; make it in the configuration file \
-                 and restart rustbgpd",
-                changed.join(", ")
-            )))
-        }
-    }
 }
 
 impl PeerManager {
@@ -4321,19 +4303,7 @@ impl PeerManager {
                 self.publish_policy_config_event(&event, applied);
                 OwnedCatalogMutationOutcome::Success
             }
-            Err(failure) => match failure.kind {
-                PolicySnapshotFailureKind::RejectedNoEffect => {
-                    OwnedCatalogMutationOutcome::RejectedNoEffect(failure.closed_catalog_error())
-                }
-                PolicySnapshotFailureKind::FullyCompensated => {
-                    OwnedCatalogMutationOutcome::FullyCompensated(failure.closed_catalog_error())
-                }
-                PolicySnapshotFailureKind::CompensationAmbiguous => {
-                    OwnedCatalogMutationOutcome::CompensationAmbiguous(
-                        failure.closed_catalog_error(),
-                    )
-                }
-            },
+            Err(failure) => failure.into_owned_outcome(),
         }
     }
 
@@ -4396,19 +4366,7 @@ impl PeerManager {
             .await
         {
             Ok(_) => OwnedCatalogMutationOutcome::Success,
-            Err(failure) => match failure.kind {
-                PolicySnapshotFailureKind::RejectedNoEffect => {
-                    OwnedCatalogMutationOutcome::RejectedNoEffect(failure.closed_catalog_error())
-                }
-                PolicySnapshotFailureKind::FullyCompensated => {
-                    OwnedCatalogMutationOutcome::FullyCompensated(failure.closed_catalog_error())
-                }
-                PolicySnapshotFailureKind::CompensationAmbiguous => {
-                    OwnedCatalogMutationOutcome::CompensationAmbiguous(
-                        failure.closed_catalog_error(),
-                    )
-                }
-            },
+            Err(failure) => failure.into_owned_outcome(),
         }
     }
 
@@ -4985,6 +4943,10 @@ impl PeerManager {
         result
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the legacy peer-group path keeps validation, the interface-only policy deltas, apply and their restore in one auditable flow"
+    )]
     async fn apply_peer_group_change_inner(
         &mut self,
         event: ConfigEvent,
@@ -5054,9 +5016,17 @@ impl PeerManager {
             && crate::config::peer_group_change_hot_applicable(old_group, new_group)
         {
             let name = name.clone();
-            return self
+            let policy_priors = self
+                .apply_interface_only_policy_deltas(&next_config)
+                .await
+                .map_err(|failure| CatalogMutationError::internal(failure.message))?;
+            let result = self
                 .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
                 .await;
+            if result.is_err() {
+                self.restore_interface_only_policies(policy_priors).await;
+            }
+            return result;
         }
 
         // ADR-0081: resolve every affected member's next config BEFORE
@@ -5104,10 +5074,19 @@ impl PeerManager {
             targets.push(Self::peer_manager_config_from_resolved(resolved, false));
         }
 
-        let priors = self
-            .apply_peer_reshape_snapshot(targets)
+        // ADR-0142: interface-only members that will not rebind take their
+        // new chains live, and get them back if the static members fail.
+        let policy_priors = self
+            .apply_interface_only_policy_deltas(&next_config)
             .await
-            .map_err(CatalogMutationError::from)?;
+            .map_err(|failure| CatalogMutationError::internal(failure.message))?;
+        let priors = match self.apply_peer_reshape_snapshot(targets).await {
+            Ok(priors) => priors,
+            Err(error) => {
+                self.restore_interface_only_policies(policy_priors).await;
+                return Err(CatalogMutationError::from(error));
+            }
+        };
 
         self.replace_current_config(next_config);
         if let Some(group) = purge_dynamic_group.as_deref() {
@@ -5210,13 +5189,22 @@ impl PeerManager {
             && crate::config::peer_group_change_hot_applicable(old_group, new_group)
         {
             let name = name.clone();
-            return match self
+            let policy_priors = match self.apply_interface_only_policy_deltas(&next_config).await {
+                Ok(priors) => priors,
+                Err(failure) => return failure.into_owned_outcome(),
+            };
+            // The hot cohort's own restore is best-effort, so its failure is
+            // ambiguous.
+            let outcome = match self
                 .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
                 .await
             {
                 Ok(()) => OwnedCatalogMutationOutcome::Success,
                 Err(error) => OwnedCatalogMutationOutcome::CompensationAmbiguous(error),
             };
+            return self
+                .settle_interface_only_policies(policy_priors, outcome)
+                .await;
         }
 
         let mut seen = BTreeSet::new();
@@ -5254,19 +5242,33 @@ impl PeerManager {
             targets.push(Self::peer_manager_config_from_resolved(resolved, false));
         }
 
-        let priors = match self
+        // ADR-0142: interface-only members that will not rebind take their
+        // new chains live first; a static-member failure puts them back.
+        let policy_priors = match self.apply_interface_only_policy_deltas(&next_config).await {
+            Ok(priors) => priors,
+            Err(failure) => return failure.into_owned_outcome(),
+        };
+        let reshaped = match self
             .apply_peer_reshape_snapshot_classified(targets, None, &mut None)
             .await
         {
-            PeerReshapeSnapshotOutcome::Success(priors) => priors,
+            PeerReshapeSnapshotOutcome::Success(priors) => Ok(priors),
             PeerReshapeSnapshotOutcome::RejectedNoEffect(error) => {
-                return OwnedCatalogMutationOutcome::RejectedNoEffect(error.into());
+                Err(OwnedCatalogMutationOutcome::RejectedNoEffect(error.into()))
             }
             PeerReshapeSnapshotOutcome::FullyCompensated(error) => {
-                return OwnedCatalogMutationOutcome::FullyCompensated(error.into());
+                Err(OwnedCatalogMutationOutcome::FullyCompensated(error.into()))
             }
-            PeerReshapeSnapshotOutcome::CompensationAmbiguous(error) => {
-                return OwnedCatalogMutationOutcome::CompensationAmbiguous(error.into());
+            PeerReshapeSnapshotOutcome::CompensationAmbiguous(error) => Err(
+                OwnedCatalogMutationOutcome::CompensationAmbiguous(error.into()),
+            ),
+        };
+        let priors = match reshaped {
+            Ok(priors) => priors,
+            Err(outcome) => {
+                return self
+                    .settle_interface_only_policies(policy_priors, outcome)
+                    .await;
             }
         };
 
@@ -5284,6 +5286,34 @@ impl PeerManager {
         self.reconcile_stale_dynamic_max_prefix_restarts();
         self.publish_policy_config_event(&event, priors.len());
         OwnedCatalogMutationOutcome::Success
+    }
+
+    /// Every exit of a typed peer-group edit between
+    /// [`Self::apply_interface_only_policy_deltas`] and adopting the
+    /// candidate goes through here. A
+    /// failure gives the interface-only members their prior chains back: a
+    /// clean rejection becomes compensated, since the deltas had an effect,
+    /// and a failed restore or an already ambiguous outcome is ambiguous.
+    async fn settle_interface_only_policies(
+        &mut self,
+        priors: Vec<ResolvedPeerPolicy>,
+        outcome: OwnedCatalogMutationOutcome,
+    ) -> OwnedCatalogMutationOutcome {
+        let error = match outcome {
+            OwnedCatalogMutationOutcome::Success => return outcome,
+            _ if priors.is_empty() => return outcome,
+            OwnedCatalogMutationOutcome::CompensationAmbiguous(error) => {
+                self.restore_interface_only_policies(priors).await;
+                return OwnedCatalogMutationOutcome::CompensationAmbiguous(error);
+            }
+            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+            | OwnedCatalogMutationOutcome::FullyCompensated(error) => error,
+        };
+        if self.restore_interface_only_policies(priors).await {
+            OwnedCatalogMutationOutcome::FullyCompensated(error)
+        } else {
+            OwnedCatalogMutationOutcome::CompensationAmbiguous(error)
+        }
     }
 
     /// Purge-reset every live dynamic session inheriting `group` after the

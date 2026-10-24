@@ -361,6 +361,7 @@ pub async fn attach(
         client.set_neighbor_peer_group(SetNeighborPeerGroupRequest {
             address: address.to_string(),
             peer_group: group.to_string(),
+            interface: String::new(),
         }),
     )
     .await?;
@@ -381,6 +382,7 @@ pub async fn detach(connection: Connection, address: &str, json: bool) -> Result
         &format!("`rbgp neighbor {address}`"),
         client.clear_neighbor_peer_group(ClearNeighborPeerGroupRequest {
             address: address.to_string(),
+            interface: String::new(),
         }),
     )
     .await?;

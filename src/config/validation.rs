@@ -920,6 +920,15 @@ impl Config {
                             reason: "interface must not be empty".to_string(),
                         });
                     }
+                    // No Linux interface name holds whitespace; a padded one
+                    // would never match the interface the kernel reports.
+                    (Some(interface), true) if interface.contains(char::is_whitespace) => {
+                        return Err(ConfigError::InvalidNeighborConfig {
+                            address: neighbor.address.clone(),
+                            field: "interface".to_string(),
+                            reason: "interface must not contain whitespace".to_string(),
+                        });
+                    }
                     (Some(_), false) => {
                         return Err(ConfigError::InvalidNeighborConfig {
                             address: neighbor.address.clone(),

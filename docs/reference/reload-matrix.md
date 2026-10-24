@@ -296,10 +296,14 @@ that rebuild sessions still require fresh scope resolution during planning.
 
 An `[[neighbors]]` entry with `interface` and no `address`
 ([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)) is keyed by
-its interface. SIGHUP and config transactions add, delete and edit these
-neighbors without a restart. A SIGHUP carries the change as one owned
-generation; a candidate that would take the sequential route is rejected.
-A transaction stages the full candidate, and nothing happens until the commit.
+its interface. SIGHUP, config transactions and the neighbor and peer-group
+RPCs add, delete and edit these neighbors without a restart. A SIGHUP carries
+the change as one owned generation; a candidate that would take the
+sequential route is rejected. A transaction stages the full candidate, and
+nothing happens until the commit. `AddNeighbor` and `DeleteNeighbor` select
+the neighbor by an empty address and its `interface`, and a `SetPeerGroup`
+edit reaches its members as a reload does (see the
+[API reference](api.md#interface-only-neighbors)).
 
 The peer manager then brings each interface's state in line with the running
 configuration:
@@ -307,7 +311,7 @@ configuration:
 | Change | Effect |
 |---|---|
 | Neighbor added | Discovery starts on the interface. Adding the first interface-only neighbor also starts the discovery actor. A peer is created once an address is learned, as at startup. |
-| Neighbor deleted | Its session ends, its Adj-RIB-In (including retained Graceful Restart and LLGR routes) is purged, and its RIB identity is released. This also releases the learned address it held or reserved, so another neighbor may take that address. Discovery stops on the interface, after a final Router Advertisement with lifetime 0 when it was advertising. Deleting the last interface-only neighbor stops the discovery actor and closes its raw sockets. |
+| Neighbor deleted | Its session ends, its Adj-RIB-In (including retained Graceful Restart and LLGR routes) is purged, and its RIB identity is released. This also releases the learned address it held or reserved, so another neighbor may take that address. Discovery stops on the interface, after a final Router Advertisement with lifetime 0 when it was advertising, and its `peer="interface:<name>"` metric series, including `bgp_unnumbered_*`, are removed, bound or not. Deleting the last interface-only neighbor stops the discovery actor and closes its raw sockets. |
 | Session settings edited, directly or through the peer group (`remote_asn`, including `"external"`/`"internal"`, `peer_group` membership, timers, families, `admin_down`, max-prefix settings, `description`, and so on) | A bound peer is rebound at once to the same learned address under the new settings, including an address learned from an inbound connection. This resets the session and keeps the neighbor's RIB identity and a max-prefix shutdown. A changed `admin_down` takes effect; otherwise an operator's enable or disable is kept, as for a static neighbor. An unbound neighbor uses the new settings when it next binds. `rustbgpd --diff` counts the neighbor as a session reset. |
 | `ttl_security`, directly or through the peer group | A session-settings edit, rebound as above. When the change gives an interface-only neighbor GTSM, the IPv6 listener's outbound Hop Limit is raised to 255 before the neighbor can bind, so an RA-silent GTSM peer that dials in is learned. It is never lowered. A deleted or rebound neighbor's listener selector is removed after its peer. |
 | Policy-only edit (`import_policy*`, `export_policy*`, policy definitions) | Live, as for a static neighbor; the session is kept. A config transaction applies it to the bound peer through the live-policy executor, which restores the prior chains if persistence fails. |
@@ -329,6 +333,8 @@ A SIGHUP checks them before its first effect, including an outbound prefix
 maximum or listener authentication change, and discovery cannot bind the
 added static address until the reload has applied. A config transaction
 checks them when it plans and again when it stages the snapshot.
+`AddNeighbor` checks them before it changes the running configuration and
+returns `FAILED_PRECONDITION`.
 
 `[global.unnumbered]` stays restart-required (see `[global]`).
 

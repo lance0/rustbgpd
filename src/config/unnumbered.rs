@@ -362,8 +362,8 @@ impl JsonSchema for NeighborList {
 /// Interface-only neighbors whose own record is unchanged but whose resolved
 /// bind-time settings differ, through a peer-group edit for example
 /// (transport knobs, `admin_down`, max-prefix restart). A bound peer takes
-/// them only when it binds, so these are restart-required for that
-/// neighbor; policy chains still follow live.
+/// them only when it binds, so the port reconcile rebinds it; policy chains
+/// still follow live.
 #[must_use]
 pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<&'a str> {
     let session = |config: &Config, neighbor: &Neighbor| config.bind_time_settings(neighbor);
@@ -612,6 +612,15 @@ impl Config {
                     neighbor,
                     "interface",
                     "interface must not be empty",
+                ));
+            }
+            // As for a static link-local neighbor: discovery and the
+            // selectors would never match a padded name.
+            if interface.contains(char::is_whitespace) {
+                return Err(invalid(
+                    neighbor,
+                    "interface",
+                    "interface must not contain whitespace",
                 ));
             }
             if !seen.insert(interface) {

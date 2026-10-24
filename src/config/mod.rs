@@ -8,10 +8,12 @@ mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
 mod unnumbered;
+#[cfg(test)]
+pub(crate) use unnumbered::interface_only_session_changes;
 pub(crate) use unnumbered::{BindTimeProjection, pin_reload_tcp_mss};
 pub use unnumbered::{
     NeighborList, RemoteAsn, UnnumberedConfig, interface_only_neighbors_changed,
-    interface_only_rebinds, interface_only_session_changes, unnumbered_settings_changed,
+    interface_only_rebinds, unnumbered_settings_changed,
 };
 mod validation;
 
