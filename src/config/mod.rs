@@ -38,6 +38,8 @@ use rustbgpd_wire::{
     LargeCommunity, MacAddress, Prefix, RouteDistinguisher, Safi,
 };
 
+#[cfg(test)]
+pub(crate) use resolution::POLICY_RESOLUTIONS;
 pub(crate) use resolution::UnpolicedEbgpBoundary;
 #[allow(
     unused_imports,

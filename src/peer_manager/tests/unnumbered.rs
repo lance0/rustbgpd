@@ -1177,6 +1177,100 @@ async fn listed_rows_report_discovery_state_learned_address_and_mode() {
     );
 }
 
+/// Unbound interface-only rows are projected from configured settings: a
+/// listing compiles no policy chain, and each row's RFC 8212 status is the
+/// one the neighbor's compiled chains give.
+#[tokio::test]
+async fn unbound_rows_compile_no_policy_and_keep_the_compiled_rfc8212_status() {
+    use rustbgpd_api::peer_types::Rfc8212PolicyStatus as Status;
+    let mut h = harness(&["swp1", "swp2", "swp3"], &[("swp1", 7, true)]);
+    h.mgr.current_config = toml::from_str(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.permit-all]
+default_action = "permit"
+
+[peer_groups.edge]
+export_policy_chain = ["permit-all"]
+
+[[neighbors]]
+interface = "swp1"
+remote_asn = "external"
+import_policy_chain = ["permit-all"]
+export_policy_chain = ["permit-all"]
+
+[[neighbors]]
+interface = "swp2"
+remote_asn = "external"
+peer_group = "edge"
+
+[[neighbors]]
+interface = "swp3"
+remote_asn = "internal"
+"#,
+    )
+    .unwrap();
+
+    let before = crate::config::POLICY_RESOLUTIONS.with(std::cell::Cell::get);
+    let rows = h.mgr.list_peers().await;
+    // Mutation-red: resolving each unbound row's chains counts here.
+    assert_eq!(
+        crate::config::POLICY_RESOLUTIONS.with(std::cell::Cell::get),
+        before,
+        "no policy compiled for unbound rows"
+    );
+    assert_eq!(rows.len(), 3);
+    let enforced_by = h.mgr.current_config.rfc8212_posture().policy_effective;
+    for (interface, expected) in [
+        ("swp1", (Status::Present, Status::Present)),
+        ("swp2", (Status::Missing, Status::Present)),
+        ("swp3", (Status::NotRequired, Status::NotRequired)),
+    ] {
+        let row = rows
+            .iter()
+            .find(|info| info.interface.as_deref() == Some(interface))
+            .unwrap();
+        let reported = (row.rfc8212_import_policy, row.rfc8212_export_policy);
+        assert_eq!(reported, expected, "{interface}");
+        let neighbor = h
+            .mgr
+            .current_config
+            .neighbors
+            .interface_only_on(interface)
+            .unwrap();
+        let compiled = h
+            .mgr
+            .current_config
+            .resolve_bound_interface_neighbor(neighbor, ll(1), 0)
+            .unwrap();
+        let enforced = enforced_by && compiled.rfc8212_external;
+        assert_eq!(
+            reported,
+            (
+                super::snapshot::rfc8212_status(
+                    enforced,
+                    compiled.import_policy.as_ref(),
+                    crate::config::RFC8212_MISSING_IMPORT_POLICY,
+                ),
+                super::snapshot::rfc8212_status(
+                    enforced,
+                    compiled.export_policy.as_ref(),
+                    crate::config::RFC8212_MISSING_EXPORT_POLICY,
+                ),
+            ),
+            "{interface}: as the compiled chains report"
+        );
+    }
+}
+
 /// A bound session that answers its state query with `reported`, and then,
 /// before it handles its next command, processes a KEEPALIVE and becomes
 /// Established: the actor's own command order pins the race between the

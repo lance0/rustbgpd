@@ -276,9 +276,12 @@ fn manager_peer_info(
 /// The row of an interface-only neighbor with no bound peer (ADR-0142): its
 /// configured settings, resolved as they would be at binding, with no
 /// session. `address` is unspecified and the API reports none.
+/// `policy_present` is the configured (import, export) policy presence; the
+/// row compiles no chain.
 pub(super) fn unbound_interface_only_info(
     interface: &str,
     resolved: &crate::config::ResolvedNeighbor,
+    policy_present: (bool, bool),
     enabled: bool,
     ebgp_requires_policy: bool,
     state: rustbgpd_api::peer_types::InterfaceOnlyState,
@@ -358,16 +361,8 @@ pub(super) fn unbound_interface_only_info(
         // No session can be stale; there is none.
         stale: false,
         slow_peer: false,
-        rfc8212_import_policy: rfc8212_status(
-            enforced,
-            resolved.import_policy.as_ref(),
-            RFC8212_MISSING_IMPORT_POLICY,
-        ),
-        rfc8212_export_policy: rfc8212_status(
-            enforced,
-            resolved.export_policy.as_ref(),
-            RFC8212_MISSING_EXPORT_POLICY,
-        ),
+        rfc8212_import_policy: rfc8212_presence_status(enforced, policy_present.0),
+        rfc8212_export_policy: rfc8212_presence_status(enforced, policy_present.1),
         remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
         negotiated_remote_asn: None,
         interface_only: Some(state),
@@ -516,6 +511,17 @@ pub(super) fn rfc8212_statuses(
             RFC8212_MISSING_EXPORT_POLICY,
         ),
     )
+}
+
+/// [`rfc8212_status`] from configured presence alone: a governed direction
+/// with no operator policy resolves to the reserved deny (missing), and one
+/// with a policy to that chain (present).
+fn rfc8212_presence_status(enforced: bool, present: bool) -> Rfc8212PolicyStatus {
+    match (enforced, present) {
+        (false, _) => Rfc8212PolicyStatus::NotRequired,
+        (true, false) => Rfc8212PolicyStatus::Missing,
+        (true, true) => Rfc8212PolicyStatus::Present,
+    }
 }
 
 /// ADR-0112 directional status for one direction of one peer.
