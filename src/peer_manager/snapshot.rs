@@ -420,7 +420,7 @@ fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSe
 
 /// A manager-owned max-prefix latch overrides the session's error and action.
 /// The remaining hold-down is computed when the row is completed.
-fn apply_max_prefix_latch(
+pub(super) fn apply_max_prefix_latch(
     info: &mut PeerInfo,
     error: &str,
     deadline: Option<tokio::time::Instant>,
