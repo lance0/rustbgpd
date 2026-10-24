@@ -6360,6 +6360,61 @@ fn session_reshape_targets_require_missing_interface_resolution() {
     assert!(reason.contains("rbgp-missing"), "{reason}");
 }
 
+/// `fe80::5` on a missing interface (group `core`) and on `lo` (group
+/// `edge`, chain `f`): two neighbors that share one link-local address,
+/// listed so that a match by address alone finds the wrong one.
+fn same_address_policy_config(action: &str, hold_time: u32) -> Config {
+    assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
+    let source = format!(
+        r#"{}
+[peer_groups.edge]
+hold_time = {hold_time}
+
+[peer_groups.core]
+
+[[neighbors]]
+address = "fe80::5"
+interface = "rbgp-missing"
+remote_asn = 65005
+peer_group = "core"
+
+[[neighbors]]
+address = "fe80::5"
+interface = "lo"
+remote_asn = 65005
+peer_group = "edge"
+import_policy_chain = ["f"]
+"#,
+        live_policy_toml(action)
+    );
+    Config::load_toml_with_diagnostics(&source, "same-address policy config").unwrap()
+}
+
+#[test]
+fn transaction_targets_select_one_of_same_address_neighbors() {
+    let previous = same_address_policy_config("permit", 90);
+
+    let targets = resolve_live_policy_targets(&previous, &same_address_policy_config("deny", 90))
+        .unwrap()
+        .static_targets;
+    let scoped = targets
+        .iter()
+        .filter(|target| target.address == "fe80::5".parse::<std::net::IpAddr>().unwrap())
+        .map(|target| (target.interface.as_deref(), import_default_action(target)))
+        .collect::<Vec<_>>();
+    assert_eq!(scoped, [(Some("lo"), PolicyAction::Deny)]);
+
+    let reshape =
+        resolve_peer_session_reshape_targets(&previous, &same_address_policy_config("permit", 180))
+            .unwrap();
+    let reshaped = reshape
+        .static_targets
+        .iter()
+        .map(|target| (target.address.to_string(), target.interface.as_deref()))
+        .collect::<Vec<_>>();
+    assert_eq!(reshaped, [("fe80::5".to_string(), Some("lo"))]);
+}
+
 fn resolved_dynamic_policy_target(toml: &str, address: &str) -> ResolvedPeerPolicy {
     let config =
         Config::load_toml_with_diagnostics(toml, "dynamic policy config").expect("valid TOML");
@@ -9565,7 +9620,7 @@ fn candidate_state_for_peer(
     let mut states = impact
         .entries
         .iter()
-        .filter(|row| row.peer == peer)
+        .filter(|row| row.peer == peer.into())
         .map(|row| &row.candidate);
     let first = states
         .next()
@@ -9585,7 +9640,7 @@ fn planned_families(
     impact
         .entries
         .iter()
-        .filter(|row| row.peer == peer)
+        .filter(|row| row.peer == peer.into())
         .map(|row| (row.afi, row.safi))
         .collect()
 }
@@ -9739,7 +9794,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
             .update_group_impact
             .entries
             .iter()
-            .filter(|row| row.peer == peer)
+            .filter(|row| row.peer == peer.into())
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.transition == expected));
@@ -10080,7 +10135,7 @@ async fn config_transaction_plan_matches_real_post_apply_heterogeneous_update_gr
         let rows = impact
             .entries
             .iter()
-            .filter(|row| row.peer == *peer)
+            .filter(|row| row.peer == (*peer).into())
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].afi, rows[0].safi), (1, 1));

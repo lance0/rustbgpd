@@ -4837,7 +4837,7 @@ peer_group = "edge"
         .mgr
         .apply_peer_group_change(
             super::peer_groups::edge_group_max_prefixes_event(90, 5000),
-            vec![addr],
+            vec![peer.clone()],
         )
         .await
         .expect("inherited hot edit retains accepted scope");

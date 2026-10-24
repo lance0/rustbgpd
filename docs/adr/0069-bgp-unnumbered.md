@@ -277,6 +277,25 @@ The first Deferred item, interface-only autodiscovery, is decided in
 2026-10-21. Implementation is pending; static link-local neighbors are
 unchanged.
 
+## Amendment (2026-10-23): one link-local address on several interfaces
+
+The second Deferred item is now supported. The RIB keys every neighbor by a
+generational neighbor handle rather than its address, and the surfaces that
+render or key by neighbor (MRT, the BMP manager's caches, explain, metrics,
+per-neighbor RIB configuration and page cursors) follow it. Configuration
+therefore accepts the same IPv6 link-local address on more than one
+interface. The selection tie-break orders same-address neighbors by interface
+name, compared bytewise, never by handle or ifindex, so the winner does not
+depend on configuration or connection order.
+
+Features that still key state by the bare address are refused on such
+neighbors rather than run in a half-working mode: any BMP collector (a
+collector cannot tell the two sessions apart, so a Peer Down for one would
+apply to the other's routes), BFD, TCP MD5 and TCP-AO on the passive
+listener, differing per-neighbor `log_level` values, and differing effective
+GTSM policies, which the listener also selects by address. Dynamic neighbors
+are never link-local, so their address-keyed bookkeeping cannot collide.
+
 ## References
 
 - RFC 4007, IPv6 scoped address architecture:

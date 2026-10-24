@@ -6,7 +6,7 @@ use rustbgpd_api::peer_types::{
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::server::ConfigTransactionApplyError;
 
-use crate::config::{Config, Neighbor, diff_config};
+use crate::config::{Config, diff_config};
 use crate::peer_manager::{
     InternalCommand, TransactionConfigRollbackToken, TransactionConfigScope,
 };
@@ -103,11 +103,6 @@ pub(super) fn resolve_live_policy_targets(
     candidate: &Config,
 ) -> Result<LivePolicyTargets, ConfigTransactionApplyError> {
     let diff = diff_config(previous, candidate);
-    let candidate_by_addr: std::collections::HashMap<&str, &Neighbor> = candidate
-        .neighbors
-        .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
-        .collect();
     let dynamic_range_by_key: std::collections::HashMap<_, _> = candidate
         .dynamic_neighbors
         .iter()
@@ -169,10 +164,14 @@ pub(super) fn resolve_live_policy_targets(
             });
             continue;
         }
-        let Some(neighbor) = candidate_by_addr.get(impact.address.as_str()) else {
+        let Some(neighbor) = candidate
+            .neighbors
+            .iter()
+            .find(|neighbor| impact.names(neighbor))
+        else {
             return Err(ConfigTransactionApplyError::Internal(format!(
                 "live-policy impact references neighbor {} absent from the candidate",
-                impact.address
+                impact.label()
             )));
         };
         let address = neighbor.address.parse().map_err(|error| {

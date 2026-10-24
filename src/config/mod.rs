@@ -2778,6 +2778,10 @@ impl EffectiveNeighborImpactKind {
 #[derive(Debug, serde::Serialize)]
 pub struct EffectiveNeighborImpact {
     pub address: String,
+    /// The interface of a link-local neighbor; with `address` it names one
+    /// of several neighbors that share a link-local address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
     pub reasons: Vec<String>,
     /// Operator-visible impact kind. `policy_chain` commits through the
     /// live-policy executor; `session_reshape` commits through the session
@@ -2800,6 +2804,49 @@ pub struct EffectiveNeighborImpact {
     pub interface_only: Option<String>,
 }
 
+impl EffectiveNeighborImpact {
+    /// Whether this impact is for the static neighbor `neighbor`.
+    /// The impact on the `[[dynamic_neighbors]]` range `prefix`.
+    fn dynamic_range(
+        prefix: String,
+        reasons: Vec<String>,
+        kind: EffectiveNeighborImpactKind,
+    ) -> Self {
+        Self {
+            address: prefix,
+            interface: None,
+            reasons,
+            kind,
+            is_dynamic_range: true,
+            interface_only: None,
+        }
+    }
+
+    pub fn names(&self, neighbor: &Neighbor) -> bool {
+        !self.is_dynamic_range
+            && self.address == neighbor.address
+            && self.interface == neighbor.interface
+    }
+
+    /// The address, scoped to its interface for a link-local neighbor.
+    pub fn label(&self) -> String {
+        scoped_neighbor_label(&self.address, self.interface.as_deref())
+    }
+}
+
+/// A static neighbor's identity: its address and, when scoped, interface.
+fn neighbor_key(neighbor: &Neighbor) -> (&str, Option<&str>) {
+    (neighbor.address.as_str(), neighbor.interface.as_deref())
+}
+
+/// `address`, or `address%interface` for an interface-scoped neighbor.
+fn scoped_neighbor_label(address: &str, interface: Option<&str>) -> String {
+    match interface {
+        Some(interface) => format!("{address}%{interface}"),
+        None => address.to_string(),
+    }
+}
+
 /// Serializable neighbor diff summary (`NeighborDiff` uses `IpAddr` which is fine,
 /// but we want address strings + field-level details).
 #[derive(Debug, serde::Serialize)]
@@ -2812,6 +2859,9 @@ pub struct NeighborDiffSummary {
 #[derive(Debug, serde::Serialize)]
 pub struct NeighborAddSummary {
     pub address: String,
+    /// The interface of a link-local neighbor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
     /// The resolved ASN: the number, `global.asn` for `internal`, 0 for
     /// `external`. `remote_asn_mode` says which.
     pub remote_asn: u32,
@@ -2822,6 +2872,9 @@ pub struct NeighborAddSummary {
 #[derive(Debug, serde::Serialize)]
 pub struct NeighborChangeSummary {
     pub address: String,
+    /// The interface of a link-local neighbor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
     pub changes: Vec<FieldChange>,
 }
 
@@ -2915,21 +2968,25 @@ impl ConfigDiff {
     /// sessions (a dynamic range counts once however many sessions it
     /// currently holds; an unbound interface-only neighbor counts too).
     pub fn session_reset_entries(&self) -> usize {
-        let mut addresses: std::collections::BTreeSet<&str> = self
+        let mut entries: std::collections::BTreeSet<(&str, Option<&str>)> = self
             .neighbors
             .changed
             .iter()
             .filter(|change| change.changes.iter().any(FieldChange::resets_session))
-            .map(|change| change.address.as_str())
+            .map(|change| (change.address.as_str(), change.interface.as_deref()))
             .collect();
-        addresses.extend(
+        entries.extend(
             self.effective_neighbor_impact
                 .iter()
                 .filter(|impact| !impact.kind.is_policy_chain())
-                .map(|impact| impact.address.as_str()),
+                .map(|impact| (impact.address.as_str(), impact.interface.as_deref())),
         );
-        addresses.extend(self.interface_only_rebinds.iter().map(String::as_str));
-        addresses.len()
+        entries.extend(
+            self.interface_only_rebinds
+                .iter()
+                .map(|label| (label.as_str(), None)),
+        );
+        entries.len()
     }
 }
 
@@ -4390,15 +4447,13 @@ fn session_reshape_transaction(diff: &ConfigDiff) -> bool {
     if diff.neighbors.changed.is_empty() {
         return true;
     }
-    let impacted: HashSet<&str> = diff
-        .effective_neighbor_impact
-        .iter()
-        .map(|impact| impact.address.as_str())
-        .collect();
-    diff.neighbors
-        .changed
-        .iter()
-        .all(|neighbor| impacted.contains(neighbor.address.as_str()))
+    diff.neighbors.changed.iter().all(|neighbor| {
+        diff.effective_neighbor_impact.iter().any(|impact| {
+            !impact.is_dynamic_range
+                && impact.address == neighbor.address
+                && impact.interface == neighbor.interface
+        })
+    })
 }
 
 fn transaction_sections_are_one_family(sections: &[String]) -> bool {
@@ -4621,7 +4676,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                     out,
                     "    {} {} (AS {})",
                     style.add_marker,
-                    n.address,
+                    scoped_neighbor_label(&n.address, n.interface.as_deref()),
                     if n.remote_asn_mode == "external" {
                         "external".to_string()
                     } else {
@@ -4633,7 +4688,8 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 let _ = writeln!(out, "    {} {addr}", style.remove_marker);
             }
             for n in &diff.neighbors.changed {
-                let _ = writeln!(out, "    {} {}:", style.change_marker, n.address);
+                let label = scoped_neighbor_label(&n.address, n.interface.as_deref());
+                let _ = writeln!(out, "    {} {label}:", style.change_marker);
                 for change in &n.changes {
                     let _ = writeln!(out, "        {}", change.render());
                 }
@@ -4722,7 +4778,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                     out,
                     "    {} {} [{}]:",
                     style.change_marker,
-                    impact.address,
+                    impact.label(),
                     impact.kind.as_str()
                 );
                 for reason in &impact.reasons {
@@ -5042,11 +5098,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     pin_bfd_startup_only_runtime(&mut reload_new, old);
     let neighbor_diff = diff_neighbors(&old.neighbors, &reload_new.neighbors);
 
-    let old_map: HashMap<&str, &Neighbor> = old
-        .neighbors
-        .iter()
-        .map(|n| (n.address.as_str(), n))
-        .collect();
+    let old_map: HashMap<(&str, Option<&str>), &Neighbor> =
+        old.neighbors.iter().map(|n| (neighbor_key(n), n)).collect();
 
     let neighbors = NeighborDiffSummary {
         added: neighbor_diff
@@ -5054,6 +5107,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             .iter()
             .map(|n| NeighborAddSummary {
                 address: n.address.clone(),
+                interface: n.interface.clone(),
                 remote_asn: n.remote_asn.resolve(new.global.asn),
                 remote_asn_mode: n.remote_asn.mode(),
             })
@@ -5068,9 +5122,10 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             .iter()
             .filter_map(|n| {
                 old_map
-                    .get(n.address.as_str())
+                    .get(&(n.address.as_str(), n.interface.as_deref()))
                     .map(|old_n| NeighborChangeSummary {
                         address: n.address.clone(),
+                        interface: n.interface.clone(),
                         changes: describe_neighbor_changes(old_n, n),
                     })
             })
@@ -5451,19 +5506,13 @@ pub(crate) fn pin_rfc8212_posture_startup_only(new_config: &mut Config, current:
 }
 
 fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool {
-    let old_by_addr: HashMap<&str, &Neighbor> = old
-        .neighbors
-        .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
-        .collect();
-    let new_by_addr: HashMap<&str, &Neighbor> = new
-        .neighbors
-        .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
-        .collect();
+    let old_by_key: HashMap<(&str, Option<&str>), &Neighbor> =
+        old.neighbors.iter().map(|n| (neighbor_key(n), n)).collect();
+    let new_by_key: HashMap<(&str, Option<&str>), &Neighbor> =
+        new.neighbors.iter().map(|n| (neighbor_key(n), n)).collect();
 
     for new_neighbor in &new.neighbors {
-        match old_by_addr.get(new_neighbor.address.as_str()) {
+        match old_by_key.get(&neighbor_key(new_neighbor)) {
             Some(old_neighbor) if old_neighbor.tcp_ao != new_neighbor.tcp_ao => return true,
             None if new_neighbor.tcp_ao.is_some() => return true,
             _ => {}
@@ -5471,7 +5520,7 @@ fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool 
     }
 
     old.neighbors.iter().any(|old_neighbor| {
-        old_neighbor.tcp_ao.is_some() && !new_by_addr.contains_key(old_neighbor.address.as_str())
+        old_neighbor.tcp_ao.is_some() && !new_by_key.contains_key(&neighbor_key(old_neighbor))
     })
 }
 
@@ -5622,7 +5671,10 @@ pub(crate) fn pin_tcp_ao_startup_only_runtime(new_config: &mut Config, current: 
         pin_tcp_ao_dependency_graph(
             new_config,
             current,
-            result.pinned_current_neighbors.iter().map(String::as_str),
+            result
+                .pinned_current_neighbors
+                .iter()
+                .map(|(address, interface)| (address.as_str(), interface.as_deref())),
         );
     }
     result.pinned
@@ -5648,26 +5700,28 @@ fn pin_tcp_ao_restart_required_globals(new_config: &mut Config, current: &Config
 
 struct TcpAoPinResult {
     pinned: usize,
-    pinned_current_neighbors: Vec<String>,
+    /// `(address, interface)` of each live neighbor kept by the pin.
+    pinned_current_neighbors: Vec<(String, Option<String>)>,
 }
 
 fn pin_tcp_ao_startup_only_neighbors(
     new_neighbors: &mut Vec<Neighbor>,
     current_neighbors: &[Neighbor],
 ) -> TcpAoPinResult {
-    let current_by_addr: HashMap<&str, &Neighbor> = current_neighbors
+    let owned_key = |neighbor: &Neighbor| (neighbor.address.clone(), neighbor.interface.clone());
+    let current_by_key: HashMap<(String, Option<String>), &Neighbor> = current_neighbors
         .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .map(|neighbor| (owned_key(neighbor), neighbor))
         .collect();
 
     let mut pinned = 0usize;
     let mut pinned_current_neighbors = Vec::new();
     for neighbor in new_neighbors.iter_mut() {
-        match current_by_addr.get(neighbor.address.as_str()) {
+        match current_by_key.get(&owned_key(neighbor)) {
             Some(current_neighbor) if current_neighbor.tcp_ao != neighbor.tcp_ao => {
                 *neighbor = (*current_neighbor).clone();
                 pinned += 1;
-                pinned_current_neighbors.push(current_neighbor.address.clone());
+                pinned_current_neighbors.push(owned_key(current_neighbor));
             }
             _ => {}
         }
@@ -5675,19 +5729,16 @@ fn pin_tcp_ao_startup_only_neighbors(
 
     let before_len = new_neighbors.len();
     new_neighbors.retain(|neighbor| {
-        current_by_addr.contains_key(neighbor.address.as_str()) || neighbor.tcp_ao.is_none()
+        current_by_key.contains_key(&owned_key(neighbor)) || neighbor.tcp_ao.is_none()
     });
     pinned += before_len - new_neighbors.len();
 
-    let new_addrs: HashSet<String> = new_neighbors
-        .iter()
-        .map(|neighbor| neighbor.address.clone())
-        .collect();
+    let new_keys: HashSet<(String, Option<String>)> = new_neighbors.iter().map(owned_key).collect();
     for current_neighbor in current_neighbors {
-        if current_neighbor.tcp_ao.is_some() && !new_addrs.contains(&current_neighbor.address) {
+        if current_neighbor.tcp_ao.is_some() && !new_keys.contains(&owned_key(current_neighbor)) {
             new_neighbors.push(current_neighbor.clone());
             pinned += 1;
-            pinned_current_neighbors.push(current_neighbor.address.clone());
+            pinned_current_neighbors.push(owned_key(current_neighbor));
         }
     }
 
@@ -5700,12 +5751,12 @@ fn pin_tcp_ao_startup_only_neighbors(
 fn pin_tcp_ao_dependency_graph<'a>(
     new_config: &mut Config,
     current: &Config,
-    pinned_current_neighbors: impl Iterator<Item = &'a str>,
+    pinned_current_neighbors: impl Iterator<Item = (&'a str, Option<&'a str>)>,
 ) {
-    let current_by_addr: HashMap<&str, &Neighbor> = current
+    let current_by_key: HashMap<(&str, Option<&str>), &Neighbor> = current
         .neighbors
         .iter()
-        .map(|neighbor| (neighbor.address.as_str(), neighbor))
+        .map(|neighbor| (neighbor_key(neighbor), neighbor))
         .collect();
 
     let mut policy_names = HashSet::new();
@@ -5714,8 +5765,8 @@ fn pin_tcp_ao_dependency_graph<'a>(
     let mut pin_global_import_chain = false;
     let mut pin_global_export_chain = false;
 
-    for address in pinned_current_neighbors {
-        let Some(neighbor) = current_by_addr.get(address) else {
+    for key in pinned_current_neighbors {
+        let Some(neighbor) = current_by_key.get(&key) else {
             continue;
         };
         let pinned_global = collect_tcp_ao_neighbor_dependency_refs(
@@ -6027,16 +6078,13 @@ fn compute_effective_neighbor_impact(
         .chain(peer_groups.added.iter().map(String::as_str))
         .chain(peer_groups.removed.iter().map(String::as_str))
         .collect();
-    let new_by_addr: HashMap<&str, &Neighbor> = new
-        .neighbors
-        .iter()
-        .map(|n| (n.address.as_str(), n))
-        .collect();
+    let new_by_key: HashMap<(&str, Option<&str>), &Neighbor> =
+        new.neighbors.iter().map(|n| (neighbor_key(n), n)).collect();
 
     let mut out: Vec<EffectiveNeighborImpact> = Vec::new();
     let (mut old_stores, mut new_stores) = (ChunkedSetStore::default(), ChunkedSetStore::default());
     for old_neighbor in &old.neighbors {
-        let Some(new_neighbor) = new_by_addr.get(old_neighbor.address.as_str()) else {
+        let Some(new_neighbor) = new_by_key.get(&neighbor_key(old_neighbor)) else {
             continue;
         };
         let Ok(old_resolved) =
@@ -6124,6 +6172,7 @@ fn compute_effective_neighbor_impact(
                 };
             out.push(EffectiveNeighborImpact {
                 address: old_neighbor.address.clone(),
+                interface: old_neighbor.interface.clone(),
                 reasons,
                 kind,
                 is_dynamic_range: false,
@@ -6167,6 +6216,9 @@ fn interface_only_policy_impact(old: &Config, new: &Config) -> Vec<EffectiveNeig
             }
             Some(EffectiveNeighborImpact {
                 address: new_neighbor.label(),
+                // Named by `interface_only`; this field scopes a static
+                // link-local neighbor.
+                interface: None,
                 reasons,
                 kind: EffectiveNeighborImpactKind::PolicyChain,
                 is_dynamic_range: false,
@@ -6370,13 +6422,11 @@ fn dynamic_range_effective_impact(
                 } else {
                     EffectiveNeighborImpactKind::SessionReshape
                 };
-            out.push(EffectiveNeighborImpact {
-                address: old_range.prefix.clone(),
+            out.push(EffectiveNeighborImpact::dynamic_range(
+                old_range.prefix.clone(),
                 reasons,
                 kind,
-                is_dynamic_range: true,
-                interface_only: None,
-            });
+            ));
         }
     }
     out

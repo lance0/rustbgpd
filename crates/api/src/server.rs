@@ -1063,106 +1063,32 @@ pub(crate) async fn dispatch_owned_catalog_mutation(
 }
 
 /// Attach a two-phase persistence acknowledgement to any owned catalog event.
-pub(crate) fn with_catalog_persist_ack(event: ConfigEvent, ack: ConfigPersistAck) -> ConfigEvent {
-    match event {
-        ConfigEvent::SetPolicy {
-            name, definition, ..
-        } => ConfigEvent::SetPolicy {
-            name,
-            definition,
-            ack: Some(ack),
-        },
-        ConfigEvent::DeletePolicy { name, .. } => ConfigEvent::DeletePolicy {
-            name,
-            ack: Some(ack),
-        },
-        ConfigEvent::SetNeighborSet {
-            name, definition, ..
-        } => ConfigEvent::SetNeighborSet {
-            name,
-            definition,
-            ack: Some(ack),
-        },
-        ConfigEvent::DeleteNeighborSet { name, .. } => ConfigEvent::DeleteNeighborSet {
-            name,
-            ack: Some(ack),
-        },
-        ConfigEvent::SetGlobalImportChain { policy_names, .. } => {
-            ConfigEvent::SetGlobalImportChain {
-                policy_names,
-                ack: Some(ack),
-            }
-        }
-        ConfigEvent::SetGlobalExportChain { policy_names, .. } => {
-            ConfigEvent::SetGlobalExportChain {
-                policy_names,
-                ack: Some(ack),
-            }
-        }
-        ConfigEvent::ClearGlobalImportChain { .. } => {
-            ConfigEvent::ClearGlobalImportChain { ack: Some(ack) }
-        }
-        ConfigEvent::ClearGlobalExportChain { .. } => {
-            ConfigEvent::ClearGlobalExportChain { ack: Some(ack) }
-        }
-        ConfigEvent::SetNeighborImportChain {
-            address,
-            policy_names,
-            ..
-        } => ConfigEvent::SetNeighborImportChain {
-            address,
-            policy_names,
-            ack: Some(ack),
-        },
-        ConfigEvent::SetNeighborExportChain {
-            address,
-            policy_names,
-            ..
-        } => ConfigEvent::SetNeighborExportChain {
-            address,
-            policy_names,
-            ack: Some(ack),
-        },
-        ConfigEvent::ClearNeighborImportChain { address, .. } => {
-            ConfigEvent::ClearNeighborImportChain {
-                address,
-                ack: Some(ack),
-            }
-        }
-        ConfigEvent::ClearNeighborExportChain { address, .. } => {
-            ConfigEvent::ClearNeighborExportChain {
-                address,
-                ack: Some(ack),
-            }
-        }
-        ConfigEvent::SetPeerGroup {
-            name, definition, ..
-        } => ConfigEvent::SetPeerGroup {
-            name,
-            definition,
-            ack: Some(ack),
-        },
-        ConfigEvent::DeletePeerGroup { name, .. } => ConfigEvent::DeletePeerGroup {
-            name,
-            ack: Some(ack),
-        },
-        ConfigEvent::SetNeighborPeerGroup {
-            address,
-            peer_group,
-            ..
-        } => ConfigEvent::SetNeighborPeerGroup {
-            address,
-            peer_group,
-            ack: Some(ack),
-        },
-        ConfigEvent::ClearNeighborPeerGroup { address, .. } => {
-            ConfigEvent::ClearNeighborPeerGroup {
-                address,
-                ack: Some(ack),
-            }
-        }
+pub(crate) fn with_catalog_persist_ack(
+    mut event: ConfigEvent,
+    ack: ConfigPersistAck,
+) -> ConfigEvent {
+    // Fill the slot in place so every other field, such as a neighbor's
+    // interface scope, carries over unchanged.
+    match &mut event {
+        ConfigEvent::SetPolicy { ack: slot, .. }
+        | ConfigEvent::DeletePolicy { ack: slot, .. }
+        | ConfigEvent::SetNeighborSet { ack: slot, .. }
+        | ConfigEvent::DeleteNeighborSet { ack: slot, .. }
+        | ConfigEvent::SetGlobalImportChain { ack: slot, .. }
+        | ConfigEvent::SetGlobalExportChain { ack: slot, .. }
+        | ConfigEvent::ClearGlobalImportChain { ack: slot }
+        | ConfigEvent::ClearGlobalExportChain { ack: slot }
+        | ConfigEvent::SetNeighborImportChain { ack: slot, .. }
+        | ConfigEvent::SetNeighborExportChain { ack: slot, .. }
+        | ConfigEvent::ClearNeighborImportChain { ack: slot, .. }
+        | ConfigEvent::ClearNeighborExportChain { ack: slot, .. }
+        | ConfigEvent::SetPeerGroup { ack: slot, .. }
+        | ConfigEvent::DeletePeerGroup { ack: slot, .. }
+        | ConfigEvent::SetNeighborPeerGroup { ack: slot, .. }
+        | ConfigEvent::ClearNeighborPeerGroup { ack: slot, .. } => *slot = Some(ack),
         _ => unreachable!("owned catalog mutation produced a non-catalog event"),
     }
+    event
 }
 
 /// Configuration for the gRPC server beyond basic connectivity.
@@ -3065,6 +2991,89 @@ mod tests {
     use crate::proto::global_service_client::GlobalServiceClient;
     use crate::proto::{EventCategory, WatchEventsRequest};
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
+
+    /// The persisted copy of a neighbor mutation keeps the selector's
+    /// interface, so it folds into that neighbor's record when several
+    /// neighbors share one link-local address.
+    #[test]
+    fn catalog_persist_ack_keeps_the_neighbor_interface() {
+        let address: std::net::IpAddr = "fe80::1".parse().unwrap();
+        let interface = Some("eth1".to_string());
+        let events = [
+            ConfigEvent::SetNeighborImportChain {
+                address,
+                interface: interface.clone(),
+                policy_names: Vec::new(),
+                ack: None,
+            },
+            ConfigEvent::SetNeighborExportChain {
+                address,
+                interface: interface.clone(),
+                policy_names: Vec::new(),
+                ack: None,
+            },
+            ConfigEvent::ClearNeighborImportChain {
+                address,
+                interface: interface.clone(),
+                ack: None,
+            },
+            ConfigEvent::ClearNeighborExportChain {
+                address,
+                interface: interface.clone(),
+                ack: None,
+            },
+            ConfigEvent::SetNeighborPeerGroup {
+                address,
+                interface: interface.clone(),
+                peer_group: "edge".to_string(),
+                ack: None,
+            },
+            ConfigEvent::ClearNeighborPeerGroup {
+                address,
+                interface: interface.clone(),
+                ack: None,
+            },
+        ];
+        for event in events {
+            let ack = ConfigPersistAck::immediate(tokio::sync::oneshot::channel().0);
+            match with_catalog_persist_ack(event, ack) {
+                ConfigEvent::SetNeighborImportChain {
+                    interface: got,
+                    ack,
+                    ..
+                }
+                | ConfigEvent::SetNeighborExportChain {
+                    interface: got,
+                    ack,
+                    ..
+                }
+                | ConfigEvent::ClearNeighborImportChain {
+                    interface: got,
+                    ack,
+                    ..
+                }
+                | ConfigEvent::ClearNeighborExportChain {
+                    interface: got,
+                    ack,
+                    ..
+                }
+                | ConfigEvent::SetNeighborPeerGroup {
+                    interface: got,
+                    ack,
+                    ..
+                }
+                | ConfigEvent::ClearNeighborPeerGroup {
+                    interface: got,
+                    ack,
+                    ..
+                } => {
+                    assert_eq!(got, interface);
+                    assert!(ack.is_some());
+                }
+                _ => panic!("neighbor event changed variant"),
+            }
+        }
+    }
 
     /// Serializes this binary's only fork, the umask re-exec below, against
     /// tests whose assertions need a dropped descriptor to be closed. Until

@@ -394,37 +394,46 @@ async fn notification_event_uses_scoped_peer_label_for_interface_scoped_peer() {
 }
 
 /// Policy events scoped to an interface-scoped peer carry the scoped label so
-/// they correlate with the lifecycle stream.
+/// they correlate with the lifecycle stream, including when another neighbor
+/// shares the link-local address on a second interface.
 #[tokio::test]
 async fn policy_event_uses_scoped_peer_label_for_interface_scoped_peer() {
     let mut mgr = test_peer_manager();
     let addr: IpAddr = "fe80::2".parse().unwrap();
-    insert_test_scoped_managed_peer(
-        &mut mgr,
-        addr,
-        "eth0",
-        10,
-        7,
-        fake_peer_handle(
+    for (interface, ifindex, session_id) in [("eth0", 10, 7), ("eth1", 11, 8)] {
+        insert_test_scoped_managed_peer(
+            &mut mgr,
             addr,
-            SessionState::Established,
-            None,
-            Arc::new(FakePeerCounters::default()),
-        ),
-    );
+            interface,
+            ifindex,
+            session_id,
+            fake_peer_handle(
+                addr,
+                SessionState::Established,
+                None,
+                Arc::new(FakePeerCounters::default()),
+            ),
+        );
+    }
     let mut events = mgr.policy_events_tx.subscribe();
-    mgr.publish_policy_config_event(
-        &ConfigEvent::SetNeighborImportChain {
-            address: addr,
-            policy_names: Vec::new(),
-            ack: None,
-        },
-        1,
-    );
+    for interface in ["eth0", "eth1"] {
+        mgr.publish_policy_config_event(
+            &ConfigEvent::SetNeighborImportChain {
+                address: addr,
+                interface: Some(interface.to_string()),
+                policy_names: Vec::new(),
+                ack: None,
+            },
+            1,
+        );
 
-    let event = events.try_recv().unwrap();
-    assert_eq!(event.peer, Some(addr));
-    assert_eq!(event.peer_label.as_deref(), Some("fe80::2%eth0"));
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.peer, Some(addr));
+        assert_eq!(
+            event.peer_label.as_deref(),
+            Some(format!("fe80::2%{interface}").as_str())
+        );
+    }
 }
 
 /// Successful configured-peer installs publish their current admin event only
