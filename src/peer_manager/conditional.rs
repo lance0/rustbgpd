@@ -25,6 +25,9 @@ const RECONCILE_RETRY_MAX: Duration = Duration::from_secs(60);
 pub(super) struct ConditionalAdvertisementPrior {
     capture: ConditionalAdvertisementCapture,
     set: ConditionalAdvertisementSet,
+    /// Whether `set` was known not to match the RIB when captured: a restore
+    /// brings back that doubt with the cache it restores.
+    uncertain: bool,
 }
 
 impl PeerManager {
@@ -57,8 +60,14 @@ impl PeerManager {
                 .map_err(|_| "RIB conditional-advertisement acknowledgement timed out".to_string())?
                 .map_err(|_| "RIB dropped conditional-advertisement acknowledgement".to_string())
         };
-        self.await_with_readiness(round_trip, OperatorReadAdmission::Served)
-            .await
+        let result = self
+            .await_with_readiness(round_trip, OperatorReadAdmission::Served)
+            .await;
+        // Any failure leaves the RIB's install unknown.
+        if result.is_err() {
+            self.conditional_install_uncertain = true;
+        }
+        result
     }
 
     /// Install `set` unless the RIB already holds it. `Ok(None)` means
@@ -68,7 +77,8 @@ impl PeerManager {
         set: ConditionalAdvertisementSet,
         swapping_datasets: &[String],
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
-        if set == self.conditional_advertisements {
+        let uncertain = self.conditional_install_uncertain;
+        if !uncertain && set == self.conditional_advertisements {
             return Ok(None);
         }
         let capture = self
@@ -78,13 +88,18 @@ impl PeerManager {
                 reply,
             })
             .await?;
+        self.conditional_install_uncertain = false;
         info!(
             definitions = set.definitions.len(),
             attached_peers = set.attachments.len(),
             "installed conditional advertisements"
         );
         let set = std::mem::replace(&mut self.conditional_advertisements, set);
-        Ok(Some(ConditionalAdvertisementPrior { capture, set }))
+        Ok(Some(ConditionalAdvertisementPrior {
+            capture,
+            set,
+            uncertain,
+        }))
     }
 
     /// Reinstate a captured install (generation compensation). Applied
@@ -99,7 +114,20 @@ impl PeerManager {
         })
         .await?;
         self.conditional_advertisements = prior.set;
+        // The restored cache is as certain as it was when captured: one
+        // that predates a lost acknowledgement may still name a gate the
+        // RIB has removed.
+        self.conditional_install_uncertain = prior.uncertain;
         Ok(())
+    }
+
+    /// `config`'s install, with the attachments of every live interface-only
+    /// binding: a learned endpoint is not in configuration (ADR-0142).
+    pub(super) fn conditional_set(
+        &self,
+        config: &Config,
+    ) -> Result<ConditionalAdvertisementSet, crate::config::ConfigError> {
+        config.conditional_advertisement_set_with_bindings(&self.unnumbered_binding_endpoints())
     }
 
     /// Install `candidate`'s set ahead of a mutation that commits it.
@@ -107,8 +135,8 @@ impl PeerManager {
         &mut self,
         candidate: &Config,
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
-        let set = candidate
-            .conditional_advertisement_set()
+        let set = self
+            .conditional_set(candidate)
             .map_err(|error| format!("conditional advertisements: {error}"))?;
         self.install_conditional_advertisements(set, &[]).await
     }
@@ -121,7 +149,7 @@ impl PeerManager {
     /// one before every command.
     pub(super) async fn reconcile_conditional_advertisements(&mut self) {
         self.conditional_reconcile_pending = false;
-        let set = match self.current_config.conditional_advertisement_set() {
+        let set = match self.conditional_set(&self.current_config) {
             Ok(set) => set,
             Err(error) => {
                 warn!(%error, "conditional advertisements unresolvable; RIB install unchanged");
@@ -186,6 +214,7 @@ impl PeerManager {
         Ok(Some(ConditionalAdvertisementPrior {
             capture,
             set: self.conditional_advertisements.clone(),
+            uncertain: self.conditional_install_uncertain,
         }))
     }
 }

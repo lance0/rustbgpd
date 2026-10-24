@@ -9535,7 +9535,7 @@ import_policy_chain = ["origin-guard"]
             failure
                 .error
                 .to_string()
-                .contains("fe80::2 ipv6_unicast advertises 3"),
+                .contains("interface:swp1 ipv6_unicast advertises 3"),
             "the refusal names the bound peer: {}",
             failure.error
         );

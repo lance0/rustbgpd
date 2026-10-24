@@ -668,20 +668,6 @@ impl Config {
                  have no TCP-layer authentication (ADR-0142)",
             ));
         }
-        // Per-peer inventories built from configured addresses at startup and
-        // reload. A learned address is never in them, so these settings would
-        // be accepted and never applied; refuse them until they are wired to
-        // the binding.
-        if !self
-            .effective_conditional_advertisements(neighbor)
-            .is_empty()
-        {
-            return Err(invalid(
-                neighbor,
-                "conditional_advertisements",
-                "conditional advertisements are not supported on interface-only neighbors yet",
-            ));
-        }
         validate_interface_only_gtsm(neighbor, group)?;
         // The shared profile-reference check walks addressed neighbors only.
         if let Some(bfd) = &neighbor.bfd

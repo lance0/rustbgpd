@@ -1896,16 +1896,69 @@ impl Config {
     }
 
     /// Resolve the complete conditional-advertisement install (ADR-0137):
-    /// every definition a static neighbor attaches, directly or through its
-    /// peer group, with both predicates compiled, and each attaching
-    /// neighbor's names in configured order. Unattached definitions are not
-    /// installed. Validation has already accepted every reference, so an
+    /// every definition a static or interface-only neighbor attaches,
+    /// directly or through its peer group, with both predicates compiled,
+    /// and each attaching static neighbor's names in configured order (an
+    /// interface-only neighbor's attach at its bindings). Unattached
+    /// definitions are not installed. Validation has already accepted every reference, so an
     /// error here means a broken candidate.
     pub(crate) fn conditional_advertisement_set(
         &self,
     ) -> Result<rustbgpd_rib::ConditionalAdvertisementSet, ConfigError> {
+        self.conditional_advertisement_set_with_bindings(&[])
+    }
+
+    /// Every definition name an interface-only neighbor attaches, own or
+    /// inherited.
+    fn interface_only_conditional_names(&self) -> std::collections::BTreeSet<String> {
+        self.neighbors
+            .interface_only()
+            .iter()
+            .flat_map(|neighbor| self.effective_conditional_advertisements(neighbor))
+            .cloned()
+            .collect()
+    }
+
+    /// Each binding's endpoint with its interface-only neighbor's attached
+    /// definition names, for the bindings that attach any.
+    fn binding_conditional_attachments<'a>(
+        &'a self,
+        bindings: &'a [(IpAddr, String)],
+    ) -> impl Iterator<Item = (rustbgpd_rib::PeerEndpoint, &'a [String])> + 'a {
+        bindings.iter().filter_map(|(address, interface)| {
+            let neighbor = self.neighbors.interface_only_on(interface)?;
+            let effective = self.effective_conditional_advertisements(neighbor);
+            (!effective.is_empty()).then(|| {
+                (
+                    rustbgpd_rib::PeerEndpoint::new(*address, Some(interface)),
+                    effective,
+                )
+            })
+        })
+    }
+
+    /// [`Self::conditional_advertisement_set`] plus the attachments of
+    /// interface-only neighbors at their live bindings, each given as the
+    /// learned address and the neighbor's interface (ADR-0142).
+    pub(crate) fn conditional_advertisement_set_with_bindings(
+        &self,
+        bindings: &[(IpAddr, String)],
+    ) -> Result<rustbgpd_rib::ConditionalAdvertisementSet, ConfigError> {
         let mut set = rustbgpd_rib::ConditionalAdvertisementSet::default();
-        let mut attached = std::collections::BTreeSet::new();
+        // An interface-only neighbor's definitions are installed whether or
+        // not it is bound, so startup settle and debounce state never wait
+        // for a binding and survive its retirement.
+        let mut attached = self.interface_only_conditional_names();
+        for (endpoint, effective) in self.binding_conditional_attachments(bindings) {
+            attached.extend(effective.iter().cloned());
+            set.attachments.insert(
+                endpoint,
+                effective
+                    .iter()
+                    .map(|name| std::sync::Arc::from(name.as_str()))
+                    .collect(),
+            );
+        }
         for neighbor in &self.neighbors {
             let effective = self.effective_conditional_advertisements(neighbor);
             if effective.is_empty() {
