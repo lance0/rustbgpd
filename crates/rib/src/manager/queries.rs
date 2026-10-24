@@ -2848,8 +2848,9 @@ impl RibManager {
         }
 
         let detail = format!(
-            "{} outbound prefix limit reached for peer {peer}: limit {limit}, usage {usage}",
-            super::outbound_prefix_limits::family_label(afi)
+            "{} outbound prefix limit reached for peer {}: limit {limit}, usage {usage}",
+            super::outbound_prefix_limits::family_label(afi),
+            peer.label()
         );
         explanation.decision = crate::update::ExplainDecision::Deny;
         explanation.already_advertised = false;
