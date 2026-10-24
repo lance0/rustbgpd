@@ -263,7 +263,7 @@ async fn retained_routes_are_purged_when_the_lost_connection_is_down() {
         Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.rib_peer()),
         _ => panic!("expected the retained routes to be purged"),
     }
-    assert!(session.gr_retained_connection.is_none());
+    assert!(session.gr_retained_connection.get().is_none());
     assert!(session.last_error.ends_with("local address removed"));
 }
 
@@ -473,7 +473,12 @@ async fn a_retained_connection_learns_its_carrier_from_a_later_valid_snapshot() 
         Ok(RibUpdate::PeerGracefulRestart { .. })
     ));
     assert_eq!(
-        session.gr_retained_connection.unwrap().connection.carrier,
+        session
+            .gr_retained_connection
+            .get()
+            .unwrap()
+            .connection
+            .carrier,
         None
     );
 
@@ -509,4 +514,201 @@ async fn retained_ibgp_routes_are_not_purged() {
     set(&tx, iface(1, true, false, &["127.0.0.1"]));
     check(&mut session).await;
     assert!(rib_rx.try_recv().is_err());
+}
+
+/// A fresh actor keeps the previous retention owner during its handshake;
+/// reaching Established retires that stamp without changing the old actor's cell.
+#[tokio::test]
+async fn a_fresh_actor_preserves_the_retention_owner_until_established() {
+    for establish in [false, true] {
+        let both_up = merge(healthy(), iface(7, true, true, &["127.0.0.3"]));
+        let (mut old, _old_remote, mut old_rib, tx) = established_gr_session(both_up).await;
+        old.session_identity = crate::SessionIdentity::primary(17);
+        old.handle_tcp_disconnect();
+        old.drive_fsm(Event::TcpConnectionFails).await;
+        assert!(matches!(
+            old_rib.try_recv(),
+            Ok(RibUpdate::PeerGracefulRestart { session_id: 17, .. })
+        ));
+
+        let (mut fresh, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        fresh.session_identity = crate::SessionIdentity::primary(29);
+        fresh.config.link_state = old.config.link_state.clone();
+        fresh
+            .gr_retained_connection
+            .set(old.gr_retained_connection.get());
+        let (replacement, _replacement_remote) = stream_from("127.0.0.3").await;
+        fresh.test_install_stream(replacement);
+        if establish {
+            establish_test_session(&mut fresh, 65002).await;
+            assert!(fresh.gr_retained_connection.get().is_none());
+        } else {
+            fresh.drive_fsm(Event::ManualStart).await;
+        }
+        while rib_rx.try_recv().is_ok() {}
+        set(
+            &tx,
+            merge(
+                iface(1, true, false, &["127.0.0.1"]),
+                iface(7, true, true, &["127.0.0.3"]),
+            ),
+        );
+        check(&mut fresh).await;
+        if establish {
+            assert!(
+                rib_rx.try_recv().is_err(),
+                "old retention no longer belongs to the Established replacement"
+            );
+        } else {
+            assert!(
+                matches!(
+                    rib_rx.try_recv(),
+                    Ok(RibUpdate::PeerDown { session_id: 17, .. })
+                ),
+                "purge keeps the retained route's owner, not the new actor's id"
+            );
+        }
+        assert!(
+            old.gr_retained_connection.get().is_some(),
+            "actor snapshots are independent"
+        );
+        assert!(
+            fresh.read_half.is_some(),
+            "replacement on the healthy link stays connected"
+        );
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the claimed candidate fallback, route receipt, GR loss and delayed inheritance must be ordered in one regression"
+)]
+async fn released_candidate_keeps_own_retention(previous_retains: bool) {
+    let both_up = merge(healthy(), iface(7, true, true, &["127.0.0.3"]));
+    let (mut old, _old_remote, _old_rib, links) = established_gr_session(both_up).await;
+    old.session_identity = SessionIdentity::primary(17);
+    old.config.peer.graceful_restart = previous_retains;
+    old.handle_tcp_disconnect();
+    old.drive_fsm(Event::TcpConnectionFails).await;
+    let previous = old.gr_retained_connection.clone();
+    assert_eq!(previous.get().is_some(), previous_retains);
+
+    let (mut candidate, mut rib_rx) = make_test_session_with_metrics_and_identity(
+        BgpMetrics::new(),
+        SessionIdentity::inbound_candidate(29),
+    );
+    candidate.config.link_state = old.config.link_state.clone();
+    candidate.config.peer.graceful_restart = true;
+    let (commands, _receiver) = mpsc::channel(1);
+    let handle = crate::PeerHandle::from_parts(commands, tokio::spawn(async { Ok(()) }));
+    candidate.gr_retained_connection = handle.retained_connection_state();
+    let (local, remote) = stream_from("127.0.0.3").await;
+    candidate.test_install_stream(local);
+    candidate.drive_fsm(Event::ManualStart).await;
+    for message in [
+        Message::Open(notification_gr_open(false)),
+        Message::Keepalive,
+    ] {
+        candidate
+            .read_buf
+            .buf
+            .extend_from_slice(&rustbgpd_wire::encode_message(&message).unwrap());
+    }
+    candidate.process_read_buffer().await;
+    assert_eq!(candidate.fsm.state(), SessionState::OpenConfirm);
+    let (reply, claimed) = oneshot::channel();
+    assert_eq!(
+        candidate
+            .handle_command(PeerCommand::ClaimCollisionPromotion { reply })
+            .await,
+        ControlFlow::Continue(())
+    );
+    assert!(claimed.await.unwrap());
+    // The fallback may run while the manager still retires the old actor.
+    // Expiring it explicitly orders that interleaving without a sleep.
+    candidate.expire_collision_verdict_wait().await;
+    assert_eq!(candidate.fsm.state(), SessionState::Established);
+    let registered = std::iter::from_fn(|| rib_rx.try_recv().ok())
+        .any(|update| matches!(update, RibUpdate::PeerUp { session_id: 29, .. }));
+    assert!(
+        registered,
+        "fallback registered the candidate's own session"
+    );
+    while rib_rx.try_recv().is_ok() {}
+    let update = Message::Update(rfc7606_update(
+        rfc7606_attr_bytes(&[]),
+        &[Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)],
+    ));
+    candidate
+        .read_buf
+        .buf
+        .extend_from_slice(&rustbgpd_wire::encode_message(&update).unwrap());
+    candidate.process_read_buffer().await;
+    assert!(std::iter::from_fn(|| rib_rx.try_recv().ok()).any(|update| {
+        matches!(update, RibUpdate::RoutesReceived { session_id: 29, announced, .. } if announced.len() == 1)
+    }));
+    drop(remote);
+    candidate.handle_tcp_disconnect();
+    candidate.drive_fsm(Event::TcpConnectionFails).await;
+    assert_eq!(candidate.fsm.state(), SessionState::Idle);
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::PeerGracefulRestart { session_id: 29, .. })
+    ));
+
+    handle.inherit_retained_connection(&previous);
+    assert_eq!(
+        candidate
+            .gr_retained_connection
+            .get()
+            .map(|stamp| stamp.session_id),
+        Some(29),
+        "late inheritance preserves the candidate's own GR owner"
+    );
+    assert_eq!(
+        candidate
+            .gr_retained_connection
+            .get()
+            .unwrap()
+            .connection
+            .carrier,
+        Some(7)
+    );
+    set(
+        &links,
+        merge(
+            iface(1, true, false, &["127.0.0.1"]),
+            iface(7, true, true, &["127.0.0.3"]),
+        ),
+    );
+    check(&mut candidate).await;
+    assert!(rib_rx.try_recv().is_err(), "the old carrier is unrelated");
+    set(
+        &links,
+        merge(healthy(), iface(7, true, false, &["127.0.0.3"])),
+    );
+    check(&mut candidate).await;
+    assert!(
+        matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::PeerDown { session_id: 29, .. })
+        ),
+        "the owning carrier purges the candidate's retained routes"
+    );
+    handle.inherit_retained_connection(&previous);
+    assert!(
+        candidate.gr_retained_connection.get().is_none(),
+        "late inheritance does not resurrect completed purge state"
+    );
+    handle.abort_for_transport_safety_and_wait().await;
+}
+
+#[tokio::test]
+async fn released_candidate_retention_survives_an_empty_predecessor() {
+    Box::pin(released_candidate_keeps_own_retention(false)).await;
+}
+
+#[tokio::test]
+async fn released_candidate_retention_survives_a_retaining_predecessor() {
+    Box::pin(released_candidate_keeps_own_retention(true)).await;
 }

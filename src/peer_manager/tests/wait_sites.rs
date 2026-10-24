@@ -802,7 +802,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::Finished,
     },
     WaitSite {
-        site: "bfd.rs::commit_bfd_reload",
+        site: "bfd.rs::commit_bfd_reload_with_ack",
         awaits: "BfdReloadCommand acknowledgement from the BFD actor",
         drive: Drive::BfdReload,
         rib: RibHold::None,

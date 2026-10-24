@@ -173,6 +173,10 @@ struct GenerationHold {
 }
 
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "link, retirement, retained-route and BFD cleanup states are independent per-port latches"
+)]
 struct Port {
     /// Discovery's current binding.
     desired: Option<Endpoint>,
@@ -189,6 +193,9 @@ struct Port {
     refusal: Option<String>,
     /// Operator and safety state carried from a retired endpoint to the next.
     held: Option<HeldState>,
+    /// A BFD removal changed local membership but its actor acknowledgement
+    /// is still uncertain. The port owns retries until the current set is confirmed.
+    bfd_removal_unsettled: bool,
     /// The neighbor's RIB identity, allocated at its first binding and kept
     /// across every later endpoint: an address change is a session down and
     /// up under the same `PeerId`. Released when configuration deletes the
@@ -1130,6 +1137,12 @@ impl PeerManager {
             .map(|unnumbered| unnumbered.ports.keys().cloned().collect())
             .unwrap_or_default();
         for name in &existing {
+            if configured.contains_key(name)
+                && self.port_mut(name).bfd_removal_unsettled
+                && !self.settle_port_bfd_removal(name).await
+            {
+                continue;
+            }
             match configured.get(name) {
                 None => self.remove_port(name).await,
                 Some(settings) => {
@@ -1271,17 +1284,26 @@ impl PeerManager {
                 self.remove_max_prefix_latch(&key);
             }
         }
-        // The deletion only disabled a bound binding's BFD session, and a bind
-        // whose BFD acknowledgement timed out left its registration with no
-        // peer at all. Remove whatever the interface registered before the
-        // address is released, so a later neighbor there neither inherits it
-        // nor is held by a strict one. The port stays, and the removal is
-        // retried.
-        if let Some(address) = self.bound_bfd_registration_on(name)
-            && let Err(error) = self.set_bound_bfd_session(address, None).await
-        {
-            warn!(interface = %name, %address, %error, "unnumbered: could not remove the deleted neighbor's BFD session; retrying");
-            self.arm_unnumbered_retry();
+        // Only cleanup ownership survives deletion, not the old neighbor's
+        // operator state, safety latch or lifetime counters.
+        self.port_mut(name).held = None;
+        // BGP teardown is settled; a pending BFD cleanup must not let a
+        // deleted and re-added neighbor inherit the old startup window.
+        let _ = self
+            .send_rib_update(
+                rustbgpd_rib::RibUpdate::RetireEorGraceInterface {
+                    interface: name.into(),
+                },
+                super::OperatorReadAdmission::Fenced {
+                    reason: "an interface-only neighbor's removal is partly applied",
+                },
+            )
+            .await;
+        if !self.settle_port_bfd_removal(name).await {
+            // The peer is already gone; only the port's cleanup ownership remains.
+            let port = self.port_mut(name);
+            port.bound = None;
+            port.established = false;
             return;
         }
         let Some(port) = self
@@ -1319,6 +1341,30 @@ impl PeerManager {
         // (kept across endpoints) and discovery counters end here.
         self.metrics.reap_peer_identity_series(&label, name);
         self.metrics.reap_peer_series(&label);
+    }
+
+    /// Keep cleanup ownership after a failed acknowledgement, even when the
+    /// local membership has already dropped the registration.
+    async fn settle_port_bfd_removal(&mut self, name: &str) -> bool {
+        let result = if let Some(address) = self.bound_bfd_registration_on(name) {
+            self.port_mut(name).bfd_removal_unsettled = true;
+            self.set_bound_bfd_session(address, None).await
+        } else if self.port_mut(name).bfd_removal_unsettled {
+            self.confirm_bound_bfd_removal().await
+        } else {
+            return true;
+        };
+        match result {
+            Ok(()) => {
+                self.port_mut(name).bfd_removal_unsettled = false;
+                true
+            }
+            Err(error) => {
+                warn!(interface = %name, %error, "unnumbered: could not confirm removal of the binding's BFD session; retrying");
+                self.arm_unnumbered_retry();
+                false
+            }
+        }
     }
 
     /// Remove the selectors of deleted neighbors, whose peers are gone; a
@@ -1364,6 +1410,9 @@ impl PeerManager {
 
     async fn reconcile_port(&mut self, name: &str) {
         let port = self.port_mut(name);
+        if port.bfd_removal_unsettled {
+            return;
+        }
         let link = port.link;
         let link_down = matches!(link, Some((_, LinkState::Down | LinkState::Removed)));
         let current_ifindex = port.link.map(|(ifindex, _)| ifindex);
@@ -1430,6 +1479,9 @@ impl PeerManager {
             }
             let reason = retire_reason(link, recreated, stopped);
             if !self.retire_bound_peer(name, key, reason, !gone).await {
+                return;
+            }
+            if self.port_mut(name).bfd_removal_unsettled {
                 return;
             }
         }
@@ -1745,10 +1797,11 @@ impl PeerManager {
         {
             self.conditional_reconcile_pending = true;
         }
-        // The endpoint's BFD session goes with it. Left disabled by the
-        // deletion when this cannot run now; the next membership change
-        // prunes it.
+        // The endpoint's BFD session goes with it; uncertain removal keeps
+        // cleanup ownership and blocks rebinding until the actor confirms it.
         if let Err(error) = self.set_bound_bfd_session(key.address, None).await {
+            self.port_mut(name).bfd_removal_unsettled = true;
+            self.arm_unnumbered_retry();
             warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound BFD session yet");
         }
         let port = self.port_mut(name);
@@ -2092,11 +2145,21 @@ impl PeerManager {
         Ok(true)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "binding admission and rollback share the held neighbor state and must preserve side-effect ordering"
+    )]
     async fn bind_port(
         &mut self,
         name: &str,
         endpoint: Endpoint,
     ) -> Result<(), PeerLifecycleError> {
+        if self.port_mut(name).bfd_removal_unsettled {
+            self.arm_unnumbered_retry();
+            return Err(PeerLifecycleError::Internal(
+                "the previous binding's BFD removal is not yet confirmed".into(),
+            ));
+        }
         let (neighbor, config) = self.bound_peer_config(name, endpoint)?;
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
         // GTSM is in force at the listener for this endpoint before the peer
@@ -2166,7 +2229,7 @@ impl PeerManager {
                 self.port_mut(name).held = held;
                 self.conditional_reconcile_pending |= gated;
                 if has_bfd {
-                    let _ = self.set_bound_bfd_session(key.address, None).await;
+                    let _ = self.settle_port_bfd_removal(name).await;
                 }
                 return Err(PeerLifecycleError::Internal(
                     "RIB channel closed while rebinding the neighbor".into(),
@@ -2187,7 +2250,7 @@ impl PeerManager {
             // The gate installed above names an endpoint with no peer.
             self.conditional_reconcile_pending |= gated;
             if has_bfd {
-                let _ = self.set_bound_bfd_session(key.address, None).await;
+                let _ = self.settle_port_bfd_removal(name).await;
             }
             return Err(error);
         }

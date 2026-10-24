@@ -1369,9 +1369,17 @@ impl PeerManager {
         context: &'static str,
         primary_notification_failures: u32,
     ) {
+        let retained_connection = old_handle.retained_connection_state();
         let _ = self
             .quiesce_retiring_session(peer_key, old_session_id, old_handle, context, false)
             .await;
+        if let Some(managed) = self.peers.get(peer_key)
+            && managed.session_id() == new_session_id
+        {
+            managed
+                .handle()
+                .inherit_retained_connection(&retained_connection);
+        }
         self.activate_promoted_max_prefix_metrics(
             peer_key,
             new_session_id,
@@ -1485,6 +1493,8 @@ impl PeerManager {
         };
         self.register_session(session_id, &peer_key);
 
+        // Capture through shutdown: its final SessionDown may change retention.
+        let retained_connection = old_handle.retained_connection_state();
         // Shut down the old session
         let _ = self
             .quiesce_retiring_session(
@@ -1500,6 +1510,13 @@ impl PeerManager {
         let Some(managed) = self.peers.get(&peer_key) else {
             return;
         };
+        // No manager link-check dispatch runs during the awaited replacement;
+        // install the stopped actor's provenance before starting its successor.
+        if managed.session_id() == session_id {
+            managed
+                .handle()
+                .inherit_retained_connection(&retained_connection);
+        }
         if !managed.enabled {
             info!(peer = %peer_addr, "inbound replacement remains stopped by terminal peer latch");
             return;

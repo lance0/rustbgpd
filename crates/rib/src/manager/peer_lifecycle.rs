@@ -756,7 +756,7 @@ impl RibManager {
         keep_series: bool,
     ) {
         self.peer_down_teardown(peer);
-        self.eor_grace_peer_deleted(peer);
+        self.eor_grace_peer_deleted(peer, keep_series);
         self.pending_peer_export_context
             .retain(|(context_peer, _), _| *context_peer != peer);
         self.pending_peer_withheld_families

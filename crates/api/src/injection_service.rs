@@ -5903,7 +5903,7 @@ mod tests {
         )
         .with_eor_grace(rustbgpd_rib::EorGraceConfig {
             peers: vec![rustbgpd_rib::EorGracePeerConfig {
-                peer: PeerId::from_addr("192.0.2.2".parse().unwrap()),
+                peer: PeerId::from_addr("192.0.2.2".parse().unwrap()).into(),
                 deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(600),
                 families: vec![(Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
             }],

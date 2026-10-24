@@ -480,13 +480,40 @@ impl PeerManager {
         self.republish_bfd_desired();
     }
 
+    pub(super) async fn commit_bfd_reload(
+        &mut self,
+        prepared: Option<PreparedRuntime>,
+    ) -> Result<(), String> {
+        self.commit_bfd_reload_with_ack(prepared, false).await
+    }
+
+    /// A timed-out binding removal already committed its local roster. Re-send
+    /// the current roster, including its admin overlay, until the actor confirms it.
+    pub(super) async fn confirm_bound_bfd_removal(&mut self) -> Result<(), String> {
+        let Some(coupling) = self.bfd_coupling.as_mut() else {
+            return Ok(());
+        };
+        if coupling.reloading {
+            return Err("a BFD membership change is in progress".into());
+        }
+        coupling.prior_held.clone_from(&coupling.held_down);
+        coupling
+            .prior_initially_withheld
+            .clone_from(&coupling.initially_withheld);
+        coupling.pending = Some(coupling.configured.clone());
+        coupling.reloading = true;
+        coupling.rollback_lookup = false;
+        self.commit_bfd_reload_with_ack(None, true).await
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "commit keeps socket acknowledgement and strict admission settlement in one ordered flow"
     )]
-    pub(super) async fn commit_bfd_reload(
+    async fn commit_bfd_reload_with_ack(
         &mut self,
         prepared: Option<PreparedRuntime>,
+        require_ack: bool,
     ) -> Result<(), String> {
         let Some(coupling) = self.bfd_coupling.as_mut() else {
             return Ok(());
@@ -549,7 +576,11 @@ impl PeerManager {
                 })
                 .collect(),
         };
-        if !changed && coupling.configured.is_empty() && coupling.held_down.is_empty() {
+        if !require_ack
+            && !changed
+            && coupling.configured.is_empty()
+            && coupling.held_down.is_empty()
+        {
             coupling.prior_held.clear();
             coupling.prior_initially_withheld.clear();
             coupling.desired_tx.send_replace(desired);

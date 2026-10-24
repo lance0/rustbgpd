@@ -2707,6 +2707,12 @@ pub enum RibUpdate {
         /// for the next, whose series name its interface and outlive it.
         keep_series: bool,
     },
+    /// Configuration removed an interface-only neighbor, including one that
+    /// never bound and therefore has no peer handle to delete.
+    RetireEorGraceInterface {
+        /// Configured interface name.
+        interface: Arc<str>,
+    },
     /// Return a deleted neighbor's handle to the peer table, after the
     /// `PeerDeleted` that cleaned up its state. The peer manager sends it
     /// once the neighbor is gone for good (not across a reconfigure), so

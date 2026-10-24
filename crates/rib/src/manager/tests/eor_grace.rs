@@ -60,7 +60,7 @@ fn grace(peers: &[PeerId]) -> EorGraceConfig {
         peers: peers
             .iter()
             .map(|&peer| EorGracePeerConfig {
-                peer,
+                peer: peer.into(),
                 deadline: start + WINDOW,
                 families: vec![V4, V6],
             })
@@ -816,7 +816,7 @@ fn replay_config(peers: &[PeerId], owners: &[&str]) -> EorGraceConfig {
         peers: peers
             .iter()
             .map(|&peer| EorGracePeerConfig {
-                peer,
+                peer: peer.into(),
                 deadline: start + LONG_WINDOW,
                 families: vec![V4, V6],
             })
@@ -1284,4 +1284,108 @@ async fn a_not_holding_signal_is_recorded_for_the_incarnation() {
         crate::ReplayComplete::NotHolding
     );
     assert_eq!(cold.eor_replay.awaiting(), vec![OTHER.to_string()]);
+}
+
+fn interface_grace_config() -> EorGraceConfig {
+    EorGraceConfig {
+        peers: vec![EorGracePeerConfig {
+            peer: crate::EorGraceTarget::Interface("swp1".into()),
+            deadline: tokio::time::Instant::now() + WINDOW,
+            families: vec![V4],
+        }],
+        replay_owners: vec![BRIDGE.into()],
+    }
+}
+
+fn interface_peer(address: &str) -> PeerId {
+    PeerId::allocate_interface_only(crate::PeerEndpoint::new(
+        address.parse().unwrap(),
+        Some("swp1"),
+    ))
+}
+
+#[tokio::test(start_paused = true)]
+async fn interface_grace_late_registration_keeps_the_original_deadline_and_families() {
+    let config = interface_grace_config();
+    let deadline = config.peers[0].deadline;
+    let mut manager = manager_from(config, &BgpMetrics::new());
+    tokio::time::advance(WINDOW.checked_sub(MS).unwrap()).await;
+    let peer = interface_peer("fe80::1");
+    let (messages, mut rx) = session_messages(peer, 1, HELPER, vec![V4, V6], 64);
+    for message in messages {
+        manager.handle_update(message);
+    }
+    let immediate: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .flat_map(|update| update.end_of_rib)
+        .collect();
+    assert_eq!(immediate, [V6], "only the configured family is held");
+    assert_eq!(manager.next_eor_hold_deadline(), Some(deadline));
+    tokio::time::advance(MS).await;
+    manager.expire_eor_grace(deadline);
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, [V4]);
+    assert!(peer.release());
+}
+
+#[tokio::test(start_paused = true)]
+async fn interface_grace_replay_complete_before_first_binding_releases_the_window() {
+    let mut manager = manager_from(interface_grace_config(), &BgpMetrics::new());
+    let incarnation = manager.injection_leases.incarnation();
+    assert_eq!(
+        signal(&mut manager, BRIDGE, incarnation).unwrap(),
+        crate::ReplayComplete::Released
+    );
+    let peer = interface_peer("fe80::1");
+    let mut rx = connect(&mut manager, peer, HELPER);
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, [V4]);
+    assert!(manager.next_eor_hold_deadline().is_none());
+    assert!(peer.release());
+}
+
+#[tokio::test(start_paused = true)]
+async fn interface_grace_survives_binding_retirement_but_ends_on_neighbor_deletion() {
+    let config = interface_grace_config();
+    let deadline = config.peers[0].deadline;
+    let mut manager = manager_from(config, &BgpMetrics::new());
+    let peer = interface_peer("fe80::1");
+    let mut rx = connect(&mut manager, peer, HELPER);
+    assert_no_eor(&mut rx, "first binding");
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer,
+        label: None,
+        keep_series: true,
+    });
+    manager.handle_update(RibUpdate::RebindPeer {
+        peer,
+        endpoint: crate::PeerEndpoint::new("fe80::2".parse().unwrap(), Some("swp1")),
+    });
+    let mut rx = connect(&mut manager, peer, HELPER);
+    assert_no_eor(&mut rx, "replacement binding");
+    assert_eq!(manager.next_eor_hold_deadline(), Some(deadline));
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer,
+        label: None,
+        keep_series: false,
+    });
+    manager.handle_update(RibUpdate::ReleasePeer { peer });
+    let new = interface_peer("fe80::2");
+    let mut rx = connect(&mut manager, new, HELPER);
+    assert_eq!(
+        rx.try_recv().unwrap().end_of_rib,
+        [V4],
+        "a deleted and re-added neighbor inherits no startup window"
+    );
+    assert!(new.release());
+}
+
+#[tokio::test(start_paused = true)]
+async fn interface_grace_deleted_before_first_binding_is_not_inherited_by_a_readd() {
+    let mut manager = manager_from(interface_grace_config(), &BgpMetrics::new());
+    manager.handle_update(RibUpdate::RetireEorGraceInterface {
+        interface: "swp1".into(),
+    });
+    let peer = interface_peer("fe80::1");
+    let mut rx = connect(&mut manager, peer, HELPER);
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, [V4]);
+    assert!(manager.next_eor_hold_deadline().is_none());
+    assert!(peer.release());
 }

@@ -2,8 +2,8 @@
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -1252,6 +1252,43 @@ pub struct WarmCheckpointSessionState {
     pub add_path_receive_families: Vec<(Afi, Safi)>,
 }
 
+/// Link provenance of routes retained under GR/LLGR after this actor's TCP loss.
+/// Keep a clone through actor shutdown, then transfer its final value before
+/// an untouched replacement progresses. Collision candidates keep independent state.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct RetainedConnectionState(Arc<Mutex<RetainedConnectionValue>>);
+
+#[derive(Debug, Default)]
+struct RetainedConnectionValue {
+    retained: Option<crate::session::RetainedConnection>,
+    /// Even clearing retention is actor progress that inheritance must preserve.
+    session_written: bool,
+}
+
+impl RetainedConnectionState {
+    pub(crate) fn get(&self) -> Option<crate::session::RetainedConnection> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retained
+    }
+
+    pub(crate) fn set(&self, retained: Option<crate::session::RetainedConnection>) {
+        let mut current = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        current.retained = retained;
+        current.session_written = true;
+    }
+
+    fn inherit(&self, previous: &Self) {
+        let retained = previous.get();
+        let mut current = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !current.session_written {
+            current.retained = retained;
+        }
+    }
+}
+
 /// Handle for controlling a spawned peer session.
 ///
 /// Dropping the handle does not stop the session — call [`shutdown`](Self::shutdown)
@@ -1260,6 +1297,7 @@ pub struct PeerHandle {
     commands: mpsc::Sender<PeerCommand>,
     task: JoinHandle<Result<(), TransportError>>,
     import_policy_counters: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
+    gr_retained_connection: RetainedConnectionState,
 }
 
 /// Channel buffer size for peer commands.
@@ -1353,6 +1391,7 @@ impl PeerHandle {
             commands,
             task,
             import_policy_counters: watch::channel(None).1,
+            gr_retained_connection: RetainedConnectionState::default(),
         }
     }
 
@@ -1368,6 +1407,7 @@ impl PeerHandle {
             commands,
             task,
             import_policy_counters,
+            gr_retained_connection: RetainedConnectionState::default(),
         }
     }
 
@@ -1574,6 +1614,8 @@ impl PeerHandle {
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let (import_publication, import_policy_counters) = watch::channel(None);
+        let gr_retained_connection = RetainedConnectionState::default();
+        let retained_connection = gr_retained_connection.clone();
         let span = peer_session_span(&config);
         let task = tokio::spawn(
             async move {
@@ -1594,6 +1636,7 @@ impl PeerHandle {
                     tcp_ao_generation,
                 );
                 session.set_import_policy_counters(import_publication);
+                session.gr_retained_connection = retained_connection;
                 session.run().await
             }
             .instrument(span),
@@ -1602,6 +1645,7 @@ impl PeerHandle {
             commands: tx,
             task,
             import_policy_counters,
+            gr_retained_connection,
         }
     }
 
@@ -1748,6 +1792,8 @@ impl PeerHandle {
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let (import_publication, import_policy_counters) = watch::channel(None);
+        let gr_retained_connection = RetainedConnectionState::default();
+        let retained_connection = gr_retained_connection.clone();
         let span = peer_session_span(&config);
         let task = tokio::spawn(
             async move {
@@ -1771,6 +1817,7 @@ impl PeerHandle {
                     tcp_ao_generation,
                 );
                 session.set_import_policy_counters(import_publication);
+                session.gr_retained_connection = retained_connection;
                 session.run().await
             }
             .instrument(span),
@@ -1779,7 +1826,22 @@ impl PeerHandle {
             commands: tx,
             task,
             import_policy_counters,
+            gr_retained_connection,
         }
+    }
+
+    /// Keep this actor's final retained-route provenance through its shutdown.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn retained_connection_state(&self) -> RetainedConnectionState {
+        self.gr_retained_connection.clone()
+    }
+
+    /// Seed provenance after the old actor has stopped, preserving any
+    /// retention state this actor already wrote while promotion was delayed.
+    #[doc(hidden)]
+    pub fn inherit_retained_connection(&self, previous: &RetainedConnectionState) {
+        self.gr_retained_connection.inherit(previous);
     }
 
     /// Send a Start command to begin the BGP handshake.
