@@ -1388,7 +1388,7 @@ async fn owned_policy_change_fences_when_failing_peer_cannot_restore() {
                 ack: None,
             },
             // Explicit order so peer 1 is applied before peer 2 fails.
-            Some(vec![a1, a2, a3]),
+            Some(keys([a1, a2, a3])),
         )
         .await;
     assert!(
@@ -1524,7 +1524,7 @@ async fn owned_policy_failure_diagnostic_never_carries_session_secret_text() {
                 },
                 ack: None,
             },
-            Some(vec![peer]),
+            Some(keys([peer])),
         )
         .await;
     let rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::FullyCompensated(error) = outcome
@@ -1576,7 +1576,7 @@ async fn owned_policy_failure_diagnostic_never_carries_rib_secret_text() {
             },
             ack: None,
         },
-        Some(vec![peer.addr()]),
+        Some(keys([peer.addr()])),
     );
     let rib = async {
         let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx.recv().await.unwrap() else {
@@ -2226,10 +2226,11 @@ async fn owned_neighbor_chain_validation_rejects_before_runtime_effect() {
         .apply_policy_change_owned(
             rustbgpd_api::peer_types::ConfigEvent::SetNeighborImportChain {
                 address,
+                interface: None,
                 policy_names: Vec::new(),
                 ack: None,
             },
-            Some(vec![address]),
+            Some(keys([address])),
         )
         .await;
     assert!(matches!(
@@ -2332,10 +2333,11 @@ async fn chain_node_budget_rejects_api_and_reload_without_effect() {
         .apply_policy_change_owned(
             ConfigEvent::SetNeighborImportChain {
                 address: peer,
+                interface: None,
                 policy_names: vec!["bulk".to_string(); 100],
                 ack: None,
             },
-            Some(vec![peer]),
+            Some(keys([peer])),
         )
         .await;
     assert!(
@@ -2769,4 +2771,81 @@ async fn local_revalidation_refreshes_a_peer_with_an_unfired_policy_refresh() {
     );
     assert_validation_import_refresh_metric(&mgr, "rpki", "revalidated_locally", 1.0);
     assert_validation_import_refresh_metric(&mgr, "rpki", "fallback_refresh", 1.0);
+}
+
+/// A chain edit for one of two neighbors that share a link-local address
+/// re-evaluates that neighbor only: the sibling's pending refresh is left
+/// for its own next policy call.
+#[tokio::test]
+async fn neighbor_chain_edit_leaves_same_address_sibling_untouched() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+
+    let mut mgr = test_peer_manager();
+    mgr.current_config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[policy.definitions.f]
+default_action = "permit"
+
+[[neighbors]]
+address = "fe80::5"
+interface = "lo"
+remote_asn = 65002
+
+[[neighbors]]
+address = "fe80::5"
+interface = "rbgp-missing"
+remote_asn = 65002
+"#,
+    );
+    let address: IpAddr = "fe80::5".parse().unwrap();
+    for (interface, scope_id, session_id) in [("lo", 1, 7), ("rbgp-missing", 42, 8)] {
+        insert_test_scoped_managed_peer(
+            &mut mgr,
+            address,
+            interface,
+            scope_id,
+            session_id,
+            acking_policy_handle(address, SessionState::Established),
+        );
+    }
+    let sibling = scoped_key(address, "rbgp-missing");
+    mgr.peers.get_mut(&sibling).unwrap().pending_refresh = true;
+
+    let (reply, response) = oneshot::channel();
+    let _ = Box::pin(
+        mgr.dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+            mutation: OwnedCatalogMutation::SetNeighborImportChain {
+                address,
+                interface: Some("lo".to_string()),
+                policy_names: vec!["f".to_string()],
+            },
+            reply,
+        }),
+    )
+    .await;
+    let outcome = response.await.unwrap();
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::Success),
+        "{outcome:?}"
+    );
+    assert!(
+        mgr.peers[&scoped_key(address, "lo")]
+            .import_policy
+            .is_some(),
+        "the selected neighbor installs the chain"
+    );
+    assert!(mgr.peers[&sibling].import_policy.is_none());
+    assert!(
+        mgr.peers[&sibling].pending_refresh,
+        "the sibling is not re-evaluated"
+    );
 }

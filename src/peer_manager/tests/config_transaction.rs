@@ -88,6 +88,75 @@ import_policy_chain = ["f"]
     responder.await.unwrap();
 }
 
+/// Neighbors that share a link-local address are planned separately: an
+/// unchanged pair in different peer groups is a no-op, and editing one
+/// member's group does not resolve the other member's missing interface.
+#[tokio::test]
+async fn transaction_plan_keeps_same_address_neighbors_apart() {
+    assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
+    let mut mgr = test_peer_manager();
+    mgr.replace_current_config(load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.edge]
+hold_time = 90
+
+[peer_groups.core]
+
+[[neighbors]]
+address = "fe80::5"
+interface = "rbgp-missing"
+remote_asn = 65005
+peer_group = "core"
+
+[[neighbors]]
+address = "fe80::5"
+interface = "lo"
+remote_asn = 65005
+peer_group = "edge"
+"#,
+    ));
+    let initial = toml::to_string_pretty(&mgr.current_config).unwrap();
+    let candidate = initial.replace("hold_time = 90", "hold_time = 180");
+    assert_ne!(candidate, initial);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    mgr.rib_tx = rib_tx;
+    let responder = tokio::spawn(async move {
+        for _ in 0..2 {
+            let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+                panic!("transaction plan snapshot query missing");
+            };
+            let _ = reply.send(rustbgpd_rib::UpdateGroupSnapshot::default());
+        }
+    });
+    let noop = mgr
+        .plan_config_transaction(&initial, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        noop.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Noop
+    );
+    let changed = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        changed.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable,
+        "{changed:?}"
+    );
+    responder.await.unwrap();
+}
+
 #[tokio::test]
 async fn stale_live_snapshot_is_rejected_before_candidate_validation() {
     let config = load_test_config(

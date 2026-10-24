@@ -40,6 +40,10 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 
 use crate::test_support::{assert_tier_authorized_test_config, tier_authorized_uds_test_config};
 
+fn keys(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<PeerKey> {
+    addrs.into_iter().map(key).collect()
+}
+
 fn key(addr: IpAddr) -> PeerKey {
     PeerKey::new(addr, None)
 }

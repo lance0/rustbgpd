@@ -537,18 +537,26 @@ async fn owned_peer_group_mutation_body(
         } => (
             OwnedCatalogMutation::SetNeighborPeerGroup {
                 address,
-                interface,
+                interface: interface.clone(),
                 peer_group: peer_group.clone(),
             },
             ConfigEvent::SetNeighborPeerGroup {
                 address,
+                interface,
                 peer_group,
                 ack: None,
             },
         ),
         PeerGroupMutationIntent::ClearNeighbor { address, interface } => (
-            OwnedCatalogMutation::ClearNeighborPeerGroup { address, interface },
-            ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
+            OwnedCatalogMutation::ClearNeighborPeerGroup {
+                address,
+                interface: interface.clone(),
+            },
+            ConfigEvent::ClearNeighborPeerGroup {
+                address,
+                interface,
+                ack: None,
+            },
         ),
     };
 
@@ -1873,10 +1881,12 @@ mod tests {
         match config_rx.recv().await {
             Some(ConfigEvent::SetNeighborPeerGroup {
                 address,
+                interface,
                 peer_group,
                 ack,
             }) => {
                 assert_eq!(address.to_string(), "10.0.0.2");
+                assert_eq!(interface, None);
                 assert_eq!(peer_group, "rs-clients");
                 ack.expect("persisted mutation must carry an ack")
                     .fail_write("disk full");

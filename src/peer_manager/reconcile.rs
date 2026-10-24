@@ -334,18 +334,19 @@ impl PeerManager {
         // Transaction executors rebuild raw member edits and static reshape
         // impacts. Preserve their fresh-interface preflight while comparison
         // inventories retain accepted peers whose interface is absent.
-        // Validated configs have one member per address, including scoped peers.
-        let fresh_targets: HashSet<&str> = operational_diff
+        // A target is `(address, interface)`: neighbors that share a
+        // link-local address are separate members.
+        let fresh_targets: HashSet<(&str, Option<&str>)> = operational_diff
             .neighbors
             .added
             .iter()
-            .map(|neighbor| neighbor.address.as_str())
+            .map(|neighbor| (neighbor.address.as_str(), neighbor.interface.as_deref()))
             .chain(
                 operational_diff
                     .neighbors
                     .changed
                     .iter()
-                    .map(|neighbor| neighbor.address.as_str()),
+                    .map(|neighbor| (neighbor.address.as_str(), neighbor.interface.as_deref())),
             )
             .chain(
                 operational_diff
@@ -355,12 +356,12 @@ impl PeerManager {
                         (!impact.is_dynamic_range
                             && impact.kind
                                 == crate::config::EffectiveNeighborImpactKind::SessionReshape)
-                            .then_some(impact.address.as_str())
+                            .then_some((impact.address.as_str(), impact.interface.as_deref()))
                     }),
             )
             .collect();
         for neighbor in &candidate.neighbors {
-            if fresh_targets.contains(neighbor.address.as_str()) {
+            if fresh_targets.contains(&(neighbor.address.as_str(), neighbor.interface.as_deref())) {
                 candidate.resolve_neighbor(neighbor).map_err(|error| {
                     RuntimeConfigTransactionPlanError::InvalidCandidate(error.to_string())
                 })?;

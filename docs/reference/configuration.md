@@ -1099,10 +1099,45 @@ be made without rebuilding its sessions.
 IPv6 link-local neighbors (`fe80::/10`) must set `interface`, because a
 link-local address is not globally unique (RFC 4007). Numbered IPv4 / IPv6
 neighbors must not set `interface`. Duplicate numbered peers are rejected by
-address. In this release each link-local address must also be unique across
-neighbors: the same link-local address may not be bound to more than one
-interface, because the RIB still keys peers by address. Scoped multi-interface
-link-local peering is deferred (see ADR-0069).
+address, and link-local peers by `(address, interface)`.
+
+One link-local address may name a neighbor on each of several interfaces, for
+example parallel links to a router that uses the same MAC, and so the same
+EUI-64 link-local address, on every port:
+
+```toml
+[[neighbors]]
+address = "fe80::1"
+interface = "eth0"
+remote_asn = 65101
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth1"
+remote_asn = 65101
+```
+
+Each is its own neighbor: its own routes, which survive the other's session
+going down, route refresh, Graceful Restart and deletion; its own metrics
+series (`peer="fe80::1%eth0"`); its own entries in MRT dumps. When the two
+advertise an equal route, the interface name breaks the tie, compared
+bytewise, so the same one wins whatever the configuration or connection
+order. Some features still key their state by the bare address and are
+refused on neighbors that share one:
+
+- BMP: any `[bmp]` collector is refused while such a pair exists, because a
+  collector cannot tell the two sessions apart;
+- BFD (`bfd`, directly or inherited);
+- TCP MD5 (`md5_password`) and TCP-AO (`tcp_ao`), which the passive listener
+  keys by peer address;
+- a `log_level` that differs between them, because the per-neighbor log
+  directive matches the bare address;
+- an effective GTSM policy (`ttl_security`, `ttl_security_hops`, direct or
+  inherited) that differs between them, because the passive listener selects
+  it by peer address.
+
+`NeighborService/ReplayOutbound`, whose completion BMP reports, also refuses
+either neighbor of such a pair.
 
 ```toml
 [[neighbors]]
@@ -1407,8 +1442,14 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   restart hold-down expires or the neighbor is enabled.
 - **One per interface.** Each interface has at most one interface-only
   neighbor, and none if it already has a static link-local neighbor.
+- **BFD.** Single-hop BFD (`bfd = { profile = "..." }`, own or inherited) runs
+  on the learned endpoint: binding an address creates the session to it on
+  the interface, a new address or a recreated interface replaces it, and
+  losing the binding removes it. There is no session before a binding. With
+  `strict = true` the BGP session is held until BFD is Up on the current
+  binding; a BFD down tears it down as for any neighbor.
 - **Rejected** on an interface-only neighbor, directly or through its peer
-  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), BFD,
+  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), `bfd.multihop`,
   `fast_external_failover = false`, `conditional_advertisements`,
   `log_level`, and explicit `[global] listen_addresses`; and on the neighbor
   itself, `max_prefixes_out_ipv4_unicast` and `max_prefixes_out_ipv6_unicast`
@@ -2940,7 +2981,11 @@ values and unknown table keys are rejected.
 and RFC 8956 IPv6 destination constraints. Infeasible received candidates remain
 available for diagnostics but cannot be newly selected or advertised. Local API
 injection remains trusted origination; it does not claim received-route validation.
-There are no per-peer exemptions or destinationless-rule bypass settings. See
+There are no per-peer exemptions or destinationless-rule bypass settings.
+Without an `ORIGINATOR_ID`, the originator is the advertising neighbor's
+address, and a link-local originator is compared together with its interface,
+so neighbors that share a link-local address on different interfaces are
+different originators. See
 [ADR-0135](../adr/0135-flowspec-feasibility.md) for the exact validation and
 revalidation semantics.
 
@@ -4610,7 +4655,8 @@ private resync, and no-op transitions. Deleted peers have an explicit `absent`
 candidate state and do not count toward the projected topology or local resyncs.
 New, down, or session-reshaped peers are reported as
 `indeterminate_session_negotiation`; the planner never guesses future
-capabilities. `local_resync` describes local outbound
+capabilities. Each row's `peer` is the neighbor address, scoped to its
+interface for a link-local neighbor (`fe80::1%eth0`). `local_resync` describes local outbound
 re-evaluation, while `remote_route_refresh` is separate and remains false for
 this outbound-only projection. Capacity is a receipt-envelope class
 (`fully_shared`, `within_uniform`, `within_mixed`, `outside_measured`, or
@@ -5855,7 +5901,7 @@ quoting it:
 | Each `address` in `[[neighbors]]` must be a valid IP address (IPv4 or IPv6) | `invalid neighbor address` |
 | IPv6 link-local `[[neighbors]]` must set `interface`; numbered neighbors must not | `invalid neighbor config` |
 | `[[neighbors]]` identity must be unique by address for numbered peers and by `(address, interface)` for IPv6 link-local peers | `duplicate neighbor address/interface` |
-| An IPv6 link-local address may not be bound to more than one interface in this release (the RIB keys peers by address; deferred per ADR-0069) | `not supported in this release` |
+| Neighbors that share one IPv6 link-local address on different interfaces may not be combined with a `[bmp]` collector, and may not use BFD, `md5_password`, `tcp_ao`, or differing `log_level` values; the error names both neighbors | `invalid neighbor config` |
 | `prometheus_addr` must be a valid `ip:port` | `invalid prometheus_addr` |
 | `grpc_tcp.address` must be a valid `ip:port` when `grpc_tcp` is enabled | `invalid gRPC config` |
 | `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |

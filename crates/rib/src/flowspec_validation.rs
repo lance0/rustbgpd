@@ -11,6 +11,7 @@ use rustbgpd_wire::{
 };
 
 use crate::route::{FlowSpecRoute, Route, RouteOrigin};
+use crate::{PeerEndpoint, PeerId};
 
 /// Completed validation result. Pending work is tracked separately by its owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,8 +149,8 @@ fn prepare(
     let flow_head = sequence_head(flow.as_path())?;
     let local_domain = flow.origin_type == RouteOrigin::Ibgp && flow_head.is_none();
     if !local_domain
-        && originator(flow.originator_id(), flow.peer.addr())
-            != originator(best.originator_id(), best.peer.addr())
+        && originator(flow.originator_id(), flow.peer)
+            != originator(best.originator_id(), best.peer)
     {
         return Err(InfeasibleReason::OriginatorMismatch);
     }
@@ -175,8 +176,16 @@ fn prepare(
     })
 }
 
-fn originator(id: Option<Ipv4Addr>, peer: IpAddr) -> IpAddr {
-    id.map_or(peer, IpAddr::V4)
+/// The `ORIGINATOR_ID`, or the advertising neighbor's address scoped to its
+/// interface, so two neighbors sharing a link-local address are different
+/// originators. An unscoped peer compares by address alone, as before.
+fn originator(id: Option<Ipv4Addr>, peer: PeerId) -> PeerEndpoint {
+    match id {
+        Some(id) => PeerEndpoint::from(IpAddr::V4(id)),
+        None => peer
+            .endpoint()
+            .unwrap_or_else(|| PeerEndpoint::from(peer.addr())),
+    }
 }
 
 /// Preserve the distinction between an absent attribute and a genuinely empty
@@ -223,8 +232,6 @@ fn covers(cover: Prefix, destination: Prefix) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::PeerId;
-
     use rustbgpd_wire::{Afi, Ipv6PrefixOffset, PathAttribute};
 
     use super::*;
@@ -300,6 +307,27 @@ mod tests {
         flow.attributes.pop();
         flow.peer = PeerId::from_addr(IpAddr::V4(id));
         assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
+    }
+
+    /// Without `ORIGINATOR_ID`, two neighbors that share a link-local address
+    /// on different interfaces are different originators: one router on two
+    /// links sends the rule on both sessions, and only the copy from the best
+    /// unicast path's session validates.
+    #[test]
+    fn same_address_neighbors_on_different_interfaces_are_different_originators() {
+        let (mut flow, mut cover) = fixture();
+        let link_local: IpAddr = "fe80::1".parse().unwrap();
+        let eth0 = PeerId::allocate(PeerEndpoint::new(link_local, Some("eth0")));
+        let eth1 = PeerId::allocate(PeerEndpoint::new(link_local, Some("eth1")));
+        cover.peer = eth0;
+        flow.peer = eth0;
+        assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
+        flow.peer = eth1;
+        assert_eq!(
+            evaluate(&flow, Some(&cover), &[]),
+            invalid(InfeasibleReason::OriginatorMismatch)
+        );
+        assert!(eth0.release() && eth1.release());
     }
 
     #[test]

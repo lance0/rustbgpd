@@ -12,7 +12,7 @@
 )]
 
 use rustbgpd_rib::route::AspaContextId;
-use rustbgpd_rib::{FibInstallCandidate, FibInstallNextHop, Route, RouteOrigin};
+use rustbgpd_rib::{FibInstallCandidate, FibInstallNextHop, PeerId, Route, RouteOrigin};
 use rustbgpd_wire::AspaValidationContext;
 use rustbgpd_wire::Prefix;
 use std::cmp::Ordering;
@@ -468,12 +468,12 @@ fn eligible_next_hops(
     candidate: &FibInstallCandidate,
     prefix: Prefix,
     max_paths: usize,
-    peer_allowed: impl Fn(IpAddr) -> bool,
+    peer_allowed: impl Fn(PeerId) -> bool,
 ) -> Vec<FibNextHop> {
     candidate
         .next_hops
         .iter()
-        .filter(|next_hop| peer_allowed(next_hop.peer.addr()))
+        .filter(|next_hop| peer_allowed(next_hop.peer))
         .filter_map(|next_hop| fib_next_hop_from_install(prefix, next_hop).ok())
         .take(max_paths)
         .collect()
@@ -615,11 +615,13 @@ impl<'a> FibProjectionTable<'a> {
         table_allows_prefix(self.table, prefix)
     }
 
-    fn allows_peer(&self, peer: IpAddr, peer_groups: &BTreeMap<IpAddr, String>) -> bool {
+    /// `allowed_neighbors` names bare addresses, so it admits every neighbor
+    /// at one; the peer-group check uses the neighbor's own membership.
+    fn allows_peer(&self, peer: PeerId, peer_groups: &BTreeMap<PeerId, String>) -> bool {
         if self.allows_all_peers {
             return true;
         }
-        self.allowed_neighbors.contains(&peer)
+        self.allowed_neighbors.contains(&peer.addr())
             || peer_groups
                 .get(&peer)
                 .is_some_and(|group| self.allowed_peer_groups.contains(group.as_str()))
@@ -636,7 +638,7 @@ impl<'a> FibProjectionTable<'a> {
 pub(crate) fn project_fib_intent_with_peer_groups(
     tables: &[FibTableConfig],
     candidates: &[FibInstallCandidate],
-    peer_groups: &BTreeMap<IpAddr, String>,
+    peer_groups: &BTreeMap<PeerId, String>,
 ) -> FibIntent {
     let mut builder = FibIntentBuilder::new(tables, peer_groups);
     builder.push(candidates);
@@ -654,11 +656,11 @@ struct FibProjectionState {
 /// Streaming projection state used by the runtime's bounded RIB page walk.
 pub(crate) struct FibIntentBuilder {
     tables: Vec<FibProjectionState>,
-    peer_groups: BTreeMap<IpAddr, String>,
+    peer_groups: BTreeMap<PeerId, String>,
 }
 
 impl FibIntentBuilder {
-    pub(crate) fn new(tables: &[FibTableConfig], peer_groups: &BTreeMap<IpAddr, String>) -> Self {
+    pub(crate) fn new(tables: &[FibTableConfig], peer_groups: &BTreeMap<PeerId, String>) -> Self {
         Self {
             tables: tables
                 .iter()
@@ -704,7 +706,7 @@ impl FibIntentBuilder {
                 if !table.allows_prefix(route.prefix) {
                     continue;
                 }
-                if !table.allows_peer(route.peer.addr(), &self.peer_groups) {
+                if !table.allows_peer(route.peer, &self.peer_groups) {
                     state.intent.drops.push(FibDrop::PeerNotAllowed {
                         table_name: table.name.to_string(),
                         prefix: route.prefix,
@@ -1533,6 +1535,49 @@ mod tests {
         ));
     }
 
+    /// Two neighbors that share a link-local address on different
+    /// interfaces are filtered by their own peer groups.
+    #[test]
+    fn peer_group_allow_list_keeps_same_address_neighbors_apart() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.allowed_peer_groups = vec!["edge".to_string()];
+        let link_local = ip("fe80::1");
+        let eth0 = PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(link_local, Some("eth0")));
+        let eth1 = PeerId::allocate(rustbgpd_rib::PeerEndpoint::new(link_local, Some("eth1")));
+        let routes = [(eth0, 2), (eth1, 3)]
+            .into_iter()
+            .map(|(peer, octet)| {
+                let mut route = route_from_peer(
+                    v4_prefix(octet, 24),
+                    ip("203.0.113.1"),
+                    RouteOrigin::Ebgp,
+                    0,
+                    link_local,
+                );
+                route.peer = peer;
+                route
+            })
+            .collect();
+        let peer_groups = BTreeMap::from([(eth0, "edge".to_string()), (eth1, "core".to_string())]);
+
+        let intent =
+            project_fib_intent_with_peer_groups(&[table], &candidates(routes), &peer_groups);
+
+        assert_eq!(
+            intent
+                .routes
+                .keys()
+                .map(|key| key.prefix)
+                .collect::<Vec<_>>(),
+            [v4_prefix(2, 24)]
+        );
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::PeerNotAllowed { prefix, .. }] if *prefix == v4_prefix(3, 24)
+        ));
+        assert!(eth0.release() && eth1.release());
+    }
+
     #[test]
     fn peer_group_allow_list_uses_current_rib_peer_group_map() {
         let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
@@ -1554,8 +1599,8 @@ mod tests {
             ),
         ];
         let peer_groups = BTreeMap::from([
-            (ip("198.51.100.1"), "ix".to_string()),
-            (ip("198.51.100.2"), "transit".to_string()),
+            (PeerId::from_addr(ip("198.51.100.1")), "ix".to_string()),
+            (PeerId::from_addr(ip("198.51.100.2")), "transit".to_string()),
         ]);
 
         let intent =

@@ -3260,9 +3260,9 @@ older queued generations remain rejected.
 The optional per-key `vrf_ifindex` is Linux's VRF L3-master key selector, not
 an IPv6 link-local interface scope. rustbgpd currently installs VRF-unbound
 TCP-AO MKTs (`TCP_AO_KEYF_IFINDEX` clear), so Linux may match them in any L3
-master. Scoped link-local routing remains attached to the TCP socket,
-and configuration validation forbids reusing the same link-local neighbor
-address across interfaces.
+master. Scoped link-local routing remains attached to the TCP socket. The
+listener keys MKTs by peer address, so configuration refuses TCP-AO (and TCP
+MD5) on a neighbor that shares its link-local address with another.
 
 Counters and the key inventory are refreshed from the socket for each query;
 inspect `last_error` for setup or connect failures.
