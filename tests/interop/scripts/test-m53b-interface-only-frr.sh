@@ -29,6 +29,11 @@ cleanup_m53b() {
     cp "$WORK/capture.jsonl" /tmp/m53b-lifecycle-last-capture.jsonl 2>/dev/null || true
     docker exec "$RUSTBGPD" cat /tmp/m53b-rustbgpd.log \
         >/tmp/m53b-lifecycle-last-daemon.log 2>/dev/null || true
+    local frr
+    for frr in "$FRR1" "$FRR2" "$FRR3"; do
+        docker exec "$frr" cat /tmp/frr.log \
+            >"/tmp/m53b-lifecycle-last-${frr##*-}.log" 2>/dev/null || true
+    done
     rm -rf "$WORK"
     _cleanup_on_exit
     return "$rc"
@@ -614,11 +619,20 @@ ok "bound RA candidate expired while Established binding and FIB stayed healthy"
 
 # FRR1's link-local address changes: a new MAC on its port gives the kernel a
 # new EUI-64 address. The interface-only neighbor on eth1 binds it with
-# exactly one session down/up, keeps its peer="interface:eth1" series and
-# counts one address change.
+# exactly one session down/up of its own, keeps its peer="interface:eth1"
+# series and counts one address change.
 metric() { prom_value "$RUSTBGPD" "$1"; }
+# Sessions on eth1 that ended for `reason`.
+eth1_downs() {
+    prom_scrape "$RUSTBGPD" | awk -v reason="$1" '
+        /^bgp_session_down_total\{/ && /peer="interface:eth1"/ && index($0, "reason=\"" reason "\"") { n += $2 }
+        END { print n + 0 }'
+}
 OLD_LL1=$LL1
 established_before=$(metric 'bgp_session_established_total{peer="interface:eth1"}')
+flaps_before=$(metric 'bgp_session_flaps_total{peer="interface:eth1"}')
+local_before=$(($(eth1_downs local_notification) + $(eth1_downs local_no_notification)))
+peer_closed_before=$(eth1_downs remote_no_notification)
 changes_before=$(metric 'bgp_unnumbered_address_changes_total{peer="interface:eth1"}')
 eth2_flaps=$(flap_count)
 docker exec "$FRR1" sh -ec '
@@ -647,18 +661,30 @@ wait_kernel_route 2
 # Let any second establishment (a connection collision) show before counting.
 sleep 5
 established_after=$(metric 'bgp_session_established_total{peer="interface:eth1"}')
+flaps_after=$(metric 'bgp_session_flaps_total{peer="interface:eth1"}')
+local_after=$(($(eth1_downs local_notification) + $(eth1_downs local_no_notification)))
+peer_closed_after=$(eth1_downs remote_no_notification)
 changes_after=$(metric 'bgp_unnumbered_address_changes_total{peer="interface:eth1"}')
-# Both ends dial once the link returns, so FRR may also count a collision's
-# losing connection; the neighbor under test is rustbgpd's.
-if [ "$((established_after - established_before))" != 1 ]; then
-    fail "address change gave not exactly one session down/up: established $established_before->$established_after"
+established=$((established_after - established_before))
+flaps=$((flaps_after - ${flaps_before:-0}))
+local_downs=$((local_after - local_before))
+peer_closed=$((peer_closed_after - peer_closed_before))
+# Both ends dial once the link returns. rustbgpd ends exactly one session of
+# its own, at carrier loss, and never an Established one in a collision
+# (RFC 4271 §6.8); every session it establishes records its end. FRR 10.7.1
+# can stop its own Established session without a NOTIFICATION right after
+# deleting the collision's other connection, which costs one more down/up that
+# rustbgpd counts as closed by the peer; only such cycles are extra.
+if [ "$local_downs" != 1 ] || [ "$flaps" != "$established" ] \
+    || [ "$established" != "$((1 + peer_closed))" ]; then
+    fail "address change gave not exactly one rustbgpd session down/up: established +$established, flaps +$flaps, ended locally +$local_downs, closed by the peer +$peer_closed"
     dump_state; exit 1
 fi
 if ! docker exec "$FRR1" vtysh -c 'show bgp neighbors eth1 json' \
     | jq -e '.eth1.bgpState == "Established"' >/dev/null; then
     fail "FRR1 did not end Established on eth1"; dump_state; exit 1
 fi
-ok "FRR1's address change from $OLD_LL1 to $LL1 gave exactly one session down/up"
+ok "FRR1's address change from $OLD_LL1 to $LL1 gave exactly one session down/up (plus $peer_closed ended by FRR)"
 if [ "$((changes_after - ${changes_before:-0}))" != 1 ]; then
     fail "address changes counted ${changes_before:-0}->$changes_after, expected one"; exit 1
 fi
