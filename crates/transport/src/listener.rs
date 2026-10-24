@@ -162,6 +162,20 @@ pub struct TtlSecurityListenerPolicy {
     pub hops: Option<NonZeroU8>,
 }
 
+/// GTSM for an interface-only neighbor's learned endpoint (ADR-0142):
+/// connections from `address` arriving on interface `ifindex`. It is matched
+/// before any configured selector, so it never applies to a neighbor on
+/// another interface that shares the link-local address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LearnedTtlSecuritySelector {
+    /// The learned IPv6 link-local peer address.
+    pub address: std::net::Ipv6Addr,
+    /// The arrival interface's index.
+    pub ifindex: u32,
+    /// Maximum peer distance in IP hops.
+    pub hops: NonZeroU8,
+}
+
 /// Socket options installed before the BGP listener enters `listen(2)`.
 #[derive(Clone, Default)]
 pub struct ListenerSocketOptions {
@@ -214,6 +228,10 @@ pub struct BgpListener {
     md5_keys: Vec<Md5ListenerKey>,
     /// GTSM selectors applied to accepted children.
     ttl_security: Vec<TtlSecurityListenerPolicy>,
+    /// GTSM selectors of interface-only neighbors' learned endpoints, by
+    /// interface name. Owned by the peer manager's bindings; a reload's
+    /// inventory replacement leaves them alone.
+    learned_ttl_security: std::collections::BTreeMap<String, LearnedTtlSecuritySelector>,
     /// Latest generation installed in the listener kernel inventory. This may
     /// lead the globally committed generation while sessions are applying.
     tcp_ao_generation: TcpAoRotationGeneration,
@@ -301,6 +319,11 @@ enum TcpAoListenerCommand {
     ReplaceInboundAuth {
         md5_keys: Vec<Md5ListenerKey>,
         ttl_security: Vec<TtlSecurityListenerPolicy>,
+        reply: oneshot::Sender<std::io::Result<()>>,
+    },
+    SetLearnedTtlSecurity {
+        interface: String,
+        selector: Option<LearnedTtlSecuritySelector>,
         reply: oneshot::Sender<std::io::Result<()>>,
     },
 }
@@ -573,6 +596,32 @@ impl TcpAoListenerHandle {
         .await
     }
 
+    /// Install, replace or (`None`) remove the GTSM selector of the
+    /// interface-only neighbor on `interface` (ADR-0142). A reload's
+    /// [`Self::replace_inbound_auth`] leaves these selectors alone.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::replace_inbound_auth`]: the listener task is unavailable,
+    /// the control deadline expires, or the outbound Hop Limit cannot be
+    /// raised.
+    pub async fn set_learned_ttl_security(
+        &self,
+        interface: String,
+        selector: Option<LearnedTtlSecuritySelector>,
+    ) -> ReloadDispatch<std::io::Result<()>, std::io::Error> {
+        self.dispatch(
+            |reply| TcpAoListenerCommand::SetLearnedTtlSecurity {
+                interface,
+                selector,
+                reply,
+            },
+            "BGP listener learned GTSM selector update",
+            || {},
+        )
+        .await
+    }
+
     /// Mark a later global phase (currently established-session apply) failed
     /// after this listener installed but did not globally commit the desired
     /// generation. A retry reuses the same immutable generation.
@@ -766,6 +815,21 @@ impl TcpAoListenerKeyIndex {
                 .collect(),
         }
     }
+}
+
+/// The learned-endpoint selector matching an inbound connection's source
+/// address and arrival interface.
+fn resolve_learned_ttl_security(
+    selectors: &std::collections::BTreeMap<String, LearnedTtlSecuritySelector>,
+    peer: SocketAddr,
+) -> Option<NonZeroU8> {
+    let SocketAddr::V6(peer) = peer else {
+        return None;
+    };
+    selectors
+        .values()
+        .find(|selector| selector.address == *peer.ip() && selector.ifindex == peer.scope_id())
+        .map(|selector| selector.hops)
 }
 
 /// Resolve whether GTSM is enforced for one inbound peer address, matching
@@ -978,6 +1042,7 @@ impl BgpListener {
             tcp_ao_keys: TcpAoListenerKeyIndex::new(options.tcp_ao_keys),
             md5_keys: options.md5_keys,
             ttl_security: options.ttl_security,
+            learned_ttl_security: std::collections::BTreeMap::new(),
             tcp_ao_generation: TcpAoRotationGeneration::STARTUP,
             previous_tcp_ao_generation: None,
             tcp_ao_committed_generation: TcpAoRotationGeneration::STARTUP,
@@ -1051,7 +1116,8 @@ impl BgpListener {
                         // between the handshake and this setsockopt are not
                         // re-filtered, but every later segment (including any
                         // KEEPALIVE required to reach Established) is.
-                        if let Some(hops) = resolve_ttl_security(&self.ttl_security, peer_ip)
+                        if let Some(hops) = resolve_learned_ttl_security(&self.learned_ttl_security, peer_addr)
+                            .or_else(|| resolve_ttl_security(&self.ttl_security, peer_ip))
                             && let Err(err) = crate::socket_opts::set_gtsm(
                                 &socket2::SockRef::from(&stream),
                                 peer_addr,
@@ -1161,6 +1227,13 @@ impl BgpListener {
                 reply,
             } => {
                 let _ = reply.send(self.replace_inbound_auth(md5_keys, ttl_security));
+            }
+            TcpAoListenerCommand::SetLearnedTtlSecurity {
+                interface,
+                selector,
+                reply,
+            } => {
+                let _ = reply.send(self.set_learned_ttl_security(interface, selector));
             }
             TcpAoListenerCommand::MarkDependentFailure {
                 generation,
@@ -1846,6 +1919,26 @@ impl BgpListener {
         }
         self.md5_keys = md5_keys;
         self.ttl_security = ttl_security;
+        Ok(())
+    }
+
+    /// Install, replace or (`None`) remove the GTSM selector of the
+    /// interface-only neighbor on `interface`. A selector raises the IPv6
+    /// listener's outbound Hop Limit to 255 first, so its SYN-ACKs pass the
+    /// peer's own check.
+    fn set_learned_ttl_security(
+        &mut self,
+        interface: String,
+        selector: Option<LearnedTtlSecuritySelector>,
+    ) -> std::io::Result<()> {
+        let Some(selector) = selector else {
+            self.learned_ttl_security.remove(&interface);
+            return Ok(());
+        };
+        for family in self.listeners.iter().filter(|family| !family.is_v4) {
+            crate::socket_opts::set_gtsm_outbound(&socket2::SockRef::from(&family.socket), false)?;
+        }
+        self.learned_ttl_security.insert(interface, selector);
         Ok(())
     }
 
@@ -2809,6 +2902,46 @@ mod tests {
     use crate::config::{TcpAoAlgorithm, TcpAoConfig};
     use std::cell::RefCell;
     use std::net::Ipv4Addr;
+
+    /// A learned endpoint's selector matches only its address on its
+    /// interface, and wins over a configured selector for that address.
+    #[test]
+    fn learned_ttl_security_matches_address_and_interface() {
+        let hops = NonZeroU8::MIN;
+        let selectors = std::collections::BTreeMap::from([(
+            "swp1".to_string(),
+            LearnedTtlSecuritySelector {
+                address: "fe80::2".parse().unwrap(),
+                ifindex: 7,
+                hops,
+            },
+        )]);
+        let source = |address: &str, scope| {
+            SocketAddr::V6(std::net::SocketAddrV6::new(
+                address.parse().unwrap(),
+                179,
+                0,
+                scope,
+            ))
+        };
+        assert_eq!(
+            resolve_learned_ttl_security(&selectors, source("fe80::2", 7)),
+            Some(hops)
+        );
+        // Mutation-red: matching by address alone reaches another interface.
+        assert_eq!(
+            resolve_learned_ttl_security(&selectors, source("fe80::2", 8)),
+            None
+        );
+        assert_eq!(
+            resolve_learned_ttl_security(&selectors, source("fe80::3", 7)),
+            None
+        );
+        assert_eq!(
+            resolve_learned_ttl_security(&selectors, "192.0.2.1:179".parse().unwrap()),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn reload_dispatch_distinguishes_rejection_from_lost_acknowledgement() {

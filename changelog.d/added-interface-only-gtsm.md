@@ -1,0 +1,12 @@
+### Added
+
+- `ttl_security` (GTSM, RFC 5082) is accepted on interface-only neighbors.
+  When the neighbor binds a learned address, the BGP listener enforces Hop
+  Limit 255 on connections from that address on that interface before the
+  peer can be matched for inbound, and removes the selector only after that
+  endpoint's peer is retired. A connection learned from an inbound SYN gets
+  the same check, and active opens send Hop Limit 255. The selector matches
+  by address and interface, so it never applies to a neighbor on another
+  link that shares the address. `ttl_security_hops` above 1 is rejected,
+  since the peer is directly connected. See
+  [Interface-only neighbors](../docs/reference/configuration.md#interface-only-neighbors).

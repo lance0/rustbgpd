@@ -73,9 +73,9 @@ pub use handle::{
 };
 pub use link::{InterfaceAddress, LinkDown, LinkDownCause, LinkSnapshot, LinkState, LinkStateFeed};
 pub use listener::{
-    AcceptedConnection, BgpListener, ListenerSocketOptions, Md5ListenerKey,
-    TcpAoListenerGeneration, TcpAoListenerHandle, TcpAoListenerKey, TcpAoListenerOwnerKind,
-    TtlSecurityListenerPolicy,
+    AcceptedConnection, BgpListener, LearnedTtlSecuritySelector, ListenerSocketOptions,
+    Md5ListenerKey, TcpAoListenerGeneration, TcpAoListenerHandle, TcpAoListenerKey,
+    TcpAoListenerOwnerKind, TtlSecurityListenerPolicy,
 };
 // ADR-0073: import-decision explain types crossing into the api +
 // binary layers (PeerManagerCommand reply, PolicyService mapping).

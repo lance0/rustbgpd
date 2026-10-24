@@ -588,6 +588,63 @@ mod inbound_auth {
         expect_data_flows(compliant, accepted).await;
     }
 
+    /// An interface-only neighbor's learned-endpoint selector (ADR-0142):
+    /// installed, low-hop-limit segments from that address on that interface
+    /// are dropped in the kernel while a hop-limit-255 sender's arrive; a
+    /// reload's inventory replacement keeps it; removed, the address is
+    /// unrestricted again. Loopback stands in for the link: `::1` arrives on
+    /// scope 0.
+    #[tokio::test]
+    async fn learned_ttl_security_selector_follows_the_binding() {
+        let (_v4_addr, v6_addr, mut accept_rx, control) =
+            bind_dual_listener(ListenerSocketOptions::default()).await;
+        let selector = |ifindex| rustbgpd_transport::LearnedTtlSecuritySelector {
+            address: std::net::Ipv6Addr::LOCALHOST,
+            ifindex,
+            hops: std::num::NonZeroU8::MIN,
+        };
+        let set = |selector| {
+            let control = control.clone();
+            async move {
+                match control
+                    .set_learned_ttl_security("lo".to_string(), selector)
+                    .await
+                {
+                    ReloadDispatch::Replied(result) => result.expect("selector update"),
+                    other => panic!("selector update not answered: {other:?}"),
+                }
+            }
+        };
+        set(Some(selector(0))).await;
+        // A reload replaces the configured inventory, not learned selectors.
+        assert!(matches!(
+            control
+                .replace_inbound_auth(Vec::new(), Vec::new(), || {})
+                .await,
+            ReloadDispatch::Replied(Ok(()))
+        ));
+        let low_hops = spawn_connect(v6_addr, None, None, Some(254))
+            .await
+            .expect("TCP handshake for a hop-limit-254 client");
+        expect_data_blocked(low_hops, expect_accept(&mut accept_rx).await).await;
+        let compliant = spawn_gtsm_connect(v6_addr, None)
+            .await
+            .expect("GTSM TCP handshake with hop-limit-255 SYN-ACK");
+        expect_data_flows(compliant, expect_accept(&mut accept_rx).await).await;
+
+        // Rebound to another interface: the old endpoint's selector is gone.
+        set(Some(selector(99))).await;
+        let rebound = spawn_connect(v6_addr, None, None, Some(254))
+            .await
+            .expect("TCP handshake after the rebind");
+        expect_data_flows(rebound, expect_accept(&mut accept_rx).await).await;
+        set(None).await;
+        let unbound = spawn_connect(v6_addr, None, None, Some(254))
+            .await
+            .expect("TCP handshake after removal");
+        expect_data_flows(unbound, expect_accept(&mut accept_rx).await).await;
+    }
+
     /// LAN-907 reload path: `replace_inbound_auth` fans each family's MD5
     /// inventory out to its own socket. Rotating only the IPv6 password
     /// takes effect on the IPv6 socket while the IPv4 key stays enforced
