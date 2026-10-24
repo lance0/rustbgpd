@@ -772,6 +772,7 @@ fn supports_outbound_registration(version: Option<&str>) -> bool {
 #[expect(clippy::too_many_arguments, reason = "snapshot fields")]
 fn peer_checks(
     address: &str,
+    metric_label: &str,
     state: &str,
     stale: bool,
     max_prefix_restart_remaining_millis: Option<u64>,
@@ -861,11 +862,11 @@ fn peer_checks(
     if slow_peer {
         let detail = if update_group == "slow_peer" {
             format!(
-                "peer {address} is flagged slow and already isolated from shared update groups: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{address}\"}} and troubleshoot the member's receive path"
+                "peer {address} is flagged slow and already isolated from shared update groups: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{metric_label}\"}} and troubleshoot the member's receive path"
             )
         } else {
             format!(
-                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{address}\"}} and enable slow_peer_isolation for chronic single-peer lag"
+                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{metric_label}\"}} and enable slow_peer_isolation for chronic single-peer lag"
             )
         };
         checks.push(Check {
@@ -1008,12 +1009,11 @@ fn outbound_resync_check(identity: &str, n: &crate::proto::NeighborState) -> Opt
             ),
         )
     } else if n.outbound_dirty_seconds.unwrap_or(0) >= OUTBOUND_RESYNC_WARN_SECS {
-        // The `peer` metric label is the neighbor's identity, scoped for a
-        // link-local neighbor.
+        let label = metric_label_of(identity, n);
         (
             CheckStatus::Warn,
             format!(
-                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{identity}\"}} and the peer's receive path"
+                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{label}\"}} and the peer's receive path"
             ),
         )
     } else {
@@ -1495,6 +1495,27 @@ fn ra_socket_check(evidence: &UnnumberedEvidence<'_>) -> Option<Check> {
             if failures == 1 { "" } else { "s" }
         ),
     })
+}
+
+/// The neighbor's `peer` metric label: `interface:<name>` for an
+/// interface-only neighbor, whose series name its interface, else its
+/// identity (scoped for a link-local neighbor).
+fn metric_label_of(identity: &str, n: &crate::proto::NeighborState) -> String {
+    match n.config.as_ref() {
+        Some(config) if config.address.is_empty() && !config.interface.is_empty() => {
+            format!("interface:{}", config.interface)
+        }
+        _ => identity.to_string(),
+    }
+}
+
+/// [`metric_label_of`] for a support-bundle row.
+fn metric_peer_label(identity: &str, row: &JsonNeighbor) -> String {
+    if row.address.is_empty() && !row.interface.is_empty() {
+        format!("interface:{}", row.interface)
+    } else {
+        identity.to_string()
+    }
 }
 
 /// A neighbor's identity in check names: its address, scoped for a
@@ -4199,6 +4220,7 @@ async fn run_with_deadlines(
                         };
                         for check in peer_checks(
                             &record.identity,
+                            &metric_peer_label(&record.identity, &record.support),
                             &record.support.state,
                             record.support.stale,
                             record.max_prefix_restart_remaining_millis,
@@ -5208,6 +5230,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn established_peer_is_green() {
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Established",
             false,
             None,
@@ -5235,7 +5258,8 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         };
         let diagnose = |stale, countdown, evidence| {
             peer_checks(
-                "10.0.0.2", "Connect", stale, countdown, false, "", 0, 0, evidence, 1_000_000, "",
+                "10.0.0.2", "10.0.0.2", "Connect", stale, countdown, false, "", 0, 0, evidence,
+                1_000_000, "",
             )
         };
 
@@ -5759,6 +5783,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let transitioned = now - (4 * 3600 + 12 * 60); // 4h12m ago
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Connect",
             false,
             None,
@@ -5784,6 +5809,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let now = 1_000_000;
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Connect",
             false,
             None,
@@ -5805,6 +5831,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn administratively_disabled_peer_is_green_without_hiding_other_checks() {
         let now = 1_000_000;
         let checks = peer_checks(
+            "10.0.0.2",
             "10.0.0.2",
             "Idle",
             false,
@@ -5843,6 +5870,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn enabled_peer_stuck_in_active_remains_red() {
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Active",
             false,
             None,
@@ -5867,6 +5895,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn peer_in_connect_with_no_retained_transition_warns_age_unknown() {
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Connect",
             false,
             None,
@@ -5888,6 +5917,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     #[test]
     fn lifetime_flap_count_without_recent_loss_warns() {
         let checks = peer_checks(
+            "10.0.0.2",
             "10.0.0.2",
             "Established",
             false,
@@ -5916,6 +5946,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn lifetime_flap_count_with_recent_retained_loss_is_red() {
         let now = 1_000_000;
         let checks = peer_checks(
+            "10.0.0.2",
             "10.0.0.2",
             "Established",
             false,
@@ -6065,6 +6096,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn stale_peer_is_warn() {
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Stale",
             true,
             None,
@@ -6090,6 +6122,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let expected = r#"peer 10.0.0.2 is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{peer="10.0.0.2"} and enable slow_peer_isolation for chronic single-peer lag"#;
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Established",
             false,
             None,
@@ -6110,6 +6143,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
         let ungrouped = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Established",
             false,
             None,
@@ -6122,6 +6156,30 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "",
         );
         assert_eq!(ungrouped[1].detail, expected);
+
+        // An interface-only neighbor's series name its interface, not its
+        // learned endpoint. Mutation-red: selecting by the check identity.
+        let fabric = peer_checks(
+            "fe80::2%swp1",
+            "interface:swp1",
+            "Established",
+            false,
+            None,
+            true,
+            "",
+            3600,
+            0,
+            retained_session_evidence(None, None),
+            1_000_000,
+            "",
+        );
+        assert!(
+            fabric[1]
+                .detail
+                .contains(r#"bgp_peer_outbound_queue_depth{peer="interface:swp1"}"#),
+            "{}",
+            fabric[1].detail
+        );
     }
 
     #[test]
@@ -6844,6 +6902,22 @@ paths = ["x"]
                 .contains("bgp_peer_outbound_queue_depth{peer=\"fe80::1%eth0\"}"),
             "{}",
             scoped.detail
+        );
+        // An interface-only neighbor's series name its interface.
+        let mut fabric = n.clone();
+        fabric.config = Some(crate::proto::NeighborConfig {
+            interface: "swp1".to_string(),
+            ..Default::default()
+        });
+        let fabric = outbound_resync_check("fe80::2%swp1", &fabric).unwrap();
+        assert!(fabric.name.contains("fe80::2%swp1"), "{}", fabric.name);
+        // Mutation-red: the identity names a series that does not exist.
+        assert!(
+            fabric
+                .detail
+                .contains("bgp_peer_outbound_queue_depth{peer=\"interface:swp1\"}"),
+            "{}",
+            fabric.detail
         );
 
         n.outbound_dirty_seconds = Some(1);
