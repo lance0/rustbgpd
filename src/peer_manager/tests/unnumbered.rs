@@ -4335,6 +4335,60 @@ async fn a_combined_group_edit_applies_the_policy_to_a_member_that_does_not_rebi
     assert!(h.mgr.peers[&key].export_policy.is_none(), "chain removed");
 }
 
+/// The live chain of a member that does not rebind fails and so does its
+/// restore: the group edit is ambiguous, so settlement keeps mutations
+/// fenced, and the candidate config is not adopted.
+#[tokio::test]
+async fn a_failed_member_policy_restore_reports_the_group_edit_ambiguous() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [peer_groups.fabric]\nhold_time = 30\n{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\nhold_time = 60\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let session = h.session(&key);
+    // The session can take neither the new chain nor the restore.
+    let _ = h
+        .mgr
+        .peers
+        .replace_handle(&key, closed_peer_handle(), session);
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.hold_time = Some(45);
+    definition.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
+    .await;
+    // Mutation-red: flattening the failure reports it compensated.
+    let outcome = outcome.await.unwrap();
+    let OwnedCatalogMutationOutcome::CompensationAmbiguous(error) = &outcome else {
+        panic!("an unrestored member must fence: {outcome:?}");
+    };
+    assert_eq!(
+        error.to_string(),
+        rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode::RollbackSessionRejected
+            .as_str()
+    );
+    assert_eq!(
+        h.mgr.current_config.peer_groups["fabric"].hold_time,
+        Some(30),
+        "the candidate is not adopted"
+    );
+}
+
 /// Deleting a bound BFD neighbor removes its binding's registration before
 /// the address is released, so nothing at that address inherits the session
 /// or a strict hold.

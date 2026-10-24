@@ -141,7 +141,10 @@ mod unnumbered {
         pub(super) async fn apply_interface_only_policy_deltas(
             &mut self,
             _: &crate::config::Config,
-        ) -> Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String> {
+        ) -> Result<
+            Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>,
+            super::policy::PolicySnapshotFailure,
+        > {
             Ok(Vec::new())
         }
         pub(super) async fn restore_interface_only_policies(

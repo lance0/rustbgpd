@@ -882,11 +882,16 @@ impl PeerManager {
     /// policy chains without changing their bind-time settings (a member
     /// that overrides the edited session knob): no rebind will give the
     /// bound peer its new chains, so they apply live here. Returns the
-    /// captured priors for [`Self::restore_interface_only_policies`].
+    /// captured priors for [`Self::restore_interface_only_policies`]. The
+    /// failure keeps its settlement classification: a failed apply whose own
+    /// restore also failed is ambiguous, not compensated.
     pub(super) async fn apply_interface_only_policy_deltas(
         &mut self,
         next: &crate::config::Config,
-    ) -> Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String> {
+    ) -> Result<
+        Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>,
+        super::policy::PolicySnapshotFailure,
+    > {
         let targets: Vec<_> = next
             .neighbors
             .interface_only()
@@ -894,13 +899,13 @@ impl PeerManager {
             .filter_map(|neighbor| {
                 let interface = neighbor.interface.as_deref()?;
                 let prior = self.current_config.neighbors.interface_only_on(interface)?;
-                self.unnumbered_bound_peer(interface)?;
+                let bound = self.unnumbered_bound_peer(interface)?;
                 let chains = next.interface_only_policy_chains(neighbor)?;
                 (self.current_config.interface_only_policy_chains(prior)? != chains
                     && self.current_config.bind_time_settings(prior)
                         == next.bind_time_settings(neighbor))
                 .then(|| rustbgpd_api::peer_types::ResolvedPeerPolicy {
-                    address: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    address: bound.address,
                     interface: Some(interface.to_owned()),
                     import_policy: chains.0,
                     export_policy: chains.1,
@@ -910,7 +915,12 @@ impl PeerManager {
         if targets.is_empty() {
             return Ok(Vec::new());
         }
-        self.apply_policy_impact_snapshot(targets, Vec::new()).await
+        self.apply_resolved_policy_snapshot_with_prestage_reads(
+            targets,
+            false,
+            super::OperatorReadAdmission::Served,
+        )
+        .await
     }
 
     /// Put back the chains [`Self::apply_interface_only_policy_deltas`]

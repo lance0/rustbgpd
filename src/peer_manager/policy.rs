@@ -336,6 +336,22 @@ impl PolicySnapshotFailure {
         }
     }
 
+    /// The settlement outcome this failure reports to an owned caller.
+    pub(super) fn into_owned_outcome(self) -> OwnedCatalogMutationOutcome {
+        let error = self.closed_catalog_error();
+        match self.kind {
+            PolicySnapshotFailureKind::RejectedNoEffect => {
+                OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+            }
+            PolicySnapshotFailureKind::FullyCompensated => {
+                OwnedCatalogMutationOutcome::FullyCompensated(error)
+            }
+            PolicySnapshotFailureKind::CompensationAmbiguous => {
+                OwnedCatalogMutationOutcome::CompensationAmbiguous(error)
+            }
+        }
+    }
+
     fn closed_catalog_error(&self) -> CatalogMutationError {
         match self.kind {
             PolicySnapshotFailureKind::RejectedNoEffect => {
@@ -4271,19 +4287,7 @@ impl PeerManager {
                 self.publish_policy_config_event(&event, applied);
                 OwnedCatalogMutationOutcome::Success
             }
-            Err(failure) => match failure.kind {
-                PolicySnapshotFailureKind::RejectedNoEffect => {
-                    OwnedCatalogMutationOutcome::RejectedNoEffect(failure.closed_catalog_error())
-                }
-                PolicySnapshotFailureKind::FullyCompensated => {
-                    OwnedCatalogMutationOutcome::FullyCompensated(failure.closed_catalog_error())
-                }
-                PolicySnapshotFailureKind::CompensationAmbiguous => {
-                    OwnedCatalogMutationOutcome::CompensationAmbiguous(
-                        failure.closed_catalog_error(),
-                    )
-                }
-            },
+            Err(failure) => failure.into_owned_outcome(),
         }
     }
 
@@ -4346,19 +4350,7 @@ impl PeerManager {
             .await
         {
             Ok(_) => OwnedCatalogMutationOutcome::Success,
-            Err(failure) => match failure.kind {
-                PolicySnapshotFailureKind::RejectedNoEffect => {
-                    OwnedCatalogMutationOutcome::RejectedNoEffect(failure.closed_catalog_error())
-                }
-                PolicySnapshotFailureKind::FullyCompensated => {
-                    OwnedCatalogMutationOutcome::FullyCompensated(failure.closed_catalog_error())
-                }
-                PolicySnapshotFailureKind::CompensationAmbiguous => {
-                    OwnedCatalogMutationOutcome::CompensationAmbiguous(
-                        failure.closed_catalog_error(),
-                    )
-                }
-            },
+            Err(failure) => failure.into_owned_outcome(),
         }
     }
 
@@ -5011,7 +5003,7 @@ impl PeerManager {
             let policy_priors = self
                 .apply_interface_only_policy_deltas(&next_config)
                 .await
-                .map_err(CatalogMutationError::internal)?;
+                .map_err(|failure| CatalogMutationError::internal(failure.message))?;
             let result = self
                 .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
                 .await;
@@ -5073,7 +5065,7 @@ impl PeerManager {
         let policy_priors = self
             .apply_interface_only_policy_deltas(&next_config)
             .await
-            .map_err(CatalogMutationError::internal)?;
+            .map_err(|failure| CatalogMutationError::internal(failure.message))?;
         let priors = match self.apply_peer_reshape_snapshot(targets).await {
             Ok(priors) => priors,
             Err(error) => {
@@ -5187,10 +5179,8 @@ impl PeerManager {
             && crate::config::peer_group_change_hot_applicable(old_group, new_group)
         {
             let name = name.clone();
-            if let Err(error) = self.apply_interface_only_policy_deltas(&next_config).await {
-                return OwnedCatalogMutationOutcome::FullyCompensated(
-                    CatalogMutationError::internal(error),
-                );
+            if let Err(failure) = self.apply_interface_only_policy_deltas(&next_config).await {
+                return failure.into_owned_outcome();
             }
             return match self
                 .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
@@ -5240,11 +5230,7 @@ impl PeerManager {
         // new chains live first; a static-member failure puts them back.
         let policy_priors = match self.apply_interface_only_policy_deltas(&next_config).await {
             Ok(priors) => priors,
-            Err(error) => {
-                return OwnedCatalogMutationOutcome::FullyCompensated(
-                    CatalogMutationError::internal(error),
-                );
-            }
+            Err(failure) => return failure.into_owned_outcome(),
         };
         let compensated = !policy_priors.is_empty();
         let priors = match self
