@@ -33,7 +33,7 @@ fi
 cd "$(dirname "$0")/.."
 digest=$(
     find Cargo.toml Cargo.lock .cargo src crates proto bench benches examples tools \
-        \( -name target -o -path 'bench/scale/matrix/artifacts-*' \) -prune \
+        \( -name target -o -name __pycache__ -o -path 'bench/scale/matrix/artifacts-*' \) -prune \
         -o -type f -print0 |
         LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum
 )

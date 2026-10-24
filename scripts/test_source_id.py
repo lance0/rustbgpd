@@ -65,7 +65,7 @@ class DockerignoreMirror(unittest.TestCase):
         for rule in ("crates/wire/fuzz/corpus/", "**/node_modules/", "src/*.tmp", "!crates/x"):
             with self.subTest(rule=rule):
                 self.assertEqual(len(unmirrored(f"{rule}\n", script)), 1)
-        for prune in ("-name target", "-path 'bench/scale/matrix/artifacts-*'"):
+        for prune in ("-name target", "-name __pycache__", "-path 'bench/scale/matrix/artifacts-*'"):
             with self.subTest(dropped=prune):
                 mutated = script.replace(prune, "-name never-matches")
                 self.assertNotEqual(unmirrored((ROOT / ".dockerignore").read_text(), mutated), [])
@@ -125,6 +125,16 @@ class FailClosed(TempTree):
         result = self.run_script(env)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
+
+
+class Pruned(TempTree):
+    def test_dockerignored_directories_do_not_change_the_digest(self) -> None:
+        before = self.run_script().stdout
+        for ignored in ("crates/__pycache__/oracle.cpython-312.pyc", "src/target/debug/x"):
+            path = self.tree / ignored
+            path.parent.mkdir(parents=True)
+            path.write_text("ignored")
+        self.assertEqual(self.run_script().stdout, before)
 
 
 class CheckImage(TempTree):
