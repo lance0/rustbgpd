@@ -815,7 +815,9 @@ fn parse_presence_aware_create(
         ));
     }
 
-    let interface = (!config.interface.trim().is_empty()).then(|| config.interface.clone());
+    // Trimmed as the delete and membership selectors trim it, so all three
+    // name the same neighbor.
+    let interface = Some(config.interface.trim().to_owned()).filter(|name| !name.is_empty());
     // ADR-0142: an empty address with an interface is an interface-only
     // neighbor; discovery learns its address.
     let address: Option<IpAddr> = if config.address.is_empty() && interface.is_some() {
@@ -2872,6 +2874,24 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.message().contains("interface-only"), "{error}");
+    }
+
+    /// A create's interface is trimmed, as the delete and membership
+    /// selectors trim theirs, so all three name the same neighbor.
+    #[test]
+    fn a_create_trims_its_interface_like_the_selectors() {
+        let spec = parse_presence_aware_create(proto::NeighborCreateIntent {
+            config: Some(proto::NeighborConfig {
+                interface: " swp1 ".into(),
+                remote_asn_mode: proto::RemoteAsnMode::External as i32,
+                ..Default::default()
+            }),
+            override_mask: Some(prost_types::FieldMask::default()),
+        })
+        .unwrap();
+        // Mutation-red: storing the raw value keeps the padding.
+        assert_eq!(spec.interface.as_deref(), Some("swp1"));
+        assert_eq!(spec.address, None);
     }
 
     /// `DeleteNeighbor` with an empty address and an interface deletes that

@@ -589,6 +589,15 @@ impl Config {
                     "interface must not be empty",
                 ));
             }
+            // As for a static link-local neighbor: discovery and the
+            // selectors would never match a padded name.
+            if interface.contains(char::is_whitespace) {
+                return Err(invalid(
+                    neighbor,
+                    "interface",
+                    "interface must not contain whitespace",
+                ));
+            }
             if !seen.insert(interface) {
                 return Err(invalid(
                     neighbor,

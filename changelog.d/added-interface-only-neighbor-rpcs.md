@@ -13,4 +13,6 @@
   address a learned endpoint holds, return `FAILED_PRECONDITION` with nothing
   changed. Deleting an interface-only neighbor's bound peer by address now
   returns `FAILED_PRECONDITION` naming the interface selector, instead of
-  asking for a restart.
+  asking for a restart. A neighbor `interface` containing whitespace is now
+  rejected when the configuration loads, and the RPCs trim the interface they
+  are given.
