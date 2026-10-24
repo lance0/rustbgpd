@@ -2390,9 +2390,9 @@ impl OutboundPrefixLimitPair {
 
 /// The resolver tables an outbound prefix-limit edit installs.
 ///
-/// The RIB manager resolves each live peer itself — a neighbor entry
-/// overrides its peer group, an absent neighbor entry inherits, and an
-/// absent effective value is unlimited — so an accepted dynamic child
+/// The RIB manager resolves each live peer itself — per family, a neighbor
+/// entry overrides its peer group and a family it leaves unset inherits the
+/// group's, and an absent effective value is unlimited — so an accepted dynamic child
 /// inherits the same effective values as a static member of its group
 /// without the caller enumerating live sessions.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

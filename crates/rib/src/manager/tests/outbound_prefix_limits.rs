@@ -2612,3 +2612,46 @@ fn an_interface_entry_limits_every_endpoint_learned_on_its_interface() {
     install(&mut manager, 4, config);
     assert_eq!(ipv4_row(&manager, rebound).limit, Some(5));
 }
+
+/// Each family resolves on its own: an entry that sets one family leaves the
+/// other to its peer group, whether the entry is an endpoint's or an
+/// interface-only neighbor's interface entry.
+#[test]
+fn a_single_family_override_keeps_the_groups_other_family() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let bound = PeerId::allocate(crate::PeerEndpoint::new(
+        "fe80::2".parse().unwrap(),
+        Some("swp1"),
+    ));
+    let configured = peer_v4(Ipv4Addr::new(10, 113, 0, 7));
+    for peer in [bound, configured] {
+        manager.handle_update(RibUpdate::SetPeerPolicyContext {
+            peer,
+            session_id: 0,
+            peer_group: Some("fabric".to_string()),
+        });
+    }
+    let mut config = limit_config(
+        &[(configured, Some(3), None)],
+        &[("fabric", None, Some(200))],
+    );
+    config.interfaces.insert(
+        "swp1".to_owned(),
+        OutboundPrefixLimitPair {
+            ipv4: Some(limit(4)),
+            ipv6: None,
+        },
+    );
+    install(&mut manager, 1, config);
+    let _bound_rx = register_peer(&mut manager, bound);
+    let _configured_rx = register_peer(&mut manager, configured);
+
+    // Mutation-red: an override replacing the whole group pair leaves IPv6
+    // unlimited.
+    for (peer, ipv4) in [(bound, 4), (configured, 3)] {
+        assert_eq!(ipv4_row(&manager, peer).limit, Some(ipv4));
+        assert_eq!(family_row(&manager, peer, "ipv6_unicast").limit, Some(200));
+    }
+}

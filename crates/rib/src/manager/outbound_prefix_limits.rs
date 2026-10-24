@@ -803,10 +803,11 @@ impl RibManager {
             .unwrap_or(0)
     }
 
-    /// Resolve a peer's effective maxima against candidate resolver tables:
-    /// a neighbor entry (by endpoint, or for an interface-only neighbor's
-    /// learned endpoint, by its interface) overrides its group, an absent
-    /// entry inherits.
+    /// Resolve a peer's effective maxima against candidate resolver tables,
+    /// per family: a neighbor entry's family (by endpoint, or for an
+    /// interface-only neighbor's learned endpoint, by its interface)
+    /// overrides its group's, and a family the entry leaves unset inherits
+    /// the group's.
     fn resolve_outbound_limits(
         &self,
         config: &OutboundPrefixLimitConfig,
@@ -823,13 +824,17 @@ impl RibManager {
                         .and_then(|interface| config.interfaces.get(interface))
                 })
             });
-        configured.copied().unwrap_or_else(|| {
-            self.peer_group
-                .get(&peer)
-                .and_then(|group| config.groups.get(group))
-                .copied()
-                .unwrap_or_default()
-        })
+        let group = self
+            .peer_group
+            .get(&peer)
+            .and_then(|group| config.groups.get(group))
+            .copied()
+            .unwrap_or_default();
+        let configured = configured.copied().unwrap_or_default();
+        OutboundPrefixLimitPair {
+            ipv4: configured.ipv4.or(group.ipv4),
+            ipv6: configured.ipv6.or(group.ipv6),
+        }
     }
 
     /// Neighbor-facing rows for one peer, one per limited unicast family.

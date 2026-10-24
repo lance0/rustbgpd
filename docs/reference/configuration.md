@@ -1445,8 +1445,11 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 - **Outbound maxima.** `max_prefixes_out_ipv4_unicast` and
   `max_prefixes_out_ipv6_unicast`, on the neighbor or its peer group, apply to
   every address learned on the interface: the limit belongs to the
-  interface, so it carries across rebinds. Lowering one below what a bound
-  session already advertises is refused, as for any neighbor.
+  interface, so it carries across rebinds, and a family the neighbor leaves
+  unset takes its peer group's. A peer-group edit reaches bound sessions on
+  reload, and lowering one below what a bound session already advertises is
+  refused, as for any neighbor. The neighbor's own maxima change with the
+  rest of the stanza, which is restart-required (below).
 - **Rejected** on an interface-only neighbor, directly or through its peer
   group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), BFD,
   `fast_external_failover = false`, `conditional_advertisements`,
