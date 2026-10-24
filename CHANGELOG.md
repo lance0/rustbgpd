@@ -11,6 +11,863 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.80.0] — 2026-10-24
+
+### Security
+
+- Updated `rustls-webpki` to 0.103.16 for RUSTSEC-2026-0382, which rejects
+  certificate paths through distrusted emSign intermediates whose private keys
+  are public. `rustbgpd` uses it to verify gRPC mTLS client certificates and
+  gNMI dial-out collector certificates, and `rbgp` uses it to verify the
+  daemon's gRPC server certificate. Both verify against the operator-configured
+  CA bundle, not a bundled root store, so exposure requires a configured trust
+  anchor that chains to an emSign root.
+- Updated `webpki-roots` and `webpki-root-certs` to 1.0.10 for
+  RUSTSEC-2026-0381 and RUSTSEC-2026-0383, which remove the `emSign ECC Root
+  CA - G3` root. Only the `rs-config-render` tool's HTTPS fetches use these
+  bundled roots; the `rustbgpd` and `rbgp` binaries do not link them.
+
+### Added
+
+- `[[bmp.collectors]] on_identity_conflict = "exclude"` lets a neighbor whose
+  link-local address another BMP-monitored neighbor already holds, on a
+  different interface, establish with its session left out of BMP instead of
+  being refused. The default, `"refuse"`, keeps the earlier behaviour; any
+  refusing collector refuses. An excluded neighbor is reported in
+  `NeighborState.bmp_identity_excluded`, `rbgp doctor` (as
+  `interface_only.<if>.bmp` for an interface-only neighbor, which also
+  reports a learned address refused with `bmp_identity_conflict`) and
+  `bgp_bmp_identity_excluded_neighbors`, and admissions are counted in
+  `bgp_bmp_identity_conflicts_total{outcome}`. See the
+  [configuration reference](docs/reference/configuration.md).
+- `ListConditionalAdvertisements` reports each attached neighbor as an
+  `attached_neighbors` row, with a bare `peer_address` and the
+  `peer_interface` of an IPv6 link-local neighbor. The bare-address
+  `attached_peers` list is unchanged and now superseded.
+  `rbgp policy conditional-advertisements` shows a link-local neighbor as
+  `fe80::1%eth0`, and its `--json` output adds `attached_neighbors` beside
+  `attached_peers`.
+- `InjectionService.BatchListPathExportDispositions` reads the export
+  dispositions of up to 1000 locally injected unicast route keys per paged
+  walk. It lists keys in request order, and a key with no local route when
+  its page is read appears with `found = false` instead of the call failing
+  with `NOT_FOUND`. A page holds at most `page_size` entries: each peer row is
+  one, so one key's rows can span several pages. Each entry costs at most one
+  export explain. A resumed page returns `ABORTED` when any named key's route
+  content or presence, the Established peer set or their export policy
+  differs from the first page. A route added and removed again between pages
+  is not detected. See
+  [batch read-back](docs/reference/api.md#batch-read-back).
+- `ListPathExportDispositions` and the batch form take `include_configured`.
+  It also lists every managed peer without an Established session, with the
+  new disposition `PATH_EXPORT_DISPOSITION_NOT_ESTABLISHED` and reason
+  `not_established`, so a controller no longer joins the result with
+  `ListNeighbors`. A neighbor added or removed between pages, or a listed peer
+  becoming Established, returns `ABORTED`.
+- `ListPathExportDispositions` rows carry `deny_validation`: for a
+  `policy_denied` row, one `rpki_<state>` or `aspa_<state>` code for each
+  validation state the deciding export-policy statement's match tests, so a
+  controller can tell a route-origin-validation deny of an RPKI-Invalid
+  blackhole from any other policy deny without parsing `detail`. Other rows
+  leave it empty. See
+  [export read-back](docs/reference/api.md#export-read-back).
+- Fast external failover: a directly connected eBGP session now closes as soon
+  as the kernel confirms that the interface carrying it lost carrier, went
+  administratively down, was removed, or lost the session's local address,
+  instead of waiting for the hold timer. A session qualifies only when its own
+  connection proves it: the local address is on that interface and the peer is
+  inside its connected prefix, or the peer is a link-local neighbor on that
+  interface. Multihop, loopback-sourced and iBGP sessions are untouched. The
+  stop sends no NOTIFICATION, retains no routes under Graceful Restart or LLGR,
+  and the session reconnects normally. A netlink overrun is treated as unknown
+  and stops nothing. `fast_external_failover` turns it off per neighbor or peer
+  group (hot-applied) or in `[global]` (restart-required); see
+  [the configuration reference](docs/reference/configuration.md#fast-external-failover).
+  **Operator-visible:** the teardown cause names the interface and reason
+  (`fast external failover: interface eth1 (ifindex 4) carrier lost`) in the
+  neighbor's last error and the session-lost event, `bgp_session_down_total`
+  counts it as `local_no_notification`, and
+  `bgp_netlink_subscription_overruns_total` gains the
+  `actor="fast_external_failover"` label value.
+- Interop leg M126 runs the official FastNetMon Community 1.2.9 package
+  against `rustbgpd-gobgp-bridge`, rustbgpd and FRR 10.7.1: a replayed
+  attack bans and unbans an IPv4 /32 and an IPv6 /128, which reach FRR with
+  BLACKHOLE (65535:666) and a next-hop-self address, through a rustbgpd
+  restart, a bridge restart and an unban while rustbgpd is stopped. The
+  `rustbgpd:dev` image now includes the bridge binary. See the
+  [M126 receipt](tests/interop/m126-fastnetmon-rtbh/README.md).
+- [`examples/flowspec-controller/`](examples/flowspec-controller/config.toml)
+  is a FlowSpec controller backend profile: border-router neighbors that carry
+  only `ipv4_flowspec` / `ipv6_flowspec`, with rules injected over gRPC. From
+  the first release that ships it, the v1 upgrade chain archives it beside the
+  route-server and route-reflector examples, so a later release that stops
+  accepting that configuration fails the archived-fixture parse test.
+- `InjectionService.ListFlowSpecExportDispositions` reports the per-peer
+  export disposition of one locally injected FlowSpec rule, named by its
+  `AddFlowSpec` key, with the rows, reasons, `include_configured`, paging and
+  `ABORTED` check of `ListPathExportDispositions`. A received rule with the
+  same key never counts as the local rule's export. The RPC is a
+  `sensitive_read`, and this new diagnostic RPC is outside v1. See
+  [FlowSpec read-back](docs/reference/api.md#flowspec-read-back).
+- gNMI `state/peer-as` reports the AS the session negotiated for a neighbor
+  with `remote_asn = "external"` or `"internal"`, and omits the leaf while
+  that session is not Established, instead of reporting 0. A `SAMPLE`
+  subscription deletes the leaf when the session goes down. Numeric neighbors
+  are unchanged. See [the gNMI reference](docs/reference/gnmi.md).
+- Opt-in planned-restart End-of-RIB grace window: `gr_eor_grace_time` on a
+  neighbor or peer group (default off) holds End-of-RIB toward a Graceful
+  Restart helper after a marker-backed restart until one deadline fixed at
+  daemon start, so injection controllers can replay routes before the helper
+  removes its stale copies. Routes and withdrawals keep flowing; every
+  End-of-RIB path respects the hold. Release is timer-driven and logged, and
+  `bgp_gr_eor_grace_released_total{peer,reason}` counts it with
+  `reason="deadline"`. The window closes the observed gap only when replay
+  completes before release; see
+  [the configuration reference](docs/reference/configuration.md#planned-restart-end-of-rib-grace-window).
+  **Operator-visible:** an explicit outbound replay ends in a wire End-of-RIB,
+  so it is now refused while the grace window holds that peer's family, as it
+  already was during restart selection deferral; retry after the window ends.
+- Replay-complete signal for the planned-restart End-of-RIB grace window:
+  list injection controllers in `[global] gr_eor_replay_owners`, and each
+  calls the new `InjectionService.MarkReplayComplete(owner, incarnation)`
+  after it replays its desired state into the current daemon incarnation.
+  The held End-of-RIB is released as soon as every listed controller has
+  signalled, counted as
+  `bgp_gr_eor_grace_released_total{peer,reason="replay_complete"}`; the
+  window's deadline still releases it otherwise, with a WARN log naming the
+  controllers that never signalled. The signal is ordered behind the
+  controller's earlier injections, so the window closes the gap when every
+  listed controller signals before the deadline. A stale incarnation is
+  `FAILED_PRECONDITION` with `ErrorInfo` reason `INCARNATION_MISMATCH`. The
+  RPC is `operator_only` and outside the v1 inventory. An empty list keeps
+  the timer-only window.
+- `rustbgpd-gobgp-bridge` signals replay complete as `gobgp-bridge` after a
+  post-restart reconcile pass finishes without a failure. See
+  [the configuration reference](docs/reference/configuration.md#planned-restart-end-of-rib-grace-window).
+- `ttl_security` (GTSM, RFC 5082) is accepted on interface-only neighbors.
+  When the neighbor binds a learned address, the BGP listener enforces Hop
+  Limit 255 on connections from that address on that interface before the
+  peer can be matched for inbound, and removes the selector only after that
+  endpoint's peer is retired. A connection learned from an inbound SYN gets
+  the same check, and active opens send Hop Limit 255. The IPv6 listener
+  answers with Hop Limit 255 from startup, or from the reload or config
+  transaction that introduces interface-only GTSM, before the neighbor can
+  bind, and never lowers it; a GTSM peer that sends no RAs and dials in is
+  therefore learned. Turning `ttl_security` on or off reloads as a session
+  settings edit, and a deleted neighbor's selector is removed after its peer.
+  A connection accepted under a selector that a reload has since turned off
+  has its Hop Limit minimum cleared before the new session takes it.
+  The selector matches by address and interface, so it never applies to a
+  neighbor on another link that shares the address. `ttl_security_hops` above 1 is rejected,
+  since the peer is directly connected. See
+  [Interface-only neighbors](docs/reference/configuration.md#interface-only-neighbors).
+- An interface-only neighbor now also learns its peer's link-local address
+  from the peer's BGP connection arriving on its interface, so a peer that
+  sends no Router Advertisements (FRR with `no bgp ipv6-auto-ra` and a static
+  `neighbor fe80::…%eth1`) establishes instead of waiting for discovery
+  indefinitely. The connection is matched by its arrival interface, never by
+  address, binds through the same admission check as an RA binding, and is accepted only while the neighbor has no Established
+  session ([ADR-0142](docs/adr/0142-interface-only-unnumbered-neighbors.md)).
+  **Operator-visible:** a learned connection is no longer dropped as
+  `unconfigured`; the log records `unnumbered: peer address learned from an
+  inbound connection`. A refused one is still counted in
+  `bgp_inbound_connections_dropped_total`, as `notification_backoff` when the
+  neighbor's NOTIFICATION reconnect wait holds it and as `unconfigured`
+  otherwise, and a connection from a second router on the link is logged
+  with reason `multiple_routers_on_link`.
+- Interface-only `[[neighbors]]` (`interface` with no `address`) now reload
+  live. SIGHUP and config transactions add, delete and edit them, including
+  `remote_asn = "external"`/`"internal"` and peer-group membership, and the
+  other neighbors keep their sessions. A deleted neighbor's session ends, its
+  routes are purged and the learned address it held is released. An edited
+  one is rebound under the new settings. The change that adds the first such
+  neighbor is refused before any effect without `CAP_NET_RAW`, and removing
+  the last one closes the Router Advertisement sockets. `[global.unnumbered]`
+  and a neighbor's effective `tcp_mss` stay restart-required. See the
+  [reload matrix](docs/reference/reload-matrix.md#interface-only-neighbors).
+  **Operator-visible:** `rustbgpd --diff --json` reports
+  `interface_only_neighbors_changed` under `reload_applied` and the new
+  `unnumbered_changed` under the restart-required keys, and counts a rebound
+  interface-only neighbor in `summary.sessions_will_reset`.
+- `rbgp doctor` checks interface-only neighbors by interface:
+  `interface_only.<if>.discovery` is red for a missing interface, yellow for a
+  down link, and yellow with FRR hints (`no bgp ipv6-auto-ra`, `v6only`,
+  `router_advertisements = false`) when no peer address has been learned
+  after three RA intervals. `interface_only.<if>.multiple_routers` and
+  `unnumbered.ra_socket` report a second router on the link and failed
+  discovery socket opens. A bound neighbor's session is checked under its
+  learned address, and an unbound one is no longer reported as a stuck
+  session. See
+  [Support bundles with `rbgp doctor`](docs/reference/operations.md#support-bundles-with-rbgp-doctor).
+- Interface-only neighbors are labelled `peer="interface:<name>"` in every
+  per-peer metric family, with `interface="<name>"` on the identity gauges.
+  The value, and the neighbor's counters, carry across a change of learned
+  address, carrier loss and interface removal; removing the neighbor's stanza
+  removes them. New families: `bgp_unnumbered_peer_address_info{peer,
+  interface,address}` (the bound address), `bgp_unnumbered_address_changes_total`,
+  `bgp_unnumbered_ra_conflicts_total` (a second router seen on the link, from a
+  Router Advertisement or an inbound connection),
+  `bgp_unnumbered_ra_dropped_total{reason}` and
+  `bgp_unnumbered_ra_socket_open_failures_total`. See
+  [Interface-only neighbor metrics](docs/reference/operations.md#interface-only-neighbor-metrics).
+  **Operator-visible:** the `PeerAdded` and `PeerRemoved` session events of an
+  interface-only neighbor's endpoint end with the reason
+  (`peer_address_learned`, `peer_address_changed`, `link_down`,
+  `interface_removed` or `session_exited`), and the daemon logs
+  `unnumbered: peer address changed` when it binds a new address.
+- `AddNeighbor` and `DeleteNeighbor` add and delete interface-only neighbors
+  at runtime. An empty `address` with an `interface` names the neighbor, and
+  `remote_asn_mode` `EXTERNAL`/`INTERNAL` is carried on the add. A
+  `SetPeerGroup` edit that changes an interface-only member's session
+  settings rebinds that member instead of being refused, and the new
+  `interface` field of `SetNeighborPeerGroup` and `ClearNeighborPeerGroup`
+  moves an interface-only neighbor between groups. See
+  [interface-only neighbors](docs/reference/api.md#interface-only-neighbors).
+  **Operator-visible:** the first interface-only neighbor added without
+  `CAP_NET_RAW` or the link monitor, and a static link-local add whose
+  address a learned endpoint holds, return `FAILED_PRECONDITION` with nothing
+  changed. Deleting an interface-only neighbor's bound peer by address now
+  returns `FAILED_PRECONDITION` naming the interface selector, instead of
+  asking for a restart. A neighbor `interface` containing whitespace is now
+  rejected when the configuration loads, and the RPCs trim the interface they
+  are given.
+- Interface-only unnumbered neighbors (ADR-0142): a `[[neighbors]]` entry may
+  name only an `interface`, with no `address`, as FRR's
+  `neighbor swp1 interface remote-as external` does. The daemon learns the
+  peer's IPv6 link-local address from the Router Advertisements it sends on
+  that link, advertises itself there so the peer can do the same, and opens
+  an ordinary scoped link-local session to the learned address. Discovery
+  never ends an Established session: a changed address is taken up only after
+  the session fails, and the move purges the routes learned from the old
+  address. Confirmed carrier loss, admin down or removal of the interface ends
+  the session at once without Graceful Restart retention; an operator disable
+  or a max-prefix shutdown stays in force across it. `[global.unnumbered]` sets
+  `ra_interval_secs` (default 10 s; Router Lifetime is three times it) and
+  `router_advertisements = false` to stop sending. See
+  [the configuration reference](docs/reference/configuration.md#interface-only-neighbors).
+  **Operator-visible:** an interface-only neighbor needs `CAP_NET_RAW`;
+  `rustbgpd --check` and startup fail with an error naming it when it is
+  missing. Single-hop BFD runs on the learned endpoint, created when an
+  address is bound, replaced when it changes and removed when the binding
+  ends; strict mode holds BGP until BFD is Up on the current binding.
+  Outbound prefix maxima, on the neighbor or its peer group, apply to every
+  address learned on the interface, and so does a per-neighbor `log_level`,
+  keyed by the session span's `peer=interface:<name>` field. Conditional
+  advertisements apply to the learned endpoint, gated from the session's
+  first UPDATE. TCP-AO, MD5, GTSM with `ttl_security_hops` above 1,
+  multihop BFD and explicit `listen_addresses` are rejected on these
+  neighbors. Operator deletion of a discovery-owned peer is refused with
+  `FAILED_PRECONDITION`.
+- `remote_asn` accepts `"external"` (any ASN except `global.asn`) and
+  `"internal"` (`global.asn`) on every static neighbor, in addition to a
+  number. Both are checked against the ASN the peer sends in OPEN; a mismatch
+  is refused with Bad Peer AS.
+- Every injection lease ownership or generation refusal now carries a
+  `google.rpc.ErrorInfo` detail (`domain: "rustbgpd"`) whose `reason` tells
+  the cases apart: `OWNER_MISMATCH` when another owner holds the key,
+  `KEY_UNOWNED` when no owner holds it, and `GENERATION_NOT_LIVE` when
+  `RenewLease` is refused. It applies to `AddLeasedPath`,
+  `AddLeasedFlowSpec`, `AddPath` and `AddFlowSpec` on an owned key,
+  `DeletePath`, `DeleteFlowSpec` and `RenewLease`. The status code stays
+  `FAILED_PRECONDITION`; the reason is contract and the message text is not.
+  See [leased injection](docs/reference/api.md#leased-injection).
+- `InjectionService.ListLeasedKeys` lists the injected keys one lease owner
+  holds, as the keys `DeletePath` and `DeleteFlowSpec` take, with each key's
+  lease generation and remaining time, paged in a fixed key order. Another
+  owner's keys and unowned entries never appear. A controller that restarts
+  while the daemon runs can now keep exactly the keys it still wants and
+  delete the rest. Each page names the owner's live generation, absent when
+  it has no live lease, and a walk that crosses a daemon restart or a new
+  generation returns `ABORTED` instead of finishing early. It is a
+  `sensitive_read` in the v1 inventory with the rest of the lease
+  lifecycle. See [reconcile an owner's keys](docs/reference/api.md#reconcile-an-owners-keys).
+- The gRPC API reports the interface of an IPv6 link-local neighbor beside
+  its bare `peer_address`: `peer_interface` on `Route`, `RouteSourceIdentity`,
+  `PathExportDispositionEntry`, `OrrExplainCandidate`,
+  `ExplainBestPathResponse`, `ExplainImportPolicyResponse`,
+  `ImportExplainMatch`, `ListRejectedRoutesResponse`, `SessionEvent`,
+  `NotificationEvent` and `PolicyEvent`; `peer_interface`,
+  `previous_peer_interface` and `target_peer_interface` on `RouteEvent`; and
+  `peer_interface` plus `route_peer_interface` on
+  `ExplainAdvertisedRouteResponse`. The address and interface together
+  identify the neighbor; the interface is empty for numbered neighbors. Route
+  rows and route events report the interface recorded when the route was
+  learned or the event was recorded, so retained routes and the history of a
+  deleted neighbor keep it. See
+  [scoped neighbor identity](docs/reference/api.md#scoped-neighbor-identity).
+- The gRPC API reports `peer_interface` beside a bare `peer_address` on more
+  outputs: `FibRouteStatus`, `BlackholeDiscard`, `DataplaneRouteEvent`,
+  `BfdSession`, `BfdSessionEvent`, `PolicyChainStats` and `TcpAoKeyState`, and
+  beside `peer` on `TestPolicyDiff` and `TestPolicyRejectedRoute`. The
+  interface is empty for numbered neighbors. FIB and blackhole rows take it from the route they
+  describe, and FIB owned state keeps it across a restart. `GetBfdSessions`
+  with a scoped selector returns only the session on that interface. `rbgp`
+  prints these rows' neighbors in the scoped `fe80::1%eth0` form, and the
+  birdwatcher adapter example sends the scoped selector for link-local
+  neighbors. EVPN, VPN, labeled, RTC, BGP-LS and FlowSpec route entries and
+  EVPN route events still report a bare address. See
+  [scoped neighbor identity](docs/reference/api.md#scoped-neighbor-identity).
+- `rbgp policy check` reports compiler-stage finding codes (`lex-error`,
+  `parse-error`, `resolve-error`, `typecheck-error`, `lower-error`) and the
+  gateable `optional-field-negation` lint for negated equalities that match
+  an absent optional field. JSON keys, format version and exit precedence
+  are unchanged; consumers selecting all compile errors should use finding
+  severity rather than the older generic `compile-error` value.
+- The neighbor API carries the configured `remote_asn` mode and the session's
+  actual ASN. `NeighborConfig.remote_asn_mode` (`NUMERIC`, `EXTERNAL`,
+  `INTERNAL`) round-trips `remote_asn = "external"` and `"internal"`: reads
+  report `remote_asn = 0` for a non-numeric mode, and `AddNeighbor` requires
+  0 with one. `NegotiatedSessionState.remote_asn` reports the ASN the peer
+  sent. Interface-only neighbors are listed by interface, with an empty
+  `address`, `learned_peer_address` and `discovery_state`, including before an
+  address is bound, and an empty address with an `interface` selects one. See
+  the [API reference](docs/reference/api.md#remote-asn-mode-and-the-session-asn).
+  **Operator-visible:** `rbgp neighbor <addr> add --remote-asn` accepts
+  `external` and `internal`; `rbgp neighbor swp1` selects an interface-only
+  neighbor; tables show `swp1 (fe80::2)` (or `swp1 (-)` until bound) and the
+  configured mode in the ASN column; detail adds `Learned Address`,
+  `Discovery`, and the session ASN beside a non-numeric mode; JSON adds
+  `remote_asn_mode`, `learned_peer_address`, `discovery_state` and
+  `negotiated_session.remote_asn`.
+- The RIB publishes `bgp_rib_outbound_registration_pending_peers`, the number
+  of Established sessions that have a live-session record but no outbound
+  registration, and `bgp_rib_outbound_registration_pending_oldest_seconds`,
+  the age of the oldest such wait measured from its `PeerUp`. The count comes
+  from the session records rather than the deferral queue, so a registration
+  lost inside the RIB stays visible and keeps ageing.
+  **Operator-visible:** `rbgp doctor`'s `peer.<addr>.outbound` advisory
+  reports the RIB's count and oldest wait instead of an unknown duration when
+  its metrics scrape includes them; it remains a warning. The route-server,
+  route-reflector and EVPN route-reflector soak analyzers record the maximum
+  sampled age and fail a run above 300 seconds. Readiness does not use the age. See
+  [delayed outbound registration](docs/reference/operations.md#delayed-outbound-registration).
+- `.rpol` can express the NLNOG "many communities" filter practice.
+  `route.communities.len`, `route.large-communities.len` and
+  `route.ext-communities.len` are u32 fields usable in comparisons and
+  arithmetic, and `remove community *`, `remove large-community *:*:*` and
+  `remove ext-community *` remove every arrived value of that kind. The
+  counts read only the route, so they never disqualify update-group
+  sharing; a strip-all fails the route closed above the attribute's wire
+  bound, like `remove large-community GA:*:*`. In-language tests can pin
+  the result with `removes community *` and the other two forms. See
+  [the language reference](docs/reference/rpol-language.md#routes-that-carry-too-many-communities)
+  for the summed (BIRD) and per-kind (OpenBGPD) shapes.
+
+### Changed
+
+- `ControlService.CheckLiveness` now returns the daemon's `incarnation`: a
+  random, non-zero value drawn once at start (the same value as a lease
+  generation's `incarnation`) that changes on every start. A client that
+  probes periodically can tell that the daemon restarted even when no probe
+  failed. The field is additive and outside the narrow v1 contract; an older
+  daemon reports zero. `rustbgpd-gobgp-bridge` uses it to replay its tracked
+  bans after a restart quicker than one liveness probe, which previously
+  waited for the next reconcile pass. See the
+  [bridge README](tools/gobgp-bridge/README.md#restart-behaviour).
+- `rustbgpd-gobgp-bridge` probes the daemon with `CheckLiveness` every half
+  second and replays its tracked bans as soon as the daemon answers again
+  after an outage, instead of waiting for the next reconcile pass, which
+  stays as the backstop. After a planned rustbgpd restart, a Graceful Restart
+  helper upstream loses the blackholes for a moment instead of up to one
+  reconcile interval; see the
+  [bridge README](tools/gobgp-bridge/README.md#restart-behaviour).
+- Interface-only neighbors that learn the same link-local address on
+  different interfaces may now use different GTSM (`ttl_security`) and
+  `log_level` settings, so enabling GTSM on one of several parallel links to
+  a device leaves the others up. Each neighbor's GTSM selector
+  matches its arrival interface as well as the address, and its log level
+  matches its interface label. A static link-local neighbor at the same
+  address must still agree with them. See the
+  [configuration reference](docs/reference/configuration.md#interface-only-neighbors).
+- Interface-only neighbors on different interfaces may now learn the same
+  link-local address, for example parallel links to one device that reuses
+  its router MAC on every port. While `[bmp]` collectors are
+  configured, a learned address that another neighbor holds is still refused
+  before the session starts, now with reason `bmp_identity_conflict`, and the
+  neighbor admitted first keeps its session. The refused neighbor shows the
+  reason as its last error in `rbgp neighbor`. See the
+  [configuration reference](docs/reference/configuration.md).
+- A neighbor's `updates_received` / `updates_sent`, `otc_routes_blocked` and
+  `import_policy_routes_permitted` / `import_policy_routes_denied` (API
+  `NeighborState`, `rbgp neighbor`, and the gNMI
+  `state/messages/{sent,received}/UPDATE` leaves) no longer reset when the session re-establishes. Like `flap_count`,
+  `notifications_*` and `messages_*`, they now count for the daemon's lifetime
+  per neighbor: a reconfigure keeps them, and only a daemon restart or
+  deleting the neighbor clears them. Previously the import-policy totals reset
+  on every session-down, and all five restarted at 0 whenever the session
+  re-established on a new session actor (an inbound reconnect, for example),
+  so their scope depended on which side reconnected. Use `uptime_seconds` and
+  `flap_count` to tell sessions apart.
+- A neighbor's `export_policy_routes_permitted` / `export_policy_routes_denied`
+  (API `NeighborState` and the `rbgp neighbor` Policy Stats block) no longer
+  reset when the session goes down. They now count for the daemon's lifetime
+  per neighbor, like the import-policy totals: a reconfigure keeps them, and
+  only a daemon restart or deleting the neighbor clears them. The totals
+  belong to the neighbor (its address, plus the interface for a scoped
+  address) rather than to a bare address. With this, every `NeighborState`
+  counter is daemon-lifetime per neighbor. The `bgp_policy_routes_total`
+  labels are unchanged.
+- Under a `RUST_LOG` quieter than `info` (`warn` or `error`), a session's
+  events now carry the session's `peer` span fields, such as `peer_addr`,
+  `remote_asn`, `peer_group` and an interface-only neighbor's `peer`
+  label. This also holds for events a per-peer `log_level` enables on a
+  session that was already running when a reload set the level.
+  **Operator-visible:** with `warn` or `error`, warn and error events from
+  inside a session gain the JSON `span`/`spans` objects and the text
+  `peer{…}:` prefix that `info` output already had. Output under the
+  default `info` is unchanged.
+- Published crates: `rustbgpd-wire` 0.26.0 → 0.26.1, `rustbgpd-fsm` 0.13.0 →
+  0.13.1 and `rustbgpd-rpki` 0.8.0 → 0.8.1, all additive within their current
+  lines. FSM adds `PeerConfig::remote_asn_external`, the OPEN check behind
+  `remote_asn = "external"`: any peer ASN except `local_asn` is accepted, and
+  the local ASN is refused with Bad Peer AS. The field defaults to `false`,
+  which keeps the existing check. Wire and RPKI change only their rustdoc,
+  including the RPKI cache inventory and ASPA verdict contracts. All three
+  crates now warn on undocumented public items.
+- The RIB now identifies each neighbor by a compact generational handle
+  instead of its address, so each stored route is 8 bytes smaller (104 bytes).
+  A neighbor keeps its handle across a reconfigure; a deleted and re-added
+  neighbor gets a new one, and messages from the deleted neighbor's sessions
+  are dropped. The final best-path tie-break compares the peer address, then
+  the interface name of a scoped IPv6 link-local neighbor, then the Add-Path
+  identifier, so two neighbors on one link-local address select the same
+  winner whatever order they were configured or connected in.
+  **Operator-visible:** a route-listing page token now names the neighbor's
+  handle; a token issued before the neighbor was deleted and re-added is
+  rejected as belonging to another scope.
+- One IPv6 link-local address may now name a neighbor on each of several
+  interfaces, for example `fe80::1` on both `eth0` and `eth1` toward a
+  router that uses one MAC on every port. Each neighbor keeps its own
+  routes, metrics series, MRT entries, FIB peer-group filtering, policy and
+  peer-group changes, transaction plans and RFC 9117 FlowSpec originator. An equal-route tie between them
+  is broken by interface name, so the winner does not depend on
+  configuration or connection order. Such neighbors may not use BFD, TCP
+  MD5, TCP-AO, differing `log_level` values or differing effective GTSM
+  (`ttl_security`, `ttl_security_hops`) settings, and no `[bmp]` collector
+  may be configured while a pair exists. See the
+  [configuration reference](docs/reference/configuration.md).
+- Config diff and transaction plan output names an interface-scoped
+  neighbor with its interface: `--diff` text shows `fe80::1%eth0`, the JSON
+  `added`, `changed` and `effective_neighbor_impact` rows gain an
+  `interface` field for such neighbors, and `update_group_impact` rows read
+  `fe80::1%eth0` in `peer`. Rows for numbered neighbors are unchanged.
+- Prometheus series for an IPv6 link-local neighbor now carry its scoped
+  address as the `peer` label value, for example `peer="fe80::1%eth0"`, in
+  every per-peer family: session, RIB, policy, max-prefix, BFD and BMP. The
+  scope is always present, even when no other neighbor uses the address.
+  Numbered neighbors keep their bare address, and label names are unchanged.
+  See [the `peer` label](docs/reference/operations.md#the-peer-label).
+- Every gRPC request field that selects a neighbor by address now requires
+  the scope of an IPv6 link-local address, as `fe80::1%eth0` or as the bare
+  address plus the request's interface field. A bare link-local selector
+  returns `INVALID_ARGUMENT` naming the scoped neighbors configured on that
+  address, even when only one neighbor uses it; a scope on a numbered address
+  is also `INVALID_ARGUMENT`. The scope is part of page-token identity.
+  Numbered selectors are unchanged. RFC 4007 permits a default zone; rustbgpd
+  deliberately requires the scope so a selector keeps its meaning when another
+  neighbor shares the address.
+  **Operator-visible:** `rbgp` sends link-local neighbors in scoped form, and
+  prints the scoped form from the daemon's interface fields in every unicast
+  route view, explanation and route-event view, including the unscoped
+  best-route listing and history.
+- The ADR-0141 injection lease lifecycle joins the v1 inventory as a whole:
+  `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`
+  and the new per-owner key listing `ListLeasedKeys`; the `owner` and
+  `override_owner` delete fields; and the `injection_owner`,
+  `lease_generation` and `lease_remaining_ms` read-back. The first four RPCs
+  were outside the v1 inventory in 0.79.0. The contract pins that a renewal
+  never resurrects a lease, that a daemon restart invalidates every
+  generation, that expiry removes only the expired owner's local intent, that
+  a leased add never becomes permanent, and that a key listing crossing a
+  restart or a new generation aborts instead of finishing early. Remote
+  withdrawal timing and dataplane enforcement stay outside the guarantee. See
+  the [v1 contract](docs/reference/v1-stable-contract.md#injection-lease-lifecycle).
+
+### Fixed
+
+- A session promoted from an inbound connection collision now starts with
+  the neighbor's current import and export policy, graceful-shutdown setting
+  and prefix limits. Previously it kept the values copied when the inbound
+  connection was accepted. A policy or knob change made while that
+  connection was pending was lost after promotion, and the neighbor was
+  exported to and imported from under the old policy, even though the change
+  had reported success.
+- A connection collision no longer closes a session that reached Established
+  while the collision was being resolved. When the peer's higher BGP
+  Identifier picked the inbound connection, the outbound session could
+  receive the peer's KEEPALIVE before the Cease/7 (Connection Collision
+  Resolution) reached it, and was then torn down as the loser. RFC 4271
+  §6.8 says an Established connection wins, so that session is now kept and
+  the inbound connection is closed instead. The check and the Cease are one
+  step in the session's own task.
+  **Operator-visible:** after a link flap where both sides dial at once, the
+  neighbor establishes once rather than two or three times, and every
+  `bgp_session_established_total` increment is matched by a
+  `bgp_session_flaps_total` increment when that session ends.
+- An administrative stop, reset or daemon shutdown now sends the outbound
+  UPDATEs the RIB had already queued for the session before its Cease,
+  within the existing close flush budget. Previously updates still waiting
+  in the session's queue when the close arrived were dropped, so EVPN
+  withdraws that shutdown drains just before closing sessions could miss the
+  peer, and a Graceful Restart peer could keep those routes as stale.
+- An export-policy deny explained by `ExplainAdvertisedRoute`,
+  `rbgp rib --prefix P advertised PEER --explain` or
+  `ListPathExportDispositions` now takes its `"<policy>:<term>"` label from
+  the evaluation that denied the route. The label previously came from a
+  second walk of the policy, so a dataset refresh between the two walks could
+  name a different `.rpol` term than the one that decided, beside
+  `deny_validation` codes that described the deciding term.
+- A paged `ListPathExportDispositions` walk no longer resumes across a change
+  that makes its pages disagree. When the route's content changes or the route
+  is removed, a peer joins, leaves or flaps out of the Established set, or an
+  Established peer's export policy or a dataset it reads changes between
+  pages, the next page returns `ABORTED` and the client restarts the walk.
+  A dataset refresh that lands while any page is being evaluated also returns
+  `ABORTED` for that page, so no page mixes dataset contents.
+  Previously a route deleted mid-walk returned the same `NOT_FOUND` as a key
+  that never existed, and a session change could skip or repeat a peer.
+  Removing the route and restoring identical content between pages leaves the
+  walk valid. The page token is now opaque and bound to the route key and
+  daemon process: a token for another key, an altered token or one from
+  before a restart returns `INVALID_ARGUMENT`. See
+  [export read-back](docs/reference/api.md#export-read-back).
+- A paged `ListPathExportDispositions`, `BatchListPathExportDispositions` or
+  `ListFlowSpecExportDispositions` walk now returns `ABORTED` when a listed
+  peer's export settings change between pages without a session reset: its
+  outbound prefix limits, an attached conditional advertisement, its peer
+  group, its Add-Path send limits, a withheld family becoming exportable,
+  its ORF filter or gate, or its session's outbound encoding profile. Before,
+  a walk spanning such a reload could mix rows from before and after it.
+  Rewriting a setting to its current value does not abort a walk. See
+  [export read-back](docs/reference/api.md#export-read-back).
+- A FlowSpec numeric component injected as `<>80` was read back as `!=80`
+  and one injected as `<>=80` as `?80`, and `DeleteFlowSpec` and
+  `AddFlowSpec` rejected both, so a controller could not delete such a rule
+  by passing back the components `ListFlowSpecRoutes` returned. The API now
+  accepts `!=` as not-equal, and the read-back renders not-equal-or-equal as
+  `<>=`.
+- Interface-only neighbor policy-chain edits now persist and update the
+  selected binding. Mixed peer-group edits wait for live policy convergence
+  before reporting success.
+- Interface-only neighbors retain late max-prefix shutdowns and lifetime
+  counters across binding replacements, and report the retained
+  administrative state while unbound. Membership edits preserve unchanged
+  hold-downs; duration edits reschedule an armed hold-down when configuration
+  changes, including while unbound.
+- An interface-only neighbor that loses its Router Advertisement binding while
+  its link stays up now releases its last address once nothing retains it.
+  While Graceful Restart or LLGR stale routes from the old session remain, the
+  neighbor keeps redialing that address and it stays reserved, as before; when
+  the stale timer retires them, or at once when the session ended without
+  retention, the peer is removed with reason `binding_expired` and another
+  link may admit the address
+  ([ADR-0142](docs/adr/0142-interface-only-unnumbered-neighbors.md)).
+  **Operator-visible:** a silent peer on a link that stays up no longer keeps
+  a parallel link to the same device refused after its retained routes are
+  gone.
+- Report disabled IPv6, missing or unusable link-local addresses, and unsafe
+  RA default-route acceptance on neighbor interfaces at startup, during runtime,
+  in `--check`, and in local `rbgp doctor` diagnostics. Plain checks remain
+  advisory; `--strict` fails on warnings. Count RA/RS send failures by errno
+  class and warn once per interface link generation.
+- Keep monitoring running interface-only ports after reload, and avoid local
+  namespace probes in doctor when the daemon connection is unavailable.
+- A static IPv6 link-local neighbor now reconnects after its interface is
+  deleted and recreated under the same name. Each outbound connection attempt
+  and each inbound match resolves the neighbor's `interface` to its current
+  index instead of the index found when the configuration was loaded, a
+  configured BFD session moves to the new index (on the link monitor's
+  report, or within 5 seconds by interface name when the monitor is not
+  running), and routes learned on the
+  new session carry the new index as their next-hop scope. Previously the
+  session kept dialing the deleted interface's index ("Network is
+  unreachable") until a reload or restart. While no interface has the name,
+  connection attempts fail and are retried; see
+  [scoped neighbor identity](docs/reference/configuration.md#scoped-neighbor-identity).
+- Apply link notifications queued during a netlink resync before publishing
+  the snapshot. An already queued recovery no longer appears as a transient
+  link failure, and another overrun keeps the monitor state unknown until a
+  successful resync.
+- A per-neighbor or peer-group `log_level` edit applied by SIGHUP now
+  reaches sessions that are already running. Before, the reload swapped in
+  a new log filter that matched only sessions started after it, and every
+  reload dropped the override from running sessions until they restarted.
+  A neighbor written with a non-canonical IPv6 address, such as
+  `2001:DB8::0002`, now also gets its level.
+  **Operator-visible:** the `RUST_LOG` base level and per-peer span
+  directives written in `RUST_LOG` behave as before, and are no longer
+  reset for running sessions by a reload; JSON and text output are
+  unchanged.
+- A config transaction whose live policy re-apply failed, and whose restore
+  of the sessions it had already changed also failed, reported a clean
+  failure and admitted further config mutations while a session could still
+  run the candidate policy chain. It now fences as known divergence: a
+  confirmed transaction keeps its revert journal, and further mutations are
+  refused until restart. A failure whose sessions were all restored still
+  rolls back and reports a clean error. See
+  [The Settlement Watchdog](docs/how-to/settlement-watchdog.md).
+- A neighbor's `flap_count` and `notifications_received` / `notifications_sent`
+  (API `NeighborState`, `rbgp neighbor`, and the gNMI `established-transitions`
+  leaf) no longer drop back to 0 when a reset session re-establishes on a new
+  session, for example after the peer sends a Hard Reset and reconnects
+  inbound. Each neighbor now keeps them for the daemon's lifetime, counting
+  the same events as `bgp_session_flaps_total` and
+  `bgp_notifications_{received,sent}_total`, separately per interface for
+  scoped link-local neighbors. A reconfigure keeps them; only a daemon
+  restart or deleting the neighbor clears them.
+  **Operator-visible:** the Cease 6/7 sent to drop the losing side of a
+  connection collision is now also counted in `bgp_notifications_sent_total`.
+- A NOTIFICATION is now the final frame rustbgpd writes on a connection. An
+  ordinary close (administrative stop or reset, daemon shutdown, a purge
+  reset, a collision dump, or an error NOTIFICATION) previously wrote the
+  Cease ahead of UPDATEs still queued for the peer and then sent those UPDATEs
+  after it. Queued UPDATEs, including the EVPN withdraws shutdown drains
+  before closing sessions, are now written first for up to 250 ms from the
+  close; anything still queued then is discarded and the NOTIFICATION
+  follows, so a slow peer still receives its Cease within the per-peer
+  shutdown deadline. The Cease/Out of Resources teardown still discards its
+  backlog. A shutdown that gives up on a peer which stopped reading also
+  stops that peer's writer.
+- A per-neighbor outbound prefix maximum set for one unicast family no
+  longer drops the other family's peer-group maximum. Each family now
+  resolves on its own: a neighbor with only `max_prefixes_out_ipv4_unicast`
+  keeps its group's `max_prefixes_out_ipv6_unicast`, as the commit-confirm
+  rollback check already assumed.
+  **Operator-visible:** such a neighbor's IPv6 (or IPv4) family is now
+  capped by its group instead of unlimited, and a reload that would lower
+  that cap below current usage is refused
+  ([ADR-0113](docs/adr/0113-outbound-prefix-limits.md)).
+- `bgp_peer_outbound_queue_depth` now returns to 0 when a peer's connection
+  closes, including after the Cease/Out of Resources teardown or an aborted
+  write. It previously kept the last backlog sample, and an administratively
+  stopped peer could show a queue that no longer existed.
+- A reload or policy edit that changes export policy no longer fails, or
+  fail-stops the daemon with exit status 70, when a peer has just
+  re-established but the RIB has not finished registering it for outbound
+  updates. That window is common after a max-prefix restart on a large table.
+  The change now skips the unregistered peer. Its registration installs the
+  policy its session accepted, so the peer's first UPDATE already carries the
+  new export policy. Dataset-driven export re-evaluation skips such a peer the
+  same way. A rollback that finds no registration for a peer whose session
+  state it observed now settles cleanly. An unknown session state still fails
+  closed.
+- An export-policy reload under steady route churn again stages the shared
+  destination update group before the RIB transition fence. The RIB advanced
+  that unfenced staging only while no UPDATE was queued, so churn that kept
+  the queue non-empty could delay it past its 5 s reply deadline. The fenced
+  transition then repeated the full staging walk while queued UPDATEs waited
+  behind the fence. Queued UPDATEs now keep priority for one 25 ms poll
+  budget, after which the staging walk takes its next slice.
+- `rs-config-render activate`, `status` and `recover rollback` now bound
+  reading an `--rbgp` or strict-checker child's output by the same settle or
+  probe deadline as the child itself. A wrapper that exited while a
+  background process kept its stdout or stderr open used to hold the tool
+  until that process exited; the cut-off read now counts as an invalid probe
+  (refused, `recovery_required` or `daemon: invalid`), never as success.
+- Preserve the link provenance of Graceful Restart routes when an inbound
+  reconnect replaces the session actor, so carrier loss during the new
+  handshake purges routes retained from the lost connection. A promoted
+  candidate that has already progressed keeps its own retention state.
+- Honor planned-restart End-of-RIB grace for interface-only neighbors,
+  including a late first binding, without extending the startup deadline.
+- Retry failed BFD removal acknowledgements during interface-only neighbor
+  deletion and endpoint changes, including a neighbor that never completed
+  its first binding. A replacement waits for confirmed cleanup, and a
+  deleted neighbor's held operator state does not enter a re-added stanza.
+- Scoped EVPN, dataplane and BFD event filters match the recorded interface,
+  keeping neighbors on the same link-local address separate. EVPN events
+  retain both current and previous interfaces in history and CLI output.
+- Event history remains readable for removed scoped neighbors after another
+  interface starts using their address. Bare link-local selectors still need
+  an explicit interface.
+- MRT `TABLE_DUMP_V2` snapshots give each neighbor its own
+  `PEER_INDEX_TABLE` entry, so two neighbors on one link-local address are
+  written as two entries. Each route references its own neighbor's entry, as
+  FRR and GoBGP write them. A snapshot taken before an interface-only neighbor
+  learns a new address files that neighbor's routes under the address that
+  held them. `rbgp rib --prefix P --explain` names the interface when it
+  decides the final tie, for example
+  `peer fe80::1%eth0 < fe80::1%eth1 (scope tie-break)`; the reason code stays
+  `lower_peer_address`. Explain replies and route pages render the addresses
+  their rows were learned on, even when converted after such an address
+  change. MRT and BMP output for ordinary peers is unchanged.
+- Preserve scoped link-local neighbor identities in MCP peer/rejection listings
+  and import, export, and best-path explanations. Doctor now recognizes scoped
+  and interface-only metric labels for GTSM advice and keeps each policy event's
+  recorded interface in support bundles.
+- Outbound prefix-limit messages name a link-local session by its scope.
+  This covers a refused lowering, the export explain reason, and the
+  limit-reached and recovered log lines. A link-local session appears as
+  `fe80::2%swp1`, and an interface-only neighbor as `interface:swp1`,
+  instead of the bare address that sessions on several links can share.
+  **Operator-visible:** the `peer` value in these messages and log events
+  changes for link-local and interface-only sessions; other neighbors still
+  appear by address.
+- Every emitter of `peer`-labeled series (RIB, session, policy and BFD) now
+  passes the neighbor's own value, scoped as `fe80::1%eth0` for an IPv6
+  link-local neighbor. Previously a shared map turned a bare link-local
+  address into the scoped value of whichever neighbor registered it last.
+  When a reload moved a link-local neighbor to another interface, RIB gauge
+  and counter writes queued for the old neighbor could land on the
+  replacement's series, and counters stayed misattributed until restart.
+  `peer` values in steady state are unchanged.
+- Policy reads selected by a scoped link-local neighbor (`fe80::1%eth0`) no
+  longer return another interface's data when a reload moves that address to
+  a different interface while the request is queued. `GetNeighborPolicyChains`,
+  `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy` and
+  `ComparePolicy` check the scope against the state that supplies the answer
+  and return `NOT_FOUND` on a mismatch, as neighbor mutations already did.
+  `GetPolicyStats` parses the selector and selects the import row by address
+  and interface from one roster snapshot. Numbered selectors are unchanged.
+- A scoped selector such as `fe80::3%swp1` now selects the interface-only
+  neighbor on `swp1` for any link-local address, bound or not, in
+  `GetNeighborState` and the neighbor action RPCs, as ADR-0142 describes.
+  Before, it found the neighbor only when the address was the one it had
+  learned, so a selector copied from a log line after an address change was
+  not found. A neighbor that matches the selector exactly is still selected
+  first.
+- Daemon shutdown, including fail-stop after a component failure, no longer
+  exits before an Established session's Cease/Administrative Shutdown
+  NOTIFICATION is written. A session now finishes only after its writer has
+  flushed the NOTIFICATION, within the existing per-peer shutdown deadline.
+  **Operator-visible:** peers see an administrative shutdown instead of a bare
+  TCP close, which a peer could treat as a failure and start Graceful Restart
+  retention or wait out its hold timer.
+
+### Documentation
+
+- Document the `CAP_NET_RAW` requirement for interface-only neighbor
+  discovery, including when RA sending is disabled. Add an opt-in systemd
+  capability drop-in that composes with the dataplane example, while keeping
+  the default unit's capability set unchanged.
+- Add the dated IPv4 policy-reload proof to the curated interop index
+  and link it from the policy quickstart, with its original peer pin
+  and scope limits.
+- Document RPKI cache inventory and ASPA verdict semantics for embedders, and
+  enforce public API documentation in the wire, FSM, and RPKI crates.
+- [`SECURITY.md`](SECURITY.md) now accepts vulnerability reports by email
+  at `lance@lance0.com` as well as through GitHub private vulnerability
+  reporting, and defines a four-level severity scale. A crash, hang or wedged
+  RIB caused by BGP peer, RPKI cache or BFD input is High. The 72-hour
+  patch-and-release commitment still covers remote crashes and session
+  hijacking, and now covers every Critical issue. Other High issues are
+  prioritized for the next patch release.
+- `.oss-scanner/` holds a build and threat model for automated security
+  scanning: an offline-capable image that builds the workspace and fuzz
+  targets and runs the test suite as an unprivileged user.
+- Clarify that IPv6 unicast over IPv4 eBGP without `local_ipv6_nexthop`
+  remains a valid configuration with an export-suppression warning. Plain
+  `--check` succeeds with that warning; `--check --strict` fails. Document
+  how to validate fixtures that intentionally exercise the suppression.
+- Corrected interface-neighbor discovery, single-hop BFD, live peer-group and
+  deletion guidance, shared-address GTSM restrictions, scoped policy statistics,
+  conditional-advertisement status, and stable interface-neighbor metric labels
+  in the operator documentation.
+
+### Upgrade notes
+
+- Update strict ProtoJSON event consumers to accept `peerInterface` and
+  `previousPeerInterface` on `EvpnRouteEvent`. These additive fields (protobuf
+  numbers 11 and 12) identify the current and previous neighbor's interface.
+  Binary protobuf clients remain wire-compatible; ProtoJSON decoders that
+  reject unknown fields need updated bindings or unknown-field handling.
+- Fast external failover is on by default. Directly connected eBGP sessions
+  (static link-local neighbors and numbered single-hop peers on a connected
+  subnet) now drop as soon as their link loses carrier, goes down, is removed,
+  or loses the session's source address, and their routes are withdrawn rather
+  than kept under Graceful Restart. Previously they stayed up until the hold
+  timer or BFD expired. A flapping link now flaps those sessions; dampen carrier
+  at the link (for example the bond's `downdelay`), or keep the previous
+  behavior with `fast_external_failover = false` in `[global]`, a peer group, or
+  a neighbor. Such a teardown is counted in `bgp_session_down_total` as
+  `local_no_notification`, and `bgp_netlink_subscription_overruns_total`
+  gains the `actor="fast_external_failover"` label value.
+- `gr_eor_grace_time` is off by default, so a planned restart sends End-of-RIB
+  exactly as before. When enabling it, keep the window a few seconds above
+  the controller's measured replay time and well below the upstream helper's
+  own stale-route limit (FRR 10.7.1 defaults to 360 s, Junos documents 300 s),
+  which `--check` cannot see. While End-of-RIB is held, stale routes the
+  restarted daemon cannot withdraw (for example a ban lifted during the
+  outage) also stay at the upstream until release. An explicit outbound replay
+  toward a held peer family is refused until the window ends.
+- A neighbor's `updates_received` / `updates_sent`, `otc_routes_blocked`,
+  `import_policy_routes_*`, `export_policy_routes_*`, `flap_count` and
+  `notifications_*` (API `NeighborState`, `rbgp neighbor` and the matching
+  gNMI leaves) now count for the daemon's lifetime per neighbor and no longer
+  reset when a session goes down or re-establishes. Tooling that read them as
+  per-session values should use `uptime_seconds` and `flap_count` to tell
+  sessions apart. `bgp_notifications_sent_total` now also counts the
+  Cease 6/7 sent to drop the losing side of a connection collision.
+- A neighbor that sets an outbound prefix maximum for only one unicast family
+  now inherits its peer group's maximum for the other family instead of being
+  unlimited there. A reload that would set that inherited cap below current
+  usage is refused.
+- A neighbor `interface` value containing whitespace is now rejected when the
+  configuration loads.
+- Log consumers: under `RUST_LOG=warn` or `error`, events from inside a
+  session now carry the JSON `span`/`spans` objects and the text `peer{…}:`
+  prefix that `info` output already had. Outbound prefix-limit messages and
+  log events name a link-local session as `fe80::2%swp1` and an interface-only
+  neighbor as `interface:swp1` in `peer`, instead of the bare address.
+- `rbgp policy check` reports compiler-stage finding codes (`lex-error`,
+  `parse-error`, `resolve-error`, `typecheck-error`, `lower-error`) where it
+  reported `compile-error`. Consumers that select every compile error should
+  match on finding severity.
+- The config schema's `Neighbor` shape changes, an amendment to the pinned
+  pre-v1 stable-surface inventory; the inventory is frozen at the v1.0 tag.
+  `address` is no longer in the schema's `required` set (it may be omitted
+  only together with `interface`), and `remote_asn` changes type from an
+  integer to an integer or one of the strings `"external"` and `"internal"`.
+  Existing configurations stay valid and behave identically. Tools that
+  validate configs against
+  [the published schema](docs/reference/rustbgpd.schema.json), or that
+  read `remote_asn` as an integer, need to accept the new forms.
+- `NeighborService` gains additive fields (`NeighborConfig.remote_asn_mode`,
+  `NegotiatedSessionState.remote_asn`, `NeighborState.learned_peer_address`
+  and `discovery_state`), an amendment to the pinned pre-v1 stable-surface
+  inventory. An unset `remote_asn_mode` means `NUMERIC`, so existing clients
+  keep their behavior. A neighbor configured with `remote_asn = "external"`
+  or `"internal"` reads `remote_asn = 0` with the mode set; read the session's
+  ASN from `negotiated_session.remote_asn`. `ListNeighbors` can return
+  interface-only neighbors with an empty `config.address`, including rows with
+  no session before an address is learned; a client that keys rows on the
+  address alone must key on the interface for those rows. `rbgp neighbor ARG`
+  treats an argument that is not an IP address as an interface name.
+- Configuration that binds one IPv6 link-local address to more than one
+  interface, which earlier releases rejected with "not supported in this
+  release", is now accepted unless it combines that pair with a
+  `[bmp]` collector, BFD, TCP MD5, TCP-AO, differing `log_level` values or
+  differing effective GTSM settings. Those combinations are refused with an
+  error naming both neighbors.
+- Tools that parse config diff or transaction plan output for an
+  interface-scoped link-local neighbor see its interface: in the `--diff`
+  text, in a new `interface` JSON field on neighbor diff and effective-impact
+  rows, and in the `update_group_impact` `peer` value (`fe80::1%eth0`).
+- Link-local neighbors' metrics move to new series. A changed `peer` value
+  starts a new series in Prometheus, so recording rules, alerts and dashboards
+  that select a link-local neighbor by exact value (`peer="fe80::1"`) stop
+  matching after the upgrade; change them to the scoped value
+  (`peer="fe80::1%eth0"`). `by (peer)` joins between rustbgpd families are
+  unaffected, and numbered neighbors' series do not change.
+- Bare IPv6 link-local neighbor selectors stop working: a gRPC client that
+  sends `fe80::1` as a neighbor address now gets `INVALID_ARGUMENT` and must
+  send `fe80::1%eth0` or the structured address and interface. Numbered
+  neighbors are unaffected. Page tokens from an earlier daemon expire on
+  restart as before.
+- New `peer_interface` response fields are additive. Binary protobuf clients
+  ignore them; strict ProtoJSON consumers that reject unknown fields must be
+  updated before they read responses from this release.
+- Session, notification and policy events (`WatchEvents`,
+  `ListSessionEvents`, `ListPolicyEvents`) now carry a scoped neighbor's bare
+  address in `peer_address`, on the payload and the `BgpEvent` envelope, with
+  its interface in the payload's new `peer_interface`. They used to put
+  `address%interface` in `peer_address`; a consumer matching that string must
+  join the two fields instead. `rbgp` output is unchanged.
+- gNMI `Get` and `Subscribe` paths key an IPv6 link-local neighbor as
+  `neighbor-address=fe80::1%eth0`, and render that key and the
+  `state/neighbor-address` leaf in the same scoped form. A bare link-local
+  key is now `INVALID_ARGUMENT`; numbered neighbors are unchanged.
+
 ## [0.79.0] — 2026-10-20
 
 ### Added

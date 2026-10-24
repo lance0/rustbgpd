@@ -3,6 +3,17 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.8.1 - 2026-10-24
+
+- Documentation only: document the cache inventory contract
+  (`CacheInventoryAttachment`, `CacheQueryHandle`, `CacheState`,
+  `AcceptedCacheState`, `CacheList`, `MAX_CACHE_ROWS`), including that
+  `CacheQueryHandle::list` has no internal timeout and that query senders
+  alone do not keep the manager running, and the ASPA record and verdict
+  fields (`AspaRecord`, `AspaInvalidHop`, `AspaVerificationResult`). Warn on
+  undocumented public items (`#![warn(missing_docs)]`). No public item,
+  signature or verifier/RTR behavior changes.
+
 ## 0.8.0 - 2026-10-18
 
 - Move the public wire dependency to 0.26. Verifier and RTR behavior and

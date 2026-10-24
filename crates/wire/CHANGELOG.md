@@ -3,6 +3,13 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.26.1 - 2026-10-24
+
+- Documentation only: document the `value` and `max` fields of
+  `RouteDistinguisherParseError::AssignedNumberOutOfRange`, and warn on
+  undocumented public items (`#![warn(missing_docs)]`). No public item,
+  signature or decode/encode behavior changes.
+
 ## 0.26.0 - 2026-10-18
 
 - `UpdateMessage::parse_revised` (and `parse_revised_observed*`) now report

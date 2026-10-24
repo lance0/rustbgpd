@@ -3,6 +3,18 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.13.1 - 2026-10-24
+
+- Add `PeerConfig::remote_asn_external`. When set, `validate_open` accepts any
+  peer ASN in OPEN except `local_asn` and refuses the local ASN with
+  NOTIFICATION OPEN Message Error / Bad Peer AS; `remote_asn` is not compared
+  while it is set. This is a check of its own, because the `remote_asn = 0`
+  accept-any sentinel also admits an iBGP peer. The field defaults to
+  `false`, which keeps the existing check. `PeerConfig` is
+  `#[non_exhaustive]`, so callers building it with `PeerConfig::new` or
+  `Default` need no change.
+- Warn on undocumented public items (`#![warn(missing_docs)]`).
+
 ## 0.13.0 - 2026-10-18
 
 - Move the public wire dependency to 0.26. Upgrade crates exchanging public

@@ -229,7 +229,18 @@ the canonical configuration labels, reports inbound max-prefix bounds by
 family and stage, and widens the v1 inventory to the everyday neighbor,
 peer-group and policy-chain commands and a route-server and route-reflector
 metric floor. It publishes no library crate. It ships on its per-change
-regression tests and main CI; no flagship receipt covers it. The
+regression tests and main CI; no flagship receipt covers it. v0.80.0
+(2026-10-24) is a minor release that adds interface-only unnumbered neighbors,
+which learn the peer's link-local address from Router Advertisements or its
+inbound connection and reload live, `remote_asn = "external"` and
+`"internal"`, and scoped link-local neighbor identity across the API,
+metrics, gNMI and event history, so one link-local address can name a
+neighbor on several interfaces. It turns on fast external failover for
+directly connected eBGP sessions, adds an opt-in planned-restart End-of-RIB
+grace window with a controller replay-complete signal, and brings the
+injection lease lifecycle into the v1 inventory. It publishes wire 0.26.1,
+FSM 0.13.1 and RPKI 0.8.1. It ships on its per-change regression tests and
+main CI; no flagship receipt covers it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
