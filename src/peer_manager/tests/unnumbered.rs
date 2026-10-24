@@ -3852,6 +3852,42 @@ async fn a_bindings_conditional_advertisement_gate_follows_the_binding() {
     );
 }
 
+/// A binding whose BFD registration fails after its conditional-advertisement
+/// gate was installed is not admitted, and that gate is reconciled away: no
+/// gate is left naming an endpoint without a peer.
+#[tokio::test]
+async fn a_failed_bfd_registration_leaves_no_gate_naming_the_endpoint() {
+    let (mut h, _bfd) = attach_bfd(
+        harness_with(
+            &["swp1"],
+            &[("swp1", 7, true)],
+            "conditional_advertisements = [\"backup\"]\nbfd = { profile = \"fast\" }\n",
+            &format!("{CONDITIONAL}[[bfd_profiles]]\nname = \"fast\"\n"),
+        ),
+        &[],
+    );
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+    // Another membership change holds BFD, so this binding's registration fails.
+    h.mgr.bfd_coupling.as_mut().unwrap().reloading = true;
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))],
+        "the gate is installed before BFD"
+    );
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "not admitted");
+    // Mutation-red: without the reconcile request the run loop leaves the
+    // gate installed at an endpoint with no peer.
+    if h.mgr.conditional_reconcile_pending {
+        h.mgr.reconcile_conditional_advertisements().await;
+    }
+    assert!(
+        attached(&h.mgr.conditional_advertisements).is_empty(),
+        "no gate names the endpoint"
+    );
+}
+
 /// A retirement whose install acknowledgement is lost leaves the RIB's
 /// gate unknown. A rebind to the same endpoint must install it again, not
 /// trust the cached set and admit an ungated session.
