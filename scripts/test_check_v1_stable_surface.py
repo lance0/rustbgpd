@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -773,6 +774,84 @@ class RoleFamilyTests(unittest.TestCase):
                 roles = copy.deepcopy(self.inventory["roles"])
                 next(r for r in roles if r["id"] == "route-reflector-l3vpn")["families"] = families
                 self.rejected(roles, expected)
+
+
+class EvpnReflectorFixtureTests(unittest.TestCase):
+    """route-reflector-evpn configuration is archived on the upgrade chain."""
+
+    TAG = "v0.79.0"
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        shutil.copytree(checker.ROOT / checker.FIXTURES_ROOT / self.TAG, self.root / self.TAG)
+        self.fixture = self.root / self.TAG / "rr-evpn-fabric" / "config.toml"
+
+    def rejected(self, expected):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            checker.check_archived_fixture_directories(self.root, set())
+        self.assertIn(expected, stderr.getvalue())
+
+    def test_archived_evpn_reflector_example_passes(self):
+        self.assertIn('families = ["l2vpn_evpn"]', self.fixture.read_text())
+        checker.check_archived_fixture_directories(self.root, set())
+
+    def test_missing_evpn_reflector_fixture_fails(self):
+        shutil.rmtree(self.fixture.parent)
+        self.rejected(f"{self.TAG} carries examples/rr-evpn-fabric/config.toml but")
+
+    def test_edited_evpn_reflector_fixture_fails(self):
+        self.fixture.write_text(self.fixture.read_text().replace("l2vpn_evpn", "ipv4_unicast"))
+        self.rejected(f"{self.TAG}/rr-evpn-fabric/config.toml does not match")
+
+
+class FlowspecControllerFixtureTests(unittest.TestCase):
+    """The first release carrying the flowspec-controller example owes its fixture.
+
+    No tag carries it yet, so the tag lookup is simulated: the archived v0.79.0
+    tree plus the working-tree example as if v0.79.0 had shipped it.
+    """
+
+    TAG = "v0.79.0"
+    EXAMPLE = "examples/flowspec-controller/config.toml"
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        shutil.copytree(checker.ROOT / checker.FIXTURES_ROOT / self.TAG, self.root / self.TAG)
+        self.example = (checker.ROOT / self.EXAMPLE).read_bytes()
+        self.fixture = self.root / self.TAG / "flowspec-controller" / "config.toml"
+
+    def carried(self, tag, path):
+        return self.example if path == self.EXAMPLE else checker.tagged_file(tag, path)
+
+    def archive(self, data):
+        self.fixture.parent.mkdir()
+        self.fixture.write_bytes(data)
+
+    def rejected(self, expected):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            checker.check_archived_fixture_directories(self.root, set(), self.carried)
+        self.assertIn(expected, stderr.getvalue())
+
+    def test_example_carries_only_flowspec_neighbor_families(self):
+        self.assertIn(b'families = ["ipv4_flowspec", "ipv6_flowspec"]', self.example)
+        self.assertNotIn(b"[flowspec]", self.example)
+
+    def test_archived_example_passes(self):
+        self.archive(self.example)
+        checker.check_archived_fixture_directories(self.root, set(), self.carried)
+
+    def test_missing_fixture_fails(self):
+        self.rejected(f"{self.TAG} carries {self.EXAMPLE} but")
+
+    def test_edited_fixture_fails(self):
+        self.archive(self.example.replace(b"ipv6_flowspec", b"ipv6_unicast"))
+        self.rejected(f"{self.TAG}/flowspec-controller/config.toml does not match")
 
 
 class NestedExperimentalJsonFieldTests(unittest.TestCase):
