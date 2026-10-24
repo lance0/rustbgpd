@@ -804,16 +804,25 @@ impl RibManager {
     }
 
     /// Resolve a peer's effective maxima against candidate resolver tables:
-    /// a neighbor entry overrides its group, an absent entry inherits.
+    /// a neighbor entry (by endpoint, or for an interface-only neighbor's
+    /// learned endpoint, by its interface) overrides its group, an absent
+    /// entry inherits.
     fn resolve_outbound_limits(
         &self,
         config: &OutboundPrefixLimitConfig,
         peer: PeerId,
     ) -> OutboundPrefixLimitPair {
-        let configured = (!config.neighbors.is_empty())
+        let configured = (!config.neighbors.is_empty() || !config.interfaces.is_empty())
             .then(|| peer.endpoint())
             .flatten()
-            .and_then(|endpoint| config.neighbors.get(&endpoint));
+            .and_then(|endpoint| {
+                config.neighbors.get(&endpoint).or_else(|| {
+                    endpoint
+                        .interface
+                        .as_deref()
+                        .and_then(|interface| config.interfaces.get(interface))
+                })
+            });
         configured.copied().unwrap_or_else(|| {
             self.peer_group
                 .get(&peer)

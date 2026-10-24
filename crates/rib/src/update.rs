@@ -2401,6 +2401,10 @@ pub struct OutboundPrefixLimitConfig {
     /// address and, for a link-local neighbor, interface (configuration
     /// compares equal across reloads; handles are runtime).
     pub neighbors: HashMap<PeerEndpoint, OutboundPrefixLimitPair>,
+    /// Per-neighbor overrides of interface-only neighbors, keyed by
+    /// interface name: such a neighbor has no configured address, so each
+    /// endpoint it learns on the interface takes this entry (ADR-0142).
+    pub interfaces: HashMap<String, OutboundPrefixLimitPair>,
     /// Peer-group defaults, keyed by group name.
     pub groups: HashMap<String, OutboundPrefixLimitPair>,
 }

@@ -863,6 +863,7 @@ fn limit_config(
             .iter()
             .map(|(peer, ipv4, ipv6)| (peer.endpoint().expect("a live peer"), pair(*ipv4, *ipv6)))
             .collect(),
+        interfaces: std::collections::HashMap::new(),
         groups: groups
             .iter()
             .map(|(name, ipv4, ipv6)| ((*name).to_string(), pair(*ipv4, *ipv6)))
@@ -2543,4 +2544,71 @@ fn same_address_neighbors_keep_their_own_outbound_maximum() {
     assert_eq!(wire_prefixes(&mut eth1_rx).len(), 2, "eth1 has no maximum");
     assert!(!ipv4_row(&manager, eth1).blocking);
     assert!(eth0.release() && eth1.release());
+}
+
+/// ADR-0142: an interface-only neighbor's per-neighbor maxima are keyed by
+/// its interface. Each endpoint learned there takes them at registration,
+/// a rebind's new endpoint included; an endpoint entry still wins; and a
+/// lowering below a bound peer's usage is refused like any other.
+#[test]
+fn an_interface_entry_limits_every_endpoint_learned_on_its_interface() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let learned = |address: &str| {
+        PeerId::allocate(crate::PeerEndpoint::new(
+            address.parse().unwrap(),
+            Some("swp1"),
+        ))
+    };
+    let interface = |cap: u32| {
+        let mut config = limit_config(&[], &[]);
+        config.interfaces.insert(
+            "swp1".to_owned(),
+            OutboundPrefixLimitPair {
+                ipv4: Some(limit(cap)),
+                ipv6: None,
+            },
+        );
+        config
+    };
+    install(&mut manager, 1, interface(1));
+
+    // Mutation-red: without the interface lookup the learned peer is
+    // unlimited.
+    let bound = learned("fe80::2");
+    let mut outbound_rx = register_peer(&mut manager, bound);
+    assert_eq!(ipv4_row(&manager, bound).limit, Some(1));
+    let rebound = learned("fe80::3");
+    let _rebound_rx = register_peer(&mut manager, rebound);
+    assert_eq!(ipv4_row(&manager, rebound).limit, Some(1), "a rebind too");
+
+    // At a cap of 2 the bound peer advertises two prefixes; lowering the
+    // interface's cap below that usage is refused.
+    install(&mut manager, 2, interface(2));
+    let source = Ipv4Addr::new(192, 0, 2, 211);
+    announce(
+        &mut manager,
+        peer_v4(source),
+        source_routes(source, &[1, 2, 3]),
+    );
+    assert_eq!(wire_prefixes(&mut outbound_rx).len(), 2, "capped at 2");
+    assert_eq!(ipv4_row(&manager, bound).usage, 2);
+    let violations = prepare(&mut manager, 3, interface(1)).unwrap_err();
+    assert!(
+        violations.iter().any(|violation| violation.peer == bound),
+        "{violations:?}"
+    );
+
+    // An endpoint entry overrides the interface entry.
+    let mut config = interface(2);
+    config.neighbors.insert(
+        rebound.endpoint().unwrap(),
+        OutboundPrefixLimitPair {
+            ipv4: Some(limit(5)),
+            ipv6: None,
+        },
+    );
+    install(&mut manager, 4, config);
+    assert_eq!(ipv4_row(&manager, rebound).limit, Some(5));
 }

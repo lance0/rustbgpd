@@ -1508,6 +1508,24 @@ impl Config {
                     ))
                 })
                 .collect(),
+            interfaces: self
+                .neighbors
+                .interface_only()
+                .iter()
+                .filter(|neighbor| {
+                    neighbor.max_prefixes_out_ipv4_unicast.is_some()
+                        || neighbor.max_prefixes_out_ipv6_unicast.is_some()
+                })
+                .filter_map(|neighbor| {
+                    Some((
+                        neighbor.interface.clone()?,
+                        pair(
+                            neighbor.max_prefixes_out_ipv4_unicast,
+                            neighbor.max_prefixes_out_ipv6_unicast,
+                        ),
+                    ))
+                })
+                .collect(),
             groups: self
                 .peer_groups
                 .iter()
@@ -1576,17 +1594,37 @@ pub fn outbound_prefix_limits_loosen(rollback: &Config, candidate: &Config) -> b
             group.max_prefixes_out_ipv6_unicast,
         )
     });
+    let neighbor_loosens = |prior: Option<&Neighbor>, neighbor: &Neighbor| {
+        let Some(prior) = prior else {
+            return false;
+        };
+        let (prior_v4, prior_v6) = effective(rollback, prior);
+        let (v4, v6) = effective(candidate, neighbor);
+        looser(prior_v4, v4) || looser(prior_v6, v6)
+    };
     groups_loosen
         || candidate.neighbors.iter().any(|neighbor| {
-            let Some(prior) = rollback.neighbors.iter().find(|prior| {
-                prior.address == neighbor.address && prior.interface == neighbor.interface
-            }) else {
-                return false;
-            };
-            let (prior_v4, prior_v6) = effective(rollback, prior);
-            let (v4, v6) = effective(candidate, neighbor);
-            looser(prior_v4, v4) || looser(prior_v6, v6)
+            neighbor_loosens(
+                rollback.neighbors.iter().find(|prior| {
+                    prior.address == neighbor.address && prior.interface == neighbor.interface
+                }),
+                neighbor,
+            )
         })
+        // Interface-only neighbors are matched by interface (ADR-0142).
+        || candidate
+            .neighbors
+            .interface_only()
+            .iter()
+            .any(|neighbor| {
+                neighbor_loosens(
+                    neighbor
+                        .interface
+                        .as_deref()
+                        .and_then(|interface| rollback.neighbors.interface_only_on(interface)),
+                    neighbor,
+                )
+            })
 }
 
 #[derive(Clone)]

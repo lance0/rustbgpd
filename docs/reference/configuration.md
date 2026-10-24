@@ -1442,12 +1442,15 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   restart hold-down expires or the neighbor is enabled.
 - **One per interface.** Each interface has at most one interface-only
   neighbor, and none if it already has a static link-local neighbor.
+- **Outbound maxima.** `max_prefixes_out_ipv4_unicast` and
+  `max_prefixes_out_ipv6_unicast`, on the neighbor or its peer group, apply to
+  every address learned on the interface: the limit belongs to the
+  interface, so it carries across rebinds. Lowering one below what a bound
+  session already advertises is refused, as for any neighbor.
 - **Rejected** on an interface-only neighbor, directly or through its peer
   group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), BFD,
   `fast_external_failover = false`, `conditional_advertisements`,
-  `log_level`, and explicit `[global] listen_addresses`; and on the neighbor
-  itself, `max_prefixes_out_ipv4_unicast` and `max_prefixes_out_ipv6_unicast`
-  (set them on the peer group instead). These sessions therefore have no TCP-layer
+  `log_level`, and explicit `[global] listen_addresses`. These sessions therefore have no TCP-layer
   authentication and no GTSM yet; what protects them is the link itself and
   OPEN validation against `remote_asn`.
 - **Same address on two links.** Until the RIB keys neighbors by scope, a

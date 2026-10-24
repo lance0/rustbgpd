@@ -18,10 +18,11 @@
   [the configuration reference](../docs/reference/configuration.md#interface-only-neighbors).
   **Operator-visible:** an interface-only neighbor needs `CAP_NET_RAW`;
   `rustbgpd --check` and startup fail with an error naming it when it is
-  missing. TCP-AO, MD5, GTSM (`ttl_security`), BFD, conditional
-  advertisements, per-neighbor `log_level` and outbound prefix maxima, and
-  explicit `listen_addresses` are rejected on these neighbors (peer-group
-  outbound maxima apply). Adding, removing or editing one, or
+  missing. Outbound prefix maxima, on the neighbor or its peer group, apply
+  to every address learned on the interface. TCP-AO, MD5, GTSM
+  (`ttl_security`), BFD, conditional advertisements, per-neighbor
+  `log_level` and explicit `listen_addresses` are rejected on these
+  neighbors. Adding, removing or editing one, or
   `[global.unnumbered]`, is restart-required. Operator deletion of a
   discovery-owned peer is refused with `FAILED_PRECONDITION`.
 - `remote_asn` accepts `"external"` (any ASN except `global.asn`) and
