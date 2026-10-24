@@ -11,8 +11,9 @@ compile and run its crate for every documentation change.
   match `proto/rustbgpd.proto` plus the vendored gNMI service, and the claim
   counts are pinned so a scanner that silently stops matching fails.
 - AddNeighbor payloads: exactly the known Markdown and shell sources call
-  `NeighborService/AddNeighbor`, and each sends an `intent` payload with the
-  expected empty-paths mask, never the removed `config` form.
+  `NeighborService/AddNeighbor`, and each sends an `intent` payload with its
+  expected mask (empty paths unless it selects overrides), never the removed
+  `config` form.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ EVPN_EXCLUDED_PREFIXES = (
 )
 
 ADD_NEIGHBOR = "NeighborService/AddNeighbor"
-# source -> (intent marker, empty-paths mask, expected mask count)
+# source -> (intent marker, expected mask, expected mask count)
 ADD_NEIGHBOR_SOURCES = {
     "docs/reference/api.md": ("-d '{\"intent", '"paths": []', 2),
     "docs/interop.md": ("-d '{\"intent", '"paths": []', 1),
@@ -46,6 +47,12 @@ ADD_NEIGHBOR_SOURCES = {
     "tests/interop/scripts/test-m44-grpc-tier-authz.sh": (
         "add_neighbor='{\"intent",
         '"paths":[]',
+        1,
+    ),
+    # Re-adds a neighbor with its families selected, so its mask names them.
+    "tests/interop/scripts/test-m53c-same-address-frr.sh": (
+        '-d "{\\"intent\\"',
+        '\\"paths\\":[\\"families\\"]',
         1,
     ),
 }
