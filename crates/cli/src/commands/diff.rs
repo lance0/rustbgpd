@@ -271,6 +271,56 @@ where
         .map_err(CliError::from)
 }
 
+/// The daemon's neighbors by address, for comparing a peer's snapshot:
+/// (the AS the peer must have, configured families, the neighbor's
+/// selector, scoped for an IPv6 link-local neighbor as the daemon requires).
+///
+/// A neighbor with `remote_asn = "external"` or `"internal"` (read as 0 with
+/// its mode) has the AS its session negotiated, `None` while it is not
+/// Established. An interface-only neighbor (ADR-0142) has no address of its
+/// own: a bound one is keyed by its learned address on its interface, and an
+/// unbound one has no endpoint to compare. A retention-only row has no
+/// session or configured families.
+fn live_neighbor_map(
+    neighbors: &[crate::proto::NeighborState],
+) -> BTreeMap<IpAddr, (Option<u32>, Vec<String>, String)> {
+    let mut map = BTreeMap::new();
+    for state in neighbors {
+        let Some(config) = state
+            .config
+            .as_ref()
+            .filter(|_| state.retention_only != Some(true))
+        else {
+            continue;
+        };
+        let address = if config.address.is_empty() && !config.interface.is_empty() {
+            state.learned_peer_address.as_str()
+        } else {
+            config.address.as_str()
+        };
+        let Ok(addr) = bare_ip_rpc_address(address).parse::<IpAddr>() else {
+            continue;
+        };
+        let selector = if config.interface.is_empty() {
+            address.to_string()
+        } else {
+            format!("{addr}%{}", config.interface)
+        };
+        let remote_asn = match crate::proto::RemoteAsnMode::try_from(config.remote_asn_mode) {
+            Ok(crate::proto::RemoteAsnMode::External | crate::proto::RemoteAsnMode::Internal) => {
+                state
+                    .negotiated_session
+                    .as_ref()
+                    .and_then(|negotiated| negotiated.remote_asn)
+            }
+            // Numeric, and an older daemon without the mode.
+            _ => Some(config.remote_asn),
+        };
+        map.insert(addr, (remote_asn, config.families.clone(), selector));
+    }
+    map
+}
+
 /// Full pipeline; returns the rendered report and the exit code so tests
 /// can assert byte-identical output across runs.
 async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(String, i32), CliError> {
@@ -324,24 +374,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
     )
     .await?
     .into_inner();
-    // Address -> (remote ASN, configured families, the neighbor's selector:
-    // its scoped form for an IPv6 link-local neighbor, which the daemon
-    // requires).
-    let mut neighbor_map: BTreeMap<IpAddr, (u32, Vec<String>, String)> = BTreeMap::new();
-    for state in &neighbors.neighbors {
-        // A retention-only row has no session or configured families.
-        if state.retention_only != Some(true)
-            && let Some(config) = &state.config
-            && let Ok(addr) = bare_ip_rpc_address(&config.address).parse::<IpAddr>()
-        {
-            let selector = if config.interface.is_empty() {
-                config.address.clone()
-            } else {
-                format!("{addr}%{}", config.interface)
-            };
-            neighbor_map.insert(addr, (config.remote_asn, config.families.clone(), selector));
-        }
-    }
+    let neighbor_map = live_neighbor_map(&neighbors.neighbors);
 
     let mut rib_client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -386,6 +419,14 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
         let Some((remote_asn, configured_families, selector)) = neighbor_map.get(peer_addr) else {
             report.incomparable_reasons.push(format!(
                 "peer {peer_display}: not configured on the daemon; equality refused"
+            ));
+            continue;
+        };
+        let Some(remote_asn) = remote_asn else {
+            report.incomparable_reasons.push(format!(
+                "peer {peer_display}: its remote_asn is \"external\" or \"internal\" and its \
+                 session is not Established, so the daemon has no ASN to compare; equality \
+                 refused"
             ));
             continue;
         };
@@ -1639,6 +1680,66 @@ mod tests {
             med_attr,
             ..live_route(prefix, med)
         }
+    }
+
+    /// The live neighbor map keys a bound interface-only neighbor by its
+    /// learned address on its interface and leaves an unbound one out; a
+    /// non-numeric remote ASN compares as the session's AS, unknown while
+    /// it is not Established; a numeric one (or an older daemon's) is the
+    /// configured number.
+    #[test]
+    fn live_neighbor_map_follows_interface_only_rows_and_asn_modes() {
+        use crate::proto::{NegotiatedSessionState, NeighborConfig, NeighborState, RemoteAsnMode};
+        let row = |address: &str, interface: &str, asn: u32, mode: RemoteAsnMode| NeighborState {
+            config: Some(NeighborConfig {
+                address: address.into(),
+                interface: interface.into(),
+                remote_asn: asn,
+                remote_asn_mode: mode as i32,
+                families: vec!["ipv6_unicast".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let session = |asn| {
+            Some(NegotiatedSessionState {
+                remote_asn: Some(asn),
+                ..Default::default()
+            })
+        };
+        let mut bound = row("", "swp1", 0, RemoteAsnMode::External);
+        bound.learned_peer_address = "fe80::2".into();
+        bound.negotiated_session = session(65009);
+        let unbound = row("", "swp2", 0, RemoteAsnMode::External);
+        let mut down_external = row("192.0.2.3", "", 0, RemoteAsnMode::External);
+        down_external.negotiated_session = None;
+        let mut internal = row("192.0.2.4", "", 0, RemoteAsnMode::Internal);
+        internal.negotiated_session = session(65001);
+        let numeric = row("192.0.2.5", "", 65005, RemoteAsnMode::Numeric);
+        let older = row("192.0.2.6", "", 65006, RemoteAsnMode::Unspecified);
+        let mut retained = row("192.0.2.7", "", 65007, RemoteAsnMode::Numeric);
+        retained.retention_only = Some(true);
+        let map = live_neighbor_map(&[
+            bound,
+            unbound,
+            down_external,
+            internal,
+            numeric,
+            older,
+            retained,
+        ]);
+        let entry = |addr: &str| {
+            map.get(&addr.parse::<IpAddr>().unwrap())
+                .map(|(asn, _, selector)| (*asn, selector.as_str()))
+        };
+        // Mutation-red: keying by `config.address` loses the bound row, and
+        // comparing `config.remote_asn` reads 0.
+        assert_eq!(entry("fe80::2"), Some((Some(65009), "fe80::2%swp1")));
+        assert_eq!(entry("192.0.2.3"), Some((None, "192.0.2.3")));
+        assert_eq!(entry("192.0.2.4"), Some((Some(65001), "192.0.2.4")));
+        assert_eq!(entry("192.0.2.5"), Some((Some(65005), "192.0.2.5")));
+        assert_eq!(entry("192.0.2.6"), Some((Some(65006), "192.0.2.6")));
+        assert_eq!(map.len(), 5, "unbound and retention-only rows are left out");
     }
 
     fn neighbor(addr: &str, asn: u32) -> server_proto::NeighborState {

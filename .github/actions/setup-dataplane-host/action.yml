@@ -36,17 +36,10 @@ runs:
 
     - name: Ensure jq
       shell: bash
-      run: |
-        set -euo pipefail
-        # jq is normally preinstalled on hosted runners; only touch apt when it
-        # is missing. A transient 403 from a preinstalled third-party repo (e.g.
-        # packages.microsoft.com) otherwise fails the whole `apt-get update` and
-        # the job — and we only need jq from the Ubuntu archive.
-        if ! command -v jq >/dev/null 2>&1; then
-          sudo apt-get update -o Acquire::Retries=3 || \
-            echo "::warning::apt-get update reported repo errors; installing jq from cache"
-          sudo apt-get install -y jq
-        fi
+      # jq is normally preinstalled on hosted runners; the helper only touches
+      # apt when it is missing, bounds a slow mirror, and only warns on index
+      # errors from a preinstalled third-party repo (e.g. packages.microsoft.com).
+      run: .github/scripts/apt-install.sh --command jq jq
 
     - name: Load vrf kernel module
       id: vrf

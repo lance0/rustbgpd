@@ -204,7 +204,7 @@ own_drop_count() {
 
 flap_count() {
     neighbors | jq -r --arg ll "$LL2" '
-        [.neighbors[]? | select(.config.interface == "eth2" and .config.address == $ll
+        [.neighbors[]? | select(.config.interface == "eth2" and .learnedPeerAddress == $ll
             and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6) and .stale != true)]
         | if length == 1 then (.[0].flapCount // 0 | tonumber) else error("bound eth2 peer not Established") end'
 }
@@ -226,8 +226,8 @@ wait_event() {
 
 assert_stable_two_paths() {
     neighbors | jq -e --arg one "$LL1" --arg two "$LL2" '
-        [.neighbors[]? | select((.config.interface == "eth1" and .config.address == $one
-            or .config.interface == "eth2" and .config.address == $two)
+        [.neighbors[]? | select((.config.interface == "eth1" and .learnedPeerAddress == $one
+            or .config.interface == "eth2" and .learnedPeerAddress == $two)
             and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6)
             and (.stale != true))] | length == 2' >/dev/null || return 1
     received | jq -e '[.routes[]? | select(.prefix == "198.51.100.53" and .prefixLength == 32)] | length == 2' >/dev/null || return 1
@@ -296,8 +296,8 @@ wait_established() {
             frr_ok=1
         fi
         if neighbors | jq -e --argjson count "$expected" --arg one "$LL1" --arg two "$LL2" '
-            [.neighbors[]? | select((.config.interface == "eth1" and .config.address == $one
-                or .config.interface == "eth2" and .config.address == $two)
+            [.neighbors[]? | select((.config.interface == "eth1" and .learnedPeerAddress == $one
+                or .config.interface == "eth2" and .learnedPeerAddress == $two)
                 and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6)
                 and (.stale != true))] | length == $count' >/dev/null 2>&1; then
             rust_ok=1
@@ -384,7 +384,7 @@ assert_outbound() {
 # connection (ADR-0142 secondary discovery).
 eth3_established() {
     neighbors | jq -e --arg ll "$LL3" '
-        [.neighbors[]? | select(.config.interface == "eth3" and .config.address == $ll
+        [.neighbors[]? | select(.config.interface == "eth3" and .learnedPeerAddress == $ll
             and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6) and .stale != true)]
         | length == 1' >/dev/null 2>&1
 }
@@ -397,7 +397,7 @@ assert_inbound_learning() {
     if [[ $config != *'no bgp ipv6-auto-ra'* ]]; then
         fail "FRR3 lacks no bgp ipv6-auto-ra"; return 1
     fi
-    if neighbors | jq -e '[.neighbors[]? | select(.config.interface == "eth3")] | length != 0' >/dev/null; then
+    if neighbors | jq -e '[.neighbors[]? | select(.config.interface == "eth3" and (.learnedPeerAddress // "") != "")] | length != 0' >/dev/null; then
         fail "eth3 neighbor was bound before FRR3 dialed"; dump_state; return 1
     fi
     docker exec "$FRR3" vtysh -c 'configure terminal' -c 'router bgp 65003' \

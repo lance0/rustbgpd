@@ -606,6 +606,15 @@ role's example: `examples/route-server/` from `v0.50.0`, and
 `examples/route-reflector/` from the first release that ships it. Earlier tags
 owe nothing for a role they never carried; afterwards the checker requires the
 role's directory beside every archived tag and the same parser test accepts it.
+The `route-reflector-evpn` role is archived from `examples/rr-evpn-fabric/`
+starting at `v0.79.0`, the release current when that role was frozen for 1.0;
+earlier tags carried the example but owe no fixture for it.
+
+The `flowspec-controller` role is archived from `examples/flowspec-controller/`,
+from the first release that ships it: neighbors that carry only
+`ipv4_flowspec` / `ipv6_flowspec`, with no keys outside the inventory. Its
+gRPC surface is pinned separately, by the signature and message-graph digests
+of the inventoried method sets.
 
 ## Release gate
 

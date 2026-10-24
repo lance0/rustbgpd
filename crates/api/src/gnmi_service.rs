@@ -229,6 +229,11 @@ impl GnmiService {
         service
     }
 
+    /// gNMI keys a neighbor by its address. An interface-only neighbor with
+    /// no learned address has none (ADR-0142), so it is left out until it
+    /// binds one.
+    // ponytail: unbound interface-only neighbors are invisible to gNMI;
+    // give them an interface key when gNMI learns that identity.
     fn with_peer_snapshot<F, Fut>(asn: u32, router_id: impl Into<String>, peer_snapshot: F) -> Self
     where
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -238,7 +243,10 @@ impl GnmiService {
             asn,
             router_id: router_id.into(),
             access_mode: AccessMode::ReadWrite,
-            peer_snapshot: Arc::new(move || Box::pin(peer_snapshot())),
+            peer_snapshot: Arc::new(move || {
+                let snapshot = peer_snapshot();
+                Box::pin(async move { snapshot.await.map(addressed_peers) })
+            }),
             initial_roster_gate: None,
             subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
             session_events: Arc::new(|| {
@@ -2495,6 +2503,17 @@ impl gnmi::g_nmi_server::GNmi for GnmiService {
     }
 }
 
+/// The rows gNMI can key: every one but an unbound interface-only
+/// neighbor's.
+fn addressed_peers(mut peers: Vec<PeerInfo>) -> Vec<PeerInfo> {
+    peers.retain(|peer| {
+        peer.interface_only
+            .as_ref()
+            .is_none_or(|state| state.learned_address.is_some())
+    });
+    peers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3553,6 +3572,25 @@ mod tests {
         let values = json_ietf_values(&response);
         assert_eq!(values[0], "\"203.0.113.2\"".to_string());
         assert_eq!(values[10], "\"203.0.113.3\"".to_string());
+    }
+
+    /// An unbound interface-only neighbor has no address to key; the
+    /// subtree lists only the neighbors gNMI can name.
+    #[tokio::test]
+    async fn neighbors_subtree_leaves_out_an_unbound_interface_only_neighbor() {
+        let mut unbound = test_peer(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
+        unbound.interface = Some("swp1".into());
+        unbound.interface_only = Some(crate::peer_types::InterfaceOnlyState {
+            discovery: crate::peer_types::NeighborDiscoveryState::AwaitingDiscovery,
+            learned_address: None,
+        });
+        let response = test_service(vec![test_peer("203.0.113.2".parse().unwrap()), unbound])
+            .get(get_request(mounted_path(&[pe("bgp"), pe("neighbors")])))
+            .await
+            .unwrap()
+            .into_inner();
+        // Mutation-red: keeping the row renders `neighbor-address=::%swp1`.
+        assert_eq!(response.notification[0].update.len(), 10);
     }
 
     #[tokio::test]

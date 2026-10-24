@@ -185,6 +185,10 @@ pub(crate) fn neighbor_key(neighbor: &NeighborState) -> Option<String> {
     neighbor.config.as_ref().map(|config| {
         if config.interface.is_empty() {
             config.address.clone()
+        } else if config.address.is_empty() {
+            // An interface-only neighbor (ADR-0142) is selected by its
+            // interface.
+            config.interface.clone()
         } else {
             format!("{}%{}", config.address, config.interface)
         }
@@ -400,6 +404,17 @@ impl App {
         self.aborted_reset_used = false;
         self.rib_page = Some(RibPageState::Loading);
         self.queue_query(peer, self.list_query(String::new()));
+    }
+
+    /// The viewed interface-only neighbor moved to another learned address,
+    /// or lost it: whatever was fetched or is pending belongs to the old
+    /// endpoint. Start the explorer over, which re-queries the new endpoint,
+    /// or reports that the neighbor has none yet.
+    fn endpoint_changed(&mut self, peer: String) {
+        self.cancel_rib();
+        self.explain = None;
+        self.view = View::RouteExplorer(peer.clone());
+        self.reset_explorer_page(peer);
     }
 
     fn open_explorer(&mut self, peer: String) {
@@ -656,6 +671,25 @@ impl App {
     pub(crate) fn take_rib_intent(&mut self) -> Option<RibIntent> {
         self.rib_intents.pop_front()
     }
+    /// The selector a RIB or explain request sends for the neighbor shown
+    /// as `key`. An interface-only neighbor's key is its interface, which the
+    /// RIB services do not accept, so it is sent as `learned%interface`;
+    /// `None` while it has no learned address. Any other key is sent as is.
+    pub(crate) fn request_peer(&self, key: &str) -> Option<String> {
+        let interface_only = self.neighbors.iter().find(|neighbor| {
+            neighbor_key(neighbor).as_deref() == Some(key)
+                && neighbor
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.address.is_empty() && !config.interface.is_empty())
+        });
+        match interface_only {
+            Some(neighbor) if neighbor.learned_peer_address.is_empty() => None,
+            Some(neighbor) => Some(format!("{}%{key}", neighbor.learned_peer_address)),
+            None => Some(key.to_owned()),
+        }
+    }
+
     pub(crate) fn record_rib_request(&mut self, identity: RibQueryIdentity) {
         self.active_rib_query = Some(identity);
     }
@@ -702,13 +736,13 @@ impl App {
                     ..
                 },
             ) => {
-                peer == &active.peer_address
+                self.request_peer(peer).as_ref() == Some(&active.peer_address)
                     && *view == self.rib_view
                     && *family == self.rib_family
                     && *filter == self.rib_filter
             }
             (View::AdvertisedExplain(peer), RibQueryKind::ExplainAdvertised { .. }) => {
-                peer == &active.peer_address
+                self.request_peer(peer).as_ref() == Some(&active.peer_address)
             }
             _ => false,
         };
@@ -907,6 +941,14 @@ impl App {
             .retain(|key, _| current_keys.contains(key));
         self.peer_rates.retain(|key, _| current_keys.contains(key));
 
+        // The endpoint RIB and explain requests for the viewed neighbor go
+        // to, before this snapshot: an interface-only neighbor's can change.
+        let viewed_endpoint = match &self.view {
+            View::RouteExplorer(peer) | View::AdvertisedExplain(peer) => {
+                Some((peer.clone(), self.request_peer(peer)))
+            }
+            View::PeerTable | View::PeerDetail(_) => None,
+        };
         self.neighbors = snapshot.neighbors;
         self.sort_neighbors();
 
@@ -926,6 +968,10 @@ impl App {
         };
         if viewed_peer.is_some_and(|peer| !current_keys.contains(peer)) {
             self.return_to_table();
+        } else if let Some((peer, before)) = viewed_endpoint
+            && self.request_peer(&peer) != before
+        {
+            self.endpoint_changed(peer);
         }
 
         let selected_idx = selected_addr
@@ -1063,6 +1109,25 @@ fn format_rib_error(error: &RibQueryError) -> String {
 mod tests {
     use super::*;
     use crate::proto::{NeighborConfig, NeighborState};
+
+    /// An interface-only neighbor's UI key is its interface; RIB requests
+    /// send its learned address scoped to it, and none while it is unbound.
+    #[test]
+    fn interface_only_rib_requests_use_the_learned_address() {
+        let mut app = App::new();
+        let mut swp1 = neighbor("", 0);
+        swp1.config.as_mut().unwrap().interface = "swp1".into();
+        app.neighbors = vec![neighbor("198.51.100.1", 0), swp1];
+        // Mutation-red: forwarding the key sends `swp1`, which the RIB
+        // services reject.
+        assert_eq!(app.request_peer("swp1"), None, "unbound");
+        app.neighbors[1].learned_peer_address = "fe80::2".into();
+        assert_eq!(app.request_peer("swp1").as_deref(), Some("fe80::2%swp1"));
+        assert_eq!(
+            app.request_peer("198.51.100.1").as_deref(),
+            Some("198.51.100.1")
+        );
+    }
 
     fn neighbor(address: &str, uptime_seconds: u64) -> NeighborState {
         NeighborState {
@@ -1435,6 +1500,53 @@ mod tests {
         };
         app.record_rib_request(identity.clone());
         identity
+    }
+
+    /// An interface-only neighbor whose learned address changes, or that
+    /// loses it, while a RIB query is pending: the stale query is cancelled
+    /// and the explorer starts over for the new endpoint.
+    #[test]
+    fn an_endpoint_change_restarts_a_pending_rib_query() {
+        let mut swp1 = neighbor("", 10);
+        swp1.config.as_mut().unwrap().interface = "swp1".into();
+        swp1.learned_peer_address = "fe80::2".into();
+        let mut app = App::new();
+        app.on_data(snapshot(vec![swp1.clone()]));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let Some(RibIntent::Query { view_id, query, .. }) = app.take_rib_intent() else {
+            panic!("query")
+        };
+        let stale = RibQueryIdentity {
+            request_id: 7,
+            view_id,
+            peer_address: "fe80::2%swp1".into(),
+            query,
+        };
+        app.record_rib_request(stale.clone());
+
+        swp1.learned_peer_address = "fe80::3".into();
+        app.on_data(snapshot(vec![swp1.clone()]));
+        // Mutation-red: without the endpoint check the pane waits on a
+        // result whose identity no longer matches.
+        assert!(matches!(app.take_rib_intent(), Some(RibIntent::Cancel)));
+        let Some(RibIntent::Query { view_id: next, .. }) = app.take_rib_intent() else {
+            panic!("re-query")
+        };
+        assert!(next > view_id);
+        assert_eq!(app.view, View::RouteExplorer("swp1".into()));
+        assert_eq!(app.request_peer("swp1").as_deref(), Some("fe80::3%swp1"));
+        assert!(matches!(app.rib_page, Some(RibPageState::Loading)));
+
+        // Unbound: the explorer starts over and the dispatch reports it.
+        swp1.learned_peer_address.clear();
+        app.on_data(snapshot(vec![swp1]));
+        assert!(matches!(app.take_rib_intent(), Some(RibIntent::Cancel)));
+        assert!(matches!(
+            app.take_rib_intent(),
+            Some(RibIntent::Query { .. })
+        ));
+        assert_eq!(app.request_peer("swp1"), None);
     }
 
     fn page(prefix: &str, next: &str) -> ListRoutesResponse {
