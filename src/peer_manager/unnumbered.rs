@@ -78,11 +78,11 @@ struct Port {
     /// still have shut the session down, which reports nothing. Settled by
     /// reading the session before the binding is trusted again.
     retire_unsettled: bool,
-    /// The bound session ended with no binding left: shut down to release
-    /// the address, or by a late conditional retirement. Either may follow a
-    /// GR teardown, so the stopped peer keeps the address until the RIB
-    /// retains nothing from it. A new session installed for the peer, such
-    /// as an inbound reconnect, clears it.
+    /// The bound session was shut down, to release the address or by a late
+    /// conditional retirement. Either may follow a GR teardown, so the
+    /// stopped peer keeps the address until the RIB retains nothing from it
+    /// or a binding elsewhere is installed. A new session installed for the
+    /// peer, such as an inbound reconnect, clears it.
     stopped_retained: bool,
 }
 
@@ -538,31 +538,36 @@ impl PeerManager {
             // Level-triggered: the bound peer's scope against the interface's
             // index now. A mismatch means the interface it ran on is gone.
             let recreated = current_ifindex.is_some_and(|ifindex| bound_scope != Some(ifindex));
-            // A session that an unanswered retirement ended is replaced at
-            // the current binding; with none, its address is released.
+            // A session that an unanswered retirement ended is a stopped
+            // peer: it may have failed with GR before its late shutdown ran.
+            // A binding elsewhere replaces it, purging that retention; with
+            // none, its address waits on the retention.
             let lost = link_down || recreated;
             let Some(exited) = self.settle_retirement(name, &key, lost).await else {
                 return;
             };
-            // An exited session with no binding left may have failed with GR
-            // before its late shutdown ran: it waits on its retention like
-            // any stopped peer instead of being deleted here.
-            if exited && desired.is_none() && !lost {
+            if exited && !lost {
                 self.port_mut(name).stopped_retained = true;
             }
-            let exited = exited && (desired.is_some() || lost);
             if !lost && !self.confirm_still_stopped(name, &key).await {
                 return;
             }
             let same_endpoint = desired.is_some_and(|endpoint| {
                 key.address == IpAddr::V6(endpoint.address) && bound_scope == Some(endpoint.ifindex)
             });
+            // A stopped peer is no session to keep at a returning binding.
+            let stopped = self.port_mut(name).stopped_retained && desired.is_some();
+            // Its replacement binds from `current_config`, so a staged
+            // transaction defers it: keep the stopped peer, and the retention
+            // its replacement would purge, until the stage clears. A binding
+            // that expires meanwhile leaves it to the retention.
+            if stopped && !lost && self.defer_unnumbered_while_staged() {
+                return;
+            }
             // A lost binding keeps the peer; a new one never displaces an
             // Established session; confirmed carrier loss or interface
             // recreation always ends it.
-            // A stopped peer is no session to keep at a returning binding.
-            let stopped = self.port_mut(name).stopped_retained && desired.is_some();
-            let gone = link_down || recreated || exited || stopped;
+            let gone = lost || stopped;
             let keep = !gone && (desired.is_none() || same_endpoint || established);
             if keep {
                 if desired.is_none() && !established {
@@ -583,7 +588,7 @@ impl PeerManager {
                 "link_down"
             } else if recreated {
                 "interface_recreated"
-            } else if exited {
+            } else if stopped {
                 "session_exited"
             } else {
                 "peer_address_changed"

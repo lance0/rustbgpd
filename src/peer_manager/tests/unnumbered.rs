@@ -42,6 +42,8 @@ struct Harness {
     commands: mpsc::UnboundedReceiver<Command>,
     links: watch::Sender<Arc<LinkSnapshot>>,
     rib_rx: mpsc::Receiver<RibUpdate>,
+    /// Retention queries [`Harness::answer_retention`] answered.
+    retention_queries: Arc<AtomicU32>,
 }
 
 /// A manager with one interface-only neighbor per name in `interfaces`
@@ -86,6 +88,7 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
         commands,
         links: links_tx,
         rib_rx,
+        retention_queries: Arc::default(),
     }
 }
 
@@ -137,9 +140,11 @@ impl Harness {
         let (_tx, rx) = mpsc::channel(1);
         let mut rib_rx = std::mem::replace(&mut self.rib_rx, rx);
         let answer = Arc::clone(&retention);
+        let queries = Arc::clone(&self.retention_queries);
         tokio::spawn(async move {
             while let Some(update) = rib_rx.recv().await {
                 if let RibUpdate::QueryPeerRetention { reply, .. } = update {
+                    queries.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(*answer.lock().unwrap());
                 }
             }
@@ -1740,6 +1745,106 @@ async fn an_address_change_never_promotes_a_pending_candidate_into_a_retired_pee
         "candidate still pending"
     );
     assert_eq!(h.peers_at(ll(3)), []);
+}
+
+/// A late conditional retirement settles while a transaction is staged:
+/// the replacement at the new endpoint is deferred, and discovery's binding
+/// then expires before the stage clears. The exited peer is kept, with any
+/// retention its replacement would purge, while the replacement is deferred;
+/// with no binding left it is released only once nothing is retained.
+async fn an_exited_peer_whose_deferred_replacement_expired(
+    retained: bool,
+) -> (Harness, Arc<std::sync::Mutex<PeerRetention>>) {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let retention = h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let (release, released) = oneshot::channel();
+    let (exited_tx, exited) = oneshot::channel();
+    h.replace_session(
+        &swp1_key(2),
+        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+    );
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    release.send(()).unwrap();
+    exited.await.unwrap();
+    if retained {
+        *retention.lock().unwrap() = PeerRetention {
+            stale_routes: 3,
+            next_deadline: Some(tokio::time::Instant::now() + Duration::from_secs(120)),
+        };
+    }
+
+    h.mgr.config_snapshot_staged = true;
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "kept while staged");
+    assert_eq!(h.peers_at(ll(3)), [], "replacement deferred");
+    // The expiry leaves the stopped peer to its retention at once: a
+    // release binds nothing, so it does not wait for the stage.
+    let asked = h.retention_queries.load(Ordering::SeqCst);
+    h.bind("swp1", None).await;
+    assert!(
+        h.retention_queries.load(Ordering::SeqCst) > asked,
+        "decided by the retention"
+    );
+    h.mgr.config_snapshot_staged = false;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    (h, retention)
+}
+
+/// Nothing retained: the exited peer is released, leaving no stale peer,
+/// and a fresh RA at the new endpoint then creates the session normally.
+#[tokio::test(start_paused = true)]
+async fn an_exited_peer_whose_deferred_replacement_expired_is_released() {
+    let (mut h, _) = an_exited_peer_whose_deferred_replacement_expired(false).await;
+    // Mutation-red: the old recovery rebinds the exited endpoint instead.
+    assert_eq!(h.peers_at(ll(2)), [], "released");
+    assert_eq!(h.peers_at(ll(3)), []);
+    assert!(h.mgr.peers.is_empty(), "no stale peer");
+    assert_eq!(
+        h.mgr.unnumbered_owner_of(&swp1_key(2)),
+        None,
+        "port unbound"
+    );
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+    assert_eq!(h.mgr.unnumbered_owner_of(&swp1_key(3)), Some("swp1"));
+    assert!(matches!(
+        h.mgr.peers[&swp1_key(3)]
+            .handle()
+            .query_state_outcome(Duration::from_secs(1))
+            .await,
+        rustbgpd_transport::StateQueryOutcome::State(_)
+    ));
+}
+
+/// Routes still retained from the exited session: the peer and its address
+/// are kept until the retention ends, then released, and an inbound
+/// connection from the new endpoint creates the session normally.
+#[tokio::test(start_paused = true)]
+async fn an_exited_peer_whose_deferred_replacement_expired_waits_on_its_retention() {
+    let (mut h, retention) = an_exited_peer_whose_deferred_replacement_expired(true).await;
+    // Mutation-red: deleting the exited peer in the staged pass purges it.
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "kept while retained");
+    let deadline = h
+        .mgr
+        .unnumbered_retry_at()
+        .expect("checked again at the RIB's timer");
+
+    tokio::time::sleep_until(deadline).await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [], "released once nothing is retained");
+    assert!(h.mgr.peers.is_empty());
+
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+    assert_eq!(h.mgr.unnumbered_owner_of(&swp1_key(3)), Some("swp1"));
 }
 
 /// Confirmed carrier loss and interface recreation stay unconditional while

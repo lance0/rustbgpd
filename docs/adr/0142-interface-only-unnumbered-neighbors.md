@@ -387,9 +387,12 @@ retention is read again after the conditional shutdown, and a session ended by
 a late retirement with no binding left is treated the same way: either may
 follow a GR teardown, so the stopped peer keeps the address until that
 retention ends, unless a new session, such as an inbound reconnect, is
-installed for it first. This replaces the first implementation's rebinding of
-an exited session at its last endpoint when discovery had no binding: such a
-session's address now waits only on its retention.
+installed for it first. A binding elsewhere replaces the stopped peer, purging
+that retention, but a staged transaction defers the replacement, so a binding
+that expires before the stage clears leaves the peer to its retention. This
+replaces the first implementation's rebinding of an exited session at its last
+endpoint when discovery had no binding: such a session's address now waits
+only on its retention.
 
 That covers the common Clos shape, where each fabric link goes to a different
 switch with its own MAC. **Limitation:** parallel links to the same device
