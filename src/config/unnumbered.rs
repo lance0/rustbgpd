@@ -775,13 +775,19 @@ impl Config {
             .map(bind_time_projection)
     }
 
-    /// One interface-only neighbor resolved with a placeholder link-local
-    /// address and no scope, for reporting an unbound neighbor's settings.
+    /// One interface-only neighbor's settings, resolved with a placeholder
+    /// link-local address and no scope, for reporting an unbound neighbor.
+    /// No policy is compiled, so the result carries no chains: the report
+    /// reads policy presence from [`Config::explicit_policy_presence`].
     pub(crate) fn resolve_unbound_interface_neighbor(
         &self,
         neighbor: &Neighbor,
     ) -> Result<ResolvedNeighbor, ConfigError> {
-        self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
+        let mut bound = neighbor.clone();
+        bound.address = LINK_LOCAL_PLACEHOLDER.to_string();
+        let mut resolved = self.resolve_neighbor_pinned_with_store(&bound, false, None, Some(0))?;
+        resolved.transport_config.fast_external_failover = true;
+        Ok(resolved)
     }
 
     /// Interface-only neighbors resolved with a placeholder link-local
@@ -814,7 +820,7 @@ impl Config {
         let mut resolved = self.resolve_neighbor_pinned_with_store(
             &bound,
             false,
-            &mut SetStore::new(),
+            Some(&mut SetStore::new()),
             Some(ifindex),
         )?;
         resolved.transport_config.fast_external_failover = true;
