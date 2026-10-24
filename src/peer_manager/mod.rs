@@ -557,6 +557,20 @@ struct MaxPrefixLatch {
     deadline: Option<tokio::time::Instant>,
 }
 
+impl MaxPrefixLatch {
+    /// An indefinite or consumed hold-down never gains a new automatic attempt.
+    fn reschedule(&mut self, generation: u64, seconds: Option<u32>) -> bool {
+        if self.deadline.is_none() {
+            return false;
+        }
+        self.generation = generation;
+        self.deadline = seconds.map(|seconds| {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(seconds.into())
+        });
+        true
+    }
+}
+
 /// Exact global inventory bound to an in-progress or failed TCP-AO
 /// generation. Retained until commit so a same-generation retry cannot change
 /// key material after any listener/session may already have installed a
@@ -1958,7 +1972,16 @@ impl PeerManager {
             PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
                 if let Some(error) = mutation
                     .neighbor()
-                    .and_then(|key| self.stale_neighbor_scope(&key))
+                    .and_then(|key| {
+                        if self.interface_only_owns(key.interface.as_deref())
+                            && (key.address.is_unspecified()
+                                || matches!(key.address, IpAddr::V6(address) if address.is_unicast_link_local()))
+                        {
+                            None
+                        } else {
+                            self.stale_neighbor_scope(&key)
+                        }
+                    })
                 {
                     let _ = reply.send(OwnedCatalogMutationOutcome::RejectedNoEffect(error));
                     return ControlFlow::Continue(());

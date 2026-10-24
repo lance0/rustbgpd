@@ -4430,6 +4430,10 @@ impl PeerManager {
             .map_err(|failure| CatalogMutationError::internal(failure.message))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "live target resolution, conditional installation, and accepted-generation publication form one policy apply"
+    )]
     async fn refresh_policies_for_config_classified(
         &mut self,
         next_config: Config,
@@ -4441,7 +4445,16 @@ impl PeerManager {
             |peers| {
                 peers
                     .into_iter()
-                    .filter(|key| self.peers.contains_key(key))
+                    .filter_map(|key| {
+                        if self.interface_only_owns(key.interface.as_deref())
+                            && (key.address.is_unspecified()
+                                || matches!(key.address, IpAddr::V6(address) if address.is_unicast_link_local()))
+                        {
+                            self.unnumbered_bound_peer(key.interface.as_deref()?)
+                        } else {
+                            self.peers.contains_key(&key).then_some(key)
+                        }
+                    })
                     .collect()
             },
         );
@@ -5041,11 +5054,13 @@ impl PeerManager {
         // already-reshaped members from their captured priors instead of
         // leaving earlier members on the next config (and the failing member
         // possibly deleted) while `current_config` never advanced.
+        // Interface-only bindings adopt membership through the port owner,
+        // preserving their safety state across its rebind.
         let mut seen = BTreeSet::new();
         let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
         for peer_key in affected_peers
             .into_iter()
-            .filter(|key| self.peers.contains_key(key))
+            .filter(|key| self.peers.contains_key(key) && self.unnumbered_owner_of(key).is_none())
         {
             if !seen.insert(peer_key.clone()) {
                 continue;
@@ -5217,11 +5232,13 @@ impl PeerManager {
                 .await;
         }
 
+        // Interface-only bindings adopt membership through the port owner,
+        // preserving their safety state across its rebind.
         let mut seen = BTreeSet::new();
         let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
         for peer_key in affected_peers
             .into_iter()
-            .filter(|key| self.peers.contains_key(key))
+            .filter(|key| self.peers.contains_key(key) && self.unnumbered_owner_of(key).is_none())
         {
             if !seen.insert(peer_key.clone()) {
                 continue;

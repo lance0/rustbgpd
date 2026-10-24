@@ -216,9 +216,8 @@ struct Port {
 }
 
 /// State of an interface-only neighbor that belongs to the neighbor, not to
-/// one learned endpoint: an operator disable and a max-prefix shutdown latch
-/// (with its restart deadline) survive carrier loss, interface recreation
-/// and a change of learned address.
+/// one learned endpoint: operator state, max-prefix shutdown and lifetime
+/// counters survive carrier loss, interface recreation and address changes.
 #[derive(Debug)]
 struct HeldState {
     enabled: bool,
@@ -229,7 +228,9 @@ struct HeldState {
     /// An operator's RFC 8326 graceful-shutdown advertisement, replayed on
     /// the next peer as a static neighbor's reconfigure does.
     graceful_shutdown: bool,
+    max_prefix_restart_seconds: Option<u32>,
     latch: Option<super::MaxPrefixLatch>,
+    counters: rustbgpd_transport::NeighborCounters,
 }
 
 impl Unnumbered {
@@ -809,12 +810,29 @@ impl PeerManager {
                 };
                 // A max-prefix shutdown held across the endpoint is still
                 // the neighbor's state: its reason and restart countdown.
-                if let Some(latch) = port.held.as_ref().and_then(|held| held.latch.as_ref()) {
-                    super::snapshot::apply_max_prefix_latch(
-                        &mut info,
-                        &latch.error,
-                        latch.deadline,
-                    );
+                if let Some(held) = &port.held {
+                    let totals = &held.counters;
+                    info.updates_received = totals.updates_received();
+                    info.updates_sent = totals.updates_sent();
+                    info.notifications_received = totals.notifications_received();
+                    info.notifications_sent = totals.notifications_sent();
+                    info.otc_routes_blocked = totals.otc_routes_blocked();
+                    info.import_policy_routes_permitted = totals.import_policy_routes_permitted();
+                    info.import_policy_routes_denied = totals.import_policy_routes_denied();
+                    let export = totals.export_policy().snapshot();
+                    info.export_policy_routes_permitted = export.export_policy_routes_permitted;
+                    info.export_policy_routes_denied = export.export_policy_routes_denied;
+                    info.flap_count = totals.flaps();
+                    (info.messages_received, info.messages_sent) = self
+                        .metrics
+                        .peer_message_totals(&rustbgpd_telemetry::interface_peer_label(name));
+                    if let Some(latch) = &held.latch {
+                        super::snapshot::apply_max_prefix_latch(
+                            &mut info,
+                            &latch.error,
+                            latch.deadline,
+                        );
+                    }
                 }
                 Some(info)
             })
@@ -1011,7 +1029,7 @@ impl PeerManager {
         }
         self.apply_resolved_policy_snapshot_with_prestage_reads(
             targets,
-            false,
+            true,
             super::OperatorReadAdmission::Served,
         )
         .await
@@ -1026,11 +1044,18 @@ impl PeerManager {
         if priors.is_empty() {
             return true;
         }
-        let Err(error) = self.apply_policy_impact_snapshot(priors, Vec::new()).await else {
+        let Err(error) = self
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                priors,
+                true,
+                super::OperatorReadAdmission::Served,
+            )
+            .await
+        else {
             return true;
         };
         warn!(
-            %error,
+            error = %error.message,
             "interface-only policy chains could not be restored after the peer-group change failed"
         );
         false
@@ -1133,6 +1158,9 @@ impl PeerManager {
             match configured.get(name) {
                 None => self.remove_port(name).await,
                 Some(settings) => {
+                    if let Some(settings) = settings {
+                        self.sync_interface_restart_policy(name, settings.2);
+                    }
                     self.rebind_reconfigured_port(name, settings.as_ref()).await;
                 }
             }
@@ -1177,6 +1205,33 @@ impl PeerManager {
         {
             info!("unnumbered: no interface-only neighbor left; stopping discovery");
             unnumbered.shutdown().await;
+        }
+    }
+
+    /// Duration edits take effect when configuration is adopted, even when
+    /// the next binding arrives much later.
+    fn sync_interface_restart_policy(&mut self, name: &str, restart_seconds: Option<u32>) {
+        let bound = self.port_mut(name).bound.clone();
+        if let Some(key) = bound {
+            if self
+                .peers
+                .get(&key)
+                .is_some_and(|peer| peer.max_prefix_restart_seconds != restart_seconds)
+            {
+                self.rearm_max_prefix_restart(&key, restart_seconds);
+                if let Some(peer) = self.peers.get_mut(&key) {
+                    peer.max_prefix_restart_seconds = restart_seconds;
+                }
+            }
+        } else if let Some(mut held) = self.port_mut(name).held.take() {
+            if held.max_prefix_restart_seconds != restart_seconds {
+                if let Some(latch) = &mut held.latch {
+                    let generation = self.allocate_max_prefix_latch_generation();
+                    latch.reschedule(generation, restart_seconds);
+                }
+                held.max_prefix_restart_seconds = restart_seconds;
+            }
+            self.port_mut(name).held = Some(held);
         }
     }
 
@@ -1701,12 +1756,11 @@ impl PeerManager {
         }
         info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
         self.port_mut(name).presence_reason = Some(reason);
-        // Apply what the session already reported, such as a max-prefix
-        // shutdown queued as it went Idle, before capturing the state that
-        // outlives it; the deletion below would otherwise apply and discard it.
+        // Drain already-reported state before joining the retiring actor.
         self.drain_ready_session_notifications(Some(&key)).await;
         // The neighbor's operator and safety state outlives the endpoint.
-        let held = HeldState {
+        let had_latch = self.max_prefix_latches.contains_key(&key);
+        let mut held = HeldState {
             enabled: self.peers.get(&key).is_none_or(|managed| managed.enabled),
             config_admin_down: self
                 .peers
@@ -1716,23 +1770,47 @@ impl PeerManager {
                 .peers
                 .get(&key)
                 .is_some_and(|managed| managed.advertise_graceful_shutdown),
-            latch: self.max_prefix_latches.remove(&key),
+            max_prefix_restart_seconds: self
+                .peers
+                .get(&key)
+                .and_then(|managed| managed.max_prefix_restart_seconds),
+            latch: None,
+            counters: self.neighbor_counters_for(&key),
         };
-        let deleted = self.delete_peer(key.clone(), false).await;
-        self.port_mut(name).presence_reason = None;
+        // Retiring an endpoint keeps terminal notices emitted during shutdown;
+        // only deleting the configured neighbor may clear its latch.
+        let deleted = self
+            .delete_peer_checked(key.clone(), false, None, false, None, None)
+            .await;
         match deleted {
             // Already gone: nothing is left to clear.
             Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
             Err(error) => {
-                if let Some(latch) = held.latch {
-                    self.max_prefix_latches.insert(key.clone(), latch);
-                }
+                self.port_mut(name).presence_reason = None;
                 warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the bound peer");
                 return false;
             }
         }
+        held.latch = self.max_prefix_latches.remove(&key);
+        if let Some(latch) = &mut held.latch {
+            held.enabled = false;
+            self.publish_peer_admin_enabled_metric(&key, false);
+            // The retiring session has left `peers`, so its late notice could
+            // not read the accepted duration when it installed this latch.
+            if !had_latch && latch.deadline.is_none() {
+                latch.deadline = held.max_prefix_restart_seconds.map(|seconds| {
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(seconds.into())
+                });
+            }
+        }
+        self.reap_deleted_peer_metric_series_for_key(&key).await;
+        self.port_mut(name).presence_reason = None;
         if held.latch.is_some() {
-            self.publish_max_prefix_latched_metric(&key, false);
+            self.metrics.set_max_prefix_latched(
+                &rustbgpd_telemetry::interface_peer_label(name),
+                name,
+                true,
+            );
             self.recompute_next_max_prefix_restart_deadline();
         }
         // The retired endpoint's export gate goes with it; the run loop's
@@ -2174,9 +2252,14 @@ impl PeerManager {
             }
         }
         self.note_binding_reason(name, endpoint.address);
+        if let Some(held) = &held {
+            self.neighbor_counters
+                .insert(key.clone(), held.counters.clone());
+        }
         let added = self.add_peer_impl(config, false, enabled, true).await;
         self.port_mut(name).presence_reason = None;
         if let Err(error) = added {
+            self.neighbor_counters.remove(&key);
             if carried_latch {
                 self.remove_max_prefix_latch(&key);
             }
