@@ -310,21 +310,23 @@ mod tests {
     }
 
     /// Without `ORIGINATOR_ID`, two neighbors that share a link-local address
-    /// on different interfaces are different originators.
+    /// on different interfaces are different originators: one router on two
+    /// links sends the rule on both sessions, and only the copy from the best
+    /// unicast path's session validates.
     #[test]
     fn same_address_neighbors_on_different_interfaces_are_different_originators() {
         let (mut flow, mut cover) = fixture();
         let link_local: IpAddr = "fe80::1".parse().unwrap();
         let eth0 = PeerId::allocate(PeerEndpoint::new(link_local, Some("eth0")));
         let eth1 = PeerId::allocate(PeerEndpoint::new(link_local, Some("eth1")));
-        flow.peer = eth1;
         cover.peer = eth0;
+        flow.peer = eth0;
+        assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
+        flow.peer = eth1;
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
             invalid(InfeasibleReason::OriginatorMismatch)
         );
-        cover.peer = eth1;
-        assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
         assert!(eth0.release() && eth1.release());
     }
 
