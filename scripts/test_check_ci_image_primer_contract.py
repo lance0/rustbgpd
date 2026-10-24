@@ -932,6 +932,41 @@ class HeavyLabPathClassifierTests(unittest.TestCase):
         with self.assertRaises(heavy.ClassificationError):
             heavy.classify_event("pull_request", "", "")
 
+    def test_draft_pull_requests_skip_labs_and_nothing_else_does(self):
+        # A draft skips without reading the diff; labs run once it is ready.
+        self.assertFalse(heavy.classify_event("pull_request", "", "", draft=True)[0])
+        for event in ("push", "workflow_dispatch", "merge_group"):
+            with self.subTest(event=event):
+                self.assertTrue(heavy.classify_event(event, "", "", draft=True)[0])
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            for draft, expected in (("true", "false"), ("false", "true"), ("", "true")):
+                with self.subTest(pr_draft=draft), mock.patch.object(
+                    heavy, "changed_paths", return_value=("src/main.rs",)
+                ), mock.patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_OUTPUT": str(output),
+                        "EVENT_NAME": "pull_request",
+                        "PR_DRAFT": draft,
+                    },
+                    clear=True,
+                ):
+                    self.assertEqual(heavy.main(), 0)
+                    self.assertEqual(output.read_text(), f"run_labs={expected}\n")
+                    output.unlink()
+
+    def test_lab_workflows_run_again_when_a_draft_is_marked_ready(self):
+        for workflow in (KERNEL, INTEROP):
+            with self.subTest(workflow=workflow):
+                text = (ROOT / workflow).read_text()
+                pull_request = text.split("  pull_request:\n", 1)[1].split("\n  workflow_dispatch:", 1)[0]
+                self.assertIn(
+                    "types: [opened, synchronize, reopened, ready_for_review]",
+                    pull_request,
+                )
+                self.assertIn("PR_DRAFT: ${{ github.event.pull_request.draft }}", text)
+
     def test_main_writes_exact_output_and_requires_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "output"

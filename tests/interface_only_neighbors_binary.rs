@@ -117,6 +117,12 @@ struct Daemon {
 
 impl Daemon {
     fn start(ns: &str, dir: &Path, asn: u32, router_id: &str) -> Self {
+        Self::start_with(ns, dir, asn, router_id, "")
+    }
+
+    /// [`Self::start`] with `neighbor_extra` appended to the `veth`
+    /// interface-only neighbor's stanza.
+    fn start_with(ns: &str, dir: &Path, asn: u32, router_id: &str, neighbor_extra: &str) -> Self {
         let runtime = dir.join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -152,7 +158,7 @@ interface = "veth"
 remote_asn = "external"
 families = ["ipv6_unicast"]
 hold_time = {HOLD_TIME_SECS}
-"#,
+{neighbor_extra}"#,
                 runtime = runtime.display()
             ),
         )
@@ -321,9 +327,14 @@ fn interface_only_neighbors_discover_each_other_and_follow_an_address_change() {
     b.wait("B Established from its new address", RECOVERY_BOUND, |b| {
         b.established_with("fe80::a1")
     });
+    // The failed session retained nothing (Hold Timer expiry closes with a
+    // NOTIFICATION), so when discovery is briefly unbound before the new
+    // address's RA arrives, the old peer is released first and the new
+    // address binds afresh; otherwise it is replaced as an address change.
+    let log = a.log();
     assert!(
-        a.log().contains("peer_address_changed"),
-        "the move is logged as an address change"
+        log.contains("peer_address_changed") || log.contains("binding_expired"),
+        "the old endpoint's retirement is logged"
     );
 }
 

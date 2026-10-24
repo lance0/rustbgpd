@@ -36,7 +36,7 @@ use rustbgpd_transport::{
     TcpAoRotationStatus,
 };
 
-use crate::config::{self, AcceptedConfigSnapshot, Config};
+use crate::config::{self, AcceptedConfigSnapshot, Config, pin_unreconciled_daemon_runtime_fields};
 use crate::config_persister::ConfigMutation;
 use crate::evpn_runtime_converger::{EvpnRuntimeReloadApply, EvpnRuntimeReloadTerminal};
 use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
@@ -1962,63 +1962,6 @@ fn load_tier_test_toml(source: &str, source_name: &str) -> Config {
     config
 }
 
-/// Keep daemon-wide, startup-owned state honest across SIGHUP.
-///
-/// These fields have no live reconciler. Advancing any of them in the runtime
-/// snapshot would make later consumers (notably a runtime-added peer resolved
-/// from that snapshot) observe an identity or subsystem configuration that the
-/// running daemon never adopted. Fields with dedicated pinning or hot-apply
-/// paths remain owned by those paths below.
-fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Config) {
-    new_config.global.asn = current.global.asn;
-    new_config
-        .global
-        .router_id
-        .clone_from(&current.global.router_id);
-    new_config.global.listen_port = current.global.listen_port;
-    new_config
-        .global
-        .listen_addresses
-        .clone_from(&current.global.listen_addresses);
-    new_config
-        .global
-        .cluster_id
-        .clone_from(&current.global.cluster_id);
-    new_config.global.worker_threads = current.global.worker_threads;
-    new_config.global.multipath_relax = current.global.multipath_relax;
-    new_config.global.link_bandwidth_weighted = current.global.link_bandwidth_weighted;
-    new_config.global.fast_external_failover = current.global.fast_external_failover;
-    new_config.global.warm_cache_checkpoint_on_shutdown =
-        current.global.warm_cache_checkpoint_on_shutdown;
-    new_config.global.max_as_path_length = current.global.max_as_path_length;
-    new_config
-        .global
-        .gr_eor_replay_owners
-        .clone_from(&current.global.gr_eor_replay_owners);
-    new_config
-        .global
-        .runtime_state_dir
-        .clone_from(&current.global.runtime_state_dir);
-    new_config
-        .global
-        .telemetry
-        .prometheus_addr
-        .clone_from(&current.global.telemetry.prometheus_addr);
-    new_config.global.telemetry.log_format = current.global.telemetry.log_format;
-    new_config.global.telemetry.dataplane_readiness = current.global.telemetry.dataplane_readiness;
-    new_config.flowspec = current.flowspec;
-    new_config.rpki.clone_from(&current.rpki);
-    new_config.bmp.clone_from(&current.bmp);
-    new_config.mrt.clone_from(&current.mrt);
-    // ADR-0142: Router Advertisement discovery starts once, at startup, for
-    // the interface-only neighbors and settings it was given.
-    new_config
-        .global
-        .unnumbered
-        .clone_from(&current.global.unnumbered);
-    new_config.neighbors.pin_interface_only(&current.neighbors);
-}
-
 #[cfg(test)]
 pub(crate) async fn reload_config(
     config_path: &str,
@@ -2229,28 +2172,30 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // any external apply. The desired snapshot still carries the edited TOML
     // so restart intent is preserved and the same drift remains visible on
     // every reload.
-    for interface in config::interface_only_session_changes(current, &new_config) {
+    if config::unnumbered_settings_changed(current, &new_config) {
         error!(
-            interface,
-            "the session settings of the interface-only neighbor on this interface changed \
-             (for example through its peer group): a bound peer takes them only when it \
-             binds. Restart rustbgpd to apply them; policy chains still follow this reload."
-        );
-    }
-    if config::interface_only_neighbors_changed(current, &new_config) {
-        error!(
-            "interface-only [[neighbors]] (interface with no address) or \
-             [global.unnumbered] changed — adding, removing or editing them requires a \
-             restart. The running set is kept for this reload."
+            "[global.unnumbered] changed: Router Advertisement discovery takes its settings \
+             when it starts. Restart rustbgpd to apply them; interface-only [[neighbors]] \
+             still follow this reload."
         );
     }
     pin_unreconciled_daemon_runtime_fields(&mut new_config, current);
-    if config::pin_tcp_mss_startup_only_runtime(&mut new_config, current) {
+    let (static_mss_pinned, interface_mss_pinned) =
+        config::pin_reload_tcp_mss(&mut new_config, current);
+    if static_mss_pinned {
         error!(
             "tcp_mss differs from the live static-neighbor/listener snapshot: active-open and \
              passive-listener sockets install TCP_MAXSEG only when created. Restart rustbgpd \
              to add, remove, or change a neighbor or peer-group tcp_mss. The running snapshot \
              keeps its startup values for this reload."
+        );
+    }
+    for interface in interface_mss_pinned {
+        error!(
+            interface,
+            "the effective tcp_mss of the interface-only neighbor on this interface changed: \
+             sockets take the clamp only when created. Restart rustbgpd to apply it; the \
+             running neighbor is kept for this reload."
         );
     }
 
@@ -2517,7 +2462,12 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // One shared classification decides the executor before the first
     // credential, listener, session, or catalog effect.
     let route = config::classify_sighup_reload(config::SighupReloadFamilies {
-        generation: !neighbors_unchanged || !peer_groups_unchanged || policy_generation_changed,
+        // ADR-0142: the generation's adopted candidate carries the
+        // interface-only set the peer manager reconciles its ports to.
+        generation: !neighbors_unchanged
+            || !peer_groups_unchanged
+            || policy_generation_changed
+            || config::interface_only_neighbors_changed(current, &new_config),
         bfd_members: config::bfd_member_attachments_changed(current, &new_config),
         datasets: dataset_commit_pending || dataset_events_pending,
         dataset_bindings: policy_diff.datasets_changed
@@ -2745,6 +2695,17 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
                 }
             }
         }
+    }
+    // Held through the generation, or through the whole sequential
+    // application below.
+    let admission_hold = Arc::new(());
+    if !matches!(route, config::SighupReloadRoute::Rejected { .. })
+        && let Some(internal_tx) = peer_mgr_internal_tx
+        && unnumbered_preflight_needed(current, &new_config)
+        && let Some(outcome) =
+            unnumbered_reload_preflight(internal_tx, &new_config, &admission_hold).await
+    {
+        return outcome;
     }
     match route {
         config::SighupReloadRoute::Rejected { reasons } => {
@@ -4520,6 +4481,62 @@ impl GenerationSideEffects<'_> {
     }
 }
 
+/// Whether the peer manager's ADR-0142 preflight has anything to check in
+/// a reload from `current` to `candidate`: it adds the first interface-only
+/// neighbor (`CAP_NET_RAW` and the link monitor), or a static link-local
+/// neighbor (the shared-address check).
+fn unnumbered_preflight_needed(current: &Config, candidate: &Config) -> bool {
+    let link_local = |neighbor: &&config::Neighbor| {
+        matches!(
+            neighbor.address.parse(),
+            Ok(std::net::IpAddr::V6(address)) if address.is_unicast_link_local()
+        )
+    };
+    (current.neighbors.interface_only().is_empty()
+        && !candidate.neighbors.interface_only().is_empty())
+        || candidate
+            .neighbors
+            .iter()
+            .filter(link_local)
+            .any(|neighbor| {
+                !current.neighbors.iter().any(|running| {
+                    running.address == neighbor.address && running.interface == neighbor.interface
+                })
+            })
+}
+
+/// ADR-0142: the peer manager accepts the candidate before either
+/// executor's first effect, so its refusal (`CAP_NET_RAW`, the link monitor,
+/// a shared-address conflict) leaves nothing to compensate. Learned
+/// admission stays closed to the candidate's static link-local addresses
+/// while `hold` lives. `Some` is the clean rejection to return.
+async fn unnumbered_reload_preflight(
+    peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
+    candidate: &Config,
+    hold: &Arc<()>,
+) -> Option<SighupReloadOutcome> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let preflight = InternalCommand::PreflightReloadGeneration {
+        candidate: Box::new(candidate.clone()),
+        route: Arc::downgrade(hold),
+        reply: reply_tx,
+    };
+    if peer_mgr_internal_tx.send(preflight).await.is_err() {
+        return Some(generation_step_rejected(
+            "unnumbered.preflight",
+            "peer manager unavailable for the interface-only preflight".to_string(),
+        ));
+    }
+    match reply_rx.await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(generation_step_rejected("unnumbered.preflight", error)),
+        Err(_) => Some(generation_step_rejected(
+            "unnumbered.preflight",
+            "peer manager dropped the interface-only preflight reply".to_string(),
+        )),
+    }
+}
+
 /// The generation route: one resolved candidate, one owned peer-manager
 /// operation, one acknowledgement. The outbound prefix maxima and the
 /// listener inbound inventory are the only effects outside the peer manager;
@@ -4878,9 +4895,10 @@ log_format = "json"
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
             // +1: the unspecified set_next_hop reload test writes its candidate.
+            // +2: the generation preflight test writes its prior and candidate.
             // +2: the same-address BMP reload test writes both of its files.
             // +2: so does the excluded same-address pair reload test.
-            (concat!("write_tier", "_test_config("), 40),
+            (concat!("write_tier", "_test_config("), 42),
             (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
@@ -7877,6 +7895,8 @@ hold_time = 90
     /// Scripted reply for one `ApplyReloadGeneration`.
     #[derive(Clone, Copy)]
     enum GenerationReply {
+        /// Refuse the ADR-0142 preflight that precedes the generation.
+        PreflightRejected(&'static str),
         Applied,
         RejectedNoEffect(&'static str),
         FullyCompensated(&'static str),
@@ -7906,6 +7926,18 @@ hold_time = 90
             let mut script = std::collections::VecDeque::from(script);
             let mut calls = Vec::new();
             while let Some(command) = rx.recv().await {
+                // The preflight is answered, not tagged: it has no effect.
+                if let InternalCommand::PreflightReloadGeneration { reply, .. } = command {
+                    let refusal = match script.front() {
+                        Some(GenerationReply::PreflightRejected(error)) => Some(*error),
+                        _ => None,
+                    };
+                    if refusal.is_some() {
+                        script.pop_front();
+                    }
+                    let _ = reply.send(refusal.map_or(Ok(()), |error| Err(error.to_string())));
+                    continue;
+                }
                 if let Some(tags) = &tags {
                     tags.lock().unwrap().push(internal_tag(&command));
                 }
@@ -7922,6 +7954,9 @@ hold_time = 90
                     actions.iter().filter(|action| action.kind == kind).count()
                 };
                 let outcome = match script.pop_front().unwrap_or(GenerationReply::Applied) {
+                    GenerationReply::PreflightRejected(_) => {
+                        panic!("a preflight refusal scripted for a generation")
+                    }
                     GenerationReply::Applied => {
                         drop(datasets.publish());
                         Some(ReloadGenerationOutcome::Applied(ReloadGenerationReceipt {
@@ -9463,6 +9498,175 @@ import_policy_chain = ["origin-guard"]
             }
             std::fs::remove_file(&path).ok();
         }
+    }
+
+    /// The ADR-0142 preflight runs before the generation route's first
+    /// effect outside the peer manager. Refusing the first interface-only
+    /// neighbor (no `CAP_NET_RAW`) beside an outbound-maxima change is a
+    /// clean rejection with the maxima never activated, so there is nothing
+    /// to restore and no restore failure to fence on.
+    #[tokio::test]
+    async fn reload_generation_preflight_refuses_before_outbound_prefix_limits() {
+        let candidate = format!(
+            "{}\n[[neighbors]]\ninterface = \"swp9\"\nremote_asn = \"external\"\n\
+             families = [\"ipv6_unicast\"]\n",
+            baseline_toml().replace(
+                "hold_time = 90",
+                "hold_time = 45\nmax_prefixes_out_ipv4 = 100",
+            )
+        );
+        let path = unique_temp_path("reload-generation-preflight");
+        write_tier_test_config(&path, baseline_toml());
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        write_tier_test_config(&path, &candidate);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(8);
+        let rib = tokio::spawn(async move {
+            let mut seen = 0;
+            while rib_rx.recv().await.is_some() {
+                seen += 1;
+            }
+            seen
+        });
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        let (internal_tx, generation) = spawn_generation_mock(
+            vec![GenerationReply::PreflightRejected(
+                "interface-only neighbor discovery needs CAP_NET_RAW",
+            )],
+            None,
+        );
+        let desired = Arc::new(
+            AcceptedConfigSnapshot::load_for_reload(
+                &path,
+                &AcceptedConfigSnapshot::from_config_for_test(initial.clone()),
+                &initial.policy.dataset_bindings,
+            )
+            .unwrap(),
+        );
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let outcome = reload_config_with_tcp_ao_recorded(
+            SighupReloadPlan {
+                baseline_runtime: initial.clone(),
+                desired,
+            },
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            Some(&internal_tx),
+            Some(&rib_tx),
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::clone(&trace)),
+        )
+        .await;
+        drop(rib_tx);
+        drop(internal_tx);
+        // Mutation-red: with the preflight inside the generation only, the
+        // maxima are prepared and activated before the refusal.
+        assert_eq!(rib.await.unwrap(), 0, "no RIB effect");
+        assert!(generation.await.unwrap().is_empty(), "never dispatched");
+        assert!(
+            matches!(
+                &outcome,
+                SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
+                    if failure.bucket == "unnumbered.preflight"
+                        && failure.error.to_string().contains("CAP_NET_RAW")
+            ),
+            "{outcome:?}"
+        );
+        assert!(trace.lock().unwrap().applied.is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The ADR-0142 preflight also precedes the sequential route: a static
+    /// link-local add that a learned endpoint holds, beside an MD5 change on
+    /// another neighbor (which keeps the sequential route), is refused before
+    /// the listener authentication swap or any peer mutation.
+    #[tokio::test]
+    async fn sequential_reload_refuses_a_duplicate_link_local_add_before_listener_auth() {
+        let current = load_config_from_toml("seq-preflight-prior", baseline_toml());
+        let desired = load_config_from_toml(
+            "seq-preflight-desired",
+            &format!(
+                "{}\n[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"lo\"\nremote_asn = 65003\n",
+                baseline_toml().replace(
+                    "hold_time = 90",
+                    "hold_time = 90\nmd5_password = \"secret\""
+                )
+            ),
+        );
+        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        let peer_task = tokio::spawn(async move {
+            let mut tags = Vec::new();
+            while let Some(command) = peer_rx.recv().await {
+                tags.push(cmd_tag(&command));
+            }
+            tags
+        });
+        let (internal_tx, generation) = spawn_generation_mock(
+            vec![GenerationReply::PreflightRejected(
+                "duplicate_link_local_address: neighbor fe80::2%lo uses fe80::2, which the \
+                 interface-only neighbor on swp1 holds",
+            )],
+            None,
+        );
+        let (accept_tx, _accept_rx) = mpsc::channel(1);
+        let listener =
+            rustbgpd_transport::BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+                .await
+                .unwrap();
+        let handle = listener.tcp_ao_rotation_handle();
+        let listener_task = tokio::spawn(listener.run());
+        let trace: SighupReloadTraceHandle = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reload_config_with_tcp_ao_recorded(
+                SighupReloadPlan {
+                    baseline_runtime: current,
+                    desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                },
+                None,
+                None,
+                &peer_tx,
+                Some(&internal_tx),
+                None,
+                None,
+                None,
+                Some(&handle),
+                None,
+                Some(Arc::clone(&trace)),
+            ),
+        )
+        .await
+        .expect("the reload settles");
+        drop(internal_tx);
+        drop(peer_tx);
+        assert!(generation.await.unwrap().is_empty(), "no generation");
+        listener_task.abort();
+        let _ = listener_task.await;
+        let tags = peer_task.await.unwrap();
+        // Mutation-red: with the preflight on the generation route only, the
+        // sequential route swaps listener authentication first.
+        assert!(
+            matches!(
+                &outcome,
+                SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
+                    if failure.bucket == "unnumbered.preflight"
+                        && failure.error.to_string().contains("duplicate_link_local_address")
+            ),
+            "{outcome:?}"
+        );
+        assert!(tags.is_empty(), "no peer mutation: {tags:?}");
+        let trace = trace.lock().unwrap();
+        assert!(
+            !trace
+                .applied
+                .iter()
+                .any(|effect| effect.bucket == "listener_auth.apply"),
+            "listener authentication unchanged"
+        );
+        assert!(trace.applied.is_empty(), "no effect at all");
     }
 
     /// The generation route never writes: a read-only config directory
@@ -11219,50 +11423,94 @@ hold_time = 90
         }
     }
 
-    /// ADR-0142: interface-only neighbors are pinned to the running set
-    /// before validation, so a candidate that is valid alone but invalid
-    /// against that set is refused before any runtime mutation.
+    /// ADR-0142: interface-only neighbors are reloaded, not pinned. Adding,
+    /// editing and deleting one each reach the peer manager as one owned
+    /// generation carrying the candidate set, and a refusal there is a
+    /// clean, effect-free reload failure.
     #[tokio::test]
-    async fn reload_refuses_a_candidate_invalid_against_the_pinned_interface_only_set() {
-        let swp1 = "\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\npeer_group = \"fabric\"\n";
-        let group = "\n[peer_groups.fabric]\nhold_time = 9\n";
-        let initial = format!("{}{group}{swp1}", baseline_toml());
+    async fn reload_applies_interface_only_neighbors_through_the_generation() {
+        let swp1 = "\n[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n";
+        let swp2 = "\n[[neighbors]]\ninterface = \"swp2\"\nremote_asn = 65009\n";
+        let base = baseline_toml();
         let cases = [
             (
-                // swp1 becomes a static link-local neighbor on the same port.
-                format!(
-                    "{}{group}\n[[neighbors]]\naddress = \"fe80::2\"\ninterface = \"swp1\"\nremote_asn = 65009\n",
-                    baseline_toml()
-                ),
-                "already has a static link-local neighbor",
+                "add",
+                base.to_string(),
+                format!("{base}{swp1}"),
+                vec!["swp1"],
             ),
             (
-                // The group the running interface-only neighbor uses is deleted.
-                baseline_toml().to_string(),
-                "fabric",
+                "modify",
+                format!("{base}{swp1}"),
+                format!("{base}{}", swp1.replace("\"external\"", "65010")),
+                vec!["swp1"],
             ),
+            (
+                "add and delete",
+                format!("{base}{swp1}"),
+                format!("{base}{swp2}"),
+                vec!["swp2"],
+            ),
+            ("delete", format!("{base}{swp1}"), base.to_string(), vec![]),
         ];
-        for (desired, expected) in cases {
-            // Mutation-red: pinning after validation lets both reach the
-            // generation apply.
+        for (case, initial, desired, interfaces) in cases {
+            // Mutation-red: pinning the running set sends the old one.
             let (outcome, tags, calls) =
                 drive_generation(&initial, &desired, GenerationReply::Applied).await;
-            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome
-            else {
-                panic!("{expected}: the reload must be refused");
+            let SighupReloadOutcome::Acknowledged(authority) = outcome else {
+                panic!("{case}: the reload must apply");
             };
             assert!(
-                failure.error.to_string().contains(expected),
-                "{expected}: {}",
-                failure.error
+                matches!(authority.completion, SighupCompletion::Complete),
+                "{case}: {:?}",
+                authority.completion
             );
-            assert!(tags.is_empty(), "no sequential mutation: {tags:?}");
-            assert!(calls.is_empty(), "no generation mutation");
+            assert_eq!(
+                tags,
+                ["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)"],
+                "{case}: no sequential step, no static session action"
+            );
+            let [call] = calls.as_slice() else {
+                panic!("{case}: exactly one generation, got {}", calls.len());
+            };
+            let sent: Vec<&str> = call
+                .candidate
+                .neighbors
+                .interface_only()
+                .iter()
+                .filter_map(|neighbor| neighbor.interface.as_deref())
+                .collect();
+            assert_eq!(sent, interfaces, "{case}");
+            assert!(call.actions.is_empty(), "{case}: static sessions untouched");
         }
+
+        // The peer manager's preflight refusal (CAP_NET_RAW, a duplicate
+        // address) leaves nothing applied.
+        let (outcome, tags, _) = drive_generation(
+            base,
+            &format!("{base}{swp1}"),
+            GenerationReply::RejectedNoEffect(
+                "interface-only neighbor discovery needs CAP_NET_RAW",
+            ),
+        )
+        .await;
+        let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome else {
+            panic!("the refused generation must be a clean failure");
+        };
+        assert!(
+            failure.error.to_string().contains("CAP_NET_RAW"),
+            "{}",
+            failure.error
+        );
+        assert!(
+            tags.iter()
+                .all(|tag| tag.starts_with("ApplyReloadGeneration")),
+            "only the refused generation: {tags:?}"
+        );
     }
 
     #[test]
-    fn unnumbered_settings_and_interface_only_neighbors_are_restart_required() {
+    fn unnumbered_settings_stay_restart_required_and_interface_only_neighbors_reload() {
         let current: Config = toml::from_str(
             r#"
 [global]
@@ -11288,21 +11536,145 @@ remote_asn = 65002
             ra_interval_secs: None,
         });
         let diff = config::diff_config(&current, &candidate);
-        assert!(diff.interface_only_neighbors_changed);
+        assert!(diff.unnumbered_changed);
+        assert!(!diff.interface_only_neighbors_changed);
         assert!(diff.has_restart_required_changes());
         // Mutation-red: leaving [global.unnumbered] unpinned advances it.
         pin_unreconciled_daemon_runtime_fields(&mut candidate, &current);
         assert_eq!(candidate.global.unnumbered, None);
 
-        // The interface-only set is pinned too, in its running position.
+        // An interface-only edit is reload-applied and survives the pins.
         let mut candidate: Config = toml::from_str(
             &toml::to_string(&current)
                 .unwrap()
                 .replace("remote_asn = \"external\"", "remote_asn = 65009"),
         )
         .unwrap();
+        let diff = config::diff_config(&current, &candidate);
+        assert!(diff.interface_only_neighbors_changed);
+        assert!(!diff.has_restart_required_changes());
+        assert!(diff.has_reload_applied_changes());
         pin_unreconciled_daemon_runtime_fields(&mut candidate, &current);
-        assert_eq!(candidate, current);
+        assert_eq!(
+            candidate
+                .neighbors
+                .interface_only_on("swp1")
+                .unwrap()
+                .remote_asn,
+            config::RemoteAsn::from(65009)
+        );
+    }
+
+    /// A clamp lives on sockets created at startup, so an interface-only
+    /// neighbor whose effective `tcp_mss` would change keeps its running
+    /// record while the rest of the reload applies.
+    #[test]
+    fn an_interface_only_tcp_mss_change_keeps_the_running_neighbor() {
+        let load = |extra: &str| -> Config {
+            toml::from_str(&format!(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+                 [global.telemetry]\nlog_format = \"json\"\n{extra}"
+            ))
+            .unwrap()
+        };
+        let swp1 = "[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n";
+        let current = load(swp1);
+        let mut candidate = load(&format!(
+            "{}[[neighbors]]\ninterface = \"swp2\"\nremote_asn = 65002\ntcp_mss = 1200\n",
+            swp1.replace("\"external\"\n", "\"external\"\ntcp_mss = 1300\n")
+        ));
+        // Mutation-red: without the pin both clamps reach the running set.
+        let (_, pinned) = config::pin_reload_tcp_mss(&mut candidate, &current);
+        assert_eq!(pinned, ["swp1", "swp2"]);
+        assert_eq!(
+            candidate.neighbors.interface_only(),
+            current.neighbors.interface_only()
+        );
+    }
+
+    fn unnumbered_load(extra: &str) -> Config {
+        toml::from_str(&format!(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+             [global.telemetry]\nlog_format = \"json\"\n{extra}"
+        ))
+        .unwrap()
+    }
+
+    /// A new peer group's clamp reaches its first interface-only member: the
+    /// member is held until restart, as a direct clamp is, even though the
+    /// group's own clamp is pinned away.
+    #[test]
+    fn a_new_groups_clamp_holds_its_first_interface_only_member() {
+        let swp1 = "[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n";
+        let current = unnumbered_load(swp1);
+        let mut candidate = unnumbered_load(&format!(
+            "[peer_groups.clamped]\ntcp_mss = 1300\n{swp1}\
+             [[neighbors]]\ninterface = \"swp9\"\nremote_asn = \"external\"\n\
+             peer_group = \"clamped\"\n"
+        ));
+        // Mutation-red: reading the differences after the static pin, which
+        // clears the new group's clamp, admits swp9 unclamped.
+        let (static_pinned, pinned) = config::pin_reload_tcp_mss(&mut candidate, &current);
+        assert!(static_pinned, "the new group's clamp is pinned");
+        assert_eq!(pinned, ["swp9"]);
+        assert!(candidate.neighbors.interface_only_on("swp9").is_none());
+        assert_eq!(candidate.peer_groups["clamped"].tcp_mss, None);
+        candidate.validate().unwrap();
+    }
+
+    /// A move to a new group with the same clamp differs only after the
+    /// static pin clears that group's clamp: the neighbor keeps its running
+    /// record (and its clamp) until restart instead of rebinding unclamped.
+    #[test]
+    fn a_move_to_a_new_group_with_the_same_clamp_keeps_the_running_neighbor() {
+        let member = |group: &str| {
+            format!(
+                "[[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+                 peer_group = \"{group}\"\n"
+            )
+        };
+        let current = unnumbered_load(&format!("[peer_groups.a]\ntcp_mss = 1300\n{}", member("a")));
+        let mut candidate = unnumbered_load(&format!(
+            "[peer_groups.a]\ntcp_mss = 1300\n[peer_groups.b]\ntcp_mss = 1300\n{}",
+            member("b")
+        ));
+        // Mutation-red: comparing only before the static pin pins nothing,
+        // and swp1 moves to `b`, whose clamp the static pin cleared.
+        let (static_pinned, pinned) = config::pin_reload_tcp_mss(&mut candidate, &current);
+        assert!(static_pinned, "the new group's clamp is pinned");
+        assert_eq!(pinned, ["swp1"]);
+        assert_eq!(
+            candidate.neighbors.interface_only_on("swp1"),
+            current.neighbors.interface_only_on("swp1"),
+            "running record kept"
+        );
+        candidate.validate().unwrap();
+    }
+
+    /// A clamped interface-only neighbor kept for restart keeps its peer
+    /// group even when the candidate removes that unclamped group, so the
+    /// rest of the reload still validates and applies.
+    #[test]
+    fn a_kept_interface_only_neighbor_keeps_its_removed_group() {
+        let current = unnumbered_load(
+            "[peer_groups.fabric]\nhold_time = 30\n\
+             [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+             peer_group = \"fabric\"\ntcp_mss = 1400\n",
+        );
+        let mut candidate =
+            unnumbered_load("[[neighbors]]\ninterface = \"swp2\"\nremote_asn = \"external\"\n");
+        let (static_pinned, pinned) = config::pin_reload_tcp_mss(&mut candidate, &current);
+        assert!(!static_pinned, "no group clamp changed");
+        assert_eq!(pinned, ["swp1"]);
+        // Mutation-red: without restoring the group the candidate fails to
+        // validate and the whole reload is rejected.
+        assert_eq!(
+            candidate.peer_groups["fabric"],
+            current.peer_groups["fabric"]
+        );
+        candidate.validate().unwrap();
+        assert!(candidate.neighbors.interface_only_on("swp1").is_some());
+        assert!(candidate.neighbors.interface_only_on("swp2").is_some());
     }
 
     /// BMP stays fail-closed against same-address link-local neighbors on

@@ -206,8 +206,6 @@ impl PeerManager {
             &mut candidate,
             external_inputs,
         );
-        self.validate_live_shared_addresses(&candidate)
-            .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
         self.finish_config_transaction_plan(
             &mut candidate,
             materialization.as_ref(),
@@ -242,8 +240,6 @@ impl PeerManager {
             candidate,
             external_inputs,
         );
-        self.validate_live_shared_addresses(candidate)
-            .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
         self.finish_config_transaction_plan(
             candidate,
             materialization.as_ref(),
@@ -323,6 +319,22 @@ impl PeerManager {
         ))
     }
 
+    /// The v1 section classification, plus the ADR-0142 preflight: the first
+    /// interface-only neighbor needs `CAP_NET_RAW`, and neighbors that would
+    /// share a link-local address must be able to. A refusal is an
+    /// unsupported section, so the plan is rejected before any effect.
+    fn classify_config_transaction(
+        &self,
+        diff: &crate::config::ConfigDiff,
+        candidate: &Config,
+    ) -> crate::config::ConfigTransactionSectionClassification {
+        let mut classification = crate::config::classify_config_transaction_v1(diff);
+        classification
+            .unsupported_sections
+            .extend(self.unnumbered_preflight(candidate).err());
+        classification
+    }
+
     fn finish_config_transaction_plan(
         &mut self,
         candidate: &mut Config,
@@ -381,7 +393,7 @@ impl PeerManager {
                     RuntimeConfigTransactionPlanError::Internal(message)
                 }
             })?;
-        let classification = crate::config::classify_config_transaction_v1(operational_diff);
+        let classification = self.classify_config_transaction(operational_diff, candidate);
         let status = if classification.is_noop() {
             RuntimeConfigTransactionStatus::Noop
         } else if classification.is_committable() {

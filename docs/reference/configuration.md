@@ -1434,7 +1434,11 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   while it stays live. Discovery never ends an Established session: an
   address change takes effect only after the session fails (hold timer, BFD,
   NOTIFICATION or TCP close), and the peer then moves to the new address,
-  purging the routes learned from the old one.
+  purging the routes learned from the old one. When the address expires with
+  no replacement and the session is down, the neighbor keeps redialing it,
+  and holds it against other neighbors, only while Graceful Restart or LLGR
+  stale routes from it are retained; after that the peer is removed and the
+  address released.
 - **Carrier.** Confirmed carrier loss, admin down or removal of the interface
   ends the session at once and purges its routes; there is no Graceful
   Restart retention for them. The interface need not exist when the
@@ -1465,7 +1469,9 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   a collector cannot tell such sessions apart, so a learned address that
   another neighbor already holds (bound, retained by Graceful Restart, or a
   static neighbor) is refused before the session starts, logged with reason
-  `bmp_identity_conflict`; the neighbor admitted first keeps its session.
+  `bmp_identity_conflict`; the neighbor admitted first keeps its session,
+  and a reload or transaction adding a static neighbor at an address a
+  learned neighbor holds is refused before any effect.
   When every collector sets `on_identity_conflict = "exclude"`, the link
   establishes instead and reports nothing to BMP (see
   [identity conflicts](#identity-conflicts-on_identity_conflict)). After a
@@ -1476,23 +1482,26 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   is a static neighbor added at runtime with one of them beside a learned
   address. A reload or config transaction that would give neighbors already
   sharing an address such a feature is refused before any effect, and one
-  that removes it rechecks the refused links. A refusal is not sticky: once the holder's peer goes, the refused
-  link is admitted on its next binding. Collectors count while disconnected, and `[bmp]` takes a
-  restart to change, so a running session is never refused later.
-- **Restart-required.** Adding, removing or editing an interface-only
-  neighbor, `[global.unnumbered]`, or a peer-group setting that changes the
-  neighbor's session (its policy chains still follow a reload) takes a
-  restart; a reload keeps the
-  running set, logs an error, and is refused if the rest of the new
-  configuration is invalid against that running set (for example a static
-  link-local neighbor on the same interface, or a deleted peer group the
-  neighbor uses). A runtime `SetPeerGroup` that would change such a
-  neighbor's session settings is refused with `FAILED_PRECONDITION`; a
-  policy-only group edit applies to it live. Inbound sessions are accepted
-  only from the learned address.
+  that removes it rechecks the refused links. A refusal is not sticky: once
+  the holder's peer goes, the refused link is admitted on its next binding.
+  Collectors count while disconnected, and `[bmp]` takes a restart to
+  change, so a running session is never refused later.
+- **Reload.** SIGHUP and config transactions add, remove and edit
+  interface-only neighbors without a restart, and the other neighbors keep
+  their sessions. A removed neighbor's session ends, its routes are purged and
+  the learned address it held is released. An edit that changes its session
+  settings, directly or through its peer group, rebinds the session under
+  them; a policy-only edit applies live. The change that adds the first one is
+  refused before any effect without `CAP_NET_RAW` or the link monitor.
+  `[global.unnumbered]` and a change to the neighbor's effective `tcp_mss`
+  still take a restart. See the
+  [reload matrix](reload-matrix.md#interface-only-neighbors). A runtime
+  `SetPeerGroup` that would change such a neighbor's session settings is
+  refused with `FAILED_PRECONDITION`; make that edit in the file and reload.
+  Inbound sessions are accepted only from the learned address.
 - **Operator removal.** The session belongs to the neighbor's configuration:
   `rbgp neighbor <address> delete` and `DeleteNeighbor` refuse it with
-  `FAILED_PRECONDITION`. Remove the `interface` stanza and restart instead.
+  `FAILED_PRECONDITION`. Remove the `interface` stanza and reload instead.
 
 ### Administrative down (`admin_down`)
 

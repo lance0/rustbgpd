@@ -206,7 +206,12 @@ fn host_ipv6_monitor_keeps_running_discovery_interfaces_after_reload() {
     let ns = &namespaces.a;
     sysctl(ns, "net.ipv6.conf.veth.accept_ra=0");
     let dir = private_tempdir();
-    let mut daemon = Daemon::start(ns, dir.path(), 65001, "10.0.0.1");
+    // Interface-only neighbors follow a reload, except one whose effective
+    // tcp_mss would change: that one keeps running until restart. Both
+    // reloads below remove `veth` from the desired file while its clamp
+    // keeps it running, so the monitor has to follow the running set, not
+    // the desired file.
+    let mut daemon = Daemon::start_with(ns, dir.path(), 65001, "10.0.0.1", "tcp_mss = 1400\n");
     daemon.wait("control plane", Duration::from_secs(30), |daemon| {
         daemon.veth_rows().is_some()
     });

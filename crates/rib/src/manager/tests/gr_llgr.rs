@@ -2549,6 +2549,50 @@ async fn partial_gr_retains_llgr_only_family_and_promotes_gr_family_later() {
     );
 }
 
+/// ADR-0142: the retention query reports the stale routes and the next
+/// timer through GR, LLGR promotion and the final sweep.
+#[tokio::test(start_paused = true)]
+async fn retention_query_follows_gr_then_llgr_to_the_sweep() {
+    fn retention(manager: &mut RibManager, peer: PeerId) -> crate::update::PeerRetention {
+        let (reply, mut rx) = tokio::sync::oneshot::channel();
+        manager.handle_query_peer_retention(peer, reply);
+        rx.try_recv().unwrap()
+    }
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    assert_eq!(retention(&mut manager, source).stale_routes, 0);
+
+    let start = tokio::time::Instant::now();
+    manager.handle_update(gr_with_llgr(
+        source,
+        10,
+        vec![V4_UNICAST],
+        vec![V4_UNICAST],
+        60,
+    ));
+    let gr = retention(&mut manager, source);
+    assert!(gr.stale_routes > 0);
+    assert_eq!(gr.next_deadline, Some(start + Duration::from_secs(10)));
+
+    tokio::time::advance(Duration::from_secs(10)).await;
+    manager.sweep_gr_stale(source);
+    let llgr = retention(&mut manager, source);
+    assert!(llgr.stale_routes > 0, "promoted, still retained");
+    assert_eq!(llgr.next_deadline, Some(start + Duration::from_secs(70)));
+
+    tokio::time::advance(Duration::from_secs(61)).await;
+    manager.sweep_expired_llgr_stale();
+    assert_eq!(
+        retention(&mut manager, source),
+        crate::update::PeerRetention {
+            stale_routes: 0,
+            next_deadline: None
+        }
+    );
+}
+
 /// Partial GR with a reconnect inside the GR window: both phases wait for
 /// End-of-RIB together, and End-of-RIB for both ends all retention state.
 #[tokio::test(start_paused = true)]

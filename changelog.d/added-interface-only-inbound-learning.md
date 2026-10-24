@@ -5,8 +5,7 @@
   sends no Router Advertisements (FRR with `no bgp ipv6-auto-ra` and a static
   `neighbor fe80::…%eth1`) establishes instead of waiting for discovery
   indefinitely. The connection is matched by its arrival interface, never by
-  address, binds through the same `duplicate_link_local_address` check as an
-  RA binding, and is accepted only while the neighbor has no Established
+  address, binds through the same admission check as an RA binding, and is accepted only while the neighbor has no Established
   session ([ADR-0142](../docs/adr/0142-interface-only-unnumbered-neighbors.md)).
   **Operator-visible:** a learned connection is no longer dropped as
   `unconfigured`; the log records `unnumbered: peer address learned from an

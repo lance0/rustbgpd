@@ -17,6 +17,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use rustbgpd_api::peer_types::PeerKey;
+use rustbgpd_policy::PolicyChain;
 use rustbgpd_policy::sets::SetStore;
 
 use super::{Config, ConfigError, Neighbor, ResolvedNeighbor};
@@ -243,11 +244,25 @@ impl NeighborList {
             .find(|neighbor| neighbor.interface.as_deref() == Some(interface))
     }
 
-    /// Take `running`'s interface-only neighbors and their positions
-    /// (reload pins them).
-    pub fn pin_interface_only(&mut self, running: &Self) {
-        self.interface_only.clone_from(&running.interface_only);
-        self.anchors.clone_from(&running.anchors);
+    /// Replace, add or (with `None`) remove the interface-only neighbor on
+    /// `interface`. An added entry goes after every addressed entry.
+    pub fn set_interface_only(&mut self, interface: &str, neighbor: Option<Neighbor>) {
+        let index = self
+            .interface_only
+            .iter()
+            .position(|entry| entry.interface.as_deref() == Some(interface));
+        match (index, neighbor) {
+            (Some(index), Some(neighbor)) => self.interface_only[index] = neighbor,
+            (Some(index), None) => {
+                self.interface_only.remove(index);
+                self.anchors.remove(index);
+            }
+            (None, Some(neighbor)) => {
+                self.anchors.push(self.addressed.len());
+                self.interface_only.push(neighbor);
+            }
+            (None, None) => {}
+        }
     }
 
     /// Every entry in configuration order.
@@ -351,12 +366,7 @@ impl JsonSchema for NeighborList {
 /// neighbor; policy chains still follow live.
 #[must_use]
 pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<&'a str> {
-    let session = |config: &Config, neighbor: &Neighbor| {
-        config
-            .resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
-            .ok()
-            .map(bind_time_projection)
-    };
+    let session = |config: &Config, neighbor: &Neighbor| config.bind_time_settings(neighbor);
     new.neighbors
         .interface_only()
         .iter()
@@ -373,7 +383,7 @@ pub fn interface_only_session_changes<'a>(old: &Config, new: &'a Config) -> Vec<
 /// all of it except the policy chains, which follow a reload live.
 /// Destructured without `..`, so a new resolved field must be classified
 /// here before it compiles.
-type BindTimeProjection = (
+pub(crate) type BindTimeProjection = (
     rustbgpd_transport::TransportConfig,
     Option<String>,
     Option<u32>,
@@ -384,7 +394,7 @@ type BindTimeProjection = (
 
 fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
     let ResolvedNeighbor {
-        transport_config,
+        mut transport_config,
         admin_down,
         max_prefix_restart_seconds,
         label,
@@ -393,6 +403,17 @@ fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
         peer_group,
         rfc8212_external,
     } = resolved;
+    // Live-owned forwarding state (the configured kernel families of
+    // `[[fib_tables]]`) follows a reload without a rebind, as
+    // `compute_effective_neighbor_impact` treats it.
+    transport_config.local_forwarding_state = None;
+    // `[policy.explain]` and `[policy.reject_retention]` apply to sessions
+    // created after the reload and leave live ones untouched, as for a
+    // static neighbor; a rebind for another reason takes them.
+    transport_config.explain_enabled = false;
+    transport_config.explain_cache_size = 0;
+    transport_config.reject_retention_enabled = false;
+    transport_config.reject_retention_capacity = 0;
     (
         transport_config,
         admin_down,
@@ -404,8 +425,8 @@ fn bind_time_projection(resolved: ResolvedNeighbor) -> BindTimeProjection {
 }
 
 /// Interface-only neighbors (compared by interface, so reordering is not a
-/// change), their resolved session settings, or `[global.unnumbered]`
-/// differ: restart-required.
+/// change) or their resolved session settings differ. Reload, transactions
+/// and the peer manager apply these live.
 #[must_use]
 pub fn interface_only_neighbors_changed(old: &Config, new: &Config) -> bool {
     fn by_interface(config: &Config) -> std::collections::BTreeMap<Option<&str>, &Neighbor> {
@@ -416,9 +437,100 @@ pub fn interface_only_neighbors_changed(old: &Config, new: &Config) -> bool {
             .map(|neighbor| (neighbor.interface.as_deref(), neighbor))
             .collect()
     }
+    by_interface(old) != by_interface(new) || !interface_only_session_changes(old, new).is_empty()
+}
+
+/// `[global.unnumbered]` differs. The discovery actor takes its RA template
+/// and timing when it starts, so this stays restart-required.
+#[must_use]
+pub fn unnumbered_settings_changed(old: &Config, new: &Config) -> bool {
     old.global.unnumbered != new.global.unnumbered
-        || by_interface(old) != by_interface(new)
-        || !interface_only_session_changes(old, new).is_empty()
+}
+
+/// Interface-only neighbors that a reload from `old` to `new` rebinds: kept
+/// by the candidate, with different bind-time settings, directly or through
+/// their peer group. Each ends its session and starts a new one, so the
+/// diff counts it as a session reset. Pass the `tcp_mss`-pinned candidate.
+#[must_use]
+pub fn interface_only_rebinds(old: &Config, new: &Config) -> Vec<String> {
+    new.neighbors
+        .interface_only()
+        .iter()
+        .filter_map(|neighbor| {
+            let interface = neighbor.interface.as_deref()?;
+            let prior = old.neighbors.interface_only_on(interface)?;
+            (old.bind_time_settings(prior) != new.bind_time_settings(neighbor))
+                .then(|| neighbor.label())
+        })
+        .collect()
+}
+
+/// Pin every startup-only `tcp_mss` of a reload candidate, as SIGHUP and
+/// `--diff` both see it. Returns whether the static pin applied and the
+/// interfaces whose interface-only neighbor was kept at its running record.
+///
+/// The interface-only differences are read first: the static pin holds every
+/// peer group's clamp at its running value, which would hide a clamp that a
+/// new or edited group gives an interface-only member. A kept neighbor's
+/// running peer group is restored when the candidate drops it, as the static
+/// pin does, so the pinned candidate still validates.
+pub(crate) fn pin_reload_tcp_mss(new: &mut Config, current: &Config) -> (bool, Vec<String>) {
+    let mut pinned = interface_only_tcp_mss_differences(current, new);
+    let static_pinned = super::pin_tcp_mss_startup_only_runtime(new, current);
+    // And after it: a move to a new group with the same clamp differs only
+    // once the static pin clears that group's clamp.
+    pinned.extend(interface_only_tcp_mss_differences(current, new));
+    pinned.sort();
+    pinned.dedup();
+    for interface in &pinned {
+        let running = current.neighbors.interface_only_on(interface).cloned();
+        if let Some(name) = running.as_ref().and_then(|n| n.peer_group.as_ref())
+            && let Some(group) = current.peer_groups.get(name)
+        {
+            new.peer_groups
+                .entry(name.clone())
+                .or_insert_with(|| group.clone());
+        }
+        new.neighbors.set_interface_only(interface, running);
+    }
+    (static_pinned, pinned)
+}
+
+/// An interface-only neighbor's effective `tcp_mss`: its own, else its peer
+/// group's.
+fn interface_only_tcp_mss(config: &Config, interface: &str) -> Option<u16> {
+    let neighbor = config.neighbors.interface_only_on(interface)?;
+    neighbor.tcp_mss.or_else(|| {
+        neighbor
+            .peer_group
+            .as_ref()
+            .and_then(|name| config.peer_groups.get(name))
+            .and_then(|group| group.tcp_mss)
+    })
+}
+
+/// Interfaces whose interface-only neighbor's effective `tcp_mss` differs,
+/// including one added or removed with a clamp.
+fn interface_only_tcp_mss_differences(old: &Config, new: &Config) -> Vec<String> {
+    let interfaces: std::collections::BTreeSet<String> = old
+        .neighbors
+        .interface_only()
+        .iter()
+        .chain(new.neighbors.interface_only())
+        .filter_map(|neighbor| neighbor.interface.clone())
+        .collect();
+    interfaces
+        .into_iter()
+        .filter(|interface| {
+            interface_only_tcp_mss(old, interface) != interface_only_tcp_mss(new, interface)
+        })
+        .collect()
+}
+
+/// Part of the shared `tcp_mss` restart-required comparison, so `--diff`
+/// and config transactions see an interface-only clamp change as SIGHUP does.
+pub(super) fn interface_only_tcp_mss_changed(old: &Config, new: &Config) -> bool {
+    !interface_only_tcp_mss_differences(old, new).is_empty()
 }
 
 fn invalid(neighbor: &Neighbor, field: &str, reason: &str) -> ConfigError {
@@ -642,6 +754,25 @@ impl Config {
             .clone();
         bound.address = address;
         Some(Cow::Owned(bound))
+    }
+
+    /// The import and export chains a bound peer of `neighbor` runs.
+    pub(crate) fn interface_only_policy_chains(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Option<(Option<PolicyChain>, Option<PolicyChain>)> {
+        self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
+            .ok()
+            .map(|resolved| (resolved.import_policy, resolved.export_policy))
+    }
+
+    /// What a bound peer of `neighbor` takes from its resolution only when it
+    /// binds, independent of the learned address. `None` when the neighbor
+    /// does not resolve.
+    pub(crate) fn bind_time_settings(&self, neighbor: &Neighbor) -> Option<BindTimeProjection> {
+        self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
+            .ok()
+            .map(bind_time_projection)
     }
 
     /// One interface-only neighbor resolved with a placeholder link-local

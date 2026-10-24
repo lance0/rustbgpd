@@ -68,6 +68,10 @@ mod unnumbered {
 
     pub(crate) enum Unnumbered {}
     pub(crate) enum DiscoveryEvent {}
+    #[derive(Default)]
+    pub(crate) struct UnnumberedRuntime {
+        pub(crate) config_due: bool,
+    }
 
     impl Unnumbered {
         pub(super) async fn shutdown(self) {
@@ -105,12 +109,32 @@ mod unnumbered {
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
+        pub(super) fn unnumbered_stopped(&self, _: &PeerKey) -> bool {
+            false
+        }
         pub(super) fn unnumbered_bound_addresses(&self) -> std::collections::HashSet<IpAddr> {
             std::collections::HashSet::new()
         }
         pub(super) fn unnumbered_bindings(&self) -> Vec<(String, std::net::Ipv6Addr, u32)> {
             Vec::new()
         }
+        pub(super) fn unnumbered_bound_peer(&self, _: &str) -> Option<PeerKey> {
+            None
+        }
+        pub(super) fn unnumbered_preflight(
+            &self,
+            candidate: &crate::config::Config,
+        ) -> Result<(), String> {
+            self.validate_live_shared_addresses(candidate)
+        }
+        pub(super) fn preflight_reload_generation(
+            &mut self,
+            _: &crate::config::Config,
+            _: std::sync::Weak<()>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        pub(super) fn release_generation_hold(&mut self) {}
         pub(super) fn unbound_interface_only_infos(
             &self,
         ) -> Vec<rustbgpd_api::peer_types::PeerInfo> {
@@ -129,7 +153,7 @@ mod unnumbered {
         }
     }
 }
-pub(crate) use unnumbered::Unnumbered;
+pub(crate) use unnumbered::{Unnumbered, UnnumberedRuntime};
 #[cfg(test)]
 pub(crate) mod test_support;
 mod update_group_plan;
@@ -326,6 +350,15 @@ fn debug_reconfigure_failures() -> std::collections::BTreeMap<PeerKey, u32> {
 }
 
 pub(crate) enum InternalCommand {
+    /// ADR-0142 preflight of a SIGHUP candidate, before the reload route's
+    /// first effect outside the peer manager. Acceptance holds the
+    /// candidate's static link-local addresses closed to learned endpoints
+    /// until its `ApplyReloadGeneration` or until `route` is dropped.
+    PreflightReloadGeneration {
+        candidate: Box<Config>,
+        route: std::sync::Weak<()>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Apply one complete SIGHUP candidate as an owned runtime generation.
     ApplyReloadGeneration {
         candidate: Box<Config>,
@@ -700,6 +733,9 @@ pub struct PeerManager {
     /// ADR-0142 interface-only neighbors: Router Advertisement discovery and
     /// the peers created for its bindings. `None` when none is configured.
     unnumbered: Option<Box<Unnumbered>>,
+    /// Whether the configured interface-only set needs reconciling, and how
+    /// discovery opens when the first one arrives at runtime.
+    unnumbered_runtime: UnnumberedRuntime,
     /// Per-process key for the optimistic config-transaction snapshot token.
     /// Seeded once at construction; never leaves the process. Keeps the token
     /// from acting as an offline oracle for config secrets. See
@@ -883,9 +919,7 @@ impl PeerManager {
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
         self.conditional_reconcile_pending = true;
-        // An address-keyed feature removed from a neighbor may admit a
-        // learned address the old configuration refused.
-        self.recheck_refused_bindings();
+        self.unnumbered_runtime.config_due = true;
         previous
     }
 
@@ -1374,6 +1408,7 @@ impl PeerManager {
             bfd_coupling: None,
             link_check: link_failover::LinkCheckDelivery::default(),
             unnumbered: None,
+            unnumbered_runtime: UnnumberedRuntime::default(),
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             accepted_rx: None,
             #[cfg(test)]
@@ -1633,21 +1668,52 @@ impl PeerManager {
             .map(|error| error.to_string())
     }
 
-    /// Refuse a candidate configuration under which neighbors that share a
-    /// link-local address now would use a feature keyed by the bare address:
-    /// a reload or transaction enabling BFD, say, on a static neighbor beside
-    /// a learned one. Checked against the live endpoints before any effect.
+    /// Refuse a candidate configuration under which the neighbors at one
+    /// link-local address, the live endpoints there plus the candidate's
+    /// static neighbors, could not share it: a new static neighbor beside a
+    /// live one while a BMP collector refuses identity conflicts
+    /// (`bmp_identity_conflict`), or a feature keyed by the bare address,
+    /// such as a reload enabling BFD on a static neighbor beside a learned
+    /// one. Checked before any effect, on every reload and transaction route.
     pub(super) fn validate_live_shared_addresses(
         &self,
         candidate: &crate::config::Config,
     ) -> Result<(), String> {
-        let mut by_address: BTreeMap<IpAddr, Vec<&PeerKey>> = BTreeMap::new();
-        for key in self.peers.keys() {
-            if matches!(key.address, IpAddr::V6(v6) if v6.is_unicast_link_local()) {
-                by_address.entry(key.address).or_default().push(key);
+        let link_local =
+            |address: &IpAddr| matches!(address, IpAddr::V6(v6) if v6.is_unicast_link_local());
+        let mut by_address: BTreeMap<IpAddr, BTreeSet<PeerKey>> = BTreeMap::new();
+        for key in self.peers.keys().filter(|key| link_local(&key.address)) {
+            by_address
+                .entry(key.address)
+                .or_default()
+                .insert(key.clone());
+        }
+        for neighbor in &candidate.neighbors {
+            if let Ok(address) = neighbor.address.parse::<IpAddr>()
+                && link_local(&address)
+            {
+                by_address
+                    .entry(address)
+                    .or_default()
+                    .insert(PeerKey::new(address, neighbor.interface.clone()));
             }
         }
+        let refuse =
+            self.bmp_identity_conflict() == Some(crate::config::BmpIdentityConflict::Refuse);
         for keys in by_address.values().filter(|keys| keys.len() > 1) {
+            // Configuration validation refuses two static neighbors at one
+            // address under a refusing collector, so the new one meets a
+            // live endpoint here.
+            if refuse
+                && let Some(new) = keys.iter().find(|key| !self.peers.contains_key(key))
+                && let Some(holder) = keys.iter().find(|key| self.peers.contains_key(key))
+            {
+                return Err(format!(
+                    "bmp_identity_conflict: neighbor {new} uses {}, which {holder} holds, \
+                     and BMP collectors cannot tell the two sessions apart",
+                    new.address
+                ));
+            }
             let records: Vec<_> = keys
                 .iter()
                 .filter_map(|key| candidate.neighbor_record(key))
@@ -2834,6 +2900,9 @@ impl PeerManager {
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {
                     self.operator_read_seam = OperatorReadSeam::Unfenced;
                     match internal {
+                        Some(InternalCommand::PreflightReloadGeneration { candidate, route, reply }) => {
+                            let _ = reply.send(self.preflight_reload_generation(&candidate, route));
+                        }
                         Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
@@ -2947,7 +3016,13 @@ impl PeerManager {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
                             let result = match scope {
-                                TransactionConfigScope::Full => Ok(*candidate),
+                                // ADR-0142: discovery may have bound an endpoint since
+                                // the plan. Recheck in this owner turn, before the
+                                // candidate is installed; once it is staged, binding
+                                // waits for the commit or rollback.
+                                TransactionConfigScope::Full => self
+                                    .unnumbered_preflight(&candidate)
+                                    .map(|()| *candidate),
                                 TransactionConfigScope::FibTablesOnly => {
                                     let mut staged = self.current_config.clone();
                                     staged.fib_tables.clone_from(&candidate.fib_tables);

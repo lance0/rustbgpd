@@ -398,7 +398,22 @@ impl GnmiService {
         due_paths: Option<&[usize]>,
         include_sync: bool,
     ) -> Result<Vec<gnmi::SubscribeResponse>, Status> {
+        self.render_tracked_subscription_snapshot(plan, due_paths, include_sync, None)
+            .await
+    }
+
+    /// [`Self::render_subscription_snapshot`] for a `SAMPLE` stream, which
+    /// deletes a `peer-as` leaf it delivered once the leaf disappears
+    /// (`delivered`, per subscription path).
+    async fn render_tracked_subscription_snapshot(
+        &self,
+        plan: &SubscriptionPlan,
+        due_paths: Option<&[usize]>,
+        include_sync: bool,
+        mut delivered: Option<&mut [DeliveredPeerAs]>,
+    ) -> Result<Vec<gnmi::SubscribeResponse>, Status> {
         let mut updates = Vec::new();
+        let mut deletes = Vec::new();
         if !plan.updates_only {
             let is_due = |index| due_paths.is_none_or(|due| due.contains(&index));
             // Snapshot peers once per snapshot/tick (the subscription may carry
@@ -420,29 +435,19 @@ impl GnmiService {
                 if !is_due(index) {
                     continue;
                 }
-                updates.extend(self.render_subscription_query(
-                    query,
-                    peers.as_deref(),
-                    plan.encoding,
-                )?);
+                let source =
+                    self.render_subscription_query(query, peers.as_deref(), plan.encoding)?;
+                if let Some(delivered) = delivered.as_deref_mut() {
+                    deletes.extend(delivered[index].track(&source, &source));
+                }
+                updates.extend(source);
             }
             updates = deduplicate_update_paths(updates);
         }
 
         let mut responses = Vec::new();
-        if !updates.is_empty() {
-            responses.push(gnmi::SubscribeResponse {
-                response: Some(gnmi::subscribe_response::Response::Update(
-                    gnmi::Notification {
-                        timestamp: now_nanos(),
-                        prefix: None,
-                        update: updates,
-                        delete: Vec::new(),
-                        atomic: false,
-                    },
-                )),
-                extension: Vec::new(),
-            });
+        if !updates.is_empty() || !deletes.is_empty() {
+            responses.push(update_response(updates, deduplicate_paths(deletes)));
         }
         if include_sync {
             responses.push(sync_response());
@@ -457,6 +462,7 @@ impl GnmiService {
         withhold_updates: bool,
         include_sync: bool,
         caches: &mut [Option<SampleValueCache>],
+        delivered: &mut [DeliveredPeerAs],
     ) -> Result<Vec<gnmi::SubscribeResponse>, Status> {
         let due_force = |index| due[index];
         let peers = if plan
@@ -473,25 +479,38 @@ impl GnmiService {
         };
 
         let mut updates = Vec::new();
+        let mut deletes = Vec::new();
         for (index, query) in plan.paths.iter().enumerate() {
             let Some(force) = due_force(index) else {
                 continue;
             };
             let source = self.render_subscription_query(query, peers.as_deref(), plan.encoding)?;
-            updates.extend(filter_sample_source_updates(
-                source,
-                force,
-                caches[index].as_mut(),
-            ));
+            // A withheld rendering still seeds the cache, but delivers nothing.
+            let mut sent =
+                filter_sample_source_updates(source.clone(), force, caches[index].as_mut());
+            if withhold_updates {
+                sent.clear();
+            }
+            deletes.extend(delivered[index].track(&source, &sent));
+            updates.extend(sent);
         }
         updates = deduplicate_update_paths(updates);
-        if withhold_updates {
-            updates.clear();
+        let deletes = deduplicate_paths(deletes);
+        // A delete clears the leaf from the collector for every subscription
+        // path: none may suppress its return as unchanged, nor delete it again.
+        for path in &deletes {
+            let identity = CanonicalPath::from(path);
+            for cache in caches.iter_mut().flatten() {
+                cache.0.remove(&identity);
+            }
+            for delivered in delivered.iter_mut() {
+                delivered.0.remove(&identity);
+            }
         }
 
         let mut responses = Vec::new();
-        if !updates.is_empty() {
-            responses.push(update_response(updates, Vec::new()));
+        if !updates.is_empty() || !deletes.is_empty() {
+            responses.push(update_response(updates, deletes));
         }
         if include_sync {
             responses.push(sync_response());
@@ -507,9 +526,10 @@ impl GnmiService {
         due_paths: Option<&[usize]>,
         include_sync: bool,
         tx: &tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
+        delivered: Option<&mut [DeliveredPeerAs]>,
     ) -> bool {
         match self
-            .render_subscription_snapshot(plan, due_paths, include_sync)
+            .render_tracked_subscription_snapshot(plan, due_paths, include_sync, delivered)
             .await
         {
             Ok(responses) => {
@@ -535,7 +555,7 @@ impl GnmiService {
         mut inbound: tonic::Streaming<gnmi::SubscribeRequest>,
         tx: tokio::sync::mpsc::Sender<Result<gnmi::SubscribeResponse, Status>>,
     ) {
-        if !self.forward_snapshot(&plan, None, true, &tx).await {
+        if !self.forward_snapshot(&plan, None, true, &tx, None).await {
             return;
         }
         loop {
@@ -544,7 +564,7 @@ impl GnmiService {
                     request: Some(gnmi::subscribe_request::Request::Poll(_)),
                     ..
                 })) => {
-                    if !self.forward_snapshot(&plan, None, true, &tx).await {
+                    if !self.forward_snapshot(&plan, None, true, &tx, None).await {
                         return;
                     }
                 }
@@ -576,7 +596,11 @@ impl GnmiService {
             self.run_controlled_stream_sample(plan, tx).await;
             return;
         }
-        if !self.forward_snapshot(&plan, None, true, &tx).await {
+        let mut delivered = vec![DeliveredPeerAs::default(); plan.paths.len()];
+        if !self
+            .forward_snapshot(&plan, None, true, &tx, Some(&mut delivered))
+            .await
+        {
             return;
         }
         // `updates_only` suppresses initial data, not later SAMPLE ticks.
@@ -599,7 +623,10 @@ impl GnmiService {
                 .enumerate()
                 .filter_map(|(index, deadline)| (*deadline <= now).then_some(index))
                 .collect();
-            if !self.forward_snapshot(&plan, Some(&due), false, &tx).await {
+            if !self
+                .forward_snapshot(&plan, Some(&due), false, &tx, Some(&mut delivered))
+                .await
+            {
                 return;
             }
             // Preserve each path's monotonic phase while skipping every period
@@ -628,6 +655,7 @@ impl GnmiService {
             .iter()
             .map(|control| control.suppress_redundant.then(SampleValueCache::default))
             .collect::<Vec<_>>();
+        let mut delivered = vec![DeliveredPeerAs::default(); plan.paths.len()];
 
         let mut initial_due = [Some(true); MAX_SUBSCRIPTIONS];
         if plan.updates_only {
@@ -642,6 +670,7 @@ impl GnmiService {
                 plan.updates_only,
                 true,
                 &mut caches,
+                &mut delivered,
             )
             .await;
         if !forward_responses(initial, &tx).await {
@@ -682,7 +711,14 @@ impl GnmiService {
                 due[index] = (sample_due || heartbeat_due).then_some(heartbeat_due);
             }
             let rendered = self
-                .render_controlled_sample_snapshot(&plan, &due, false, false, &mut caches)
+                .render_controlled_sample_snapshot(
+                    &plan,
+                    &due,
+                    false,
+                    false,
+                    &mut caches,
+                    &mut delivered,
+                )
                 .await;
             if !forward_responses(rendered, &tx).await {
                 return;
@@ -1998,22 +2034,30 @@ fn render_one_neighbor_updates(
     select
         .leaves()
         .into_iter()
-        .map(|leaf| {
-            let value = neighbor_leaf_value(peer, local_as, leaf);
-            leaf_update(
+        .filter_map(|leaf| {
+            let value = neighbor_leaf_value(peer, local_as, leaf)?;
+            Some(leaf_update(
                 neighbor_leaf_path(&peer_info_key(peer), leaf),
                 &value,
                 encoding,
-            )
+            ))
         })
         .collect()
 }
 
-fn neighbor_leaf_value(peer: &PeerInfo, local_as: u32, leaf: NeighborLeaf) -> LeafValue {
-    match leaf {
+/// A leaf's value, `None` when the neighbor has none to report.
+fn neighbor_leaf_value(peer: &PeerInfo, local_as: u32, leaf: NeighborLeaf) -> Option<LeafValue> {
+    Some(match leaf {
         NeighborLeaf::NeighborAddress => LeafValue::Str(peer_info_key(peer).label()),
         NeighborLeaf::Enabled => LeafValue::Bool(peer.enabled),
-        NeighborLeaf::PeerAs => LeafValue::U32(peer.remote_asn),
+        // A configured number is the peer's AS. With `remote_asn = "external"`
+        // or `"internal"` the AS is the one the session negotiated, and there
+        // is none while the session is down: the leaf is absent, never 0.
+        NeighborLeaf::PeerAs => LeafValue::U32(match peer.remote_asn_mode {
+            crate::peer_types::RemoteAsnMode::Numeric => peer.remote_asn,
+            crate::peer_types::RemoteAsnMode::External
+            | crate::peer_types::RemoteAsnMode::Internal => peer.negotiated_remote_asn?,
+        }),
         // `local-as` is derived from the global ASN: rustbgpd is single-AS and
         // has no per-neighbor local-as override.
         NeighborLeaf::LocalAs => LeafValue::U32(local_as),
@@ -2026,7 +2070,7 @@ fn neighbor_leaf_value(peer: &PeerInfo, local_as: u32, leaf: NeighborLeaf) -> Le
         NeighborLeaf::UpdatesReceived => LeafValue::U64(peer.updates_received),
         NeighborLeaf::NotificationsSent => LeafValue::U64(peer.notifications_sent),
         NeighborLeaf::NotificationsReceived => LeafValue::U64(peer.notifications_received),
-    }
+    })
 }
 
 fn session_state_name(state: SessionState) -> &'static str {
@@ -2238,6 +2282,41 @@ struct CanonicalPath {
 #[derive(Default)]
 struct SampleValueCache(HashMap<CanonicalPath, gnmi::TypedValue>);
 
+/// The `peer-as` leaves one `SAMPLE` subscription path delivered and the
+/// collector still holds. `peer-as` is the one neighbor leaf that can
+/// vanish while its neighbor stays (an `external`/`internal` neighbor whose
+/// session went down), and a `SAMPLE` tick that merely omits it would leave
+/// the last AS in the collector's tree.
+#[derive(Clone, Default)]
+struct DeliveredPeerAs(HashMap<CanonicalPath, gnmi::Path>);
+
+impl DeliveredPeerAs {
+    /// One rendering of the path: `source` is everything it rendered and
+    /// `sent` what went out. Returns a delete for each delivered leaf that
+    /// `source` no longer carries; a leaf never delivered stays silent.
+    fn track(&mut self, source: &[gnmi::Update], sent: &[gnmi::Update]) -> Vec<gnmi::Path> {
+        let peer_as = |updates: &[gnmi::Update]| {
+            updates
+                .iter()
+                .filter_map(|update| update.path.as_ref())
+                .filter(|path| path.elem.last().is_some_and(|elem| elem.name == "peer-as"))
+                .map(|path| (CanonicalPath::from(path), path.clone()))
+                .collect::<HashMap<_, _>>()
+        };
+        let present = peer_as(source);
+        let mut deletes = Vec::new();
+        self.0.retain(|identity, path| {
+            let kept = present.contains_key(identity);
+            if !kept {
+                deletes.push(path.clone());
+            }
+            kept
+        });
+        self.0.extend(peer_as(sent));
+        deletes
+    }
+}
+
 fn filter_sample_source_updates(
     updates: Vec<gnmi::Update>,
     force: bool,
@@ -2316,6 +2395,14 @@ fn update_paths(responses: &[gnmi::SubscribeResponse]) -> HashMap<CanonicalPath,
 
 /// Collapse duplicate fully resolved paths within one Notification. The first
 /// path position is stable, while the final rendered Update supplies its value.
+fn deduplicate_paths(paths: Vec<gnmi::Path>) -> Vec<gnmi::Path> {
+    let mut seen = std::collections::HashSet::with_capacity(paths.len());
+    paths
+        .into_iter()
+        .filter(|path| seen.insert(CanonicalPath::from(path)))
+        .collect()
+}
+
 fn deduplicate_update_paths(updates: Vec<gnmi::Update>) -> Vec<gnmi::Update> {
     let mut positions = HashMap::with_capacity(updates.len());
     let mut output: Vec<gnmi::Update> = Vec::with_capacity(updates.len());
@@ -4863,6 +4950,170 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
+    fn external_peer(negotiated: Option<u32>) -> PeerInfo {
+        let mut peer = test_peer("10.0.0.2".parse().unwrap());
+        peer.remote_asn_mode = crate::peer_types::RemoteAsnMode::External;
+        peer.negotiated_remote_asn = negotiated;
+        peer
+    }
+
+    /// `peer-as` is the configured number for a numeric neighbor and the
+    /// session's AS for an `external`/`internal` one, absent (never 0) while
+    /// that session is down.
+    #[test]
+    fn peer_as_follows_the_remote_asn_mode() {
+        let peer_as = |peer: &PeerInfo| {
+            neighbor_leaf_value(peer, 65001, NeighborLeaf::PeerAs).map(|value| match value {
+                LeafValue::U32(asn) => asn,
+                _ => panic!("peer-as is a uint32"),
+            })
+        };
+        let numeric = test_peer("10.0.0.3".parse().unwrap());
+        assert_eq!(peer_as(&numeric), Some(numeric.remote_asn));
+        // Mutation-red: reading `remote_asn` reports 0, or the last OPEN's AS
+        // after the session dropped.
+        assert_eq!(peer_as(&external_peer(None)), None);
+        assert_eq!(peer_as(&external_peer(Some(65009))), Some(65009));
+        let mut internal = external_peer(None);
+        internal.remote_asn_mode = crate::peer_types::RemoteAsnMode::Internal;
+        assert_eq!(peer_as(&internal), None);
+        internal.negotiated_remote_asn = Some(65001);
+        assert_eq!(peer_as(&internal), Some(65001));
+    }
+
+    /// Get omits the leaf for a down `external` neighbor and renders the
+    /// rest of its state.
+    #[tokio::test]
+    async fn get_omits_peer_as_for_a_down_external_neighbor() {
+        let state = |peer: PeerInfo| async move {
+            let response = test_service(vec![peer])
+                .get(get_request(mounted_path(&[
+                    pe("bgp"),
+                    pe("neighbors"),
+                    keyed_pe("neighbor", "neighbor-address", "10.0.0.2"),
+                    pe("state"),
+                ])))
+                .await
+                .unwrap()
+                .into_inner();
+            json_ietf_values(&response)
+        };
+        let down = state(external_peer(None)).await;
+        assert_eq!(down.len(), 9);
+        assert!(!down.contains(&"0".to_string()), "{down:?}");
+        let up = state(external_peer(Some(65009))).await;
+        assert_eq!(up[2], "65009");
+    }
+
+    /// `SAMPLE`, plain and with `suppress_redundant`: an initially absent
+    /// leaf stays silent, it appears when the session establishes, a down
+    /// session deletes it exactly (gNMI's delete for data that no longer
+    /// exists, so the collector does not keep the last AS), and it reappears
+    /// afterwards. `ON_CHANGE` does not cover `peer-as`.
+    #[tokio::test(start_paused = true)]
+    async fn sampled_peer_as_is_deleted_when_the_session_goes_down() {
+        let path = neighbor_leaf_path(
+            &PeerKey::new("10.0.0.2".parse().unwrap(), None),
+            NeighborLeaf::PeerAs,
+        );
+        for suppress_redundant in [false, true] {
+            let peers = Arc::new(Mutex::new(vec![external_peer(None)]));
+            let snapshot = Arc::clone(&peers);
+            let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+                let peers = snapshot.lock().unwrap().clone();
+                async move { Ok(peers) }
+            });
+            let list = controlled_sample_list(path.clone(), suppress_redundant, 1_000_000_000, 0);
+            let plan = parse_subscription_list(&list).unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+            tokio::spawn(service.run_stream_sample(plan, tx));
+            tokio::task::yield_now().await;
+            // Down: the initial snapshot carries no peer-as, only the sync.
+            assert_eq!(
+                rx.try_recv().unwrap().unwrap().response,
+                Some(gnmi::subscribe_response::Response::SyncResponse(true)),
+                "suppress_redundant={suppress_redundant}"
+            );
+            let mut tick = async |peer: PeerInfo| {
+                *peers.lock().unwrap() = vec![peer];
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+                rx.try_recv()
+                    .ok()
+                    .map(|response| subscribe_notification(response.unwrap()))
+            };
+            let still_down = tick(external_peer(None)).await;
+            assert!(still_down.is_none(), "never delivered, never deleted");
+            let up = tick(external_peer(Some(65009))).await.expect("established");
+            assert_eq!(up.update.len(), 1);
+            assert_eq!(up.update[0].path, Some(path.clone()));
+            // Mutation-red: omitting the leaf leaves the collector at 65009.
+            let down = tick(external_peer(None)).await.expect("a delete on down");
+            assert_eq!(
+                (down.update.len(), down.delete.as_slice()),
+                (0, std::slice::from_ref(&path)),
+                "suppress_redundant={suppress_redundant}"
+            );
+            assert!(tick(external_peer(None)).await.is_none(), "deleted once");
+            let again = tick(external_peer(Some(65009))).await.expect("reappears");
+            assert_eq!(again.update.len(), 1);
+        }
+
+        let on_change = parse_subscription_list(&stream_on_change_list(path)).unwrap_err();
+        assert_eq!(on_change.code(), tonic::Code::Unimplemented);
+    }
+
+    /// Overlapping `suppress_redundant` subscriptions on one `peer-as` leaf
+    /// (2 s and 3 s): the 2 s sample's delete evicts the leaf from the 3 s
+    /// subscription's cache too, so when the session comes back with the
+    /// same AS before the 3 s sample, that sample restores the leaf instead
+    /// of suppressing it as unchanged.
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_as_delete_evicts_every_overlapping_sample_cache() {
+        let path = neighbor_leaf_path(
+            &PeerKey::new("10.0.0.2".parse().unwrap(), None),
+            NeighborLeaf::PeerAs,
+        );
+        let peers = Arc::new(Mutex::new(vec![external_peer(Some(65009))]));
+        let snapshot = Arc::clone(&peers);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let peers = snapshot.lock().unwrap().clone();
+            async move { Ok(peers) }
+        });
+        let mut list = controlled_sample_list(path.clone(), true, 2_000_000_000, 0);
+        let mut slower = list.subscription[0].clone();
+        slower.sample_interval = 3_000_000_000;
+        list.subscription.push(slower);
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        tokio::spawn(service.run_stream_sample(plan, tx));
+        tokio::task::yield_now().await;
+        let initial = subscribe_notification(rx.try_recv().unwrap().unwrap());
+        assert_eq!(initial.update.len(), 1, "both subscriptions deliver it");
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        let mut advance = async |seconds| {
+            tokio::time::advance(Duration::from_secs(seconds)).await;
+            tokio::task::yield_now().await;
+            rx.try_recv()
+                .ok()
+                .map(|response| subscribe_notification(response.unwrap()))
+        };
+        // t=2: the 2 s sample finds the session down and deletes the leaf.
+        *peers.lock().unwrap() = vec![external_peer(None)];
+        let down = advance(2).await.expect("a delete at 2 s");
+        assert_eq!(down.delete.as_slice(), std::slice::from_ref(&path));
+        // The session is back with the same AS before the 3 s sample.
+        *peers.lock().unwrap() = vec![external_peer(Some(65009))];
+        // Mutation-red: an unevicted 3 s cache suppresses it as unchanged,
+        // and the collector keeps no peer-as.
+        let restored = advance(1).await.expect("the 3 s sample restores it");
+        assert_eq!(restored.update.len(), 1);
+        assert_eq!(restored.update[0].path, Some(path));
+    }
+
     #[tokio::test]
     async fn controlled_updates_only_seed_propagates_snapshot_error_before_sync() {
         let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", || async {
@@ -4960,6 +5211,7 @@ mod tests {
             .iter()
             .map(|control| control.suppress_redundant.then(SampleValueCache::default))
             .collect::<Vec<_>>();
+        let mut delivered = vec![DeliveredPeerAs::default(); plan.paths.len()];
         let initial = service
             .render_controlled_sample_snapshot(
                 &plan,
@@ -4967,6 +5219,7 @@ mod tests {
                 false,
                 true,
                 &mut caches,
+                &mut delivered,
             )
             .await
             .unwrap();
@@ -4975,7 +5228,14 @@ mod tests {
         due[0] = Some(true);
         due[1] = Some(false);
         let sampled = service
-            .render_controlled_sample_snapshot(&plan, &due, false, false, &mut caches)
+            .render_controlled_sample_snapshot(
+                &plan,
+                &due,
+                false,
+                false,
+                &mut caches,
+                &mut delivered,
+            )
             .await
             .unwrap();
         assert_eq!(

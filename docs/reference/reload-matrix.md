@@ -46,9 +46,9 @@ prints the result as `SIGHUP reload route`:
 
 | Route | Candidate | Guarantee |
 |---|---|---|
-| **generation** | Static `[[neighbors]]`, `[peer_groups]`, BFD member attachments, inline policy / neighbor sets / global chains, `[policy.conditional_advertisements]` definitions and neighbor or peer-group attachments, `.rpol` content, dataset contents, dataset bindings (added, removed, or re-mapped `[policy.datasets]` entries), or outbound prefix maxima changed without an incompatible family. This includes adding or removing a whole static neighbor that carries `md5_password` or `ttl_security` | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores retained state and rejects cleanly when compensation is confirmed. Uncertain settlement recovery-fences the daemon |
+| **generation** | Static or interface-only `[[neighbors]]`, `[peer_groups]`, BFD member attachments, inline policy / neighbor sets / global chains, `[policy.conditional_advertisements]` definitions and neighbor or peer-group attachments, `.rpol` content, dataset contents, dataset bindings (added, removed, or re-mapped `[policy.datasets]` entries), or outbound prefix maxima changed without an incompatible family. This includes adding or removing a whole static neighbor that carries `md5_password` or `ttl_security` | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores retained state and rejects cleanly when compensation is confirmed. Uncertain settlement recovery-fences the daemon |
 | **sequential** | No generation-class or dataset change, or a generation-class change together with TCP-AO rotation or a listener MD5/GTSM edit while dataset contents, dataset bindings, and BFD attachments are unchanged | The existing per-subsystem steps; a failure halts with an authoritative known-partial receipt or recovery-fences if state is ambiguous |
-| **rejected** | Dataset content/binding or BFD attachment changes combined with TCP-AO rotation or a listener MD5/GTSM edit; a sequential candidate whose peer-group edit adds or changes a config-file-only group field (below), or that changes a conditional-advertisement definition or neighbor attachment; or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
+| **rejected** | Dataset content/binding or BFD attachment changes combined with TCP-AO rotation or a listener MD5/GTSM edit; a sequential candidate that adds, removes or edits an interface-only neighbor; a sequential candidate whose peer-group edit adds or changes a config-file-only group field (below), or that changes a conditional-advertisement definition or neighbor attachment; or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
 
 The sequential route applies peer-group edits as `SetPeerGroup` definitions,
 which cannot carry the config-file-only group fields: `admin_down`,
@@ -150,7 +150,10 @@ each config field. ADR-0076 config transactions add a stricter overlay:
 has a rollback-capable transaction executor for that exact impact shape.
 
 Current transaction support includes pure `[[fib_tables]]`, pure
-`[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only
+`[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify,
+interface-only `[[neighbors]]` add/delete/modify (alone or with catalog,
+live-policy or reshape changes; see
+[Interface-only neighbors](#interface-only-neighbors)), catalog-only
 policy / neighbor-set / peer-group / global-chain changes, pure live
 policy-chain impact for static neighbors or accepted dynamic peers, and
 peer-group/session reshape impact. Reshapes include peer-group field edits or
@@ -288,6 +291,51 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `export_policy_chain` | live | Named-chain reference; same re-evaluation behavior. |
 | `conditional_advertisements` | live (generation route only) | Attached `[policy.conditional_advertisements]` names (ADR-0137). An attachment edit commits with the reload generation without a session reset; the neighbor's Adj-RIB-Out is re-evaluated through the gate and its update-group membership follows. The sequential route rejects a candidate that changes an attachment; reload it separately. |
 | `route_flap_dampening` | live (disabled-only schema) | Optional alpha override. Effective eligible enablement is refused until runtime integration exists. Accepted edits preserve the config snapshot without a session reset; no route behavior changes. |
+
+### Interface-only neighbors
+
+An `[[neighbors]]` entry with `interface` and no `address`
+([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)) is keyed by
+its interface. SIGHUP and config transactions add, delete and edit these
+neighbors without a restart. A SIGHUP carries the change as one owned
+generation; a candidate that would take the sequential route is rejected.
+A transaction stages the full candidate, and nothing happens until the commit.
+
+The peer manager then brings each interface's state in line with the running
+configuration:
+
+| Change | Effect |
+|---|---|
+| Neighbor added | Discovery starts on the interface. Adding the first interface-only neighbor also starts the discovery actor. A peer is created once an address is learned, as at startup. |
+| Neighbor deleted | Its session ends, its Adj-RIB-In (including retained Graceful Restart and LLGR routes) is purged, and its RIB identity is released. This also releases the learned address it held or reserved, so another neighbor may take that address. Discovery stops on the interface, after a final Router Advertisement with lifetime 0 when it was advertising. Deleting the last interface-only neighbor stops the discovery actor and closes its raw sockets. |
+| Session settings edited, directly or through the peer group (`remote_asn`, including `"external"`/`"internal"`, `peer_group` membership, timers, families, `admin_down`, max-prefix settings, `description`, and so on) | A bound peer is rebound at once to the same learned address under the new settings, including an address learned from an inbound connection. This resets the session and keeps the neighbor's RIB identity and a max-prefix shutdown. A changed `admin_down` takes effect; otherwise an operator's enable or disable is kept, as for a static neighbor. An unbound neighbor uses the new settings when it next binds. `rustbgpd --diff` counts the neighbor as a session reset. |
+| Policy-only edit (`import_policy*`, `export_policy*`, policy definitions) | Live, as for a static neighbor; the session is kept. A config transaction applies it to the bound peer through the live-policy executor, which restores the prior chains if persistence fails. |
+| `tcp_mss`, directly or through the peer group | restart-required. SIGHUP keeps the running neighbor for this reload, with its running peer group if the reload removes that group, and logs an `ERROR`. A new neighbor that would take a clamp, its own or a new group's, is held until restart. `rustbgpd --diff` reports it with the other `tcp_mss` changes and routes the rest of the reload as SIGHUP applies it; a config transaction rejects it. |
+
+Neighbors whose settings did not change keep their sessions.
+
+These changes are refused before any effect, with the running configuration
+kept:
+
+- Adding the first interface-only neighbor when the daemon lacks
+  `CAP_NET_RAW` (the error names it) or the link monitor is not running.
+- Adding a static link-local neighbor at an interface-only neighbor's
+  learned endpoint, its address on the same interface, bound or still
+  reserved. The error is `duplicate_link_local_address` and names the
+  interface. Delete that neighbor in an earlier change first.
+- Adding a static link-local neighbor at an address a learned endpoint holds
+  while a BMP collector refuses identity conflicts (`bmp_identity_conflict`).
+- Giving neighbors that share a link-local address BFD, TCP MD5, TCP-AO, or a
+  GTSM policy or `log_level` that differs between them; the error names the
+  feature.
+
+A SIGHUP checks them before its first effect, including an outbound prefix
+maximum or listener authentication change, and discovery cannot bind a
+static link-local address of the new configuration until the reload has
+applied. A config transaction
+checks them when it plans and again when it stages the snapshot.
+
+`[global.unnumbered]` stays restart-required (see `[global]`).
 
 ## `[peer_groups.<name>]`
 
@@ -450,6 +498,7 @@ that are stood up once at startup. Three fields are not restart-required:
 | `gr_eor_replay_owners` | restart-required | The RIB takes the listed replay controllers once at startup, alongside the planned-restart End-of-RIB grace windows; SIGHUP pins the running list. |
 | `warm_cache_checkpoint_on_shutdown` | restart-required | The shutdown checkpoint writer and its pinned runtime-state directory are selected at startup. |
 | `runtime_state_dir` | restart-required | File-system paths (`gr-restart.toml`, `fib-owned.json`, `grpc.sock`) are bound at startup. |
+| `[global.unnumbered]` (`router_advertisements`, `ra_interval_secs`) | restart-required | The discovery actor takes its Router Advertisement template and timing when it starts. SIGHUP pins the running values and logs an `ERROR`; interface-only neighbors themselves still reload. |
 
 `apply_bum_enforcement` is **restart-required** but is a top-level
 (document-root) key, **not** a `[global]` key — EVPN BUM-port enforcement is
