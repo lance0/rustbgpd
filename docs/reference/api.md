@@ -1228,7 +1228,12 @@ with an empty `NeighborConfig.address` and its `interface`:
 - `ListNeighbors` lists a neighbor with no bound address after the addressed
   rows, ordered by interface. It has no session or RIB counters yet.
 - A selector with an empty address and an `interface` selects that interface's
-  interface-only neighbor. `GetNeighborState` answers for it bound or not.
+  interface-only neighbor. So does `fe80::x%swp1` (or `fe80::x` with
+  `interface` `swp1`) for any link-local `x`, bound or not, because the
+  interface owns at most one neighbor; a neighbor whose address and interface
+  match the selector exactly is still selected first. A bare link-local
+  selector stays `INVALID_ARGUMENT`. `GetNeighborState` answers for it bound
+  or not.
   Actions that need a session (enable, disable, reset, soft reset, refresh,
   replay) return `FAILED_PRECONDITION` until an address is bound.
   `DeleteNeighbor` returns `FAILED_PRECONDITION` for an interface-only
