@@ -1603,11 +1603,15 @@ struct AdminEnabledInventory {
     peers: HashMap<String, Option<bool>>,
 }
 
-fn configured_gtsm_hops(row: &toml::Value) -> Option<u8> {
-    if row.get("ttl_security").and_then(toml::Value::as_bool) != Some(true) {
+fn configured_gtsm_hops(row: &toml::Value, group: Option<&toml::Value>) -> Option<u8> {
+    let setting = |name| {
+        row.get(name)
+            .or_else(|| group.and_then(|group| group.get(name)))
+    };
+    if setting("ttl_security").and_then(toml::Value::as_bool) != Some(true) {
         return None;
     }
-    match row.get("ttl_security_hops") {
+    match setting("ttl_security_hops") {
         None => Some(1),
         Some(value) => value
             .as_integer()
@@ -1635,12 +1639,17 @@ fn gtsm_inventory(value: &toml::Value) -> GtsmInventory {
         .into_iter()
         .flatten()
     {
-        let Some(hops) = configured_gtsm_hops(row) else {
+        let group = row
+            .get("peer_group")
+            .and_then(toml::Value::as_str)
+            .and_then(|name| value.get("peer_groups")?.get(name));
+        let Some(hops) = configured_gtsm_hops(row, group) else {
             continue;
         };
-        let Some(address) = row.get("address").and_then(toml::Value::as_str) else {
-            continue;
-        };
+        let address = row
+            .get("address")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
         let interface = row
             .get("interface")
             .and_then(toml::Value::as_str)
@@ -1657,7 +1666,7 @@ fn gtsm_inventory(value: &toml::Value) -> GtsmInventory {
         .into_iter()
         .flat_map(toml::map::Map::iter)
     {
-        if let Some(hops) = configured_gtsm_hops(row) {
+        if let Some(hops) = configured_gtsm_hops(row, None) {
             insert_unique(&mut inventory.peer_groups, name.clone(), hops);
         }
     }
@@ -1721,7 +1730,18 @@ fn admin_enabled_inventory(metrics: &str) -> Option<AdminEnabledInventory> {
             "1" => true,
             _ => return None,
         };
-        let key = peer_identity(&peer, &interface);
+        let key = if let Some(name) = peer.strip_prefix("interface:") {
+            if interface.is_empty() || name != interface {
+                continue;
+            }
+            peer
+        } else {
+            match peer.split_once('%') {
+                Some((_, scope)) if !interface.is_empty() && scope == interface => peer,
+                Some(_) => continue,
+                None => peer_identity(&peer, &interface),
+            }
+        };
         match inventory.peers.entry(key) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(Some(enabled));
@@ -1742,6 +1762,10 @@ fn gtsm_advisory_check(
 ) -> Option<Check> {
     if record.support.stale
         || record.support.state == "Established"
+        || record
+            .support
+            .discovery_state
+            .is_some_and(|state| state != "bound")
         || record.support.flap_count != 0
         || record.max_prefix_restart_remaining_millis.is_some()
         || matches!(
@@ -1761,11 +1785,18 @@ fn gtsm_advisory_check(
     } else {
         inventory
             .static_peers
-            .get(&record.identity)
+            .get(&peer_identity(
+                &record.support.address,
+                &record.support.interface,
+            ))
             .copied()
             .flatten()?
     };
-    if admin_enabled?.peers.get(&record.identity) != Some(&Some(true)) {
+    if admin_enabled?
+        .peers
+        .get(&metric_peer_label(&record.identity, &record.support))
+        != Some(&Some(true))
+    {
         return None;
     }
     Some(Check {
@@ -4102,8 +4133,11 @@ async fn run_with_deadlines(
                 Ok(resp) => resp
                     .into_inner()
                     .events
-                    .iter()
-                    .map(|e| bgp_event_json_value(e).map(redact_event))
+                    .into_iter()
+                    .map(|mut event| {
+                        super::watch::scope_bgp_event(&mut event);
+                        bgp_event_json_value(&event).map(redact_event)
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
                 Err(e) => {
                     sections.insert(
@@ -4870,7 +4904,7 @@ address = "192.0.2.1"
     #[test]
     fn gtsm_advisory_static_and_dynamic_identity_and_detail_are_exact() {
         let static_record = gtsm_record("fe80::1", "eth0");
-        let metric = admin_metric("fe80::1", "eth0", 1);
+        let metric = admin_metric("fe80::1%eth0", "eth0", 1);
         let check = gtsm_check(
             &static_record,
             SessionHistoryEvidence::Unavailable,
@@ -4900,6 +4934,101 @@ address = "192.0.2.1"
         )
         .unwrap();
         assert!(check.detail.contains("ttl_security_hops=9"));
+    }
+
+    #[test]
+    fn gtsm_advisory_keeps_scoped_metric_safeguards() {
+        let record = gtsm_record("fe80::1", "eth0");
+        let enabled = admin_metric("fe80::1%eth0", "eth0", 1);
+        for metric in [
+            admin_metric("fe80::1%eth0", "eth0", 0),
+            admin_metric("fe80::1%eth0", "", 1),
+            admin_metric("fe80::1%eth0", "eth1", 1),
+            format!("{enabled}\n{enabled}"),
+        ] {
+            assert!(
+                gtsm_check(
+                    &record,
+                    SessionHistoryEvidence::Unavailable,
+                    Some(gtsm_config()),
+                    Some(&metric),
+                )
+                .is_none(),
+                "metric evidence must suppress: {metric}"
+            );
+        }
+        let mut established = record;
+        established.support.state = "Established".into();
+        assert!(
+            gtsm_check(
+                &established,
+                SessionHistoryEvidence::Unavailable,
+                Some(gtsm_config()),
+                Some(&enabled),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn gtsm_advisory_joins_bound_interface_only_config_and_metrics() {
+        let mut record = gtsm_record("", "swp1");
+        record.support.learned_peer_address = "fe80::1".into();
+        record.support.discovery_state = Some("bound");
+        record.identity = "fe80::1%swp1".into();
+        let metric = admin_metric("interface:swp1", "swp1", 1);
+        for (settings, hops) in [
+            ("ttl_security = true\nttl_security_hops = 9", Some(9)),
+            ("peer_group = \"fabric\"", Some(9)),
+            ("peer_group = \"fabric\"\nttl_security_hops = 5", Some(5)),
+            ("peer_group = \"fabric\"\nttl_security = false", None),
+        ] {
+            let config = format!(
+                "[peer_groups.fabric]\nttl_security = true\nttl_security_hops = 9\n\
+                 [[neighbors]]\ninterface = \"swp1\"\n{settings}\n"
+            );
+            let check = gtsm_check(
+                &record,
+                SessionHistoryEvidence::Unavailable,
+                Some(&config),
+                Some(&metric),
+            );
+            let Some(hops) = hops else {
+                assert!(check.is_none(), "explicit disable overrides the group");
+                continue;
+            };
+            let check = check.expect("bound interface-only neighbor has configured GTSM advice");
+            assert_eq!(check.name, "peer.fe80::1%swp1.ttl_security");
+            assert!(check.detail.contains(&format!("ttl_security_hops={hops}")));
+            for bad_metric in [
+                admin_metric("interface:swp1", "", 1),
+                admin_metric("interface:swp1", "swp2", 1),
+                admin_metric("interface:swp1", "swp1", 0),
+                format!("{metric}\n{metric}"),
+            ] {
+                assert!(
+                    gtsm_check(
+                        &record,
+                        SessionHistoryEvidence::Unavailable,
+                        Some(&config),
+                        Some(&bad_metric),
+                    )
+                    .is_none()
+                );
+            }
+            let mut unbound = gtsm_record("", "swp1");
+            unbound.support.discovery_state = Some("awaiting_discovery");
+            unbound.identity = "swp1".into();
+            assert!(
+                gtsm_check(
+                    &unbound,
+                    SessionHistoryEvidence::Unavailable,
+                    Some(&config),
+                    Some(&metric),
+                )
+                .is_none()
+            );
+        }
     }
 
     #[test]
@@ -9158,7 +9287,7 @@ paths = ["x"]
     }
 
     #[tokio::test]
-    async fn doctor_marks_session_history_failure_without_discarding_peer_evidence() {
+    async fn doctor_policy_bundle_keeps_scope_and_redaction_when_session_history_fails() {
         let server = spawn_mock_server(None).await;
         *server.state.list_neighbors_response.lock().await = vec![neighbor(
             "10.0.0.2",
@@ -9170,12 +9299,23 @@ paths = ["x"]
             Code::Unavailable,
             "upstream bearer must-not-escape".to_string(),
         ));
-        *server.state.policy_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
-            timestamp: "200".to_string(),
-            peer_address: "10.0.0.2".to_string(),
-            summary: "policy evidence survives".to_string(),
-            ..Default::default()
-        }];
+        *server.state.policy_events.lock().await = ["eth0", "eth1"]
+            .into_iter()
+            .map(|interface| rustbgpd_api::proto::BgpEvent {
+                timestamp: "200".to_string(),
+                peer_address: "fe80::1".to_string(),
+                summary: "policy evidence survives".to_string(),
+                payload: Some(rustbgpd_api::proto::bgp_event::Payload::Policy(
+                    rustbgpd_api::proto::PolicyEvent {
+                        peer_address: "fe80::1".into(),
+                        peer_interface: interface.into(),
+                        reason: "bearer must-not-escape".into(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            })
+            .collect();
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();
         let bundle_path = dir.path().join("bundle.tar.gz");
@@ -9230,6 +9370,10 @@ paths = ["x"]
         // vector while the session RPC fails makes this exact evidence
         // assertion red.
         assert_eq!(events["policy"][0]["summary"], "policy evidence survives");
+        assert_eq!(events["policy"][0]["peer_address"], "fe80::1%eth0");
+        assert_eq!(events["policy"][1]["peer_address"], "fe80::1%eth1");
+        assert_eq!(events["policy"][0]["reason"], "[REDACTED]");
+        assert!(!find(&files, "peers/events.json").contains("must-not-escape"));
     }
 
     #[tokio::test]
