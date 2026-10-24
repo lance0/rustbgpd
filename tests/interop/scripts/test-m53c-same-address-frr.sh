@@ -59,6 +59,22 @@ established_rows() {
 
 flaps() { established_rows | awk -v dev="$1" '$1 == dev { print $2 }'; }
 
+# Carrier is down on $1 only: its row is present, observed (not stale) and
+# not Established, and the other neighbor is Established and observed. A
+# stale row's Idle is a placeholder, not an observed state.
+down_only() {
+    local dev=$1 other=eth1
+    [ "$dev" = eth1 ] && other=eth2
+    neighbors | jq -e --arg ll "$LL" --arg dev "$dev" --arg other "$other" '
+        [.neighbors[]? | select(.config.address == $ll)] as $rows
+        | ($rows | map(select(.config.interface == $dev)) | length == 1
+            and all(.stale != true
+                and .state != "SESSION_STATE_ESTABLISHED" and .state != 6))
+        and ($rows | map(select(.config.interface == $other)) | length == 1
+            and all(.stale != true
+                and (.state == "SESSION_STATE_ESTABLISHED" or .state == 6)))' >/dev/null 2>&1
+}
+
 frr_established() {
     frr_neighbor "$1" | jq -e '.. | objects | select(.bgpState? == "Established")' >/dev/null 2>&1
 }
@@ -157,18 +173,31 @@ refreshed() { [ "$(refresh_count eth1)" -gt "$before1" ]; }
 if ! wait_until 20 1 refreshed; then
     fail "FRR eth1 session received no route refresh"; dump_state; exit 1
 fi
-[ "$(refresh_count eth2)" = "$before2" ] || { fail "refresh for eth1 reached the eth2 session"; exit 1; }
 wait_paths "eth1 eth2" "route refresh on eth1 kept both paths"
-if [ "$(flaps eth1)" != "$flaps1" ] || [ "$(flaps eth2)" != "$flaps2" ]; then
-    fail "route refresh flapped a session"; exit 1
-fi
+# After convergence, and for a bounded window after it, the eth2 session has
+# seen no route refresh and neither session has flapped.
+for _ in $(seq 1 5); do
+    if [ "$(refresh_count eth2)" != "$before2" ]; then
+        fail "refresh for eth1 reached the eth2 session"; dump_state; exit 1
+    fi
+    if [ "$(flaps eth1)" != "$flaps1" ] || [ "$(flaps eth2)" != "$flaps2" ]; then
+        fail "route refresh flapped a session"; dump_state; exit 1
+    fi
+    sleep 1
+done
 ok "route refresh reached only the eth1 session"
 
 # Carrier loss on eth2 takes down only the eth2 neighbor and its path. FRR's
 # end of the link goes down, so rustbgpd sees carrier loss and keeps its own
 # static link-local address (an admin-down would flush it).
 docker exec "$FRR" ip link set eth2 down
-wait_rows "eth1" "carrier loss on eth2 left only the eth1 neighbor Established"
+if wait_until 45 2 down_only eth2; then
+    ok "carrier loss on eth2 left the eth1 neighbor Established and eth2 observed down"
+else
+    fail "carrier loss on eth2 did not leave eth1 Established and eth2 observed down"
+    dump_state
+    exit 1
+fi
 wait_paths "eth1" "carrier loss on eth2 removed only the eth2 path"
 [ "$(flaps eth1)" = "$flaps1" ] || { fail "carrier loss on eth2 flapped eth1"; exit 1; }
 docker exec "$FRR" ip link set eth2 up
