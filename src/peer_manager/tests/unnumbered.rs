@@ -472,6 +472,73 @@ async fn a_shared_address_refuses_an_address_keyed_feature_without_bmp() {
     assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
 }
 
+/// A static link-local neighbor without BFD, and the BFD profile a reload
+/// may attach to it.
+const STATIC_PLAIN_NEIGHBOR: &str = "[[bfd_profiles]]\nname = \"fast\"\n\
+    [[neighbors]]\naddress = \"fe80::2\"\ninterface = \"eth9\"\nremote_asn = 65002\n";
+
+/// The static `fe80::2%eth9` record in `config`.
+fn eth9_record(config: &mut crate::config::Config) -> &mut crate::config::Neighbor {
+    config
+        .neighbors
+        .iter_mut()
+        .find(|neighbor| neighbor.interface.as_deref() == Some("eth9"))
+        .unwrap()
+}
+
+/// A reload that would enable BFD on a static neighbor already sharing a
+/// learned address is refused before any effect: the live pair would leave
+/// BFD unable to select a unique peer.
+#[tokio::test]
+async fn a_reload_enabling_bfd_on_a_shared_address_is_refused_with_no_effect() {
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", STATIC_PLAIN_NEIGHBOR);
+    let mut static_peer = make_config(IpAddr::V6(ll(2)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)).len(), 2, "the pair shares fe80::2");
+
+    let before = h.mgr.current_config.clone();
+    let mut candidate = before.clone();
+    eth9_record(&mut candidate).bfd = Some(crate::config::BfdConfig {
+        profile: "fast".into(),
+        enabled: true,
+        strict: false,
+        multihop: false,
+    });
+    let outcome = Box::pin(h.mgr.apply_reload_generation(
+        candidate,
+        Vec::new(),
+        crate::config::PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    // Mutation-red: without the live check the generation applies.
+    let ReloadGenerationOutcome::RejectedNoEffect(error) = outcome else {
+        panic!("expected a refusal with no effect: {outcome:?}");
+    };
+    assert!(error.contains("BFD"), "{error}");
+    assert_eq!(h.mgr.current_config, before, "nothing changed");
+    assert_eq!(h.peers_at(ll(2)).len(), 2);
+}
+
+/// A learned address refused for a static neighbor's BFD binds once a
+/// reload removes that BFD: the configuration swap rechecks refused ports.
+#[tokio::test]
+async fn removing_bfd_by_reload_admits_a_refused_learned_address() {
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", STATIC_BFD_NEIGHBOR);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [], "refused while eth9 runs BFD");
+
+    let mut candidate = h.mgr.current_config.clone();
+    eth9_record(&mut candidate).bfd = None;
+    h.mgr.replace_current_config(candidate);
+    // Mutation-red: without the recheck no reconcile is due and the port
+    // stays unbound, since unchanged RAs raise no new binding.
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+}
+
 /// Two BMP collectors, both set to exclude identity conflicts.
 const BMP_EXCLUDING_COLLECTORS: &str = "[bmp]\n\
     [[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\non_identity_conflict = \"exclude\"\n\

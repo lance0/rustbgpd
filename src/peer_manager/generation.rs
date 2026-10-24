@@ -248,6 +248,9 @@ impl PeerManager {
         actions: Vec<ReloadPeerAction>,
         datasets: PreparedDatasetGeneration,
     ) -> ReloadGenerationOutcome {
+        if let Err(error) = self.validate_live_shared_addresses(&candidate) {
+            return ReloadGenerationOutcome::RejectedNoEffect(error);
+        }
         let prepared = match self.prepare_bfd_reload(&candidate) {
             Ok(prepared) => prepared,
             Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),

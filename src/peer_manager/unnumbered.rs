@@ -417,8 +417,10 @@ impl PeerManager {
         }
     }
 
-    /// A peer left the table: a refused binding may now be admissible.
-    pub(super) fn note_peer_removed(&mut self) {
+    /// A peer left the table, or the configuration changed what may share
+    /// an address: a refused binding may now be admissible, and nothing else
+    /// re-raises it (refreshed RAs emit no binding change).
+    pub(super) fn recheck_refused_bindings(&mut self) {
         if let Some(unnumbered) = self.unnumbered.as_mut()
             && unnumbered.ports.values().any(|port| port.refused.is_some())
         {

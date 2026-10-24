@@ -2099,7 +2099,7 @@ impl PeerManager {
             self.reap_deleted_peer_metric_series_for_key(&peer_for_reap)
                 .await;
         }
-        self.note_peer_removed();
+        self.recheck_refused_bindings();
         Ok(removed_config)
     }
 

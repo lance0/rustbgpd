@@ -1474,7 +1474,9 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   when a neighbor at that address uses BFD, TCP MD5, TCP-AO, GTSM or a
   per-neighbor `log_level`, whose state is keyed by the bare address, and so
   is a static neighbor added at runtime with one of them beside a learned
-  address. A refusal is not sticky: once the holder's peer goes, the refused
+  address. A reload or config transaction that would give neighbors already
+  sharing an address such a feature is refused before any effect, and one
+  that removes it rechecks the refused links. A refusal is not sticky: once the holder's peer goes, the refused
   link is admitted on its next binding. Collectors count while disconnected, and `[bmp]` takes a
   restart to change, so a running session is never refused later.
 - **Restart-required.** Adding, removing or editing an interface-only

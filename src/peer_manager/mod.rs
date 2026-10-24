@@ -96,7 +96,7 @@ mod unnumbered {
             _: rustbgpd_fsm::SessionState,
         ) {
         }
-        pub(super) fn note_peer_removed(&mut self) {}
+        pub(super) fn recheck_refused_bindings(&mut self) {}
         pub(super) fn note_unnumbered_session_idle(&mut self, _: &PeerKey) {}
         pub(super) fn unnumbered_retry_at(&self) -> Option<tokio::time::Instant> {
             None
@@ -883,6 +883,9 @@ impl PeerManager {
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
         self.conditional_reconcile_pending = true;
+        // An address-keyed feature removed from a neighbor may admit a
+        // learned address the old configuration refused.
+        self.recheck_refused_bindings();
         previous
     }
 
@@ -1628,6 +1631,37 @@ impl PeerManager {
         view.validate_shared_address_features(&records)
             .err()
             .map(|error| error.to_string())
+    }
+
+    /// Refuse a candidate configuration under which neighbors that share a
+    /// link-local address now would use a feature keyed by the bare address:
+    /// a reload or transaction enabling BFD, say, on a static neighbor beside
+    /// a learned one. Checked against the live endpoints before any effect.
+    pub(super) fn validate_live_shared_addresses(
+        &self,
+        candidate: &crate::config::Config,
+    ) -> Result<(), String> {
+        let mut by_address: BTreeMap<IpAddr, Vec<&PeerKey>> = BTreeMap::new();
+        for key in self.peers.keys() {
+            if matches!(key.address, IpAddr::V6(v6) if v6.is_unicast_link_local()) {
+                by_address.entry(key.address).or_default().push(key);
+            }
+        }
+        for keys in by_address.values().filter(|keys| keys.len() > 1) {
+            let records: Vec<_> = keys
+                .iter()
+                .filter_map(|key| candidate.neighbor_record(key))
+                .collect();
+            if records.len() < 2 {
+                continue;
+            }
+            let records: Vec<&crate::config::Neighbor> =
+                records.iter().map(std::borrow::Cow::as_ref).collect();
+            candidate
+                .validate_shared_address_features(&records)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     /// Of the neighbors `sharing` an address, one that BMP monitors, by

@@ -206,6 +206,8 @@ impl PeerManager {
             &mut candidate,
             external_inputs,
         );
+        self.validate_live_shared_addresses(&candidate)
+            .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
         self.finish_config_transaction_plan(
             &mut candidate,
             materialization.as_ref(),
@@ -240,6 +242,8 @@ impl PeerManager {
             candidate,
             external_inputs,
         );
+        self.validate_live_shared_addresses(candidate)
+            .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
         self.finish_config_transaction_plan(
             candidate,
             materialization.as_ref(),
