@@ -580,7 +580,20 @@ impl DetailRows {
 fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
     let cfg = n.config.as_ref();
     let mut rows = DetailRows::default();
-    rows.field(0, "Neighbor", cfg.map(|c| c.address.as_str()).unwrap_or(""));
+    // An interface-only neighbor has no address of its own; its interface
+    // names it, and Learned Address below carries the endpoint.
+    rows.field(
+        0,
+        "Neighbor",
+        cfg.map(|c| {
+            if c.address.is_empty() {
+                c.interface.as_str()
+            } else {
+                c.address.as_str()
+            }
+        })
+        .unwrap_or(""),
+    );
     let interface = cfg.map(|c| c.interface.as_str()).unwrap_or("");
     if !interface.is_empty() {
         rows.field(0, "Interface", interface);
@@ -594,16 +607,11 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
         rows.field(0, "Learned Address", learned);
         rows.field(0, "Discovery", discovery);
     }
-    let remote_asn = cfg.map(output::remote_asn_label).unwrap_or_default();
-    let negotiated_asn = n
-        .negotiated_session
-        .as_ref()
-        .and_then(|negotiated| negotiated.remote_asn)
-        .filter(|asn| remote_asn != asn.to_string());
-    match negotiated_asn {
-        Some(asn) => rows.field(0, "Remote ASN", format!("{remote_asn} (session {asn})")),
-        None => rows.field(0, "Remote ASN", remote_asn),
-    }
+    rows.field(
+        0,
+        "Remote ASN",
+        output::remote_asn_with_session(n).unwrap_or_default(),
+    );
     rows.field(
         0,
         "Description",
@@ -1669,6 +1677,26 @@ pub async fn replay_outbound(
     }
 }
 
+/// The request for one neighbor, or for every peer when `peer` is `None`.
+/// An empty address and interface is the daemon's every-peer form, so a
+/// named neighbor that would send one is refused instead.
+fn graceful_shutdown_request(
+    peer: Option<&str>,
+    enabled: bool,
+) -> Result<SetGracefulShutdownRequest, CliError> {
+    let (address, interface) = peer.map(split_scoped_address).unwrap_or_default();
+    if peer.is_some() && address.is_empty() && interface.trim().is_empty() {
+        return Err(CliError::Argument(
+            "--neighbor needs an address or an interface name".into(),
+        ));
+    }
+    Ok(SetGracefulShutdownRequest {
+        address,
+        enabled,
+        interface,
+    })
+}
+
 /// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates.
 /// `peer = None` applies to every currently-managed peer (operator
 /// running planned maintenance on the whole router).
@@ -1678,10 +1706,9 @@ pub async fn set_graceful_shutdown(
     enabled: bool,
     json: bool,
 ) -> Result<(), CliError> {
+    let request = graceful_shutdown_request(peer.as_deref(), enabled)?;
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let address = peer.clone().unwrap_or_default();
-    let (address_only, interface) = split_scoped_address(&address);
     mutation_rpc(
         "SetGracefulShutdown",
         MUTATION_RPC_TIMEOUT,
@@ -1689,11 +1716,7 @@ pub async fn set_graceful_shutdown(
             || "`rbgp neighbor`".to_string(),
             |peer| format!("`rbgp neighbor {peer}`"),
         ),
-        client.set_graceful_shutdown(SetGracefulShutdownRequest {
-            address: address_only,
-            enabled,
-            interface,
-        }),
+        client.set_graceful_shutdown(request),
     )
     .await?;
     let scope = peer.as_deref().unwrap_or("all peers");
@@ -1763,6 +1786,24 @@ mod tests {
         );
     }
 
+    /// Only `None` sends the every-peer form; a named neighbor never does,
+    /// and an interface name selects that interface's neighbor.
+    #[test]
+    fn graceful_shutdown_broadcasts_only_without_a_neighbor() {
+        let all = graceful_shutdown_request(None, true).unwrap();
+        assert_eq!((all.address.as_str(), all.interface.as_str()), ("", ""));
+        let swp1 = graceful_shutdown_request(Some("swp1"), true).unwrap();
+        assert_eq!(
+            (swp1.address.as_str(), swp1.interface.as_str()),
+            ("", "swp1")
+        );
+        // Mutation-red: passing the split through sends the broadcast form.
+        for empty in ["", " "] {
+            let error = graceful_shutdown_request(Some(empty), true).unwrap_err();
+            assert!(matches!(error, CliError::Argument(_)), "{empty:?}");
+        }
+    }
+
     #[test]
     fn remote_asn_accepts_a_number_external_or_internal() {
         assert_eq!(parse_remote_asn("65002"), Ok(RemoteAsnArg::Number(65002)));
@@ -1804,6 +1845,14 @@ mod tests {
             "external"
         );
         let detail = render_neighbor_detail_human(&state);
+        // Mutation-red: the empty address leaves the Neighbor row blank.
+        assert!(
+            detail
+                .lines()
+                .next()
+                .is_some_and(|row| row.contains("swp1")),
+            "{detail}"
+        );
         assert!(detail.contains("Learned Address:"), "{detail}");
         assert!(detail.contains("fe80::2"), "{detail}");
         assert!(detail.contains("Discovery:"), "{detail}");

@@ -193,6 +193,12 @@ pub async fn run(connection: Connection, interval: u64, no_color: bool) -> Resul
                     peer_address,
                     query,
                 } => {
+                    let Some(peer_address) = app.request_peer(&peer_address) else {
+                        app.rib_unavailable(
+                            "the interface-only neighbor has no learned address yet",
+                        );
+                        continue;
+                    };
                     let Some(request_id) =
                         rib_lane.query(view_id, peer_address.clone(), query.clone())
                     else {
