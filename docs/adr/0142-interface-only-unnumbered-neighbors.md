@@ -397,10 +397,17 @@ refused before the session starts with `bmp_identity_conflict`, through the
 same atomic admission check; a static neighbor added at runtime is checked the
 same way, and configuration refuses a static same-address pair outright.
 `[bmp]` is restart-only, so configured collectors decide admission whether or
-not they are connected, and no reload can refuse a running session. The
-per-station `on_identity_conflict = "exclude"` opt-in is not implemented yet:
-every collector refuses. The MRT peer index already lists same-address
-neighbors as separate entries.
+not they are connected, and no reload can refuse a running session. When every
+collector sets `on_identity_conflict = "exclude"`, the neighbor is admitted
+instead and its session gets no BMP sender, so it emits no Peer Up, route
+monitoring, statistics or Peer Down; any `refuse` collector refuses. Only a
+monitored neighbor counts as holding an address, so an excluded neighbor never
+causes the first one to be excluded on its next admission. The exclusion is
+reported in `NeighborState.bmp_identity_excluded`, `rbgp doctor` and
+`bgp_bmp_identity_excluded_neighbors`, and admissions are counted in
+`bgp_bmp_identity_conflicts_total{outcome}`. A static same-address pair is
+accepted only under the same all-`exclude` rule. The MRT peer index already
+lists same-address neighbors as separate entries.
 
 ### Operator surfaces
 

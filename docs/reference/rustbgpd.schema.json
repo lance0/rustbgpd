@@ -363,6 +363,11 @@
             "$ref": "#/$defs/BmpMonitorView"
           }
         },
+        "on_identity_conflict": {
+          "description": "What a neighbor whose address another monitored neighbor already\nholds (link-local neighbors on different interfaces) does while this\ncollector is configured, since the collector cannot tell the two\nsessions apart. `refuse` (default) keeps it down; `exclude` lets it\nestablish without being reported to BMP. Any `refuse` collector\nrefuses; the neighbor is excluded only when every collector says\n`exclude`.",
+          "$ref": "#/$defs/BmpIdentityConflict",
+          "default": "refuse"
+        },
         "reconnect_interval": {
           "description": "Seconds between reconnect attempts. Default 30.",
           "type": "integer",
@@ -407,6 +412,21 @@
         }
       },
       "additionalProperties": false
+    },
+    "BmpIdentityConflict": {
+      "description": "A BMP collector's choice for a neighbor it could not tell apart from\nanother monitored neighbor at the same address.",
+      "oneOf": [
+        {
+          "description": "Refuse the conflicting session before it establishes.",
+          "type": "string",
+          "const": "refuse"
+        },
+        {
+          "description": "Let the session establish, left out of BMP.",
+          "type": "string",
+          "const": "exclude"
+        }
+      ]
     },
     "BmpMonitorView": {
       "description": "A BMP route-monitoring stream selection (per collector).",

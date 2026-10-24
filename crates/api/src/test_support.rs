@@ -95,6 +95,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         accepted_dynamic_range: None,
         stale: false,
         slow_peer: false,
+        bmp_identity_excluded: false,
         rfc8212_import_policy: Rfc8212PolicyStatus::NotRequired,
         rfc8212_export_policy: Rfc8212PolicyStatus::NotRequired,
     }

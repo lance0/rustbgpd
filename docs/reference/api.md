@@ -583,6 +583,13 @@ config). It clears when the queue drains and on session teardown, and
 mirrors the `bgp_peer_slow{peer}` gauge. See the "Slow peers" section
 in `OPERATIONS.md` for interpretation.
 
+`NeighborState.bmp_identity_excluded` is `true` while the neighbor's session
+reports nothing to BMP: another BMP-monitored neighbor held its link-local
+address when it was admitted, and every collector sets
+`on_identity_conflict = "exclude"`. It lasts for the session's peer and
+mirrors `bgp_bmp_identity_excluded_neighbors`; see the configuration
+reference's BMP identity conflicts.
+
 `NeighborState.rejected_routes_retained` is the actor-authoritative size of
 that exact peer session's bounded retained-reject store. Presence distinguishes
 a current fresh snapshot, including an explicit zero, from an older daemon or a

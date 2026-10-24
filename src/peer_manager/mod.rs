@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::ControlFlow;
@@ -102,9 +102,6 @@ mod unnumbered {
             None
         }
         pub(super) fn unnumbered_retry_due(&mut self) {}
-        pub(super) fn unnumbered_holder_of(&self, _: IpAddr, _: &PeerKey) -> Option<&str> {
-            None
-        }
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
@@ -526,6 +523,10 @@ pub struct PeerManager {
     /// config reconciliation until explicit enable or one configured restart
     /// attempt reaches its deadline; a failed attempt remains latched down.
     max_prefix_latches: HashMap<PeerKey, MaxPrefixLatch>,
+    /// Neighbors admitted at an address another neighbor holds while every
+    /// BMP collector is set to `on_identity_conflict = "exclude"`: their
+    /// sessions report nothing to BMP. Kept until the neighbor's peer goes.
+    pub(super) bmp_excluded: BTreeSet<PeerKey>,
     /// Cached earliest deadline, recomputed only when latch state mutates so
     /// ordinary actor traffic does not scan every disabled peer.
     next_max_prefix_restart_deadline: Option<tokio::time::Instant>,
@@ -1292,6 +1293,7 @@ impl PeerManager {
             configured_owners: configured_owners::ConfiguredOwners::new(&current_config),
             dampening_control_failed: false,
             max_prefix_latches: HashMap::new(),
+            bmp_excluded: BTreeSet::new(),
             next_max_prefix_restart_deadline: None,
             next_max_prefix_latch_generation: 1,
             retiring_sessions: HashMap::new(),
@@ -1556,15 +1558,39 @@ impl PeerManager {
             .then(|| CatalogMutationError::NotFound(format!("neighbor {key} not found")))
     }
 
-    /// Whether any managed neighbor uses `address`: every neighbor on a
-    /// link-local address that several interfaces share counts.
-    /// Whether BMP collectors are configured. Configured collectors decide,
-    /// connected or not, so a collector reconnecting never changes admission.
-    pub(super) fn bmp_monitors_neighbors(&self) -> bool {
-        self.current_config
-            .bmp
-            .as_ref()
-            .is_some_and(|bmp| !bmp.collectors.is_empty())
+    /// The configured BMP collectors' combined choice for a neighbor at an
+    /// address another neighbor holds, `None` without collectors. Configured
+    /// collectors decide, connected or not, so a collector reconnecting
+    /// never changes admission.
+    pub(super) fn bmp_identity_conflict(&self) -> Option<crate::config::BmpIdentityConflict> {
+        self.current_config.bmp_identity_conflict()
+    }
+
+    /// Another BMP-monitored neighbor holding `peer`'s address, by label: a
+    /// managed peer that is not itself left out of BMP. Configured collectors
+    /// see every such peer, so the two would be indistinguishable.
+    pub(super) fn bmp_identity_holder_of(&self, peer: &PeerKey) -> Option<String> {
+        self.peers
+            .keys()
+            .find(|key| {
+                key.address == peer.address && *key != peer && !self.bmp_excluded.contains(*key)
+            })
+            .map(PeerKey::label)
+    }
+
+    pub(super) fn publish_bmp_excluded_metric(&self) {
+        self.metrics
+            .set_bmp_identity_excluded_neighbors(self.bmp_excluded.len());
+    }
+
+    /// The BMP event sender for `peer`'s session: none for a neighbor left
+    /// out of BMP for an identity conflict.
+    pub(super) fn session_bmp_tx(&self, peer: &PeerKey) -> Option<mpsc::Sender<BmpEvent>> {
+        if self.bmp_excluded.contains(peer) {
+            None
+        } else {
+            self.bmp_tx.clone()
+        }
     }
 
     /// The configured members of peer group `name`, each by its own key.
@@ -1582,6 +1608,8 @@ impl PeerManager {
             .collect()
     }
 
+    /// Whether any managed neighbor uses `address`: every neighbor on a
+    /// link-local address that several interfaces share counts.
     pub(super) fn has_peer_address(&self, address: IpAddr) -> bool {
         self.peers.keys().any(|key| key.address == address)
     }

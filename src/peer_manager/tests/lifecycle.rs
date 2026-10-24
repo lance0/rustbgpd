@@ -591,18 +591,23 @@ async fn runtime_add_of_a_same_address_neighbor_is_refused_while_bmp_runs() {
             reconnect_interval: 30,
             monitor: vec![crate::config::BmpMonitorView::RibInPre],
             version: 3,
+            on_identity_conflict: crate::config::BmpIdentityConflict::Refuse,
         }],
     });
     // The persisted add resolves its interface, so the first neighbor uses
-    // one that exists; the refusal comes from validation, before the
-    // second neighbor's interface is ever resolved.
+    // one that exists; the admission check refuses before the second
+    // neighbor's interface is ever resolved.
     mgr.add_peer(scoped_config("lo", 1), true).await.unwrap();
     let error = mgr
         .add_peer(scoped_config("eth1", 3), true)
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("fe80::1%lo and fe80::1%eth1"), "{error}");
+    assert!(error.contains("bmp_identity_conflict"), "{error}");
+    assert!(
+        error.contains("fe80::1%eth1") && error.contains("fe80::1%lo"),
+        "{error}"
+    );
     assert!(error.contains("BMP"), "{error}");
     assert_eq!(mgr.peers.len(), 1, "the refused add has no effect");
     assert_eq!(mgr.current_config.neighbors.len(), 1);
@@ -723,4 +728,47 @@ fn update_group_plan_keeps_same_address_neighbors_apart() {
     for handle in handles {
         assert!(handle.release());
     }
+}
+
+/// With every collector set to exclude, the second of two static neighbors
+/// on one link-local address is admitted with its session left out of BMP.
+/// Reconfiguring the first keeps it monitored (an excluded neighbor is not
+/// a monitored holder), and deleting the second ends its exclusion.
+#[tokio::test]
+async fn second_static_neighbor_at_an_address_is_excluded_when_every_collector_excludes() {
+    let mut mgr = test_peer_manager();
+    let collector = |address: &str| crate::config::BmpCollector {
+        address: address.to_string(),
+        reconnect_interval: 30,
+        monitor: vec![crate::config::BmpMonitorView::RibInPre],
+        version: 3,
+        on_identity_conflict: crate::config::BmpIdentityConflict::Exclude,
+    };
+    mgr.current_config.bmp = Some(crate::config::BmpConfig {
+        sys_name: "rustbgpd".to_string(),
+        sys_descr: String::new(),
+        collectors: vec![collector("127.0.0.1:11019"), collector("127.0.0.1:11020")],
+    });
+    let (bmp_tx, _bmp_rx) = mpsc::channel(8);
+    mgr.bmp_tx = Some(bmp_tx);
+    mgr.add_peer(scoped_config("eth0", 10), false)
+        .await
+        .unwrap();
+    mgr.add_peer(scoped_config("eth1", 11), false)
+        .await
+        .unwrap();
+    let address: IpAddr = "fe80::1".parse().unwrap();
+    let (eth0, eth1) = (scoped_key(address, "eth0"), scoped_key(address, "eth1"));
+    assert!(mgr.session_bmp_tx(&eth0).is_some());
+    assert!(mgr.session_bmp_tx(&eth1).is_none());
+
+    let mut changed = scoped_config("eth0", 10);
+    changed.description = "reconfigured".to_string();
+    mgr.reconfigure_peer(changed).await.unwrap();
+    assert!(mgr.session_bmp_tx(&eth0).is_some(), "still monitored");
+    assert!(mgr.session_bmp_tx(&eth1).is_none());
+
+    mgr.delete_peer(eth1.clone(), false).await.unwrap();
+    assert!(mgr.bmp_excluded.is_empty());
+    mgr.delete_peer(eth0, false).await.unwrap();
 }

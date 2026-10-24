@@ -258,6 +258,7 @@ fn manager_peer_info(
         accepted_dynamic_range: accepted_dynamic_range_snapshot(managed),
         stale: true,
         slow_peer: false,
+        bmp_identity_excluded: false,
         rfc8212_import_policy,
         rfc8212_export_policy,
     }
@@ -664,6 +665,7 @@ impl PeerManager {
             session_state.as_ref(),
             self.current_config.rfc8212_posture().policy_effective,
         );
+        info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
         if let Some(latch) = self.max_prefix_latches.get(peer) {
             apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
         }
@@ -692,6 +694,7 @@ impl PeerManager {
                 session_state,
                 self.current_config.rfc8212_posture().policy_effective,
             );
+            info.bmp_identity_excluded = self.bmp_excluded.contains(peer);
             if let Some(latch) = self.max_prefix_latches.get(peer) {
                 apply_max_prefix_latch(&mut info, &latch.error, latch.deadline);
             }
@@ -747,7 +750,10 @@ impl PeerManager {
         let rows = reserved
             .into_iter()
             .map(|(peer, managed, permit)| DetachedPeerRow {
-                info: manager_peer_info(peer, managed, ebgp_requires_policy),
+                info: PeerInfo {
+                    bmp_identity_excluded: self.bmp_excluded.contains(peer),
+                    ..manager_peer_info(peer, managed, ebgp_requires_policy)
+                },
                 md5_configured: managed.transport_config.md5_password.is_some(),
                 latch: self
                     .max_prefix_latches
@@ -907,6 +913,10 @@ impl PeerManager {
             self.emit_loc_rib_bmp_stats(bmp_tx, per_family);
         }
         for (peer, managed) in &self.peers {
+            // Left out of BMP for an identity conflict: no Peer Up was sent.
+            if self.bmp_excluded.contains(peer) {
+                continue;
+            }
             let peer_addr = peer.address;
             let rib_peer = self.rib_peer_of(peer);
             let state = match states.get(peer) {

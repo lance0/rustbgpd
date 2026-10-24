@@ -990,6 +990,21 @@ fn outbound_registration_check(
 /// every candidate it might have advertised; a resync pending well past the
 /// one-second retry means the peer is not draining. A short pending resync is
 /// reported green so the window stays visible.
+/// A neighbor left out of BMP because another monitored neighbor held its
+/// link-local address when it was admitted (ADR-0142, every collector
+/// set to `on_identity_conflict = "exclude"`). `None` for a monitored one.
+fn bmp_identity_exclusion_check(identity: &str, n: &crate::proto::NeighborState) -> Option<Check> {
+    n.bmp_identity_excluded.then(|| Check {
+        name: format!("peer.{identity}.bmp"),
+        status: CheckStatus::Warn,
+        detail: format!(
+            "peer {identity} reports nothing to BMP: another BMP-monitored neighbor held its \
+             link-local address when it was admitted, and every collector sets \
+             on_identity_conflict = \"exclude\"; collectors do not see this session"
+        ),
+    })
+}
+
 fn outbound_resync_check(identity: &str, n: &crate::proto::NeighborState) -> Option<Check> {
     let cause = n.update_group_recovery_fallback.as_str();
     let pending = n.outbound_resync_pending == Some(true);
@@ -3902,6 +3917,7 @@ async fn run_with_deadlines(
                                     ))
                                     .chain(inbound_prefix_bound_check(&identity, n, local_asn))
                                     .chain(outbound_resync_check(&identity, n))
+                                    .chain(bmp_identity_exclusion_check(&identity, n))
                             {
                                 reporter.record(check.name, check.status, check.detail)?;
                             }
@@ -6488,6 +6504,23 @@ paths = ["x"]
         let failed = rpki_cache_session_checks(&caches, Err("ListCaches RPC failed: denied"));
         assert!(failed.iter().all(|check| check.status == CheckStatus::Warn
             && check.detail.contains("RPC failed: denied")));
+    }
+
+    /// A neighbor left out of BMP warns under its own scoped identity; a
+    /// monitored one reports nothing.
+    #[test]
+    fn bmp_identity_exclusion_check_warns_only_for_an_excluded_neighbor() {
+        let mut n = crate::proto::NeighborState::default();
+        assert!(bmp_identity_exclusion_check("fe80::1%eth1", &n).is_none());
+        n.bmp_identity_excluded = true;
+        let check = bmp_identity_exclusion_check("fe80::1%eth1", &n).unwrap();
+        assert_eq!(check.name, "peer.fe80::1%eth1.bmp");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.detail.contains("on_identity_conflict"),
+            "{}",
+            check.detail
+        );
     }
 
     /// Red proofs: inverting the threshold comparison, dropping the cause

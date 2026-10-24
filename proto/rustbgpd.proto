@@ -862,6 +862,10 @@ message NeighborState {
   // not the routes the peer is known to hold. Absence means an older daemon.
   // Update-group internal; explicitly unstable.
   optional bool prefixes_sent_pending = 65;
+  // The session reports nothing to BMP: another BMP-monitored neighbor held
+  // its link-local address when it was admitted, and every collector sets
+  // on_identity_conflict = "exclude". Kept for the life of the session.
+  bool bmp_identity_excluded = 66;
 }
 
 // Stale routes one family of a neighbor still holds for GR or LLGR.

@@ -4879,7 +4879,8 @@ log_format = "json"
             (concat!("explicit_tier", "_test_toml("), 4),
             // +1: the unspecified set_next_hop reload test writes its candidate.
             // +2: the same-address BMP reload test writes both of its files.
-            (concat!("write_tier", "_test_config("), 38),
+            // +2: so does the excluded same-address pair reload test.
+            (concat!("write_tier", "_test_config("), 40),
             (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
@@ -11364,6 +11365,62 @@ remote_asn = 65002
         names_both_and_bmp(&error.to_string());
         assert!(tags.is_empty(), "{tags:?}");
         assert!(calls.is_empty());
+    }
+
+    /// With every collector excluding identity conflicts, a same-address
+    /// pair runs. A reload file that switches a collector to `refuse` is
+    /// refused before any effect; one that drops `[bmp]` has the running
+    /// collectors pinned back (restart-only) and leaves both neighbors in
+    /// place.
+    #[tokio::test]
+    async fn reload_keeps_an_excluded_same_address_pair_running() {
+        let collectors = |second: &str| {
+            format!(
+                "\n[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n\
+                 on_identity_conflict = \"exclude\"\n\
+                 [[bmp.collectors]]\naddress = \"127.0.0.1:11020\"\n{second}"
+            )
+        };
+        let excluding = collectors("on_identity_conflict = \"exclude\"\n");
+        let neighbor = |interface: &str| {
+            format!(
+                "\n[[neighbors]]\naddress = \"fe80::1\"\ninterface = \"{interface}\"\nremote_asn = 65009\n"
+            )
+        };
+        let pair = format!("{}{}", neighbor("eth0"), neighbor("eth1"));
+        let base = baseline_toml();
+
+        let path = unique_temp_path("same-address-bmp-exclude");
+        write_tier_test_config(&path, &format!("{base}{pair}{excluding}"));
+        let current = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        write_tier_test_config(&path, &format!("{base}{pair}{}", collectors("")));
+        let prior = AcceptedConfigSnapshot::from_config_for_test(current.clone());
+        let Err(error) = AcceptedConfigSnapshot::load_for_reload(
+            &path,
+            &prior,
+            &current.policy.dataset_bindings,
+        ) else {
+            panic!("a refusing collector beside the pair must be refused");
+        };
+        assert!(error.contains("on_identity_conflict"), "{error}");
+
+        let (outcome, _tags, calls) = drive_generation(
+            &format!("{base}{pair}{excluding}"),
+            &format!("{base}{pair}"),
+            GenerationReply::Applied,
+        )
+        .await;
+        assert!(
+            !matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)),
+            "{outcome:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .flat_map(|call| &call.actions)
+                .all(|action| action.kind != config::ReloadPeerActionKind::Remove),
+            "no neighbor is removed"
+        );
     }
 
     #[tokio::test]

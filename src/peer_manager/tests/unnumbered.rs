@@ -427,6 +427,129 @@ async fn learned_and_static_neighbors_share_an_address_without_bmp() {
     );
 }
 
+/// Two BMP collectors, both set to exclude identity conflicts.
+const BMP_EXCLUDING_COLLECTORS: &str = "[bmp]\n\
+    [[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\non_identity_conflict = \"exclude\"\n\
+    [[bmp.collectors]]\naddress = \"127.0.0.1:11020\"\non_identity_conflict = \"exclude\"\n";
+
+/// When every collector excludes identity conflicts, the second link to
+/// learn an address establishes with its session left out of BMP, and the
+/// first keeps its monitoring. The exclusion is reported in neighbor state
+/// and metrics, survives the first link losing and regaining carrier, and ends with
+/// the excluded neighbor's peer.
+#[tokio::test]
+async fn a_shared_learned_address_is_excluded_from_bmp_when_every_collector_excludes() {
+    let mut h = harness_with(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        BMP_EXCLUDING_COLLECTORS,
+    );
+    let (bmp_tx, _bmp_rx) = mpsc::channel(8);
+    h.mgr.bmp_tx = Some(bmp_tx);
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2), swp2.clone()]);
+
+    assert!(
+        h.mgr.session_bmp_tx(&swp1_key(2)).is_some(),
+        "first link monitored"
+    );
+    assert!(
+        h.mgr.session_bmp_tx(&swp2).is_none(),
+        "second link excluded"
+    );
+    assert!(
+        !h.mgr
+            .get_peer_info(&swp1_key(2))
+            .await
+            .unwrap()
+            .bmp_identity_excluded
+    );
+    assert!(
+        h.mgr
+            .get_peer_info(&swp2)
+            .await
+            .unwrap()
+            .bmp_identity_excluded
+    );
+    assert!(
+        h.mgr
+            .list_peers()
+            .await
+            .iter()
+            .any(|info| info.interface.as_deref() == Some("swp2") && info.bmp_identity_excluded)
+    );
+    assert_eq!(
+        bmp_identity_conflict_metric(&h.mgr.metrics, "excluded"),
+        Some(1.0)
+    );
+    assert_eq!(
+        bmp_identity_conflict_metric(&h.mgr.metrics, "refused"),
+        Some(0.0)
+    );
+    assert_eq!(
+        process_global_metric(&h.mgr.metrics, "bgp_bmp_identity_excluded_neighbors"),
+        Some(1.0)
+    );
+
+    // An excluded neighbor is not a monitored holder: carrier loss and
+    // recovery of the first link readmits it with its monitoring.
+    h.links_changed(snapshot(true, &[("swp1", 7, false), ("swp2", 8, true)]));
+    h.reconcile().await;
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, true)]));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(h.mgr.session_bmp_tx(&swp1_key(2)).is_some());
+    assert!(h.mgr.session_bmp_tx(&swp2).is_none());
+
+    // The exclusion ends with the excluded neighbor's peer.
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    assert!(h.mgr.bmp_excluded.is_empty());
+    assert_eq!(
+        process_global_metric(&h.mgr.metrics, "bgp_bmp_identity_excluded_neighbors"),
+        Some(0.0)
+    );
+}
+
+/// Collector modes combine strictly: one refusing collector refuses the
+/// conflict even when another excludes.
+#[tokio::test]
+async fn one_refusing_collector_refuses_a_shared_learned_address() {
+    let mixed = "[bmp]\n\
+        [[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\non_identity_conflict = \"exclude\"\n\
+        [[bmp.collectors]]\naddress = \"127.0.0.1:11020\"\n";
+    let mut h = harness_with(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        mixed,
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    assert_eq!(
+        bmp_identity_conflict_metric(&h.mgr.metrics, "refused"),
+        Some(1.0)
+    );
+    assert!(h.mgr.bmp_excluded.is_empty());
+}
+
+/// A static neighbor added at runtime at a learned address follows the
+/// same rule: excluded when every collector excludes.
+#[tokio::test]
+async fn a_static_neighbor_at_a_learned_address_is_excluded_when_every_collector_excludes() {
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], BMP_EXCLUDING_COLLECTORS);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let mut static_peer = make_config(IpAddr::V6(ll(2)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    h.mgr.add_peer(static_peer, false).await.unwrap();
+    let eth9 = PeerKey::new(IpAddr::V6(ll(2)), Some("eth9".into()));
+    assert!(h.mgr.bmp_excluded.contains(&eth9));
+    assert!(!h.mgr.bmp_excluded.contains(&swp1_key(2)));
+}
+
 #[tokio::test]
 async fn learned_and_static_admission_refuse_each_other_while_bmp_monitors() {
     let mut h = harness_with(

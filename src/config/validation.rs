@@ -12,11 +12,13 @@ use super::parse::{
     resolve_chain_with_store,
 };
 use super::schema::{
+    BmpIdentityConflict, OrrVantage, parse_orr_vantage, validate_orr_vantage_address,
+};
+use super::schema::{
     MAX_POLICY_CACHE_ENTRIES, ManagedBridgeNetdevConfig, ManagedL3VxlanNetdevConfig,
     ManagedNetdevsConfig, ManagedSvdVxlanNetdevConfig, ManagedVlanUpperNetdevConfig,
     ManagedVrfNetdevConfig, ManagedVxlanNetdevConfig, Rfc8212PolicySource,
 };
-use super::schema::{OrrVantage, parse_orr_vantage, validate_orr_vantage_address};
 use super::{
     ChunkedSetStore, Config, ConfigError, DEFAULT_HOLD_TIME, InboundAdmissionConfig, Neighbor,
     PeerGroupConfig, SecurityConfig, TcpAoConfig, TcpAoKeyringConfig, dynamic_prefixes_intersect,
@@ -534,17 +536,15 @@ impl Config {
                 field: field.to_string(),
                 reason,
             };
-            if self
-                .bmp
-                .as_ref()
-                .is_some_and(|bmp| !bmp.collectors.is_empty())
-            {
+            if self.bmp_identity_conflict() == Some(BmpIdentityConflict::Refuse) {
                 return Err(refuse(
                     "bmp",
                     format!(
                         "neighbors {names} share one IPv6 link-local address, and BMP \
-                         collectors cannot tell their sessions apart; remove the [bmp] \
-                         collectors or give each neighbor a distinct link-local address"
+                         collectors cannot tell their sessions apart; set \
+                         on_identity_conflict = \"exclude\" on every [[bmp.collectors]] \
+                         entry, remove the collectors, or give each neighbor a distinct \
+                         link-local address"
                     ),
                 ));
             }
@@ -613,6 +613,26 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// How BMP treats two monitored neighbors at one address: `None`
+    /// without collectors, `Exclude` only when every collector excludes,
+    /// otherwise `Refuse`.
+    pub(crate) fn bmp_identity_conflict(&self) -> Option<BmpIdentityConflict> {
+        let collectors = &self.bmp.as_ref()?.collectors;
+        if collectors.is_empty() {
+            return None;
+        }
+        Some(
+            if collectors
+                .iter()
+                .all(|collector| collector.on_identity_conflict == BmpIdentityConflict::Exclude)
+            {
+                BmpIdentityConflict::Exclude
+            } else {
+                BmpIdentityConflict::Refuse
+            },
+        )
     }
 
     /// A neighbor's effective GTSM hop limit, `None` when GTSM is off,

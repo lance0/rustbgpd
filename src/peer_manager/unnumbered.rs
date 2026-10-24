@@ -426,22 +426,6 @@ impl PeerManager {
         }
     }
 
-    /// The interface-only neighbor whose bound peer holds `address`, other
-    /// than `peer` itself. While BMP collectors are configured, static
-    /// admission refuses such an address.
-    pub(super) fn unnumbered_holder_of(&self, address: IpAddr, peer: &PeerKey) -> Option<&str> {
-        self.unnumbered
-            .as_ref()?
-            .ports
-            .iter()
-            .find_map(|(name, port)| {
-                port.bound
-                    .as_ref()
-                    .is_some_and(|bound| bound.address == address && bound != peer)
-                    .then_some(name.as_str())
-            })
-    }
-
     /// The interface whose interface-only neighbor owns `peer`.
     /// Whether an interface-only neighbor keeps `peer` as its RIB identity.
     pub(super) fn unnumbered_holds(&self, peer: rustbgpd_rib::PeerId) -> bool {
@@ -461,12 +445,13 @@ impl PeerManager {
             .find_map(|(name, port)| (port.bound.as_ref() == Some(peer)).then_some(name.as_str()))
     }
 
-    /// While BMP collectors are configured, any neighbor already holding
-    /// `address`: a peer in the table (bound interface-only, static, or
-    /// retained) or a configured static neighbor. Without BMP, neighbors on
-    /// different interfaces may share an address.
+    /// While a BMP collector refuses identity conflicts, any neighbor
+    /// already holding `address`: a peer in the table (bound interface-only,
+    /// static, or retained) or a configured static neighbor. Without BMP,
+    /// neighbors on different interfaces may share an address; when every
+    /// collector excludes, admission excludes the newcomer from BMP instead.
     fn bmp_identity_holder(&self, address: Ipv6Addr) -> Option<String> {
-        if !self.bmp_monitors_neighbors() {
+        if self.bmp_identity_conflict() != Some(crate::config::BmpIdentityConflict::Refuse) {
             return None;
         }
         let address = IpAddr::V6(address);
@@ -598,17 +583,7 @@ impl PeerManager {
             return;
         }
         if let Some(holder) = self.bmp_identity_holder(endpoint.address) {
-            let port = self.port_mut(name);
-            if port.refused != Some(endpoint.address) {
-                port.refused = Some(endpoint.address);
-                warn!(
-                    interface = %name,
-                    address = %endpoint.address,
-                    holder = %holder,
-                    reason = "bmp_identity_conflict",
-                    "unnumbered: refusing a learned address another BMP-monitored neighbor holds"
-                );
-            }
+            self.refuse_learned_address(name, endpoint.address, &holder);
             return;
         }
         self.port_mut(name).refused = None;
@@ -618,6 +593,22 @@ impl PeerManager {
             warn!(interface = %name, address = %endpoint.address, %error, "unnumbered: could not add the bound peer; retrying");
             self.arm_unnumbered_retry();
         }
+    }
+
+    /// Refuse a learned address another BMP-monitored neighbor holds,
+    /// logging and counting it once per address.
+    fn refuse_learned_address(&mut self, name: &str, address: Ipv6Addr, holder: &str) {
+        let port = self.port_mut(name);
+        if port.refused == Some(address) {
+            return;
+        }
+        port.refused = Some(address);
+        self.metrics.record_bmp_identity_conflict(false);
+        warn!(
+            interface = %name, %address, %holder,
+            reason = "bmp_identity_conflict",
+            "unnumbered: refusing a learned address another BMP-monitored neighbor holds"
+        );
     }
 
     /// End the bound peer's session and clear the binding, keeping the
@@ -705,6 +696,7 @@ impl PeerManager {
         let Some(holder) = self.bmp_identity_holder(address) else {
             return false;
         };
+        self.metrics.record_bmp_identity_conflict(false);
         warn!(
             interface = %name, %address, %holder,
             reason = "bmp_identity_conflict",

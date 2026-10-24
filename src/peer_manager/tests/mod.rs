@@ -1434,6 +1434,23 @@ fn assert_dynamic_neighbor_capacity(
 
 /// Every reason is exported at 0 from startup, so `Some(0.0)` means "never
 /// dropped" and `None` means the series is missing.
+fn bmp_identity_conflict_metric(metrics: &BgpMetrics, outcome: &str) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_bmp_identity_conflicts_total")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "outcome" && label.value() == outcome)
+                    .then(|| metric.get_counter().get_value())
+            })
+        })
+}
+
 fn inbound_drop_metric(metrics: &BgpMetrics, reason: &str) -> Option<f64> {
     metrics
         .registry()
