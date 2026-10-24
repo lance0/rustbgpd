@@ -1511,9 +1511,15 @@ impl Config {
     /// `EnvFilter` directive parser (`error parsing level filter`), which
     /// would make `init_logging` fail and abort daemon boot the moment any
     /// neighbor set a `log_level`.
+    ///
+    /// An interface-only neighbor's directive matches its stable
+    /// `peer=interface:<name>` span label instead, so it applies to whatever
+    /// address the neighbor binds. The value is a regex; validation limits
+    /// those interface names to letters, digits, `.`, `-` and `_`, and `.`
+    /// is escaped here.
     pub fn per_peer_log_directives(&self) -> Vec<String> {
         let mut directives = Vec::new();
-        for neighbor in &self.neighbors {
+        for neighbor in self.neighbors.all() {
             let level = neighbor.log_level.as_deref().or_else(|| {
                 neighbor
                     .peer_group
@@ -1521,7 +1527,14 @@ impl Config {
                     .and_then(|name| self.peer_groups.get(name))
                     .and_then(|g| g.log_level.as_deref())
             });
-            if let Some(level) = level {
+            let Some(level) = level else { continue };
+            if neighbor.is_interface_only() {
+                let label = rustbgpd_telemetry::interface_peer_label(
+                    neighbor.interface.as_deref().unwrap_or_default(),
+                );
+                let label = label.replace('.', r"\.");
+                directives.push(format!("[peer{{peer={label}}}]={level}"));
+            } else {
                 directives.push(format!(
                     "[peer{{peer_addr={addr}}}]={level}",
                     addr = neighbor.address
