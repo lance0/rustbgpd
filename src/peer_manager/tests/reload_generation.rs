@@ -5208,9 +5208,60 @@ async fn generation_holds_session_replacement_until_the_conditional_install_comm
     relay.abort();
 }
 
+/// ADR-0137: a generation that removes a gated neighbor keeps the gate
+/// installed until the neighbor's session is torn down, then prunes it.
+/// Dropping it at the config swap would let the RIB export what the gate
+/// suppresses to a session that is still registered.
+#[tokio::test]
+async fn generation_removing_a_gated_neighbor_keeps_its_gate_until_teardown() {
+    let fixture = RsFixture::new();
+    let attached = attach_backup(
+        &fixture,
+        &fixture
+            .base_toml()
+            .replace("remote_asn = 65002", "remote_asn = 65012"),
+    );
+    let mut harness = GenerationHarness::new(&attached);
+    let (log, relay) = relay_conditional_to_real_rib(&mut harness);
+    let gated = key("10.0.0.2".parse().unwrap());
+    let mut removed = attached.clone();
+    removed
+        .neighbors
+        .retain(|neighbor| neighbor.address != "10.0.0.2");
+
+    let outcome = harness.apply(&removed).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    // The generation installs at its config swap, before its removal phase
+    // deletes the peer. Mutation-red: that install drops the gate while the
+    // session is still registered.
+    assert!(
+        conditional_log(&log)
+            .iter()
+            .all(|entry| entry == "install [10.0.0.2]"),
+        "gate dropped before teardown: {:?}",
+        conditional_log(&log)
+    );
+    assert!(!harness.mgr.peers.contains_key(&gated), "torn down");
+    assert!(
+        harness.mgr.conditional_reconcile_pending,
+        "pruned after teardown"
+    );
+    harness.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(
+        conditional_log(&log).last().map(String::as_str),
+        Some("install []")
+    );
+    harness.shutdown().await;
+    relay.abort();
+}
+
 /// ADR-0137: a config replacement outside the generation, such as a
-/// neighbor removal, is reconciled into the RIB install, which drops that
-/// neighbor's attachment and its now-unattached definition.
+/// neighbor removal, is reconciled into the RIB install. The neighbor's
+/// attachment, and its now-unattached definition, go once its session is
+/// torn down: until then the gate still suppresses what it attaches.
 #[tokio::test]
 async fn neighbor_removal_reconcile_drops_its_attachment() {
     let fixture = RsFixture::new();
@@ -5235,6 +5286,19 @@ async fn neighbor_removal_reconcile_drops_its_attachment() {
         .retain(|neighbor| neighbor.address != "10.0.0.2");
     let _ = harness.mgr.replace_current_config(removed);
     assert!(harness.mgr.conditional_reconcile_pending);
+    // Mutation-red: while its session is still registered, the removed
+    // neighbor keeps its gate.
+    harness.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(conditional_log(&log), Vec::<String>::new(), "kept");
+    harness
+        .mgr
+        .delete_peer(key("10.0.0.2".parse().unwrap()), false)
+        .await
+        .unwrap();
+    assert!(
+        harness.mgr.conditional_reconcile_pending,
+        "pruned after teardown"
+    );
     harness.mgr.reconcile_conditional_advertisements().await;
     assert_eq!(conditional_log(&log), ["install []"]);
     assert_eq!(

@@ -127,7 +127,48 @@ impl PeerManager {
         &self,
         config: &Config,
     ) -> Result<ConditionalAdvertisementSet, crate::config::ConfigError> {
-        config.conditional_advertisement_set_with_bindings(&self.unnumbered_binding_endpoints())
+        self.conditional_set_with_bindings(config, &self.unnumbered_binding_endpoints())
+    }
+
+    /// [`Self::conditional_set`] for the interface-only `bindings` given.
+    ///
+    /// A peer whose neighbor `config` no longer configures keeps the gate
+    /// installed for it, and the definitions that gate names, while the peer
+    /// is still in the table: its session is torn down after this install,
+    /// and dropping the gate first would let the RIB export to it what the
+    /// gate suppresses. Deleting the peer asks for the reconcile that prunes
+    /// the gate.
+    pub(super) fn conditional_set_with_bindings(
+        &self,
+        config: &Config,
+        bindings: &[(std::net::IpAddr, String)],
+    ) -> Result<ConditionalAdvertisementSet, crate::config::ConfigError> {
+        let mut set = config.conditional_advertisement_set_with_bindings(bindings)?;
+        let installed = &self.conditional_advertisements;
+        for key in self.peers.keys() {
+            let endpoint = key.rib_endpoint();
+            let Some(names) = installed.attachments.get(&endpoint) else {
+                continue;
+            };
+            if set.attachments.contains_key(&endpoint) || config.neighbor_record(key).is_some() {
+                continue;
+            }
+            for name in names {
+                if !set
+                    .definitions
+                    .iter()
+                    .any(|definition| definition.name == *name)
+                    && let Some(definition) = installed
+                        .definitions
+                        .iter()
+                        .find(|definition| definition.name == *name)
+                {
+                    set.definitions.push(definition.clone());
+                }
+            }
+            set.attachments.insert(endpoint, names.clone());
+        }
+        Ok(set)
     }
 
     /// Install `candidate`'s set ahead of a mutation that commits it.
