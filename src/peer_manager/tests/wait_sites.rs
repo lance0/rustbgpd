@@ -1036,7 +1036,7 @@ fn answer_rib(
 }
 
 /// A real RIB's capture of an empty install, for the stub to acknowledge with.
-async fn conditional_capture() -> ConditionalAdvertisementCapture {
+pub(super) async fn conditional_capture() -> ConditionalAdvertisementCapture {
     let (rib_tx, rib_rx) = mpsc::channel(1);
     let rib = tokio::spawn(
         rustbgpd_rib::RibManager::new(rib_rx, mpsc::channel(1).1, None, None, BgpMetrics::new())

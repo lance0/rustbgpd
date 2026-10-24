@@ -1461,6 +1461,11 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   unset takes its peer group's. An edit on the neighbor or its peer group
   reaches bound sessions on reload, and lowering one below what a bound
   session already advertises is refused, as for any neighbor.
+- **Conditional advertisements.** `conditional_advertisements`, own or
+  inherited, apply to the learned endpoint: the export gate is installed for
+  each binding before its session starts, so the first UPDATE is already
+  gated, and it is retired with the binding. A binding is not admitted until
+  the gate is installed.
 - **Log level.** `log_level`, on the neighbor or its peer group, applies to
   the session at every address learned on the interface: its filter matches
   the session span's `peer=interface:<name>` field, not the learned address.
@@ -1469,10 +1474,10 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   reload, not a session already running.
 - **Rejected** on an interface-only neighbor, directly or through its peer
   group: `md5_password` and `tcp_ao`, `bfd.multihop`, `ttl_security_hops` above 1,
-  `fast_external_failover = false`, `conditional_advertisements`, and
-  explicit `[global] listen_addresses`. These sessions
-  therefore have no TCP-layer authentication; what protects them is the link
-  itself, OPEN validation against `remote_asn`, and optional GTSM.
+  `fast_external_failover = false`, and explicit `[global] listen_addresses`.
+  These sessions therefore have no TCP-layer authentication; what protects
+  them is the link itself, OPEN validation against `remote_asn`, and optional
+  GTSM.
 - **GTSM.** `ttl_security = true` (RFC 5082) applies to the learned
   endpoint. When the neighbor binds an address, the BGP listener enforces
   Hop Limit 255 on connections from that address on that interface before

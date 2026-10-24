@@ -2546,6 +2546,66 @@ fn same_address_neighbors_keep_their_own_outbound_maximum() {
     assert!(eth0.release() && eth1.release());
 }
 
+/// On a fabric that reuses one link-local address,
+/// a lowering refusal and an export explain name each blocking session by
+/// its scope, `fe80::1%eth0` or `interface:swp1`, not the bare address
+/// both share.
+#[test]
+fn outbound_limit_refusal_names_the_scoped_session() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let shared = || "fe80::1".parse().unwrap();
+    let scoped = PeerId::allocate(crate::PeerEndpoint::new(shared(), Some("eth0")));
+    let learned = PeerId::allocate_interface_only(crate::PeerEndpoint::new(shared(), Some("swp1")));
+    let _receivers = [
+        register_peer(&mut manager, scoped),
+        register_peer(&mut manager, learned),
+    ];
+    let config = |cap: u32| {
+        let mut config = limit_config(&[(scoped, Some(cap), None)], &[]);
+        config.interfaces.insert(
+            "swp1".to_owned(),
+            OutboundPrefixLimitPair {
+                ipv4: Some(limit(cap)),
+                ipv6: None,
+            },
+        );
+        config
+    };
+    install(&mut manager, 1, config(2));
+    let source = Ipv4Addr::new(192, 0, 2, 214);
+    announce(
+        &mut manager,
+        peer_v4(source),
+        source_routes(source, &[1, 2, 3]),
+    );
+
+    // Mutation-red: the bare address names both sessions alike.
+    let mut refusals: Vec<String> = prepare(&mut manager, 2, config(1))
+        .unwrap_err()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    refusals.sort();
+    assert_eq!(
+        refusals,
+        [
+            "fe80::1%eth0 ipv4_unicast advertises 2 prefixes, above the requested maximum 1",
+            "interface:swp1 ipv4_unicast advertises 2 prefixes, above the requested maximum 1",
+        ]
+    );
+    for (peer, label) in [(scoped, "fe80::1%eth0"), (learned, "interface:swp1")] {
+        let withheld = [v4(1), v4(2), v4(3)]
+            .into_iter()
+            .find(|prefix| !advertised_prefixes(&mut manager, peer).contains(prefix))
+            .unwrap();
+        let reason = &explain_export(&mut manager, peer, withheld).reasons[0].message;
+        assert!(reason.contains(&format!("for peer {label}:")), "{reason}");
+    }
+    assert!(scoped.release() && learned.release());
+}
+
 /// ADR-0142: an interface-only neighbor's per-neighbor maxima are keyed by
 /// its interface. Each endpoint learned there takes them at registration,
 /// a rebind's new endpoint included; an endpoint entry still wins; and a

@@ -425,7 +425,7 @@ async fn retention_left_after_the_check() -> (
                         SessionState::Active,
                     ));
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => {
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => {
                     *flip.lock().unwrap() = PeerRetention {
                         stale_routes: 3,
                         next_deadline: Some(deadline),
@@ -535,7 +535,7 @@ async fn a_late_release_shutdown_after_a_gr_teardown_keeps_the_retention() {
                         SessionState::Active,
                     ));
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => {
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => {
                     if let Some(released) = released.take() {
                         let _ = released.await;
                     }
@@ -648,10 +648,10 @@ async fn a_handshake_that_starts_during_the_retention_query_is_kept() {
                     let _ = reply.send(policy_test_peer_state(IpAddr::V6(ll(2)), now));
                     continue;
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     (reply, now == SessionState::Established)
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => (
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => (
                     reply,
                     matches!(
                         now,
@@ -710,7 +710,7 @@ async fn a_handshake_that_fails_after_the_state_read_releases_the_address() {
                 PeerCommand::QueryState { reply } => {
                     let _ = reply.send(policy_test_peer_state(IpAddr::V6(ll(2)), now));
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => {
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => {
                     let quiet = !matches!(
                         now,
                         SessionState::OpenSent
@@ -2754,7 +2754,7 @@ fn establishes_after_its_state_query(
                     let _ = reply.send(policy_test_peer_state(peer_addr, state));
                     state = SessionState::Established;
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     let shut_down = state != SessionState::Established;
                     let _ = reply.send(shut_down);
                     if shut_down {
@@ -2870,7 +2870,7 @@ fn retirement_answered_after_release(
                 PeerCommand::QueryState { reply } => {
                     let _ = reply.send(policy_test_peer_state(peer_addr, SessionState::Active));
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     if let Some(release) = release.take() {
                         let _ = release.await;
                     }
@@ -4818,6 +4818,398 @@ async fn second_routers_beside_an_inbound_learned_session_are_counted() {
     h.bind("swp1", Some(endpoint(9, 7))).await;
     assert_eq!(conflicts(&h), Some(2.0));
     assert!(h.mgr.peers.contains_key(&swp1_key(2)), "still kept");
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0137 conditional advertisements on an interface-only neighbor: the
+// export gate is keyed by endpoint, so it is installed for each binding
+// before its peer exists and retired with the binding.
+// ---------------------------------------------------------------------------
+
+const CONDITIONAL: &str = "[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\
+    [policy.definitions.transit-a]\ndefault_action = \"permit\"\n\
+    [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
+    advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\
+    condition_policy = \"transit-a\"\n";
+
+/// A RIB stand-in for `h`: acknowledges each conditional-advertisement
+/// install (or drops the reply while `refuse` is set) and reports the
+/// installed set, in order.
+async fn conditional_rib(
+    h: &mut Harness,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+) -> mpsc::UnboundedReceiver<rustbgpd_rib::ConditionalAdvertisementSet> {
+    let capture = super::wait_sites::conditional_capture().await;
+    let mut rib_rx = std::mem::replace(&mut h.rib_rx, mpsc::channel(1).1);
+    let (installed_tx, installed) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::InstallConditionalAdvertisements { set, reply, .. } => {
+                    if refuse.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    let _ = installed_tx.send(set);
+                    let _ = reply.send(capture.clone());
+                }
+                RibUpdate::RestoreConditionalAdvertisements { reply, .. } => {
+                    let _ = reply.send(());
+                }
+                _ => {}
+            }
+        }
+    });
+    installed
+}
+
+fn attached(set: &rustbgpd_rib::ConditionalAdvertisementSet) -> Vec<IpAddr> {
+    set.attachments
+        .keys()
+        .map(|endpoint| endpoint.addr)
+        .collect()
+}
+
+/// The binding's gate is installed at its endpoint before the peer exists,
+/// survives an unrelated reconcile, moves with a rebind, and is retired when
+/// the binding ends.
+#[tokio::test]
+async fn a_bindings_conditional_advertisement_gate_follows_the_binding() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+
+    // Mutation-red: without the bind-time install the learned peer has no
+    // gate and advertises unconditionally.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))]
+    );
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+
+    // Mutation-red: a reconcile computed from configuration alone drops it.
+    h.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(
+        attached(&h.mgr.conditional_advertisements),
+        [IpAddr::V6(ll(2))]
+    );
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(3))]
+    );
+
+    // Mutation-red: without the retirement the gate outlives the binding.
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(
+        h.mgr.conditional_reconcile_pending,
+        "retirement asks for it"
+    );
+    h.mgr.reconcile_conditional_advertisements().await;
+    assert!(
+        attached(&h.mgr.conditional_advertisements).is_empty(),
+        "retired"
+    );
+    assert!(
+        !h.mgr.conditional_advertisements.definitions.is_empty(),
+        "the definition, and its settle state, stay installed"
+    );
+}
+
+/// Two links that learn one address each keep their own gate, keyed by the
+/// scoped endpoint, and losing one link retires only its own.
+/// Load-bearing proof: keying the gate by the bare address leaves one
+/// attachment for both neighbors.
+#[tokio::test]
+async fn shared_address_bindings_keep_separate_conditional_gates() {
+    let mut h = harness_with(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2), swp2.clone()]);
+    let scoped = |set: &rustbgpd_rib::ConditionalAdvertisementSet| {
+        let mut keys: Vec<_> = set
+            .attachments
+            .keys()
+            .map(|endpoint| {
+                (
+                    endpoint.addr,
+                    endpoint.interface.as_deref().map(str::to_owned),
+                )
+            })
+            .collect();
+        keys.sort();
+        keys
+    };
+    let mut last = None;
+    while let Ok(set) = installed.try_recv() {
+        last = Some(set);
+    }
+    assert_eq!(
+        scoped(&last.unwrap()),
+        [
+            (IpAddr::V6(ll(2)), Some("swp1".to_owned())),
+            (IpAddr::V6(ll(2)), Some("swp2".to_owned()))
+        ]
+    );
+
+    h.links_changed(snapshot(true, &[("swp1", 7, false), ("swp2", 8, true)]));
+    h.reconcile().await;
+    h.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(h.peers_at(ll(2)), [swp2]);
+    assert_eq!(
+        scoped(&h.mgr.conditional_advertisements),
+        [(IpAddr::V6(ll(2)), Some("swp2".to_owned()))]
+    );
+}
+
+/// The RIB installs a binding's gate but its acknowledgement is lost, so
+/// the binding is not admitted; the binding then expires before any retry.
+/// The uncertain install is reconciled against the live bindings, so no gate
+/// is left naming an endpoint without a peer.
+#[tokio::test]
+async fn a_lost_gate_acknowledgement_leaves_no_gate_once_the_binding_expires() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    // The RIB's installed set, and whether it acknowledges the next install.
+    let held = Arc::new(std::sync::Mutex::new(
+        None::<rustbgpd_rib::ConditionalAdvertisementSet>,
+    ));
+    let drop_ack = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let capture = super::wait_sites::conditional_capture().await;
+    let mut rib_rx = std::mem::replace(&mut h.rib_rx, mpsc::channel(1).1);
+    let (rib_held, rib_drop) = (Arc::clone(&held), Arc::clone(&drop_ack));
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::InstallConditionalAdvertisements { set, reply, .. } = update {
+                *rib_held.lock().unwrap() = Some(set);
+                if !rib_drop.swap(false, Ordering::SeqCst) {
+                    let _ = reply.send(capture.clone());
+                }
+            }
+        }
+    });
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "not admitted");
+    let installed = held.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        attached(&installed),
+        [IpAddr::V6(ll(2))],
+        "the RIB holds the gate"
+    );
+    h.bind("swp1", None).await;
+    // Mutation-red: without the reconcile request the run loop leaves the
+    // gate installed at an endpoint with no peer.
+    if h.mgr.conditional_reconcile_pending {
+        h.mgr.reconcile_conditional_advertisements().await;
+    }
+    let installed = held.lock().unwrap().clone().unwrap();
+    assert!(
+        attached(&installed).is_empty(),
+        "no gate names the endpoint"
+    );
+}
+
+/// A binding whose BFD registration fails after its conditional-advertisement
+/// gate was installed is not admitted, and that gate is reconciled away: no
+/// gate is left naming an endpoint without a peer.
+#[tokio::test]
+async fn a_failed_bfd_registration_leaves_no_gate_naming_the_endpoint() {
+    let (mut h, _bfd) = attach_bfd(
+        harness_with(
+            &["swp1"],
+            &[("swp1", 7, true)],
+            "conditional_advertisements = [\"backup\"]\nbfd = { profile = \"fast\" }\n",
+            &format!("{CONDITIONAL}[[bfd_profiles]]\nname = \"fast\"\n"),
+            None,
+        ),
+        &[],
+    );
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+    // Another membership change holds BFD, so this binding's registration fails.
+    h.mgr.bfd_coupling.as_mut().unwrap().reloading = true;
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))],
+        "the gate is installed before BFD"
+    );
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "not admitted");
+    // Mutation-red: without the reconcile request the run loop leaves the
+    // gate installed at an endpoint with no peer.
+    if h.mgr.conditional_reconcile_pending {
+        h.mgr.reconcile_conditional_advertisements().await;
+    }
+    assert!(
+        attached(&h.mgr.conditional_advertisements).is_empty(),
+        "no gate names the endpoint"
+    );
+}
+
+/// Carrier loss retires a gated binding inside the owner loop's unnumbered
+/// reconcile, which asks for a conditional reconcile. The same loop step
+/// runs it, so the retired gate is gone without waiting for another wakeup.
+#[tokio::test]
+async fn a_retirement_in_the_loops_reconcile_removes_its_gate_in_the_same_step() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))]
+    );
+
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    // Mutation-red: with the conditional reconcile ahead of the unnumbered
+    // one, this step leaves the request for a wakeup that may never come.
+    h.mgr.run_due_reconciles().await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "retired");
+    assert!(
+        attached(&installed.try_recv().unwrap()).is_empty(),
+        "the retired gate is removed in the same step"
+    );
+}
+
+/// A retirement whose install acknowledgement is lost leaves the RIB's
+/// gate unknown. A rebind to the same endpoint must install it again, not
+/// trust the cached set and admit an ungated session.
+#[tokio::test]
+async fn a_lost_retirement_acknowledgement_never_admits_an_ungated_rebind() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut installed = conditional_rib(&mut h, refuse.clone()).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))]
+    );
+
+    // The retirement's install reaches the RIB, but its acknowledgement is lost.
+    refuse.store(true, Ordering::SeqCst);
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.mgr.reconcile_conditional_advertisements().await;
+    refuse.store(false, Ordering::SeqCst);
+
+    // Mutation-red: the cached set still names the endpoint, so the rebind
+    // skips its install and the session starts ungated.
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+    assert_eq!(
+        installed.try_recv().map(|set| attached(&set)),
+        Ok(vec![IpAddr::V6(ll(2))]),
+        "the rebind installs the gate again"
+    );
+}
+
+/// No gate, no peer: when the install is not acknowledged the binding is
+/// not admitted, so the learned peer can never advertise ungated.
+#[tokio::test(start_paused = true)]
+async fn an_unacknowledged_gate_install_admits_no_bound_peer() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let _installed = conditional_rib(&mut h, refuse).await;
+    // Mutation-red: installing after the peer is added admits it ungated.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [], "not admitted");
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "retried");
+}
+
+/// A compensated mutation after a lost retirement acknowledgement restores
+/// the RIB to its capture and the cache to the stale set, which still names
+/// the endpoint. The doubt comes back with it, so a same-endpoint rebind
+/// installs the gate instead of trusting that cache.
+#[tokio::test]
+async fn a_compensated_restore_keeps_a_lost_acknowledgements_doubt() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+        None,
+    );
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut installed = conditional_rib(&mut h, refuse.clone()).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    installed.try_recv().unwrap();
+
+    // The retirement's install loses its acknowledgement.
+    refuse.store(true, Ordering::SeqCst);
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.mgr.reconcile_conditional_advertisements().await;
+    refuse.store(false, Ordering::SeqCst);
+
+    // A later mutation installs, then is compensated back.
+    let set = h
+        .mgr
+        .conditional_set(&h.mgr.current_config.clone())
+        .unwrap();
+    let prior = h
+        .mgr
+        .install_conditional_advertisements(set, &[])
+        .await
+        .unwrap()
+        .expect("an uncertain install is always sent");
+    installed.try_recv().unwrap();
+    h.mgr
+        .restore_conditional_advertisements(prior)
+        .await
+        .unwrap();
+    assert_eq!(
+        attached(&h.mgr.conditional_advertisements),
+        [IpAddr::V6(ll(2))]
+    );
+
+    // Mutation-red: clearing the doubt on restore skips this install.
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+    assert_eq!(
+        installed.try_recv().map(|set| attached(&set)),
+        Ok(vec![IpAddr::V6(ll(2))]),
+        "the rebind installs the gate again"
+    );
 }
 
 /// One SIGHUP generation to `candidate`, through the real executor, then

@@ -2434,12 +2434,18 @@ pub struct OutboundPrefixLimitViolation {
     pub requested: u32,
 }
 
+/// Names the peer by its scoped label (`fe80::2%swp1`, or `interface:swp1`
+/// for an interface-only neighbor), so a refusal on a fabric that reuses
+/// link-local addresses still says which link's session blocks it.
 impl std::fmt::Display for OutboundPrefixLimitViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{} {} advertises {} prefixes, above the requested maximum {}",
-            self.peer, self.family, self.usage, self.requested
+            self.peer.label(),
+            self.family,
+            self.usage,
+            self.requested
         )
     }
 }

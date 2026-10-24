@@ -467,6 +467,14 @@ jobs:
           label: M53b
           topology: tests/interop/m53b-interface-only-frr.clab.yml
           script: tests/interop/scripts/test-m53b-interface-only-frr.sh
+      - name: Upload M53b daemon and FRR logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m53b-interface-only-logs
+          path: /tmp/m53b-lifecycle-last-*
+          if-no-files-found: warn
+          retention-days: 14
 
   m53c:
     needs: [prime_dev_image]

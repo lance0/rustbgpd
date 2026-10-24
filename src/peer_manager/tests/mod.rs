@@ -903,6 +903,13 @@ struct FakePeerCounters {
     stop: AtomicU32,
     purge_reset: AtomicU32,
     administrative_reset: AtomicU32,
+    /// The session establishes after reporting its state and before a
+    /// conditional collision dump reaches it.
+    established_before_dump: std::sync::atomic::AtomicBool,
+    /// A conditional collision dump waits for `release_retirement` before the
+    /// session reads it, as a session busy past the caller's deadline would.
+    hold_retirement: std::sync::atomic::AtomicBool,
+    release_retirement: tokio::sync::Notify,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -911,6 +918,21 @@ enum MaxPrefixTrigger {
     StartTwice,
     CollisionDump,
     Shutdown,
+}
+
+/// A session that is not Established takes a conditional collision dump as
+/// an unconditional one.
+fn unconditional_collision_dump(
+    command: rustbgpd_transport::PeerCommand,
+) -> rustbgpd_transport::PeerCommand {
+    use rustbgpd_transport::PeerCommand;
+    match command {
+        PeerCommand::CollisionDumpUnlessEstablished { reply, .. } => {
+            let _ = reply.send(true);
+            PeerCommand::CollisionDump
+        }
+        other => other,
+    }
 }
 
 fn max_prefix_on_command_peer_handle(
@@ -927,6 +949,7 @@ fn max_prefix_on_command_peer_handle(
     let task = tokio::spawn(async move {
         let mut emitted = 0;
         while let Some(command) = session_rx.recv().await {
+            let command = unconditional_collision_dump(command);
             let terminal = matches!(&command, PeerCommand::CollisionDump | PeerCommand::Shutdown);
             let should_emit = match command {
                 PeerCommand::Start => {
@@ -1156,7 +1179,23 @@ fn fake_peer_handle_with_route_refresh_reply(
                     counters.collision_dump.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
-                PeerCommand::ShutdownUnlessConnected { reply } => {
+                PeerCommand::CollisionDumpUnlessEstablished { reply, ticket } => {
+                    if counters.hold_retirement.load(Ordering::SeqCst) {
+                        counters.release_retirement.notified().await;
+                    }
+                    // As the session does: a withdrawn command is a no-op.
+                    if !ticket.claim() {
+                        continue;
+                    }
+                    let dumped = state != SessionState::Established
+                        && !counters.established_before_dump.load(Ordering::SeqCst);
+                    let _ = reply.send(dumped);
+                    if dumped {
+                        counters.collision_dump.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                }
+                PeerCommand::ShutdownUnlessConnected { reply, .. } => {
                     let shut_down = !matches!(
                         state,
                         SessionState::Established
@@ -1169,7 +1208,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                         break;
                     }
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessEstablished { reply, .. } => {
                     let shut_down = state != SessionState::Established;
                     let _ = reply.send(shut_down);
                     if shut_down {

@@ -64,7 +64,7 @@ pub use config::{
 pub use error::TransportError;
 pub use handle::PeerRuntimeConfigUpdate;
 pub use handle::{
-    ImportPolicyTermHits, ImportRevalidation, NegotiatedGracefulRestartState,
+    CommandTicket, ImportPolicyTermHits, ImportRevalidation, NegotiatedGracefulRestartState,
     NegotiatedSessionState, PeerCommand, PeerCommandError, PeerHandle, PeerSessionState,
     PeerShutdownError, PolicyRejectCounts, SessionIdentity, SessionLifecycleNotification,
     SessionNotification, SessionNotificationDirection, SessionNotificationEvent,
