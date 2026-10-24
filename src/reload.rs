@@ -4938,7 +4938,8 @@ log_format = "json"
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
             // +1: the unspecified set_next_hop reload test writes its candidate.
-            (concat!("write_tier", "_test_config("), 36),
+            // +2: the generation preflight test writes its prior and candidate.
+            (concat!("write_tier", "_test_config("), 38),
             (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
