@@ -22,8 +22,11 @@
   address is bound, replaced when it changes and removed when the binding
   ends; strict mode holds BGP until BFD is Up on the current binding.
   Outbound prefix maxima, on the neighbor or its peer group, apply to every
-  address learned on the interface. TCP-AO, MD5, GTSM (`ttl_security`),
-  multihop BFD, conditional advertisements, per-neighbor `log_level` and
+  address learned on the interface, and so does a per-neighbor `log_level`,
+  keyed by the session span's `peer=interface:<name>` field; as for other
+  neighbors, a reload applies a level edit to sessions that start or rebind
+  after it, not to a session already running. TCP-AO, MD5,
+  GTSM (`ttl_security`), multihop BFD, conditional advertisements and
   explicit `listen_addresses` are rejected on these neighbors. Adding,
   removing or editing one, or
   `[global.unnumbered]`, is restart-required. Operator deletion of a
