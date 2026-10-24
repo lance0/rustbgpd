@@ -116,18 +116,44 @@ assert_best_is_eth1() {
     ok "$label"
 }
 
+# The neighbor on `$1`'s establishments and flaps: a session torn down and
+# re-established, or a recreated peer, moves one of them.
+link_counters() {
+    local established flaps
+    established=$(prom_value "$RUSTBGPD" "bgp_session_established_total{peer=\"interface:$1\"}")
+    flaps=$(prom_value "$RUSTBGPD" "bgp_session_flaps_total{peer=\"interface:$1\"}")
+    echo "established=${established:-0} flaps=${flaps:-0}"
+}
+
+# The surviving link's session must be untouched, not merely Established
+# again by the time the waits poll.
+assert_untouched() {
+    local dev=$1 before=$2 label=$3 now
+    now=$(link_counters "$dev")
+    if [ "$now" != "$before" ]; then
+        fail "$label: the $dev neighbor's session was replaced ($before -> $now)"
+        dump_state
+        exit 1
+    fi
+    ok "$label: the $dev neighbor's session was untouched ($now)"
+}
+
 # Take FRR's end of one link down and back up, so that link's session comes
 # up after the other's.
 bounce() {
     local dev=$1
-    docker exec "$FRR" ip link set "$dev" down
     local other=eth1
     [ "$dev" = eth1 ] && other=eth2
+    local survivor
+    survivor=$(link_counters "$other")
+    docker exec "$FRR" ip link set "$dev" down
     wait_rows "$other" "carrier loss on $dev left only the $other neighbor Established"
     wait_paths "$other" "carrier loss on $dev removed only the $dev path"
+    assert_untouched "$other" "$survivor" "carrier loss on $dev"
     docker exec "$FRR" ip link set "$dev" up
     wait_rows "eth1 eth2" "$dev neighbor re-established after carrier restoration"
     wait_paths "eth1 eth2" "ECMP restored after $dev carrier restoration"
+    assert_untouched "$other" "$survivor" "carrier restoration on $dev"
 }
 
 log "M53d: two interface-only neighbors learn one link-local address"
