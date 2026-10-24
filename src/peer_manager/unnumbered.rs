@@ -589,13 +589,12 @@ impl PeerManager {
             else {
                 return;
             };
-            if exited
-                && desired.is_none()
-                && let (IpAddr::V6(address), Some(ifindex)) = (key.address, bound_scope)
-            {
+            // Kept even when discovery points elsewhere: that binding may
+            // expire before a deferred replacement is installed.
+            if exited && let (IpAddr::V6(address), Some(ifindex)) = (key.address, bound_scope) {
                 let endpoint = Endpoint { address, ifindex };
                 self.port_mut(name).recover = Some(endpoint);
-                desired = Some(endpoint);
+                desired = desired.or(Some(endpoint));
             }
             let same_endpoint = desired.is_some_and(|endpoint| {
                 key.address == IpAddr::V6(endpoint.address) && bound_scope == Some(endpoint.ifindex)

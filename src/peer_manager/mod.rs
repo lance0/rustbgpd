@@ -2628,7 +2628,7 @@ impl PeerManager {
             let bfd_retry_at = self.bfd_retry_deadline();
             let evpn_recovery_retry_at = self.evpn_recovery_retry_at;
             let link_check_retry_at = self.link_check.retry_at;
-            let bfd_scope_retry_at = self.link_check.bfd_retry_at;
+            let bfd_scope_retry_at = self.bfd_scope_deadline();
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             let conditional_retry_at = self.conditional_reconcile_retry.map(|(at, _)| at);
             let unnumbered_retry_at = self.unnumbered_retry_at();
