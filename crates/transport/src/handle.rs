@@ -681,6 +681,13 @@ pub enum PeerCommand {
         /// Whether the task was shut down.
         reply: oneshot::Sender<bool>,
     },
+    /// Like [`Self::ShutdownUnlessEstablished`], but also keeps a session in
+    /// `OpenSent` or `OpenConfirm`: only an Idle, Connect or Active session,
+    /// with no connection past TCP, is shut down.
+    ShutdownUnlessConnected {
+        /// Whether the task was shut down.
+        reply: oneshot::Sender<bool>,
+    },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
     /// ADR-0073: query this session's import-decision cache. Read-only
@@ -1970,11 +1977,45 @@ impl PeerHandle {
         &self,
         deadline: Duration,
     ) -> Result<bool, PeerCommandError> {
+        self.conditional_shutdown(
+            |reply| PeerCommand::ShutdownUnlessEstablished { reply },
+            "shutdown_unless_established",
+            deadline,
+        )
+        .await
+    }
+
+    /// Shut the session down unless it is past TCP: `OpenSent`,
+    /// `OpenConfirm` or Established ([`PeerCommand::ShutdownUnlessConnected`]).
+    /// Outcomes as for [`Self::shutdown_unless_established_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, drops the reply, or
+    /// does not answer within `deadline`.
+    pub async fn shutdown_unless_connected_timeout(
+        &self,
+        deadline: Duration,
+    ) -> Result<bool, PeerCommandError> {
+        self.conditional_shutdown(
+            |reply| PeerCommand::ShutdownUnlessConnected { reply },
+            "shutdown_unless_connected",
+            deadline,
+        )
+        .await
+    }
+
+    async fn conditional_shutdown(
+        &self,
+        command: impl FnOnce(oneshot::Sender<bool>) -> PeerCommand,
+        operation: &'static str,
+        deadline: Duration,
+    ) -> Result<bool, PeerCommandError> {
         let commands = self.commands.clone();
         match tokio::time::timeout(deadline, async move {
             let (reply, shut_down) = oneshot::channel();
             commands
-                .send(PeerCommand::ShutdownUnlessEstablished { reply })
+                .send(command(reply))
                 .await
                 .map_err(|_| PeerCommandError::SessionExited)?;
             shut_down.await.map_err(|_| PeerCommandError::ReplyDropped)
@@ -1983,7 +2024,7 @@ impl PeerHandle {
         {
             Ok(result) => result,
             Err(_elapsed) => Err(PeerCommandError::TimedOut {
-                operation: "shutdown_unless_established",
+                operation,
                 deadline,
             }),
         }

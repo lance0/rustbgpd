@@ -1152,6 +1152,19 @@ fn fake_peer_handle_with_route_refresh_reply(
                     counters.collision_dump.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
+                PeerCommand::ShutdownUnlessConnected { reply } => {
+                    let shut_down = !matches!(
+                        state,
+                        SessionState::Established
+                            | SessionState::OpenSent
+                            | SessionState::OpenConfirm
+                    );
+                    let _ = reply.send(shut_down);
+                    if shut_down {
+                        counters.shutdown.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                }
                 PeerCommand::ShutdownUnlessEstablished { reply } => {
                     let shut_down = state != SessionState::Established;
                     let _ = reply.send(shut_down);

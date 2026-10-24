@@ -390,7 +390,7 @@ async fn retention_left_after_the_check() -> (
                         SessionState::Active,
                     ));
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessConnected { reply } => {
                     *flip.lock().unwrap() = PeerRetention {
                         stale_routes: 3,
                         next_deadline: Some(deadline),
@@ -500,7 +500,7 @@ async fn a_late_release_shutdown_after_a_gr_teardown_keeps_the_retention() {
                         SessionState::Active,
                     ));
                 }
-                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                PeerCommand::ShutdownUnlessConnected { reply } => {
                     if let Some(released) = released.take() {
                         let _ = released.await;
                     }
@@ -569,6 +569,83 @@ async fn an_inbound_handshake_without_an_ra_is_not_released() {
     h.reconcile().await;
     assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
     assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+}
+
+/// The session starts a handshake while the release waits on the RIB's
+/// retention reply. The release's shutdown is decided by the session in its
+/// own turn, so the now-connected session is kept.
+#[tokio::test(start_paused = true)]
+async fn a_handshake_that_starts_during_the_retention_query_is_kept() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+
+    // The RIB answers the first retention query only once released.
+    let (asked_tx, asked) = oneshot::channel::<()>();
+    let (answer, answered) = oneshot::channel::<()>();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut rib_rx = std::mem::replace(&mut h.rib_rx, rx);
+    tokio::spawn(async move {
+        let (mut asked_tx, mut answered) = (Some(asked_tx), Some(answered));
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::QueryPeerRetention { reply, .. } = update {
+                if let (Some(asked_tx), Some(answered)) = (asked_tx.take(), answered.take()) {
+                    let _ = asked_tx.send(());
+                    let _ = answered.await;
+                }
+                let _ = reply.send(PeerRetention {
+                    stale_routes: 0,
+                    next_deadline: None,
+                });
+            }
+        }
+    });
+
+    let state = Arc::new(std::sync::Mutex::new(SessionState::Active));
+    let shut_down = Arc::new(AtomicU32::new(0));
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let (session_state, session_shut_down) = (Arc::clone(&state), Arc::clone(&shut_down));
+    let task = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            let now = *session_state.lock().unwrap();
+            let (reply, spared) = match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(IpAddr::V6(ll(2)), now));
+                    continue;
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                    (reply, now == SessionState::Established)
+                }
+                PeerCommand::ShutdownUnlessConnected { reply } => (
+                    reply,
+                    matches!(
+                        now,
+                        SessionState::OpenSent
+                            | SessionState::OpenConfirm
+                            | SessionState::Established
+                    ),
+                ),
+                _ => continue,
+            };
+            let _ = reply.send(!spared);
+            if !spared {
+                session_shut_down.fetch_add(1, Ordering::SeqCst);
+                break;
+            }
+        }
+        Ok(())
+    });
+    h.replace_session(&key, PeerHandle::from_parts(tx, task));
+
+    // Mutation-red: the Established-only shutdown closes the handshake.
+    let handshake = async {
+        asked.await.unwrap();
+        *state.lock().unwrap() = SessionState::OpenSent;
+        answer.send(()).unwrap();
+    };
+    tokio::join!(h.bind("swp1", None), handshake);
+    assert_eq!(shut_down.load(Ordering::SeqCst), 0, "the handshake is kept");
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
 }
 
 /// Without retained routes the address is released as soon as the session

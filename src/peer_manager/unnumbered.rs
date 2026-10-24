@@ -326,7 +326,14 @@ impl PeerManager {
     /// gone). An Established session is kept and reported to discovery. An
     /// unanswered command keeps the binding and retries: it may still run
     /// later, and the retry's command then finds the session gone.
-    async fn shut_down_unless_established(&mut self, name: &str, key: &PeerKey) -> bool {
+    /// `spare_handshake` also keeps an `OpenSent` or `OpenConfirm` session,
+    /// decided in the same session turn; its outcome reports itself.
+    async fn shut_down_unless_established(
+        &mut self,
+        name: &str,
+        key: &PeerKey,
+        spare_handshake: bool,
+    ) -> bool {
         let Some(managed) = self.peers.get(key) else {
             return true;
         };
@@ -340,16 +347,26 @@ impl PeerManager {
             self.arm_unnumbered_retry();
             return false;
         }
-        match managed
-            .handle()
-            .shutdown_unless_established_timeout(BOUND_STATE_QUERY_TIMEOUT)
-            .await
-        {
+        let handle = managed.handle();
+        let outcome = if spare_handshake {
+            handle
+                .shutdown_unless_connected_timeout(BOUND_STATE_QUERY_TIMEOUT)
+                .await
+        } else {
+            handle
+                .shutdown_unless_established_timeout(BOUND_STATE_QUERY_TIMEOUT)
+                .await
+        };
+        match outcome {
             Ok(true)
             | Err(
                 rustbgpd_transport::PeerCommandError::SessionExited
                 | rustbgpd_transport::PeerCommandError::ReplyDropped,
             ) => true,
+            Ok(false) if spare_handshake => {
+                info!(interface = %name, peer = %key, "unnumbered: bound session is connected; keeping it");
+                false
+            }
             Ok(false) => {
                 info!(interface = %name, peer = %key, "unnumbered: bound session became Established; keeping it");
                 if let Some(unnumbered) = self.unnumbered.as_mut() {
@@ -644,7 +661,7 @@ impl PeerManager {
             if self.retained_until_next_check(name, &key).await {
                 return;
             }
-            if !self.shut_down_unless_established(name, &key).await {
+            if !self.shut_down_unless_established(name, &key, true).await {
                 return;
             }
             // The session may have established and failed with GR between
@@ -778,7 +795,7 @@ impl PeerManager {
         reason: &str,
         unless_established: bool,
     ) -> bool {
-        if unless_established && !self.shut_down_unless_established(name, &key).await {
+        if unless_established && !self.shut_down_unless_established(name, &key, false).await {
             return false;
         }
         info!(interface = %name, peer = %key, reason, "unnumbered: ending the bound session");
