@@ -19,7 +19,10 @@ on:
     paths-ignore:
       - "**/*.md"
       - "docs/**"
+  # A draft runs no labs (`classify_changes` reports `run_labs=false`), so
+  # marking it ready reruns the workflow on the same head with the labs.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -49,6 +52,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
         run: python3 scripts/classify_heavy_ci_paths.py
 
   # This job gates exactly one scenario, m43. Its host is a third party:

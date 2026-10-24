@@ -133,11 +133,17 @@ def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
 
 
 def classify_event(
-    event: str, base: str, head: str, repo: Path = ROOT
+    event: str, base: str, head: str, repo: Path = ROOT, draft: bool = False
 ) -> tuple[bool, str]:
-    """Only pull requests may take the narrow lab-independent skip path."""
+    """Only pull requests may take the narrow lab-independent skip path.
+
+    A draft pull request skips the labs whatever it changes: they run once it
+    is marked ready for review (a ``ready_for_review`` run on the same head).
+    """
     if event != PULL_REQUEST:
         return True, f"{event or 'unknown'} event"
+    if draft:
+        return False, "draft pull request; labs run when it is marked ready"
     return classify_paths(changed_paths(repo, base, head))
 
 
@@ -147,6 +153,8 @@ def main() -> int:
             os.environ.get("EVENT_NAME", ""),
             os.environ.get("BASE_SHA", ""),
             os.environ.get("HEAD_SHA", ""),
+            # Anything but an explicit "true" runs the labs.
+            draft=os.environ.get("PR_DRAFT") == "true",
         )
         output = os.environ.get("GITHUB_OUTPUT")
         if not output:

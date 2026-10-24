@@ -207,6 +207,14 @@ learned endpoint is installed in that inventory.
   first interface-only neighbor fail with an error that names `CAP_NET_RAW`.
   The daemon never degrades silently to inbound-only discovery. The security
   reference and the example systemd units are updated to match.
+
+  Implementation note (2026-10-23): reload and config transactions add and
+  remove interface-only neighbors live. The check runs in the peer manager
+  before any effect, for a SIGHUP generation and a transaction plan alike,
+  when a candidate introduces the first interface-only neighbor; it also
+  requires the link monitor. Deleting the last one stops the discovery actor
+  and closes its raw sockets. `[global.unnumbered]` remains
+  restart-required.
 - **Trust boundary.** The trust boundary is the link, as for any directly
   connected session. An RA or a SYN only proposes a TCP endpoint on that one
   interface, and the session still has to pass OPEN validation. Two hop-limit
@@ -370,6 +378,36 @@ unbound neighbor's reservation only when the neighbor rebinds or its link is
 confirmed down, not when its retained GR or LLGR state retires. Until that
 release lands, a peer that goes silent on a link that stays up keeps its last
 address reserved, and the neighbor keeps redialing it.
+
+Implementation note (2026-10-23): the release on retirement is now
+implemented. When an interface-only neighbor has no binding, its link is up
+and its session has no connection past TCP (Idle, Connect or Active; a session
+in OpenSent or OpenConfirm, such as an inbound connection learned without an
+RA, is a live router and is kept), the peer manager asks the RIB whether the
+neighbor still retains GR or LLGR stale routes. While it does, the peer stays
+and keeps redialing its last address, which stays reserved; the check repeats
+at the RIB's next GR or LLGR timer, which sweeps the routes or promotes them
+to LLGR. Once nothing is retained, the peer is removed with reason
+`binding_expired`, which ends the redial and releases the address to any other
+neighbor. A session that ends without retention, including one that never
+established, releases the address as soon as the binding is gone. The
+retention is read again after the conditional shutdown, and a session ended by
+a late retirement with no binding left is treated the same way: either may
+follow a GR teardown, so the stopped peer keeps the address until that
+retention ends, unless a new session, such as an inbound reconnect, is
+installed for it first. A binding elsewhere replaces the stopped peer, purging
+that retention, but a staged transaction defers the replacement, so a binding
+that expires before the stage clears leaves the peer to its retention. This
+replaces the first implementation's rebinding of an exited session at its last
+endpoint when discovery had no binding: such a session's address now waits
+only on its retention.
+
+Implementation note (2026-10-23): deleting an interface-only neighbor by
+reload or config transaction ends its session, purges its retained routes and
+releases its RIB identity, and with it any reservation. The static admission
+check covers a static link-local neighbor added by reload or transaction
+against bound and reserved learned endpoints, and refuses the whole change
+before any effect.
 
 That covers the common Clos shape, where each fabric link goes to a different
 switch with its own MAC. **Limitation:** parallel links to the same device

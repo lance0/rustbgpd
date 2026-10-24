@@ -241,13 +241,36 @@ fn retains_set_name<T>(
 }
 
 impl PeerManager {
-    /// Stage BFD resources before any generation effect and publish only after settlement.
+    /// Apply one reload generation, then end the hold its preflight took
+    /// ([`PeerManager::preflight_reload_generation`]).
     pub(super) async fn apply_reload_generation(
         &mut self,
         candidate: Config,
         actions: Vec<ReloadPeerAction>,
         datasets: PreparedDatasetGeneration,
     ) -> ReloadGenerationOutcome {
+        let outcome =
+            Box::pin(self.apply_held_reload_generation(candidate, actions, datasets)).await;
+        // Applied static neighbors are now in the peer table; a refused
+        // generation adds none. Either way the preflight's hold ends here.
+        self.release_generation_hold();
+        outcome
+    }
+
+    /// Stage BFD resources before any generation effect and publish only after settlement.
+    async fn apply_held_reload_generation(
+        &mut self,
+        candidate: Config,
+        actions: Vec<ReloadPeerAction>,
+        datasets: PreparedDatasetGeneration,
+    ) -> ReloadGenerationOutcome {
+        // ADR-0142: refused before any effect, naming CAP_NET_RAW or the
+        // duplicate address. The reload route ran the same check before its
+        // own effects; learned admission has stayed closed to the
+        // candidate's static addresses since.
+        if let Err(error) = self.unnumbered_preflight(&candidate) {
+            return ReloadGenerationOutcome::RejectedNoEffect(error);
+        }
         let prepared = match self.prepare_bfd_reload(&candidate) {
             Ok(prepared) => prepared,
             Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),
@@ -739,6 +762,10 @@ impl PeerManager {
                 None if managed.is_dynamic => {
                     Self::policy_resolution_neighbor(candidate, peer.address, managed)
                 }
+                // ADR-0142: the candidate deletes or moves the interface-only
+                // neighbor that owns this bound peer. The port reconcile ends
+                // its session once the generation commits.
+                None if self.unnumbered_owner_of(peer).is_some() => continue,
                 None => {
                     return Err(format!(
                         "static peer {peer} has no neighbor record in the candidate and no removal action"

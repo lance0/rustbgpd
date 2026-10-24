@@ -85,6 +85,12 @@ pub(super) struct BfdCoupling {
     /// withhold is level-triggered without `PeerManager` caching a (possibly
     /// stale) BFD state.
     pub(super) held_down: HashSet<IpAddr>,
+    /// Members registered by an interface-only neighbor's binding (ADR-0142),
+    /// not derived from configuration: a reload carries them over, and the
+    /// binding, not the scope refresh, moves them.
+    pub(super) bound: HashSet<IpAddr>,
+    /// The bound members a staged reload settles on, applied with it.
+    pending_bound: Option<HashSet<IpAddr>>,
 }
 
 impl PeerManager {
@@ -127,6 +133,8 @@ impl PeerManager {
             configured,
             disabled: HashSet::new(),
             held_down: HashSet::new(),
+            bound: HashSet::new(),
+            pending_bound: None,
         });
         self
     }
@@ -144,12 +152,18 @@ impl PeerManager {
         &mut self,
         candidate: &crate::config::Config,
     ) -> Result<Option<PreparedRuntime>, String> {
+        let bound = self.rebuild_bound_bfd_sessions(candidate)?;
         let Some(coupling) = self.bfd_coupling.as_mut() else {
             return Ok(None);
         };
+        let pending_bound = bound.iter().map(|params| params.peer).collect();
         let mut desired =
             BfdRuntimeConfig::from_reload(candidate, &self.current_config, &coupling.configured)
                 .map_err(|error| error.to_string())?;
+        // A binding's session is not in configuration: every live binding's
+        // is rebuilt from the candidate, so enabling, disabling or editing
+        // its BFD applies, and an unchanged one keeps its revision.
+        desired.sessions.extend(bound);
         for params in &mut desired.sessions {
             if let Some(old) = coupling.configured.get(&params.peer) {
                 params.revision = old.revision;
@@ -179,9 +193,33 @@ impl PeerManager {
                 .map(|params| (params.peer, params))
                 .collect(),
         );
+        // Staged only once preparation succeeds: a rejected one stages nothing.
+        coupling.pending_bound = Some(pending_bound);
         coupling.reloading = true;
         coupling.rollback_lookup = false;
         Ok(prepared)
+    }
+
+    /// Every live binding's session as `candidate` configures it, for the
+    /// binding's endpoint; a neighbor that runs no BFD there has none.
+    fn rebuild_bound_bfd_sessions(
+        &self,
+        candidate: &crate::config::Config,
+    ) -> Result<Vec<BfdSessionParams>, String> {
+        let mut sessions = Vec::new();
+        for (interface, address, ifindex) in self.unnumbered_bindings() {
+            let Some(neighbor) = candidate.neighbors.interface_only_on(&interface) else {
+                continue;
+            };
+            if let Some(params) = crate::bfd_runtime::bound_session_params(
+                candidate, neighbor, &interface, address, ifindex,
+            )
+            .map_err(|error| error.to_string())?
+            {
+                sessions.push(params);
+            }
+        }
+        Ok(sessions)
     }
 
     /// Restore strict lookup before rollback re-adds peers, but keep publication suspended.
@@ -415,6 +453,7 @@ impl PeerManager {
     pub(super) fn abort_bfd_reload(&mut self) {
         if let Some(coupling) = self.bfd_coupling.as_mut() {
             coupling.pending = None;
+            coupling.pending_bound = None;
             coupling.reloading = false;
             coupling.rollback_lookup = false;
             coupling.held_down.retain(|peer| {
@@ -479,12 +518,25 @@ impl PeerManager {
             })
             .collect();
         coupling.configured = configured;
+        if let Some(bound) = coupling.pending_bound.take() {
+            coupling.bound = bound;
+        }
+        let previously_disabled = std::mem::take(&mut coupling.disabled);
         coupling.disabled = self
             .peers
             .iter()
             .filter(|(_, managed)| !managed.enabled)
             .map(|(key, _)| key.address)
             .collect();
+        // A member with no peer keeps its state: a membership change that
+        // configuration did not make (a binding, a scope move) must not
+        // restart a session that a runtime deletion drained.
+        coupling
+            .disabled
+            .extend(previously_disabled.into_iter().filter(|peer| {
+                coupling.configured.contains_key(peer)
+                    && !self.peers.keys().any(|key| key.address == *peer)
+            }));
         coupling.reloading = false;
         coupling.rollback_lookup = false;
         let desired = BfdRuntimeConfig {
@@ -727,6 +779,9 @@ impl PeerManager {
         let updates: Vec<(IpAddr, u32)> = coupling
             .configured
             .values()
+            // A binding's session follows the binding: a recreated interface
+            // retires and rebinds it, so this path never moves it as well.
+            .filter(|params| !coupling.bound.contains(&params.peer))
             .filter_map(|params| {
                 let scope = params.scope_id?;
                 let key = self.unique_peer_key_for_address(params.peer)?;
@@ -818,6 +873,64 @@ impl PeerManager {
             self.link_check.bfd_unsettled = moving;
             self.schedule_bfd_scope_retry();
         }
+    }
+
+    /// Register (`Some`) or remove (`None`) the BFD session of an
+    /// interface-only neighbor's binding at `peer`, under a fresh revision,
+    /// through the acknowledged replacement path a reload and a scope move
+    /// use: the actor confirms the new set, and a strict peer that is not Up
+    /// on it is held. Members left by bindings that no longer exist are
+    /// pruned on the way. A no-op when nothing is registered or removed.
+    pub(super) async fn set_bound_bfd_session(
+        &mut self,
+        peer: IpAddr,
+        params: Option<BfdSessionParams>,
+    ) -> Result<(), String> {
+        let live = self.unnumbered_bound_addresses();
+        let Some(coupling) = self.bfd_coupling.as_mut() else {
+            return if params.is_some() {
+                Err("BFD is not running".into())
+            } else {
+                Ok(())
+            };
+        };
+        let mut bound = coupling.bound.clone();
+        bound.retain(|member| *member == peer || live.contains(member));
+        if params.is_none() && !bound.contains(&peer) && bound.len() == coupling.bound.len() {
+            return Ok(());
+        }
+        if coupling.reloading {
+            return Err("a BFD membership change is in progress".into());
+        }
+        let mut configured = coupling.configured.clone();
+        configured.retain(|member, _| !coupling.bound.contains(member) || bound.contains(member));
+        if let Some(mut params) = params {
+            params.revision = coupling.next_revision;
+            configured.insert(peer, params);
+            bound.insert(peer);
+        } else {
+            configured.remove(&peer);
+            bound.remove(&peer);
+        }
+        let desired = BfdRuntimeConfig {
+            sessions: configured.values().cloned().collect(),
+        };
+        let prepared = prepare_reload(&desired, &coupling.opened)
+            .map_err(|error| format!("BFD socket preflight: {error}"))?;
+        coupling.next_revision = coupling
+            .next_revision
+            .checked_add(1)
+            .ok_or("BFD session revision exhausted")?;
+        coupling.bound = bound;
+        coupling.pending_bound = None;
+        coupling.prior_held.clone_from(&coupling.held_down);
+        coupling
+            .prior_initially_withheld
+            .clone_from(&coupling.initially_withheld);
+        coupling.pending = Some(configured);
+        coupling.reloading = true;
+        coupling.rollback_lookup = false;
+        self.commit_bfd_reload(prepared).await
     }
 
     fn schedule_bfd_scope_retry(&mut self) {
@@ -918,7 +1031,13 @@ impl PeerManager {
             // here makes removal the last word. A merely disabled peer
             // still exists (`peer_keys_for_address` non-empty) and keeps
             // its series.
-            if self.peer_keys_for_address(peer).is_empty() {
+            // A binding registers its session before its peer exists; the
+            // registration's own acknowledgement is not a deletion.
+            let awaiting_binding = self
+                .bfd_coupling
+                .as_ref()
+                .is_some_and(|c| c.bound.contains(&peer));
+            if self.peer_keys_for_address(peer).is_empty() && !awaiting_binding {
                 // The session's own value: scoped for a link-local neighbor.
                 let label = self
                     .bfd_coupling
