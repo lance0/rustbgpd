@@ -712,9 +712,17 @@ impl PeerManager {
         // every collector sets `on_identity_conflict = "exclude"`, admitted
         // with its session left out of BMP. The neighbor admitted first
         // keeps its session and its monitoring.
+        // Only a link-local address can be shared, so a numbered add never
+        // searches the table.
+        let sharing = self.peers_sharing_address(&peer_key);
+        let bmp_policy = if sharing.is_empty() {
+            None
+        } else {
+            self.bmp_identity_conflict()
+        };
         let bmp_excluded = match (
-            self.bmp_identity_conflict(),
-            self.bmp_identity_holder_of(&peer_key),
+            bmp_policy,
+            bmp_policy.and_then(|_| self.bmp_identity_holder_of(&sharing)),
         ) {
             (Some(crate::config::BmpIdentityConflict::Refuse), Some(holder)) => {
                 self.metrics.record_bmp_identity_conflict(false);
@@ -786,6 +794,17 @@ impl PeerManager {
                     None,
                 )
             };
+
+        // Whatever BMP does, state keyed by the bare address (BFD, the TCP
+        // MD5/TCP-AO and GTSM listener policy, a per-neighbor log level)
+        // cannot serve two neighbors at one address: refuse a learned or
+        // runtime neighbor that would put such a feature on a shared address.
+        if let Some(reason) = self.shared_address_feature_conflict(
+            &peer_key,
+            next_config.as_ref().unwrap_or(&self.current_config),
+        ) {
+            return Err(PeerLifecycleError::Invalid(reason));
+        }
 
         transport.neighbor_counters = self.neighbor_counters_for(&peer_key);
         transport.dampening_admission = self

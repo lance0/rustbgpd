@@ -427,6 +427,44 @@ async fn learned_and_static_neighbors_share_an_address_without_bmp() {
     );
 }
 
+/// A static link-local neighbor with BFD (keyed by the bare address).
+const STATIC_BFD_NEIGHBOR: &str = "[[bfd_profiles]]\nname = \"fast\"\n\
+    [[neighbors]]\naddress = \"fe80::2\"\ninterface = \"eth9\"\nremote_asn = 65002\n\
+    bfd = { profile = \"fast\" }\n";
+
+/// Whatever BMP does, a neighbor whose BFD session is keyed by its bare
+/// address cannot share it: an interface-only neighbor learning that
+/// address is refused, with no retry storm, as is the static neighbor
+/// added at runtime beside a learned one.
+#[tokio::test]
+async fn a_shared_address_refuses_an_address_keyed_feature_without_bmp() {
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], STATIC_BFD_NEIGHBOR);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [], "the learned address is refused");
+    assert!(
+        h.mgr.unnumbered_retry_at().is_none(),
+        "a refusal is not retried"
+    );
+
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], STATIC_BFD_NEIGHBOR);
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    let mut static_peer = make_config(IpAddr::V6(ll(3)), 65002);
+    static_peer.interface = Some("eth9".into());
+    static_peer.scope_id = Some(9);
+    // Move the configured BFD neighbor to the learned fe80::3, as a
+    // runtime add would record it.
+    h.mgr
+        .current_config
+        .neighbors
+        .iter_mut()
+        .find(|neighbor| neighbor.interface.as_deref() == Some("eth9"))
+        .unwrap()
+        .address = ll(3).to_string();
+    let error = h.mgr.add_peer(static_peer, false).await.unwrap_err();
+    assert!(error.to_string().contains("BFD"), "{error}");
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+}
+
 /// Two BMP collectors, both set to exclude identity conflicts.
 const BMP_EXCLUDING_COLLECTORS: &str = "[bmp]\n\
     [[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\non_identity_conflict = \"exclude\"\n\

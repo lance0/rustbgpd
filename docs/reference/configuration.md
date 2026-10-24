@@ -1463,9 +1463,13 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   When every collector sets `on_identity_conflict = "exclude"`, the link
   establishes instead and reports nothing to BMP (see
   [identity conflicts](#identity-conflicts-on_identity_conflict)). After a
-  restart, which link is admitted first depends on timing. A refusal is not
-  sticky: once the holder's peer goes, the refused link is admitted on its
-  next binding. Collectors count while disconnected, and `[bmp]` takes a
+  restart, which link is admitted first depends on timing. Whether or not BMP
+  is configured, a learned address is also refused (`shared_address_feature`)
+  when a neighbor at that address uses BFD, TCP MD5, TCP-AO, GTSM or a
+  per-neighbor `log_level`, whose state is keyed by the bare address, and so
+  is a static neighbor added at runtime with one of them beside a learned
+  address. A refusal is not sticky: once the holder's peer goes, the refused
+  link is admitted on its next binding. Collectors count while disconnected, and `[bmp]` takes a
   restart to change, so a running session is never refused later.
 - **Restart-required.** Adding, removing or editing an interface-only
   neighbor, `[global.unnumbered]`, or a peer-group setting that changes the

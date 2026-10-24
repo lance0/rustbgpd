@@ -1571,15 +1571,67 @@ impl PeerManager {
         self.current_config.bmp_identity_conflict()
     }
 
-    /// Another BMP-monitored neighbor holding `peer`'s address, by label: a
-    /// managed peer that is not itself left out of BMP. Configured collectors
-    /// see every such peer, so the two would be indistinguishable.
-    pub(super) fn bmp_identity_holder_of(&self, peer: &PeerKey) -> Option<String> {
+    /// The other managed neighbors at `peer`'s address. Only a link-local
+    /// address can be shared, so a numbered peer never searches the table.
+    pub(super) fn peers_sharing_address(&self, peer: &PeerKey) -> Vec<PeerKey> {
+        if !matches!(peer.address, IpAddr::V6(v6) if v6.is_unicast_link_local()) {
+            return Vec::new();
+        }
         self.peers
             .keys()
-            .find(|key| {
-                key.address == peer.address && *key != peer && !self.bmp_excluded.contains(*key)
-            })
+            .filter(|key| key.address == peer.address && *key != peer)
+            .cloned()
+            .collect()
+    }
+
+    /// Why a neighbor at `peer` cannot share its link-local address with the
+    /// neighbors the table holds or `view` configures there: a feature keyed
+    /// by the bare address (BFD, TCP MD5, TCP-AO, a differing GTSM policy or
+    /// log level). `None` when it can, or when no other neighbor is there.
+    pub(super) fn shared_address_feature_conflict(
+        &self,
+        peer: &PeerKey,
+        view: &crate::config::Config,
+    ) -> Option<String> {
+        if !matches!(peer.address, IpAddr::V6(v6) if v6.is_unicast_link_local()) {
+            return None;
+        }
+        let mut keys = self.peers_sharing_address(peer);
+        let address = peer.address.to_string();
+        for neighbor in &view.neighbors {
+            if neighbor.address == address {
+                let key = PeerKey::new(peer.address, neighbor.interface.clone());
+                if key != *peer && !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+        if keys.is_empty() {
+            return None;
+        }
+        let records: Vec<_> = keys
+            .iter()
+            .chain(std::iter::once(peer))
+            .filter_map(|key| view.neighbor_record(key))
+            .collect();
+        if records.len() < 2 {
+            return None;
+        }
+        let records: Vec<&crate::config::Neighbor> =
+            records.iter().map(std::borrow::Cow::as_ref).collect();
+        view.validate_shared_address_features(&records)
+            .err()
+            .map(|error| error.to_string())
+    }
+
+    /// Of the neighbors `sharing` an address, one that BMP monitors, by
+    /// label: a managed peer not itself left out of BMP. Configured
+    /// collectors see every such peer, so the two would be
+    /// indistinguishable.
+    pub(super) fn bmp_identity_holder_of(&self, sharing: &[PeerKey]) -> Option<String> {
+        sharing
+            .iter()
+            .find(|key| !self.bmp_excluded.contains(*key))
             .map(PeerKey::label)
     }
 

@@ -646,8 +646,8 @@ impl PeerManager {
         if self.defer_unnumbered_while_staged() {
             return;
         }
-        if let Some(holder) = self.bmp_identity_holder(endpoint.address) {
-            self.refuse_learned_address(name, endpoint.address, &holder);
+        if let Some((reason, detail)) = self.learned_address_refusal(name, endpoint.address) {
+            self.refuse_learned_address(name, endpoint.address, reason, &detail);
             return;
         }
         self.port_mut(name).refused = None;
@@ -661,18 +661,42 @@ impl PeerManager {
 
     /// Refuse a learned address another BMP-monitored neighbor holds,
     /// logging and counting it once per address.
-    fn refuse_learned_address(&mut self, name: &str, address: Ipv6Addr, holder: &str) {
+    fn refuse_learned_address(
+        &mut self,
+        name: &str,
+        address: Ipv6Addr,
+        reason: &'static str,
+        detail: &str,
+    ) {
         let port = self.port_mut(name);
         if port.refused == Some(address) {
             return;
         }
         port.refused = Some(address);
-        self.metrics.record_bmp_identity_conflict(false);
+        if reason == "bmp_identity_conflict" {
+            self.metrics.record_bmp_identity_conflict(false);
+        }
         warn!(
-            interface = %name, %address, %holder,
-            reason = "bmp_identity_conflict",
-            "unnumbered: refusing a learned address another BMP-monitored neighbor holds"
+            interface = %name, %address, %detail, reason,
+            "unnumbered: refusing a learned address another neighbor holds"
         );
+    }
+
+    /// Why the interface-only neighbor on `name` may not bind `address`:
+    /// a BMP-monitored holder while a collector refuses identity conflicts
+    /// (`bmp_identity_conflict`), or a neighbor there using a feature keyed
+    /// by the bare address (`shared_address_feature`).
+    fn learned_address_refusal(
+        &self,
+        name: &str,
+        address: Ipv6Addr,
+    ) -> Option<(&'static str, String)> {
+        if let Some(holder) = self.bmp_identity_holder(address) {
+            return Some(("bmp_identity_conflict", format!("held by {holder}")));
+        }
+        let key = PeerKey::new(IpAddr::V6(address), Some(name.to_owned()));
+        self.shared_address_feature_conflict(&key, &self.current_config)
+            .map(|reason| ("shared_address_feature", reason))
     }
 
     /// End the bound peer's session and clear the binding, keeping the
@@ -757,14 +781,15 @@ impl PeerManager {
     /// Another BMP-monitored neighbor holds `address`: log the refusal and
     /// count it.
     fn inbound_address_held(&self, name: &str, address: Ipv6Addr) -> bool {
-        let Some(holder) = self.bmp_identity_holder(address) else {
+        let Some((reason, detail)) = self.learned_address_refusal(name, address) else {
             return false;
         };
-        self.metrics.record_bmp_identity_conflict(false);
+        if reason == "bmp_identity_conflict" {
+            self.metrics.record_bmp_identity_conflict(false);
+        }
         warn!(
-            interface = %name, %address, %holder,
-            reason = "bmp_identity_conflict",
-            "unnumbered: refusing an inbound address another BMP-monitored neighbor holds"
+            interface = %name, %address, %detail, reason,
+            "unnumbered: refusing an inbound address another neighbor holds"
         );
         self.refuse_inbound();
         true
