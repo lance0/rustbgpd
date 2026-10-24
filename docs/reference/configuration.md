@@ -1462,7 +1462,9 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 - **Log level.** `log_level`, on the neighbor or its peer group, applies to
   the session at every address learned on the interface: its filter matches
   the session span's `peer=interface:<name>` field, not the learned address.
-  It needs an interface name of ASCII letters, digits, `.`, `-` and `_`.
+  It needs an interface name of ASCII letters, digits, `.`, `-` and `_`. As
+  for every neighbor, an edit reaches sessions that start or rebind after the
+  reload, not a session already running.
 - **Rejected** on an interface-only neighbor, directly or through its peer
   group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), `bfd.multihop`,
   `fast_external_failover = false`, `conditional_advertisements`, and
