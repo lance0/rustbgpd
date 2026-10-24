@@ -2131,3 +2131,73 @@ async fn a_strict_peer_is_held_while_its_bfd_scope_move_awaits_the_actor() {
         .expect("the Up acknowledgement admits BGP");
     assert!(!mgr.bfd_withholding(&peer));
 }
+
+/// Without a link monitor nothing reports a recreated interface, so a
+/// configured link-local BFD session is re-resolved by name on a timer,
+/// through the same acknowledged refresh. A strict peer held on the old
+/// index is released once BFD is Up on the new one.
+#[tokio::test(start_paused = true)]
+async fn without_a_link_monitor_a_strict_link_local_peer_follows_its_interface() {
+    let peer: IpAddr = "fe80::2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let mut mgr = test_peer_manager();
+    // The kernel resolves `lo`; the session still points at a gone index.
+    let key = PeerKey::new(peer, Some("lo".to_owned()));
+    insert_test_managed_peer_for_key(
+        &mut mgr,
+        &key,
+        65002,
+        fake_bfd_peer_handle(counters.clone()),
+        false,
+    );
+    let stale = 4242;
+    let transport = &mut mgr.peers.get_mut(&key).unwrap().transport_config;
+    transport.remote_addr = format!("[fe80::2%{stale}]:179").parse().unwrap();
+    transport.peer_interface = Some("lo".to_owned());
+    transport.peer_scope_id = Some(stale);
+    let mut params = bfd_params(IpAddr::V4("192.0.2.9".parse().unwrap()), true);
+    params.peer = peer;
+    params.scope_id = Some(stale);
+    params.destination = crate::bfd_runtime::bfd_destination(peer, Some(stale), false).unwrap();
+    params.revision = 3;
+    let (desired_tx, _desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let (reload_tx, reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    let mut mgr = mgr
+        .with_bfd_coupling(desired_tx, state_rx, HashMap::from([(peer, params)]))
+        .with_bfd_reload(reload_tx);
+    mgr.mark_bfd_withheld(peer);
+    let lo = nix::net::if_::if_nametoindex("lo").unwrap();
+    let actor = answer_reload(reload_rx, rustbgpd_bfd::SessionState::Down);
+
+    // Mutation-red: without the poll nothing ever re-resolves the scope.
+    let due = mgr
+        .bfd_scope_deadline()
+        .expect("re-resolved on a timer without a monitor");
+    tokio::time::sleep_until(due).await;
+    mgr.bfd_scope_retry_due();
+    mgr.run_due_bfd_scope_refresh().await;
+    let desired = actor.await.unwrap().expect("the session was replaced");
+    assert_eq!(desired.sessions[0].scope_id, Some(lo));
+    assert!(mgr.bfd_withholding(&peer), "held until Up on the new index");
+
+    let mut up = up_ack(peer);
+    up.revision = mgr.bfd_coupling.as_ref().unwrap().configured[&peer].revision;
+    up.resync = false;
+    mgr.handle_bfd_state_change(up).await;
+    tokio::time::timeout(Duration::from_secs(2), wait_counter(&counters.start, 1))
+        .await
+        .expect("BFD Up on the new index admits BGP");
+    assert!(!mgr.bfd_withholding(&peer));
+}
+
+/// The link monitor reports changes itself: no timer runs while it does.
+#[tokio::test]
+async fn a_link_monitor_needs_no_bfd_scope_poll() {
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mgr, _desired_rx, _reload_rx) =
+        link_local_bfd_mgr("eth1", false, fake_bfd_peer_handle(counters));
+    let (_monitor, links) = watch::channel(Arc::new(rustbgpd_transport::LinkSnapshot::default()));
+    let mut mgr = mgr.with_link_failover(links);
+    assert_eq!(mgr.bfd_scope_deadline(), None);
+}

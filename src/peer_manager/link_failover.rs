@@ -24,6 +24,11 @@ use super::{ManagedPeerState, PeerManager};
 const LINK_CHECK_RETRY: Duration = Duration::from_millis(100);
 /// How often an unacknowledged link-local BFD scope move is re-attempted.
 pub(super) const BFD_SCOPE_RETRY: Duration = Duration::from_secs(1);
+/// How often link-local BFD scopes are re-resolved by interface name when no
+/// link monitor reports changes.
+// ponytail: a fixed poll; a recreated interface is followed within this
+// bound instead of at once, which the monitor path does on Linux.
+pub(super) const BFD_SCOPE_POLL: Duration = Duration::from_secs(5);
 
 /// The monitor's snapshot feed and the sessions whose check did not fit their
 /// mailbox: one entry per session id, so at most one per live session.
@@ -91,6 +96,26 @@ impl PeerManager {
         if std::mem::take(&mut self.link_check.bfd_refresh_due) {
             self.refresh_bfd_link_local_scopes().await;
         }
+    }
+
+    /// When the BFD scope refresh is next due on a timer: an unacknowledged
+    /// move's retry, or, with no link monitor to report a recreated interface
+    /// (it could not open, or has exited), a periodic re-resolution by name
+    /// while any configured BFD session is link-local. Both run the same
+    /// acknowledged refresh.
+    pub(super) fn bfd_scope_deadline(&mut self) -> Option<tokio::time::Instant> {
+        if self.link_check.bfd_retry_at.is_none()
+            && self.link_check.changes.is_none()
+            && self.bfd_coupling.as_ref().is_some_and(|coupling| {
+                coupling
+                    .configured
+                    .values()
+                    .any(|params| params.scope_id.is_some())
+            })
+        {
+            self.link_check.bfd_retry_at = Some(tokio::time::Instant::now() + BFD_SCOPE_POLL);
+        }
+        self.link_check.bfd_retry_at
     }
 
     /// The unacknowledged BFD scope move is due for another attempt.
