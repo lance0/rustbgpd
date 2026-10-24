@@ -115,6 +115,9 @@ mod unnumbered {
         pub(super) fn unnumbered_stopped(&self, _: &PeerKey) -> bool {
             false
         }
+        pub(super) fn unnumbered_presence_reason(&self, _: &PeerKey) -> Option<&'static str> {
+            None
+        }
         pub(super) fn unnumbered_bound_addresses(&self) -> std::collections::HashSet<IpAddr> {
             std::collections::HashSet::new()
         }

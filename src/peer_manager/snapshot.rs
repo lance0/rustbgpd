@@ -622,7 +622,7 @@ impl PeerManager {
             self.current_config.rfc8212_posture().policy_effective,
         );
         self.metrics.set_rfc8212_missing_policy(
-            &peer.label(),
+            &self.peer_metric_label(peer),
             import == Rfc8212PolicyStatus::Missing,
             export == Rfc8212PolicyStatus::Missing,
         );
@@ -1109,7 +1109,7 @@ impl PeerManager {
             let state = match states.get(peer) {
                 Some(StateQueryOutcome::State(state)) => state,
                 Some(StateQueryOutcome::TimedOut) => {
-                    let peer_label = peer.label();
+                    let peer_label = self.peer_metric_label(peer);
                     self.metrics
                         .record_bmp_source_drop(&peer_label, "state_query_timeout");
                     warn!(
@@ -1170,7 +1170,8 @@ impl PeerManager {
                     tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
                     tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
                 };
-                self.metrics.record_bmp_source_drop(&peer.label(), reason);
+                self.metrics
+                    .record_bmp_source_drop(&self.peer_metric_label(peer), reason);
                 warn!(
                     peer = %peer_addr,
                     error = %e,
