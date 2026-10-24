@@ -20,3 +20,9 @@ docs/artifacts/
 docs/perf/artifacts/
 target/criterion/
 *.log
+
+# Python bytecode. A lab job that runs an oracle self-test before
+# `docker build` writes tests/interop/scripts/__pycache__/, which would
+# change the `COPY . .` digest and miss the primed workspace-build cache.
+# scripts/source-id.sh prunes the same directories.
+**/__pycache__/
