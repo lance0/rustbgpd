@@ -1865,19 +1865,18 @@ pub(crate) async fn finalize_sighup_authority(
         }
     }
 
-    // Per-peer `log_level` is a LIVE field (reload matrix): re-apply the
-    // tracing filter so level edits take effect without a restart. This is
-    // the single choke point every successful reload flows through, so it
-    // catches a log_level change regardless of which diff bucket carried it.
-    // Directives come from the operator's on-disk `desired` config (the
-    // live intent for this live field); the telemetry layer rebuilds the
-    // full filter (RUST_LOG base + all per-peer directives), so the global
-    // base level always survives. Reapplying identical directives is a
-    // no-op; a malformed directive leaves the live filter untouched. A
-    // failure here leaves the adopted config and tracing projection divergent,
-    // so the owner fences rather than claiming acknowledged authority.
+    // Per-peer `log_level` is a LIVE field (reload matrix): replace the
+    // live per-peer levels so edits reach running sessions without a
+    // restart. This is the single choke point every successful reload flows
+    // through, so it catches a log_level change regardless of which diff
+    // bucket carried it. Levels come from the operator's on-disk `desired`
+    // config (the live intent for this live field); the `RUST_LOG` base is
+    // not touched. Reapplying identical levels is a no-op; a malformed level
+    // leaves the live levels untouched. A failure here leaves the adopted
+    // config and tracing projection divergent, so the owner fences rather
+    // than claiming acknowledged authority.
     if let Err(error) =
-        rustbgpd_telemetry::reload_per_peer_directives(&authority.desired.per_peer_log_directives())
+        rustbgpd_telemetry::reload_per_peer_levels(&authority.desired.per_peer_log_levels())
     {
         return fenced(
             "peer_tracing",

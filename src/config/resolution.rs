@@ -1503,22 +1503,13 @@ impl Config {
                 .collect()
         })
     }
-    /// Build `tracing` filter directives for per-peer log level overrides.
-    ///
-    /// Returns directives like `[peer{peer_addr=10.0.0.1}]=debug` that can
-    /// be appended to an `EnvFilter`. The span directive MUST be wrapped in
-    /// square brackets — `peer{...}=level` (no brackets) is rejected by the
-    /// `EnvFilter` directive parser (`error parsing level filter`), which
-    /// would make `init_logging` fail and abort daemon boot the moment any
-    /// neighbor set a `log_level`.
-    ///
-    /// An interface-only neighbor's directive matches its stable
-    /// `peer=interface:<name>` span label instead, so it applies to whatever
-    /// address the neighbor binds. The value is a regex; validation limits
-    /// those interface names to letters, digits, `.`, `-` and `_`, and `.`
-    /// is escaped here.
-    pub fn per_peer_log_directives(&self) -> Vec<String> {
-        let mut directives = Vec::new();
+    /// Per-peer log level overrides as `(peer key, level)` pairs for
+    /// `rustbgpd_telemetry`: the key a session's `peer` span carries. That
+    /// is an interface-only neighbor's stable `interface:<name>` label, so
+    /// the level follows every address it binds; otherwise the neighbor's
+    /// address in the canonical form the span records as `peer_addr`.
+    pub fn per_peer_log_levels(&self) -> Vec<(String, String)> {
+        let mut levels = Vec::new();
         for neighbor in self.neighbors.all() {
             let level = neighbor.log_level.as_deref().or_else(|| {
                 neighbor
@@ -1528,20 +1519,19 @@ impl Config {
                     .and_then(|g| g.log_level.as_deref())
             });
             let Some(level) = level else { continue };
-            if neighbor.is_interface_only() {
-                let label = rustbgpd_telemetry::interface_peer_label(
+            let key = if neighbor.is_interface_only() {
+                rustbgpd_telemetry::interface_peer_label(
                     neighbor.interface.as_deref().unwrap_or_default(),
-                );
-                let label = label.replace('.', r"\.");
-                directives.push(format!("[peer{{peer={label}}}]={level}"));
+                )
             } else {
-                directives.push(format!(
-                    "[peer{{peer_addr={addr}}}]={level}",
-                    addr = neighbor.address
-                ));
-            }
+                neighbor
+                    .address
+                    .parse::<std::net::IpAddr>()
+                    .map_or_else(|_| neighbor.address.clone(), |addr| addr.to_string())
+            };
+            levels.push((key, level.to_owned()));
         }
-        directives
+        levels
     }
 
     /// Resolver tables for the ADR-0113 outbound unicast prefix maxima.
