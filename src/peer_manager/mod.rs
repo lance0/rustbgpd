@@ -138,6 +138,18 @@ mod unnumbered {
             Ok(())
         }
         pub(super) fn release_generation_hold(&mut self) {}
+        pub(super) async fn apply_interface_only_policy_deltas(
+            &mut self,
+            _: &crate::config::Config,
+        ) -> Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String> {
+            Ok(Vec::new())
+        }
+        pub(super) async fn restore_interface_only_policies(
+            &mut self,
+            _: Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>,
+        ) -> bool {
+            true
+        }
         pub(super) fn add_interface_only_neighbor(
             &mut self,
             _: Box<rustbgpd_api::peer_types::PresenceAwareNeighborCreate>,

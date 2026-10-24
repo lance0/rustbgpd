@@ -4209,8 +4209,11 @@ async fn an_rpc_delete_reaps_the_neighbors_interface_labelled_series() {
         .collect();
     assert_eq!(
         reaped_in_rib,
-        [(Some("interface:swp1".to_string()), false)],
-        "the RIB reaps the bound neighbor's series under its interface label"
+        [
+            (Some("interface:swp1".to_string()), false),
+            (Some("interface:swp2".to_string()), false)
+        ],
+        "the RIB reaps each neighbor's series under its interface label"
     );
 }
 
@@ -4266,4 +4269,201 @@ async fn a_membership_rpc_moves_an_interface_only_neighbor_between_groups() {
         assert_eq!(h.mgr.peers[&swp2].hold_time, hold);
         assert_eq!(h.session(&swp1_key(2)), swp1_session, "swp1 kept");
     }
+}
+
+/// A group edit that changes a session knob and the export chain: a member
+/// that overrides the knob keeps its bind-time settings, so it is not
+/// rebound, and takes the new chain live on both peer-group paths, keeping
+/// its session.
+#[tokio::test]
+async fn a_combined_group_edit_applies_the_policy_to_a_member_that_does_not_rebind() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [peer_groups.fabric]\nhold_time = 30\n{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\nhold_time = 60\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let session = h.session(&key);
+    assert!(h.mgr.peers[&key].export_policy.is_none());
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.hold_time = Some(45);
+    definition.export_policy_chain = vec!["alt".to_string()];
+
+    // Mutation-red: without the live delta the member keeps no chain.
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition.clone()),
+                },
+                reply,
+            }),
+    )
+    .await;
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::Success),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    assert_eq!(h.session(&key), session, "not rebound");
+    assert!(
+        h.mgr.peers[&key].export_policy.is_some(),
+        "new chain installed"
+    );
+
+    // The legacy path: back to no chain, with another knob.
+    definition.hold_time = Some(50);
+    definition.export_policy_chain = Vec::new();
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(h.mgr.dispatch_command(PeerManagerCommand::SetPeerGroup {
+        name: "fabric".to_string(),
+        definition,
+        reply,
+    }))
+    .await;
+    outcome.await.unwrap().expect("applied");
+    h.reconcile().await;
+    assert_eq!(h.session(&key), session, "not rebound");
+    assert!(h.mgr.peers[&key].export_policy.is_none(), "chain removed");
+}
+
+/// Deleting a bound BFD neighbor removes its binding's registration before
+/// the address is released, so nothing at that address inherits the session
+/// or a strict hold.
+#[tokio::test]
+async fn deleting_a_bound_bfd_neighbor_removes_its_registration() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let peer = IpAddr::V6(ll(2));
+    assert!(h.mgr.bfd_withholding(&peer), "strict, held until Up");
+    let outcome = h
+        .owned_neighbor(
+            rustbgpd_api::peer_types::OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    // Mutation-red: the deletion only disables it; the registration stays.
+    let coupling = h.mgr.bfd_coupling.as_ref().unwrap();
+    assert!(
+        !coupling.configured.contains_key(&peer),
+        "registration removed"
+    );
+    assert!(!coupling.bound.contains(&peer));
+    assert!(!h.mgr.bfd_withholding(&peer), "no strict hold left");
+    let mut last = None;
+    while let Ok(applied) = bfd.applied.try_recv() {
+        last = Some(applied);
+    }
+    assert_eq!(
+        BfdSide::sessions(&last.expect("the removal was acknowledged")),
+        []
+    );
+}
+
+/// A binding lost before the delete left a `PeerDeleted { keep_series }`
+/// queued for the RIB. The removal queues a final deletion behind it under
+/// the interface label, so nothing that one emits outlives the neighbor.
+#[tokio::test]
+async fn an_unbound_neighbors_removal_queues_a_final_rib_deletion() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    while h.rib_rx.try_recv().is_ok() {}
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    // The RIB has not processed the retirement yet: the delete runs behind it.
+    let outcome = h
+        .owned_neighbor(
+            rustbgpd_api::peer_types::OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    let queued: Vec<_> = std::iter::from_fn(|| h.rib_rx.try_recv().ok())
+        .filter_map(|update| match update {
+            RibUpdate::PeerDeleted {
+                label, keep_series, ..
+            } => Some(format!(
+                "deleted({}, keep={keep_series})",
+                label.as_deref().unwrap_or("-")
+            )),
+            RibUpdate::ReleasePeer { .. } => Some("released".to_string()),
+            _ => None,
+        })
+        .collect();
+    // Mutation-red: without the final deletion the retirement's kept
+    // series are the last word.
+    assert_eq!(
+        queued,
+        [
+            "deleted(interface:swp1, keep=true)",
+            "deleted(interface:swp1, keep=false)",
+            "released"
+        ]
+    );
+}
+
+/// A discovery conflict queued before the neighbor's deletion arrives
+/// after it, while another neighbor's port keeps discovery running: it is
+/// ignored and recreates no series for the deleted neighbor.
+#[tokio::test]
+async fn a_late_conflict_for_a_deleted_neighbor_recreates_no_series() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let outcome = h
+        .owned_neighbor(
+            rustbgpd_api::peer_types::OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    h.mgr.handle_discovery_event(DiscoveryEvent::Conflict {
+        interface: "swp1".into(),
+        bound: ll(2),
+        other: ll(9),
+    });
+    // Mutation-red: counting it recreates `ra_conflicts{peer="interface:swp1"}`.
+    assert_eq!(series_for(&h, "interface:swp1"), Vec::<String>::new());
+    h.mgr.handle_discovery_event(DiscoveryEvent::Conflict {
+        interface: "swp2".into(),
+        bound: ll(3),
+        other: ll(9),
+    });
+    assert_eq!(
+        sample(
+            &h,
+            "bgp_unnumbered_ra_conflicts_total",
+            &[("peer", "interface:swp2")]
+        ),
+        Some(1.0),
+        "the remaining neighbor is still counted"
+    );
 }

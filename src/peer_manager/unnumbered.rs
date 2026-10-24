@@ -342,6 +342,12 @@ impl PeerManager {
                 bound,
                 other,
             } => {
+                // Queued before the neighbor was deleted: counting it would
+                // recreate the series its removal reaped.
+                if !unnumbered.ports.contains_key(&interface) {
+                    debug!(%interface, "unnumbered: conflict for a removed neighbor, ignored");
+                    return;
+                }
                 warn!(
                     %interface, %bound, %other,
                     reason = "multiple_routers_on_link",
@@ -872,6 +878,54 @@ impl PeerManager {
         Ok(())
     }
 
+    /// A runtime catalog edit to `next` moves some interface-only neighbors'
+    /// policy chains without changing their bind-time settings (a member
+    /// that overrides the edited session knob): no rebind will give the
+    /// bound peer its new chains, so they apply live here. Returns the
+    /// captured priors for [`Self::restore_interface_only_policies`].
+    pub(super) async fn apply_interface_only_policy_deltas(
+        &mut self,
+        next: &crate::config::Config,
+    ) -> Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String> {
+        let targets: Vec<_> = next
+            .neighbors
+            .interface_only()
+            .iter()
+            .filter_map(|neighbor| {
+                let interface = neighbor.interface.as_deref()?;
+                let prior = self.current_config.neighbors.interface_only_on(interface)?;
+                self.unnumbered_bound_peer(interface)?;
+                let chains = next.interface_only_policy_chains(neighbor)?;
+                (self.current_config.interface_only_policy_chains(prior)? != chains
+                    && self.current_config.bind_time_settings(prior)
+                        == next.bind_time_settings(neighbor))
+                .then(|| rustbgpd_api::peer_types::ResolvedPeerPolicy {
+                    address: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                    interface: Some(interface.to_owned()),
+                    import_policy: chains.0,
+                    export_policy: chains.1,
+                })
+            })
+            .collect();
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.apply_policy_impact_snapshot(targets, Vec::new()).await
+    }
+
+    /// Put back the chains [`Self::apply_interface_only_policy_deltas`]
+    /// replaced; `false` when that failed and runtime state is uncertain.
+    pub(super) async fn restore_interface_only_policies(
+        &mut self,
+        priors: Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>,
+    ) -> bool {
+        priors.is_empty()
+            || self
+                .apply_policy_impact_snapshot(priors, Vec::new())
+                .await
+                .is_ok()
+    }
+
     /// The held generation applied or was refused: admission sees only the
     /// peer table and `current_config` again, and a binding the hold refused
     /// is reconsidered.
@@ -1106,6 +1160,15 @@ impl PeerManager {
             if self.max_prefix_latches.contains_key(&key) {
                 self.remove_max_prefix_latch(&key);
             }
+            // The deletion only disabled the binding's BFD session. Remove
+            // the registration before the address is released, so a later
+            // neighbor there neither inherits it nor is held by a strict one.
+            // The port stays, and the removal is retried.
+            if let Err(error) = self.set_bound_bfd_session(key.address, None).await {
+                warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the deleted neighbor's BFD session; retrying");
+                self.arm_unnumbered_retry();
+                return;
+            }
         }
         let Some(port) = self
             .unnumbered
@@ -1114,7 +1177,25 @@ impl PeerManager {
         else {
             return;
         };
+        let label = rustbgpd_telemetry::interface_peer_label(name);
         if let Some(rib_peer) = port.rib_peer {
+            // A binding lost earlier was deleted from the RIB keeping its
+            // series; this final deletion, queued behind it, ends them under
+            // the interface label after anything that one still emits.
+            if port.bound.is_none() {
+                let _ = self
+                    .send_rib_update(
+                        rustbgpd_rib::RibUpdate::PeerDeleted {
+                            peer: rib_peer,
+                            label: Some(label.as_str().into()),
+                            keep_series: false,
+                        },
+                        super::OperatorReadAdmission::Fenced {
+                            reason: "an interface-only neighbor's removal is partly applied",
+                        },
+                    )
+                    .await;
+            }
             self.release_unused_rib_peer(rib_peer).await;
         }
         if let Some(unnumbered) = self.unnumbered.as_mut() {
@@ -1122,7 +1203,6 @@ impl PeerManager {
         }
         // An unbound neighbor has no peer to delete: its identity series
         // (kept across endpoints) and discovery counters end here.
-        let label = rustbgpd_telemetry::interface_peer_label(name);
         self.metrics.reap_peer_identity_series(&label, name);
         self.metrics.reap_peer_series(&label);
     }
