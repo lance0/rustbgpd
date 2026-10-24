@@ -297,26 +297,24 @@ DOCKER_ARGS=(
 # netnses and re-exec into them; running them in parallel inside
 # the same container risks them clobbering each other on the
 # `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
+# The persistent `$TARGET_CACHE_VOL` is reused by every selector, so cargo
+# builds each test binary once and later selectors only re-check
+# fingerprints. A changed proto still regenerates the gRPC types:
+# `crates/api/build.rs` declares `rerun-if-changed=../../proto`, so cargo
+# re-runs it when any file under `proto/` changes. That replaced the
+# `cargo clean -p rustbgpd-api` this script used to run before every
+# invocation, which rebuilt the API crate and everything above it each time.
 if [ -n "$RUSTBGPD_TEST_BIN" ]; then
-    # Same stale-proto guard as the filter branch below; `rbgp` is built
-    # up front because it lives in another package.
+    # `rbgp` is built up front because it lives in another package.
     TEST_ARGS=(
-        sh -c "cargo clean -p rustbgpd-api && cargo build -p rustbgpctl --bin rbgp && CARGO_BIN_EXE_rbgp=/work/target/debug/rbgp cargo test -p rustbgpd --test '${RUSTBGPD_TEST_BIN}' -- --test-threads=1 --nocapture"
+        sh -c "cargo build -p rustbgpctl --bin rbgp && CARGO_BIN_EXE_rbgp=/work/target/debug/rbgp cargo test -p rustbgpd --test '${RUSTBGPD_TEST_BIN}' -- --test-threads=1 --nocapture"
     )
 elif [ -n "$RUSTBGPD_TEST_FILTER" ]; then
-    # The rustbgpd binary's gRPC types are generated from
-    # `proto/rustbgpd.proto` by `rustbgpd-api`'s build script into that crate's
-    # OUT_DIR. The persistent `$TARGET_CACHE_VOL` can retain a stale generated
-    # module when the proto changes but cargo's incremental fingerprint does not
-    # re-run the build script (the proto lives outside the crate dir), which
-    # surfaces as "struct FibRouteStatus has no field named ..." compile errors.
-    # Force a regeneration of just that crate before building so the cached
-    # volume can't ship a stale proto. Cheap: only `rustbgpd-api` is rebuilt.
     # Single-quote the filter inside the `sh -c` program so it reaches
     # `cargo test` verbatim even if it ever gains whitespace / shell
     # metacharacters (today it is a plain module path).
     TEST_ARGS=(
-        sh -c "cargo clean -p rustbgpd-api && cargo test -p rustbgpd '${RUSTBGPD_TEST_FILTER}' -- --test-threads=1 --nocapture"
+        sh -c "cargo test -p rustbgpd '${RUSTBGPD_TEST_FILTER}' -- --test-threads=1 --nocapture"
     )
 else
     TEST_ARGS=(
