@@ -231,6 +231,38 @@ fn escape_controls(s: &str) -> String {
         .collect()
 }
 
+/// Replaces the per-peer levels of a [`peer_level_filter`], as
+/// [`reload_per_peer_levels`] does for the installed subscriber.
+pub struct PeerLevelHandle(SharedPeerLevels);
+
+impl PeerLevelHandle {
+    /// Replace the levels; spans that already exist follow on their next
+    /// event.
+    ///
+    /// # Errors
+    ///
+    /// [`LoggingError::InvalidDirective`] if a level does not parse; the
+    /// levels are left untouched.
+    pub fn replace(&self, peer_levels: &[(String, String)]) -> Result<(), LoggingError> {
+        install_levels(&self.0, PeerLevels::parse(peer_levels)?);
+        Ok(())
+    }
+}
+
+/// `base` or the per-peer levels, the daemon's output filter, with a handle
+/// to its levels (none at first): for tests that drive a real session span.
+#[must_use]
+pub fn peer_level_filter<S>(base: EnvFilter) -> (impl Filter<S>, PeerLevelHandle)
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let peers = SharedPeerLevels::default();
+    (
+        base.or(PeerLevelFilter(Arc::clone(&peers))),
+        PeerLevelHandle(peers),
+    )
+}
+
 /// The daemon's one output layer: JSON or text on `writer`, filtered by
 /// `RUST_LOG` or the per-peer levels.
 fn output_layer<W>(

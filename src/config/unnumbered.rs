@@ -673,27 +673,6 @@ impl Config {
                 "conditional advertisements are not supported on interface-only neighbors yet",
             ));
         }
-        // The level is keyed by the `interface:<name>` span label, which the
-        // filter directive can carry only for plain interface names.
-        if neighbor
-            .log_level
-            .as_deref()
-            .or_else(|| group.and_then(|group| group.log_level.as_deref()))
-            .is_some()
-            && !neighbor
-                .interface
-                .as_deref()
-                .unwrap_or_default()
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-        {
-            return Err(invalid(
-                neighbor,
-                "log_level",
-                "a per-neighbor log_level needs an interface name of ASCII letters, \
-                 digits, '.', '-' and '_'",
-            ));
-        }
         validate_interface_only_gtsm(neighbor, group)?;
         // The shared profile-reference check walks addressed neighbors only.
         if let Some(bfd) = &neighbor.bfd
