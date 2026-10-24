@@ -296,10 +296,14 @@ that rebuild sessions still require fresh scope resolution during planning.
 
 An `[[neighbors]]` entry with `interface` and no `address`
 ([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)) is keyed by
-its interface. SIGHUP and config transactions add, delete and edit these
-neighbors without a restart. A SIGHUP carries the change as one owned
-generation; a candidate that would take the sequential route is rejected.
-A transaction stages the full candidate, and nothing happens until the commit.
+its interface. SIGHUP, config transactions and the neighbor and peer-group
+RPCs add, delete and edit these neighbors without a restart. A SIGHUP carries
+the change as one owned generation; a candidate that would take the
+sequential route is rejected. A transaction stages the full candidate, and
+nothing happens until the commit. `AddNeighbor` and `DeleteNeighbor` select
+the neighbor by an empty address and its `interface`, and a `SetPeerGroup`
+edit reaches its members as a reload does (see the
+[API reference](api.md#interface-only-neighbors)).
 
 The peer manager then brings each interface's state in line with the running
 configuration:
@@ -328,6 +332,8 @@ A SIGHUP checks them before its first effect, including an outbound prefix
 maximum or listener authentication change, and discovery cannot bind the
 added static address until the reload has applied. A config transaction
 checks them when it plans and again when it stages the snapshot.
+`AddNeighbor` checks them before it changes the running configuration and
+returns `FAILED_PRECONDITION`.
 
 `[global.unnumbered]` stays restart-required (see `[global]`).
 

@@ -4467,8 +4467,13 @@ fn peer_lifecycle_error_to_apply_error(error: PeerLifecycleError) -> ConfigTrans
         PeerLifecycleError::Invalid(message) => {
             ConfigTransactionApplyError::InvalidArgument(message)
         }
-        PeerLifecycleError::RestartRequired(message) => {
+        PeerLifecycleError::RestartRequired(message)
+        | PeerLifecycleError::Precondition(message) => {
             ConfigTransactionApplyError::FailedPrecondition(message)
+        }
+        error @ (PeerLifecycleError::InterfaceOnlyExists(_)
+        | PeerLifecycleError::InterfaceOnlyNotFound(_)) => {
+            ConfigTransactionApplyError::FailedPrecondition(error.to_string())
         }
         PeerLifecycleError::Internal(message) => ConfigTransactionApplyError::Internal(message),
     }

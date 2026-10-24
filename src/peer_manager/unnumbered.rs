@@ -789,6 +789,89 @@ impl PeerManager {
         Ok(())
     }
 
+    /// The neighbor RPC's add of an interface-only neighbor: checked, then
+    /// installed in `current_config` in this owner turn. The port reconcile
+    /// on the next loop pass starts discovery, as for a reload. A refusal,
+    /// including the [`Self::unnumbered_preflight`] one, changes nothing.
+    pub(super) fn add_interface_only_neighbor(
+        &mut self,
+        spec: Box<rustbgpd_api::peer_types::PresenceAwareNeighborCreate>,
+    ) -> Result<(), PeerLifecycleError> {
+        let Some(interface) = spec.interface.clone() else {
+            return Err(PeerLifecycleError::Invalid(
+                "an interface-only neighbor needs an interface".to_string(),
+            ));
+        };
+        if self
+            .current_config
+            .neighbors
+            .interface_only_on(&interface)
+            .is_some()
+        {
+            return Err(PeerLifecycleError::InterfaceOnlyExists(interface));
+        }
+        let mut next = self.current_config.clone();
+        crate::policy_admin::apply_config_event(
+            &mut next,
+            &rustbgpd_api::peer_types::ConfigEvent::PresenceAwareNeighborAdded { spec, ack: None },
+        )
+        .and_then(|()| next.validate())
+        .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
+        let neighbor = next
+            .neighbors
+            .interface_only_on(&interface)
+            .ok_or_else(|| {
+                PeerLifecycleError::internal(format!(
+                    "interface-only neighbor on {interface} missing after the config update"
+                ))
+            })?;
+        let resolved = next
+            .resolve_unbound_interface_neighbor(neighbor)
+            .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
+        // As for a static RPC add: the listener takes these only at startup
+        // or SIGHUP, and the clamp only at startup.
+        let transport = &resolved.transport_config;
+        if transport.md5_password.is_some()
+            || transport.ttl_security_hops.is_some()
+            || transport.tcp_mss.is_some()
+        {
+            return Err(PeerLifecycleError::RestartRequired(format!(
+                "the interface-only neighbor on {interface} resolves md5_password, \
+                 ttl_security, or tcp_mss; runtime peer CRUD cannot change inbound listener \
+                 enforcement — use the config file and SIGHUP for md5_password/ttl_security, \
+                 or restart for tcp_mss"
+            )));
+        }
+        self.unnumbered_preflight(&next)
+            .map_err(PeerLifecycleError::Precondition)?;
+        self.replace_current_config(next);
+        Ok(())
+    }
+
+    /// The neighbor RPC's delete of the interface-only neighbor on
+    /// `interface`, bound or not: removed from `current_config` in this owner
+    /// turn. The port reconcile then ends its session, purges its routes and
+    /// releases its RIB identity and learned address, as for a reload.
+    pub(super) fn delete_interface_only_neighbor(
+        &mut self,
+        interface: &str,
+    ) -> Result<(), PeerLifecycleError> {
+        if self
+            .current_config
+            .neighbors
+            .interface_only_on(interface)
+            .is_none()
+        {
+            return Err(PeerLifecycleError::InterfaceOnlyNotFound(
+                interface.to_owned(),
+            ));
+        }
+        let mut next = self.current_config.clone();
+        next.neighbors.set_interface_only(interface, None);
+        self.replace_current_config(next);
+        Ok(())
+    }
+
     /// The held generation applied or was refused: admission sees only the
     /// peer table and `current_config` again, and a binding the hold refused
     /// is reconsidered.

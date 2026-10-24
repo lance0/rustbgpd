@@ -124,7 +124,10 @@ impl PeerManager {
             }
             ConfigEvent::NeighborAdded { .. }
             | ConfigEvent::PresenceAwareNeighborAdded { .. }
-            | ConfigEvent::NeighborDeleted { .. } => ("change", "neighbor", String::new(), None),
+            | ConfigEvent::NeighborDeleted { .. }
+            | ConfigEvent::InterfaceOnlyNeighborDeleted { .. } => {
+                ("change", "neighbor", String::new(), None)
+            }
             ConfigEvent::FibTablesReplaced { .. } => {
                 ("replace", "fib_tables", "fib_tables".to_string(), None)
             }

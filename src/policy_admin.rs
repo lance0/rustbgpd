@@ -487,7 +487,7 @@ pub(crate) fn catalog_config_error(error: ConfigError) -> CatalogMutationError {
 }
 
 fn configured_family_labels(
-    address: IpAddr,
+    address: &str,
     field: &str,
     families: &[(rustbgpd_wire::Afi, rustbgpd_wire::Safi)],
 ) -> Result<Vec<String>, ConfigError> {
@@ -497,7 +497,7 @@ fn configured_family_labels(
             rustbgpd_wire::family_label(*afi, *safi)
                 .map(str::to_string)
                 .ok_or_else(|| ConfigError::InvalidNeighborConfig {
-                    address: address.to_string(),
+                    address: address.to_owned(),
                     field: field.to_string(),
                     reason: format!("unsupported AFI/SAFI pair {afi:?}/{safi:?}"),
                 })
@@ -505,10 +505,25 @@ fn configured_family_labels(
         .collect()
 }
 
+/// The stored `address` of a create, empty for an interface-only neighbor
+/// (ADR-0142), and the name its validation errors use.
+fn raw_identity(raw: &PresenceAwareNeighborCreate) -> (String, String) {
+    match (raw.address, raw.interface.as_deref()) {
+        (None, Some(interface)) => (String::new(), format!("interface {interface}")),
+        (address, _) => {
+            let address = address
+                .map(|address| address.to_string())
+                .unwrap_or_default();
+            (address.clone(), address)
+        }
+    }
+}
+
 fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigError> {
+    let (address, context) = raw_identity(raw);
     Ok(Neighbor {
         tcp_mss: None,
-        address: raw.address.to_string(),
+        address,
         interface: raw.interface.clone(),
         remote_asn: match raw.remote_asn_mode {
             rustbgpd_api::peer_types::RemoteAsnMode::Numeric => raw.remote_asn.into(),
@@ -556,13 +571,13 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         families: raw
             .families
             .as_ref()
-            .map(|families| configured_family_labels(raw.address, "families", families))
+            .map(|families| configured_family_labels(&context, "families", families))
             .transpose()?
             .unwrap_or_default(),
         required_families: raw
             .required_families
             .as_ref()
-            .map(|families| configured_family_labels(raw.address, "required_families", families))
+            .map(|families| configured_family_labels(&context, "required_families", families))
             .transpose()?
             .unwrap_or_default(),
         graceful_restart: None,
@@ -617,9 +632,10 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
             if !config.neighbors.iter().any(|neighbor| {
                 neighbor.address == cfg.address.to_string() && neighbor.interface == cfg.interface
             }) {
-                let families = configured_family_labels(cfg.address, "families", &cfg.families)?;
+                let address = cfg.address.to_string();
+                let families = configured_family_labels(&address, "families", &cfg.families)?;
                 let required_families = configured_family_labels(
-                    cfg.address,
+                    &address,
                     "required_families",
                     &cfg.required_families,
                 )?;
@@ -749,7 +765,13 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         }
         ConfigEvent::PresenceAwareNeighborAdded { spec, .. } => {
             let neighbor = raw_neighbor(spec)?;
-            if !config.neighbors.iter().any(|configured| {
+            if let (None, Some(interface)) = (spec.address, spec.interface.as_deref()) {
+                if config.neighbors.interface_only_on(interface).is_none() {
+                    config
+                        .neighbors
+                        .set_interface_only(interface, Some(neighbor));
+                }
+            } else if !config.neighbors.iter().any(|configured| {
                 configured.address == neighbor.address && configured.interface == neighbor.interface
             }) {
                 config.neighbors.push(neighbor);
@@ -760,6 +782,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
             config.neighbors.retain(|neighbor| {
                 !(neighbor.address == addr && neighbor.interface == peer.interface)
             });
+        }
+        ConfigEvent::InterfaceOnlyNeighborDeleted { interface, .. } => {
+            config.neighbors.set_interface_only(interface, None);
         }
         ConfigEvent::DynamicNeighborAdded {
             prefix,
@@ -1068,7 +1093,7 @@ remote_asn = 65002
             .map(|(_, afi, safi)| (*afi, *safi))
             .collect::<Vec<_>>();
         let raw = PresenceAwareNeighborCreate {
-            address: "192.0.2.1".parse().unwrap(),
+            address: Some("192.0.2.1".parse().unwrap()),
             interface: None,
             remote_asn: 65_001,
             remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
@@ -1097,6 +1122,44 @@ remote_asn = 65002
         let neighbor = raw_neighbor(&raw).unwrap();
         assert_eq!(neighbor.families, expected);
         assert_eq!(neighbor.required_families, expected);
+
+        // ADR-0142: a create without an address persists an interface-only
+        // stanza, and its delete event removes exactly that stanza.
+        let mut config = minimal_config();
+        let addressed = config.neighbors.len();
+        let interface_only = PresenceAwareNeighborCreate {
+            address: None,
+            interface: Some("swp1".to_string()),
+            remote_asn: 0,
+            remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::External,
+            families: None,
+            required_families: None,
+            ..raw
+        };
+        // Mutation-red: pushing it as an addressed neighbor leaves no
+        // interface-only stanza.
+        apply_config_event(
+            &mut config,
+            &ConfigEvent::PresenceAwareNeighborAdded {
+                spec: Box::new(interface_only),
+                ack: None,
+            },
+        )
+        .unwrap();
+        let stanza = config.neighbors.interface_only_on("swp1").expect("stanza");
+        assert_eq!(stanza.address, "");
+        assert_eq!(stanza.remote_asn, crate::config::RemoteAsn::External);
+        assert_eq!(config.neighbors.len(), addressed, "no addressed neighbor");
+        apply_config_event(
+            &mut config,
+            &ConfigEvent::InterfaceOnlyNeighborDeleted {
+                interface: "swp1".to_string(),
+                ack: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(config.neighbors.interface_only(), []);
+        assert_eq!(config.neighbors.len(), addressed);
     }
 
     #[test]

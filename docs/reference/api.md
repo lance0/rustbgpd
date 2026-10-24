@@ -1236,14 +1236,36 @@ with an empty `NeighborConfig.address` and its `interface`:
   or not.
   Actions that need a session (enable, disable, reset, soft reset, refresh,
   replay) return `FAILED_PRECONDITION` until an address is bound.
-  `DeleteNeighbor` returns `FAILED_PRECONDITION` for an interface-only
-  neighbor, bound or not: remove its stanza from the configuration instead.
   `SetGracefulShutdown` applies to every peer only when both the address and
   the interface are empty; an interface alone selects that interface's
   neighbor like any other action.
 - Peer-scoped RIB and explain requests take the learned address with its
   scope, `fe80::2%swp1`, not the interface alone. gNMI lists an
   interface-only neighbor once it has a learned address.
+
+`AddNeighbor` and `DeleteNeighbor` add and delete interface-only neighbors at
+runtime, with the same effect as a SIGHUP reload of the stanza (see the
+[reload matrix](reload-matrix.md#interface-only-neighbors)):
+
+- `AddNeighbor` with an empty `NeighborConfig.address` and an `interface`
+  adds an interface-only neighbor, including `remote_asn_mode` `EXTERNAL` or
+  `INTERNAL`. Discovery starts on the interface and a peer is created once an
+  address is learned. An interface that already has one returns
+  `ALREADY_EXISTS`.
+- The first interface-only neighbor needs `CAP_NET_RAW` and the link monitor.
+  Without them `AddNeighbor` returns `FAILED_PRECONDITION`, naming the cause,
+  with nothing changed. A static link-local `AddNeighbor` whose address an
+  interface-only neighbor holds or still reserves also returns
+  `FAILED_PRECONDITION` (`duplicate_link_local_address`, naming the
+  interface).
+- `DeleteNeighbor` with an empty address and an `interface` deletes that
+  interface's interface-only neighbor, bound or not: its session ends, its
+  routes are purged, and the learned address it held or reserved is released.
+  An interface with none returns `NOT_FOUND`. Deleting its bound peer by
+  address returns `FAILED_PRECONDITION`, naming the interface selector.
+- A `SetPeerGroup` edit that changes an interface-only member's session
+  settings rebinds that member, as a reload does; members whose settings do
+  not change keep their sessions.
 
 ### Add a neighbor
 

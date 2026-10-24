@@ -879,13 +879,13 @@ async fn operator_deletion_of_a_discovery_owned_peer_is_refused() {
     assert!(
         matches!(
             error,
-            rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(_)
+            rustbgpd_api::peer_types::PeerLifecycleError::Precondition(_)
         ),
         "{error}"
     );
     assert!(
-        error.to_string().contains("interface = \"swp1\""),
-        "{error}"
+        error.to_string().contains("by its interface") && error.to_string().contains("swp1"),
+        "names the interface selector: {error}"
     );
     assert!(h.mgr.peers.contains_key(&swp1_key(2)));
 }
@@ -3429,6 +3429,284 @@ async fn a_binding_between_plan_and_stage_refuses_the_static_add() {
     task.await.unwrap();
     drop(links_tx);
     rib.abort();
+}
+
+// ---------------------------------------------------------------------------
+// The neighbor and peer-group RPCs: an owned mutation of `current_config`,
+// then the same port reconcile as a reload.
+// ---------------------------------------------------------------------------
+
+/// An `AddNeighbor` create for the interface-only neighbor on `interface`.
+fn interface_only_create(
+    interface: &str,
+    mode: rustbgpd_api::peer_types::RemoteAsnMode,
+) -> Box<rustbgpd_api::peer_types::PresenceAwareNeighborCreate> {
+    Box::new(rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
+        address: None,
+        interface: Some(interface.into()),
+        remote_asn: 0,
+        remote_asn_mode: mode,
+        description: None,
+        peer_group: None,
+        hold_time: None,
+        min_hold_time: None,
+        send_hold_time: None,
+        max_prefixes: None,
+        max_prefix_restart_seconds: None,
+        remove_private_as: None,
+        discard_path_attributes: None,
+        local_role: None,
+        families: Some(vec![(
+            rustbgpd_wire::Afi::Ipv6,
+            rustbgpd_wire::Safi::Unicast,
+        )]),
+        required_families: None,
+        route_server_client: None,
+        per_client_best: None,
+        strict_role: None,
+        add_path: None,
+    })
+}
+
+impl Harness {
+    async fn owned_neighbor(
+        &mut self,
+        mutation: rustbgpd_api::peer_types::OwnedNeighborMutation,
+    ) -> rustbgpd_api::peer_types::OwnedNeighborMutationOutcome {
+        let (reply, outcome) = oneshot::channel();
+        let _ = Box::pin(
+            self.mgr
+                .dispatch_command(PeerManagerCommand::OwnedNeighborMutation { mutation, reply }),
+        )
+        .await;
+        outcome.await.unwrap()
+    }
+}
+
+fn refused(
+    outcome: rustbgpd_api::peer_types::OwnedNeighborMutationOutcome,
+) -> rustbgpd_api::peer_types::PeerLifecycleError {
+    match outcome {
+        rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::RejectedNoEffect(
+            rustbgpd_api::peer_types::OwnedNeighborMutationError::Peer(error),
+        ) => error,
+        other => panic!("expected a refusal with no effect, got {other:?}"),
+    }
+}
+
+/// `AddNeighbor` of an interface-only neighbor installs it in the running
+/// configuration with its `remote_asn` mode; the reconcile starts discovery
+/// and a binding creates its peer. A second add on the interface exists.
+#[tokio::test]
+async fn an_rpc_add_starts_discovery_and_carries_the_remote_asn_mode() {
+    use rustbgpd_api::peer_types::{OwnedNeighborMutation, OwnedNeighborMutationOutcome};
+    let (mut h, launched) = Harness::without_discovery(&[("swp1", 7, true)]);
+    h.mgr.unnumbered_runtime.probe = || Ok(());
+    let internal = rustbgpd_api::peer_types::RemoteAsnMode::Internal;
+    let outcome = h
+        .owned_neighbor(OwnedNeighborMutation::Add(interface_only_create(
+            "swp1", internal,
+        )))
+        .await;
+    assert!(
+        matches!(outcome, OwnedNeighborMutationOutcome::Success),
+        "{outcome:?}"
+    );
+    let neighbor = h
+        .mgr
+        .current_config
+        .neighbors
+        .interface_only_on("swp1")
+        .expect("configured");
+    assert_eq!(neighbor.remote_asn, crate::config::RemoteAsn::Internal);
+    // Mutation-red: without installing the neighbor no discovery starts.
+    h.reconcile().await;
+    assert_eq!(launched.lock().unwrap().len(), 1, "discovery started");
+    assert_eq!(
+        drain_launched(&launched).first(),
+        Some(&Command::Start("swp1".into()))
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+
+    let again = h
+        .owned_neighbor(OwnedNeighborMutation::Add(interface_only_create(
+            "swp1", internal,
+        )))
+        .await;
+    assert!(
+        matches!(
+            refused(again),
+            rustbgpd_api::peer_types::PeerLifecycleError::InterfaceOnlyExists(_)
+        ),
+        "already configured"
+    );
+}
+
+/// The first interface-only neighbor added without `CAP_NET_RAW` is
+/// refused as a failed precondition naming it, with nothing changed: no
+/// configuration, port, discovery actor or peer.
+#[tokio::test]
+async fn a_refused_rpc_add_changes_nothing() {
+    use rustbgpd_api::peer_types::OwnedNeighborMutation;
+    let (mut h, launched) = Harness::without_discovery(&[("swp1", 7, true)]);
+    h.mgr.unnumbered_runtime.probe = || {
+        Err(
+            "interface-only neighbor discovery needs CAP_NET_RAW to open a raw ICMPv6 socket"
+                .into(),
+        )
+    };
+    let before = h.mgr.current_config.clone();
+    // Mutation-red: without the preflight the add is installed.
+    let error = refused(
+        h.owned_neighbor(OwnedNeighborMutation::Add(interface_only_create(
+            "swp1",
+            rustbgpd_api::peer_types::RemoteAsnMode::External,
+        )))
+        .await,
+    );
+    let rustbgpd_api::peer_types::PeerLifecycleError::Precondition(message) = &error else {
+        panic!("{error:?}");
+    };
+    assert!(message.contains("CAP_NET_RAW"), "{message}");
+    assert_eq!(h.mgr.current_config, before, "running config untouched");
+    h.reconcile().await;
+    assert!(launched.lock().unwrap().is_empty(), "no discovery");
+    assert!(h.mgr.unnumbered.is_none(), "no port");
+    assert!(h.mgr.peers.is_empty(), "no peer");
+}
+
+/// A static link-local `AddNeighbor` whose address a learned endpoint
+/// holds, bound or reserved, is a failed precondition with nothing changed.
+#[tokio::test]
+async fn an_rpc_static_add_against_a_learned_address_changes_nothing() {
+    use rustbgpd_api::peer_types::OwnedNeighborMutation;
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let mut create = interface_only_create("lo", rustbgpd_api::peer_types::RemoteAsnMode::Numeric);
+    create.address = Some(IpAddr::V6(ll(2)));
+    create.remote_asn = 65002;
+    for state in ["bound", "reserved"] {
+        if state == "reserved" {
+            h.bind("swp1", None).await;
+        }
+        let before = h.mgr.current_config.clone();
+        // Mutation-red: without the preflight the add replaces the config,
+        // fails admission and is reported as compensated.
+        let error = refused(
+            h.owned_neighbor(OwnedNeighborMutation::Add(create.clone()))
+                .await,
+        );
+        let rustbgpd_api::peer_types::PeerLifecycleError::Precondition(message) = &error else {
+            panic!("{state}: {error:?}");
+        };
+        assert!(
+            message.contains("duplicate_link_local_address"),
+            "{state}: {message}"
+        );
+        assert!(
+            message.contains("swp1"),
+            "{state}: names the holder: {message}"
+        );
+        assert_eq!(h.mgr.current_config, before, "{state}");
+        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "{state}");
+    }
+}
+
+/// `DeleteNeighbor` by interface ends a bound interface-only neighbor's
+/// session through the reconcile, stops discovery on it, keeps the other
+/// neighbor's session, and refuses an interface with no such neighbor.
+#[tokio::test]
+async fn an_rpc_delete_ends_a_bound_interface_only_neighbor() {
+    use rustbgpd_api::peer_types::{OwnedNeighborMutation, OwnedNeighborMutationOutcome};
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let swp2_session = h.session(&swp2);
+    h.drain();
+    let outcome = h
+        .owned_neighbor(OwnedNeighborMutation::DeleteInterfaceOnly("swp1".into()))
+        .await;
+    assert!(
+        matches!(outcome, OwnedNeighborMutationOutcome::Success),
+        "{outcome:?}"
+    );
+    assert!(
+        h.mgr
+            .current_config
+            .neighbors
+            .interface_only_on("swp1")
+            .is_none()
+    );
+    // Mutation-red: without removing the stanza the session survives.
+    h.reconcile().await;
+    assert!(!h.mgr.peers.contains_key(&swp1_key(2)), "session ended");
+    assert_eq!(h.drain(), [Command::Stop("swp1".into())]);
+    assert_eq!(h.session(&swp2), swp2_session, "the other neighbor is kept");
+
+    let missing = refused(
+        h.owned_neighbor(OwnedNeighborMutation::DeleteInterfaceOnly("swp9".into()))
+            .await,
+    );
+    assert!(
+        matches!(
+            missing,
+            rustbgpd_api::peer_types::PeerLifecycleError::InterfaceOnlyNotFound(_)
+        ),
+        "{missing:?}"
+    );
+}
+
+/// A `SetPeerGroup` session edit that reaches an interface-only member is
+/// applied: the member rebinds under the new settings on the reconcile,
+/// and a neighbor of another group keeps its session.
+#[tokio::test]
+async fn a_peer_group_rpc_rebinds_only_the_changed_members() {
+    let groups = config_with(&format!(
+        "[peer_groups.fabric]\nhold_time = 9\n[peer_groups.other]\nhold_time = 90\n{}{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\n"),
+        port_stanza("swp2", "peer_group = \"other\"\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.reload(groups).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let (swp1_session, swp2_session) = (h.session(&swp1_key(2)), h.session(&swp2));
+
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.hold_time = Some(30);
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: rustbgpd_api::peer_types::OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
+    .await;
+    // Mutation-red: with the old refusal the edit is rejected.
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+    assert_ne!(
+        h.session(&swp1_key(2)),
+        swp1_session,
+        "fabric member rebound"
+    );
+    assert_eq!(h.mgr.peers[&swp1_key(2)].hold_time, Some(30));
+    assert_eq!(h.session(&swp2), swp2_session, "other group untouched");
 }
 
 /// A static neighbor that replaces an interface-only stanza at its learned
