@@ -111,6 +111,7 @@ impl Drop for Namespaces {
 
 struct Daemon {
     child: Child,
+    config: PathBuf,
     log: PathBuf,
     grpc: String,
 }
@@ -120,9 +121,19 @@ impl Daemon {
         Self::start_with(ns, dir, asn, router_id, "")
     }
 
-    /// [`Self::start`] with `neighbor_extra` appended to the `veth`
-    /// interface-only neighbor's stanza.
-    fn start_with(ns: &str, dir: &Path, asn: u32, router_id: &str, neighbor_extra: &str) -> Self {
+    /// [`Self::start`] with `extra` TOML on the `veth` neighbor.
+    fn start_with(ns: &str, dir: &Path, asn: u32, router_id: &str, extra: &str) -> Self {
+        Self::start_neighbor(
+            ns,
+            dir,
+            asn,
+            router_id,
+            &format!("interface = \"veth\"\nremote_asn = \"external\"\n{extra}"),
+        )
+    }
+
+    /// A daemon whose one `veth` neighbor is `neighbor` (TOML keys).
+    fn start_neighbor(ns: &str, dir: &Path, asn: u32, router_id: &str, neighbor: &str) -> Self {
         let runtime = dir.join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -154,11 +165,10 @@ path = "{runtime}/grpc.sock"
 principal = "rustbgpd://operator/ion-test"
 
 [[neighbors]]
-interface = "veth"
-remote_asn = "external"
 families = ["ipv6_unicast"]
 hold_time = {HOLD_TIME_SECS}
-{neighbor_extra}"#,
+{neighbor}
+"#,
                 runtime = runtime.display()
             ),
         )
@@ -176,9 +186,28 @@ hold_time = {HOLD_TIME_SECS}
             .expect("spawn rustbgpd");
         Self {
             child,
+            config,
             log,
             grpc: format!("unix://{}/grpc.sock", runtime.display()),
         }
+    }
+
+    /// Append `toml` to the last (`veth`) neighbor's stanza and SIGHUP the
+    /// daemon, waiting until the reload completes.
+    fn reload_appending(&mut self, toml: &str) {
+        let mut config = std::fs::read_to_string(&self.config).unwrap();
+        config.push_str(toml);
+        std::fs::write(&self.config, config).unwrap();
+        let reloads = |log: &str| log.matches("config reload complete").count();
+        let before = reloads(&self.log());
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(self.child.id()).unwrap()),
+            nix::sys::signal::Signal::SIGHUP,
+        )
+        .unwrap();
+        self.wait("the reload to complete", FAILOVER_BOUND, |d| {
+            reloads(&d.log()) > before
+        });
     }
 
     fn log(&self) -> String {
@@ -231,6 +260,19 @@ hold_time = {HOLD_TIME_SECS}
                 && rows[0]["learned_peer_address"].as_str() == Some(address)
                 && rows[0]["state"].as_str() == Some("Established")
         })
+    }
+
+    /// The `veth` neighbor's learned address and state, when listed.
+    fn veth_binding(&mut self) -> Option<(String, String)> {
+        let rows = self.veth_rows()?;
+        let row = rows.first()?;
+        Some((
+            row["learned_peer_address"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            row["state"].as_str().unwrap_or("").to_string(),
+        ))
     }
 
     /// A successful query whose `veth` neighbor is listed unbound, with no
@@ -340,3 +382,146 @@ fn interface_only_neighbors_discover_each_other_and_follow_an_address_change() {
 
 #[path = "support/host_ipv6_netns.rs"]
 mod host_ipv6_netns;
+
+/// GTSM (`ttl_security`) on interface-only neighbors: with B's link route
+/// hop limit lowered to 254, A binds B's learned address but never establishes,
+/// because the listener and A's own active open refuse segments below 255.
+/// Once B also runs GTSM, its session socket sends 255 and both establish.
+#[test]
+fn interface_only_gtsm_refuses_hop_limit_254_and_accepts_255() {
+    if !netns_enabled() {
+        return;
+    }
+    let ns = Namespaces::create();
+    // B's link route carries Hop Limit 254, so a session socket that does
+    // not set its own (no GTSM) sends 254; GTSM's explicit 255 overrides it.
+    ip(&[
+        "-n",
+        &ns.b,
+        "-6",
+        "route",
+        "replace",
+        "fe80::/64",
+        "dev",
+        "veth",
+        "hoplimit",
+        "254",
+    ]);
+    let (dir_a, dir_b) = (private_tempdir(), private_tempdir());
+    let gtsm = "ttl_security = true";
+    let mut a = Daemon::start_with(&ns.a, dir_a.path(), 65001, "192.0.2.1", gtsm);
+    let b = Daemon::start(&ns.b, dir_b.path(), 65002, "192.0.2.2");
+
+    a.wait("A bound to B's learned address", RECOVERY_BOUND, |a| {
+        a.veth_binding()
+            .is_some_and(|(learned, _)| learned == "fe80::b1")
+    });
+    // Discovery and both directions' handshakes have had several attempts
+    // (connect retry and RA interval are a few seconds here).
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline {
+        // Mutation-red: without the learned selector or the inbound
+        // IP_MINTTL, B's hop-limit-254 session reaches Established.
+        assert!(
+            !a.established_with("fe80::b1"),
+            "A established with a hop-limit-254 peer\nlog:\n{}",
+            a.log()
+        );
+        thread::sleep(Duration::from_millis(500));
+    }
+    drop(b);
+
+    let dir_b = private_tempdir();
+    let mut b = Daemon::start_with(&ns.b, dir_b.path(), 65002, "192.0.2.2", gtsm);
+    a.wait("A Established once B runs GTSM", RECOVERY_BOUND, |a| {
+        a.established_with("fe80::b1")
+    });
+    b.wait("B Established with A", RECOVERY_BOUND, |b| {
+        b.established_with("fe80::a1")
+    });
+}
+
+/// The same RA-silent GTSM peer when a reload turns on A's GTSM: until
+/// then A's listener answers at the default Hop Limit and B drops every
+/// SYN-ACK, so nothing is learned; the reload raises it to 255 before any
+/// binding exists, and A then learns B from its next connection.
+#[test]
+fn an_ra_silent_gtsm_peer_is_learned_after_a_reload_enables_gtsm() {
+    if !netns_enabled() {
+        return;
+    }
+    let ns = Namespaces::create();
+    let (dir_a, dir_b) = (private_tempdir(), private_tempdir());
+    let mut a = Daemon::start(&ns.a, dir_a.path(), 65001, "192.0.2.1");
+    let _b = Daemon::start_neighbor(
+        &ns.b,
+        dir_b.path(),
+        65002,
+        "192.0.2.2",
+        "address = \"fe80::a1\"\ninterface = \"veth\"\nremote_asn = 65001\nttl_security = true",
+    );
+    a.wait("A's neighbor listed", RECOVERY_BOUND, |a| {
+        a.veth_rows().is_some_and(|rows| rows.len() == 1)
+    });
+    // B dials repeatedly in this window; none of its handshakes completes.
+    thread::sleep(Duration::from_secs(15));
+    assert!(
+        !a.log()
+            .contains("peer address learned from an inbound connection"),
+        "nothing learned while A answers at the default Hop Limit"
+    );
+
+    // Mutation-red: without the live raise, A keeps the default Hop Limit
+    // and B's handshakes keep failing.
+    a.reload_appending("ttl_security = true\n");
+    a.wait(
+        "A Established with the RA-silent GTSM peer after the reload",
+        RECOVERY_BOUND,
+        |a| a.established_with("fe80::b1"),
+    );
+    assert!(
+        a.log()
+            .contains("peer address learned from an inbound connection"),
+        "learned from B's inbound connection, not an RA"
+    );
+}
+
+/// An RA-silent GTSM peer that dials in: B has a static link-local neighbor
+/// toward A with `ttl_security` and no interface-only neighbor, so it sends no
+/// RAs and A can learn it only from B's inbound connection. B's socket drops
+/// any SYN-ACK below Hop Limit 255, so A's listener must send 255 before any
+/// binding exists; A then learns B, installs its selector and establishes.
+#[test]
+fn an_ra_silent_gtsm_peer_is_learned_from_its_inbound_connection() {
+    if !netns_enabled() {
+        return;
+    }
+    let ns = Namespaces::create();
+    let (dir_a, dir_b) = (private_tempdir(), private_tempdir());
+    let mut a = Daemon::start_with(
+        &ns.a,
+        dir_a.path(),
+        65001,
+        "192.0.2.1",
+        "ttl_security = true",
+    );
+    let _b = Daemon::start_neighbor(
+        &ns.b,
+        dir_b.path(),
+        65002,
+        "192.0.2.2",
+        "address = \"fe80::a1\"\ninterface = \"veth\"\nremote_asn = 65001\nttl_security = true",
+    );
+    // Mutation-red: without the listener's startup Hop Limit, B never
+    // completes a handshake and A never learns it.
+    a.wait(
+        "A Established with the RA-silent GTSM peer",
+        RECOVERY_BOUND,
+        |a| a.established_with("fe80::b1"),
+    );
+    assert!(
+        a.log()
+            .contains("peer address learned from an inbound connection"),
+        "learned from B's inbound connection, not an RA"
+    );
+}

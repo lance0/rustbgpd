@@ -1842,6 +1842,21 @@ async fn query_warm_checkpoint_capture(
         .map_err(|_| "peer manager dropped warm checkpoint query".to_string())?
 }
 
+/// Whether an interface-only neighbor runs GTSM (ADR-0142): the IPv6
+/// listener then answers with Hop Limit 255, so a GTSM peer that sends no
+/// RAs and dials in can complete its handshake and be learned. Startup binds
+/// the listener that way; a reload or transaction that makes this true has
+/// the peer manager raise it live. It is never lowered.
+pub(crate) fn interface_only_gtsm(config: &Config) -> bool {
+    config
+        .interface_only_resolved_for_comparison()
+        .is_ok_and(|resolved| {
+            resolved
+                .iter()
+                .any(|neighbor| neighbor.transport_config.ttl_security_hops.is_some())
+        })
+}
+
 fn tcp_ao_listener_key_for_neighbor(
     neighbor: &config::ResolvedNeighbor,
 ) -> Option<TcpAoListenerKey> {
@@ -4553,6 +4568,7 @@ async fn run<T>(
             // MSS implied by the IPv6 minimum MTU.
             tcp_mss_v4: min_v4_mss,
             tcp_mss_v6: min_v6_mss,
+            gtsm_outbound_v6: interface_only_gtsm(&config),
         };
     let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
     let explicit_endpoints = config.explicit_listen_endpoints();
@@ -5158,7 +5174,9 @@ async fn run<T>(
     // Advertisements and follow carrier through the link monitor; without
     // either, refuse to start rather than run them blind.
     #[cfg(target_os = "linux")]
-    let peer_mgr = peer_mgr.with_running_interface_only(running_interface_only_tx);
+    let peer_mgr = peer_mgr
+        .with_running_interface_only(running_interface_only_tx)
+        .with_listener_gtsm(tcp_ao_listener_handle.clone());
     #[cfg(target_os = "linux")]
     let peer_mgr = if config.neighbors.interface_only().is_empty() {
         peer_mgr
@@ -11369,6 +11387,26 @@ peer_group = "plain"
             Some(180),
             "resolution failure must retain the previous raw-config marker fallback"
         );
+    }
+
+    /// The IPv6 listener sends Hop Limit 255 from startup exactly when an
+    /// interface-only neighbor runs GTSM, directly or from its peer group.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interface_only_gtsm_sets_the_listener_outbound_hop_limit() {
+        let config = |neighbor: &str| -> Config {
+            toml::from_str(&format!(
+                "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+                 [global.telemetry]\nlog_format = \"json\"\n\
+                 [peer_groups.fabric]\nttl_security = true\n\
+                 [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\n\
+                 families = [\"ipv6_unicast\"]\n{neighbor}"
+            ))
+            .unwrap()
+        };
+        assert!(!interface_only_gtsm(&config("")));
+        assert!(interface_only_gtsm(&config("ttl_security = true\n")));
+        assert!(interface_only_gtsm(&config("peer_group = \"fabric\"\n")));
     }
 
     /// An interface-only neighbor whose port is absent (allowed at load)
