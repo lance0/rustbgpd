@@ -1580,12 +1580,18 @@ async fn conditional_rib(
     let (installed_tx, installed) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::InstallConditionalAdvertisements { set, reply, .. } = update {
-                if refuse.load(Ordering::SeqCst) {
-                    continue;
+            match update {
+                RibUpdate::InstallConditionalAdvertisements { set, reply, .. } => {
+                    if refuse.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    let _ = installed_tx.send(set);
+                    let _ = reply.send(capture.clone());
                 }
-                let _ = installed_tx.send(set);
-                let _ = reply.send(capture.clone());
+                RibUpdate::RestoreConditionalAdvertisements { reply, .. } => {
+                    let _ = reply.send(());
+                }
+                _ => {}
             }
         }
     });
@@ -1706,4 +1712,60 @@ async fn an_unacknowledged_gate_install_admits_no_bound_peer() {
     h.bind("swp1", Some(endpoint(2, 7))).await;
     assert_eq!(h.peers_at(ll(2)), [], "not admitted");
     assert!(h.mgr.unnumbered_retry_at().is_some(), "retried");
+}
+
+/// A compensated mutation after a lost retirement acknowledgement restores
+/// the RIB to its capture and the cache to the stale set, which still names
+/// the endpoint. The doubt comes back with it, so a same-endpoint rebind
+/// installs the gate instead of trusting that cache.
+#[tokio::test]
+async fn a_compensated_restore_keeps_a_lost_acknowledgements_doubt() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+    );
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut installed = conditional_rib(&mut h, refuse.clone()).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    installed.try_recv().unwrap();
+
+    // The retirement's install loses its acknowledgement.
+    refuse.store(true, Ordering::SeqCst);
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.mgr.reconcile_conditional_advertisements().await;
+    refuse.store(false, Ordering::SeqCst);
+
+    // A later mutation installs, then is compensated back.
+    let set = h
+        .mgr
+        .conditional_set(&h.mgr.current_config.clone())
+        .unwrap();
+    let prior = h
+        .mgr
+        .install_conditional_advertisements(set, &[])
+        .await
+        .unwrap()
+        .expect("an uncertain install is always sent");
+    installed.try_recv().unwrap();
+    h.mgr
+        .restore_conditional_advertisements(prior)
+        .await
+        .unwrap();
+    assert_eq!(
+        attached(&h.mgr.conditional_advertisements),
+        [IpAddr::V6(ll(2))]
+    );
+
+    // Mutation-red: clearing the doubt on restore skips this install.
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+    assert_eq!(
+        installed.try_recv().map(|set| attached(&set)),
+        Ok(vec![IpAddr::V6(ll(2))]),
+        "the rebind installs the gate again"
+    );
 }

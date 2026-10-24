@@ -25,6 +25,9 @@ const RECONCILE_RETRY_MAX: Duration = Duration::from_secs(60);
 pub(super) struct ConditionalAdvertisementPrior {
     capture: ConditionalAdvertisementCapture,
     set: ConditionalAdvertisementSet,
+    /// Whether `set` was known not to match the RIB when captured: a restore
+    /// brings back that doubt with the cache it restores.
+    uncertain: bool,
 }
 
 impl PeerManager {
@@ -74,7 +77,8 @@ impl PeerManager {
         set: ConditionalAdvertisementSet,
         swapping_datasets: &[String],
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
-        if !self.conditional_install_uncertain && set == self.conditional_advertisements {
+        let uncertain = self.conditional_install_uncertain;
+        if !uncertain && set == self.conditional_advertisements {
             return Ok(None);
         }
         let capture = self
@@ -91,7 +95,11 @@ impl PeerManager {
             "installed conditional advertisements"
         );
         let set = std::mem::replace(&mut self.conditional_advertisements, set);
-        Ok(Some(ConditionalAdvertisementPrior { capture, set }))
+        Ok(Some(ConditionalAdvertisementPrior {
+            capture,
+            set,
+            uncertain,
+        }))
     }
 
     /// Reinstate a captured install (generation compensation). Applied
@@ -106,7 +114,10 @@ impl PeerManager {
         })
         .await?;
         self.conditional_advertisements = prior.set;
-        self.conditional_install_uncertain = false;
+        // The restored cache is as certain as it was when captured: one
+        // that predates a lost acknowledgement may still name a gate the
+        // RIB has removed.
+        self.conditional_install_uncertain = prior.uncertain;
         Ok(())
     }
 
@@ -203,6 +214,7 @@ impl PeerManager {
         Ok(Some(ConditionalAdvertisementPrior {
             capture,
             set: self.conditional_advertisements.clone(),
+            uncertain: self.conditional_install_uncertain,
         }))
     }
 }
