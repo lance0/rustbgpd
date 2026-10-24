@@ -413,6 +413,53 @@ impl BfdRuntimeConfig {
     }
 }
 
+/// The single-hop BFD session an interface-only neighbor's binding runs, from
+/// its own or its peer group's `bfd` (ADR-0142 "Lifecycle"): the learned
+/// address scoped to the binding's interface index. `None` when the neighbor
+/// configures no enabled BFD. Configuration validation rejects multihop here.
+pub(crate) fn bound_session_params(
+    config: &Config,
+    neighbor: &crate::config::Neighbor,
+    interface: &str,
+    address: std::net::Ipv6Addr,
+    ifindex: u32,
+) -> Result<Option<BfdSessionParams>, BfdRuntimeConfigError> {
+    let Some(bfd) = resolve_bfd(
+        neighbor.bfd.as_ref(),
+        neighbor.peer_group.as_deref(),
+        config,
+    )
+    .filter(|bfd| bfd.enabled) else {
+        return Ok(None);
+    };
+    let profile = config
+        .bfd_profiles
+        .iter()
+        .find(|p| p.name == bfd.profile)
+        .ok_or_else(|| {
+            BfdRuntimeConfigError(format!(
+                "interface-only neighbor on {interface:?}: configured BFD profile {:?} is missing",
+                bfd.profile
+            ))
+        })?;
+    let peer = IpAddr::V6(address);
+    Ok(Some(BfdSessionParams {
+        revision: 0,
+        peer,
+        peer_label: rustbgpd_api::peer_types::PeerKey::new(peer, Some(interface.to_owned()))
+            .label(),
+        scope_id: Some(ifindex),
+        destination: bfd_destination(peer, Some(ifindex), false)?,
+        desired_min_tx_us: profile.min_tx_interval.saturating_mul(1000),
+        required_min_rx_us: profile.min_rx_interval.saturating_mul(1000),
+        detect_mult: u8::try_from(profile.multiplier).unwrap_or(u8::MAX),
+        strict: bfd.strict,
+        enabled: true,
+        multihop: false,
+        source: None,
+    }))
+}
+
 fn is_ipv6_link_local(peer: IpAddr) -> bool {
     matches!(peer, IpAddr::V6(v6) if {
         let octets = v6.octets();

@@ -86,34 +86,111 @@ fn link_local_neighbor_requires_interface() {
     }
 }
 
-#[test]
-fn link_local_neighbor_rejects_same_address_on_different_interfaces() {
-    // v1 limitation (ADR-0069 Deferred): the RIB keys peers by bare address, so
-    // the same link-local address on two interfaces would alias in the RIB.
-    // Validation rejects it until the RIB carries scoped peer identity.
-    let base = valid_toml().replace(
-        r#"address = "10.0.0.2""#,
-        r#"address = "fe80::1"
-interface = "lo""#,
-    );
-    let toml_str = format!(
+/// Two neighbors on one IPv6 link-local address, on different interfaces,
+/// with `extra` appended to the first one's `[[neighbors]]` block.
+fn same_address_pair(extra: &str, tail: &str) -> String {
+    format!(
         r#"
-{base}
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
 
+[global.telemetry]
+log_format = "json"
+{tail}
 [[neighbors]]
 address = "fe80::1"
 interface = "eth0"
-remote_asn = 65099
+remote_asn = 65002
+{extra}
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth1"
+remote_asn = 65002
 "#
+    )
+}
+
+/// The RIB keys every neighbor by its own identity, so one link-local
+/// address may name a neighbor on each of several interfaces (ADR-0069).
+#[test]
+fn link_local_neighbors_may_share_an_address_across_interfaces() {
+    let config = parse(&same_address_pair("", "")).unwrap();
+    let scopes: Vec<_> = config
+        .neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.as_str(), neighbor.interface.as_deref()))
+        .collect();
+    assert_eq!(
+        scopes,
+        [("fe80::1", Some("eth0")), ("fe80::1", Some("eth1"))]
     );
-    let err = parse(&toml_str).unwrap_err();
-    match err {
-        ConfigError::InvalidNeighborConfig { field, reason, .. } => {
-            assert_eq!(field, "interface");
-            assert!(reason.contains("multiple"), "unexpected reason: {reason}");
+}
+
+/// Expect a refusal on `field` that names both neighbors.
+fn assert_pair_refused(toml: &str, field: &str, needle: &str) {
+    match parse(toml).unwrap_err() {
+        ConfigError::InvalidNeighborConfig {
+            address,
+            field: refused,
+            reason,
+        } => {
+            assert_eq!(refused, field, "{reason}");
+            assert_eq!(address, "fe80::1%eth0 and fe80::1%eth1");
+            assert!(reason.contains("fe80::1%eth0 and fe80::1%eth1"), "{reason}");
+            assert!(reason.contains(needle), "{reason}");
         }
         other => panic!("expected InvalidNeighborConfig, got {other}"),
     }
+}
+
+/// BMP stays fail-closed: collectors cannot tell same-address sessions
+/// apart, so any collector is refused while such a pair exists. The same
+/// validator runs at startup, on reload (whose running `[bmp]` is checked
+/// against the new neighbors) and for runtime neighbor adds.
+#[test]
+fn same_address_neighbors_refuse_bmp() {
+    let bmp = "[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n";
+    assert_pair_refused(&same_address_pair("", bmp), "bmp", "BMP");
+}
+
+/// BFD, TCP MD5, TCP-AO and a differing per-neighbor `log_level` are each
+/// keyed by bare address somewhere, so a same-address neighbor may not
+/// use them.
+#[test]
+fn same_address_neighbors_refuse_address_keyed_features() {
+    let bfd_profile = "[[bfd_profiles]]\nname = \"fast\"\nmin_tx_interval = 300\nmin_rx_interval = 300\nmultiplier = 3\n";
+    assert_pair_refused(
+        &same_address_pair("bfd = { profile = \"fast\" }", bfd_profile),
+        "bfd",
+        "BFD",
+    );
+    assert_pair_refused(
+        &same_address_pair("md5_password = \"secret\"", ""),
+        "md5_password",
+        "TCP MD5",
+    );
+    assert_pair_refused(
+        &same_address_pair(
+            "tcp_ao = { key = \"secret\", send_id = 7, recv_id = 9, algorithm = \"hmac(sha256)\" }",
+            "",
+        ),
+        "tcp_ao",
+        "TCP-AO",
+    );
+    assert_pair_refused(
+        &same_address_pair("log_level = \"debug\"", ""),
+        "log_level",
+        "log_level",
+    );
+    // A disabled BFD block runs no session, so it is not refused.
+    parse(&same_address_pair(
+        "bfd = { profile = \"fast\", enabled = false }",
+        bfd_profile,
+    ))
+    .unwrap();
 }
 
 #[test]
@@ -1656,4 +1733,170 @@ peer_group = "ixp"
     );
     parse(&toml_str.replace("admin_down = true", "admin_down = false"))
         .expect("an explicit false is allowed");
+}
+
+/// The confirmed-transaction rollback check compares each neighbor with its
+/// own prior record, not with another neighbor at the same address.
+#[test]
+fn rollback_limit_check_pairs_same_address_neighbors_by_interface() {
+    let with_eth1_limit = |limit: u32| {
+        parse(
+            &same_address_pair("max_prefixes_out_ipv4_unicast = 100", "").replace(
+                "interface = \"eth1\"\nremote_asn = 65002\n",
+                &format!(
+                    "interface = \"eth1\"\nremote_asn = 65002\n\
+                     max_prefixes_out_ipv4_unicast = {limit}\n"
+                ),
+            ),
+        )
+        .unwrap()
+    };
+    let rollback = with_eth1_limit(10);
+    assert_eq!(
+        rollback.neighbors[1].max_prefixes_out_ipv4_unicast,
+        std::num::NonZeroU32::new(10)
+    );
+    assert!(outbound_prefix_limits_loosen(
+        &rollback,
+        &with_eth1_limit(20)
+    ));
+    assert!(!outbound_prefix_limits_loosen(
+        &rollback,
+        &with_eth1_limit(10)
+    ));
+}
+
+/// The listener selects GTSM by peer address, so a same-address pair must
+/// agree on the effective policy, inherited and disabled states included.
+#[test]
+fn same_address_neighbors_must_agree_on_gtsm() {
+    let group = "[peer_groups.gtsm]\nttl_security = true\n";
+    let pair = |eth0: &str, eth1: &str| {
+        same_address_pair(eth0, group).replace(
+            "interface = \"eth1\"\nremote_asn = 65002\n",
+            &format!("interface = \"eth1\"\nremote_asn = 65002\n{eth1}\n"),
+        )
+    };
+    for (eth0, eth1) in [
+        ("ttl_security = true", ""),
+        ("peer_group = \"gtsm\"", ""),
+        (
+            "ttl_security = true\nttl_security_hops = 2",
+            "ttl_security = true",
+        ),
+        (
+            "peer_group = \"gtsm\"",
+            "ttl_security = false\npeer_group = \"gtsm\"",
+        ),
+    ] {
+        assert_pair_refused(&pair(eth0, eth1), "ttl_security", "GTSM");
+    }
+    for (eth0, eth1) in [
+        ("peer_group = \"gtsm\"", "peer_group = \"gtsm\""),
+        ("ttl_security = true", "peer_group = \"gtsm\""),
+        ("ttl_security = false", ""),
+    ] {
+        parse(&pair(eth0, eth1)).unwrap();
+    }
+}
+
+/// Two neighbors that share a link-local address are diffed against their
+/// own prior records: an unchanged pair in different peer groups is a no-op,
+/// and a peer-group edit impacts only that group's member.
+#[test]
+fn same_address_neighbors_diff_against_their_own_records() {
+    let groups = "[peer_groups.a]\n[peer_groups.b]\n";
+    let config = |groups: &str| {
+        parse(&same_address_pair("peer_group = \"a\"", groups).replace(
+            "interface = \"eth1\"\nremote_asn = 65002\n",
+            "interface = \"eth1\"\nremote_asn = 65002\npeer_group = \"b\"\n",
+        ))
+        .unwrap()
+    };
+    let current = config(groups);
+
+    let unchanged = diff_config(&current, &config(groups));
+    assert!(
+        unchanged.effective_neighbor_impact.is_empty(),
+        "{:?}",
+        unchanged.effective_neighbor_impact
+    );
+    assert_eq!(unchanged.session_reset_entries(), 0);
+    let class = classify_config_transaction_v1(&unchanged);
+    assert!(class.unsupported_sections.is_empty(), "{class:?}");
+
+    let changed = diff_config(
+        &current,
+        &config("[peer_groups.a]\nhold_time = 30\n[peer_groups.b]\n"),
+    );
+    let impacts = changed
+        .effective_neighbor_impact
+        .iter()
+        .map(|impact| (impact.label(), impact.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        impacts,
+        [(
+            "fe80::1%eth0".to_string(),
+            EffectiveNeighborImpactKind::SessionReshape
+        )]
+    );
+    assert_eq!(changed.session_reset_entries(), 1);
+}
+
+/// The TCP-AO startup pin matches each neighbor with its own live record,
+/// so it never swaps one same-address neighbor for the other.
+#[test]
+fn tcp_ao_pin_keeps_same_address_neighbors_apart() {
+    let ao =
+        "tcp_ao = { key = \"secret\", send_id = 7, recv_id = 9, algorithm = \"hmac(sha256)\" }";
+    let single = |extra: &str| {
+        parse(&same_address_pair(extra, "").replace(
+            "\n[[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth1\"\nremote_asn = 65002\n",
+            "\n",
+        ))
+        .unwrap()
+    };
+    let identities = |config: &Config| {
+        config
+            .neighbors
+            .iter()
+            .map(|neighbor| {
+                (
+                    neighbor.interface.clone().unwrap_or_default(),
+                    neighbor.tcp_ao.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let owned = |pairs: &[(&str, bool)]| {
+        pairs
+            .iter()
+            .map(|(interface, ao)| ((*interface).to_string(), *ao))
+            .collect::<Vec<_>>()
+    };
+
+    // Dropping eth0's key and adding eth1 keeps eth0's live key and leaves
+    // the new eth1 record alone.
+    let live = single(ao);
+    assert_eq!(identities(&live), owned(&[("eth0", true)]));
+    let mut runtime = parse(&same_address_pair("", "")).unwrap();
+    assert_eq!(
+        super::pin_tcp_ao_startup_only_runtime(&mut runtime, &live),
+        1
+    );
+    assert_eq!(
+        identities(&runtime),
+        owned(&[("eth0", true), ("eth1", false)])
+    );
+
+    // Keeping only eth0 and adding a key to it pins eth0 to its own live
+    // record; eth1's removal stands.
+    let live = parse(&same_address_pair("", "")).unwrap();
+    let mut runtime = single(ao);
+    assert_eq!(
+        super::pin_tcp_ao_startup_only_runtime(&mut runtime, &live),
+        1
+    );
+    assert_eq!(identities(&runtime), owned(&[("eth0", false)]));
 }

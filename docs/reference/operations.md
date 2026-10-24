@@ -3211,9 +3211,9 @@ older queued generations remain rejected.
 The optional per-key `vrf_ifindex` is Linux's VRF L3-master key selector, not
 an IPv6 link-local interface scope. rustbgpd currently installs VRF-unbound
 TCP-AO MKTs (`TCP_AO_KEYF_IFINDEX` clear), so Linux may match them in any L3
-master. Scoped link-local routing remains attached to the TCP socket,
-and configuration validation forbids reusing the same link-local neighbor
-address across interfaces.
+master. Scoped link-local routing remains attached to the TCP socket. The
+listener keys MKTs by peer address, so configuration refuses TCP-AO (and TCP
+MD5) on a neighbor that shares its link-local address with another.
 
 Counters and the key inventory are refreshed from the socket for each query;
 inspect `last_error` for setup or connect failures.
@@ -3308,6 +3308,14 @@ rbgp neighbor 203.0.113.2 add --remote-asn 65002 --role provider --strict-role
 The peer is persisted to the config file automatically. `--role` enables RFC
 9234 BGP Roles / OTC route-leak protection for static eBGP peers; the optional
 `--strict-role` flag rejects peers that do not advertise a compatible Role.
+`--remote-asn` also takes `external` (any AS except the local one) or
+`internal` (the local AS), as `remote_asn` does in the configuration file;
+`rbgp neighbor <addr>` then shows the mode with the session's AS beside it,
+for example `external (session 65009)`.
+
+An interface-only neighbor is selected by its interface name, as in
+`rbgp neighbor swp1`; the table lists it as `swp1 (fe80::2)`, or `swp1 (-)`
+until its peer's address is learned.
 
 ### Remove a peer
 

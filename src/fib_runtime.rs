@@ -940,7 +940,13 @@ fn max_install_paths(config: &FibRuntimeConfig) -> u32 {
 async fn query_peer_groups_versioned(
     rib_tx: &mpsc::Sender<RibUpdate>,
     planning_deadline: tokio::time::Instant,
-) -> Result<(BTreeMap<IpAddr, String>, rustbgpd_rib::RoutePageVersion), &'static str> {
+) -> Result<
+    (
+        BTreeMap<rustbgpd_rib::PeerId, String>,
+        rustbgpd_rib::RoutePageVersion,
+    ),
+    &'static str,
+> {
     let deadline = planning_request_deadline(planning_deadline);
     let (reply, rx) = oneshot::channel();
     let query = async {
@@ -955,14 +961,7 @@ async fn query_peer_groups_versioned(
     let groups = tokio::time::timeout_at(deadline, query)
         .await
         .map_err(|_| "timeout")??;
-    Ok((
-        groups
-            .groups
-            .into_iter()
-            .map(|(peer, group)| (peer.addr(), group))
-            .collect(),
-        groups.observed_version,
-    ))
+    Ok((groups.groups.into_iter().collect(), groups.observed_version))
 }
 
 async fn query_versions(

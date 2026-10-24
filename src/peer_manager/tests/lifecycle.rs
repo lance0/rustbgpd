@@ -569,3 +569,158 @@ async fn delete_peer_rejects_dynamic_targets() {
         "rejected delete must leave the dynamic peer managed"
     );
 }
+
+fn scoped_config(interface: &str, scope_id: u32) -> PeerManagerNeighborConfig {
+    let mut config = make_config("fe80::1".parse().unwrap(), 65002);
+    config.interface = Some(interface.to_string());
+    config.scope_id = Some(scope_id);
+    config
+}
+
+/// A runtime neighbor add that would put a second neighbor on a link-local
+/// address while BMP runs is refused before any effect, naming both
+/// neighbors and BMP (BMP running first, then the neighbor).
+#[tokio::test]
+async fn runtime_add_of_a_same_address_neighbor_is_refused_while_bmp_runs() {
+    let mut mgr = test_peer_manager();
+    mgr.current_config.bmp = Some(crate::config::BmpConfig {
+        sys_name: "rustbgpd".to_string(),
+        sys_descr: String::new(),
+        collectors: vec![crate::config::BmpCollector {
+            address: "127.0.0.1:11019".to_string(),
+            reconnect_interval: 30,
+            monitor: vec![crate::config::BmpMonitorView::RibInPre],
+            version: 3,
+        }],
+    });
+    // The persisted add resolves its interface, so the first neighbor uses
+    // one that exists; the refusal comes from validation, before the
+    // second neighbor's interface is ever resolved.
+    mgr.add_peer(scoped_config("lo", 1), true).await.unwrap();
+    let error = mgr
+        .add_peer(scoped_config("eth1", 3), true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("fe80::1%lo and fe80::1%eth1"), "{error}");
+    assert!(error.contains("BMP"), "{error}");
+    assert_eq!(mgr.peers.len(), 1, "the refused add has no effect");
+    assert_eq!(mgr.current_config.neighbors.len(), 1);
+    for (_, managed) in mgr.peers.drain() {
+        let _ = managed.into_parts().0.shutdown().await;
+    }
+}
+
+/// Every neighbor on a shared link-local address is known by that address,
+/// and operations on one reach that neighbor's own RIB handle, never its
+/// sibling's: an outbound refresh for eth1 names eth1's handle.
+#[tokio::test]
+async fn same_address_neighbors_reach_their_own_rib_handles() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    mgr.add_peer(scoped_config("eth0", 2), false).await.unwrap();
+    mgr.add_peer(scoped_config("eth1", 3), false).await.unwrap();
+    assert!(mgr.has_peer_address("fe80::1".parse().unwrap()));
+    let eth1 = scoped_key("fe80::1".parse().unwrap(), "eth1");
+    let expected = mgr.rib_peer_of(&eth1);
+    assert_ne!(
+        expected,
+        mgr.rib_peer_of(&scoped_key("fe80::1".parse().unwrap(), "eth0"))
+    );
+    let rib = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::RefreshPeerOutbound { peer, reply } = update {
+                let _ = reply.send(Ok(()));
+                return peer;
+            }
+        }
+        panic!("RefreshPeerOutbound never arrived");
+    });
+    mgr.refresh_outbound(eth1).await.unwrap();
+    assert_eq!(rib.await.unwrap(), expected);
+    for (_, managed) in mgr.peers.drain() {
+        let _ = managed.into_parts().0.shutdown().await;
+    }
+}
+
+/// The update-group planner keeps two neighbors that share a link-local
+/// address apart: a change to one is planned for that one only.
+#[test]
+fn update_group_plan_keeps_same_address_neighbors_apart() {
+    let pair = |eth0_extra: &str| -> crate::config::Config {
+        toml::from_str(&format!(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+             [global.telemetry]\nlog_format = \"json\"\n\
+             [[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth0\"\nremote_asn = 65001\n\
+             {eth0_extra}\n\
+             [[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth1\"\nremote_asn = 65001\n"
+        ))
+        .unwrap()
+    };
+    let mut mgr = test_peer_manager();
+    mgr.current_config = pair("");
+    let link_local: IpAddr = "fe80::1".parse().unwrap();
+    let endpoint = |interface| rustbgpd_rib::PeerEndpoint::new(link_local, Some(interface));
+    let handles = [
+        rustbgpd_rib::PeerId::allocate(endpoint("eth0")),
+        rustbgpd_rib::PeerId::allocate(endpoint("eth1")),
+    ];
+    let input = rustbgpd_rib::UpdateGroupClassifierInput {
+        policy_fingerprint: None,
+        policy_provenance: None,
+        policy_requires_peer_context: false,
+        target_is_ebgp: false,
+        target_is_rr_client: false,
+        target_local_role: None,
+        interpret_rfc1997: true,
+        sendable_families: vec![(1, 1)],
+        llgr_families: Vec::new(),
+        add_path_send: false,
+        per_client_best: false,
+        orr_vantage: None,
+        orf_installed: false,
+        conditional_advertisement: false,
+    };
+    let snapshot = rustbgpd_rib::UpdateGroupSnapshot {
+        peers: handles
+            .iter()
+            .map(|&peer| rustbgpd_rib::UpdateGroupPeerSnapshot {
+                peer,
+                input: input.clone(),
+                classification: rustbgpd_rib::classify_update_group(input.clone()),
+                runtime_membership: String::new(),
+            })
+            .collect(),
+    };
+
+    let plan = mgr
+        .plan_update_group_impact(&pair("route_reflector_client = true"), snapshot)
+        .unwrap();
+
+    let transitions = plan
+        .entries
+        .iter()
+        .map(|row| (row.peer.to_string(), row.transition.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transitions,
+        [
+            ("fe80::1%eth0".to_string(), "regroup"),
+            ("fe80::1%eth1".to_string(), "no_op")
+        ]
+    );
+    assert_eq!(plan.rollup.affected_peers, 1);
+    for handle in handles {
+        assert!(handle.release());
+    }
+}

@@ -481,6 +481,156 @@ impl Config {
             Ok(())
         }
     }
+
+    /// One IPv6 link-local address may name a neighbor on each of several
+    /// interfaces: the RIB keys every neighbor by its own identity. A few
+    /// features still key their state by bare address, so a neighbor that
+    /// shares its address with another may not use them; each is rejected
+    /// here, at every config entry point (startup, reload, transactions and
+    /// the runtime neighbor RPCs), before any effect:
+    ///
+    /// - BMP: collectors cannot tell same-address sessions apart (a Peer
+    ///   Down for one would apply to the other's routes), so any BMP
+    ///   collector is refused while such a pair exists.
+    /// - BFD: single-hop sessions are keyed by peer address.
+    /// - TCP MD5 and TCP-AO: the passive listener keys its keys by peer
+    ///   address.
+    /// - Per-neighbor `log_level`: its span directive matches the bare
+    ///   address, so the pair must agree on it.
+    /// - GTSM: the passive listener selects its TTL-security policy by peer
+    ///   address, so the pair must agree on the effective `ttl_security`
+    ///   and `ttl_security_hops`.
+    fn validate_same_address_neighbors(&self) -> Result<(), ConfigError> {
+        let mut by_address: std::collections::BTreeMap<IpAddr, Vec<&Neighbor>> =
+            std::collections::BTreeMap::new();
+        for neighbor in &self.neighbors {
+            if let Ok(addr) = neighbor.address.parse::<IpAddr>()
+                && neighbor.interface.is_some()
+            {
+                by_address.entry(addr).or_default().push(neighbor);
+            }
+        }
+        by_address
+            .values()
+            .filter(|group| group.len() > 1)
+            .try_for_each(|group| self.validate_same_address_group(group))
+    }
+
+    fn validate_same_address_group(&self, group: &[&Neighbor]) -> Result<(), ConfigError> {
+        {
+            let names = group
+                .iter()
+                .map(|neighbor| {
+                    format!(
+                        "{}%{}",
+                        neighbor.address,
+                        neighbor.interface.as_deref().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" and ");
+            let refuse = |field: &str, reason: String| ConfigError::InvalidNeighborConfig {
+                address: names.clone(),
+                field: field.to_string(),
+                reason,
+            };
+            if self
+                .bmp
+                .as_ref()
+                .is_some_and(|bmp| !bmp.collectors.is_empty())
+            {
+                return Err(refuse(
+                    "bmp",
+                    format!(
+                        "neighbors {names} share one IPv6 link-local address, and BMP \
+                         collectors cannot tell their sessions apart; remove the [bmp] \
+                         collectors or give each neighbor a distinct link-local address"
+                    ),
+                ));
+            }
+            for neighbor in group {
+                let group_config = self.peer_group_for_neighbor(neighbor)?;
+                let bfd = neighbor
+                    .bfd
+                    .as_ref()
+                    .or_else(|| group_config.and_then(|group| group.bfd.as_ref()));
+                if bfd.is_some_and(|bfd| bfd.enabled) {
+                    return Err(refuse(
+                        "bfd",
+                        format!(
+                            "neighbors {names} share one IPv6 link-local address; BFD \
+                             keys its sessions by peer address and is not supported on \
+                             such neighbors"
+                        ),
+                    ));
+                }
+                let md5 = neighbor.md5_password.is_some()
+                    || group_config.is_some_and(|group| group.md5_password.is_some());
+                if md5 || neighbor.tcp_ao.is_some() {
+                    return Err(refuse(
+                        if md5 { "md5_password" } else { "tcp_ao" },
+                        format!(
+                            "neighbors {names} share one IPv6 link-local address; the \
+                             listener keys TCP MD5 and TCP-AO by peer address, so neither \
+                             is supported on such neighbors"
+                        ),
+                    ));
+                }
+            }
+            let level = |neighbor: &Neighbor| {
+                let group = self.peer_group_for_neighbor(neighbor).ok().flatten();
+                neighbor
+                    .log_level
+                    .clone()
+                    .or_else(|| group.and_then(|group| group.log_level.clone()))
+            };
+            if group
+                .iter()
+                .any(|neighbor| level(neighbor) != level(group[0]))
+            {
+                return Err(refuse(
+                    "log_level",
+                    format!(
+                        "neighbors {names} share one IPv6 link-local address, and a \
+                         per-neighbor log_level matches the bare address; give them the \
+                         same log_level"
+                    ),
+                ));
+            }
+            let gtsm = |neighbor: &Neighbor| self.effective_gtsm_hops(neighbor);
+            if group
+                .iter()
+                .any(|neighbor| gtsm(neighbor) != gtsm(group[0]))
+            {
+                return Err(refuse(
+                    "ttl_security",
+                    format!(
+                        "neighbors {names} share one IPv6 link-local address, and the \
+                         listener selects its GTSM policy by peer address; give them the \
+                         same effective ttl_security and ttl_security_hops"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A neighbor's effective GTSM hop limit, `None` when GTSM is off,
+    /// resolved as `resolve_neighbor` does.
+    fn effective_gtsm_hops(&self, neighbor: &Neighbor) -> Option<std::num::NonZeroU8> {
+        let group = self.peer_group_for_neighbor(neighbor).ok().flatten();
+        neighbor
+            .ttl_security
+            .or_else(|| group.and_then(|group| group.ttl_security))
+            .unwrap_or(false)
+            .then(|| {
+                neighbor
+                    .ttl_security_hops
+                    .or_else(|| group.and_then(|group| group.ttl_security_hops))
+                    .unwrap_or(std::num::NonZeroU8::MIN)
+            })
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "validation keeps related operator diagnostics in one ordered pass"
@@ -745,7 +895,6 @@ impl Config {
         // keyed by bare address; link-local peers are scoped by interface.
         {
             let mut seen = std::collections::HashSet::new();
-            let mut seen_link_local_addrs = std::collections::HashSet::new();
             for neighbor in &self.neighbors {
                 if neighbor.address.is_empty() {
                     return Err(ConfigError::InvalidNeighborConfig {
@@ -802,24 +951,9 @@ impl Config {
                         reason: "duplicate neighbor address/interface".to_string(),
                     });
                 }
-                // v1 limitation: the RIB still keys peers by bare address, so the
-                // same link-local address bound to two interfaces would alias into
-                // one Adj-RIB-In/Out entry (a PeerDown on one would wipe the
-                // other's routes). Require each link-local address to be unique
-                // across neighbors until the RIB carries scoped peer identity.
-                // See ADR-0069 "Deferred".
-                if is_link_local && !seen_link_local_addrs.insert(addr) {
-                    return Err(ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
-                        field: "interface".to_string(),
-                        reason: "the same IPv6 link-local address on multiple \
-                                 interfaces is not supported in this release; use a \
-                                 distinct link-local address per interface"
-                            .to_string(),
-                    });
-                }
             }
         }
+        self.validate_same_address_neighbors()?;
 
         self.validate_interface_only_neighbors()?;
 

@@ -1092,12 +1092,13 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the peer snapshot (None if not found).
         reply: oneshot::Sender<Option<PeerInfo>>,
     },
-    /// Check whether one unique managed peer owns an address without querying
-    /// its session task. This includes accepted dynamic peers.
+    /// Check whether any managed peer uses an address, without querying its
+    /// session task. This includes accepted dynamic peers, and every neighbor
+    /// on a link-local address that several interfaces share.
     HasPeerAddress {
         /// Peer address to resolve.
         address: IpAddr,
-        /// Reply channel; false also covers an ambiguous scoped address.
+        /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
     /// Explicit enable retained by the existing runtime-config settlement owner.
@@ -1750,7 +1751,7 @@ pub enum PeerManagerOperatorQuery {
         peer: PeerKey,
         reply: oneshot::Sender<Option<PeerInfo>>,
     },
-    /// Resolve one unique managed peer address, including dynamic peers.
+    /// Whether any managed peer uses an address, including dynamic peers.
     HasPeerAddress {
         address: IpAddr,
         reply: oneshot::Sender<bool>,
@@ -2109,8 +2110,10 @@ pub struct PresenceAwareNeighborCreate {
     pub address: IpAddr,
     /// Optional interface for an IPv6 link-local peer.
     pub interface: Option<String>,
-    /// Remote autonomous system number.
+    /// Remote autonomous system number; 0 with a non-numeric mode.
     pub remote_asn: u32,
+    /// How `remote_asn` matches the peer's OPEN.
+    pub remote_asn_mode: RemoteAsnMode,
     /// Optional operator description.
     pub description: Option<String>,
     /// Optional peer-group reference.
@@ -2593,6 +2596,9 @@ pub enum ConfigEvent {
     SetNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2602,6 +2608,9 @@ pub enum ConfigEvent {
     SetNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Ordered policy names.
         policy_names: Vec<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2611,6 +2620,9 @@ pub enum ConfigEvent {
     ClearNeighborImportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },
@@ -2618,6 +2630,9 @@ pub enum ConfigEvent {
     ClearNeighborExportChain {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },
@@ -2641,6 +2656,9 @@ pub enum ConfigEvent {
     SetNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Peer-group name.
         peer_group: String,
         /// Optional persistence acknowledgement (see `SetPolicy`).
@@ -2650,6 +2668,9 @@ pub enum ConfigEvent {
     ClearNeighborPeerGroup {
         /// Neighbor address.
         address: IpAddr,
+        /// Interface scope of a link-local neighbor; `None` for an unscoped
+        /// neighbor. Selects one of several neighbors sharing `address`.
+        interface: Option<String>,
         /// Optional persistence acknowledgement (see `SetPolicy`).
         ack: Option<ConfigPersistAck>,
     },
@@ -2819,6 +2840,49 @@ pub struct PeerInfo {
     pub rfc8212_import_policy: Rfc8212PolicyStatus,
     /// ADR-0112 RFC 8212 explicit-policy status for the export direction.
     pub rfc8212_export_policy: Rfc8212PolicyStatus,
+    /// How the configured `remote_asn` matches the peer's OPEN. Reads report
+    /// `remote_asn` = 0 for a non-numeric mode.
+    pub remote_asn_mode: RemoteAsnMode,
+    /// The ASN the peer sent in its OPEN, while a session is Established.
+    pub negotiated_remote_asn: Option<u32>,
+    /// Set for an interface-only neighbor (ADR-0142): its discovery state
+    /// and the address bound to it.
+    pub interface_only: Option<InterfaceOnlyState>,
+}
+
+/// How a neighbor's `remote_asn` matches the ASN in the peer's OPEN.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RemoteAsnMode {
+    /// The configured number (the only mode before ADR-0142).
+    #[default]
+    Numeric,
+    /// Any ASN except the local ASN.
+    External,
+    /// The local ASN.
+    Internal,
+}
+
+/// Discovery state of an interface-only neighbor (ADR-0142).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeighborDiscoveryState {
+    /// The interface does not exist.
+    InterfaceMissing,
+    /// The interface is down.
+    LinkDown,
+    /// The link is up and no peer address is bound.
+    AwaitingDiscovery,
+    /// A learned peer address is bound.
+    Bound,
+}
+
+/// What an interface-only neighbor's row reports beyond an ordinary
+/// neighbor's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceOnlyState {
+    /// Where discovery stands.
+    pub discovery: NeighborDiscoveryState,
+    /// The bound IPv6 link-local address, without a scope.
+    pub learned_address: Option<std::net::Ipv6Addr>,
 }
 
 /// RFC 8212 explicit-policy status for one direction of one session

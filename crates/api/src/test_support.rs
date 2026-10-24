@@ -97,6 +97,9 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         slow_peer: false,
         rfc8212_import_policy: Rfc8212PolicyStatus::NotRequired,
         rfc8212_export_policy: Rfc8212PolicyStatus::NotRequired,
+        remote_asn_mode: crate::peer_types::RemoteAsnMode::Numeric,
+        negotiated_remote_asn: None,
+        interface_only: None,
     }
 }
 

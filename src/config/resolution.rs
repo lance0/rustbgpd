@@ -1578,11 +1578,9 @@ pub fn outbound_prefix_limits_loosen(rollback: &Config, candidate: &Config) -> b
     });
     groups_loosen
         || candidate.neighbors.iter().any(|neighbor| {
-            let Some(prior) = rollback
-                .neighbors
-                .iter()
-                .find(|prior| prior.address == neighbor.address)
-            else {
+            let Some(prior) = rollback.neighbors.iter().find(|prior| {
+                prior.address == neighbor.address && prior.interface == neighbor.interface
+            }) else {
                 return false;
             };
             let (prior_v4, prior_v6) = effective(rollback, prior);

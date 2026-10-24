@@ -191,7 +191,7 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let rows = app.neighbors.iter().map(|n| {
         let cfg = n.config.as_ref();
         let identity = neighbor_key(n).unwrap_or_default();
-        let asn = cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default();
+        let asn = cfg.map(crate::output::remote_asn_label).unwrap_or_default();
         let state_label = format_state_with_stale(n.state, n.stale);
         let state_color = theme.state_color_with_stale(n.state, n.stale);
         let uptime = format_duration(n.uptime_seconds);
@@ -490,7 +490,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
         ),
         row(
             "Remote ASN:",
-            cfg.map(|config| config.remote_asn.to_string())
+            crate::output::remote_asn_with_session(neighbor)
                 .unwrap_or_else(|| "unknown".to_string()),
             text,
         ),
@@ -1734,6 +1734,26 @@ mod tests {
         app.view = View::PeerDetail("192.0.2.2".into());
         let detail = rendered_detail(&mut app, 130, 50);
         assert!(!detail.contains("pending outbound resync"), "{detail}");
+    }
+
+    /// A non-numeric remote ASN shows the session's AS beside the mode, as
+    /// `rbgp neighbor <addr>` does.
+    #[test]
+    fn peer_detail_shows_the_session_asn_beside_a_non_numeric_mode() {
+        let mut neighbor = safety_neighbor();
+        let config = neighbor.config.as_mut().unwrap();
+        config.remote_asn = 0;
+        config.remote_asn_mode = crate::proto::RemoteAsnMode::External as i32;
+        neighbor.negotiated_session = Some(crate::proto::NegotiatedSessionState {
+            remote_asn: Some(65009),
+            ..Default::default()
+        });
+        let mut app = App::new();
+        app.on_data(snapshot(vec![neighbor], Freshness::Fresh));
+        app.view = View::PeerDetail("192.0.2.2".into());
+        let detail = rendered_detail(&mut app, 130, 50);
+        // Mutation-red: the mode label alone renders `external`.
+        assert_detail_row(&detail, "Remote ASN:", "external (session 65009)");
     }
 
     /// Mutation receipt: forcing the production paragraph scroll offset to zero

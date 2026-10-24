@@ -352,7 +352,9 @@ impl PlannedGroupability {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateGroupFamilyImpact {
-    pub peer: IpAddr,
+    /// The neighbor, scoped to its interface when it has one, so neighbors
+    /// sharing a link-local address stay apart.
+    pub peer: crate::PeerEndpoint,
     pub afi: u16,
     pub safi: u8,
     pub current: PlannedGroupability,

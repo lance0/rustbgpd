@@ -311,12 +311,16 @@ pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGrou
 
 pub(crate) const NEIGHBOR_NOT_FOUND_REASON: &str = "neighbor not found";
 
-fn neighbor_mut(config: &mut Config, address: IpAddr) -> Result<&mut Neighbor, ConfigError> {
+fn neighbor_mut<'a>(
+    config: &'a mut Config,
+    address: IpAddr,
+    interface: Option<&String>,
+) -> Result<&'a mut Neighbor, ConfigError> {
     let addr = address.to_string();
     config
         .neighbors
         .iter_mut()
-        .find(|neighbor| neighbor.address == addr)
+        .find(|neighbor| neighbor.address == addr && neighbor.interface.as_ref() == interface)
         .ok_or_else(|| ConfigError::InvalidNeighborAddress {
             value: addr,
             reason: NEIGHBOR_NOT_FOUND_REASON.to_string(),
@@ -506,7 +510,11 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         tcp_mss: None,
         address: raw.address.to_string(),
         interface: raw.interface.clone(),
-        remote_asn: raw.remote_asn.into(),
+        remote_asn: match raw.remote_asn_mode {
+            rustbgpd_api::peer_types::RemoteAsnMode::Numeric => raw.remote_asn.into(),
+            rustbgpd_api::peer_types::RemoteAsnMode::External => crate::config::RemoteAsn::External,
+            rustbgpd_api::peer_types::RemoteAsnMode::Internal => crate::config::RemoteAsn::Internal,
+        },
         description: raw.description.clone(),
         peer_group: raw.peer_group.clone(),
         // Runtime neighbor creation has no admin-state field; the peer
@@ -831,27 +839,37 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         }
         ConfigEvent::SetNeighborImportChain {
             address,
+            interface,
             policy_names,
             ..
         } => {
-            let neighbor = neighbor_mut(config, *address)?;
+            let neighbor = neighbor_mut(config, *address, interface.as_ref())?;
             neighbor.import_policy_chain.clone_from(policy_names);
             neighbor.import_policy.clear();
         }
         ConfigEvent::SetNeighborExportChain {
             address,
+            interface,
             policy_names,
             ..
         } => {
-            let neighbor = neighbor_mut(config, *address)?;
+            let neighbor = neighbor_mut(config, *address, interface.as_ref())?;
             neighbor.export_policy_chain.clone_from(policy_names);
             neighbor.export_policy.clear();
         }
-        ConfigEvent::ClearNeighborImportChain { address, .. } => {
-            neighbor_mut(config, *address)?.import_policy_chain.clear();
+        ConfigEvent::ClearNeighborImportChain {
+            address, interface, ..
+        } => {
+            neighbor_mut(config, *address, interface.as_ref())?
+                .import_policy_chain
+                .clear();
         }
-        ConfigEvent::ClearNeighborExportChain { address, .. } => {
-            neighbor_mut(config, *address)?.export_policy_chain.clear();
+        ConfigEvent::ClearNeighborExportChain {
+            address, interface, ..
+        } => {
+            neighbor_mut(config, *address, interface.as_ref())?
+                .export_policy_chain
+                .clear();
         }
         ConfigEvent::SetPeerGroup {
             name, definition, ..
@@ -865,13 +883,17 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         }
         ConfigEvent::SetNeighborPeerGroup {
             address,
+            interface,
             peer_group,
             ..
         } => {
-            neighbor_mut(config, *address)?.peer_group = Some(peer_group.clone());
+            neighbor_mut(config, *address, interface.as_ref())?.peer_group =
+                Some(peer_group.clone());
         }
-        ConfigEvent::ClearNeighborPeerGroup { address, .. } => {
-            neighbor_mut(config, *address)?.peer_group = None;
+        ConfigEvent::ClearNeighborPeerGroup {
+            address, interface, ..
+        } => {
+            neighbor_mut(config, *address, interface.as_ref())?.peer_group = None;
         }
         ConfigEvent::FibTablesReplaced {
             tables: snapshots, ..
@@ -1049,6 +1071,7 @@ remote_asn = 65002
             address: "192.0.2.1".parse().unwrap(),
             interface: None,
             remote_asn: 65_001,
+            remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
             description: None,
             peer_group: None,
             hold_time: None,
@@ -1318,6 +1341,90 @@ conditional_advertisements = ["backup"]
         );
     }
 
+    /// A neighbor mutation for one of several neighbors sharing a link-local
+    /// address folds into that neighbor's record only.
+    #[test]
+    fn neighbor_events_select_the_scoped_record_among_same_address_neighbors() {
+        let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[peer_groups.edge]
+[peer_groups.core]
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth0"
+remote_asn = 65002
+peer_group = "edge"
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth1"
+remote_asn = 65002
+peer_group = "edge"
+"#;
+        let mut config = Config::load_toml_with_diagnostics(
+            &tier_authorized_uds_test_config(toml),
+            "same-address neighbor events",
+        )
+        .unwrap();
+        let address: IpAddr = "fe80::1".parse().unwrap();
+        let groups = |config: &Config| {
+            config
+                .neighbors
+                .iter()
+                .map(|neighbor| neighbor.peer_group.clone())
+                .collect::<Vec<_>>()
+        };
+
+        apply_config_event(
+            &mut config,
+            &ConfigEvent::ClearNeighborPeerGroup {
+                address,
+                interface: Some("eth1".to_string()),
+                ack: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(groups(&config), [Some("edge".to_string()), None]);
+
+        apply_config_event(
+            &mut config,
+            &ConfigEvent::SetNeighborPeerGroup {
+                address,
+                interface: Some("eth0".to_string()),
+                peer_group: "core".to_string(),
+                ack: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(groups(&config), [Some("core".to_string()), None]);
+
+        for interface in [None, Some("eth2".to_string())] {
+            let error = apply_config_event(
+                &mut config,
+                &ConfigEvent::ClearNeighborPeerGroup {
+                    address,
+                    interface,
+                    ack: None,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(NEIGHBOR_NOT_FOUND_REASON),
+                "{error}"
+            );
+        }
+        assert_eq!(groups(&config), [Some("core".to_string()), None]);
+    }
+
     /// Runtime catalog and neighbor mutations fold into the running config
     /// in place. None of them carries the ADR-0137 attachments or
     /// definitions, so every one must leave them as configured.
@@ -1330,37 +1437,52 @@ conditional_advertisements = ["backup"]
                 "SetNeighborExportChain",
                 ConfigEvent::SetNeighborExportChain {
                     address,
+                    interface: None,
                     policy_names: names(&["other"]),
                     ack: None,
                 },
             ),
             (
                 "ClearNeighborExportChain",
-                ConfigEvent::ClearNeighborExportChain { address, ack: None },
+                ConfigEvent::ClearNeighborExportChain {
+                    address,
+                    interface: None,
+                    ack: None,
+                },
             ),
             (
                 "SetNeighborImportChain",
                 ConfigEvent::SetNeighborImportChain {
                     address,
+                    interface: None,
                     policy_names: names(&["other"]),
                     ack: None,
                 },
             ),
             (
                 "ClearNeighborImportChain",
-                ConfigEvent::ClearNeighborImportChain { address, ack: None },
+                ConfigEvent::ClearNeighborImportChain {
+                    address,
+                    interface: None,
+                    ack: None,
+                },
             ),
             (
                 "SetNeighborPeerGroup",
                 ConfigEvent::SetNeighborPeerGroup {
                     address,
+                    interface: None,
                     peer_group: "edge".to_string(),
                     ack: None,
                 },
             ),
             (
                 "ClearNeighborPeerGroup",
-                ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
+                ConfigEvent::ClearNeighborPeerGroup {
+                    address,
+                    interface: None,
+                    ack: None,
+                },
             ),
             (
                 "SetGlobalExportChain",

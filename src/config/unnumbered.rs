@@ -572,16 +572,32 @@ impl Config {
                 "GTSM (ttl_security) is not supported on interface-only neighbors yet",
             ));
         }
+        // The shared profile-reference check walks addressed neighbors only.
+        if let Some(bfd) = &neighbor.bfd
+            && !self
+                .bfd_profiles
+                .iter()
+                .any(|profile| profile.name == bfd.profile)
+        {
+            return Err(invalid(
+                neighbor,
+                "bfd.profile",
+                "the BFD profile is not defined in [[bfd_profiles]]",
+            ));
+        }
+        // Single-hop BFD runs against the learned link-local address; RFC
+        // 5883 multihop needs a global peer address.
         if neighbor
             .bfd
             .as_ref()
             .or_else(|| group.and_then(|group| group.bfd.as_ref()))
-            .is_some_and(|bfd| bfd.enabled)
+            .is_some_and(|bfd| bfd.enabled && bfd.multihop)
         {
             return Err(invalid(
                 neighbor,
-                "bfd",
-                "BFD for interface-only neighbors is not supported yet",
+                "bfd.multihop",
+                "multihop BFD is not supported on an interface-only neighbor (RFC 5883 needs \
+                 a global peer address)",
             ));
         }
         if neighbor
@@ -626,6 +642,15 @@ impl Config {
             .clone();
         bound.address = address;
         Some(Cow::Owned(bound))
+    }
+
+    /// One interface-only neighbor resolved with a placeholder link-local
+    /// address and no scope, for reporting an unbound neighbor's settings.
+    pub(crate) fn resolve_unbound_interface_neighbor(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        self.resolve_bound_interface_neighbor(neighbor, LINK_LOCAL_PLACEHOLDER, 0)
     }
 
     /// Interface-only neighbors resolved with a placeholder link-local

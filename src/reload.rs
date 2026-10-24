@@ -4878,7 +4878,8 @@ log_format = "json"
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
             // +1: the unspecified set_next_hop reload test writes its candidate.
-            (concat!("write_tier", "_test_config("), 36),
+            // +2: the same-address BMP reload test writes both of its files.
+            (concat!("write_tier", "_test_config("), 38),
             (concat!("load_tier", "_test_config("), 37),
             (concat!("load_tier", "_test_toml("), 9),
             (concat!("tier_authorized_uds", "_test_config("), 4),
@@ -11301,6 +11302,68 @@ remote_asn = 65002
         .unwrap();
         pin_unreconciled_daemon_runtime_fields(&mut candidate, &current);
         assert_eq!(candidate, current);
+    }
+
+    /// BMP stays fail-closed against same-address link-local neighbors on
+    /// every SIGHUP order: a second neighbor added while BMP runs, BMP
+    /// enabled over an existing pair, and a file that drops `[bmp]` while
+    /// the running daemon keeps it (BMP is restart-only, so the running
+    /// value is pinned back and checked). Each is refused before any
+    /// peer-manager effect.
+    #[tokio::test]
+    async fn reload_refuses_same_address_neighbors_with_bmp_in_every_order() {
+        let bmp = "\n[bmp]\n[[bmp.collectors]]\naddress = \"127.0.0.1:11019\"\n";
+        let neighbor = |interface: &str| {
+            format!(
+                "\n[[neighbors]]\naddress = \"fe80::1\"\ninterface = \"{interface}\"\nremote_asn = 65009\n"
+            )
+        };
+        let (eth0, eth1) = (neighbor("eth0"), neighbor("eth1"));
+        let base = baseline_toml();
+        let names_both_and_bmp = |error: &str| {
+            assert!(error.contains("fe80::1%eth0 and fe80::1%eth1"), "{error}");
+            assert!(error.contains("BMP"), "{error}");
+        };
+        // BMP running, then a second neighbor; and a pair, then BMP. The
+        // file itself fails to load, so the reload stops before any effect.
+        for (initial, desired) in [
+            (
+                format!("{base}{eth0}{bmp}"),
+                format!("{base}{eth0}{eth1}{bmp}"),
+            ),
+            (
+                format!("{base}{eth0}{eth1}"),
+                format!("{base}{eth0}{eth1}{bmp}"),
+            ),
+        ] {
+            let path = unique_temp_path("same-address-bmp");
+            write_tier_test_config(&path, &initial);
+            let current = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+            write_tier_test_config(&path, &desired);
+            let prior = AcceptedConfigSnapshot::from_config_for_test(current.clone());
+            let Err(error) = AcceptedConfigSnapshot::load_for_reload(
+                &path,
+                &prior,
+                &current.policy.dataset_bindings,
+            ) else {
+                panic!("the reload file must be refused");
+            };
+            names_both_and_bmp(&error);
+        }
+        // A file without `[bmp]` while BMP runs: BMP is restart-only, so the
+        // running value is pinned back, and the pinned config is refused.
+        let (outcome, tags, calls) = drive_generation(
+            &format!("{base}{eth0}{bmp}"),
+            &format!("{base}{eth0}{eth1}"),
+            GenerationReply::Applied,
+        )
+        .await;
+        let SighupReloadOutcome::CleanNoEffect(error) = outcome else {
+            panic!("expected a clean refusal: {outcome:?}");
+        };
+        names_both_and_bmp(&error.to_string());
+        assert!(tags.is_empty(), "{tags:?}");
+        assert!(calls.is_empty());
     }
 
     #[tokio::test]
