@@ -653,3 +653,36 @@ fn an_interface_only_rebind_is_a_session_reset_in_the_diff() {
     let clamp_only = resets(&format!("{}{member}tcp_mss = 1300\n", group(90)));
     assert_eq!(clamp_only.0, 0, "the pinned neighbor keeps running");
 }
+
+/// A restart-only global edit (`asn`, `router_id`) rebinds no
+/// interface-only neighbor under SIGHUP, which pins those fields; `--diff`
+/// reports it the same way, also beside a `[[dynamic_neighbors]]` edit.
+#[test]
+fn a_restart_only_global_edit_is_no_interface_only_change_in_the_diff() {
+    let range = |prefix: &str| {
+        format!("[[dynamic_neighbors]]\nprefix = \"{prefix}\"\npeer_group = \"edge\"\n")
+    };
+    let group = "[peer_groups.edge]\nhold_time = 90\n";
+    let internal = SWP1.replace("\"external\"", "\"internal\"");
+    let old = parse(&with(&format!("{group}{internal}{}", range("10.1.0.0/24")))).unwrap();
+    let edited = with(&format!("{group}{internal}{}", range("10.2.0.0/24")))
+        .replace("asn = 65001", "asn = 65009")
+        .replace("router_id = \"10.0.0.1\"", "router_id = \"10.0.0.9\"");
+    let diff = diff_config(&old, &parse(&edited).unwrap());
+    assert!(
+        diff.has_restart_required_changes(),
+        "the global edit is restart-required"
+    );
+    // Mutation-red: projecting the unpinned globals rebinds the internal
+    // neighbor and rejects the range edit.
+    assert!(!diff.interface_only_neighbors_changed);
+    assert_eq!(diff.session_reset_entries(), 0);
+    assert!(
+        matches!(
+            diff.sighup_route,
+            crate::config::SighupReloadRoute::Sequential { .. }
+        ),
+        "{:?}",
+        diff.sighup_route
+    );
+}

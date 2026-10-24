@@ -5171,6 +5171,12 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         }
         _ => false,
     };
+    // Interface-only reporting follows SIGHUP's daemon-global pins as well:
+    // a restart-only global edit (`asn`, `router_id`, the RFC 8212 tuple)
+    // rebinds nothing until restart.
+    let mut interface_new = reload_new.clone();
+    pin_unreconciled_daemon_runtime_fields(&mut interface_new, old);
+    pin_rfc8212_posture_startup_only(&mut interface_new, old);
     let mut diff = ConfigDiff {
         neighbors,
         effective_neighbor_impact,
@@ -5209,8 +5215,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,
         tcp_mss_changed,
-        interface_only_neighbors_changed: interface_only_neighbors_changed(old, &reload_new),
-        interface_only_rebinds: interface_only_rebinds(old, &reload_new),
+        interface_only_neighbors_changed: interface_only_neighbors_changed(old, &interface_new),
+        interface_only_rebinds: interface_only_rebinds(old, &interface_new),
         unnumbered_changed: unnumbered_settings_changed(old, new),
         bfd_changed,
         bfd_members_changed,
@@ -5454,6 +5460,62 @@ pub(crate) fn pin_tcp_mss_startup_only_runtime(new_config: &mut Config, current:
         }
     }
     true
+}
+
+/// Keep daemon-wide, startup-owned state honest across SIGHUP.
+///
+/// These fields have no live reconciler. Advancing any of them in the runtime
+/// snapshot would make later consumers (notably a runtime-added peer resolved
+/// from that snapshot) observe an identity or subsystem configuration that the
+/// running daemon never adopted. Fields with dedicated pinning or hot-apply
+/// paths remain owned by those paths below.
+pub(crate) fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Config) {
+    new_config.global.asn = current.global.asn;
+    new_config
+        .global
+        .router_id
+        .clone_from(&current.global.router_id);
+    new_config.global.listen_port = current.global.listen_port;
+    new_config
+        .global
+        .listen_addresses
+        .clone_from(&current.global.listen_addresses);
+    new_config
+        .global
+        .cluster_id
+        .clone_from(&current.global.cluster_id);
+    new_config.global.worker_threads = current.global.worker_threads;
+    new_config.global.multipath_relax = current.global.multipath_relax;
+    new_config.global.link_bandwidth_weighted = current.global.link_bandwidth_weighted;
+    new_config.global.fast_external_failover = current.global.fast_external_failover;
+    new_config.global.warm_cache_checkpoint_on_shutdown =
+        current.global.warm_cache_checkpoint_on_shutdown;
+    new_config.global.max_as_path_length = current.global.max_as_path_length;
+    new_config
+        .global
+        .gr_eor_replay_owners
+        .clone_from(&current.global.gr_eor_replay_owners);
+    new_config
+        .global
+        .runtime_state_dir
+        .clone_from(&current.global.runtime_state_dir);
+    new_config
+        .global
+        .telemetry
+        .prometheus_addr
+        .clone_from(&current.global.telemetry.prometheus_addr);
+    new_config.global.telemetry.log_format = current.global.telemetry.log_format;
+    new_config.global.telemetry.dataplane_readiness = current.global.telemetry.dataplane_readiness;
+    new_config.flowspec = current.flowspec;
+    new_config.rpki.clone_from(&current.rpki);
+    new_config.bmp.clone_from(&current.bmp);
+    new_config.mrt.clone_from(&current.mrt);
+    // ADR-0142: the discovery actor takes its RA template and timing when it
+    // starts. Interface-only neighbors themselves apply live.
+    new_config
+        .global
+        .unnumbered
+        .clone_from(&current.global.unnumbered);
 }
 
 /// Profiles are named definitions; their declaration order has no runtime effect.
@@ -6805,6 +6867,8 @@ pub fn reject_unappliable_sequential_reload(
     // the unpinned candidate, so pin a copy here to agree with it.
     let mut pinned = new.clone();
     pin_reload_tcp_mss(&mut pinned, old);
+    pin_unreconciled_daemon_runtime_fields(&mut pinned, old);
+    pin_rfc8212_posture_startup_only(&mut pinned, old);
     let mut blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
     if interface_only_neighbors_changed(old, &pinned) {
         blocked.push("interface-only [[neighbors]]".to_string());

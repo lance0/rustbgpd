@@ -36,7 +36,7 @@ use rustbgpd_transport::{
     TcpAoRotationStatus,
 };
 
-use crate::config::{self, AcceptedConfigSnapshot, Config};
+use crate::config::{self, AcceptedConfigSnapshot, Config, pin_unreconciled_daemon_runtime_fields};
 use crate::config_persister::ConfigMutation;
 use crate::evpn_runtime_converger::{EvpnRuntimeReloadApply, EvpnRuntimeReloadTerminal};
 use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
@@ -1960,62 +1960,6 @@ fn load_tier_test_toml(source: &str, source_name: &str) -> Config {
     let config = Config::load_toml_with_diagnostics(&source, source_name).unwrap();
     crate::test_support::assert_tier_authorized_test_config(&config);
     config
-}
-
-/// Keep daemon-wide, startup-owned state honest across SIGHUP.
-///
-/// These fields have no live reconciler. Advancing any of them in the runtime
-/// snapshot would make later consumers (notably a runtime-added peer resolved
-/// from that snapshot) observe an identity or subsystem configuration that the
-/// running daemon never adopted. Fields with dedicated pinning or hot-apply
-/// paths remain owned by those paths below.
-fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Config) {
-    new_config.global.asn = current.global.asn;
-    new_config
-        .global
-        .router_id
-        .clone_from(&current.global.router_id);
-    new_config.global.listen_port = current.global.listen_port;
-    new_config
-        .global
-        .listen_addresses
-        .clone_from(&current.global.listen_addresses);
-    new_config
-        .global
-        .cluster_id
-        .clone_from(&current.global.cluster_id);
-    new_config.global.worker_threads = current.global.worker_threads;
-    new_config.global.multipath_relax = current.global.multipath_relax;
-    new_config.global.link_bandwidth_weighted = current.global.link_bandwidth_weighted;
-    new_config.global.fast_external_failover = current.global.fast_external_failover;
-    new_config.global.warm_cache_checkpoint_on_shutdown =
-        current.global.warm_cache_checkpoint_on_shutdown;
-    new_config.global.max_as_path_length = current.global.max_as_path_length;
-    new_config
-        .global
-        .gr_eor_replay_owners
-        .clone_from(&current.global.gr_eor_replay_owners);
-    new_config
-        .global
-        .runtime_state_dir
-        .clone_from(&current.global.runtime_state_dir);
-    new_config
-        .global
-        .telemetry
-        .prometheus_addr
-        .clone_from(&current.global.telemetry.prometheus_addr);
-    new_config.global.telemetry.log_format = current.global.telemetry.log_format;
-    new_config.global.telemetry.dataplane_readiness = current.global.telemetry.dataplane_readiness;
-    new_config.flowspec = current.flowspec;
-    new_config.rpki.clone_from(&current.rpki);
-    new_config.bmp.clone_from(&current.bmp);
-    new_config.mrt.clone_from(&current.mrt);
-    // ADR-0142: the discovery actor takes its RA template and timing when it
-    // starts. Interface-only neighbors themselves apply live.
-    new_config
-        .global
-        .unnumbered
-        .clone_from(&current.global.unnumbered);
 }
 
 #[cfg(test)]
