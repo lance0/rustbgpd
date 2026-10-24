@@ -1432,7 +1432,11 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   while it stays live. Discovery never ends an Established session: an
   address change takes effect only after the session fails (hold timer, BFD,
   NOTIFICATION or TCP close), and the peer then moves to the new address,
-  purging the routes learned from the old one.
+  purging the routes learned from the old one. When the address expires with
+  no replacement and the session is down, the neighbor keeps redialing it,
+  and holds it against other neighbors, only while Graceful Restart or LLGR
+  stale routes from it are retained; after that the peer is removed and the
+  address released.
 - **Carrier.** Confirmed carrier loss, admin down or removal of the interface
   ends the session at once and purges its routes; there is no Graceful
   Restart retention for them. The interface need not exist when the
@@ -1442,8 +1446,14 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   restart hold-down expires or the neighbor is enabled.
 - **One per interface.** Each interface has at most one interface-only
   neighbor, and none if it already has a static link-local neighbor.
+- **BFD.** Single-hop BFD (`bfd = { profile = "..." }`, own or inherited) runs
+  on the learned endpoint: binding an address creates the session to it on
+  the interface, a new address or a recreated interface replaces it, and
+  losing the binding removes it. There is no session before a binding. With
+  `strict = true` the BGP session is held until BFD is Up on the current
+  binding; a BFD down tears it down as for any neighbor.
 - **Rejected** on an interface-only neighbor, directly or through its peer
-  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), BFD,
+  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), `bfd.multihop`,
   `fast_external_failover = false`, `conditional_advertisements`,
   `log_level`, and explicit `[global] listen_addresses`; and on the neighbor
   itself, `max_prefixes_out_ipv4_unicast` and `max_prefixes_out_ipv6_unicast`

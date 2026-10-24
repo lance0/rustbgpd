@@ -203,11 +203,36 @@ fn interface_only_rules_are_enforced() {
 }
 
 #[test]
-fn interface_only_bfd_is_rejected_until_supported() {
-    let error = rejected(&format!(
-        "\n[[bfd_profiles]]\nname = \"fast\"\n{SWP1}bfd = {{ profile = \"fast\" }}\n"
+fn interface_only_single_hop_bfd_is_accepted() {
+    let config = parse(&with(&format!(
+        "\n[[bfd_profiles]]\nname = \"fast\"\n{SWP1}bfd = {{ profile = \"fast\", strict = true }}\n"
+    )))
+    .unwrap();
+    let neighbor = config.neighbors.interface_only_on("swp1").unwrap();
+    assert!(neighbor.bfd.as_ref().is_some_and(|bfd| bfd.strict));
+}
+
+/// Mutation-red: without it an undefined profile fails only at bind time.
+#[test]
+fn interface_only_bfd_profile_must_be_defined() {
+    let error = rejected(&format!("{SWP1}bfd = {{ profile = \"missing\" }}\n"));
+    assert!(
+        error.contains("is not defined in [[bfd_profiles]]"),
+        "{error}"
+    );
+}
+
+/// Mutation-red: dropping either source of the multihop check accepts it.
+#[test]
+fn interface_only_multihop_bfd_is_rejected_from_the_neighbor_and_its_group() {
+    let own = rejected(&format!(
+        "\n[[bfd_profiles]]\nname = \"fast\"\n{SWP1}bfd = {{ profile = \"fast\", multihop = true }}\n"
     ));
-    assert!(error.contains("BFD for interface-only"), "{error}");
+    assert!(own.contains("bfd.multihop"), "{own}");
+    let inherited = rejected(&format!(
+        "\n[[bfd_profiles]]\nname = \"fast\"\n[peer_groups.fabric]\nbfd = {{ profile = \"fast\", multihop = true }}\n{SWP1}peer_group = \"fabric\"\n"
+    ));
+    assert!(inherited.contains("bfd.multihop"), "{inherited}");
 }
 
 #[test]

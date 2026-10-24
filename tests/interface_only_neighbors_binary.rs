@@ -327,9 +327,14 @@ fn interface_only_neighbors_discover_each_other_and_follow_an_address_change() {
     b.wait("B Established from its new address", RECOVERY_BOUND, |b| {
         b.established_with("fe80::a1")
     });
+    // The failed session retained nothing (Hold Timer expiry closes with a
+    // NOTIFICATION), so when discovery is briefly unbound before the new
+    // address's RA arrives, the old peer is released first and the new
+    // address binds afresh; otherwise it is replaced as an address change.
+    let log = a.log();
     assert!(
-        a.log().contains("peer_address_changed"),
-        "the move is logged as an address change"
+        log.contains("peer_address_changed") || log.contains("binding_expired"),
+        "the old endpoint's retirement is logged"
     );
 }
 

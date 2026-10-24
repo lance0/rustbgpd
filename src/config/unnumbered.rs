@@ -684,16 +684,32 @@ impl Config {
                 "GTSM (ttl_security) is not supported on interface-only neighbors yet",
             ));
         }
+        // The shared profile-reference check walks addressed neighbors only.
+        if let Some(bfd) = &neighbor.bfd
+            && !self
+                .bfd_profiles
+                .iter()
+                .any(|profile| profile.name == bfd.profile)
+        {
+            return Err(invalid(
+                neighbor,
+                "bfd.profile",
+                "the BFD profile is not defined in [[bfd_profiles]]",
+            ));
+        }
+        // Single-hop BFD runs against the learned link-local address; RFC
+        // 5883 multihop needs a global peer address.
         if neighbor
             .bfd
             .as_ref()
             .or_else(|| group.and_then(|group| group.bfd.as_ref()))
-            .is_some_and(|bfd| bfd.enabled)
+            .is_some_and(|bfd| bfd.enabled && bfd.multihop)
         {
             return Err(invalid(
                 neighbor,
-                "bfd",
-                "BFD for interface-only neighbors is not supported yet",
+                "bfd.multihop",
+                "multihop BFD is not supported on an interface-only neighbor (RFC 5883 needs \
+                 a global peer address)",
             ));
         }
         if neighbor

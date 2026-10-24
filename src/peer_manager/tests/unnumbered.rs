@@ -5,7 +5,7 @@
 use std::net::Ipv6Addr;
 
 use rustbgpd_fsm::SessionState;
-use rustbgpd_rib::PeerId;
+use rustbgpd_rib::{PeerId, PeerRetention};
 use rustbgpd_transport::{LinkSnapshot, LinkState as KernelLink};
 use tokio::sync::watch;
 
@@ -42,12 +42,25 @@ struct Harness {
     commands: mpsc::UnboundedReceiver<Command>,
     links: watch::Sender<Arc<LinkSnapshot>>,
     rib_rx: mpsc::Receiver<RibUpdate>,
+    /// Retention queries [`Harness::answer_retention`] answered.
+    retention_queries: Arc<AtomicU32>,
 }
 
 /// A manager with one interface-only neighbor per name in `interfaces`
 /// (`remote_asn = "external"`), discovery recorded, and `links` reported by
 /// the link monitor.
 fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
+    harness_with(interfaces, links, "", "")
+}
+
+/// [`harness`] with `neighbor_extra` added to every interface-only stanza and
+/// `extra` appended to the configuration.
+fn harness_with(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    neighbor_extra: &str,
+    extra: &str,
+) -> Harness {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -64,14 +77,14 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
         .iter()
         .map(|name| {
             format!(
-                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n"
+                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n{neighbor_extra}"
             )
         })
         .collect::<Vec<_>>()
         .concat();
     let config: crate::config::Config = toml::from_str(&format!(
         "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
-         [global.telemetry]\nlog_format = \"json\"\n{neighbors}"
+         [global.telemetry]\nlog_format = \"json\"\n{neighbors}{extra}"
     ))
     .unwrap();
     mgr.current_config = config;
@@ -86,6 +99,7 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
         commands,
         links: links_tx,
         rib_rx,
+        retention_queries: Arc::default(),
     }
 }
 
@@ -125,6 +139,28 @@ impl Harness {
             .unwrap()
             .transport_config
             .set_link_local_scope(scope.unwrap());
+    }
+
+    /// Answer the RIB's retention queries with the returned value, as it
+    /// stands when each query arrives. Every other RIB message is dropped.
+    fn answer_retention(&mut self) -> Arc<std::sync::Mutex<PeerRetention>> {
+        let retention = Arc::new(std::sync::Mutex::new(PeerRetention {
+            stale_routes: 0,
+            next_deadline: None,
+        }));
+        let (_tx, rx) = mpsc::channel(1);
+        let mut rib_rx = std::mem::replace(&mut self.rib_rx, rx);
+        let answer = Arc::clone(&retention);
+        let queries = Arc::clone(&self.retention_queries);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::QueryPeerRetention { reply, .. } = update {
+                    queries.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(*answer.lock().unwrap());
+                }
+            }
+        });
+        retention
     }
 
     fn peers_at(&self, address: Ipv6Addr) -> Vec<PeerKey> {
@@ -279,12 +315,454 @@ async fn a_change_back_to_the_previous_endpoint_is_queued_behind_a_pending_rebin
 }
 
 #[tokio::test]
-async fn a_lost_binding_keeps_the_peer_while_the_link_is_up() {
+async fn a_lost_binding_keeps_an_established_peer_while_the_link_is_up() {
     let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
     h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
     // Mutation-red: treating a lost binding as an unbind removes the peer.
     h.bind("swp1", None).await;
     assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+}
+
+/// ADR-0142: the binding expires under an Established session, which then
+/// fails with Graceful Restart. The neighbor keeps redialing its last
+/// address, reserved against every other link, until the stale timer
+/// retires the routes; then the peer is removed and the address released.
+#[tokio::test(start_paused = true)]
+async fn an_unbound_neighbors_address_is_reserved_until_its_gr_routes_retire() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    let retention = h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    h.mgr
+        .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
+    h.bind("swp1", None).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 3,
+        next_deadline: Some(deadline),
+    };
+    h.mgr.note_unnumbered_session_idle(&key);
+    h.reconcile().await;
+    // Mutation-red: releasing without reading the retention removes it here.
+    assert_eq!(
+        h.peers_at(ll(2)),
+        std::slice::from_ref(&key),
+        "reserved while retained"
+    );
+    assert_eq!(
+        h.mgr.unnumbered_retry_at(),
+        Some(deadline),
+        "checked again at the RIB's timer"
+    );
+    let swp2 = PeerKey::new(IpAddr::V6(ll(2)), Some("swp2".into()));
+    h.bind("swp2", Some(endpoint(2, 8))).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        std::slice::from_ref(&key),
+        "another link is refused"
+    );
+
+    // The stale timer sweeps the routes.
+    tokio::time::sleep_until(deadline).await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    h.reconcile().await;
+    // Mutation-red: keeping every unbound peer leaves swp1 holding it.
+    assert_eq!(h.peers_at(ll(2)), [swp2], "released, then admitted on swp2");
+}
+
+/// The session establishes and fails with GR after the retention check but
+/// before the conditional shutdown, which then succeeds on a down session.
+/// The retention that failure left keeps the stopped peer, and its address.
+async fn retention_left_after_the_check() -> (
+    Harness,
+    Arc<std::sync::Mutex<PeerRetention>>,
+    tokio::time::Instant,
+) {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let retention = h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let flip = Arc::clone(&retention);
+    let task = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(
+                        IpAddr::V6(ll(2)),
+                        SessionState::Active,
+                    ));
+                }
+                PeerCommand::ShutdownUnlessConnected { reply } => {
+                    *flip.lock().unwrap() = PeerRetention {
+                        stale_routes: 3,
+                        next_deadline: Some(deadline),
+                    };
+                    let _ = reply.send(true);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    h.replace_session(&key, PeerHandle::from_parts(tx, task));
+
+    // Mutation-red: deciding on the first query alone purges that retention.
+    h.bind("swp1", None).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        std::slice::from_ref(&key),
+        "kept, stopped"
+    );
+    assert_eq!(h.mgr.unnumbered_retry_at(), Some(deadline));
+    (h, retention, deadline)
+}
+
+#[tokio::test(start_paused = true)]
+async fn retention_left_after_the_check_keeps_the_stopped_peer_until_it_retires() {
+    let (mut h, retention, deadline) = retention_left_after_the_check().await;
+    tokio::time::sleep_until(deadline).await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), []);
+}
+
+/// A binding that returns to the stopped peer's address replaces it with a
+/// live session instead of keeping the stopped one.
+#[tokio::test(start_paused = true)]
+async fn a_returning_binding_replaces_a_stopped_retained_peer() {
+    let (mut h, _retention, _) = retention_left_after_the_check().await;
+    // Mutation-red: keeping the same endpoint leaves the stopped session.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    assert!(matches!(
+        h.mgr.peers[&swp1_key(2)]
+            .handle()
+            .query_state_outcome(Duration::from_secs(1))
+            .await,
+        rustbgpd_transport::StateQueryOutcome::State(_)
+    ));
+}
+
+/// An inbound reconnect installs a new session for the stopped peer before
+/// the RA binding returns: the stop no longer describes the peer, so neither
+/// a reconcile nor the returning binding ends that session.
+#[tokio::test(start_paused = true)]
+async fn an_inbound_reconnect_clears_the_stop_of_a_retained_peer() {
+    let (mut h, retention, _) = retention_left_after_the_check().await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    let counters = Arc::new(FakePeerCounters::default());
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Established,
+            None,
+            Arc::clone(&counters),
+        ),
+    );
+    // Mutation-red: a mark kept across the new session deletes it here,
+    // or at the returning binding.
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+}
+
+/// A release's conditional shutdown goes unanswered, then runs after the
+/// session established and failed with GR. The settled exit leaves no
+/// binding, so the stopped peer waits on that retention like any other.
+#[tokio::test(start_paused = true)]
+async fn a_late_release_shutdown_after_a_gr_teardown_keeps_the_retention() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let retention = h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let (release, released) = oneshot::channel::<()>();
+    let (exited_tx, exited) = oneshot::channel::<()>();
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let flip = Arc::clone(&retention);
+    let task = tokio::spawn(async move {
+        let mut released = Some(released);
+        while let Some(command) = rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(
+                        IpAddr::V6(ll(2)),
+                        SessionState::Active,
+                    ));
+                }
+                PeerCommand::ShutdownUnlessConnected { reply } => {
+                    if let Some(released) = released.take() {
+                        let _ = released.await;
+                    }
+                    *flip.lock().unwrap() = PeerRetention {
+                        stale_routes: 3,
+                        next_deadline: Some(deadline),
+                    };
+                    let _ = reply.send(true);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(rx);
+        let _ = exited_tx.send(());
+        Ok(())
+    });
+    h.replace_session(&key, PeerHandle::from_parts(tx, task));
+
+    h.bind("swp1", None).await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key), "unanswered");
+    release.send(()).unwrap();
+    exited.await.unwrap();
+
+    // Mutation-red: deleting the settled exit purges the new retention.
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key), "retained");
+    assert_eq!(h.mgr.unnumbered_retry_at(), Some(deadline));
+
+    tokio::time::sleep_until(deadline).await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), []);
+}
+
+/// An inbound connection learned without an RA is mid-handshake when a
+/// reconcile runs for another port: the router is live, so it is kept.
+#[tokio::test(start_paused = true)]
+async fn an_inbound_handshake_without_an_ra_is_not_released() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.answer_retention();
+    let _client = inbound(&mut h, 2, 7).await;
+    let key = swp1_key(2);
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+    let counters = Arc::new(FakePeerCounters::default());
+    h.replace_session(
+        &key,
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::OpenConfirm,
+            None,
+            Arc::clone(&counters),
+        ),
+    );
+    h.mgr.peers.get_mut(&key).unwrap().pending_inbound = None;
+
+    // Mutation-red: treating any state short of Established as down shuts
+    // the handshake down.
+    h.bind("swp2", Some(endpoint(5, 8))).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+}
+
+/// The session starts a handshake while the release waits on the RIB's
+/// retention reply. The release's shutdown is decided by the session in its
+/// own turn, so the now-connected session is kept.
+#[tokio::test(start_paused = true)]
+async fn a_handshake_that_starts_during_the_retention_query_is_kept() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+
+    // The RIB answers the first retention query only once released.
+    let (asked_tx, asked) = oneshot::channel::<()>();
+    let (answer, answered) = oneshot::channel::<()>();
+    let (_tx, rx) = mpsc::channel(1);
+    let mut rib_rx = std::mem::replace(&mut h.rib_rx, rx);
+    tokio::spawn(async move {
+        let (mut asked_tx, mut answered) = (Some(asked_tx), Some(answered));
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::QueryPeerRetention { reply, .. } = update {
+                if let (Some(asked_tx), Some(answered)) = (asked_tx.take(), answered.take()) {
+                    let _ = asked_tx.send(());
+                    let _ = answered.await;
+                }
+                let _ = reply.send(PeerRetention {
+                    stale_routes: 0,
+                    next_deadline: None,
+                });
+            }
+        }
+    });
+
+    let state = Arc::new(std::sync::Mutex::new(SessionState::Active));
+    let shut_down = Arc::new(AtomicU32::new(0));
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let (session_state, session_shut_down) = (Arc::clone(&state), Arc::clone(&shut_down));
+    let task = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            let now = *session_state.lock().unwrap();
+            let (reply, spared) = match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(IpAddr::V6(ll(2)), now));
+                    continue;
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                    (reply, now == SessionState::Established)
+                }
+                PeerCommand::ShutdownUnlessConnected { reply } => (
+                    reply,
+                    matches!(
+                        now,
+                        SessionState::OpenSent
+                            | SessionState::OpenConfirm
+                            | SessionState::Established
+                    ),
+                ),
+                _ => continue,
+            };
+            let _ = reply.send(!spared);
+            if !spared {
+                session_shut_down.fetch_add(1, Ordering::SeqCst);
+                break;
+            }
+        }
+        Ok(())
+    });
+    h.replace_session(&key, PeerHandle::from_parts(tx, task));
+
+    // Mutation-red: the Established-only shutdown closes the handshake.
+    let handshake = async {
+        asked.await.unwrap();
+        *state.lock().unwrap() = SessionState::OpenSent;
+        answer.send(()).unwrap();
+    };
+    tokio::join!(h.bind("swp1", None), handshake);
+    assert_eq!(shut_down.load(Ordering::SeqCst), 0, "the handshake is kept");
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+
+    // The handshake then fails in OpenSent, back to Active, which reports
+    // nothing. Mutation-red: with no retry armed the address stays held.
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "checked again");
+    *state.lock().unwrap() = SessionState::Active;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [], "released after the failed handshake");
+}
+
+/// A session found mid-handshake by the release's state read is kept and
+/// checked again: a failure in `OpenSent` falls back to Active silently, and
+/// the next check releases the address.
+#[tokio::test(start_paused = true)]
+async fn a_handshake_that_fails_after_the_state_read_releases_the_address() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let state = Arc::new(std::sync::Mutex::new(SessionState::OpenSent));
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let session_state = Arc::clone(&state);
+    let task = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            let now = *session_state.lock().unwrap();
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(IpAddr::V6(ll(2)), now));
+                }
+                PeerCommand::ShutdownUnlessConnected { reply } => {
+                    let quiet = !matches!(
+                        now,
+                        SessionState::OpenSent
+                            | SessionState::OpenConfirm
+                            | SessionState::Established
+                    );
+                    let _ = reply.send(quiet);
+                    if quiet {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    h.replace_session(&key, PeerHandle::from_parts(tx, task));
+
+    h.bind("swp1", None).await;
+    assert_eq!(
+        h.peers_at(ll(2)),
+        std::slice::from_ref(&key),
+        "kept mid-handshake"
+    );
+    // Mutation-red: with no retry armed nothing checks the session again.
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "checked again");
+    *state.lock().unwrap() = SessionState::Active;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [], "released after the failed handshake");
+}
+
+/// A stopped peer kept for its retention has no session task: disable and
+/// enable still apply, and a binding that returns carries the state to the
+/// peer that replaces it.
+#[tokio::test(start_paused = true)]
+async fn disable_and_enable_apply_to_a_stopped_retained_peer() {
+    let (mut h, _retention, _) = retention_left_after_the_check().await;
+    let key = swp1_key(2);
+    // Mutation-red: requiring the exited task to answer Stop or Start fails
+    // both and leaves the neighbor disabled.
+    h.mgr.disable_peer(key.clone(), None).await.unwrap();
+    assert!(!h.mgr.peers[&key].enabled);
+    h.mgr.enable_peer(key.clone()).await.unwrap();
+    assert!(h.mgr.peers[&key].enabled);
+    h.mgr.disable_peer(key.clone(), None).await.unwrap();
+
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+    assert!(
+        !h.mgr.peers[&key].enabled,
+        "the disable carries to the replacement"
+    );
+}
+
+/// Without retained routes the address is released as soon as the session
+/// is down.
+#[tokio::test(start_paused = true)]
+async fn an_unbound_neighbor_without_retained_routes_is_released_at_once() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    h.mgr
+        .note_unnumbered_session_state(&key, SessionState::OpenConfirm, SessionState::Established);
+    h.bind("swp1", None).await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+
+    h.mgr.note_unnumbered_session_idle(&key);
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), []);
 }
 
 #[tokio::test]
@@ -1895,11 +2373,13 @@ fn retirement_answered_after_release(
 
 /// An admitted retirement whose answer came too late ended the session
 /// afterwards. Whether discovery then expires the new address or reverts to
-/// the old one, the binding is not trusted on its face: the session is read,
-/// found gone, and recreated at the endpoint the neighbor keeps.
+/// the old one, the binding is not trusted on its face: the session is read
+/// and found gone. A reverted binding recreates it; an expired one leaves
+/// nothing retained, so the address is released.
 async fn settle_an_unanswered_retirement(reverted: bool) {
     {
         let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+        h.answer_retention();
         h.bind("swp1", Some(endpoint(2, 7))).await;
         let (release, released) = oneshot::channel();
         let (exited_tx, exited) = oneshot::channel();
@@ -1919,7 +2399,11 @@ async fn settle_an_unanswered_retirement(reverted: bool) {
         // exited session that never reconnects.
         let back = reverted.then(|| endpoint(2, 7));
         h.bind("swp1", back).await;
-        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "reverted: {reverted}");
+        if !reverted {
+            assert_eq!(h.peers_at(ll(2)), [], "released");
+            return;
+        }
+        assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
         assert!(
             matches!(
                 h.mgr.peers[&swp1_key(2)]
@@ -1928,13 +2412,13 @@ async fn settle_an_unanswered_retirement(reverted: bool) {
                     .await,
                 rustbgpd_transport::StateQueryOutcome::State(_)
             ),
-            "a live session replaces the exited one (reverted: {reverted})"
+            "a live session replaces the exited one"
         );
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unanswered_retirement_then_an_expired_endpoint_recreates_the_session() {
+async fn an_unanswered_retirement_then_an_expired_endpoint_releases_the_address() {
     settle_an_unanswered_retirement(false).await;
 }
 
@@ -1980,6 +2464,106 @@ async fn an_address_change_never_promotes_a_pending_candidate_into_a_retired_pee
         "candidate still pending"
     );
     assert_eq!(h.peers_at(ll(3)), []);
+}
+
+/// A late conditional retirement settles while a transaction is staged:
+/// the replacement at the new endpoint is deferred, and discovery's binding
+/// then expires before the stage clears. The exited peer is kept, with any
+/// retention its replacement would purge, while the replacement is deferred;
+/// with no binding left it is released only once nothing is retained.
+async fn an_exited_peer_whose_deferred_replacement_expired(
+    retained: bool,
+) -> (Harness, Arc<std::sync::Mutex<PeerRetention>>) {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let retention = h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let (release, released) = oneshot::channel();
+    let (exited_tx, exited) = oneshot::channel();
+    h.replace_session(
+        &swp1_key(2),
+        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+    );
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    release.send(()).unwrap();
+    exited.await.unwrap();
+    if retained {
+        *retention.lock().unwrap() = PeerRetention {
+            stale_routes: 3,
+            next_deadline: Some(tokio::time::Instant::now() + Duration::from_secs(120)),
+        };
+    }
+
+    h.mgr.config_snapshot_staged = true;
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "kept while staged");
+    assert_eq!(h.peers_at(ll(3)), [], "replacement deferred");
+    // The expiry leaves the stopped peer to its retention at once: a
+    // release binds nothing, so it does not wait for the stage.
+    let asked = h.retention_queries.load(Ordering::SeqCst);
+    h.bind("swp1", None).await;
+    assert!(
+        h.retention_queries.load(Ordering::SeqCst) > asked,
+        "decided by the retention"
+    );
+    h.mgr.config_snapshot_staged = false;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    (h, retention)
+}
+
+/// Nothing retained: the exited peer is released, leaving no stale peer,
+/// and a fresh RA at the new endpoint then creates the session normally.
+#[tokio::test(start_paused = true)]
+async fn an_exited_peer_whose_deferred_replacement_expired_is_released() {
+    let (mut h, _) = an_exited_peer_whose_deferred_replacement_expired(false).await;
+    // Mutation-red: the old recovery rebinds the exited endpoint instead.
+    assert_eq!(h.peers_at(ll(2)), [], "released");
+    assert_eq!(h.peers_at(ll(3)), []);
+    assert!(h.mgr.peers.is_empty(), "no stale peer");
+    assert_eq!(
+        h.mgr.unnumbered_owner_of(&swp1_key(2)),
+        None,
+        "port unbound"
+    );
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+    assert_eq!(h.mgr.unnumbered_owner_of(&swp1_key(3)), Some("swp1"));
+    assert!(matches!(
+        h.mgr.peers[&swp1_key(3)]
+            .handle()
+            .query_state_outcome(Duration::from_secs(1))
+            .await,
+        rustbgpd_transport::StateQueryOutcome::State(_)
+    ));
+}
+
+/// Routes still retained from the exited session: the peer and its address
+/// are kept until the retention ends, then released, and an inbound
+/// connection from the new endpoint creates the session normally.
+#[tokio::test(start_paused = true)]
+async fn an_exited_peer_whose_deferred_replacement_expired_waits_on_its_retention() {
+    let (mut h, retention) = an_exited_peer_whose_deferred_replacement_expired(true).await;
+    // Mutation-red: deleting the exited peer in the staged pass purges it.
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "kept while retained");
+    let deadline = h
+        .mgr
+        .unnumbered_retry_at()
+        .expect("checked again at the RIB's timer");
+
+    tokio::time::sleep_until(deadline).await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [], "released once nothing is retained");
+    assert!(h.mgr.peers.is_empty());
+
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+    assert_eq!(h.mgr.unnumbered_owner_of(&swp1_key(3)), Some("swp1"));
 }
 
 /// Confirmed carrier loss and interface recreation stay unconditional while
@@ -2036,78 +2620,532 @@ async fn recreation_never_rebinds_an_exited_session_at_the_old_index() {
     a_lost_link_overrides_an_unsettled_retirement(true, true).await;
 }
 
-/// The endpoint recovered for an exited session outlives a rebind that a
-/// staged transaction defers: the next pass, with no discovery binding,
-/// still recreates the session there.
-#[tokio::test(start_paused = true)]
-async fn a_recovered_endpoint_survives_a_deferred_rebind() {
-    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
-    h.bind("swp1", Some(endpoint(2, 7))).await;
-    let (release, released) = oneshot::channel();
-    let (exited_tx, exited) = oneshot::channel();
-    h.replace_session(
-        &swp1_key(2),
-        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
-    );
-    h.bind("swp1", Some(endpoint(3, 7))).await;
-    release.send(()).unwrap();
-    exited.await.unwrap();
+// ---------------------------------------------------------------------------
+// ADR-0142 "Lifecycle", BFD: an interface-only neighbor's binding registers
+// its single-hop session at runtime through the acknowledged replacement
+// path; rebinding replaces it and unbinding removes it.
+// ---------------------------------------------------------------------------
 
-    h.mgr.config_snapshot_staged = true;
-    h.bind("swp1", None).await;
-    assert_eq!(
-        h.peers_at(ll(2)),
-        [],
-        "exited peer retired; rebind deferred"
-    );
-    h.mgr.config_snapshot_staged = false;
-    // Mutation-red: a recovery endpoint held only for one pass is gone.
-    h.reconcile().await;
-    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "recreated on retry");
-    assert!(matches!(
-        h.mgr.peers[&swp1_key(2)]
-            .handle()
-            .query_state_outcome(Duration::from_secs(1))
-            .await,
-        rustbgpd_transport::StateQueryOutcome::State(_)
-    ));
+/// The BFD runtime side of a [`Harness`]: every acknowledged membership the
+/// manager asks for, and the state the fake actor reports for each session.
+struct BfdSide {
+    applied: mpsc::UnboundedReceiver<crate::bfd_runtime::BfdRuntimeConfig>,
+    state: Arc<std::sync::Mutex<rustbgpd_bfd::SessionState>>,
 }
 
-/// The same recovery when discovery still points at the new address as the
-/// exited peer is retired: the replacement is deferred by a staged
-/// transaction, discovery's binding then expires before it clears, and the
-/// retry still recreates the session at the recovered endpoint.
-#[tokio::test(start_paused = true)]
-async fn a_recovered_endpoint_outlives_an_expired_discovery_binding() {
-    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+impl BfdSide {
+    fn next_applied(&mut self) -> crate::bfd_runtime::BfdRuntimeConfig {
+        self.applied
+            .try_recv()
+            .expect("a membership change was acknowledged")
+    }
+
+    fn sessions(config: &crate::bfd_runtime::BfdRuntimeConfig) -> Vec<(IpAddr, Option<u32>)> {
+        let mut sessions: Vec<_> = config
+            .sessions
+            .iter()
+            .map(|params| (params.peer, params.scope_id))
+            .collect();
+        sessions.sort();
+        sessions
+    }
+}
+
+/// A harness whose interface-only neighbors run BFD (`strict` or not) with a
+/// fake BFD actor acknowledging every membership change.
+fn bfd_harness(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    strict: bool,
+) -> (Harness, BfdSide) {
+    attach_bfd(
+        harness_with(
+            interfaces,
+            links,
+            &format!("bfd = {{ profile = \"fast\", strict = {strict} }}\n"),
+            "[[bfd_profiles]]\nname = \"fast\"\n",
+        ),
+        &[],
+    )
+}
+
+/// A BFD session parameter set for `peer` (scoped when link-local).
+fn session_params(peer: IpAddr, scope: Option<u32>) -> crate::bfd_runtime::BfdSessionParams {
+    crate::bfd_runtime::BfdSessionParams {
+        revision: 1,
+        peer,
+        peer_label: peer.to_string(),
+        scope_id: scope,
+        destination: crate::bfd_runtime::bfd_destination(peer, scope, false).unwrap(),
+        desired_min_tx_us: 300_000,
+        required_min_rx_us: 300_000,
+        detect_mult: 3,
+        strict: false,
+        enabled: true,
+        multihop: false,
+        source: None,
+    }
+}
+
+/// Attach BFD coupling with a fake actor acknowledging every membership
+/// change, plus configured single-hop members at `statics` (IPv4). The IPv6
+/// and IPv4 single-hop sockets count as already open, so tests bind none.
+fn attach_bfd(h: Harness, statics: &[IpAddr]) -> (Harness, BfdSide) {
+    let Harness {
+        mgr,
+        commands,
+        links,
+        rib_rx,
+        retention_queries,
+    } = h;
+    let opened: IpAddr = "fe80::ffff".parse().unwrap();
+    let mut configured = HashMap::from([(opened, session_params(opened, Some(1)))]);
+    for peer in statics {
+        configured.insert(*peer, session_params(*peer, None));
+    }
+    configured
+        .entry("192.0.2.255".parse().unwrap())
+        .or_insert_with(|| session_params("192.0.2.255".parse().unwrap(), None));
+    let (desired_tx, _desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    let mut mgr = mgr
+        .with_bfd_coupling(desired_tx, state_rx, configured)
+        .with_bfd_reload(reload_tx);
+    mgr.bfd_coupling
+        .as_mut()
+        .unwrap()
+        .configured
+        .retain(|peer, _| statics.contains(peer));
+    let state = Arc::new(std::sync::Mutex::new(rustbgpd_bfd::SessionState::Down));
+    let (applied_tx, applied) = mpsc::unbounded_channel();
+    let reported = state.clone();
+    let metrics = mgr.metrics.clone();
+    tokio::spawn(async move {
+        while let Some(command) = reload_rx.recv().await {
+            let state = *reported.lock().unwrap();
+            // As the actor does, seed each running session's gauge before
+            // acknowledging.
+            for params in command
+                .desired
+                .sessions
+                .iter()
+                .filter(|params| params.enabled)
+            {
+                let up = state == rustbgpd_bfd::SessionState::Up;
+                metrics.record_bfd_state(&params.peer_label, up, up);
+            }
+            let acks = command
+                .desired
+                .sessions
+                .iter()
+                .filter(|params| params.enabled)
+                .map(|params| crate::bfd_runtime::BfdStateChange {
+                    revision: params.revision,
+                    peer: params.peer,
+                    state,
+                    diagnostic: rustbgpd_bfd::Diagnostic::None,
+                    remote_admin_down: false,
+                    resync: true,
+                })
+                .collect();
+            let _ = applied_tx.send(command.desired);
+            let _ = command.reply.send(acks);
+        }
+    });
+    (
+        Harness {
+            mgr,
+            commands,
+            links,
+            rib_rx,
+            retention_queries,
+        },
+        BfdSide { applied, state },
+    )
+}
+
+fn bfd_revision(h: &Harness, peer: Ipv6Addr) -> u64 {
+    h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(peer)].revision
+}
+
+/// No session exists before a binding; binding registers the single-hop
+/// session to the learned address on the binding's index; an address change
+/// removes it and registers the new endpoint under a fresh revision; carrier
+/// loss removes it. Every change goes through the acknowledged path.
+#[tokio::test]
+async fn a_binding_registers_replaces_and_removes_its_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+
+    // Mutation-red: without registration the bound peer runs no BFD.
     h.bind("swp1", Some(endpoint(2, 7))).await;
-    let (release, released) = oneshot::channel();
-    let (exited_tx, exited) = oneshot::channel();
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7))]
+    );
+    let first = bfd_revision(&h, ll(2));
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(3)), Some(7))]
+    );
+    assert!(bfd_revision(&h, ll(3)) > first, "a fresh revision");
+
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().configured.is_empty());
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().bound.is_empty());
+}
+
+/// A strict neighbor is added withheld and released only by BFD Up for the
+/// current binding's revision; an Up for a retired binding never releases
+/// the new one.
+#[tokio::test]
+async fn a_strict_binding_waits_for_bfd_up_on_its_own_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], true);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let peer = IpAddr::V6(ll(2));
+    // Mutation-red: registering after the peer is added starts it unheld.
+    assert!(h.mgr.bfd_withholding(&peer), "held until BFD is Up");
+    let old = bfd_revision(&h, ll(2));
+
+    // The address changes before BFD came up.
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    bfd.next_applied();
+    bfd.next_applied();
+    let new_peer = IpAddr::V6(ll(3));
+    assert!(h.mgr.bfd_withholding(&new_peer));
+    let up = |peer, revision| crate::bfd_runtime::BfdStateChange {
+        revision,
+        peer,
+        state: rustbgpd_bfd::SessionState::Up,
+        diagnostic: rustbgpd_bfd::Diagnostic::None,
+        remote_admin_down: false,
+        resync: false,
+    };
+    h.mgr.handle_bfd_state_change(up(new_peer, old)).await;
+    assert!(
+        h.mgr.bfd_withholding(&new_peer),
+        "a stale revision never releases"
+    );
+    h.mgr
+        .handle_bfd_state_change(up(new_peer, bfd_revision(&h, ll(3))))
+        .await;
+    assert!(!h.mgr.bfd_withholding(&new_peer), "released by its own Up");
+}
+
+/// BFD down is a session-down input for a bound peer: its BGP session gets
+/// `BfdDown` and is held until BFD permits BGP again.
+#[tokio::test]
+async fn bfd_down_tears_down_a_bound_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    *bfd.state.lock().unwrap() = rustbgpd_bfd::SessionState::Up;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
     h.replace_session(
         &swp1_key(2),
-        retirement_answered_after_release(IpAddr::V6(ll(2)), released, exited_tx),
+        PeerHandle::from_parts(tx, tokio::spawn(std::future::pending())),
     );
-    h.bind("swp1", Some(endpoint(3, 7))).await;
-    release.send(()).unwrap();
-    exited.await.unwrap();
+    let peer = IpAddr::V6(ll(2));
+    h.mgr
+        .handle_bfd_state_change(crate::bfd_runtime::BfdStateChange {
+            revision: bfd_revision(&h, ll(2)),
+            peer,
+            state: rustbgpd_bfd::SessionState::Down,
+            diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
+            remote_admin_down: false,
+            resync: false,
+        })
+        .await;
+    assert!(matches!(rx.try_recv(), Ok(PeerCommand::BfdDown)));
+    assert!(h.mgr.bfd_withholding(&peer));
+}
 
-    h.mgr.config_snapshot_staged = true;
-    h.bind("swp1", Some(endpoint(3, 7))).await;
-    assert_eq!(h.peers_at(ll(2)), [], "exited peer retired");
-    assert_eq!(h.peers_at(ll(3)), [], "replacement deferred");
-    h.bind("swp1", None).await;
-    h.mgr.config_snapshot_staged = false;
-    // Mutation-red: recovering only when discovery has no binding leaves
-    // nothing to reconnect to once that binding expires.
+/// A reload rebuilds BFD membership from configuration, which has no
+/// address for an interface-only neighbor: the binding's session is carried
+/// over unchanged.
+#[tokio::test]
+async fn a_reload_keeps_a_bindings_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let revision = bfd_revision(&h, ll(2));
+    let candidate = h.mgr.current_config.clone();
+    // Mutation-red: without the carry-over the reload drops the session.
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7))]
+    );
+    assert_eq!(bfd_revision(&h, ll(2)), revision, "unchanged");
+
+    // A profile edit applies to the binding's session on reload.
+    let mut candidate = h.mgr.current_config.clone();
+    candidate.bfd_profiles[0].multiplier = 5;
+    // Mutation-red: carrying the old session over ignores the edit.
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    bfd.next_applied();
+    let session = &h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(ll(2))];
+    assert_eq!((session.detect_mult, session.scope_id), (5, Some(7)));
+    assert_ne!(session.revision, revision, "replaced");
+}
+
+/// A recreated interface moves a binding's session only by rebinding it,
+/// never through the configured link-local scope refresh: one mechanism
+/// owns each session.
+#[tokio::test]
+async fn a_recreated_interface_moves_a_bindings_bfd_session_only_by_rebinding() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+
+    h.links_changed(snapshot(true, &[("swp1", 9, true)]));
+    h.mgr.run_due_bfd_scope_refresh().await;
+    // Mutation-red: the scope refresh would move it to index 9 itself.
+    assert!(bfd.applied.try_recv().is_err(), "no refresh replacement");
+    assert_eq!(
+        h.mgr.bfd_coupling.as_ref().unwrap().configured[&IpAddr::V6(ll(2))].scope_id,
+        Some(7)
+    );
+
     h.reconcile().await;
-    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)], "recreated on retry");
-    assert!(matches!(
-        h.mgr.peers[&swp1_key(2)]
-            .handle()
-            .query_state_outcome(Duration::from_secs(1))
-            .await,
-        rustbgpd_transport::StateQueryOutcome::State(_)
-    ));
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [], "retired");
+    h.bind("swp1", Some(endpoint(2, 9))).await;
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(9))],
+        "rebound on the new index"
+    );
+}
+
+/// A neighbor deleted through the runtime API leaves its BFD member
+/// drained. A binding's membership change must not publish it enabled again,
+/// on bind or on unbind.
+#[tokio::test]
+async fn a_binding_change_never_restarts_a_deleted_neighbors_bfd_session() {
+    let deleted: IpAddr = "192.0.2.9".parse().unwrap();
+    let (mut h, mut bfd) = attach_bfd(
+        harness_with(
+            &["swp1"],
+            &[("swp1", 7, true)],
+            "bfd = { profile = \"fast\" }\n",
+            "[[bfd_profiles]]\nname = \"fast\"\n",
+        ),
+        &[deleted],
+    );
+    insert_test_managed_peer(
+        &mut h.mgr,
+        deleted,
+        fake_peer_handle(
+            deleted,
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    h.mgr
+        .delete_peer_runtime(PeerKey::new(deleted, None), false)
+        .await
+        .unwrap();
+    let drained = |config: &crate::bfd_runtime::BfdRuntimeConfig| {
+        config
+            .sessions
+            .iter()
+            .find(|params| params.peer == deleted)
+            .is_some_and(|params| !params.enabled)
+    };
+
+    // Mutation-red: rebuilding the disabled set from live peers only
+    // re-enables the deleted neighbor's session.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(drained(&bfd.next_applied()), "still drained after a bind");
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(
+        drained(&bfd.next_applied()),
+        "still drained after an unbind"
+    );
+}
+
+/// Prepare and commit the BFD side of a reload to `candidate`, then adopt it.
+async fn reload(h: &mut Harness, candidate: crate::config::Config) {
+    let prepared = h.mgr.prepare_bfd_reload(&candidate).unwrap();
+    h.mgr.commit_bfd_reload(prepared).await.unwrap();
+    h.mgr.current_config = candidate;
+}
+
+/// Inherited BFD enabled, disabled and enabled again by peer-group reloads
+/// reaches an interface-only neighbor that is already bound, without a
+/// rebind: the session is registered (and a strict one holds BGP until Up),
+/// removed, and registered again.
+#[tokio::test]
+async fn a_reload_enables_disables_and_reenables_bfd_on_a_bound_neighbor() {
+    let (mut h, mut bfd) = attach_bfd(
+        harness_with(
+            &["swp1"],
+            &[("swp1", 7, true)],
+            "peer_group = \"fabric\"\n",
+            "[[bfd_profiles]]\nname = \"fast\"\n[peer_groups.fabric]\n",
+        ),
+        &[],
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(bfd.applied.try_recv().is_err(), "no BFD configured yet");
+    let peer = IpAddr::V6(ll(2));
+    let with_bfd = |h: &Harness, bfd: Option<&str>| {
+        let mut candidate = h.mgr.current_config.clone();
+        candidate.peer_groups.get_mut("fabric").unwrap().bfd =
+            bfd.map(|bfd| toml::from_str::<crate::config::BfdConfig>(bfd).unwrap());
+        candidate
+    };
+
+    // Mutation-red: rebuilding only existing sessions never adds one.
+    let enabled = with_bfd(&h, Some("profile = \"fast\"\nstrict = true"));
+    reload(&mut h, enabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
+    assert!(h.mgr.bfd_withholding(&peer), "strict holds BGP until Up");
+
+    let disabled = with_bfd(&h, None);
+    reload(&mut h, disabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), []);
+    assert!(!h.mgr.bfd_withholding(&peer), "released with its session");
+    assert!(!h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
+
+    let enabled = with_bfd(&h, Some("profile = \"fast\""));
+    reload(&mut h, enabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
+    assert!(h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
+}
+
+/// With no link monitor, the scope poll re-resolves configured link-local
+/// BFD sessions only: it is not armed for binding-owned sessions alone, and
+/// when it runs it moves a configured session to its interface's current
+/// index while a binding-owned session keeps its binding's index.
+#[tokio::test(start_paused = true)]
+async fn the_no_monitor_scope_poll_never_moves_a_bindings_bfd_session() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    h.mgr.link_check.changes = None;
+    // Mutation-red: arming for any link-local member polls for nothing.
+    assert_eq!(h.mgr.bfd_scope_deadline(), None, "binding-owned only");
+
+    // A configured link-local neighbor on `lo`, at a stale index.
+    let configured: IpAddr = "fe80::9".parse().unwrap();
+    let key = PeerKey::new(configured, Some("lo".to_owned()));
+    insert_test_managed_peer_for_key(
+        &mut h.mgr,
+        &key,
+        65002,
+        fake_peer_handle(
+            configured,
+            SessionState::Active,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+        false,
+    );
+    let transport = &mut h.mgr.peers.get_mut(&key).unwrap().transport_config;
+    transport.peer_interface = Some("lo".to_owned());
+    transport.peer_scope_id = Some(4242);
+    h.mgr
+        .bfd_coupling
+        .as_mut()
+        .unwrap()
+        .configured
+        .insert(configured, session_params(configured, Some(4242)));
+    // The binding's interface now resolves elsewhere, unreported.
+    h.links.send_replace(snapshot(true, &[("swp1", 9, true)]));
+
+    let due = h
+        .mgr
+        .bfd_scope_deadline()
+        .expect("polled for the configured one");
+    tokio::time::sleep_until(due).await;
+    h.mgr.bfd_scope_retry_due();
+    h.mgr.run_due_bfd_scope_refresh().await;
+    let lo = nix::net::if_::if_nametoindex("lo").unwrap();
+    // Mutation-red: without the refresh skip the binding's session moves too.
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(IpAddr::V6(ll(2)), Some(7)), (configured, Some(lo))]
+    );
+}
+
+fn bfd_session_up(h: &Harness, peer: &str) -> Option<f64> {
+    h.mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bfd_session_up")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer)
+                    .then(|| metric.get_gauge().get_value())
+            })
+        })
+}
+
+/// A non-strict binding whose remote never answers BFD keeps its
+/// `bfd_session_up 0` series: the registration's own Down acknowledgement,
+/// which arrives before the bound peer exists, is not a deletion, and the
+/// series survives a reconcile.
+#[tokio::test]
+async fn an_unanswered_bindings_bfd_gauge_stays_at_zero() {
+    let (mut h, mut bfd) = bfd_harness(&["swp1"], &[("swp1", 7, true)], false);
+    // Mutation-red: reaping for a peer that is only awaiting insertion
+    // drops the series the actor just seeded.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    let label = format!("{}%swp1", ll(2));
+    assert_eq!(bfd_session_up(&h, &label), Some(0.0));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(bfd_session_up(&h, &label), Some(0.0), "after a reconcile");
+}
+
+/// A rejected reload preparation stages nothing: the next unrelated
+/// membership commit must not publish a stale binding-owned set.
+#[tokio::test]
+async fn a_rejected_reload_preparation_leaves_no_staged_bindings() {
+    let (mut h, mut bfd) = bfd_harness(
+        &["swp1", "swp2"],
+        &[("swp1", 7, true), ("swp2", 8, true)],
+        false,
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    bfd.next_applied();
+    // A candidate without BFD on the interface-only neighbors, with an
+    // addressed neighbor naming a missing profile: preparation fails after
+    // the binding sessions are rebuilt.
+    let candidate: crate::config::Config = toml::from_str(
+        "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+         [global.telemetry]\nlog_format = \"json\"\n\
+         [[neighbors]]\ninterface = \"swp1\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n\
+         [[neighbors]]\ninterface = \"swp2\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n\
+         [[neighbors]]\naddress = \"192.0.2.7\"\nremote_asn = 65002\nbfd = { profile = \"missing\" }\n",
+    )
+    .unwrap();
+    assert!(h.mgr.prepare_bfd_reload(&candidate).is_err());
+
+    // Mutation-red: a stage left by the rejection overwrites this commit's
+    // binding-owned set.
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    bfd.next_applied();
+    let bound = &h.mgr.bfd_coupling.as_ref().unwrap().bound;
+    assert!(bound.contains(&IpAddr::V6(ll(2))) && bound.contains(&IpAddr::V6(ll(3))));
 }
 
 /// A static link-local neighbor on `lo`, which every host has, so a

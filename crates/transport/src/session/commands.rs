@@ -1388,11 +1388,24 @@ impl PeerSession {
                 self.handle_check_links().await;
                 ControlFlow::Continue(())
             }
-            PeerCommand::ShutdownUnlessEstablished { reply } => {
-                if self.fsm.state() == SessionState::Established {
-                    let _ = reply.send(false);
-                    return ControlFlow::Continue(());
-                }
+            PeerCommand::ShutdownUnlessEstablished { reply }
+            | PeerCommand::ShutdownUnlessConnected { reply }
+                if self.fsm.state() == SessionState::Established =>
+            {
+                let _ = reply.send(false);
+                ControlFlow::Continue(())
+            }
+            PeerCommand::ShutdownUnlessConnected { reply }
+                if matches!(
+                    self.fsm.state(),
+                    SessionState::OpenSent | SessionState::OpenConfirm
+                ) =>
+            {
+                let _ = reply.send(false);
+                ControlFlow::Continue(())
+            }
+            PeerCommand::ShutdownUnlessEstablished { reply }
+            | PeerCommand::ShutdownUnlessConnected { reply } => {
                 // Shutdown's own path for a session that is not Established,
                 // decided in this turn: nothing further is read, so the
                 // session cannot reach Established after the check.
