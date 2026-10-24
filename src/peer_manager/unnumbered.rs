@@ -1080,24 +1080,25 @@ impl PeerManager {
     /// reservation) and stop discovery there. A peer that cannot be removed
     /// keeps its port, and the removal is retried.
     async fn remove_port(&mut self, name: &str) {
-        let Some(port) = self
+        let Some(bound) = self
             .unnumbered
-            .as_mut()
-            .and_then(|unnumbered| unnumbered.ports.remove(name))
+            .as_ref()
+            .and_then(|unnumbered| unnumbered.ports.get(name))
+            .map(|port| port.bound.clone())
         else {
             return;
         };
         info!(interface = %name, "unnumbered: interface-only neighbor removed");
-        if let Some(key) = port.bound.clone() {
+        if let Some(key) = bound {
             self.drain_ready_session_notifications(Some(&key)).await;
-            // The port is gone, so the deletion releases the RIB identity.
+            // Deleted while the port still owns it, so the deletion reaps
+            // the series labelled by the interface (the stanza has left
+            // `current_config`) in the session and, after its teardown, in
+            // the RIB. The port keeps the RIB identity until released below.
             match self.delete_peer(key.clone(), false).await {
                 Ok(_) | Err(PeerLifecycleError::NotFound(_)) => {}
                 Err(error) => {
                     warn!(interface = %name, peer = %key, %error, "unnumbered: could not remove the deleted neighbor's peer; retrying");
-                    if let Some(unnumbered) = self.unnumbered.as_mut() {
-                        unnumbered.ports.insert(name.to_owned(), port);
-                    }
                     self.arm_unnumbered_retry();
                     return;
                 }
@@ -1105,12 +1106,25 @@ impl PeerManager {
             if self.max_prefix_latches.contains_key(&key) {
                 self.remove_max_prefix_latch(&key);
             }
-        } else if let Some(rib_peer) = port.rib_peer {
+        }
+        let Some(port) = self
+            .unnumbered
+            .as_mut()
+            .and_then(|unnumbered| unnumbered.ports.remove(name))
+        else {
+            return;
+        };
+        if let Some(rib_peer) = port.rib_peer {
             self.release_unused_rib_peer(rib_peer).await;
         }
         if let Some(unnumbered) = self.unnumbered.as_mut() {
             unnumbered.discovery.stop(name);
         }
+        // An unbound neighbor has no peer to delete: its identity series
+        // (kept across endpoints) and discovery counters end here.
+        let label = rustbgpd_telemetry::interface_peer_label(name);
+        self.metrics.reap_peer_identity_series(&label, name);
+        self.metrics.reap_peer_series(&label);
     }
 
     fn port_mut(&mut self, name: &str) -> &mut Port {

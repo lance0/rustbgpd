@@ -4125,3 +4125,91 @@ async fn sighup_bfd_edits_on_a_bound_interface_only_neighbor_keep_its_session() 
     assert!(!h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
     assert_eq!(h.session(&key), session, "kept on disable");
 }
+
+/// Every exported series whose `peer` label is `label`, by family.
+fn series_for(h: &Harness, label: &str) -> Vec<String> {
+    let mut families: Vec<String> = h
+        .mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| {
+            family.get_metric().iter().any(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|pair| pair.name() == "peer" && pair.value() == label)
+            })
+        })
+        .map(|family| family.name().to_owned())
+        .collect();
+    families.sort();
+    families
+}
+
+/// Deleting an interface-only neighbor through `DeleteNeighbor` ends every
+/// series labelled `peer="interface:<name>"`, including `bgp_unnumbered_*`,
+/// for a bound neighbor and for one whose binding was lost, which has no
+/// peer to delete. The deletion of the bound one tells the RIB the same
+/// label, so its teardown emissions are reaped after them.
+#[tokio::test]
+async fn an_rpc_delete_reaps_the_neighbors_interface_labelled_series() {
+    use rustbgpd_api::peer_types::OwnedNeighborMutation;
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    // swp2 is then unbound: its identity series stay with the neighbor.
+    h.links_changed(snapshot(true, &[("swp1", 7, true), ("swp2", 8, false)]));
+    h.reconcile().await;
+    h.mgr.handle_discovery_event(DiscoveryEvent::Conflict {
+        interface: "swp1".into(),
+        bound: ll(2),
+        other: ll(9),
+    });
+    for label in ["interface:swp1", "interface:swp2"] {
+        assert!(
+            series_for(&h, label)
+                .iter()
+                .any(|family| family == "bgp_peer_admin_enabled"),
+            "{label} exported before the delete: {:?}",
+            series_for(&h, label)
+        );
+    }
+    assert!(
+        series_for(&h, "interface:swp1")
+            .iter()
+            .any(|family| family.starts_with("bgp_unnumbered_"))
+    );
+    while h.rib_rx.try_recv().is_ok() {}
+
+    for interface in ["swp1", "swp2"] {
+        let outcome = h
+            .owned_neighbor(OwnedNeighborMutation::DeleteInterfaceOnly(interface.into()))
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                rustbgpd_api::peer_types::OwnedNeighborMutationOutcome::Success
+            ),
+            "{outcome:?}"
+        );
+    }
+    h.reconcile().await;
+    // Mutation-red: without the reap both neighbors' series survive.
+    assert_eq!(series_for(&h, "interface:swp1"), Vec::<String>::new());
+    assert_eq!(series_for(&h, "interface:swp2"), Vec::<String>::new());
+    let reaped_in_rib: Vec<_> = std::iter::from_fn(|| h.rib_rx.try_recv().ok())
+        .filter_map(|update| match update {
+            RibUpdate::PeerDeleted {
+                label, keep_series, ..
+            } => Some((label.map(|label| label.to_string()), keep_series)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reaped_in_rib,
+        [(Some("interface:swp1".to_string()), false)],
+        "the RIB reaps the bound neighbor's series under its interface label"
+    );
+}
