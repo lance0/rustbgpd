@@ -263,7 +263,7 @@ async fn retained_routes_are_purged_when_the_lost_connection_is_down() {
         Ok(RibUpdate::PeerDown { peer, .. }) => assert_eq!(peer, session.rib_peer()),
         _ => panic!("expected the retained routes to be purged"),
     }
-    assert!(session.gr_retained_connection.is_none());
+    assert!(session.gr_retained_connection.get().is_none());
     assert!(session.last_error.ends_with("local address removed"));
 }
 
@@ -473,7 +473,12 @@ async fn a_retained_connection_learns_its_carrier_from_a_later_valid_snapshot() 
         Ok(RibUpdate::PeerGracefulRestart { .. })
     ));
     assert_eq!(
-        session.gr_retained_connection.unwrap().connection.carrier,
+        session
+            .gr_retained_connection
+            .get()
+            .unwrap()
+            .connection
+            .carrier,
         None
     );
 
@@ -509,4 +514,67 @@ async fn retained_ibgp_routes_are_not_purged() {
     set(&tx, iface(1, true, false, &["127.0.0.1"]));
     check(&mut session).await;
     assert!(rib_rx.try_recv().is_err());
+}
+
+/// A fresh actor keeps the previous retention owner during its handshake;
+/// reaching Established retires that stamp without changing the old actor's cell.
+#[tokio::test]
+async fn a_fresh_actor_preserves_the_retention_owner_until_established() {
+    for establish in [false, true] {
+        let both_up = merge(healthy(), iface(7, true, true, &["127.0.0.3"]));
+        let (mut old, _old_remote, mut old_rib, tx) = established_gr_session(both_up).await;
+        old.session_identity = crate::SessionIdentity::primary(17);
+        old.handle_tcp_disconnect();
+        old.drive_fsm(Event::TcpConnectionFails).await;
+        assert!(matches!(
+            old_rib.try_recv(),
+            Ok(RibUpdate::PeerGracefulRestart { session_id: 17, .. })
+        ));
+
+        let (mut fresh, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        fresh.session_identity = crate::SessionIdentity::primary(29);
+        fresh.config.link_state = old.config.link_state.clone();
+        fresh
+            .gr_retained_connection
+            .set(old.gr_retained_connection.get());
+        let (replacement, _replacement_remote) = stream_from("127.0.0.3").await;
+        fresh.test_install_stream(replacement);
+        if establish {
+            establish_test_session(&mut fresh, 65002).await;
+            assert!(fresh.gr_retained_connection.get().is_none());
+        } else {
+            fresh.drive_fsm(Event::ManualStart).await;
+        }
+        while rib_rx.try_recv().is_ok() {}
+        set(
+            &tx,
+            merge(
+                iface(1, true, false, &["127.0.0.1"]),
+                iface(7, true, true, &["127.0.0.3"]),
+            ),
+        );
+        check(&mut fresh).await;
+        if establish {
+            assert!(
+                rib_rx.try_recv().is_err(),
+                "old retention no longer belongs to the Established replacement"
+            );
+        } else {
+            assert!(
+                matches!(
+                    rib_rx.try_recv(),
+                    Ok(RibUpdate::PeerDown { session_id: 17, .. })
+                ),
+                "purge keeps the retained route's owner, not the new actor's id"
+            );
+        }
+        assert!(
+            old.gr_retained_connection.get().is_some(),
+            "actor snapshots are independent"
+        );
+        assert!(
+            fresh.read_half.is_some(),
+            "replacement on the healthy link stays connected"
+        );
+    }
 }

@@ -257,3 +257,278 @@ async fn inbound_link_local_does_not_match_a_missing_interface() {
         assert_eq!(mgr.inbound_peer_key(addr), None);
     }
 }
+
+async fn retained_routes(
+    rib: &mpsc::Sender<RibUpdate>,
+    peer: rustbgpd_rib::PeerId,
+) -> Vec<rustbgpd_rib::Route> {
+    let (reply, response) = oneshot::channel();
+    rib.send(RibUpdate::QueryRoutesPage {
+        scope: rustbgpd_rib::update::RouteQueryScope::Received { peer: Some(peer) },
+        filter: None,
+        after: None,
+        expected_version: None,
+        page_size: 10,
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap().routes
+}
+
+fn loopback_links(primary_up: bool, other_up: bool) -> rustbgpd_transport::LinkSnapshot {
+    use rustbgpd_transport::{InterfaceAddress, LinkSnapshot, LinkState};
+    use std::collections::BTreeMap;
+    LinkSnapshot {
+        valid: true,
+        links: BTreeMap::from([
+            (
+                1,
+                LinkState {
+                    name: "test1".into(),
+                    admin_up: true,
+                    lower_up: primary_up,
+                },
+            ),
+            (
+                2,
+                LinkState {
+                    name: "test2".into(),
+                    admin_up: true,
+                    lower_up: other_up,
+                },
+            ),
+        ]),
+        addresses: BTreeMap::from([(
+            1,
+            vec![InterfaceAddress {
+                local: "127.0.0.1".parse().unwrap(),
+                prefix: "127.0.0.0".parse().unwrap(),
+                prefix_len: 8,
+            }],
+        )]),
+    }
+}
+
+/// The manager replaces the Idle actor while the RIB holds its route. A
+/// link check during the fresh actor's handshake must still purge that route.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end scenario orders real route retention, actor replacement, and the owning carrier-loss purge"
+)]
+async fn retained_route_replacement(promote_candidate: bool) {
+    use super::collision::{mock_open, read_bgp_message, send_bgp_message};
+    use bytes::Bytes;
+
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let rib = tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, mpsc::channel(1).1, None, None, BgpMetrics::new())
+            .run(),
+    );
+    let (links_tx, links_rx) = tokio::sync::watch::channel(Arc::new(loopback_links(true, true)));
+    let mut mgr = test_peer_manager().with_link_failover(links_rx);
+    mgr.rib_tx = rib_tx.clone();
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let original_id = mgr.allocate_session_id();
+    let (server, mut client) = super::inbound_admission::localhost_inbound_stream().await;
+    let mut config = mgr.build_transport_config(&make_config(peer_addr, 65002));
+    let unused = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    config.remote_addr = unused.local_addr().unwrap();
+    drop(unused);
+    let retained_config = config.clone();
+    let handle = PeerHandle::spawn_inbound_with_identity(
+        config,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+        None,
+        server,
+        None,
+        None,
+        None,
+        None,
+        false,
+        rustbgpd_transport::SessionIdentity::primary(original_id),
+    );
+    insert_test_managed_peer(&mut mgr, peer_addr, handle, false);
+    mgr.peers.get_mut(&key(peer_addr)).unwrap().transport_config = retained_config;
+    mgr.peers[&key(peer_addr)]
+        .handle()
+        .start_inbound_timeout(0, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut buf).await,
+        Message::Open(_)
+    ));
+    let mut open = mock_open(Ipv4Addr::new(10, 0, 0, 2));
+    open.capabilities.push(Capability::GracefulRestart {
+        restart_state: false,
+        notification: false,
+        restart_time: 120,
+        families: vec![rustbgpd_wire::GracefulRestartFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+        }],
+    });
+    send_bgp_message(&mut client, &Message::Open(open)).await;
+    assert!(matches!(
+        read_bgp_message(&mut client, &mut buf).await,
+        Message::Keepalive
+    ));
+    send_bgp_message(&mut client, &Message::Keepalive).await;
+    let handle = mgr.peers[&key(peer_addr)].handle();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle.query_state().await.unwrap().fsm_state == SessionState::Established {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    send_bgp_message(
+        &mut client,
+        &Message::Update(rustbgpd_wire::UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from_static(&[
+                0x40, 1, 1, 0, 0x40, 2, 6, 2, 1, 0, 0, 0xfd, 0xea, 0x40, 3, 4, 10, 0, 0, 2,
+            ]),
+            nlri: Bytes::from_static(&[24, 203, 0, 113]),
+        }),
+    )
+    .await;
+    let peer = mgr.rib_peer_of(&key(peer_addr));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while retained_routes(&rib_tx, peer).await.len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if handle.query_state().await.unwrap().fsm_state == SessionState::Idle {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        retained_routes(&rib_tx, peer).await[0].is_stale,
+        "ordinary TCP loss retains the route"
+    );
+
+    if promote_candidate {
+        handle.start_timeout(Duration::from_secs(2)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    handle.query_state().await.unwrap().fsm_state,
+                    SessionState::Connect | SessionState::Active
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    while mgr.session_notify_rx.try_recv().is_ok() {}
+    let (server, mut replacement) = super::inbound_admission::localhost_inbound_stream().await;
+    mgr.handle_inbound(server, sock(peer_addr), None, None)
+        .await;
+    if promote_candidate {
+        assert!(mgr.peers[&key(peer_addr)].pending_inbound.is_some());
+        let mut buf = BytesMut::new();
+        assert!(matches!(
+            read_bgp_message(&mut replacement, &mut buf).await,
+            Message::Open(_)
+        ));
+        send_bgp_message(
+            &mut replacement,
+            &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+        )
+        .await;
+        let notification =
+            tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            notification,
+            SessionNotification::OpenReceived {
+                role: rustbgpd_transport::SessionRole::InboundCandidate,
+                ..
+            }
+        ));
+        mgr.handle_session_notification(notification).await;
+    }
+    assert_ne!(mgr.peers[&key(peer_addr)].session_id(), original_id);
+    assert_eq!(
+        mgr.peers[&key(peer_addr)]
+            .handle()
+            .query_state()
+            .await
+            .unwrap()
+            .fsm_state,
+        if promote_candidate {
+            SessionState::OpenConfirm
+        } else {
+            SessionState::OpenSent
+        }
+    );
+    for snapshot in [
+        rustbgpd_transport::LinkSnapshot::default(),
+        loopback_links(true, false),
+    ] {
+        links_tx.send_replace(Arc::new(snapshot));
+        mgr.handle_links_changed();
+        // The command round trip orders the RIB read after CheckLinks.
+        let _ = mgr.peers[&key(peer_addr)]
+            .handle()
+            .query_state()
+            .await
+            .unwrap();
+        assert_eq!(
+            retained_routes(&rib_tx, peer).await.len(),
+            1,
+            "unknown or unrelated link state does not purge retention"
+        );
+    }
+    links_tx.send_replace(Arc::new(loopback_links(false, true)));
+    mgr.handle_links_changed();
+    let _ = mgr.peers[&key(peer_addr)]
+        .handle()
+        .query_state()
+        .await
+        .unwrap();
+    assert!(
+        retained_routes(&rib_tx, peer).await.is_empty(),
+        "carrier loss during the replacement handshake purges immediately"
+    );
+    for (_, managed) in mgr.peers.drain() {
+        let (handle, _, _) = managed.into_parts();
+        let _ = handle.shutdown().await;
+    }
+    drop(mgr);
+    drop(rib_tx);
+    rib.await.unwrap();
+}
+
+#[tokio::test]
+async fn inbound_replacement_keeps_gr_retained_route_link_provenance() {
+    retained_route_replacement(false).await;
+}
+
+#[tokio::test]
+async fn promoted_inbound_keeps_gr_retained_route_link_provenance() {
+    retained_route_replacement(true).await;
+}

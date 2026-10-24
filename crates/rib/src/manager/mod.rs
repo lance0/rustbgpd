@@ -133,7 +133,7 @@ pub use conditional_advertisement::{
     ConditionEntryStatus, ConditionalAdvertiseIf, ConditionalAdvertisement,
     ConditionalAdvertisementCapture, ConditionalAdvertisementSet, ConditionalAdvertisementStatus,
 };
-pub use eor_grace::{EorGraceConfig, EorGracePeerConfig, ReplayComplete};
+pub use eor_grace::{EorGraceConfig, EorGracePeerConfig, EorGraceTarget, ReplayComplete};
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, gauge_val, prefix_family};
 pub use selection_deferral::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
 
@@ -922,10 +922,10 @@ pub struct RibManager {
     rtc_eor_hold_ready: HashSet<PeerId>,
     /// Opt-in End-of-RIB grace windows after a planned restart, keyed by
     /// configured peer. Empty on cold starts and once each deadline passes.
-    eor_grace: HashMap<PeerId, eor_grace::EorGracePeer>,
+    eor_grace: HashMap<EorGraceTarget, eor_grace::EorGracePeer>,
     /// Each grace window's absolute deadline, with a cached minimum so the
     /// run loop's per-turn timer probe does not scan the peers.
-    eor_grace_deadlines: graceful_restart::DeadlineMap<PeerId>,
+    eor_grace_deadlines: graceful_restart::DeadlineMap<EorGraceTarget>,
     /// Controllers whose replay-complete signals release the grace windows
     /// early, and the ones that have signalled.
     eor_replay: eor_grace::ReplayWait,
@@ -4040,6 +4040,9 @@ impl RibManager {
                 label,
                 keep_series,
             } => self.handle_peer_deleted(peer, label, keep_series),
+            RibUpdate::RetireEorGraceInterface { interface } => {
+                self.retire_eor_grace_interface(interface);
+            }
             RibUpdate::ReleasePeer { peer } => {
                 if !peer.release() {
                     debug!(%peer, "release of a handle that was not live");

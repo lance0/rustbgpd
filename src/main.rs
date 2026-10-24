@@ -1056,8 +1056,8 @@ fn raw_max_gr_restart_time_secs(config: &Config) -> Option<u64> {
 /// `gr_eor_grace_time`. One absolute deadline per peer, counted from daemon
 /// start (so startup work cannot stretch it) and never past the
 /// restart-marker window.
-fn eor_grace_config(
-    peer_configs: &[config::ResolvedNeighbor],
+fn eor_grace_config<'a>(
+    peer_configs: impl IntoIterator<Item = &'a config::ResolvedNeighbor>,
     start_time: tokio::time::Instant,
     restart_deadline: StdInstant,
     replay_owners: &[String],
@@ -1066,11 +1066,24 @@ fn eor_grace_config(
     rustbgpd_rib::EorGraceConfig {
         replay_owners: replay_owners.to_vec(),
         peers: peer_configs
-            .iter()
+            .into_iter()
             .map(|neighbor| &neighbor.transport_config)
             .filter(|transport| transport.peer.graceful_restart && transport.gr_eor_grace_time > 0)
             .map(|transport| rustbgpd_rib::EorGracePeerConfig {
-                peer: transport.rib_peer.current(transport.remote_addr.ip()),
+                peer: if transport.interface_only {
+                    rustbgpd_rib::EorGraceTarget::Interface(
+                        transport
+                            .peer_interface
+                            .as_deref()
+                            .map(std::sync::Arc::from)
+                            .expect("interface-only neighbor has an interface"),
+                    )
+                } else {
+                    transport
+                        .rib_peer
+                        .current(transport.remote_addr.ip())
+                        .into()
+                },
                 deadline: (start_time + Duration::from_secs(transport.gr_eor_grace_time.into()))
                     .min(restart_deadline),
                 families: transport
@@ -4798,8 +4811,14 @@ async fn run<T>(
             timeout: deadline.saturating_duration_since(StdInstant::now()),
             waiters,
         });
+        let interface_configs = config
+            .interface_only_resolved_for_comparison()
+            .unwrap_or_else(|e| {
+                error!(error = %e, "invalid interface-only Graceful Restart configuration");
+                process::exit(1);
+            });
         rib_manager = rib_manager.with_eor_grace(eor_grace_config(
-            &peer_configs,
+            peer_configs.iter().chain(&interface_configs),
             start_time,
             deadline,
             &config.global.gr_eor_replay_owners,
@@ -11517,6 +11536,50 @@ tcp_mss = 1200
                 ("10.0.0.3".to_string(), start_time + Duration::from_secs(5)),
             ]
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interface_only_eor_grace_uses_startup_deadlines_and_effective_families() {
+        let config: Config = toml::from_str(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[peer_groups.fabric]
+gr_restart_time = 120
+gr_eor_grace_time = 60
+[[neighbors]]
+interface = "rbgp-absent0"
+remote_asn = "external"
+peer_group = "fabric"
+families = ["ipv6_unicast"]
+[[neighbors]]
+interface = "rbgp-absent1"
+remote_asn = "external"
+gr_eor_grace_time = 0
+"#,
+        )
+        .unwrap();
+        let addressed = config.resolved_neighbors().unwrap();
+        let interfaces = config.interface_only_resolved_for_comparison().unwrap();
+        let now = StdInstant::now();
+        let start = tokio::time::Instant::from_std(now) - Duration::from_secs(30);
+        let deadline = now + Duration::from_secs(10);
+        let grace = eor_grace_config(addressed.iter().chain(&interfaces), start, deadline, &[]);
+        assert_eq!(grace.peers.len(), 1);
+        assert_eq!(
+            grace.peers[0].peer,
+            rustbgpd_rib::EorGraceTarget::Interface("rbgp-absent0".into())
+        );
+        assert_eq!(
+            grace.peers[0].deadline,
+            tokio::time::Instant::from_std(deadline)
+        );
+        assert_eq!(grace.peers[0].families, [(Afi::Ipv6, Safi::Unicast)]);
     }
 
     /// When only an IPv4 neighbor has `tcp_mss = 536`, the IPv4 listener gets

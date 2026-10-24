@@ -21,6 +21,8 @@
 
 use crate::PeerId;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
+use std::sync::Arc;
 
 use rustbgpd_telemetry::reason_labels::GrEorGraceReleaseReason;
 use rustbgpd_wire::{Afi, Safi};
@@ -30,11 +32,44 @@ use super::RibManager;
 use crate::injection_lease::LeaseConflict;
 use crate::update::RibCommandError;
 
+/// A configured neighbor whose grace window starts before its session exists.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum EorGraceTarget {
+    /// An addressed neighbor whose handle is allocated at startup.
+    Peer(PeerId),
+    /// An interface-only neighbor, before its learned endpoint has a handle.
+    Interface(Arc<str>),
+}
+
+impl EorGraceTarget {
+    fn label(&self) -> String {
+        match self {
+            Self::Peer(peer) => peer.label(),
+            Self::Interface(interface) => rustbgpd_telemetry::interface_peer_label(interface),
+        }
+    }
+}
+
+impl From<PeerId> for EorGraceTarget {
+    fn from(peer: PeerId) -> Self {
+        Self::Peer(peer)
+    }
+}
+
+impl fmt::Display for EorGraceTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Peer(peer) => fmt::Display::fmt(peer, f),
+            Self::Interface(interface) => write!(f, "interface:{interface}"),
+        }
+    }
+}
+
 /// One configured peer's grace window, resolved at daemon start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EorGracePeerConfig {
-    /// Static peer address.
-    pub peer: PeerId,
+    /// Configured neighbor identity, independent of its first binding.
+    pub peer: EorGraceTarget,
     /// Absolute release deadline: daemon start plus the configured window,
     /// clamped to the restarting-speaker (marker) window. Counting from
     /// daemon start keeps startup work from stretching the window.
@@ -105,6 +140,7 @@ impl ReplayWait {
 /// per-turn timer probe O(1).
 #[derive(Debug)]
 pub(super) struct EorGracePeer {
+    peer: Option<PeerId>,
     families: HashSet<(Afi, Safi)>,
     /// The current session negotiated helper retention: the peer advertised
     /// a Graceful Restart capability (a helper-only capability lists no
@@ -118,24 +154,28 @@ impl RibManager {
     #[must_use]
     pub fn with_eor_grace(mut self, config: EorGraceConfig) -> Self {
         let now = tokio::time::Instant::now();
-        let mut peers: HashMap<PeerId, EorGracePeer> = HashMap::new();
+        let mut peers: HashMap<EorGraceTarget, EorGracePeer> = HashMap::new();
         let mut deadlines = super::graceful_restart::DeadlineMap::default();
         for entry in config.peers {
             if entry.families.is_empty() {
                 continue;
             }
-            // Address-only RIB identity cannot tell scoped duplicates apart;
-            // the earlier deadline is the conservative choice.
+            // Duplicate startup entries must not extend an existing window.
             if deadlines
                 .get(&entry.peer)
                 .is_some_and(|existing| *existing <= entry.deadline)
             {
                 continue;
             }
-            deadlines.insert(entry.peer, entry.deadline);
+            deadlines.insert(entry.peer.clone(), entry.deadline);
+            let peer = match &entry.peer {
+                EorGraceTarget::Peer(peer) => Some(*peer),
+                EorGraceTarget::Interface(_) => None,
+            };
             peers.insert(
                 entry.peer,
                 EorGracePeer {
+                    peer,
                     families: entry.families.into_iter().collect(),
                     helper_session: false,
                 },
@@ -210,11 +250,11 @@ impl RibManager {
         // deadline first, and a signal in that backlog must not claim the
         // release. The expiry turn counts it as `deadline` and names the
         // controllers that had not signalled by that window's deadline.
-        let holding: Vec<PeerId> = self
+        let holding: Vec<EorGraceTarget> = self
             .eor_grace_deadlines
             .iter()
             .filter(|&(_, &deadline)| deadline > now)
-            .map(|(&peer, _)| peer)
+            .map(|(peer, _)| peer.clone())
             .collect();
         if holding.is_empty() {
             info!(owner = %owner, "replay-complete signal: no End-of-RIB is held");
@@ -231,7 +271,7 @@ impl RibManager {
         }
         for peer in holding {
             let (helper_session, held) =
-                self.release_eor_grace_peer(peer, GrEorGraceReleaseReason::ReplayComplete);
+                self.release_eor_grace_peer(&peer, GrEorGraceReleaseReason::ReplayComplete);
             info!(
                 %peer,
                 owner = %owner,
@@ -248,16 +288,16 @@ impl RibManager {
     /// replays. Returns the session's helper flag and the held families.
     fn release_eor_grace_peer(
         &mut self,
-        peer: PeerId,
+        target: &EorGraceTarget,
         reason: GrEorGraceReleaseReason,
     ) -> (bool, String) {
-        self.eor_grace_deadlines.remove(&peer);
-        let Some(grace) = self.eor_grace.remove(&peer) else {
+        self.eor_grace_deadlines.remove(target);
+        let Some(grace) = self.eor_grace.remove(target) else {
             return (false, String::new());
         };
-        let mut held: Vec<&str> = self
-            .pending_eor
-            .get(&peer)
+        let mut held: Vec<&str> = grace
+            .peer
+            .and_then(|peer| self.pending_eor.get(&peer))
             .into_iter()
             .flatten()
             .filter(|family| grace.helper_session && grace.families.contains(family))
@@ -266,17 +306,30 @@ impl RibManager {
         held.sort_unstable();
         let held = held.join(",");
         self.metrics
-            .record_gr_eor_grace_released(&peer.label(), reason);
-        if !self.dirty_peers.contains(&peer) {
+            .record_gr_eor_grace_released(&target.label(), reason);
+        if let Some(peer) = grace.peer
+            && !self.dirty_peers.contains(&peer)
+        {
             self.flush_pending_eor(peer);
         }
         (grace.helper_session, held)
     }
 
+    fn eor_grace_target(&self, peer: PeerId) -> EorGraceTarget {
+        let addressed = EorGraceTarget::Peer(peer);
+        if self.eor_grace.contains_key(&addressed) {
+            return addressed;
+        }
+        peer.interface()
+            .map(EorGraceTarget::Interface)
+            .filter(|target| self.eor_grace.contains_key(target))
+            .unwrap_or(addressed)
+    }
+
     /// Whether the grace window holds `family`'s End-of-RIB toward `peer`.
     pub(super) fn eor_grace_held(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
         self.eor_grace
-            .get(&peer)
+            .get(&self.eor_grace_target(peer))
             .is_some_and(|grace| grace.helper_session && grace.families.contains(&family))
     }
 
@@ -287,15 +340,32 @@ impl RibManager {
         peer_gr_helper: bool,
         peer_restart_state: bool,
     ) {
-        if let Some(grace) = self.eor_grace.get_mut(&peer) {
+        let target = self.eor_grace_target(peer);
+        if let Some(grace) = self.eor_grace.get_mut(&target) {
+            grace.peer = Some(peer);
             grace.helper_session = peer_gr_helper && !peer_restart_state;
         }
     }
 
-    /// A deleted peer has no future session to hold for.
-    pub(super) fn eor_grace_peer_deleted(&mut self, peer: PeerId) {
-        self.eor_grace.remove(&peer);
-        self.eor_grace_deadlines.remove(&peer);
+    /// Binding retirement keeps the interface's startup window; final
+    /// neighbor deletion ends it.
+    pub(super) fn eor_grace_peer_deleted(&mut self, peer: PeerId, keep_series: bool) {
+        let target = self.eor_grace_target(peer);
+        if keep_series && matches!(target, EorGraceTarget::Interface(_)) {
+            if let Some(grace) = self.eor_grace.get_mut(&target) {
+                grace.peer = None;
+                grace.helper_session = false;
+            }
+            return;
+        }
+        self.eor_grace.remove(&target);
+        self.eor_grace_deadlines.remove(&target);
+    }
+
+    pub(super) fn retire_eor_grace_interface(&mut self, interface: Arc<str>) {
+        let target = EorGraceTarget::Interface(interface);
+        self.eor_grace.remove(&target);
+        self.eor_grace_deadlines.remove(&target);
     }
 
     pub(super) fn next_eor_grace_deadline(&mut self) -> Option<tokio::time::Instant> {
@@ -310,11 +380,11 @@ impl RibManager {
     /// timer-driven only: it does not know whether controller replay
     /// finished, and the log says so.
     pub(super) fn expire_eor_grace(&mut self, due: tokio::time::Instant) {
-        let expired: Vec<PeerId> = self
+        let expired: Vec<EorGraceTarget> = self
             .eor_grace_deadlines
             .iter()
             .filter(|&(_, &deadline)| deadline <= due)
-            .map(|(&peer, _)| peer)
+            .map(|(peer, _)| peer.clone())
             .collect();
         let now = tokio::time::Instant::now();
         for peer in expired {
@@ -327,7 +397,7 @@ impl RibManager {
             // while a longer window was still open, missed this one.
             let awaiting = self.eor_replay.awaiting_at(Some(deadline));
             let (helper_session, held) =
-                self.release_eor_grace_peer(peer, GrEorGraceReleaseReason::Deadline);
+                self.release_eor_grace_peer(&peer, GrEorGraceReleaseReason::Deadline);
             if awaiting.is_empty() {
                 info!(
                     %peer,
