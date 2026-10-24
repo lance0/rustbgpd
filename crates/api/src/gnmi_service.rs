@@ -495,10 +495,22 @@ impl GnmiService {
             updates.extend(sent);
         }
         updates = deduplicate_update_paths(updates);
+        let deletes = deduplicate_paths(deletes);
+        // A delete clears the leaf from the collector for every subscription
+        // path: none may suppress its return as unchanged, nor delete it again.
+        for path in &deletes {
+            let identity = CanonicalPath::from(path);
+            for cache in caches.iter_mut().flatten() {
+                cache.0.remove(&identity);
+            }
+            for delivered in delivered.iter_mut() {
+                delivered.0.remove(&identity);
+            }
+        }
 
         let mut responses = Vec::new();
         if !updates.is_empty() || !deletes.is_empty() {
-            responses.push(update_response(updates, deduplicate_paths(deletes)));
+            responses.push(update_response(updates, deletes));
         }
         if include_sync {
             responses.push(sync_response());
@@ -5049,6 +5061,57 @@ mod tests {
 
         let on_change = parse_subscription_list(&stream_on_change_list(path)).unwrap_err();
         assert_eq!(on_change.code(), tonic::Code::Unimplemented);
+    }
+
+    /// Overlapping `suppress_redundant` subscriptions on one `peer-as` leaf
+    /// (2 s and 3 s): the 2 s sample's delete evicts the leaf from the 3 s
+    /// subscription's cache too, so when the session comes back with the
+    /// same AS before the 3 s sample, that sample restores the leaf instead
+    /// of suppressing it as unchanged.
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_as_delete_evicts_every_overlapping_sample_cache() {
+        let path = neighbor_leaf_path(
+            &PeerKey::new("10.0.0.2".parse().unwrap(), None),
+            NeighborLeaf::PeerAs,
+        );
+        let peers = Arc::new(Mutex::new(vec![external_peer(Some(65009))]));
+        let snapshot = Arc::clone(&peers);
+        let service = GnmiService::with_peer_snapshot(65001, "192.0.2.1", move || {
+            let peers = snapshot.lock().unwrap().clone();
+            async move { Ok(peers) }
+        });
+        let mut list = controlled_sample_list(path.clone(), true, 2_000_000_000, 0);
+        let mut slower = list.subscription[0].clone();
+        slower.sample_interval = 3_000_000_000;
+        list.subscription.push(slower);
+        let plan = parse_subscription_list(&list).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
+        tokio::spawn(service.run_stream_sample(plan, tx));
+        tokio::task::yield_now().await;
+        let initial = subscribe_notification(rx.try_recv().unwrap().unwrap());
+        assert_eq!(initial.update.len(), 1, "both subscriptions deliver it");
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().response,
+            Some(gnmi::subscribe_response::Response::SyncResponse(true))
+        );
+        let mut advance = async |seconds| {
+            tokio::time::advance(Duration::from_secs(seconds)).await;
+            tokio::task::yield_now().await;
+            rx.try_recv()
+                .ok()
+                .map(|response| subscribe_notification(response.unwrap()))
+        };
+        // t=2: the 2 s sample finds the session down and deletes the leaf.
+        *peers.lock().unwrap() = vec![external_peer(None)];
+        let down = advance(2).await.expect("a delete at 2 s");
+        assert_eq!(down.delete.as_slice(), std::slice::from_ref(&path));
+        // The session is back with the same AS before the 3 s sample.
+        *peers.lock().unwrap() = vec![external_peer(Some(65009))];
+        // Mutation-red: an unevicted 3 s cache suppresses it as unchanged,
+        // and the collector keeps no peer-as.
+        let restored = advance(1).await.expect("the 3 s sample restores it");
+        assert_eq!(restored.update.len(), 1);
+        assert_eq!(restored.update[0].path, Some(path));
     }
 
     #[tokio::test]
