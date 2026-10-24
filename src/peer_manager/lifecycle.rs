@@ -2121,7 +2121,7 @@ impl PeerManager {
 
     /// Release a handle the RIB never learned of (a refused add). Queued
     /// behind anything a session might have sent, like a deletion's release.
-    async fn release_unused_rib_peer(&mut self, peer: PeerId) {
+    pub(super) async fn release_unused_rib_peer(&mut self, peer: PeerId) {
         if self
             .send_rib_update(
                 RibUpdate::ReleasePeer { peer },
@@ -2217,14 +2217,23 @@ impl PeerManager {
         // (A freshly-restarted BFD session begins Down with no transition, so an
         // unconditional start here would establish BGP with BFD down.)
         let withhold = self.bfd_should_withhold(&address);
+        let stopped = self.unnumbered_stopped(&peer);
         let Some((handle, managed)) = self.peers.get_mut_with_handle(&peer) else {
             return Err(PeerLifecycleError::NotFound(peer));
         };
         if !withhold {
-            handle
-                .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                .await
-                .map_err(|e| PeerLifecycleError::Internal(format!("failed to start peer: {e}")))?;
+            match handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
+                Ok(()) => {}
+                // An interface-only neighbor's stopped peer has no task to
+                // start: the session that replaces it, at a new binding or
+                // from an inbound connection, takes the enabled state.
+                Err(rustbgpd_transport::PeerCommandError::SessionExited) if stopped => {}
+                Err(e) => {
+                    return Err(PeerLifecycleError::Internal(format!(
+                        "failed to start peer: {e}"
+                    )));
+                }
+            }
         }
         // Enable is the sole recovery operation for a max-prefix shutdown.
         // Clear the manager-owned error only after the session accepted Start,
@@ -2276,15 +2285,25 @@ impl PeerManager {
                 )
                 .await;
         }
+        let stopped = self.unnumbered_stopped(&peer);
         let managed = self
             .peers
             .get(&peer)
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
-        managed
+        match managed
             .handle()
             .stop_timeout(reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
-            .map_err(|e| PeerLifecycleError::Internal(format!("failed to stop peer: {e}")))?;
+        {
+            Ok(()) => {}
+            // An interface-only neighbor's stopped peer is already stopped.
+            Err(rustbgpd_transport::PeerCommandError::SessionExited) if stopped => {}
+            Err(e) => {
+                return Err(PeerLifecycleError::Internal(format!(
+                    "failed to stop peer: {e}"
+                )));
+            }
+        }
         self.publish_peer_lifecycle_event(
             &peer,
             SessionLifecycleEventType::PeerDisabled,

@@ -581,9 +581,10 @@ the raw ICMPv6 socket used for discovery. This applies with
 `[global.unnumbered] router_advertisements = false` too: disabling rustbgpd's
 advertisements and solicitations does not disable RA reception. `--check` and
 startup report an error naming `CAP_NET_RAW` if that socket cannot be opened.
-Adding or removing an interface-only neighbor requires a restart: reload
-reports that requirement and retains the running set without probing new
-discovery privileges.
+A reload or config transaction that adds the first interface-only neighbor
+probes the same socket before any effect and is refused, naming
+`CAP_NET_RAW`, if it cannot be opened. Removing the last one closes the
+discovery sockets.
 
 Static link-local neighbors with an explicit `address` and `interface` do not
 use this discovery socket. RS/RR deployments without interface-only neighbors

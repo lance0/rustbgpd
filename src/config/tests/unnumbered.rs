@@ -232,11 +232,36 @@ fn interface_only_gtsm_is_accepted_at_one_hop() {
 }
 
 #[test]
-fn interface_only_bfd_is_rejected_until_supported() {
-    let error = rejected(&format!(
-        "\n[[bfd_profiles]]\nname = \"fast\"\n{SWP1}bfd = {{ profile = \"fast\" }}\n"
+fn interface_only_single_hop_bfd_is_accepted() {
+    let config = parse(&with(&format!(
+        "\n[[bfd_profiles]]\nname = \"fast\"\n{SWP1}bfd = {{ profile = \"fast\", strict = true }}\n"
+    )))
+    .unwrap();
+    let neighbor = config.neighbors.interface_only_on("swp1").unwrap();
+    assert!(neighbor.bfd.as_ref().is_some_and(|bfd| bfd.strict));
+}
+
+/// Mutation-red: without it an undefined profile fails only at bind time.
+#[test]
+fn interface_only_bfd_profile_must_be_defined() {
+    let error = rejected(&format!("{SWP1}bfd = {{ profile = \"missing\" }}\n"));
+    assert!(
+        error.contains("is not defined in [[bfd_profiles]]"),
+        "{error}"
+    );
+}
+
+/// Mutation-red: dropping either source of the multihop check accepts it.
+#[test]
+fn interface_only_multihop_bfd_is_rejected_from_the_neighbor_and_its_group() {
+    let own = rejected(&format!(
+        "\n[[bfd_profiles]]\nname = \"fast\"\n{SWP1}bfd = {{ profile = \"fast\", multihop = true }}\n"
     ));
-    assert!(error.contains("BFD for interface-only"), "{error}");
+    assert!(own.contains("bfd.multihop"), "{own}");
+    let inherited = rejected(&format!(
+        "\n[[bfd_profiles]]\nname = \"fast\"\n[peer_groups.fabric]\nbfd = {{ profile = \"fast\", multihop = true }}\n{SWP1}peer_group = \"fabric\"\n"
+    ));
+    assert!(inherited.contains("bfd.multihop"), "{inherited}");
 }
 
 #[test]
@@ -270,12 +295,19 @@ fn ra_interval_secs_is_bounded() {
 }
 
 #[test]
-fn interface_only_edits_are_restart_required_in_the_diff() {
+fn interface_only_edits_are_reload_applied_in_the_diff() {
     let old = parse(&with(SWP1)).unwrap();
     let new = parse(&with(&SWP1.replace("\"external\"", "65002"))).unwrap();
     let diff = diff_config(&old, &new);
     assert!(diff.interface_only_neighbors_changed);
-    assert!(diff.has_restart_required_changes());
+    // Mutation-red: counting the edit as restart-required pins it again.
+    assert!(!diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+    assert_eq!(
+        diff.sighup_route,
+        crate::config::SighupReloadRoute::Generation,
+        "an interface-only change is one owned generation"
+    );
     assert!(!diff_config(&old, &old).interface_only_neighbors_changed);
     // Static neighbor machinery never sees interface-only neighbors.
     let neighbor_diff = diff_neighbors(&old.neighbors, &new.neighbors);
@@ -472,4 +504,239 @@ fn bounded_rendering_chunks_an_interface_only_neighbors_inline_policy() {
         257
     );
     assert_eq!(bounded, oracle, "byte-identical to the unbounded render");
+}
+
+/// A config transaction carries an interface-only change as its own section
+/// in the snapshot-staging family; `[global.unnumbered]` stays
+/// restart-required.
+#[test]
+fn an_interface_only_change_is_a_committable_snapshot_transaction() {
+    let old = parse(&with(SWP1)).unwrap();
+    let new = parse(&with(&SWP1.replace("\"external\"", "65002"))).unwrap();
+    let class = classify_config_transaction_v1(&diff_config(&old, &new));
+    // Mutation-red: classifying it restart-required rejects the transaction.
+    assert_eq!(
+        class.supported_sections,
+        [TRANSACTION_INTERFACE_ONLY_SECTION]
+    );
+    assert!(class.is_committable(), "{class:?}");
+
+    let mut unnumbered = old.clone();
+    unnumbered.global.unnumbered = Some(UnnumberedConfig {
+        router_advertisements: Some(false),
+        ra_interval_secs: None,
+    });
+    let class = classify_config_transaction_v1(&diff_config(&old, &unnumbered));
+    assert!(
+        class
+            .restart_required_sections
+            .iter()
+            .any(|section| section == "[global.unnumbered]"),
+        "{class:?}"
+    );
+    assert!(!class.is_committable());
+}
+
+/// An interface-only neighbor's clamp is part of the shared `tcp_mss`
+/// comparison, so `--diff` and transactions see it as SIGHUP pins it.
+#[test]
+fn an_interface_only_tcp_mss_change_is_restart_required_in_the_diff() {
+    let old = parse(&with(SWP1)).unwrap();
+    let direct = parse(&with(&format!("{SWP1}tcp_mss = 1300\n"))).unwrap();
+    // Mutation-red: comparing addressed neighbors only misses both.
+    let diff = diff_config(&old, &direct);
+    assert!(diff.tcp_mss_changed);
+    assert!(diff.has_restart_required_changes());
+    let class = classify_config_transaction_v1(&diff);
+    assert!(!class.is_committable(), "{class:?}");
+
+    // A move between groups with different clamps.
+    let grouped = |group: &str| {
+        parse(&with(&format!(
+            "[peer_groups.a]\ntcp_mss = 1300\n[peer_groups.b]\ntcp_mss = 1400\n{SWP1}peer_group = \"{group}\"\n"
+        )))
+        .unwrap()
+    };
+    assert!(diff_config(&grouped("a"), &grouped("b")).tcp_mss_changed);
+    assert!(!diff_config(&grouped("a"), &grouped("a")).tcp_mss_changed);
+}
+
+/// The configured kernel families of `[[fib_tables]]` follow a reload
+/// without a rebind, so a FIB-only edit is not an interface-only change.
+#[test]
+fn a_fib_table_edit_is_not_an_interface_only_change() {
+    let old = parse(&with(SWP1)).unwrap();
+    let new = parse(&with(&format!(
+        "{SWP1}\n[[fib_tables]]\nname = \"edge\"\ntable_id = 1000\nmetric = 200\n"
+    )))
+    .unwrap();
+    // Mutation-red: the projection carries local_forwarding_state.
+    assert!(!diff_config(&old, &new).interface_only_neighbors_changed);
+}
+
+/// A policy-only edit of an interface-only neighbor is a live policy-chain
+/// impact on its bound peer, committed by the live-policy executor.
+#[test]
+fn an_interface_only_policy_edit_is_a_live_policy_impact() {
+    let policies = "[policy.definitions.deny-all]\ndefault_action = \"deny\"\n";
+    let old = parse(&with(&format!("{policies}{SWP1}"))).unwrap();
+    let new = parse(&with(&format!(
+        "{policies}{SWP1}import_policy_chain = [\"deny-all\"]\n"
+    )))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+    // Mutation-red: impact planning walks addressed neighbors only.
+    let impact = diff
+        .effective_neighbor_impact
+        .iter()
+        .find(|impact| impact.interface_only.as_deref() == Some("swp1"))
+        .expect("interface-only impact");
+    assert!(impact.kind.is_policy_chain());
+    let class = classify_config_transaction_v1(&diff);
+    assert!(class.is_committable(), "{class:?}");
+    assert!(
+        class
+            .supported_sections
+            .iter()
+            .any(|section| section == TRANSACTION_POLICY_LIVE_IMPACT_SECTION),
+        "{class:?}"
+    );
+}
+
+/// The interface-only section is registered before the guards that read
+/// the supported sections: an unverified external input fences it like any
+/// full-snapshot family, and it does not mix with the static neighbor
+/// executor.
+#[test]
+fn interface_only_transactions_meet_the_family_and_external_input_guards() {
+    let old = parse(&with(SWP1)).unwrap();
+    let new = parse(&with(&SWP1.replace("\"external\"", "65002"))).unwrap();
+    let mut diff = diff_config(&old, &new);
+    diff.policy.external_inputs_present = true;
+    // Mutation-red: registering the section after the guards commits it.
+    let fenced = classify_config_transaction_v1(&diff);
+    assert!(
+        fenced
+            .unsupported_sections
+            .iter()
+            .any(|section| section.contains("external inputs")),
+        "{fenced:?}"
+    );
+    assert!(!fenced.is_committable());
+
+    let mixed = parse(&with(&format!(
+        "{}\n[[neighbors]]\naddress = \"10.0.0.9\"\nremote_asn = 65009\n",
+        SWP1.replace("\"external\"", "65002")
+    )))
+    .unwrap();
+    let class = classify_config_transaction_v1(&diff_config(&old, &mixed));
+    assert!(
+        class
+            .unsupported_sections
+            .iter()
+            .any(|section| section == "mixed transaction families"),
+        "{class:?}"
+    );
+    assert!(!class.is_committable());
+}
+
+/// An interface-only clamp edit together with a `[[dynamic_neighbors]]`
+/// edit: SIGHUP pins the clamp, keeping the running neighbor, and applies
+/// the range change on the sequential route. `--diff` reports that route
+/// and keeps the clamp restart-required.
+#[test]
+fn an_interface_only_clamp_edit_with_a_range_edit_routes_as_sighup_runs_it() {
+    let range = |prefix: &str| {
+        format!("[[dynamic_neighbors]]\nprefix = \"{prefix}\"\npeer_group = \"edge\"\n")
+    };
+    let group = "[peer_groups.edge]\nhold_time = 90\n";
+    let old = parse(&with(&format!("{group}{SWP1}{}", range("10.1.0.0/24")))).unwrap();
+    let new = parse(&with(&format!(
+        "{group}{SWP1}tcp_mss = 1300\n{}",
+        range("10.2.0.0/24")
+    )))
+    .unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(diff.tcp_mss_changed, "the raw clamp difference is kept");
+    assert!(diff.has_restart_required_changes());
+    assert!(diff.dynamic_neighbors_reload_applied_changed);
+    // Mutation-red: routing from the raw interface-only change selects the
+    // generation family and rejects the pair.
+    assert!(!diff.interface_only_neighbors_changed);
+    assert!(
+        matches!(
+            diff.sighup_route,
+            crate::config::SighupReloadRoute::Sequential { .. }
+        ),
+        "{:?}",
+        diff.sighup_route
+    );
+}
+
+/// An interface-only bind-time edit rebinds the neighbor, directly or
+/// through its peer group, so the diff counts a session reset; a
+/// policy-only edit and a pinned clamp edit do not.
+#[test]
+fn an_interface_only_rebind_is_a_session_reset_in_the_diff() {
+    let group = |hold: u16| format!("[peer_groups.fabric]\nhold_time = {hold}\n");
+    let member = format!("{SWP1}peer_group = \"fabric\"\n");
+    let old = parse(&with(&format!("{}{member}", group(90)))).unwrap();
+    let resets = |extra: &str| {
+        let diff = diff_config(&old, &parse(&with(extra)).unwrap());
+        (diff.session_reset_entries(), format_config_diff(&diff))
+    };
+
+    // Mutation-red: leaving interface-only neighbors out of the count
+    // reports "no session resets expected" for each rebind.
+    let direct = resets(&format!(
+        "{}{}",
+        group(90),
+        member.replace("\"external\"", "65002")
+    ));
+    assert_eq!(direct.0, 1, "{}", direct.1);
+    assert!(direct.1.contains("1 session will reset"), "{}", direct.1);
+    let inherited = resets(&format!("{}{member}", group(30)));
+    assert_eq!(inherited.0, 1, "{}", inherited.1);
+
+    let policies = "[policy.definitions.deny-all]\ndefault_action = \"deny\"\n";
+    let policy_only = resets(&format!(
+        "{policies}{}{member}import_policy_chain = [\"deny-all\"]\n",
+        group(90)
+    ));
+    assert_eq!(policy_only.0, 0, "{}", policy_only.1);
+    let clamp_only = resets(&format!("{}{member}tcp_mss = 1300\n", group(90)));
+    assert_eq!(clamp_only.0, 0, "the pinned neighbor keeps running");
+}
+
+/// A restart-only global edit (`asn`, `router_id`) rebinds no
+/// interface-only neighbor under SIGHUP, which pins those fields; `--diff`
+/// reports it the same way, also beside a `[[dynamic_neighbors]]` edit.
+#[test]
+fn a_restart_only_global_edit_is_no_interface_only_change_in_the_diff() {
+    let range = |prefix: &str| {
+        format!("[[dynamic_neighbors]]\nprefix = \"{prefix}\"\npeer_group = \"edge\"\n")
+    };
+    let group = "[peer_groups.edge]\nhold_time = 90\n";
+    let internal = SWP1.replace("\"external\"", "\"internal\"");
+    let old = parse(&with(&format!("{group}{internal}{}", range("10.1.0.0/24")))).unwrap();
+    let edited = with(&format!("{group}{internal}{}", range("10.2.0.0/24")))
+        .replace("asn = 65001", "asn = 65009")
+        .replace("router_id = \"10.0.0.1\"", "router_id = \"10.0.0.9\"");
+    let diff = diff_config(&old, &parse(&edited).unwrap());
+    assert!(
+        diff.has_restart_required_changes(),
+        "the global edit is restart-required"
+    );
+    // Mutation-red: projecting the unpinned globals rebinds the internal
+    // neighbor and rejects the range edit.
+    assert!(!diff.interface_only_neighbors_changed);
+    assert_eq!(diff.session_reset_entries(), 0);
+    assert!(
+        matches!(
+            diff.sighup_route,
+            crate::config::SighupReloadRoute::Sequential { .. }
+        ),
+        "{:?}",
+        diff.sighup_route
+    );
 }

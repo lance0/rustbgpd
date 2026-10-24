@@ -8,9 +8,10 @@ mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
 mod unnumbered;
+pub(crate) use unnumbered::{BindTimeProjection, pin_reload_tcp_mss};
 pub use unnumbered::{
     NeighborList, RemoteAsn, UnnumberedConfig, interface_only_neighbors_changed,
-    interface_only_session_changes,
+    interface_only_rebinds, interface_only_session_changes, unnumbered_settings_changed,
 };
 mod validation;
 
@@ -1844,6 +1845,9 @@ pub(crate) const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neig
 pub(crate) const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
 pub(crate) const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
 pub(crate) const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
+/// Interface-only `[[neighbors]]`: staged with the full candidate snapshot and
+/// reconciled by the peer manager once the commit clears the stage.
+pub(crate) const TRANSACTION_INTERFACE_ONLY_SECTION: &str = "[[neighbors]] interface-only";
 const TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION: &str =
     "[policy] external inputs (rpol_files / datasets; deploy files and apply via SIGHUP reload)";
 
@@ -2592,9 +2596,16 @@ pub struct ConfigDiff {
     /// they are created, so edits remain pinned to the startup snapshot until
     /// the daemon restarts.
     pub tcp_mss_changed: bool,
-    /// Interface-only `[[neighbors]]` (ADR-0142) added, removed or edited, or
-    /// `[global.unnumbered]` changed. The running set is kept until restart.
+    /// Interface-only `[[neighbors]]` (ADR-0142) added, removed or edited,
+    /// directly or through their peer group, after the reload's `tcp_mss`
+    /// pins. Reload and transactions apply these live.
     pub interface_only_neighbors_changed: bool,
+    /// Interface-only neighbors the reload rebinds (bind-time settings
+    /// changed), by label. Each is a session reset.
+    pub interface_only_rebinds: Vec<String>,
+    /// `[global.unnumbered]` changed: the RA discovery actor takes it only
+    /// when it starts, so it stays restart-required.
+    pub unnumbered_changed: bool,
     /// BFD profile definitions changed. Profiles remain startup-owned even
     /// when no running member currently references the changed profile.
     pub bfd_changed: bool,
@@ -2785,10 +2796,32 @@ pub struct EffectiveNeighborImpact {
     /// neighbor record).
     #[serde(skip)]
     pub is_dynamic_range: bool,
+    /// The interface of an interface-only neighbor (ADR-0142) whose bound
+    /// peer this impact targets; `address` is then its label. Only policy
+    /// chain moves are reported for it: a session change rebinds the peer
+    /// through the peer manager's port reconcile instead.
+    #[serde(skip)]
+    pub interface_only: Option<String>,
 }
 
 impl EffectiveNeighborImpact {
     /// Whether this impact is for the static neighbor `neighbor`.
+    /// The impact on the `[[dynamic_neighbors]]` range `prefix`.
+    fn dynamic_range(
+        prefix: String,
+        reasons: Vec<String>,
+        kind: EffectiveNeighborImpactKind,
+    ) -> Self {
+        Self {
+            address: prefix,
+            interface: None,
+            reasons,
+            kind,
+            is_dynamic_range: true,
+            interface_only: None,
+        }
+    }
+
     pub fn names(&self, neighbor: &Neighbor) -> bool {
         !self.is_dynamic_range
             && self.address == neighbor.address
@@ -2875,6 +2908,7 @@ impl ConfigDiff {
             || self.gnmi_dialout_changed
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
             || self.evpn_runtime_change_class.is_reload_applied()
+            || self.interface_only_neighbors_changed
     }
 
     /// Changes that require a full daemon restart.
@@ -2891,7 +2925,7 @@ impl ConfigDiff {
             || self.neighbor_tcp_ao_changed
             || self.dynamic_neighbor_tcp_ao_changed
             || self.tcp_mss_changed
-            || self.interface_only_neighbors_changed
+            || self.unnumbered_changed
             || self.bfd_changed
             || self.policy_explain_changed
             || self.policy_reject_retention_changed
@@ -2929,9 +2963,10 @@ impl ConfigDiff {
     /// Distinct config entries (static neighbors or dynamic ranges) whose
     /// live session(s) the classifiers say will reset when this diff is
     /// applied: changed neighbors with at least one session-reset-class
-    /// field edit, plus inheritance-driven session-reshape impacts. Counts
-    /// config entries, not live TCP sessions (a dynamic range counts once
-    /// however many sessions it currently holds).
+    /// field edit, plus inheritance-driven session-reshape impacts, plus
+    /// rebound interface-only neighbors. Counts config entries, not live TCP
+    /// sessions (a dynamic range counts once however many sessions it
+    /// currently holds; an unbound interface-only neighbor counts too).
     pub fn session_reset_entries(&self) -> usize {
         let mut entries: std::collections::BTreeSet<(&str, Option<&str>)> = self
             .neighbors
@@ -2945,6 +2980,11 @@ impl ConfigDiff {
                 .iter()
                 .filter(|impact| !impact.kind.is_policy_chain())
                 .map(|impact| (impact.address.as_str(), impact.interface.as_deref())),
+        );
+        entries.extend(
+            self.interface_only_rebinds
+                .iter()
+                .map(|label| (label.as_str(), None)),
         );
         entries.len()
     }
@@ -3767,7 +3807,8 @@ impl SighupReloadFamilies {
             || diff.policy.export_chain_changed
             || !diff.policy.conditional_advertisements_changed.is_empty()
             || diff.policy.route_flap_dampening_changed
-            || diff.policy.rpol_changed;
+            || diff.policy.rpol_changed
+            || diff.interface_only_neighbors_changed;
         Self {
             generation,
             bfd_members: diff.bfd_members_changed,
@@ -4072,6 +4113,13 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .supported_sections
             .push(TRANSACTION_NEIGHBOR_MODIFY_SECTION.to_string());
     }
+    // Registered before the family and external-input guards below, which
+    // read the supported sections.
+    if diff.interface_only_neighbors_changed {
+        class
+            .supported_sections
+            .push(TRANSACTION_INTERFACE_ONLY_SECTION.to_string());
+    }
     if diff.dynamic_neighbors_changed && !diff.dynamic_neighbor_tcp_ao_changed {
         class
             .supported_sections
@@ -4292,10 +4340,10 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[[neighbors]] / [peer_groups.*].tcp_mss".to_string());
     }
-    if diff.interface_only_neighbors_changed {
+    if diff.unnumbered_changed {
         class
             .restart_required_sections
-            .push("[[neighbors]] interface-only / [global.unnumbered]".to_string());
+            .push("[global.unnumbered]".to_string());
     }
     if diff.bfd_members_changed {
         class
@@ -4429,7 +4477,8 @@ fn transaction_sections_are_one_family(sections: &[String]) -> bool {
             // The live-impact section co-occurs with the catalog record sections
             // it stems from (a policy/peer-group/chain edit), so it counts as
             // the same family rather than tripping the mixed-family guard.
-            | TRANSACTION_POLICY_LIVE_IMPACT_SECTION => {
+            | TRANSACTION_POLICY_LIVE_IMPACT_SECTION
+            | TRANSACTION_INTERFACE_ONLY_SECTION => {
                 has_catalog = true;
             }
             _ => {
@@ -4503,6 +4552,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "conditional_advertisements_changed": &diff.policy.conditional_advertisements_changed,
             "route_flap_dampening_changed": diff.policy.route_flap_dampening_changed,
             "rpol_changed": diff.policy.rpol_changed,
+            "interface_only_neighbors_changed": diff.interface_only_neighbors_changed,
             "datasets_changed": diff.policy.datasets_changed,
             "declared_datasets_count": diff.policy.declared_datasets_count,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
@@ -4539,7 +4589,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
             "dynamic_neighbor_tcp_ao_changed": diff.dynamic_neighbor_tcp_ao_changed,
             "tcp_mss_changed": diff.tcp_mss_changed,
-            "interface_only_neighbors_changed": diff.interface_only_neighbors_changed,
+            "unnumbered_changed": diff.unnumbered_changed,
             "bfd_changed": diff.bfd_changed,
             "policy_explain_changed": diff.policy_explain_changed,
             "policy_reject_retention_changed": diff.policy_reject_retention_changed,
@@ -4759,6 +4809,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
                 style.change_marker
             );
         }
+        if diff.interface_only_neighbors_changed {
+            let _ = writeln!(
+                out,
+                "  {} interface-only [[neighbors]] reconciled (added, removed or rebound)",
+                style.change_marker
+            );
+        }
         if diff.dynamic_neighbors_reload_applied_changed {
             let _ = writeln!(
                 out,
@@ -4859,8 +4916,8 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.tcp_mss_changed {
         restart_sections.push("[[neighbors]] / [peer_groups.*].tcp_mss");
     }
-    if diff.interface_only_neighbors_changed {
-        restart_sections.push("[[neighbors]] interface-only / [global.unnumbered]");
+    if diff.unnumbered_changed {
+        restart_sections.push("[global.unnumbered]");
     }
     if diff.bfd_changed {
         restart_sections.push("[[bfd_profiles]]");
@@ -5034,7 +5091,9 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let bfd_members_changed = bfd_member_attachments_changed(old, new);
     let mut reload_new = new.clone();
     pin_tcp_ao_startup_only_runtime(&mut reload_new, old);
-    pin_tcp_mss_startup_only_runtime(&mut reload_new, old);
+    // The same tcp_mss pins as SIGHUP, so the route and the reset summary
+    // follow execution; `tcp_mss_changed` keeps the raw difference.
+    pin_reload_tcp_mss(&mut reload_new, old);
     // Profiles stay startup-owned; member attachments remain reload-applied.
     pin_bfd_startup_only_runtime(&mut reload_new, old);
     let neighbor_diff = diff_neighbors(&old.neighbors, &reload_new.neighbors);
@@ -5112,6 +5171,12 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         }
         _ => false,
     };
+    // Interface-only reporting follows SIGHUP's daemon-global pins as well:
+    // a restart-only global edit (`asn`, `router_id`, the RFC 8212 tuple)
+    // rebinds nothing until restart.
+    let mut interface_new = reload_new.clone();
+    pin_unreconciled_daemon_runtime_fields(&mut interface_new, old);
+    pin_rfc8212_posture_startup_only(&mut interface_new, old);
     let mut diff = ConfigDiff {
         neighbors,
         effective_neighbor_impact,
@@ -5150,7 +5215,9 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,
         tcp_mss_changed,
-        interface_only_neighbors_changed: interface_only_neighbors_changed(old, new),
+        interface_only_neighbors_changed: interface_only_neighbors_changed(old, &interface_new),
+        interface_only_rebinds: interface_only_rebinds(old, &interface_new),
+        unnumbered_changed: unnumbered_settings_changed(old, new),
         bfd_changed,
         bfd_members_changed,
         policy_explain_changed: old.policy.explain != new.policy.explain,
@@ -5309,6 +5376,11 @@ fn configured_peer_group_tcp_mss(config: &Config) -> BTreeMap<String, u16> {
 }
 
 fn tcp_mss_restart_required_changed(old: &Config, new: &Config) -> bool {
+    static_tcp_mss_changed(old, new) || unnumbered::interface_only_tcp_mss_changed(old, new)
+}
+
+/// The startup-owned clamps of static neighbors and peer groups.
+fn static_tcp_mss_changed(old: &Config, new: &Config) -> bool {
     effective_static_neighbor_tcp_mss(old) != effective_static_neighbor_tcp_mss(new)
         || configured_peer_group_tcp_mss(old) != configured_peer_group_tcp_mss(new)
 }
@@ -5320,7 +5392,8 @@ fn tcp_mss_restart_required_changed(old: &Config, new: &Config) -> bool {
 /// additions, changes, and removals are pinned independently, including groups
 /// that currently have no static members.
 pub(crate) fn pin_tcp_mss_startup_only_runtime(new_config: &mut Config, current: &Config) -> bool {
-    if !tcp_mss_restart_required_changed(current, new_config) {
+    // Interface-only neighbors are pinned by `pin_interface_only_tcp_mss`.
+    if !static_tcp_mss_changed(current, new_config) {
         return false;
     }
 
@@ -5387,6 +5460,62 @@ pub(crate) fn pin_tcp_mss_startup_only_runtime(new_config: &mut Config, current:
         }
     }
     true
+}
+
+/// Keep daemon-wide, startup-owned state honest across SIGHUP.
+///
+/// These fields have no live reconciler. Advancing any of them in the runtime
+/// snapshot would make later consumers (notably a runtime-added peer resolved
+/// from that snapshot) observe an identity or subsystem configuration that the
+/// running daemon never adopted. Fields with dedicated pinning or hot-apply
+/// paths remain owned by those paths below.
+pub(crate) fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Config) {
+    new_config.global.asn = current.global.asn;
+    new_config
+        .global
+        .router_id
+        .clone_from(&current.global.router_id);
+    new_config.global.listen_port = current.global.listen_port;
+    new_config
+        .global
+        .listen_addresses
+        .clone_from(&current.global.listen_addresses);
+    new_config
+        .global
+        .cluster_id
+        .clone_from(&current.global.cluster_id);
+    new_config.global.worker_threads = current.global.worker_threads;
+    new_config.global.multipath_relax = current.global.multipath_relax;
+    new_config.global.link_bandwidth_weighted = current.global.link_bandwidth_weighted;
+    new_config.global.fast_external_failover = current.global.fast_external_failover;
+    new_config.global.warm_cache_checkpoint_on_shutdown =
+        current.global.warm_cache_checkpoint_on_shutdown;
+    new_config.global.max_as_path_length = current.global.max_as_path_length;
+    new_config
+        .global
+        .gr_eor_replay_owners
+        .clone_from(&current.global.gr_eor_replay_owners);
+    new_config
+        .global
+        .runtime_state_dir
+        .clone_from(&current.global.runtime_state_dir);
+    new_config
+        .global
+        .telemetry
+        .prometheus_addr
+        .clone_from(&current.global.telemetry.prometheus_addr);
+    new_config.global.telemetry.log_format = current.global.telemetry.log_format;
+    new_config.global.telemetry.dataplane_readiness = current.global.telemetry.dataplane_readiness;
+    new_config.flowspec = current.flowspec;
+    new_config.rpki.clone_from(&current.rpki);
+    new_config.bmp.clone_from(&current.bmp);
+    new_config.mrt.clone_from(&current.mrt);
+    // ADR-0142: the discovery actor takes its RA template and timing when it
+    // starts. Interface-only neighbors themselves apply live.
+    new_config
+        .global
+        .unnumbered
+        .clone_from(&current.global.unnumbered);
 }
 
 /// Profiles are named definitions; their declaration order has no runtime effect.
@@ -6109,14 +6238,56 @@ fn compute_effective_neighbor_impact(
                 reasons,
                 kind,
                 is_dynamic_range: false,
+                interface_only: None,
             });
         }
     }
 
     out.extend(dynamic_range_effective_impact(old, new, &pg_changed));
+    out.extend(interface_only_policy_impact(old, new));
 
     out.sort_by(|a, b| a.address.cmp(&b.address));
     out
+}
+
+/// ADR-0142: interface-only neighbors kept by the candidate whose resolved
+/// policy chains move while their bind-time session settings do not. Their
+/// bound peers take the new chains live, as a static neighbor's would.
+fn interface_only_policy_impact(old: &Config, new: &Config) -> Vec<EffectiveNeighborImpact> {
+    new.neighbors
+        .interface_only()
+        .iter()
+        .filter_map(|new_neighbor| {
+            let interface = new_neighbor.interface.as_deref()?;
+            let old_neighbor = old.neighbors.interface_only_on(interface)?;
+            let (old_chains, new_chains) = (
+                old.interface_only_policy_chains(old_neighbor)?,
+                new.interface_only_policy_chains(new_neighbor)?,
+            );
+            if old_chains == new_chains
+                || old.bind_time_settings(old_neighbor) != new.bind_time_settings(new_neighbor)
+            {
+                return None;
+            }
+            let mut reasons = Vec::new();
+            if old_chains.0 != new_chains.0 {
+                reasons.push("import policy resolved differently".to_string());
+            }
+            if old_chains.1 != new_chains.1 {
+                reasons.push("export policy resolved differently".to_string());
+            }
+            Some(EffectiveNeighborImpact {
+                address: new_neighbor.label(),
+                // Named by `interface_only`; this field scopes a static
+                // link-local neighbor.
+                interface: None,
+                reasons,
+                kind: EffectiveNeighborImpactKind::PolicyChain,
+                is_dynamic_range: false,
+                interface_only: Some(interface.to_owned()),
+            })
+        })
+        .collect()
 }
 
 /// Name direct compiled term edits in a changed resolved chain only when its
@@ -6313,13 +6484,11 @@ fn dynamic_range_effective_impact(
                 } else {
                     EffectiveNeighborImpactKind::SessionReshape
                 };
-            out.push(EffectiveNeighborImpact {
-                address: old_range.prefix.clone(),
-                interface: None,
+            out.push(EffectiveNeighborImpact::dynamic_range(
+                old_range.prefix.clone(),
                 reasons,
                 kind,
-                is_dynamic_range: true,
-            });
+            ));
         }
     }
     out
@@ -6697,8 +6866,13 @@ pub fn reject_unappliable_sequential_reload(
     // The reload pins startup-only `tcp_mss` before routing; `--diff` sees
     // the unpinned candidate, so pin a copy here to agree with it.
     let mut pinned = new.clone();
-    pin_tcp_mss_startup_only_runtime(&mut pinned, old);
+    pin_reload_tcp_mss(&mut pinned, old);
+    pin_unreconciled_daemon_runtime_fields(&mut pinned, old);
+    pin_rfc8212_posture_startup_only(&mut pinned, old);
     let mut blocked = peer_group_file_only_changes(&old.peer_groups, &pinned.peer_groups);
+    if interface_only_neighbors_changed(old, &pinned) {
+        blocked.push("interface-only [[neighbors]]".to_string());
+    }
     blocked.extend(conditional_advertisement_changes(old, &pinned));
     if old.policy.route_flap_dampening != pinned.policy.route_flap_dampening {
         blocked.push("policy.route_flap_dampening".to_string());
