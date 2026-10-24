@@ -317,19 +317,16 @@ fn neighbor_mut<'a>(
     interface: Option<&String>,
 ) -> Result<&'a mut Neighbor, ConfigError> {
     let addr = address.to_string();
-    // ADR-0142: the unspecified address with an interface names that
-    // interface's interface-only neighbor, as the neighbor RPCs select it.
-    let interface_only = address.is_unspecified() && interface.is_some();
+    // A scoped link-local selector also names the interface-only stanza;
+    // addressed records come first, so an exact static match wins.
+    let interface_only = address.is_unspecified()
+        || matches!(address, IpAddr::V6(address) if address.is_unicast_link_local());
     config
         .neighbors
         .all_mut()
         .find(|neighbor| {
             neighbor.interface.as_ref() == interface
-                && if interface_only {
-                    neighbor.address.is_empty()
-                } else {
-                    neighbor.address == addr
-                }
+                && (neighbor.address == addr || (interface_only && neighbor.address.is_empty()))
         })
         .ok_or_else(|| ConfigError::InvalidNeighborAddress {
             value: addr,

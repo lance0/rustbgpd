@@ -1233,7 +1233,8 @@ with an empty `NeighborConfig.address` and its `interface`:
 - `NeighborState.discovery_state` is `INTERFACE_MISSING`, `LINK_DOWN`,
   `AWAITING_DISCOVERY` or `BOUND`, and `UNSPECIFIED` for every other neighbor.
 - `ListNeighbors` lists a neighbor with no bound address after the addressed
-  rows, ordered by interface. It has no session or RIB counters yet.
+  rows, ordered by interface. Session and RIB gauges are absent while unbound;
+  previously accumulated per-neighbor lifetime totals are retained.
 - A selector with an empty address and an `interface` selects that interface's
   interface-only neighbor. So does `fe80::x%swp1` (or `fe80::x` with
   `interface` `swp1`) for any link-local `x`, bound or not, because the

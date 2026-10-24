@@ -12,6 +12,9 @@ use tokio::sync::watch;
 use super::*;
 use crate::ra_discovery::{Command, DiscoveryEvent, Endpoint, LinkEvent, LinkState, RaDiscovery};
 
+#[path = "unnumbered_mutation_state.rs"]
+mod mutation_state;
+
 fn ll(last: u16) -> Ipv6Addr {
     Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, last)
 }
