@@ -5161,9 +5161,10 @@ async fn run<T>(
             process::exit(1);
         }
         match ra_discovery::RaDiscovery::spawn(unnumbered_discovery_config(&config)) {
-            Ok((discovery, events)) => {
-                peer_mgr.with_unnumbered(peer_manager::Unnumbered::new(discovery, events))
-            }
+            Ok((discovery, events)) => peer_mgr.with_unnumbered(
+                peer_manager::Unnumbered::new(discovery, events)
+                    .with_listener(tcp_ao_listener_handle.clone()),
+            ),
             Err(error) => {
                 error!(%error, "interface-only neighbor discovery could not start");
                 process::exit(1);

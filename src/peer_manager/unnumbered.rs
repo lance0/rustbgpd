@@ -49,6 +49,31 @@ pub(crate) struct Unnumbered {
     reconcile_due: bool,
     /// A bound session did not answer its state query: reconcile again then.
     retry_at: Option<tokio::time::Instant>,
+    /// Installs a GTSM neighbor's learned-endpoint selector at the BGP
+    /// listener, which enforces it from accept.
+    gtsm: Option<LearnedGtsmUpdate>,
+}
+
+/// One learned-endpoint GTSM selector update at the listener (`None`
+/// removes the interface's selector).
+pub(crate) type LearnedGtsmUpdate = std::sync::Arc<
+    dyn Fn(
+            String,
+            Option<rustbgpd_transport::LearnedTtlSecuritySelector>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = LearnedGtsmOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// How the listener answered a [`LearnedGtsmUpdate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LearnedGtsmOutcome {
+    Applied,
+    /// Definitely not applied.
+    Failed(String),
+    /// Accepted, with no answer: it may have been applied.
+    Unconfirmed,
 }
 
 #[derive(Debug, Default)]
@@ -74,6 +99,9 @@ struct Port {
     /// still have shut the session down, which reports nothing. Settled by
     /// reading the session before the binding is trusted again.
     retire_unsettled: bool,
+    /// The listener holds a GTSM selector for this interface (or may: an
+    /// unanswered update counts as installed until a later one is answered).
+    gtsm_selector: bool,
     /// The endpoint of a session found exited, to rebind when discovery has
     /// no binding. Kept across retries until a replacement is installed; it
     /// is not a discovery binding and confirmed carrier loss drops it.
@@ -102,7 +130,38 @@ impl Unnumbered {
             ports: BTreeMap::new(),
             reconcile_due: false,
             retry_at: None,
+            gtsm: None,
         }
+    }
+
+    /// Enforce GTSM neighbors' `ttl_security` at `listener` from accept.
+    #[must_use]
+    pub(crate) fn with_listener(
+        self,
+        listener: Option<rustbgpd_transport::TcpAoListenerHandle>,
+    ) -> Self {
+        let Some(listener) = listener else {
+            return self;
+        };
+        self.with_gtsm_update(std::sync::Arc::new(move |interface, selector| {
+            let listener = listener.clone();
+            Box::pin(async move {
+                use rustbgpd_transport::listener::ReloadDispatch;
+                match listener.set_learned_ttl_security(interface, selector).await {
+                    ReloadDispatch::Replied(Ok(())) => LearnedGtsmOutcome::Applied,
+                    ReloadDispatch::Replied(Err(error)) | ReloadDispatch::NotAccepted(error) => {
+                        LearnedGtsmOutcome::Failed(error.to_string())
+                    }
+                    ReloadDispatch::AcknowledgementLost => LearnedGtsmOutcome::Unconfirmed,
+                }
+            })
+        }))
+    }
+
+    #[must_use]
+    pub(crate) fn with_gtsm_update(mut self, update: LearnedGtsmUpdate) -> Self {
+        self.gtsm = Some(update);
+        self
     }
 
     pub(super) async fn shutdown(self) {
@@ -724,6 +783,10 @@ impl PeerManager {
         port.established = false;
         port.retire_unsettled = false;
         port.held = Some(held);
+        // Only once the old peer is gone: until then its endpoint keeps GTSM.
+        if let Err(error) = self.set_learned_gtsm(name, None).await {
+            warn!(interface = %name, %error, "unnumbered: could not remove the retired endpoint's GTSM selector; the next binding replaces it");
+        }
         // The retired session's queued reports have been drained by
         // now; an Established among them must not outlive it.
         if let Some(unnumbered) = self.unnumbered.as_mut() {
@@ -894,6 +957,43 @@ impl PeerManager {
         self.port_mut(name).bound.clone()
     }
 
+    /// Install, replace or (`None`) remove the listener's GTSM selector for
+    /// `name`'s interface-only neighbor. A neighbor without GTSM and no
+    /// selector skips the listener entirely.
+    async fn set_learned_gtsm(
+        &mut self,
+        name: &str,
+        selector: Option<rustbgpd_transport::LearnedTtlSecuritySelector>,
+    ) -> Result<(), PeerLifecycleError> {
+        let Some(update) = self
+            .unnumbered
+            .as_ref()
+            .and_then(|unnumbered| unnumbered.gtsm.clone())
+        else {
+            return Ok(());
+        };
+        if selector.is_none() && !self.port_mut(name).gtsm_selector {
+            return Ok(());
+        }
+        let outcome = update(name.to_owned(), selector).await;
+        let port = self.port_mut(name);
+        match outcome {
+            LearnedGtsmOutcome::Applied => {
+                port.gtsm_selector = selector.is_some();
+                Ok(())
+            }
+            LearnedGtsmOutcome::Failed(error) => Err(PeerLifecycleError::Internal(format!(
+                "the listener did not update the GTSM selector: {error}"
+            ))),
+            LearnedGtsmOutcome::Unconfirmed => {
+                port.gtsm_selector = true;
+                Err(PeerLifecycleError::Internal(
+                    "the listener did not confirm the GTSM selector update".into(),
+                ))
+            }
+        }
+    }
+
     async fn bind_port(
         &mut self,
         name: &str,
@@ -916,6 +1016,18 @@ impl PeerManager {
         // they retained; after the window it carries R=0.
         let config = Self::peer_manager_config_from_resolved(resolved, true);
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
+        // GTSM is in force at the listener for this endpoint before the peer
+        // can be matched for an inbound connection, and a neighbor without it
+        // leaves no selector behind.
+        let selector =
+            config
+                .ttl_security_hops
+                .map(|hops| rustbgpd_transport::LearnedTtlSecuritySelector {
+                    address: endpoint.address,
+                    ifindex: endpoint.ifindex,
+                    hops,
+                });
+        self.set_learned_gtsm(name, selector).await?;
         // Carry the previous endpoint's state: a disable stays, and a latch
         // keeps the new peer down until its restart deadline or an enable.
         let held = self.port_mut(name).held.take();

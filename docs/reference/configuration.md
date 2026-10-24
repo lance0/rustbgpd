@@ -1443,13 +1443,22 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 - **One per interface.** Each interface has at most one interface-only
   neighbor, and none if it already has a static link-local neighbor.
 - **Rejected** on an interface-only neighbor, directly or through its peer
-  group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), BFD,
+  group: `md5_password` and `tcp_ao`, BFD, `ttl_security_hops` above 1,
   `fast_external_failover = false`, `conditional_advertisements`,
   `log_level`, and explicit `[global] listen_addresses`; and on the neighbor
   itself, `max_prefixes_out_ipv4_unicast` and `max_prefixes_out_ipv6_unicast`
-  (set them on the peer group instead). These sessions therefore have no TCP-layer
-  authentication and no GTSM yet; what protects them is the link itself and
-  OPEN validation against `remote_asn`.
+  (set them on the peer group instead). These sessions therefore have no
+  TCP-layer authentication; what protects them is the link itself, OPEN
+  validation against `remote_asn`, and optional GTSM.
+- **GTSM.** `ttl_security = true` (RFC 5082) applies to the learned
+  endpoint. When the neighbor binds an address, the BGP listener enforces
+  Hop Limit 255 on connections from that address on that interface before
+  the peer can be matched, and the selector is removed only after that
+  endpoint's peer is retired. A connection learned from an inbound SYN gets
+  the same check, and active opens send Hop Limit 255. The selector is
+  matched by address and interface, so it never applies to a neighbor on
+  another link that shares the address. Turning `ttl_security` on or off is
+  restart-required, like any other edit to an interface-only neighbor.
 - **Same address on two links.** Until the RIB keys neighbors by scope, a
   learned address that another neighbor already holds is refused with
   `duplicate_link_local_address`. Parallel links to one device that reuse a

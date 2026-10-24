@@ -117,6 +117,11 @@ struct Daemon {
 
 impl Daemon {
     fn start(ns: &str, dir: &Path, asn: u32, router_id: &str) -> Self {
+        Self::start_with(ns, dir, asn, router_id, "")
+    }
+
+    /// [`Self::start`] with `extra` TOML on the `veth` neighbor.
+    fn start_with(ns: &str, dir: &Path, asn: u32, router_id: &str, extra: &str) -> Self {
         let runtime = dir.join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -152,6 +157,7 @@ interface = "veth"
 remote_asn = "external"
 families = ["ipv6_unicast"]
 hold_time = {HOLD_TIME_SECS}
+{extra}
 "#,
                 runtime = runtime.display()
             ),
@@ -225,6 +231,19 @@ hold_time = {HOLD_TIME_SECS}
                 && rows[0]["learned_peer_address"].as_str() == Some(address)
                 && rows[0]["state"].as_str() == Some("Established")
         })
+    }
+
+    /// The `veth` neighbor's learned address and state, when listed.
+    fn veth_binding(&mut self) -> Option<(String, String)> {
+        let rows = self.veth_rows()?;
+        let row = rows.first()?;
+        Some((
+            row["learned_peer_address"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            row["state"].as_str().unwrap_or("").to_string(),
+        ))
     }
 
     /// A successful query whose `veth` neighbor is listed unbound, with no
@@ -329,3 +348,61 @@ fn interface_only_neighbors_discover_each_other_and_follow_an_address_change() {
 
 #[path = "support/host_ipv6_netns.rs"]
 mod host_ipv6_netns;
+
+/// GTSM (`ttl_security`) on interface-only neighbors: with B's link route
+/// hop limit lowered to 254, A binds B's learned address but never establishes,
+/// because the listener and A's own active open refuse segments below 255.
+/// Once B also runs GTSM, its session socket sends 255 and both establish.
+#[test]
+fn interface_only_gtsm_refuses_hop_limit_254_and_accepts_255() {
+    if !netns_enabled() {
+        return;
+    }
+    let ns = Namespaces::create();
+    // B's link route carries Hop Limit 254, so a session socket that does
+    // not set its own (no GTSM) sends 254; GTSM's explicit 255 overrides it.
+    ip(&[
+        "-n",
+        &ns.b,
+        "-6",
+        "route",
+        "replace",
+        "fe80::/64",
+        "dev",
+        "veth",
+        "hoplimit",
+        "254",
+    ]);
+    let (dir_a, dir_b) = (private_tempdir(), private_tempdir());
+    let gtsm = "ttl_security = true";
+    let mut a = Daemon::start_with(&ns.a, dir_a.path(), 65001, "192.0.2.1", gtsm);
+    let b = Daemon::start(&ns.b, dir_b.path(), 65002, "192.0.2.2");
+
+    a.wait("A bound to B's learned address", RECOVERY_BOUND, |a| {
+        a.veth_binding()
+            .is_some_and(|(learned, _)| learned == "fe80::b1")
+    });
+    // Discovery and both directions' handshakes have had several attempts
+    // (connect retry and RA interval are a few seconds here).
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline {
+        // Mutation-red: without the learned selector or the inbound
+        // IP_MINTTL, B's hop-limit-254 session reaches Established.
+        assert!(
+            !a.established_with("fe80::b1"),
+            "A established with a hop-limit-254 peer\nlog:\n{}",
+            a.log()
+        );
+        thread::sleep(Duration::from_millis(500));
+    }
+    drop(b);
+
+    let dir_b = private_tempdir();
+    let mut b = Daemon::start_with(&ns.b, dir_b.path(), 65002, "192.0.2.2", gtsm);
+    a.wait("A Established once B runs GTSM", RECOVERY_BOUND, |a| {
+        a.established_with("fe80::b1")
+    });
+    b.wait("B Established with A", RECOVERY_BOUND, |b| {
+        b.established_with("fe80::a1")
+    });
+}

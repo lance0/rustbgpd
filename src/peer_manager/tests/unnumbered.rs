@@ -48,6 +48,17 @@ struct Harness {
 /// (`remote_asn = "external"`), discovery recorded, and `links` reported by
 /// the link monitor.
 fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
+    harness_with(interfaces, links, "", None)
+}
+
+/// [`harness`] with `extra` TOML on every neighbor and `gtsm` standing in
+/// for the listener's learned-selector update.
+fn harness_with(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    extra: &str,
+    gtsm: Option<crate::peer_manager::unnumbered::LearnedGtsmUpdate>,
+) -> Harness {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -64,7 +75,7 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
         .iter()
         .map(|name| {
             format!(
-                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n"
+                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n{extra}"
             )
         })
         .collect::<Vec<_>>()
@@ -78,9 +89,12 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
     let (links_tx, links_rx) = watch::channel(snapshot(true, links));
     let (discovery, commands) = RaDiscovery::recording();
     let (_events_tx, events_rx) = mpsc::unbounded_channel();
-    let mgr = mgr
-        .with_link_failover(links_rx)
-        .with_unnumbered(Unnumbered::new(discovery, events_rx));
+    let unnumbered = Unnumbered::new(discovery, events_rx);
+    let unnumbered = match gtsm {
+        Some(update) => unnumbered.with_gtsm_update(update),
+        None => unnumbered,
+    };
+    let mgr = mgr.with_link_failover(links_rx).with_unnumbered(unnumbered);
     Harness {
         mgr,
         commands,
@@ -1543,4 +1557,119 @@ async fn a_recovered_endpoint_outlives_an_expired_discovery_binding() {
             .await,
         rustbgpd_transport::StateQueryOutcome::State(_)
     ));
+}
+
+/// The listener's learned-selector updates, in order, each with whether the
+/// RIB had already been told the previous endpoint was deleted.
+type GtsmLog = Arc<std::sync::Mutex<Vec<(String, Option<Ipv6Addr>, bool)>>>;
+
+/// A GTSM neighbor's harness whose listener answers `outcome` and logs
+/// each update; the harness's RIB receiver is shared with the log so an
+/// update can record what the RIB had seen when it arrived.
+fn gtsm_harness(
+    outcome: Arc<std::sync::Mutex<crate::peer_manager::unnumbered::LearnedGtsmOutcome>>,
+) -> (Harness, GtsmLog) {
+    let log: GtsmLog = Arc::default();
+    let rib: Arc<std::sync::Mutex<Option<mpsc::Receiver<RibUpdate>>>> = Arc::default();
+    let update: crate::peer_manager::unnumbered::LearnedGtsmUpdate = {
+        let (log, rib) = (Arc::clone(&log), Arc::clone(&rib));
+        Arc::new(move |interface, selector| {
+            let deleted = rib.lock().unwrap().as_mut().is_some_and(|rib| {
+                std::iter::from_fn(|| rib.try_recv().ok())
+                    .any(|update| matches!(update, RibUpdate::PeerDeleted { .. }))
+            });
+            log.lock().unwrap().push((
+                interface,
+                selector.map(|selector| selector.address),
+                deleted,
+            ));
+            let outcome = outcome.lock().unwrap().clone();
+            Box::pin(async move { outcome })
+        })
+    };
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "ttl_security = true\n",
+        Some(update),
+    );
+    let (_tx, placeholder) = mpsc::channel(1);
+    *rib.lock().unwrap() = Some(std::mem::replace(&mut h.rib_rx, placeholder));
+    (h, log)
+}
+
+/// ADR-0142 GTSM: the learned endpoint's selector is installed before the
+/// peer exists, so no inbound connection is matched without it, and a
+/// selector the listener did not apply leaves the neighbor unbound.
+#[tokio::test]
+async fn a_gtsm_neighbor_binds_only_once_the_listener_has_its_selector() {
+    use crate::peer_manager::unnumbered::LearnedGtsmOutcome;
+    let outcome = Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Failed(
+        "listener gone".into(),
+    )));
+    let (mut h, log) = gtsm_harness(Arc::clone(&outcome));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // Mutation-red: adding the peer first admits it without the selector.
+    assert_eq!(h.peers_at(ll(2)), [], "refused while unapplied");
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        [("swp1".into(), Some(ll(2)), false)]
+    );
+
+    *outcome.lock().unwrap() = LearnedGtsmOutcome::Applied;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    let hops = h.mgr.peers[&swp1_key(2)].transport_config.ttl_security_hops;
+    assert_eq!(
+        hops,
+        Some(std::num::NonZeroU8::MIN),
+        "active opens use TTL 255"
+    );
+}
+
+/// A rebind removes the old endpoint's selector only after that peer is
+/// deleted, then installs the new one before the new peer; a carrier loss
+/// removes it after the peer is gone.
+#[tokio::test]
+async fn a_rebind_replaces_the_gtsm_selector_after_the_old_peer_is_retired() {
+    use crate::peer_manager::unnumbered::LearnedGtsmOutcome;
+    let (mut h, log) = gtsm_harness(Arc::new(std::sync::Mutex::new(LearnedGtsmOutcome::Applied)));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)]);
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(3)), []);
+    // Mutation-red: removing before the deletion leaves the old peer
+    // matchable without its selector (`false` in the third field).
+    assert_eq!(
+        log.lock().unwrap().as_slice(),
+        [
+            ("swp1".into(), Some(ll(2)), false),
+            ("swp1".into(), None, true),
+            ("swp1".into(), Some(ll(3)), false),
+            ("swp1".into(), None, true),
+        ]
+    );
+}
+
+/// A neighbor without `ttl_security` never touches the listener.
+#[tokio::test]
+async fn a_neighbor_without_gtsm_installs_no_selector() {
+    let log: GtsmLog = Arc::default();
+    let update: crate::peer_manager::unnumbered::LearnedGtsmUpdate = {
+        let log = Arc::clone(&log);
+        Arc::new(move |interface, selector| {
+            log.lock()
+                .unwrap()
+                .push((interface, selector.map(|selector| selector.address), false));
+            Box::pin(async { crate::peer_manager::unnumbered::LearnedGtsmOutcome::Applied })
+        })
+    };
+    let mut h = harness_with(&["swp1"], &[("swp1", 7, true)], "", Some(update));
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(log.lock().unwrap().as_slice(), []);
 }

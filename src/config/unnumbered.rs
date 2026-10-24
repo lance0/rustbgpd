@@ -558,18 +558,22 @@ impl Config {
                 "a per-neighbor log_level is not supported on interface-only neighbors yet",
             ));
         }
-        // GTSM is enforced by the listener's per-peer IP_MINTTL selectors,
-        // built from configured addresses at startup and reload; a learned
-        // address is not in that inventory, so it would go unprotected.
+        // GTSM is enforced on the learned endpoint (the listener's learned
+        // selector and the inbound match); the peer is directly connected,
+        // so it is one hop away.
         if neighbor
             .ttl_security
             .or_else(|| group.and_then(|group| group.ttl_security))
             .unwrap_or(false)
+            && neighbor
+                .ttl_security_hops
+                .or_else(|| group.and_then(|group| group.ttl_security_hops))
+                .is_some_and(|hops| hops.get() > 1)
         {
             return Err(invalid(
                 neighbor,
-                "ttl_security",
-                "GTSM (ttl_security) is not supported on interface-only neighbors yet",
+                "ttl_security_hops",
+                "an interface-only neighbor is directly connected: ttl_security_hops must be 1",
             ));
         }
         if neighbor
