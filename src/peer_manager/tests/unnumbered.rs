@@ -446,6 +446,131 @@ async fn a_returning_binding_replaces_a_stopped_retained_peer() {
     ));
 }
 
+/// An inbound reconnect installs a new session for the stopped peer before
+/// the RA binding returns: the stop no longer describes the peer, so neither
+/// a reconcile nor the returning binding ends that session.
+#[tokio::test(start_paused = true)]
+async fn an_inbound_reconnect_clears_the_stop_of_a_retained_peer() {
+    let (mut h, retention, _) = retention_left_after_the_check().await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    let counters = Arc::new(FakePeerCounters::default());
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Established,
+            None,
+            Arc::clone(&counters),
+        ),
+    );
+    // Mutation-red: a mark kept across the new session deletes it here,
+    // or at the returning binding.
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [swp1_key(2)]);
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+}
+
+/// A release's conditional shutdown goes unanswered, then runs after the
+/// session established and failed with GR. The settled exit leaves no
+/// binding, so the stopped peer waits on that retention like any other.
+#[tokio::test(start_paused = true)]
+async fn a_late_release_shutdown_after_a_gr_teardown_keeps_the_retention() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let retention = h.answer_retention();
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let key = swp1_key(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let (release, released) = oneshot::channel::<()>();
+    let (exited_tx, exited) = oneshot::channel::<()>();
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let flip = Arc::clone(&retention);
+    let task = tokio::spawn(async move {
+        let mut released = Some(released);
+        while let Some(command) = rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(
+                        IpAddr::V6(ll(2)),
+                        SessionState::Active,
+                    ));
+                }
+                PeerCommand::ShutdownUnlessEstablished { reply } => {
+                    if let Some(released) = released.take() {
+                        let _ = released.await;
+                    }
+                    *flip.lock().unwrap() = PeerRetention {
+                        stale_routes: 3,
+                        next_deadline: Some(deadline),
+                    };
+                    let _ = reply.send(true);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(rx);
+        let _ = exited_tx.send(());
+        Ok(())
+    });
+    h.replace_session(&key, PeerHandle::from_parts(tx, task));
+
+    h.bind("swp1", None).await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key), "unanswered");
+    release.send(()).unwrap();
+    exited.await.unwrap();
+
+    // Mutation-red: deleting the settled exit purges the new retention.
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key), "retained");
+    assert_eq!(h.mgr.unnumbered_retry_at(), Some(deadline));
+
+    tokio::time::sleep_until(deadline).await;
+    *retention.lock().unwrap() = PeerRetention {
+        stale_routes: 0,
+        next_deadline: None,
+    };
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), []);
+}
+
+/// An inbound connection learned without an RA is mid-handshake when a
+/// reconcile runs for another port: the router is live, so it is kept.
+#[tokio::test(start_paused = true)]
+async fn an_inbound_handshake_without_an_ra_is_not_released() {
+    let mut h = harness(&["swp1", "swp2"], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.answer_retention();
+    let _client = inbound(&mut h, 2, 7).await;
+    let key = swp1_key(2);
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+    let counters = Arc::new(FakePeerCounters::default());
+    h.replace_session(
+        &key,
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::OpenConfirm,
+            None,
+            Arc::clone(&counters),
+        ),
+    );
+    h.mgr.peers.get_mut(&key).unwrap().pending_inbound = None;
+
+    // Mutation-red: treating any state short of Established as down shuts
+    // the handshake down.
+    h.bind("swp2", Some(endpoint(5, 8))).await;
+    h.mgr.unnumbered_retry_due();
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(2)), std::slice::from_ref(&key));
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+}
+
 /// Without retained routes the address is released as soon as the session
 /// is down.
 #[tokio::test(start_paused = true)]
@@ -1453,6 +1578,7 @@ fn retirement_answered_after_release(
 async fn settle_an_unanswered_retirement(reverted: bool) {
     {
         let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+        h.answer_retention();
         h.bind("swp1", Some(endpoint(2, 7))).await;
         let (release, released) = oneshot::channel();
         let (exited_tx, exited) = oneshot::channel();
