@@ -108,6 +108,9 @@ mod unnumbered {
         pub(super) fn unnumbered_owner_of(&self, _: &PeerKey) -> Option<&str> {
             None
         }
+        pub(super) fn unnumbered_binding_endpoints(&self) -> Vec<(IpAddr, String)> {
+            Vec::new()
+        }
         pub(super) fn unbound_interface_only_infos(
             &self,
         ) -> Vec<rustbgpd_api::peer_types::PeerInfo> {

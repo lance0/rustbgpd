@@ -370,18 +370,9 @@ fn diff_json_keeps_remote_asn_an_integer_and_names_the_mode() {
 
 #[test]
 fn address_keyed_per_peer_settings_are_rejected_on_interface_only_neighbors() {
-    let conditional = "\n[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
-        [policy.definitions.transit-a]\ndefault_action = \"permit\"\n\n\
-        [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
-        advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\
-        condition_policy = \"transit-a\"\n";
     // Mutation-red: each setting is otherwise accepted and never applied to
     // the learned peer.
     for (extra, expected) in [
-        (
-            format!("{conditional}{SWP1}conditional_advertisements = [\"backup\"]\n"),
-            "conditional advertisements",
-        ),
         (format!("{SWP1}log_level = \"debug\"\n"), "log_level"),
         (
             format!("{SWP1}max_prefixes_out_ipv6_unicast = 10\n"),
@@ -396,6 +387,49 @@ fn address_keyed_per_peer_settings_are_rejected_on_interface_only_neighbors() {
         "\n[peer_groups.fabric]\nmax_prefixes_out_ipv6_unicast = 10\n{SWP1}peer_group = \"fabric\"\n"
     )))
     .unwrap();
+}
+
+const CONDITIONAL: &str = "\n[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\n\
+    [policy.definitions.transit-a]\ndefault_action = \"permit\"\n\n\
+    [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
+    advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\
+    condition_policy = \"transit-a\"\n";
+
+/// Conditional advertisements, own or inherited, are accepted on an
+/// interface-only neighbor and attach at each live binding's endpoint.
+#[test]
+fn interface_only_conditional_advertisements_attach_at_the_binding() {
+    for extra in [
+        format!("{CONDITIONAL}{SWP1}conditional_advertisements = [\"backup\"]\n"),
+        format!(
+            "{CONDITIONAL}[peer_groups.fabric]\nconditional_advertisements = [\"backup\"]\n\
+             {SWP1}peer_group = \"fabric\"\n"
+        ),
+    ] {
+        let config = parse(&with(&extra)).unwrap();
+        assert!(
+            config
+                .conditional_advertisement_set()
+                .unwrap()
+                .attachments
+                .is_empty()
+        );
+        let learned: std::net::IpAddr = "fe80::2".parse().unwrap();
+        let set = config
+            .conditional_advertisement_set_with_bindings(&[(learned, "swp1".to_owned())])
+            .unwrap();
+        assert_eq!(
+            set.attachments
+                .get(&rustbgpd_rib::PeerEndpoint::new(learned, Some("swp1")))
+                .map(Vec::len),
+            Some(1)
+        );
+        assert!(
+            set.definitions
+                .iter()
+                .any(|definition| &*definition.name == "backup")
+        );
+    }
 }
 
 #[test]

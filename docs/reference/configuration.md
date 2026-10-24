@@ -1442,9 +1442,14 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   restart hold-down expires or the neighbor is enabled.
 - **One per interface.** Each interface has at most one interface-only
   neighbor, and none if it already has a static link-local neighbor.
+- **Conditional advertisements.** `conditional_advertisements`, own or
+  inherited, apply to the learned endpoint: the export gate is installed for
+  each binding before its session starts, so the first UPDATE is already
+  gated, and it is retired with the binding. A binding is not admitted until
+  the gate is installed.
 - **Rejected** on an interface-only neighbor, directly or through its peer
   group: `md5_password` and `tcp_ao`, `ttl_security` (GTSM), BFD,
-  `fast_external_failover = false`, `conditional_advertisements`,
+  `fast_external_failover = false`,
   `log_level`, and explicit `[global] listen_addresses`; and on the neighbor
   itself, `max_prefixes_out_ipv4_unicast` and `max_prefixes_out_ipv6_unicast`
   (set them on the peer group instead). These sessions therefore have no TCP-layer

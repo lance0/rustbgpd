@@ -48,6 +48,17 @@ struct Harness {
 /// (`remote_asn = "external"`), discovery recorded, and `links` reported by
 /// the link monitor.
 fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
+    harness_with(interfaces, links, "", "")
+}
+
+/// [`harness`] with `neighbor_extra` added to every interface-only stanza and
+/// `extra` appended to the configuration.
+fn harness_with(
+    interfaces: &[&str],
+    links: &[(&str, u32, bool)],
+    neighbor_extra: &str,
+    extra: &str,
+) -> Harness {
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -64,14 +75,14 @@ fn harness(interfaces: &[&str], links: &[(&str, u32, bool)]) -> Harness {
         .iter()
         .map(|name| {
             format!(
-                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n"
+                "[[neighbors]]\ninterface = \"{name}\"\nremote_asn = \"external\"\nfamilies = [\"ipv6_unicast\"]\n{neighbor_extra}"
             )
         })
         .collect::<Vec<_>>()
         .concat();
     let config: crate::config::Config = toml::from_str(&format!(
         "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
-         [global.telemetry]\nlog_format = \"json\"\n{neighbors}"
+         [global.telemetry]\nlog_format = \"json\"\n{neighbors}{extra}"
     ))
     .unwrap();
     mgr.current_config = config;
@@ -1543,4 +1554,114 @@ async fn a_recovered_endpoint_outlives_an_expired_discovery_binding() {
             .await,
         rustbgpd_transport::StateQueryOutcome::State(_)
     ));
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0137 conditional advertisements on an interface-only neighbor: the
+// export gate is keyed by endpoint, so it is installed for each binding
+// before its peer exists and retired with the binding.
+// ---------------------------------------------------------------------------
+
+const CONDITIONAL: &str = "[policy.definitions.backup-routes]\ndefault_action = \"deny\"\n\
+    [policy.definitions.transit-a]\ndefault_action = \"permit\"\n\
+    [policy.conditional_advertisements.backup]\nadvertise_policy = \"backup-routes\"\n\
+    advertise_if = \"absent\"\ncondition_prefixes = [\"0.0.0.0/0\"]\n\
+    condition_policy = \"transit-a\"\n";
+
+/// A RIB stand-in for `h`: acknowledges each conditional-advertisement
+/// install (or drops the reply while `refuse` is set) and reports the
+/// installed set, in order.
+async fn conditional_rib(
+    h: &mut Harness,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+) -> mpsc::UnboundedReceiver<rustbgpd_rib::ConditionalAdvertisementSet> {
+    let capture = super::wait_sites::conditional_capture().await;
+    let mut rib_rx = std::mem::replace(&mut h.rib_rx, mpsc::channel(1).1);
+    let (installed_tx, installed) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::InstallConditionalAdvertisements { set, reply, .. } = update {
+                if refuse.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let _ = installed_tx.send(set);
+                let _ = reply.send(capture.clone());
+            }
+        }
+    });
+    installed
+}
+
+fn attached(set: &rustbgpd_rib::ConditionalAdvertisementSet) -> Vec<IpAddr> {
+    set.attachments
+        .keys()
+        .map(|endpoint| endpoint.addr)
+        .collect()
+}
+
+/// The binding's gate is installed at its endpoint before the peer exists,
+/// survives an unrelated reconcile, moves with a rebind, and is retired when
+/// the binding ends.
+#[tokio::test]
+async fn a_bindings_conditional_advertisement_gate_follows_the_binding() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+    );
+    let mut installed = conditional_rib(&mut h, Arc::default()).await;
+
+    // Mutation-red: without the bind-time install the learned peer has no
+    // gate and advertises unconditionally.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(2))]
+    );
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)));
+
+    // Mutation-red: a reconcile computed from configuration alone drops it.
+    h.mgr.reconcile_conditional_advertisements().await;
+    assert_eq!(
+        attached(&h.mgr.conditional_advertisements),
+        [IpAddr::V6(ll(2))]
+    );
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(
+        attached(&installed.try_recv().unwrap()),
+        [IpAddr::V6(ll(3))]
+    );
+
+    // Mutation-red: without the retirement the gate outlives the binding.
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert!(
+        h.mgr.conditional_reconcile_pending,
+        "retirement asks for it"
+    );
+    h.mgr.reconcile_conditional_advertisements().await;
+    assert!(
+        attached(&h.mgr.conditional_advertisements).is_empty(),
+        "retired"
+    );
+}
+
+/// No gate, no peer: when the install is not acknowledged the binding is
+/// not admitted, so the learned peer can never advertise ungated.
+#[tokio::test(start_paused = true)]
+async fn an_unacknowledged_gate_install_admits_no_bound_peer() {
+    let mut h = harness_with(
+        &["swp1"],
+        &[("swp1", 7, true)],
+        "conditional_advertisements = [\"backup\"]\n",
+        CONDITIONAL,
+    );
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let _installed = conditional_rib(&mut h, refuse).await;
+    // Mutation-red: installing after the peer is added admits it ungated.
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert_eq!(h.peers_at(ll(2)), [], "not admitted");
+    assert!(h.mgr.unnumbered_retry_at().is_some(), "retried");
 }

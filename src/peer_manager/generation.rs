@@ -286,7 +286,7 @@ impl PeerManager {
             Ok(resolved) => resolved,
             Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),
         };
-        let conditional = match candidate.conditional_advertisement_set() {
+        let conditional = match self.conditional_set(&candidate) {
             Ok(set) => set,
             Err(error) => {
                 return ReloadGenerationOutcome::RejectedNoEffect(format!(

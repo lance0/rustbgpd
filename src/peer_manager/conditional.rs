@@ -102,13 +102,22 @@ impl PeerManager {
         Ok(())
     }
 
+    /// `config`'s install, with the attachments of every live interface-only
+    /// binding: a learned endpoint is not in configuration (ADR-0142).
+    pub(super) fn conditional_set(
+        &self,
+        config: &Config,
+    ) -> Result<ConditionalAdvertisementSet, crate::config::ConfigError> {
+        config.conditional_advertisement_set_with_bindings(&self.unnumbered_binding_endpoints())
+    }
+
     /// Install `candidate`'s set ahead of a mutation that commits it.
     pub(super) async fn install_conditional_advertisements_for(
         &mut self,
         candidate: &Config,
     ) -> Result<Option<ConditionalAdvertisementPrior>, String> {
-        let set = candidate
-            .conditional_advertisement_set()
+        let set = self
+            .conditional_set(candidate)
             .map_err(|error| format!("conditional advertisements: {error}"))?;
         self.install_conditional_advertisements(set, &[]).await
     }
@@ -121,7 +130,7 @@ impl PeerManager {
     /// one before every command.
     pub(super) async fn reconcile_conditional_advertisements(&mut self) {
         self.conditional_reconcile_pending = false;
-        let set = match self.current_config.conditional_advertisement_set() {
+        let set = match self.conditional_set(&self.current_config) {
             Ok(set) => set,
             Err(error) => {
                 warn!(%error, "conditional advertisements unresolvable; RIB install unchanged");

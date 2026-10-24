@@ -536,16 +536,6 @@ impl Config {
                  neighbors yet; set them on the peer group",
             ));
         }
-        if !self
-            .effective_conditional_advertisements(neighbor)
-            .is_empty()
-        {
-            return Err(invalid(
-                neighbor,
-                "conditional_advertisements",
-                "conditional advertisements are not supported on interface-only neighbors yet",
-            ));
-        }
         if neighbor
             .log_level
             .as_deref()

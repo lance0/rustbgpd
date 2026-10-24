@@ -439,6 +439,15 @@ impl PeerManager {
             })
     }
 
+    /// Every live binding's learned address and interface.
+    pub(super) fn unnumbered_binding_endpoints(&self) -> Vec<(IpAddr, String)> {
+        self.unnumbered
+            .iter()
+            .flat_map(|unnumbered| unnumbered.ports.iter())
+            .filter_map(|(name, port)| Some((port.bound.as_ref()?.address, name.clone())))
+            .collect()
+    }
+
     /// The interface whose interface-only neighbor owns `peer`.
     /// Whether an interface-only neighbor keeps `peer` as its RIB identity.
     pub(super) fn unnumbered_holds(&self, peer: rustbgpd_rib::PeerId) -> bool {
@@ -719,6 +728,16 @@ impl PeerManager {
             self.publish_max_prefix_latched_metric(&key, false);
             self.recompute_next_max_prefix_restart_deadline();
         }
+        // The retired endpoint's export gate goes with it; the run loop's
+        // reconcile installs the set without it (or the next binding's
+        // install does, first).
+        if self
+            .conditional_advertisements
+            .attachments
+            .contains_key(&key.rib_endpoint())
+        {
+            self.conditional_reconcile_pending = true;
+        }
         let port = self.port_mut(name);
         port.bound = None;
         port.established = false;
@@ -916,6 +935,24 @@ impl PeerManager {
         // they retained; after the window it carries R=0.
         let config = Self::peer_manager_config_from_resolved(resolved, true);
         let key = PeerKey::new(IpAddr::V6(endpoint.address), Some(name.to_owned()));
+        // The export gate of the neighbor's conditional advertisements is
+        // keyed by endpoint: install it for this one before the peer exists,
+        // so its first UPDATE is already gated (ADR-0137).
+        let gated = !self
+            .current_config
+            .effective_conditional_advertisements(&neighbor)
+            .is_empty();
+        if gated {
+            let mut bindings = self.unnumbered_binding_endpoints();
+            bindings.push((key.address, name.to_owned()));
+            let set = self
+                .current_config
+                .conditional_advertisement_set_with_bindings(&bindings)
+                .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
+            self.install_conditional_advertisements(set, &[])
+                .await
+                .map_err(PeerLifecycleError::Internal)?;
+        }
         // Carry the previous endpoint's state: a disable stays, and a latch
         // keeps the new peer down until its restart deadline or an enable.
         let held = self.port_mut(name).held.take();
@@ -957,6 +994,7 @@ impl PeerManager {
             {
                 self.rib_peers.remove(&key);
                 self.port_mut(name).held = held;
+                self.conditional_reconcile_pending |= gated;
                 return Err(PeerLifecycleError::Internal(
                     "RIB channel closed while rebinding the neighbor".into(),
                 ));
@@ -970,6 +1008,8 @@ impl PeerManager {
                 self.rib_peers.remove(&key);
             }
             self.port_mut(name).held = held;
+            // The gate installed above names an endpoint with no peer.
+            self.conditional_reconcile_pending |= gated;
             return Err(error);
         }
         info!(interface = %name, peer = %key, enabled, "unnumbered: bound peer added");

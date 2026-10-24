@@ -3256,8 +3256,8 @@ impl PeerManager {
         };
         // ADR-0137: an attached `advertise_policy`, installed or candidate,
         // is an export dependency.
-        let candidate_conditional = candidate
-            .conditional_advertisement_set()
+        let candidate_conditional = self
+            .conditional_set(candidate)
             .map_err(|error| format!("conditional advertisements: {error}"))?;
         let mut dependents = Vec::new();
         for (peer, managed) in &self.peers {
