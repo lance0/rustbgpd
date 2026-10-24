@@ -772,6 +772,7 @@ fn supports_outbound_registration(version: Option<&str>) -> bool {
 #[expect(clippy::too_many_arguments, reason = "snapshot fields")]
 fn peer_checks(
     address: &str,
+    metric_label: &str,
     state: &str,
     stale: bool,
     max_prefix_restart_remaining_millis: Option<u64>,
@@ -861,11 +862,11 @@ fn peer_checks(
     if slow_peer {
         let detail = if update_group == "slow_peer" {
             format!(
-                "peer {address} is flagged slow and already isolated from shared update groups: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{address}\"}} and troubleshoot the member's receive path"
+                "peer {address} is flagged slow and already isolated from shared update groups: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{metric_label}\"}} and troubleshoot the member's receive path"
             )
         } else {
             format!(
-                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{address}\"}} and enable slow_peer_isolation for chronic single-peer lag"
+                "peer {address} is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{{peer=\"{metric_label}\"}} and enable slow_peer_isolation for chronic single-peer lag"
             )
         };
         checks.push(Check {
@@ -1023,12 +1024,11 @@ fn outbound_resync_check(identity: &str, n: &crate::proto::NeighborState) -> Opt
             ),
         )
     } else if n.outbound_dirty_seconds.unwrap_or(0) >= OUTBOUND_RESYNC_WARN_SECS {
-        // The `peer` metric label is the neighbor's identity, scoped for a
-        // link-local neighbor.
+        let label = metric_label_of(identity, n);
         (
             CheckStatus::Warn,
             format!(
-                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{identity}\"}} and the peer's receive path"
+                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{label}\"}} and the peer's receive path"
             ),
         )
     } else {
@@ -1350,6 +1350,187 @@ fn latest_admin_state_by_peer(events: &[serde_json::Value]) -> HashMap<String, R
         map.insert(peer.to_string(), state);
     }
     map
+}
+
+/// What doctor knows about interface-only neighbor discovery (ADR-0142).
+struct UnnumberedEvidence<'a> {
+    /// `[global.unnumbered] ra_interval_secs`: the peer's Router
+    /// Advertisements are expected at least this often.
+    ra_interval_secs: u64,
+    /// `[global.unnumbered] router_advertisements`: whether this router
+    /// advertises itself so the peer can discover it.
+    router_advertisements: bool,
+    /// When the daemon started, the earliest discovery could have begun.
+    daemon_started_unix: Option<u64>,
+    metrics: Option<&'a str>,
+}
+
+impl<'a> UnnumberedEvidence<'a> {
+    fn new(
+        document: Option<&toml::Value>,
+        daemon_started_unix: Option<u64>,
+        metrics: Option<&'a str>,
+    ) -> Self {
+        let setting = |key: &str| {
+            document.and_then(|document| config_value(document, &["global", "unnumbered", key]))
+        };
+        Self {
+            ra_interval_secs: setting("ra_interval_secs")
+                .and_then(toml::Value::as_integer)
+                .and_then(|secs| u64::try_from(secs).ok())
+                .unwrap_or(10),
+            router_advertisements: setting("router_advertisements")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(true),
+            daemon_started_unix,
+            metrics,
+        }
+    }
+
+    /// One unlabelled or `peer`-labelled counter sample from the scrape.
+    fn counter(&self, series: &str) -> u64 {
+        self.metrics
+            .and_then(|metrics| {
+                metrics
+                    .lines()
+                    .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+            })
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0)
+    }
+}
+
+/// Most recent retained session event on `interface` (a scoped
+/// `addr%interface` peer): a binding coming or going restarts discovery's
+/// wait.
+fn last_event_on_interface(events: &[serde_json::Value], interface: &str) -> Option<u64> {
+    events
+        .iter()
+        .filter(|event| {
+            event
+                .get("peer_address")
+                .and_then(|v| v.as_str())
+                .and_then(|peer| peer.rsplit_once('%'))
+                .is_some_and(|(_, scope)| scope == interface)
+        })
+        .filter_map(|event| event.get("timestamp")?.as_str()?.parse::<u64>().ok())
+        .max()
+}
+
+/// `interface_only.<if>.*`: where an interface-only neighbor's discovery
+/// stands and whether a second router shares its link. A bound neighbor's
+/// session is checked like any other peer's.
+fn interface_only_checks(
+    interface: &str,
+    discovery: &str,
+    last_event_unix: Option<u64>,
+    evidence: &UnnumberedEvidence<'_>,
+    now: u64,
+) -> Vec<Check> {
+    let name = |what: &str| format!("interface_only.{interface}.{what}");
+    let mut checks = Vec::new();
+    let discovery_check = match discovery {
+        "interface_missing" => Some((
+            CheckStatus::Fail,
+            format!(
+                "interface-only neighbor on {interface}: the interface does not exist; create it or fix the neighbor's `interface`"
+            ),
+        )),
+        "link_down" => Some((
+            CheckStatus::Warn,
+            format!(
+                "interface-only neighbor on {interface}: the link is down (carrier or admin); the session starts when it comes up"
+            ),
+        )),
+        "awaiting_discovery" => {
+            let since = last_event_unix.max(evidence.daemon_started_unix);
+            let bound = 3 * evidence.ra_interval_secs;
+            match since.map(|since| now.saturating_sub(since)) {
+                Some(waited) if waited < bound => Some((
+                    CheckStatus::Ok,
+                    format!(
+                        "interface-only neighbor on {interface}: waiting for the peer's Router Advertisement ({})",
+                        output::format_duration(waited)
+                    ),
+                )),
+                waited => {
+                    let waited = waited.map_or_else(
+                        || "for an unknown duration".to_string(),
+                        |waited| format!("for {}", output::format_duration(waited)),
+                    );
+                    let own = if evidence.router_advertisements {
+                        ""
+                    } else {
+                        "; this router sends no Router Advertisements (router_advertisements = false), so the peer cannot discover it unless another router advertises on the link"
+                    };
+                    Some((
+                        CheckStatus::Warn,
+                        format!(
+                            "interface-only neighbor on {interface}: no peer address learned {waited}, more than three RA intervals ({bound}s). The peer may send no Router Advertisements: on FRR, check for `no bgp ipv6-auto-ra`, and use `neighbor {interface} interface v6only` so FRR does not prefer an IPv4 /30 or /31 session{own}"
+                        ),
+                    ))
+                }
+            }
+        }
+        _ => None,
+    };
+    if let Some((status, detail)) = discovery_check {
+        checks.push(Check {
+            name: name("discovery"),
+            status,
+            detail,
+        });
+    }
+    let conflicts = evidence.counter(&format!(
+        "bgp_unnumbered_ra_conflicts_total{{peer=\"interface:{interface}\"}}"
+    ));
+    if conflicts > 0 {
+        checks.push(Check {
+            name: name("multiple_routers"),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "interface-only neighbor on {interface}: a second router was seen on the link {conflicts} time{} since the daemon started (`multiple_routers_on_link` in the log); an interface-only link has one peer",
+                if conflicts == 1 { "" } else { "s" }
+            ),
+        });
+    }
+    checks
+}
+
+/// `unnumbered.ra_socket`: failed opens of a discovery socket since the
+/// daemon started. Each is retried, so a count shows trouble, not that it
+/// persists.
+fn ra_socket_check(evidence: &UnnumberedEvidence<'_>) -> Option<Check> {
+    let failures = evidence.counter("bgp_unnumbered_ra_socket_open_failures_total");
+    (failures > 0).then(|| Check {
+        name: "unnumbered.ra_socket".to_string(),
+        status: CheckStatus::Warn,
+        detail: format!(
+            "{failures} failed open{} of an interface's Router Advertisement socket since the daemon started (`cannot open RA socket` in the log); discovery retries with backoff, but a persistent failure leaves that interface's neighbor undiscovered",
+            if failures == 1 { "" } else { "s" }
+        ),
+    })
+}
+
+/// The neighbor's `peer` metric label: `interface:<name>` for an
+/// interface-only neighbor, whose series name its interface, else its
+/// identity (scoped for a link-local neighbor).
+fn metric_label_of(identity: &str, n: &crate::proto::NeighborState) -> String {
+    match n.config.as_ref() {
+        Some(config) if config.address.is_empty() && !config.interface.is_empty() => {
+            format!("interface:{}", config.interface)
+        }
+        _ => identity.to_string(),
+    }
+}
+
+/// [`metric_label_of`] for a support-bundle row.
+fn metric_peer_label(identity: &str, row: &JsonNeighbor) -> String {
+    if row.address.is_empty() && !row.interface.is_empty() {
+        format!("interface:{}", row.interface)
+    } else {
+        identity.to_string()
+    }
 }
 
 /// A neighbor's identity in check names: its address, scoped for a
@@ -3484,6 +3665,7 @@ async fn run_with_deadlines(
     let mut effective_toml: Option<String> = None;
     let mut effective_config: Option<toml::Value> = None;
     let mut metrics_text: Option<String> = None;
+    let mut daemon_uptime_seconds: Option<u64> = None;
     let mut metrics_error: Option<String> = None;
     let mut effective_config_error: Option<String> = None;
     let mut transaction_status: Option<Result<ConfigTransactionStatusResponse, tonic::Status>> =
@@ -3565,6 +3747,7 @@ async fn run_with_deadlines(
                     if !health.daemon_version.is_empty() {
                         daemon_version = Some(health.daemon_version.clone());
                     }
+                    daemon_uptime_seconds = Some(health.uptime_seconds);
                     let check = daemon_healthy_check(Ok(&health), health_first_miss.as_ref());
                     reporter.record(check.name, check.status, check.detail)?;
                     bundle.add_json(
@@ -3839,10 +4022,15 @@ async fn run_with_deadlines(
             .await
             {
                 Ok(resp) => (
+                    // Scoped as `rbgp events` prints them, so a link-local
+                    // neighbor's events match its scoped identity.
                     resp.into_inner()
                         .events
-                        .iter()
-                        .map(|e| bgp_event_json_value(e).map(redact_event))
+                        .into_iter()
+                        .map(|mut e| {
+                            super::watch::scope_bgp_event(&mut e);
+                            bgp_event_json_value(&e).map(redact_event)
+                        })
                         .collect::<Result<Vec<_>, _>>()?,
                     true,
                 ),
@@ -3904,11 +4092,33 @@ async fn run_with_deadlines(
                     let losses = last_loss_by_peer(&session_events);
                     let admin_states = latest_admin_state_by_peer(&session_events);
                     let mut records = Vec::with_capacity(neighbors.neighbors.len());
+                    let unnumbered = UnnumberedEvidence::new(
+                        effective_config.as_ref(),
+                        daemon_uptime_seconds.map(|uptime| now.saturating_sub(uptime)),
+                        metrics_text.as_deref(),
+                    );
+                    let mut interface_only = false;
                     for n in &neighbors.neighbors {
                         let cfg = n.config.as_ref();
+                        // An interface-only neighbor (ADR-0142) has no
+                        // address of its own: its session is its learned
+                        // endpoint, and an unbound one has none to check.
+                        let discovery = output::discovery_state_label(n);
                         let identity = cfg.map_or_else(String::new, |config| {
                             neighbor_identity(config, &n.learned_peer_address)
                         });
+                        if let (Some(discovery), Some(config)) = (discovery, cfg) {
+                            interface_only = true;
+                            for check in interface_only_checks(
+                                &config.interface,
+                                discovery,
+                                last_event_on_interface(&session_events, &config.interface),
+                                &unnumbered,
+                                now,
+                            ) {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
+                        }
                         // A down dynamic neighbor whose routes are still
                         // retained has no session or configuration to check:
                         // only its retention is diagnosed, but it stays in
@@ -3980,6 +4190,9 @@ async fn run_with_deadlines(
                                 .max_prefix_restart_remaining_millis,
                         });
                     }
+                    if interface_only && let Some(check) = ra_socket_check(&unnumbered) {
+                        reporter.record(check.name, check.status, check.detail)?;
+                    }
                     if records.is_empty() {
                         match dynamic_neighbor_snapshot.as_ref() {
                             Some(ranges) if ranges.is_empty() => reporter.record(
@@ -4023,6 +4236,7 @@ async fn run_with_deadlines(
                         };
                         for check in peer_checks(
                             &record.identity,
+                            &metric_peer_label(&record.identity, &record.support),
                             &record.support.state,
                             record.support.stale,
                             record.max_prefix_restart_remaining_millis,
@@ -5032,6 +5246,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn established_peer_is_green() {
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Established",
             false,
             None,
@@ -5059,7 +5274,8 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         };
         let diagnose = |stale, countdown, evidence| {
             peer_checks(
-                "10.0.0.2", "Connect", stale, countdown, false, "", 0, 0, evidence, 1_000_000, "",
+                "10.0.0.2", "10.0.0.2", "Connect", stale, countdown, false, "", 0, 0, evidence,
+                1_000_000, "",
             )
         };
 
@@ -5456,6 +5672,85 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         }
     }
 
+    fn unnumbered_evidence(metrics: Option<&str>) -> UnnumberedEvidence<'_> {
+        UnnumberedEvidence {
+            ra_interval_secs: 10,
+            router_advertisements: true,
+            daemon_started_unix: Some(1_000),
+            metrics,
+        }
+    }
+
+    /// ADR-0142 doctor findings: a missing interface fails, a down link
+    /// warns, discovery warns with the FRR hints only after three RA
+    /// intervals, a bound neighbor gets no discovery finding, and a second
+    /// router on the link warns.
+    #[test]
+    fn interface_only_checks_report_discovery_and_conflicts() {
+        let checks = |discovery, last_event, evidence: &UnnumberedEvidence<'_>, now| {
+            interface_only_checks("swp1", discovery, last_event, evidence, now)
+                .into_iter()
+                .map(|check| (check.name, check.status, check.detail))
+                .collect::<Vec<_>>()
+        };
+        let quiet = unnumbered_evidence(None);
+        let missing = checks("interface_missing", None, &quiet, 2_000);
+        assert_eq!(missing[0].1, CheckStatus::Fail);
+        assert_eq!(missing[0].0, "interface_only.swp1.discovery");
+        assert_eq!(
+            checks("link_down", None, &quiet, 2_000)[0].1,
+            CheckStatus::Warn
+        );
+        // Mutation-red: warning at once flags every link that just came up.
+        let early = checks("awaiting_discovery", Some(1_995), &quiet, 2_000);
+        assert_eq!(early[0].1, CheckStatus::Ok, "{early:?}");
+        let late = checks("awaiting_discovery", Some(1_900), &quiet, 2_000);
+        assert_eq!(late[0].1, CheckStatus::Warn);
+        assert!(late[0].2.contains("no bgp ipv6-auto-ra"), "{late:?}");
+        assert!(late[0].2.contains("v6only"), "{late:?}");
+        assert!(!late[0].2.contains("router_advertisements = false"));
+        let silent = UnnumberedEvidence {
+            router_advertisements: false,
+            ..unnumbered_evidence(None)
+        };
+        assert!(
+            checks("awaiting_discovery", None, &silent, 2_000)[0]
+                .2
+                .contains("router_advertisements = false")
+        );
+        assert_eq!(checks("bound", None, &quiet, 2_000), []);
+
+        let metrics = "bgp_unnumbered_ra_conflicts_total{peer=\"interface:swp1\"} 2\n\
+                       bgp_unnumbered_ra_socket_open_failures_total 3\n";
+        let conflicted = unnumbered_evidence(Some(metrics));
+        let bound = checks("bound", None, &conflicted, 2_000);
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].0, "interface_only.swp1.multiple_routers");
+        assert!(bound[0].2.contains("2 times"), "{bound:?}");
+        assert_eq!(
+            interface_only_checks("swp2", "bound", None, &conflicted, 2_000).len(),
+            0
+        );
+        let socket = ra_socket_check(&conflicted).unwrap();
+        assert_eq!(
+            (socket.name.as_str(), socket.status),
+            ("unnumbered.ra_socket", CheckStatus::Warn)
+        );
+        assert!(ra_socket_check(&quiet).is_none());
+    }
+
+    #[test]
+    fn last_event_on_interface_takes_the_latest_retained_event() {
+        let events = [
+            serde_json::json!({"peer_address": "fe80::2%swp1", "timestamp": "100"}),
+            serde_json::json!({"peer_address": "fe80::3%swp1", "timestamp": "300"}),
+            serde_json::json!({"peer_address": "fe80::2%swp2", "timestamp": "900"}),
+            serde_json::json!({"peer_address": "10.0.0.1", "timestamp": "999"}),
+        ];
+        assert_eq!(last_event_on_interface(&events, "swp1"), Some(300));
+        assert_eq!(last_event_on_interface(&events, "swp3"), None);
+    }
+
     /// ADR-0112 doctor contract, all four dispositions in one place.
     ///
     /// Load-bearing three ways: warning on the compatibility default would
@@ -5504,6 +5799,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let transitioned = now - (4 * 3600 + 12 * 60); // 4h12m ago
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Connect",
             false,
             None,
@@ -5529,6 +5825,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let now = 1_000_000;
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Connect",
             false,
             None,
@@ -5550,6 +5847,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn administratively_disabled_peer_is_green_without_hiding_other_checks() {
         let now = 1_000_000;
         let checks = peer_checks(
+            "10.0.0.2",
             "10.0.0.2",
             "Idle",
             false,
@@ -5588,6 +5886,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn enabled_peer_stuck_in_active_remains_red() {
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Active",
             false,
             None,
@@ -5612,6 +5911,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn peer_in_connect_with_no_retained_transition_warns_age_unknown() {
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Connect",
             false,
             None,
@@ -5633,6 +5933,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     #[test]
     fn lifetime_flap_count_without_recent_loss_warns() {
         let checks = peer_checks(
+            "10.0.0.2",
             "10.0.0.2",
             "Established",
             false,
@@ -5661,6 +5962,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn lifetime_flap_count_with_recent_retained_loss_is_red() {
         let now = 1_000_000;
         let checks = peer_checks(
+            "10.0.0.2",
             "10.0.0.2",
             "Established",
             false,
@@ -5810,6 +6112,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn stale_peer_is_warn() {
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Stale",
             true,
             None,
@@ -5835,6 +6138,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let expected = r#"peer 10.0.0.2 is flagged slow: outbound queue persistently backlogged; inspect bgp_peer_outbound_queue_depth{peer="10.0.0.2"} and enable slow_peer_isolation for chronic single-peer lag"#;
         let checks = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Established",
             false,
             None,
@@ -5855,6 +6159,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
         let ungrouped = peer_checks(
             "10.0.0.2",
+            "10.0.0.2",
             "Established",
             false,
             None,
@@ -5867,6 +6172,30 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             "",
         );
         assert_eq!(ungrouped[1].detail, expected);
+
+        // An interface-only neighbor's series name its interface, not its
+        // learned endpoint. Mutation-red: selecting by the check identity.
+        let fabric = peer_checks(
+            "fe80::2%swp1",
+            "interface:swp1",
+            "Established",
+            false,
+            None,
+            true,
+            "",
+            3600,
+            0,
+            retained_session_evidence(None, None),
+            1_000_000,
+            "",
+        );
+        assert!(
+            fabric[1]
+                .detail
+                .contains(r#"bgp_peer_outbound_queue_depth{peer="interface:swp1"}"#),
+            "{}",
+            fabric[1].detail
+        );
     }
 
     #[test]
@@ -6606,6 +6935,22 @@ paths = ["x"]
                 .contains("bgp_peer_outbound_queue_depth{peer=\"fe80::1%eth0\"}"),
             "{}",
             scoped.detail
+        );
+        // An interface-only neighbor's series name its interface.
+        let mut fabric = n.clone();
+        fabric.config = Some(crate::proto::NeighborConfig {
+            interface: "swp1".to_string(),
+            ..Default::default()
+        });
+        let fabric = outbound_resync_check("fe80::2%swp1", &fabric).unwrap();
+        assert!(fabric.name.contains("fe80::2%swp1"), "{}", fabric.name);
+        // Mutation-red: the identity names a series that does not exist.
+        assert!(
+            fabric
+                .detail
+                .contains("bgp_peer_outbound_queue_depth{peer=\"interface:swp1\"}"),
+            "{}",
+            fabric.detail
         );
 
         n.outbound_dirty_seconds = Some(1);

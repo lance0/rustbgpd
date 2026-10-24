@@ -1606,6 +1606,7 @@ fn install_prefix_limits(manager: &mut RibManager, txn: u64, peer: PeerId, ipv4:
         )]
         .into_iter()
         .collect(),
+        interfaces: HashMap::new(),
         groups: HashMap::new(),
     };
     let (reply, mut rx) = oneshot::channel();

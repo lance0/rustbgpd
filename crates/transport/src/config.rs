@@ -792,6 +792,9 @@ pub struct TransportConfig {
     pub local_address: Option<IpAddr>,
     /// Configured interface for IPv6 link-local / unnumbered peers.
     pub peer_interface: Option<String>,
+    /// An interface-only neighbor's learned endpoint (ADR-0142): the
+    /// `peer` metric and log label names `peer_interface`, not the address.
+    pub interface_only: bool,
     /// Canonical range selected at accept; retained across matcher changes.
     pub accepted_dynamic_range: Option<rustbgpd_rib::update::AcceptedDynamicRange>,
     /// Captured owner and pre-owned recovery target; absent for legacy embedders.
@@ -1038,6 +1041,20 @@ impl TransportConfig {
         Ok(changed)
     }
 
+    /// The neighbor's canonical `peer` metric and log label: its address,
+    /// scoped to its interface for a link-local neighbor, or
+    /// `interface:<name>` for an interface-only one, which stays the same
+    /// when its peer's address changes.
+    #[must_use]
+    pub fn peer_label(&self) -> String {
+        match (&self.peer_interface, self.interface_only) {
+            (Some(interface), true) => rustbgpd_telemetry::interface_peer_label(interface),
+            (interface, _) => {
+                rustbgpd_telemetry::scoped_peer_label(self.remote_addr.ip(), interface.as_deref())
+            }
+        }
+    }
+
     /// Default TCP connect timeout (30 seconds).
     const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1049,6 +1066,7 @@ impl TransportConfig {
             remote_addr,
             local_address: None,
             peer_interface: None,
+            interface_only: false,
             accepted_dynamic_range: None,
             dampening_admission: None,
             peer_scope_id: None,

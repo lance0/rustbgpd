@@ -86,6 +86,9 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M53b: ADR-0142 interface-only neighbor discovery and carrier recovery with
   two FRR peers and kernel-generated link-local addresses, plus a third FRR
   peer that sends no RAs and is learned from its inbound connection.
+- M53c: two neighbors that share one EUI-64 link-local address on parallel
+  links to the same FRR router, with scoped route refresh, carrier loss and
+  neighbor deletion on one link.
 - M53d: two interface-only neighbors that learn one EUI-64 link-local
   address on parallel links to the same FRR router.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.

@@ -9,7 +9,8 @@
 //! [`reason_labels`] contract are typed instead, so the canonical
 //! vocabulary is enforced at compile time. The `peer` label has one
 //! value per neighbor — the bare address built by [`peer_label`], or
-//! `addr%if` ([`scoped_peer_label`]) for an IPv6 link-local neighbor — so
+//! `addr%if` ([`scoped_peer_label`]) for an IPv6 link-local neighbor, or
+//! `interface:<name>` ([`interface_peer_label`]) for an interface-only one — so
 //! `by (peer)`
 //! aggregations and cross-family joins behave.
 
@@ -23,7 +24,7 @@ pub mod reason_labels;
 
 pub use logging::{LoggingError, init_logging, reload_per_peer_directives};
 pub use metrics::{
-    BgpMetrics, evpn_es_auto_esi_states, evpn_es_core_isolation_states, non_canonical_peer_labels,
-    peer_label, scoped_peer_label,
+    BgpMetrics, evpn_es_auto_esi_states, evpn_es_core_isolation_states, interface_peer_label,
+    non_canonical_peer_labels, peer_label, scoped_peer_label,
 };
 pub use reason_labels::{NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason};

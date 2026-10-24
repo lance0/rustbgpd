@@ -415,10 +415,6 @@ fn address_keyed_per_peer_settings_are_rejected_on_interface_only_neighbors() {
             "conditional advertisements",
         ),
         (format!("{SWP1}log_level = \"debug\"\n"), "log_level"),
-        (
-            format!("{SWP1}max_prefixes_out_ipv6_unicast = 10\n"),
-            "outbound prefix maxima",
-        ),
     ] {
         let error = rejected(&extra);
         assert!(error.contains(expected), "{expected}: {error}");
@@ -428,6 +424,37 @@ fn address_keyed_per_peer_settings_are_rejected_on_interface_only_neighbors() {
         "\n[peer_groups.fabric]\nmax_prefixes_out_ipv6_unicast = 10\n{SWP1}peer_group = \"fabric\"\n"
     )))
     .unwrap();
+}
+
+/// An interface-only neighbor's own outbound maxima are keyed by its
+/// interface, so every endpoint it learns there takes them; raising one is a
+/// loosening a transaction's automatic undo may not reverse.
+#[test]
+fn interface_only_outbound_maxima_are_keyed_by_interface() {
+    let config = parse(&with(&format!(
+        "{SWP1}max_prefixes_out_ipv6_unicast = 10\n"
+    )))
+    .unwrap();
+    let limits = config.outbound_prefix_limits();
+    // Mutation-red: an address-keyed table has no row for the neighbor.
+    assert_eq!(
+        limits.interfaces["swp1"]
+            .ipv6
+            .map(std::num::NonZeroU32::get),
+        Some(10)
+    );
+    assert!(limits.neighbors.is_empty());
+    let raised = parse(&with(&format!(
+        "{SWP1}max_prefixes_out_ipv6_unicast = 20\n"
+    )))
+    .unwrap();
+    // Mutation-red: comparing addressed neighbors only misses the raise.
+    assert!(crate::config::outbound_prefix_limits_loosen(
+        &config, &raised
+    ));
+    assert!(!crate::config::outbound_prefix_limits_loosen(
+        &raised, &config
+    ));
 }
 
 #[test]

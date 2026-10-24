@@ -1762,10 +1762,11 @@ identifies the peer the same way, never by the transport endpoint's
   for example `fe80::1%eth0`. The scope is always present, even when no other
   neighbor uses that address, so adding a second neighbor never renames the
   first one's series.
-- A future interface-only neighbor (configured by interface, with no address)
-  will use `peer="interface:<name>"`, for example `peer="interface:swp1"`.
-  That value stays the same when the learned link-local address changes; the
-  learned address will be exported as separate metadata, not in `peer`.
+- An interface-only neighbor (configured by interface, with no address) uses
+  `peer="interface:<name>"`, for example `peer="interface:swp1"`, in every
+  family. That value stays the same when the learned link-local address
+  changes; the learned address is exported as separate metadata
+  (`bgp_unnumbered_peer_address_info`), not in `peer`.
 
 The current administrative and session-state gauges also carry the configured
 `interface` label (empty for unscoped peers), so exact
@@ -1851,6 +1852,28 @@ sum by (instance, peer, interface, reason) (
 ```
 
 ### Routing
+
+An interface-only neighbor's series belong to the neighbor, not to one learned
+address. A change of address, carrier loss or interface removal ends the
+session but keeps the `peer="interface:<name>"` series, so counters carry
+across endpoints; only removing the neighbor's stanza removes them.
+
+### Interface-only neighbor metrics
+
+Interface-only neighbors
+([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)) add these
+families:
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `bgp_unnumbered_peer_address_info` | gauge | `peer`, `interface`, `address` | Always 1; one series while an address is bound, naming it. Absent while the neighbor is unbound |
+| `bgp_unnumbered_address_changes_total` | counter | `peer` | Times the neighbor was bound to a different peer address than the one it last used |
+| `bgp_unnumbered_ra_conflicts_total` | counter | `peer` | A second router seen on the link while another address holds the binding, from a Router Advertisement or an inbound connection (`multiple_routers_on_link` in the log) |
+| `bgp_unnumbered_ra_dropped_total` | counter | `reason` | Router Solicitations and Advertisements discarded by discovery: `hop_limit`, `source_not_link_local`, `non_zero_code`, `too_short`, `malformed_option`, `unspecified_source_with_link_layer_address`, `unexpected_type`, `own_address`, `candidate_limit`, `stale_link`, `address_inventory_unavailable` |
+| `bgp_unnumbered_ra_socket_open_failures_total` | counter | — | Failed opens of an interface's raw ICMPv6 discovery socket; each is retried with backoff up to 60 s |
+
+Join the learned address onto any per-peer family with
+`* on (peer) group_left(address) bgp_unnumbered_peer_address_info`.
 
 Dynamic-neighbor admission capacity is process-global and deliberately
 label-free. The three slot gauges are materialized when `PeerManager` starts:
@@ -2885,6 +2908,12 @@ rustbgpd uses structured logging: JSON under `log_format = "json"` (the
 | `IPv6 unicast negotiated but withheld from export for this session: no usable local IPv6 next hop; set local_ipv6_nexthop to export it` | WARN | Once per session, at establishment, for an eBGP session (not a route-server client) with no IPv6 next hop to advertise. Fields `peer`, `family`, `reason`; counted in `bgp_export_family_suppressed_total`. Set `local_ipv6_nexthop` and reload; no session reset is needed |
 | `local_ipv6_nexthop now provides an IPv6 next hop: exporting IPv6 unicast` | INFO | A reload supplied a next hop to a session that withheld IPv6 unicast. The session keeps running and receives its full IPv6 unicast table and End-of-RIB |
 | `gRPC TCP listener bound to a non-loopback address` | WARN | Security posture warning |
+| `unnumbered: peer address learned` | INFO | Discovery saw a new Router Advertisement source on an interface-only neighbor's link (`interface`, `address`) |
+| `unnumbered: peer address learned from an inbound connection` | INFO | An interface-only neighbor bound the source of a connection that arrived on its interface |
+| `unnumbered: peer address changed` | INFO | An interface-only neighbor was bound to a new address (`previous`, `address`); counted in `bgp_unnumbered_address_changes_total` |
+| `unnumbered: ending the bound session` | INFO | An interface-only neighbor's endpoint is retired; `reason` is `peer_address_changed`, `link_down`, `interface_removed`, `session_exited`, `binding_expired` (no binding left and nothing retained) or `neighbor_reconfigured` (a bind-time setting changed). The `PeerRemoved` and `PeerAdded` session events carry the same reason |
+| `unnumbered: a second router advertises on an interface-only link` | WARN | `reason = "multiple_routers_on_link"`: another router advertises on a link that has one peer. The inbound-connection variants log the same reason. Counted in `bgp_unnumbered_ra_conflicts_total` |
+| `cannot open RA socket` | WARN | The interface's discovery socket could not be opened; retried with backoff and counted in `bgp_unnumbered_ra_socket_open_failures_total` |
 
 Later socket or task retries in the same failed-connect episode stay at DEBUG
 to avoid one default-visible record per ConnectRetry interval. Every retry still
@@ -3003,6 +3032,26 @@ installed there and no route crosses it. It is yellow against a daemon that
 does not expose the status, because "no evidence" is not "no problem". A red
 verdict here never affects `/readyz`: missing operator policy is a
 configuration state to repair, not a daemon that cannot serve traffic.
+
+Interface-only neighbors
+([ADR-0142](../adr/0142-interface-only-unnumbered-neighbors.md)) are checked
+by interface:
+
+- `interface_only.<if>.discovery` is red when the interface does not exist
+  and yellow while its link is down. While the link is up with no peer
+  address learned, it is green for three RA intervals (`ra_interval_secs`),
+  counted from the daemon's start or the neighbor's last retained session
+  event, and then yellow with hints: the peer may send no Router
+  Advertisements (FRR `no bgp ipv6-auto-ra`), FRR without `v6only` may
+  prefer an IPv4 /30 or /31 session, and with `router_advertisements = false`
+  the peer cannot discover this router unless another router advertises on
+  the link. A bound neighbor's session is checked as
+  `peer.<learned>%<if>.*`, like any other peer.
+- `interface_only.<if>.multiple_routers` is yellow when
+  `bgp_unnumbered_ra_conflicts_total` shows a second router on the link since
+  the daemon started.
+- `unnumbered.ra_socket` is yellow when a discovery socket failed to open
+  since the daemon started (`bgp_unnumbered_ra_socket_open_failures_total`).
 
 `rpki.invalid_route_policy` and `aspa.invalid_route_policy` are advisory compiled-policy
 disposition proofs. Green requires a complete, nonempty response whose aggregate and every

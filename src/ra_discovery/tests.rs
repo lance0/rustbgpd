@@ -870,7 +870,11 @@ mod netns {
                         send: true,
                         timing: RaTiming::new(4).unwrap(),
                     };
-                    tx.send(RaDiscovery::spawn(config)).unwrap();
+                    tx.send(RaDiscovery::spawn(
+                        config,
+                        rustbgpd_telemetry::BgpMetrics::new(),
+                    ))
+                    .unwrap();
                     let _ = stop_rx.await;
                 });
             });

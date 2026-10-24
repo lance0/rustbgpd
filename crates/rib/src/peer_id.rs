@@ -142,6 +142,9 @@ struct Slot {
     generation: NonZeroU32,
     state: SlotState,
     endpoint: PeerEndpoint,
+    /// An interface-only neighbor (ADR-0142): its `peer` label names the
+    /// interface, which outlives every learned endpoint.
+    interface_only: bool,
 }
 
 /// The slot allocator and endpoint store behind every allocated [`PeerId`].
@@ -163,7 +166,12 @@ impl Slots {
         slot_of(&self.entries, peer)
     }
 
-    fn allocate(&mut self, endpoint: PeerEndpoint, state: SlotState) -> PeerId {
+    fn allocate(
+        &mut self,
+        endpoint: PeerEndpoint,
+        state: SlotState,
+        interface_only: bool,
+    ) -> PeerId {
         let reused = if self.free.len() > REUSE_QUARANTINE {
             self.free.pop_front()
         } else {
@@ -178,6 +186,7 @@ impl Slots {
                 .expect("a free slot is below the last generation");
             slot.state = state;
             slot.endpoint = endpoint;
+            slot.interface_only = interface_only;
             return PeerId {
                 index,
                 generation: slot.generation,
@@ -194,6 +203,7 @@ impl Slots {
             generation: NonZeroU32::MIN,
             state,
             endpoint,
+            interface_only,
         });
         PeerId {
             index,
@@ -234,7 +244,11 @@ impl Slots {
                 generation: self.entries[index as usize].generation,
             };
         }
-        let peer = self.allocate(PeerEndpoint::new(IpAddr::V6(addr), None), SlotState::Pinned);
+        let peer = self.allocate(
+            PeerEndpoint::new(IpAddr::V6(addr), None),
+            SlotState::Pinned,
+            false,
+        );
         self.pinned.insert(addr, peer.index);
         peer
     }
@@ -352,7 +366,15 @@ impl PeerId {
     /// validates) and keeps the handle across reconfigures.
     #[must_use]
     pub fn allocate(endpoint: PeerEndpoint) -> Self {
-        write(|slots| slots.allocate(endpoint, SlotState::Live))
+        write(|slots| slots.allocate(endpoint, SlotState::Live, false))
+    }
+
+    /// [`Self::allocate`] for an interface-only neighbor (ADR-0142), whose
+    /// [`Self::label`] is `interface:<name>` at every endpoint it is moved
+    /// to, so its metric series survive a change of learned address.
+    #[must_use]
+    pub fn allocate_interface_only(endpoint: PeerEndpoint) -> Self {
+        write(|slots| slots.allocate(endpoint, SlotState::Live, true))
     }
 
     /// Return a deleted neighbor's handle to the free list. Afterwards
@@ -451,14 +473,28 @@ impl PeerId {
     /// The neighbor's `peer` metric label: its address, scoped to its
     /// interface for a link-local neighbor (`fe80::1%eth0`), the value the
     /// peer manager and the neighbor's session emit, so two neighbors on one
-    /// link-local address never share a series. A handle whose slot was
-    /// reused labels as its [`Display`](fmt::Display) form.
+    /// link-local address never share a series. An interface-only neighbor
+    /// ([`Self::allocate_interface_only`]) is `interface:<name>` at every
+    /// endpoint. A handle whose slot was reused labels as `peer#<index>.<generation>`.
     #[must_use]
     pub fn label(self) -> String {
-        self.with_endpoint(|endpoint| match endpoint {
-            Some(endpoint) => {
-                rustbgpd_telemetry::scoped_peer_label(endpoint.addr, endpoint.interface.as_deref())
-            }
+        if let Some(addr) = self.pinned_v4() {
+            return rustbgpd_telemetry::peer_label(IpAddr::V4(addr));
+        }
+        read(|table| match slot_of(&table.entries, self) {
+            Some(Slot {
+                endpoint:
+                    PeerEndpoint {
+                        interface: Some(interface),
+                        ..
+                    },
+                interface_only: true,
+                ..
+            }) => rustbgpd_telemetry::interface_peer_label(interface),
+            Some(slot) => rustbgpd_telemetry::scoped_peer_label(
+                slot.endpoint.addr,
+                slot.endpoint.interface.as_deref(),
+            ),
             None => format!("peer#{}.{}", self.index, self.generation),
         })
     }
@@ -681,6 +717,21 @@ mod tests {
         assert!(peer.release());
     }
 
+    /// An interface-only neighbor labels by its interface at every
+    /// endpoint; an ordinary scoped neighbor labels by its endpoint.
+    #[test]
+    fn an_interface_only_handle_labels_by_interface_across_rebinds() {
+        let fabric = PeerId::allocate_interface_only(endpoint("fe80::1", Some("swp1")));
+        let scoped = PeerId::allocate(endpoint("fe80::1", Some("swp2")));
+        assert_eq!(fabric.label(), "interface:swp1");
+        assert!(fabric.rebind(endpoint("fe80::9", Some("swp1"))));
+        // Mutation-red: labelling from the endpoint moves the series.
+        assert_eq!(fabric.label(), "interface:swp1");
+        assert_eq!(scoped.label(), "fe80::1%swp2");
+        assert!(fabric.release());
+        assert!(scoped.release());
+    }
+
     #[test]
     fn handle_is_eight_bytes_and_option_is_free() {
         assert_eq!(size_of::<PeerId>(), 8);
@@ -692,7 +743,7 @@ mod tests {
     #[test]
     fn a_slot_at_the_last_generation_is_retired() {
         let mut slots = Slots::default();
-        let first = slots.allocate(endpoint("192.0.2.1", None), SlotState::Live);
+        let first = slots.allocate(endpoint("192.0.2.1", None), SlotState::Live, false);
         slots.entries[first.index as usize].generation = LAST_GENERATION;
         let last = PeerId {
             index: first.index,
@@ -704,7 +755,7 @@ mod tests {
             slots.free.is_empty(),
             "a retired slot never enters the free list"
         );
-        let next = slots.allocate(endpoint("192.0.2.2", None), SlotState::Live);
+        let next = slots.allocate(endpoint("192.0.2.2", None), SlotState::Live, false);
         assert_ne!(next.index, last.index);
         assert_eq!(next.generation, NonZeroU32::MIN);
         // The retired handle still resolves its last endpoint for history.
@@ -733,20 +784,20 @@ mod tests {
     #[test]
     fn released_slots_are_reused_oldest_first_with_a_new_generation() {
         let mut slots = Slots::default();
-        let a = slots.allocate(endpoint("192.0.2.1", None), SlotState::Live);
-        let b = slots.allocate(endpoint("192.0.2.2", None), SlotState::Live);
+        let a = slots.allocate(endpoint("192.0.2.1", None), SlotState::Live, false);
+        let b = slots.allocate(endpoint("192.0.2.2", None), SlotState::Live, false);
         assert!(slots.release(b));
         assert!(slots.release(a));
         // Released handles keep resolving while the quarantine fills.
         for _ in 0..REUSE_QUARANTINE - 1 {
-            let other = slots.allocate(endpoint("198.18.0.1", None), SlotState::Live);
+            let other = slots.allocate(endpoint("198.18.0.1", None), SlotState::Live, false);
             assert_ne!(other.index, b.index);
             assert_ne!(other.index, a.index);
             assert!(slots.release(other));
         }
         assert_eq!(slots.slot(b).unwrap().endpoint, endpoint("192.0.2.2", None));
         assert!(slots.slot(a).is_some());
-        let c = slots.allocate(endpoint("192.0.2.3", None), SlotState::Live);
+        let c = slots.allocate(endpoint("192.0.2.3", None), SlotState::Live, false);
         assert_eq!(
             c.index, b.index,
             "FIFO: the first slot released is reused first"

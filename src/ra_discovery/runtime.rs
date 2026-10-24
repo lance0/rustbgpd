@@ -107,11 +107,23 @@ struct Counters {
     drops: [AtomicU64; DropReason::ALL.len()],
     socket_open_failures: AtomicU64,
     send_failures: [AtomicU64; SendFailure::ALL.len()],
+    /// Exports the drop and socket-open counts; absent in unit tests.
+    metrics: Option<rustbgpd_telemetry::BgpMetrics>,
 }
 
 impl Counters {
     fn bump(&self, reason: DropReason) {
         self.drops[reason as usize].fetch_add(1, Ordering::Relaxed);
+        if let Some(metrics) = &self.metrics {
+            metrics.record_unnumbered_ra_drop(reason.as_str());
+        }
+    }
+
+    fn socket_open_failed(&self) {
+        self.socket_open_failures.fetch_add(1, Ordering::Relaxed);
+        if let Some(metrics) = &self.metrics {
+            metrics.record_unnumbered_ra_socket_open_failure();
+        }
     }
 }
 
@@ -125,6 +137,7 @@ impl RaDiscovery {
     /// Tokio runtime. A missing `CAP_NET_RAW` is a typed error.
     pub fn spawn(
         config: DiscoveryConfig,
+        metrics: rustbgpd_telemetry::BgpMetrics,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DiscoveryEvent>), DiscoveryError> {
         drop(raw_socket()?);
         let seed = std::time::SystemTime::now()
@@ -132,7 +145,12 @@ impl RaDiscovery {
             .map_or(0, |d| d.as_secs() ^ u64::from(d.subsec_nanos()))
             ^ u64::from(std::process::id());
         let (commands, command_rx) = mpsc::unbounded_channel();
-        let (actor, event_rx, received_rx) = Actor::new(config, seed, Box::new(interface_socket));
+        let (mut actor, event_rx, received_rx) =
+            Actor::new(config, seed, Box::new(interface_socket));
+        actor.counters = Arc::new(Counters {
+            metrics: Some(metrics),
+            ..Counters::default()
+        });
         let counters = Arc::clone(&actor.counters);
         let task = tokio::spawn(actor.run(command_rx, received_rx));
         Ok((
@@ -631,9 +649,7 @@ impl Actor {
                 Err(error) => {
                     let failures = failures + 1;
                     let retry_in = open_backoff(failures);
-                    self.counters
-                        .socket_open_failures
-                        .fetch_add(1, Ordering::Relaxed);
+                    self.counters.socket_open_failed();
                     warn!(interface = %name, ifindex, %error, ?retry_in, "cannot open RA socket");
                     self.open_retries.insert(
                         name,

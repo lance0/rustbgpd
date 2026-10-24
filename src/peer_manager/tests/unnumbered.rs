@@ -2007,7 +2007,7 @@ type Launched = Arc<std::sync::Mutex<Vec<mpsc::UnboundedReceiver<Command>>>>;
 fn recording_launcher(mgr: &mut PeerManager) -> Launched {
     let launched: Launched = Arc::default();
     let sink = Arc::clone(&launched);
-    mgr.unnumbered_runtime.spawn = Box::new(move |_| {
+    mgr.unnumbered_runtime.spawn = Box::new(move |_, _| {
         let (discovery, commands) = RaDiscovery::recording();
         sink.lock().unwrap().push(commands);
         Ok((discovery, mpsc::unbounded_channel().1))
@@ -2483,7 +2483,7 @@ async fn a_discovery_actor_that_fails_to_start_is_retried() {
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let sink = Arc::clone(&launched);
     let counter = Arc::clone(&attempts);
-    h.mgr.unnumbered_runtime.spawn = Box::new(move |_| {
+    h.mgr.unnumbered_runtime.spawn = Box::new(move |_, _| {
         if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             return Err("transient".to_string());
         }
@@ -2586,6 +2586,100 @@ async fn listed_rows_report_discovery_state_learned_address_and_mode() {
         swp2.interface_only.as_ref().unwrap().discovery,
         NeighborDiscoveryState::AwaitingDiscovery
     );
+}
+
+/// Unbound interface-only rows are projected from configured settings: a
+/// listing compiles no policy chain, and each row's RFC 8212 status is the
+/// one the neighbor's compiled chains give.
+#[tokio::test]
+async fn unbound_rows_compile_no_policy_and_keep_the_compiled_rfc8212_status() {
+    use rustbgpd_api::peer_types::Rfc8212PolicyStatus as Status;
+    let mut h = harness(&["swp1", "swp2", "swp3"], &[("swp1", 7, true)]);
+    h.mgr.current_config = toml::from_str(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.permit-all]
+default_action = "permit"
+
+[peer_groups.edge]
+export_policy_chain = ["permit-all"]
+
+[[neighbors]]
+interface = "swp1"
+remote_asn = "external"
+import_policy_chain = ["permit-all"]
+export_policy_chain = ["permit-all"]
+
+[[neighbors]]
+interface = "swp2"
+remote_asn = "external"
+peer_group = "edge"
+
+[[neighbors]]
+interface = "swp3"
+remote_asn = "internal"
+"#,
+    )
+    .unwrap();
+
+    let before = crate::config::POLICY_RESOLUTIONS.with(std::cell::Cell::get);
+    let rows = h.mgr.list_peers().await;
+    // Mutation-red: resolving each unbound row's chains counts here.
+    assert_eq!(
+        crate::config::POLICY_RESOLUTIONS.with(std::cell::Cell::get),
+        before,
+        "no policy compiled for unbound rows"
+    );
+    assert_eq!(rows.len(), 3);
+    let enforced_by = h.mgr.current_config.rfc8212_posture().policy_effective;
+    for (interface, expected) in [
+        ("swp1", (Status::Present, Status::Present)),
+        ("swp2", (Status::Missing, Status::Present)),
+        ("swp3", (Status::NotRequired, Status::NotRequired)),
+    ] {
+        let row = rows
+            .iter()
+            .find(|info| info.interface.as_deref() == Some(interface))
+            .unwrap();
+        let reported = (row.rfc8212_import_policy, row.rfc8212_export_policy);
+        assert_eq!(reported, expected, "{interface}");
+        let neighbor = h
+            .mgr
+            .current_config
+            .neighbors
+            .interface_only_on(interface)
+            .unwrap();
+        let compiled = h
+            .mgr
+            .current_config
+            .resolve_bound_interface_neighbor(neighbor, ll(1), 0)
+            .unwrap();
+        let enforced = enforced_by && compiled.rfc8212_external;
+        assert_eq!(
+            reported,
+            (
+                super::snapshot::rfc8212_status(
+                    enforced,
+                    compiled.import_policy.as_ref(),
+                    crate::config::RFC8212_MISSING_IMPORT_POLICY,
+                ),
+                super::snapshot::rfc8212_status(
+                    enforced,
+                    compiled.export_policy.as_ref(),
+                    crate::config::RFC8212_MISSING_EXPORT_POLICY,
+                ),
+            ),
+            "{interface}: as the compiled chains report"
+        );
+    }
 }
 
 /// A bound session that answers its state query with `reported`, and then,
@@ -3043,6 +3137,7 @@ fn session_params(peer: IpAddr, scope: Option<u32>) -> crate::bfd_runtime::BfdSe
         revision: 1,
         peer,
         peer_label: peer.to_string(),
+        peer_interface: String::new(),
         scope_id: scope,
         destination: crate::bfd_runtime::bfd_destination(peer, scope, false).unwrap(),
         desired_min_tx_us: 300_000,
@@ -3478,10 +3573,11 @@ async fn an_unanswered_bindings_bfd_gauge_stays_at_zero() {
     // drops the series the actor just seeded.
     h.bind("swp1", Some(endpoint(2, 7))).await;
     bfd.next_applied();
-    let label = format!("{}%swp1", ll(2));
-    assert_eq!(bfd_session_up(&h, &label), Some(0.0));
+    // The neighbor's series name its interface (ADR-0142 metrics).
+    let label = "interface:swp1";
+    assert_eq!(bfd_session_up(&h, label), Some(0.0));
     h.bind("swp1", Some(endpoint(2, 7))).await;
-    assert_eq!(bfd_session_up(&h, &label), Some(0.0), "after a reconcile");
+    assert_eq!(bfd_session_up(&h, label), Some(0.0), "after a reconcile");
 }
 
 /// A rejected reload preparation stages nothing: the next unrelated
@@ -3755,4 +3851,273 @@ async fn an_explain_or_retention_edit_keeps_bound_interface_only_sessions() {
         h.reload(config_with(&format!("{stanza}{policy}"))).await;
         assert_eq!(h.session(&swp1_key(2)), session, "kept: {policy}");
     }
+}
+
+/// Every `peer` value exported for `interface`'s neighbor family `name`.
+fn peer_values(h: &Harness, name: &str) -> Vec<String> {
+    let mut values: Vec<String> = h
+        .mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| family.name() == name)
+        .flat_map(|family| family.get_metric().to_vec())
+        .filter_map(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .find(|label| label.name() == "peer")
+                .map(|label| label.value().to_owned())
+        })
+        .collect();
+    values.sort();
+    values.dedup();
+    values
+}
+
+/// One `family` sample's value for `labels`, if exported.
+fn sample(h: &Harness, family: &str, labels: &[(&str, &str)]) -> Option<f64> {
+    h.mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|candidate| candidate.name() == family)
+        .flat_map(|candidate| candidate.get_metric().to_vec())
+        .find(|metric| {
+            labels.iter().all(|(name, value)| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == *name && label.value() == *value)
+            })
+        })
+        // A family is one type; the other reads 0.
+        .map(|metric| metric.get_counter().get_value() + metric.get_gauge().get_value())
+}
+
+/// ADR-0142 metrics: an interface-only neighbor's series are labelled
+/// `peer="interface:swp1"` at every endpoint and survive an address change,
+/// which is counted once, while the address metadata follows the binding.
+#[tokio::test]
+async fn an_interface_only_neighbors_series_follow_the_interface_across_endpoints() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    // Mutation-red: labelling from the key emits `fe80::2%swp1`.
+    assert_eq!(
+        peer_values(&h, "bgp_peer_admin_enabled"),
+        ["interface:swp1"]
+    );
+    assert_eq!(peer_values(&h, "bgp_peer_info"), ["interface:swp1"]);
+    assert_eq!(
+        h.mgr.rib_peer_of(&swp1_key(2)).label(),
+        "interface:swp1",
+        "the RIB emits the same value"
+    );
+    assert_eq!(
+        h.mgr.peers[&swp1_key(2)].transport_config.peer_label(),
+        "interface:swp1",
+        "and so does the session"
+    );
+    let info = [("peer", "interface:swp1"), ("interface", "swp1")];
+    assert_eq!(
+        sample(
+            &h,
+            "bgp_unnumbered_peer_address_info",
+            &[info[0], ("address", "fe80::2")]
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&h, "bgp_unnumbered_address_changes_total", &info[..1]),
+        None
+    );
+    while h.rib_rx.try_recv().is_ok() {}
+
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert!(h.mgr.peers.contains_key(&swp1_key(3)));
+    // Mutation-red: reaping on retirement drops the identity series.
+    assert_eq!(
+        peer_values(&h, "bgp_peer_admin_enabled"),
+        ["interface:swp1"]
+    );
+    assert_eq!(
+        sample(&h, "bgp_unnumbered_address_changes_total", &info[..1]),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(
+            &h,
+            "bgp_unnumbered_peer_address_info",
+            &[info[0], ("address", "fe80::2")]
+        ),
+        None,
+        "the old address is gone"
+    );
+    assert_eq!(
+        sample(
+            &h,
+            "bgp_unnumbered_peer_address_info",
+            &[info[0], ("address", "fe80::3")]
+        ),
+        Some(1.0)
+    );
+    let deleted: Vec<bool> = std::iter::from_fn(|| h.rib_rx.try_recv().ok())
+        .filter_map(|update| match update {
+            RibUpdate::PeerDeleted { keep_series, .. } => Some(keep_series),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deleted, [true], "the RIB keeps the series too");
+
+    // Carrier loss unbinds: no address series, the identity stays.
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    assert_eq!(h.peers_at(ll(3)), []);
+    assert!(!h.mgr.metrics.registry().gather().iter().any(|family| {
+        family.name() == "bgp_unnumbered_peer_address_info" && !family.get_metric().is_empty()
+    }));
+    assert_eq!(
+        peer_values(&h, "bgp_peer_admin_enabled"),
+        ["interface:swp1"]
+    );
+}
+
+/// A second router on the link is counted for the neighbor, from a Router
+/// Advertisement and from an inbound connection alike.
+#[tokio::test]
+async fn second_routers_on_the_link_are_counted_for_the_neighbor() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.handle_discovery_event(DiscoveryEvent::Conflict {
+        interface: "swp1".into(),
+        bound: ll(2),
+        other: ll(9),
+    });
+    let _client = inbound(&mut h, 9, 7).await;
+    assert_eq!(
+        sample(
+            &h,
+            "bgp_unnumbered_ra_conflicts_total",
+            &[("peer", "interface:swp1")]
+        ),
+        Some(2.0)
+    );
+}
+
+/// The presence events of an interface-only neighbor's endpoints carry why
+/// the endpoint changed: learned, address changed, link down, interface
+/// removed.
+#[tokio::test]
+async fn endpoint_presence_events_carry_the_reason() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    h.links_changed(snapshot(true, &[("swp1", 7, false)]));
+    h.reconcile().await;
+    h.links_changed(snapshot(true, &[("swp1", 7, true)]));
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    h.links_changed(snapshot(true, &[]));
+    h.reconcile().await;
+    let events = query_session_event_history(
+        &h.mgr,
+        None,
+        [
+            SessionLifecycleEventType::PeerAdded,
+            SessionLifecycleEventType::PeerRemoved,
+        ]
+        .into_iter()
+        .collect(),
+        0,
+    )
+    .await;
+    let reasons: Vec<&str> = events.iter().map(|event| event.reason.as_str()).collect();
+    // Mutation-red: without the port's reason the events read "added".
+    assert_eq!(
+        reasons,
+        [
+            "peer fe80::2%swp1 added: peer_address_learned",
+            "peer fe80::2%swp1 removed: peer_address_changed",
+            "peer fe80::3%swp1 added: peer_address_changed",
+            "peer fe80::3%swp1 removed: link_down",
+            "peer fe80::3%swp1 added: peer_address_learned",
+            "peer fe80::3%swp1 removed: interface_removed",
+        ]
+    );
+}
+
+/// A failed start of an interface-only neighbor's replacement endpoint
+/// keeps the neighbor's identity series, its down history included; the
+/// retry's peer reports under the same series.
+#[tokio::test]
+async fn a_failed_endpoint_start_keeps_the_neighbors_identity_series() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.metrics.record_session_down(
+        "interface:swp1",
+        "swp1",
+        rustbgpd_telemetry::reason_labels::SessionDownReason::TransportError,
+    );
+    let down = |h: &Harness| {
+        sample(
+            h,
+            "bgp_session_down_total",
+            &[("peer", "interface:swp1"), ("reason", "transport_error")],
+        )
+    };
+    assert_eq!(down(&h), Some(1.0));
+    let failed = h
+        .mgr
+        .provision_new_peer_session(&swp1_key(3), true, true, closed_peer_handle(), "test start")
+        .await;
+    assert!(failed.is_err(), "the closed session cannot start");
+    // Mutation-red: reaping on this path drops the down counter.
+    assert_eq!(down(&h), Some(1.0));
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)], "the retry binds");
+    assert_eq!(down(&h), Some(1.0));
+}
+
+/// A neighbor learned from an inbound connection is unknown to discovery,
+/// so a second router seen only by RA, or only by another inbound
+/// connection, is still counted once each.
+#[tokio::test]
+async fn second_routers_beside_an_inbound_learned_session_are_counted() {
+    let conflicts = |h: &Harness| {
+        sample(
+            h,
+            "bgp_unnumbered_ra_conflicts_total",
+            &[("peer", "interface:swp1")],
+        )
+    };
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    let _client = inbound(&mut h, 2, 7).await;
+    h.replace_session(
+        &swp1_key(2),
+        fake_peer_handle(
+            IpAddr::V6(ll(2)),
+            SessionState::Established,
+            None,
+            Arc::new(FakePeerCounters::default()),
+        ),
+    );
+    h.mgr.note_unnumbered_session_state(
+        &swp1_key(2),
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    );
+    // No RA binding: an inbound connection from another address while
+    // Established. Mutation-red: refusing it as `unconfigured` alone leaves
+    // the counter empty.
+    let _client = inbound(&mut h, 3, 7).await;
+    assert_eq!(conflicts(&h), Some(1.0));
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "kept");
+
+    // The second router's first RA: discovery had no binding, so it raises
+    // no conflict of its own. Mutation-red: without the manager's check the
+    // counter stays at 1.
+    h.bind("swp1", Some(endpoint(9, 7))).await;
+    assert_eq!(conflicts(&h), Some(2.0));
+    assert!(h.mgr.peers.contains_key(&swp1_key(2)), "still kept");
 }

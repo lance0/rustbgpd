@@ -501,7 +501,7 @@ member individually.
     validated against FRR by M53 (ADR-0069), and interface-only neighbors
     that learn the peer's address from Router Advertisements or its inbound
     connection, validated by M53b (ADR-0142). One link-local address may
-    serve several interfaces. The experimental Link-Local Next Hop capability 77
+    serve several interfaces (M53c, M53d). The experimental Link-Local Next Hop capability 77
     (`draft-ietf-idr-linklocal-capability-06`) is opt-in per neighbor or peer group
     (`link_local_next_hop = true`).
     FRR (`neighbor IFACE interface`), GoBGP (`neighbor-interface`),

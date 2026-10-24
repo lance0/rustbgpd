@@ -363,6 +363,7 @@ async fn link_local_neighbor_series_share_one_scoped_peer_value() {
     let RibUpdate::PeerDeleted {
         peer,
         label: Some(label),
+        keep_series: false,
     } = update
     else {
         panic!("PeerDeleted with the scoped label expected");

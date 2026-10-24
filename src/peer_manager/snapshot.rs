@@ -277,9 +277,12 @@ fn manager_peer_info(
 /// The row of an interface-only neighbor with no bound peer (ADR-0142): its
 /// configured settings, resolved as they would be at binding, with no
 /// session. `address` is unspecified and the API reports none.
+/// `policy_present` is the configured (import, export) policy presence; the
+/// row compiles no chain.
 pub(super) fn unbound_interface_only_info(
     interface: &str,
     resolved: &crate::config::ResolvedNeighbor,
+    policy_present: (bool, bool),
     enabled: bool,
     ebgp_requires_policy: bool,
     state: rustbgpd_api::peer_types::InterfaceOnlyState,
@@ -360,16 +363,8 @@ pub(super) fn unbound_interface_only_info(
         stale: false,
         slow_peer: false,
         bmp_identity_excluded: false,
-        rfc8212_import_policy: rfc8212_status(
-            enforced,
-            resolved.import_policy.as_ref(),
-            RFC8212_MISSING_IMPORT_POLICY,
-        ),
-        rfc8212_export_policy: rfc8212_status(
-            enforced,
-            resolved.export_policy.as_ref(),
-            RFC8212_MISSING_EXPORT_POLICY,
-        ),
+        rfc8212_import_policy: rfc8212_presence_status(enforced, policy_present.0),
+        rfc8212_export_policy: rfc8212_presence_status(enforced, policy_present.1),
         remote_asn_mode: rustbgpd_api::peer_types::RemoteAsnMode::Numeric,
         negotiated_remote_asn: None,
         interface_only: Some(state),
@@ -520,6 +515,17 @@ pub(super) fn rfc8212_statuses(
     )
 }
 
+/// [`rfc8212_status`] from configured presence alone: a governed direction
+/// with no operator policy resolves to the reserved deny (missing), and one
+/// with a policy to that chain (present).
+fn rfc8212_presence_status(enforced: bool, present: bool) -> Rfc8212PolicyStatus {
+    match (enforced, present) {
+        (false, _) => Rfc8212PolicyStatus::NotRequired,
+        (true, false) => Rfc8212PolicyStatus::Missing,
+        (true, true) => Rfc8212PolicyStatus::Present,
+    }
+}
+
 /// ADR-0112 directional status for one direction of one peer.
 ///
 /// `chain` must be the chain this peer currently has *installed* —
@@ -618,7 +624,7 @@ impl PeerManager {
             self.current_config.rfc8212_posture().policy_effective,
         );
         self.metrics.set_rfc8212_missing_policy(
-            &peer.label(),
+            &self.peer_metric_label(peer),
             import == Rfc8212PolicyStatus::Missing,
             export == Rfc8212PolicyStatus::Missing,
         );
@@ -1112,7 +1118,7 @@ impl PeerManager {
             let state = match states.get(peer) {
                 Some(StateQueryOutcome::State(state)) => state,
                 Some(StateQueryOutcome::TimedOut) => {
-                    let peer_label = peer.label();
+                    let peer_label = self.peer_metric_label(peer);
                     self.metrics
                         .record_bmp_source_drop(&peer_label, "state_query_timeout");
                     warn!(
@@ -1173,7 +1179,8 @@ impl PeerManager {
                     tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
                     tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
                 };
-                self.metrics.record_bmp_source_drop(&peer.label(), reason);
+                self.metrics
+                    .record_bmp_source_drop(&self.peer_metric_label(peer), reason);
                 warn!(
                     peer = %peer_addr,
                     error = %e,

@@ -53,6 +53,7 @@ async fn a_stale_handle_message_after_delete_and_re_add_is_dropped() {
     tx.send(RibUpdate::PeerDeleted {
         peer: old,
         label: None,
+        keep_series: false,
     })
     .await
     .unwrap();
@@ -514,6 +515,7 @@ async fn same_address_neighbors_keep_their_routes_through_each_others_lifecycle(
     tx.send(RibUpdate::PeerDeleted {
         peer: eth1,
         label: Some(eth1.label().into()),
+        keep_series: false,
     })
     .await
     .unwrap();

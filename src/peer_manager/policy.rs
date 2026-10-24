@@ -529,7 +529,7 @@ impl PeerManager {
         let mut snapshot = InstalledPolicyRoutesReachability::default();
         for (peer, managed) in &self.peers {
             // The neighbor's own value, as the transport and RIB emit it.
-            let peer_label = peer.label();
+            let peer_label = self.peer_metric_label(peer);
             for (direction, chain, clean) in [
                 (
                     "import",
