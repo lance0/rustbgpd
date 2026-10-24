@@ -611,8 +611,12 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
         graceful_restart: None,
     });
 
+    state.peer_asn = Some(65047);
     let live = super::snapshot::build_peer_info(&peer_key, managed, Some(&state), false);
     assert_eq!(live.negotiated_session, state.negotiated_session);
+    // Mutation-red: leaving it unset hides the session ASN of an external
+    // neighbor, whose configured remote_asn reads 0.
+    assert_eq!(live.negotiated_remote_asn, Some(65047));
 
     let stale_info = super::snapshot::build_peer_info(&peer_key, managed, None, false);
     assert!(stale_info.stale);
@@ -623,6 +627,7 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
     let fresh_down = super::snapshot::build_peer_info(&peer_key, managed, Some(&state), false);
     assert!(!fresh_down.stale);
     assert!(fresh_down.negotiated_session.is_none());
+    assert_eq!(fresh_down.negotiated_remote_asn, None, "no session, no ASN");
 
     let managed = mgr.peers.remove(&peer_key).unwrap();
     managed.into_parts().0.shutdown().await.unwrap().unwrap();

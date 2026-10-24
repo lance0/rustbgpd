@@ -742,12 +742,47 @@ async fn status(State(state): State<AppState>) -> Result<Json<Value>, HttpError>
 async fn list_neighbors(state: &AppState) -> Result<Vec<proto::NeighborState>, HttpError> {
     let mut client =
         proto::neighbor_service_client::NeighborServiceClient::new(state.upstream.clone());
-    Ok(client
-        .list_neighbors(proto::ListNeighborsRequest {})
-        .await
-        .map_err(|e| bad_gateway("ListNeighbors", &e))?
-        .into_inner()
-        .neighbors)
+    Ok(birdwatcher_neighbors(
+        client
+            .list_neighbors(proto::ListNeighborsRequest {})
+            .await
+            .map_err(|e| bad_gateway("ListNeighbors", &e))?
+            .into_inner()
+            .neighbors,
+    ))
+}
+
+/// The daemon's rows as Birdwatcher's addressed protocols. An interface-only
+/// neighbor (ADR-0142) has no address of its own: a bound one is shown at
+/// its learned link-local address on its interface, and an unbound one has
+/// no protocol to show. A neighbor whose `remote_asn` is `"external"` or
+/// `"internal"` reads 0 with its mode; its AS is the one its session
+/// negotiated, 0 while that session is down.
+fn birdwatcher_neighbors(mut neighbors: Vec<proto::NeighborState>) -> Vec<proto::NeighborState> {
+    neighbors.retain_mut(|neighbor| {
+        let learned = std::mem::take(&mut neighbor.learned_peer_address);
+        let session_asn = neighbor
+            .negotiated_session
+            .as_ref()
+            .and_then(|negotiated| negotiated.remote_asn);
+        let Some(config) = neighbor.config.as_mut() else {
+            return true;
+        };
+        if config.address.is_empty() && !config.interface.is_empty() {
+            if learned.is_empty() {
+                return false;
+            }
+            config.address = learned;
+        }
+        if matches!(
+            proto::RemoteAsnMode::try_from(config.remote_asn_mode),
+            Ok(proto::RemoteAsnMode::External | proto::RemoteAsnMode::Internal)
+        ) {
+            config.remote_asn = session_asn.unwrap_or(0);
+        }
+        true
+    });
+    neighbors
 }
 
 /// The daemon's selector for `peer`. An IPv6 link-local neighbor must be
@@ -3078,6 +3113,48 @@ mod tests {
             let error = parse_daemon_endpoint(endpoint).unwrap_err().to_string();
             assert!(error.contains(expected), "{endpoint}: {error}");
         }
+    }
+
+    /// An interface-only neighbor is a protocol at its learned endpoint;
+    /// an unbound one is left out instead of failing every endpoint; a
+    /// non-numeric remote ASN reads as the session's AS.
+    #[test]
+    fn interface_only_and_external_neighbors_project_to_addressed_protocols() {
+        let row = |address: &str, interface: &str, learned: &str, session: Option<u32>| {
+            proto::NeighborState {
+                config: Some(proto::NeighborConfig {
+                    address: address.into(),
+                    interface: interface.into(),
+                    remote_asn_mode: proto::RemoteAsnMode::External as i32,
+                    ..Default::default()
+                }),
+                learned_peer_address: learned.into(),
+                negotiated_session: session.map(|asn| proto::NegotiatedSessionState {
+                    remote_asn: Some(asn),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        };
+        let neighbors = birdwatcher_neighbors(vec![
+            row("", "swp1", "fe80::2", Some(65009)),
+            row("", "swp2", "", None),
+            row("192.0.2.3", "", "", None),
+        ]);
+        // Mutation-red: without the projection the bound row's empty address
+        // is a 502 for the whole response, and its AS reads 0.
+        assert_eq!(neighbors.len(), 2, "the unbound row is left out");
+        let bound = neighbors[0].config.as_ref().unwrap();
+        assert_eq!(
+            (bound.address.as_str(), bound.interface.as_str()),
+            ("fe80::2", "swp1")
+        );
+        assert_eq!(bound.remote_asn, 65009);
+        assert_eq!(neighbors[1].config.as_ref().unwrap().remote_asn, 0, "down");
+        assert_eq!(
+            scoped_selector(&neighbors, "fe80::2".parse().unwrap()),
+            "fe80::2%swp1"
+        );
     }
 
     #[test]

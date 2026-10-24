@@ -258,7 +258,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset refresh-in refresh-out replay-out help" -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset refresh-in refresh-out replay-out help" -a "replay-out" -d 'Replay this peer\'s negotiated IPv4/IPv6 unicast routes with terminal UPDATE EoRs'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable reset refresh-in refresh-out replay-out help" -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l remote-asn -l asn -d 'Remote AS number of the peer (the local AS is `rbgp global`)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l remote-asn -l asn -d 'Remote AS of the peer: a number, `external` (any AS but the local one) or `internal` (the local AS, shown by `rbgp global`)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l description -d 'Description' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l hold-time -d 'Hold time in seconds' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l min-hold-time -d 'Minimum hold time accepted from the peer (3..=65535)' -r
@@ -393,7 +393,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset refresh-in refresh-out replay-out help" -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset refresh-in refresh-out replay-out help" -a "replay-out" -d 'Replay this peer\'s negotiated IPv4/IPv6 unicast routes with terminal UPDATE EoRs'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable reset refresh-in refresh-out replay-out help" -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l remote-asn -l asn -d 'Remote AS number of the peer (the local AS is `rbgp global`)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l remote-asn -l asn -d 'Remote AS of the peer: a number, `external` (any AS but the local one) or `internal` (the local AS, shown by `rbgp global`)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l description -d 'Description' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l hold-time -d 'Hold time in seconds' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l min-hold-time -d 'Minimum hold time accepted from the peer (3..=65535)' -r

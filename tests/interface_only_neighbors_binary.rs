@@ -221,19 +221,26 @@ hold_time = {HOLD_TIME_SECS}
         )
     }
 
-    /// Exactly one `veth` neighbor, Established with `address`. An
-    /// unavailable control plane is retried by the caller's poll.
+    /// Exactly one `veth` neighbor, Established with the learned `address`
+    /// (an interface-only row's own `address` is empty). An unavailable
+    /// control plane is retried by the caller's poll.
     fn established_with(&mut self, address: &str) -> bool {
         self.veth_rows().is_some_and(|rows| {
             rows.len() == 1
-                && rows[0]["address"].as_str() == Some(address)
+                && rows[0]["address"].as_str() == Some("")
+                && rows[0]["learned_peer_address"].as_str() == Some(address)
                 && rows[0]["state"].as_str() == Some("Established")
         })
     }
 
-    /// A successful query that lists no `veth` neighbor.
-    fn no_veth_neighbor(&mut self) -> bool {
-        self.veth_rows().is_some_and(|rows| rows.is_empty())
+    /// A successful query whose `veth` neighbor is listed unbound, with no
+    /// learned address and its link down.
+    fn veth_neighbor_unbound(&mut self) -> bool {
+        self.veth_rows().is_some_and(|rows| {
+            rows.len() == 1
+                && rows[0].get("learned_peer_address").is_none()
+                && rows[0]["discovery_state"].as_str() == Some("link_down")
+        })
     }
 
     fn wait(
@@ -294,7 +301,7 @@ fn interface_only_neighbors_discover_each_other_and_follow_an_address_change() {
     // down), and it comes back with the link.
     ip(&["-n", &ns.b, "link", "set", "veth", "down"]);
     let elapsed = a.wait("A's session gone after carrier loss", FAILOVER_BOUND, |a| {
-        a.no_veth_neighbor()
+        a.veth_neighbor_unbound()
     });
     eprintln!("carrier-loss teardown took {elapsed:?} (hold time {HOLD_TIME_SECS}s)");
     ip(&["-n", &ns.b, "link", "set", "veth", "up"]);
