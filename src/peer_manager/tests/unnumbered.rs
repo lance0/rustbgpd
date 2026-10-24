@@ -4785,6 +4785,74 @@ async fn a_failed_hot_group_edit_restores_the_member_policy() {
     );
 }
 
+/// A combined group edit reshapes the static members and gives a member that
+/// overrides the session knob its new chain live. The static reshape is
+/// ambiguous (the second member fails, the first's restore fails): the edit
+/// stays ambiguous and the interface-only member still gets its prior chain.
+#[tokio::test]
+async fn an_ambiguous_static_reshape_restores_the_member_policy() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[policy.definitions.alt]\ndefault_action = \"permit\"\n\
+         [peer_groups.fabric]\nhold_time = 30\n\
+         [[neighbors]]\naddress = \"192.0.2.7\"\nremote_asn = 65002\npeer_group = \"fabric\"\n\
+         [[neighbors]]\naddress = \"192.0.2.8\"\nremote_asn = 65002\npeer_group = \"fabric\"\n{}",
+        port_stanza("swp1", "peer_group = \"fabric\"\nhold_time = 60\n")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true)]);
+    h.reload(config.clone()).await;
+    for resolved in config.resolved_neighbors().unwrap() {
+        h.mgr
+            .add_peer(
+                PeerManager::peer_manager_config_from_resolved(resolved, false),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    let first = key(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)));
+    let second = key(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8)));
+    h.mgr.inject_reconfigure_failures.insert(second, 0);
+    h.mgr.inject_reconfigure_failures.insert(first, 1);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    let member = swp1_key(2);
+    assert!(h.mgr.peers[&member].export_policy.is_none());
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&h.mgr.current_config.peer_groups["fabric"]);
+    definition.hold_time = Some(45);
+    definition.export_policy_chain = vec!["alt".to_string()];
+    let (reply, outcome) = oneshot::channel();
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
+    .await;
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            OwnedCatalogMutationOutcome::CompensationAmbiguous(_)
+        ),
+        "{outcome:?}"
+    );
+    // Mutation-red: returning on the ambiguous reshape leaves the member
+    // on the uncommitted chain.
+    assert!(
+        h.mgr.peers[&member].export_policy.is_none(),
+        "member chain restored"
+    );
+    assert_eq!(
+        h.mgr.current_config.peer_groups["fabric"].hold_time,
+        Some(30)
+    );
+}
+
 /// Deleting a bound BFD neighbor removes its binding's registration before
 /// the address is released, so nothing at that address inherits the session
 /// or a strict hold.

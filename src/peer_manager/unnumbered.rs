@@ -1014,11 +1014,17 @@ impl PeerManager {
         &mut self,
         priors: Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>,
     ) -> bool {
-        priors.is_empty()
-            || self
-                .apply_policy_impact_snapshot(priors, Vec::new())
-                .await
-                .is_ok()
+        if priors.is_empty() {
+            return true;
+        }
+        let Err(error) = self.apply_policy_impact_snapshot(priors, Vec::new()).await else {
+            return true;
+        };
+        warn!(
+            %error,
+            "interface-only policy chains could not be restored after the peer-group change failed"
+        );
+        false
     }
 
     /// The held generation applied or was refused: admission sees only the

@@ -5007,10 +5007,8 @@ impl PeerManager {
             let result = self
                 .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
                 .await;
-            if result.is_err() && !self.restore_interface_only_policies(policy_priors).await {
-                warn!(
-                    "interface-only policy chains could not be restored after the peer-group change failed"
-                );
+            if result.is_err() {
+                self.restore_interface_only_policies(policy_priors).await;
             }
             return result;
         }
@@ -5069,11 +5067,7 @@ impl PeerManager {
         let priors = match self.apply_peer_reshape_snapshot(targets).await {
             Ok(priors) => priors,
             Err(error) => {
-                if !self.restore_interface_only_policies(policy_priors).await {
-                    warn!(
-                        "interface-only policy chains could not be restored after the peer-group change failed"
-                    );
-                }
+                self.restore_interface_only_policies(policy_priors).await;
                 return Err(CatalogMutationError::from(error));
             }
         };
@@ -5183,20 +5177,18 @@ impl PeerManager {
                 Ok(priors) => priors,
                 Err(failure) => return failure.into_owned_outcome(),
             };
-            let result = self
+            // The hot cohort's own restore is best-effort, so its failure is
+            // ambiguous.
+            let outcome = match self
                 .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
-                .await;
-            let Err(error) = result else {
-                return OwnedCatalogMutationOutcome::Success;
+                .await
+            {
+                Ok(()) => OwnedCatalogMutationOutcome::Success,
+                Err(error) => OwnedCatalogMutationOutcome::CompensationAmbiguous(error),
             };
-            // The hot cohort's own restore is best-effort, so the edit stays
-            // ambiguous; the interface-only members still get their priors.
-            if !self.restore_interface_only_policies(policy_priors).await {
-                warn!(
-                    "interface-only policy chains could not be restored after the peer-group change failed"
-                );
-            }
-            return OwnedCatalogMutationOutcome::CompensationAmbiguous(error);
+            return self
+                .settle_interface_only_policies(policy_priors, outcome)
+                .await;
         }
 
         let mut seen = BTreeSet::new();
@@ -5240,25 +5232,27 @@ impl PeerManager {
             Ok(priors) => priors,
             Err(failure) => return failure.into_owned_outcome(),
         };
-        let compensated = !policy_priors.is_empty();
-        let priors = match self
+        let reshaped = match self
             .apply_peer_reshape_snapshot_classified(targets, None, &mut None)
             .await
         {
-            PeerReshapeSnapshotOutcome::Success(priors) => priors,
-            PeerReshapeSnapshotOutcome::RejectedNoEffect(error) if !compensated => {
-                return OwnedCatalogMutationOutcome::RejectedNoEffect(error.into());
+            PeerReshapeSnapshotOutcome::Success(priors) => Ok(priors),
+            PeerReshapeSnapshotOutcome::RejectedNoEffect(error) => {
+                Err(OwnedCatalogMutationOutcome::RejectedNoEffect(error.into()))
             }
-            PeerReshapeSnapshotOutcome::RejectedNoEffect(error)
-            | PeerReshapeSnapshotOutcome::FullyCompensated(error) => {
-                return if self.restore_interface_only_policies(policy_priors).await {
-                    OwnedCatalogMutationOutcome::FullyCompensated(error.into())
-                } else {
-                    OwnedCatalogMutationOutcome::CompensationAmbiguous(error.into())
-                };
+            PeerReshapeSnapshotOutcome::FullyCompensated(error) => {
+                Err(OwnedCatalogMutationOutcome::FullyCompensated(error.into()))
             }
-            PeerReshapeSnapshotOutcome::CompensationAmbiguous(error) => {
-                return OwnedCatalogMutationOutcome::CompensationAmbiguous(error.into());
+            PeerReshapeSnapshotOutcome::CompensationAmbiguous(error) => Err(
+                OwnedCatalogMutationOutcome::CompensationAmbiguous(error.into()),
+            ),
+        };
+        let priors = match reshaped {
+            Ok(priors) => priors,
+            Err(outcome) => {
+                return self
+                    .settle_interface_only_policies(policy_priors, outcome)
+                    .await;
             }
         };
 
@@ -5276,6 +5270,34 @@ impl PeerManager {
         self.reconcile_stale_dynamic_max_prefix_restarts();
         self.publish_policy_config_event(&event, priors.len());
         OwnedCatalogMutationOutcome::Success
+    }
+
+    /// Every exit of a typed peer-group edit between
+    /// [`Self::apply_interface_only_policy_deltas`] and adopting the
+    /// candidate goes through here. A
+    /// failure gives the interface-only members their prior chains back: a
+    /// clean rejection becomes compensated, since the deltas had an effect,
+    /// and a failed restore or an already ambiguous outcome is ambiguous.
+    async fn settle_interface_only_policies(
+        &mut self,
+        priors: Vec<ResolvedPeerPolicy>,
+        outcome: OwnedCatalogMutationOutcome,
+    ) -> OwnedCatalogMutationOutcome {
+        let error = match outcome {
+            OwnedCatalogMutationOutcome::Success => return outcome,
+            _ if priors.is_empty() => return outcome,
+            OwnedCatalogMutationOutcome::CompensationAmbiguous(error) => {
+                self.restore_interface_only_policies(priors).await;
+                return OwnedCatalogMutationOutcome::CompensationAmbiguous(error);
+            }
+            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+            | OwnedCatalogMutationOutcome::FullyCompensated(error) => error,
+        };
+        if self.restore_interface_only_policies(priors).await {
+            OwnedCatalogMutationOutcome::FullyCompensated(error)
+        } else {
+            OwnedCatalogMutationOutcome::CompensationAmbiguous(error)
+        }
     }
 
     /// Purge-reset every live dynamic session inheriting `group` after the
