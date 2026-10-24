@@ -4027,3 +4027,101 @@ async fn second_routers_beside_an_inbound_learned_session_are_counted() {
     assert_eq!(conflicts(&h), Some(2.0));
     assert!(h.mgr.peers.contains_key(&swp1_key(2)), "still kept");
 }
+
+/// One SIGHUP generation to `candidate`, through the real executor, then
+/// the owner loop's port reconcile.
+async fn sighup(h: &mut Harness, candidate: crate::config::Config) {
+    let actions =
+        crate::config::plan_reload_peer_actions(&h.mgr.current_config, &candidate).unwrap();
+    let outcome = Box::pin(h.mgr.apply_reload_generation(
+        candidate,
+        actions,
+        crate::config::PreparedDatasetGeneration::default(),
+    ))
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            crate::peer_manager::generation::ReloadGenerationOutcome::Applied(_)
+        ),
+        "{outcome:?}"
+    );
+    h.reconcile().await;
+}
+
+/// SIGHUP enables BFD on a bound interface-only neighbor, moves it to
+/// another profile, toggles strict mode and disables it. Each generation
+/// creates, updates, holds, releases and finally removes the single-hop
+/// session for the binding's `fe80::2%7`, and the BGP session is kept
+/// throughout: BFD membership is not a bind-time setting. Strict mode
+/// (ADR-0067) withholds BGP while BFD is not Up and releases it when strict
+/// is turned off.
+#[tokio::test]
+async fn sighup_bfd_edits_on_a_bound_interface_only_neighbor_keep_its_session() {
+    let profiles = "[[bfd_profiles]]\nname = \"fast\"\n\
+                    [[bfd_profiles]]\nname = \"slow\"\nmultiplier = 5\n";
+    let (mut h, mut bfd) = attach_bfd(
+        harness_with(&["swp1"], &[("swp1", 7, true)], "", profiles),
+        &[],
+    );
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    assert!(bfd.applied.try_recv().is_err(), "no BFD configured yet");
+    let key = swp1_key(2);
+    let peer = IpAddr::V6(ll(2));
+    let session = h.session(&key);
+    let with_bfd = |h: &Harness, bfd: Option<&str>| {
+        let mut candidate = h.mgr.current_config.clone();
+        let mut neighbor = candidate
+            .neighbors
+            .interface_only_on("swp1")
+            .unwrap()
+            .clone();
+        neighbor.bfd = bfd.map(|bfd| toml::from_str::<crate::config::BfdConfig>(bfd).unwrap());
+        candidate
+            .neighbors
+            .set_interface_only("swp1", Some(neighbor));
+        candidate
+    };
+    let detect_mult =
+        |h: &Harness| h.mgr.bfd_coupling.as_ref().unwrap().configured[&peer].detect_mult;
+
+    // Mutation-red: a bind-time BFD setting rebinds the neighbor instead.
+    let enabled = with_bfd(&h, Some("profile = \"fast\""));
+    sighup(&mut h, enabled).await;
+    assert_eq!(
+        BfdSide::sessions(&bfd.next_applied()),
+        [(peer, Some(7))],
+        "created"
+    );
+    assert_eq!(h.session(&key), session, "kept on enable");
+    assert!(!h.mgr.bfd_withholding(&peer));
+    let created = bfd_revision(&h, ll(2));
+
+    let moved = with_bfd(&h, Some("profile = \"slow\""));
+    sighup(&mut h, moved).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [(peer, Some(7))]);
+    assert_eq!(detect_mult(&h), 5, "updated to the new profile");
+    assert_ne!(bfd_revision(&h, ll(2)), created, "a replaced session");
+    assert_eq!(h.session(&key), session, "kept on a profile change");
+
+    let strict = with_bfd(&h, Some("profile = \"slow\"\nstrict = true"));
+    sighup(&mut h, strict).await;
+    bfd.next_applied();
+    assert!(
+        h.mgr.bfd_withholding(&peer),
+        "strict holds BGP until BFD is Up"
+    );
+    assert_eq!(h.session(&key), session, "kept when strict is enabled");
+
+    let relaxed = with_bfd(&h, Some("profile = \"slow\""));
+    sighup(&mut h, relaxed).await;
+    bfd.next_applied();
+    assert!(!h.mgr.bfd_withholding(&peer), "released when strict is off");
+    assert_eq!(h.session(&key), session, "kept when strict is disabled");
+
+    let disabled = with_bfd(&h, None);
+    sighup(&mut h, disabled).await;
+    assert_eq!(BfdSide::sessions(&bfd.next_applied()), [], "removed");
+    assert!(!h.mgr.bfd_coupling.as_ref().unwrap().bound.contains(&peer));
+    assert_eq!(h.session(&key), session, "kept on disable");
+}
