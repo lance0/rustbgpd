@@ -1,6 +1,5 @@
 //! Structured JSON or human-readable text logging via `tracing`.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::IsTerminal as _;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
@@ -48,12 +47,7 @@ type SharedPeerLevels = Arc<RwLock<PeerLevels>>;
 static PEER_LEVELS: OnceLock<SharedPeerLevels> = OnceLock::new();
 
 /// A `peer` span's key into [`PeerLevels`], kept in its extensions.
-struct PeerKey(Arc<str>);
-
-thread_local! {
-    /// The keys of the `peer` spans entered on this thread, innermost last.
-    static PEER_SCOPE: RefCell<Vec<Arc<str>>> = const { RefCell::new(Vec::new()) };
-}
+struct PeerKey(String);
 
 #[derive(Default)]
 struct PeerKeyVisitor {
@@ -81,80 +75,18 @@ impl Visit for PeerKeyVisitor {
     }
 }
 
-/// Enables every `peer` span, for [`PeerSpanTracker`] alone: the registry
-/// then records a session span even when `RUST_LOG` and the per-peer
-/// levels in force when it starts would not, so a later reload can still
-/// reach it.
-struct PeerSpans;
-
-impl<S> Filter<S> for PeerSpans {
-    fn enabled(&self, meta: &Metadata<'_>, _: &Context<'_, S>) -> bool {
-        meta.is_span() && meta.name() == "peer"
-    }
-
-    fn callsite_enabled(&self, meta: &'static Metadata<'static>) -> Interest {
-        if meta.is_span() && meta.name() == "peer" {
-            Interest::always()
-        } else {
-            Interest::never()
-        }
-    }
-
-    fn max_level_hint(&self) -> Option<LevelFilter> {
-        Some(LevelFilter::INFO)
-    }
-}
-
-/// Keeps each `peer` span's key in its extensions and the entered keys in
-/// [`PEER_SCOPE`], which [`PeerLevelFilter`] reads.
-struct PeerSpanTracker;
-
-impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for PeerSpanTracker {
-    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, cx: Context<'_, S>) {
-        let mut visitor = PeerKeyVisitor::default();
-        attrs.record(&mut visitor);
-        if let (Some(key), Some(span)) = (visitor.peer.or(visitor.peer_addr), cx.span(id)) {
-            span.extensions_mut().insert(PeerKey(key.into()));
-        }
-    }
-
-    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, cx: Context<'_, S>) {
-        let mut visitor = PeerKeyVisitor::default();
-        values.record(&mut visitor);
-        if let (Some(peer), Some(span)) = (visitor.peer, cx.span(id)) {
-            span.extensions_mut().replace(PeerKey(peer.into()));
-        }
-    }
-
-    fn on_enter(&self, id: &span::Id, cx: Context<'_, S>) {
-        if let Some(PeerKey(key)) = cx.span(id).and_then(|span| {
-            span.extensions()
-                .get::<PeerKey>()
-                .map(|PeerKey(key)| PeerKey(Arc::clone(key)))
-        }) {
-            PEER_SCOPE.with(|scope| scope.borrow_mut().push(key));
-        }
-    }
-
-    fn on_exit(&self, id: &span::Id, cx: Context<'_, S>) {
-        if cx
-            .span(id)
-            .is_some_and(|span| span.extensions().get::<PeerKey>().is_some())
-        {
-            PEER_SCOPE.with(|scope| scope.borrow_mut().pop());
-        }
-    }
-}
-
-/// Enables events inside a `peer` session span at that peer's configured
-/// level, read from the live map on every event so a reload reaches spans
-/// that already exist. Combined with the `RUST_LOG` filter by `or`: a
-/// per-peer level adds verbosity and never hides what `RUST_LOG` enables,
-/// as the span directives it replaces did. A `peer` span itself is shown
-/// whenever some per-peer level is at least its own, as before.
+/// Shows every `peer` session span, and enables events inside one at that
+/// peer's configured level, read from the live map on every event so a
+/// reload reaches sessions that are already running. Combined with the
+/// `RUST_LOG` filter by `or`: a per-peer level adds verbosity and never
+/// hides what `RUST_LOG` enables, as the span directives it replaces did.
 ///
-/// ponytail: one read lock per event while any per-peer level is set; a
-/// lock-free swap if that shows up in a profile.
+/// A session span is created once per session, so showing it at every
+/// level costs nothing per message; its fields then accompany the
+/// session's events under any `RUST_LOG`, before and after a reload.
+///
+/// ponytail: one read lock and a scope walk per event while any per-peer
+/// level is set; a lock-free swap if that shows up in a profile.
 struct PeerLevelFilter(SharedPeerLevels);
 
 impl PeerLevelFilter {
@@ -163,29 +95,37 @@ impl PeerLevelFilter {
     }
 }
 
-impl<S> Filter<S> for PeerLevelFilter {
-    fn enabled(&self, meta: &Metadata<'_>, _: &Context<'_, S>) -> bool {
+fn is_peer_span(meta: &Metadata<'_>) -> bool {
+    meta.is_span() && meta.name() == "peer"
+}
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Filter<S> for PeerLevelFilter {
+    fn enabled(&self, meta: &Metadata<'_>, cx: &Context<'_, S>) -> bool {
+        if meta.is_span() {
+            return is_peer_span(meta);
+        }
         let peers = self.0.read().unwrap_or_else(PoisonError::into_inner);
-        let Some(max) = peers.max else {
+        if peers.max.is_none_or(|max| meta.level() > &max) {
+            return false;
+        }
+        let Some(current) = cx.lookup_current() else {
             return false;
         };
-        if meta.level() > &max {
-            return false;
-        }
-        if meta.is_span() {
-            return meta.name() == "peer";
-        }
-        PEER_SCOPE.with(|scope| {
-            scope
-                .borrow()
-                .last()
-                .and_then(|key| peers.levels.get(&**key))
-                .is_some_and(|level| meta.level() <= level)
-        })
+        current
+            .scope()
+            .find_map(|span| {
+                span.extensions()
+                    .get::<PeerKey>()
+                    .map(|PeerKey(key)| peers.levels.get(key).copied())
+            })
+            .flatten()
+            .is_some_and(|level| meta.level() <= &level)
     }
 
     fn callsite_enabled(&self, meta: &'static Metadata<'static>) -> Interest {
-        if self.max().is_some_and(|max| meta.level() <= &max) {
+        if is_peer_span(meta) {
+            Interest::always()
+        } else if self.max().is_some_and(|max| meta.level() <= &max) {
             Interest::sometimes()
         } else {
             Interest::never()
@@ -193,13 +133,33 @@ impl<S> Filter<S> for PeerLevelFilter {
     }
 
     /// At least `INFO`, the `peer` span's level, so a session span is
-    /// recorded under a quieter `RUST_LOG`: the combined layer reports the
-    /// output filter's hint, not [`PeerSpans`]'.
+    /// created under a quieter `RUST_LOG`.
     fn max_level_hint(&self) -> Option<LevelFilter> {
         Some(
             self.max()
                 .map_or(LevelFilter::INFO, |max| max.max(LevelFilter::INFO)),
         )
+    }
+
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, cx: Context<'_, S>) {
+        if !is_peer_span(attrs.metadata()) {
+            return;
+        }
+        let mut visitor = PeerKeyVisitor::default();
+        attrs.record(&mut visitor);
+        if let (Some(key), Some(span)) = (visitor.peer.or(visitor.peer_addr), cx.span(id)) {
+            span.extensions_mut().insert(PeerKey(key));
+        }
+    }
+
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, cx: Context<'_, S>) {
+        let mut visitor = PeerKeyVisitor::default();
+        values.record(&mut visitor);
+        if let (Some(peer), Some(span)) = (visitor.peer, cx.span(id))
+            && is_peer_span(span.metadata())
+        {
+            span.extensions_mut().replace(PeerKey(peer));
+        }
     }
 }
 
@@ -322,9 +282,7 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
     L: Layer<S>,
 {
-    PeerSpanTracker
-        .with_filter(PeerSpans)
-        .and_then(output.with_filter(base.or(PeerLevelFilter(peers))))
+    output.with_filter(base.or(PeerLevelFilter(peers)))
 }
 
 /// The daemon's one output layer: JSON or text on `writer`, filtered by
@@ -626,22 +584,32 @@ mod tests {
         untimed
     }
 
-    /// The JSON and text output, `RUST_LOG` base and per-peer level
-    /// included, match the `fmt` subscriber with an `EnvFilter` span
-    /// directive that this layer replaced, byte for byte past the
-    /// timestamp.
+    /// The sample's output through the daemon's layer.
+    fn new_output(json: bool, base: &str, level: Option<&str>) -> String {
+        let buffer = Buffer::default();
+        let peer_levels = level.map_or_else(Vec::new, |level| pairs(&[("10.0.0.9", level)]));
+        let live = Arc::new(RwLock::new(PeerLevels::parse(&peer_levels).unwrap()));
+        let subscriber = tracing_subscriber::registry().with(output_layer(
+            json,
+            false,
+            buffer.clone(),
+            EnvFilter::new(base),
+            live,
+        ));
+        tracing::subscriber::with_default(subscriber, emit_log_sample);
+        untimed(&buffer, json)
+    }
+
+    /// Under the default `info` base the JSON and text output, with and
+    /// without a per-peer level, match the `fmt` subscriber with an
+    /// `EnvFilter` span directive that this layer replaced, byte for byte
+    /// past the timestamp. Under a quieter base the same events print
+    /// exactly as they do under `info`, session span fields included.
     #[test]
     fn output_matches_the_env_filter_subscriber() {
-        // (RUST_LOG, per-peer level, lines the sample yields)
-        let cases = [
-            ("info", Some("debug"), 6),
-            ("info", None, 5),
-            ("warn", Some("debug"), 4),
-            ("warn", None, 2),
-        ];
         for json in [true, false] {
-            for (base, level, lines) in cases {
-                let mut filter = EnvFilter::new(base);
+            for (level, lines) in [(Some("debug"), 6), (None, 5)] {
+                let mut filter = EnvFilter::new("info");
                 if let Some(level) = level {
                     filter = filter.add_directive(
                         format!("[peer{{peer_addr=10.0.0.9}}]={level}")
@@ -662,26 +630,69 @@ mod tests {
                 } else {
                     tracing::subscriber::with_default(builder.finish(), emit_log_sample);
                 }
+                let (old, info) = (untimed(&old, json), new_output(json, "info", level));
+                let case = format!("json={json} level={level:?}");
+                assert_eq!(info.lines().count(), lines, "{case}: {info}");
+                assert_eq!(info, old, "{case}");
 
-                let new = Buffer::default();
-                let peer_levels = level.map_or_else(Vec::new, |level| {
-                    vec![("10.0.0.9".to_owned(), level.to_owned())]
-                });
-                let live = Arc::new(RwLock::new(PeerLevels::parse(&peer_levels).unwrap()));
-                let subscriber = tracing_subscriber::registry().with(output_layer(
-                    json,
-                    false,
-                    new.clone(),
-                    EnvFilter::new(base),
-                    live,
-                ));
-                tracing::subscriber::with_default(subscriber, emit_log_sample);
-
-                let (old, new) = (untimed(&old, json), untimed(&new, json));
-                let case = format!("json={json} base={base} level={level:?}");
-                assert_eq!(new.lines().count(), lines, "{case}: {new}");
-                assert_eq!(new, old, "{case}");
+                for (base, kept) in [("warn", "WARN"), ("error", "ERROR")] {
+                    // Mutation-red: a span hidden from the output drops its
+                    // fields from the session's warn and error events.
+                    let mut expected = String::new();
+                    for line in info.lines().filter(|line| {
+                        line.contains(kept)
+                            || (kept == "WARN" && line.contains("ERROR"))
+                            || (level.is_some() && line.contains("10.0.0.9"))
+                    }) {
+                        expected.push_str(line);
+                        expected.push('\n');
+                    }
+                    assert_eq!(
+                        new_output(json, base, level),
+                        expected,
+                        "{case} base={base}"
+                    );
+                }
             }
+        }
+    }
+
+    /// Under a quieter `RUST_LOG`, a level set by a reload on a session that
+    /// is already running prints its events with the session span's fields,
+    /// in JSON and in text.
+    #[test]
+    fn a_reload_under_a_quieter_base_keeps_the_span_fields() {
+        for json in [true, false] {
+            let buffer = Buffer::default();
+            let live = SharedPeerLevels::default();
+            let subscriber = tracing_subscriber::registry().with(output_layer(
+                json,
+                false,
+                buffer.clone(),
+                EnvFilter::new("warn"),
+                Arc::clone(&live),
+            ));
+            tracing::subscriber::with_default(subscriber, || {
+                let session =
+                    tracing::info_span!("peer", peer_addr = "10.0.0.9", remote_asn = 65002);
+                install_levels(
+                    &live,
+                    PeerLevels::parse(&pairs(&[("10.0.0.9", "debug")])).unwrap(),
+                );
+                session.in_scope(|| tracing::debug!("after reload"));
+            });
+            let output = untimed(&buffer, json);
+            let fields = if json {
+                ["\"peer_addr\":\"10.0.0.9\"", "\"remote_asn\":65002"]
+            } else {
+                ["peer_addr=\"10.0.0.9\"", "remote_asn=65002"]
+            };
+            // Mutation-red: a span shown only when a level was set at its
+            // creation leaves the line without its fields.
+            assert!(
+                output.contains("after reload") && fields.iter().all(|f| output.contains(f)),
+                "json={json}: {output}"
+            );
         }
     }
 
