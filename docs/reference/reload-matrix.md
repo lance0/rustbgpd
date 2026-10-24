@@ -308,9 +308,9 @@ configuration:
 |---|---|
 | Neighbor added | Discovery starts on the interface. Adding the first interface-only neighbor also starts the discovery actor. A peer is created once an address is learned, as at startup. |
 | Neighbor deleted | Its session ends, its Adj-RIB-In (including retained Graceful Restart and LLGR routes) is purged, and its RIB identity is released. This also releases the learned address it held or reserved, so another neighbor may take that address. Discovery stops on the interface, after a final Router Advertisement with lifetime 0 when it was advertising. Deleting the last interface-only neighbor stops the discovery actor and closes its raw sockets. |
-| Session settings edited, directly or through the peer group (`remote_asn`, including `"external"`/`"internal"`, `peer_group` membership, timers, families, `admin_down`, max-prefix settings, `description`, and so on) | A bound peer is rebound at once to the same learned address under the new settings, including an address learned from an inbound connection. This resets the session and keeps the neighbor's RIB identity and a max-prefix shutdown. A changed `admin_down` takes effect; otherwise an operator's enable or disable is kept, as for a static neighbor. An unbound neighbor uses the new settings when it next binds. |
+| Session settings edited, directly or through the peer group (`remote_asn`, including `"external"`/`"internal"`, `peer_group` membership, timers, families, `admin_down`, max-prefix settings, `description`, and so on) | A bound peer is rebound at once to the same learned address under the new settings, including an address learned from an inbound connection. This resets the session and keeps the neighbor's RIB identity and a max-prefix shutdown. A changed `admin_down` takes effect; otherwise an operator's enable or disable is kept, as for a static neighbor. An unbound neighbor uses the new settings when it next binds. `rustbgpd --diff` counts the neighbor as a session reset. |
 | Policy-only edit (`import_policy*`, `export_policy*`, policy definitions) | Live, as for a static neighbor; the session is kept. A config transaction applies it to the bound peer through the live-policy executor, which restores the prior chains if persistence fails. |
-| `tcp_mss`, directly or through the peer group | restart-required. SIGHUP keeps the running neighbor for this reload and logs an `ERROR`; `rustbgpd --diff` reports it with the other `tcp_mss` changes and a config transaction rejects it. |
+| `tcp_mss`, directly or through the peer group | restart-required. SIGHUP keeps the running neighbor for this reload, with its running peer group if the reload removes that group, and logs an `ERROR`. A new neighbor that would take a clamp, its own or a new group's, is held until restart. `rustbgpd --diff` reports it with the other `tcp_mss` changes and routes the rest of the reload as SIGHUP applies it; a config transaction rejects it. |
 
 Neighbors whose settings did not change keep their sessions.
 
@@ -323,6 +323,11 @@ kept:
   neighbor's learned endpoint holds or still reserves. The error is
   `duplicate_link_local_address` and names the interface. Delete that
   neighbor in an earlier change first.
+
+A SIGHUP checks them before its first effect, including an outbound prefix
+maximum or listener authentication change, and discovery cannot bind the
+added static address until the reload has applied. A config transaction
+checks them when it plans and again when it stages the snapshot.
 
 `[global.unnumbered]` stays restart-required (see `[global]`).
 

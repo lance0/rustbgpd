@@ -12,4 +12,5 @@
   [reload matrix](../docs/reference/reload-matrix.md#interface-only-neighbors).
   **Operator-visible:** `rustbgpd --diff --json` reports
   `interface_only_neighbors_changed` under `reload_applied` and the new
-  `unnumbered_changed` under the restart-required keys.
+  `unnumbered_changed` under the restart-required keys, and counts a rebound
+  interface-only neighbor in `summary.sessions_will_reset`.
