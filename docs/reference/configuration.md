@@ -1465,20 +1465,22 @@ families = ["ipv4_unicast", "ipv6_unicast"]
   `duplicate_link_local_address`. Parallel links to one device that reuse a
   router MAC on every port, or `fe80::1` on every port, therefore bring up
   only the first link admitted.
-- **Restart-required.** Adding, removing or editing an interface-only
-  neighbor, `[global.unnumbered]`, or a peer-group setting that changes the
-  neighbor's session (its policy chains still follow a reload) takes a
-  restart; a reload keeps the
-  running set, logs an error, and is refused if the rest of the new
-  configuration is invalid against that running set (for example a static
-  link-local neighbor on the same interface, or a deleted peer group the
-  neighbor uses). A runtime `SetPeerGroup` that would change such a
-  neighbor's session settings is refused with `FAILED_PRECONDITION`; a
-  policy-only group edit applies to it live. Inbound sessions are accepted
-  only from the learned address.
+- **Reload.** SIGHUP and config transactions add, remove and edit
+  interface-only neighbors without a restart, and the other neighbors keep
+  their sessions. A removed neighbor's session ends, its routes are purged and
+  the learned address it held is released. An edit that changes its session
+  settings, directly or through its peer group, rebinds the session under
+  them; a policy-only edit applies live. The change that adds the first one is
+  refused before any effect without `CAP_NET_RAW` or the link monitor.
+  `[global.unnumbered]` and a change to the neighbor's effective `tcp_mss`
+  still take a restart. See the
+  [reload matrix](reload-matrix.md#interface-only-neighbors). A runtime
+  `SetPeerGroup` that would change such a neighbor's session settings is
+  refused with `FAILED_PRECONDITION`; make that edit in the file and reload.
+  Inbound sessions are accepted only from the learned address.
 - **Operator removal.** The session belongs to the neighbor's configuration:
   `rbgp neighbor <address> delete` and `DeleteNeighbor` refuse it with
-  `FAILED_PRECONDITION`. Remove the `interface` stanza and restart instead.
+  `FAILED_PRECONDITION`. Remove the `interface` stanza and reload instead.
 
 ### Administrative down (`admin_down`)
 

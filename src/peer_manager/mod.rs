@@ -68,6 +68,10 @@ mod unnumbered {
 
     pub(crate) enum Unnumbered {}
     pub(crate) enum DiscoveryEvent {}
+    #[derive(Default)]
+    pub(crate) struct UnnumberedRuntime {
+        pub(crate) config_due: bool,
+    }
 
     impl Unnumbered {
         pub(super) async fn shutdown(self) {
@@ -117,6 +121,20 @@ mod unnumbered {
         pub(super) fn unnumbered_bindings(&self) -> Vec<(String, std::net::Ipv6Addr, u32)> {
             Vec::new()
         }
+        pub(super) fn unnumbered_bound_peer(&self, _: &str) -> Option<PeerKey> {
+            None
+        }
+        pub(super) fn unnumbered_preflight(&self, _: &crate::config::Config) -> Result<(), String> {
+            Ok(())
+        }
+        pub(super) fn preflight_reload_generation(
+            &mut self,
+            _: &crate::config::Config,
+            _: std::sync::Weak<()>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        pub(super) fn release_generation_hold(&mut self) {}
         pub(super) fn unbound_interface_only_infos(
             &self,
         ) -> Vec<rustbgpd_api::peer_types::PeerInfo> {
@@ -135,7 +153,7 @@ mod unnumbered {
         }
     }
 }
-pub(crate) use unnumbered::Unnumbered;
+pub(crate) use unnumbered::{Unnumbered, UnnumberedRuntime};
 #[cfg(test)]
 pub(crate) mod test_support;
 mod update_group_plan;
@@ -332,6 +350,15 @@ fn debug_reconfigure_failures() -> std::collections::BTreeMap<PeerKey, u32> {
 }
 
 pub(crate) enum InternalCommand {
+    /// ADR-0142 preflight of a SIGHUP candidate, before the reload route's
+    /// first effect outside the peer manager. Acceptance holds the
+    /// candidate's static link-local addresses closed to learned endpoints
+    /// until its `ApplyReloadGeneration` or until `route` is dropped.
+    PreflightReloadGeneration {
+        candidate: Box<Config>,
+        route: std::sync::Weak<()>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Apply one complete SIGHUP candidate as an owned runtime generation.
     ApplyReloadGeneration {
         candidate: Box<Config>,
@@ -702,6 +729,9 @@ pub struct PeerManager {
     /// ADR-0142 interface-only neighbors: Router Advertisement discovery and
     /// the peers created for its bindings. `None` when none is configured.
     unnumbered: Option<Box<Unnumbered>>,
+    /// Whether the configured interface-only set needs reconciling, and how
+    /// discovery opens when the first one arrives at runtime.
+    unnumbered_runtime: UnnumberedRuntime,
     /// Per-process key for the optimistic config-transaction snapshot token.
     /// Seeded once at construction; never leaves the process. Keeps the token
     /// from acting as an offline oracle for config secrets. See
@@ -885,6 +915,7 @@ impl PeerManager {
         let previous = std::mem::replace(&mut self.current_config, config);
         self.peers.set_datasets(&self.current_config);
         self.conditional_reconcile_pending = true;
+        self.unnumbered_runtime.config_due = true;
         previous
     }
 
@@ -1372,6 +1403,7 @@ impl PeerManager {
             bfd_coupling: None,
             link_check: link_failover::LinkCheckDelivery::default(),
             unnumbered: None,
+            unnumbered_runtime: UnnumberedRuntime::default(),
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
             accepted_rx: None,
             #[cfg(test)]
@@ -2714,6 +2746,9 @@ impl PeerManager {
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {
                     self.operator_read_seam = OperatorReadSeam::Unfenced;
                     match internal {
+                        Some(InternalCommand::PreflightReloadGeneration { candidate, route, reply }) => {
+                            let _ = reply.send(self.preflight_reload_generation(&candidate, route));
+                        }
                         Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
@@ -2827,7 +2862,13 @@ impl PeerManager {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
                             let result = match scope {
-                                TransactionConfigScope::Full => Ok(*candidate),
+                                // ADR-0142: discovery may have bound an endpoint since
+                                // the plan. Recheck in this owner turn, before the
+                                // candidate is installed; once it is staged, binding
+                                // waits for the commit or rollback.
+                                TransactionConfigScope::Full => self
+                                    .unnumbered_preflight(&candidate)
+                                    .map(|()| *candidate),
                                 TransactionConfigScope::FibTablesOnly => {
                                     let mut staged = self.current_config.clone();
                                     staged.fib_tables.clone_from(&candidate.fib_tables);
