@@ -69,6 +69,24 @@ pub(crate) fn scope_bgp_event(event: &mut BgpEvent) {
             scope_address(&mut event.peer_address, &session.peer_interface);
             scope_address(&mut session.peer_address, &session.peer_interface);
         }
+        Some(Payload::Evpn(route)) => {
+            scope_address(&mut event.peer_address, &route.peer_interface);
+            scope_address(
+                &mut event.previous_peer_address,
+                &route.previous_peer_interface,
+            );
+            scope_address(&mut route.peer_address, &route.peer_interface);
+            scope_address(
+                &mut route.previous_peer_address,
+                &route.previous_peer_interface,
+            );
+            if let Some(current) = route.route.as_mut() {
+                scope_address(&mut current.peer_address, &route.peer_interface);
+            }
+            if let Some(previous) = route.previous_route.as_mut() {
+                scope_address(&mut previous.peer_address, &route.previous_peer_interface);
+            }
+        }
         _ => {}
     }
 }
@@ -1294,7 +1312,8 @@ pub async fn evpn_history(
         print_empty_history(json, "EVPN")?;
         return Ok(());
     }
-    for event in response.events {
+    for mut event in response.events {
+        scope_bgp_event(&mut event);
         print_bgp_event(&event, json)?;
     }
     Ok(())
@@ -2387,6 +2406,41 @@ mod tests {
         assert_eq!(value["summary"], "route best changed 203.0.113.0/24");
     }
 
+    /// A best-path move on one link-local address keeps the two interfaces
+    /// distinct in the envelope and both retained route bodies.
+    #[test]
+    fn evpn_events_render_current_and_previous_scoped_neighbors() {
+        use crate::proto::bgp_event::Payload;
+        let source = || EvpnRouteEntry {
+            peer_address: "fe80::1".into(),
+            ..Default::default()
+        };
+        let mut event = BgpEvent {
+            peer_address: "fe80::1".into(),
+            previous_peer_address: "fe80::1".into(),
+            payload: Some(Payload::Evpn(crate::proto::EvpnRouteEvent {
+                peer_address: "fe80::1".into(),
+                previous_peer_address: "fe80::1".into(),
+                peer_interface: "eth1".into(),
+                previous_peer_interface: "eth0".into(),
+                route: Some(source()),
+                previous_route: Some(source()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        scope_bgp_event(&mut event);
+        assert_eq!(event.peer_address, "fe80::1%eth1");
+        assert_eq!(event.previous_peer_address, "fe80::1%eth0");
+        let Some(Payload::Evpn(payload)) = event.payload else {
+            panic!("EVPN event")
+        };
+        assert_eq!(payload.peer_address, "fe80::1%eth1");
+        assert_eq!(payload.previous_peer_address, "fe80::1%eth0");
+        assert_eq!(payload.route.unwrap().peer_address, "fe80::1%eth1");
+        assert_eq!(payload.previous_route.unwrap().peer_address, "fe80::1%eth0");
+    }
+
     /// The daemon reports a scoped neighbor as a bare address plus its
     /// interface; rbgp keeps printing `address%interface` for session and
     /// policy events, envelope and payload alike.
@@ -2773,6 +2827,7 @@ mod tests {
                     }),
                     previous_route: None,
                     reason: "EVPN route best changed mac".to_string(),
+                    ..Default::default()
                 },
             )),
             ..Default::default()

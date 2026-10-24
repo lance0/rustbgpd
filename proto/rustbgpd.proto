@@ -3663,6 +3663,10 @@ message EvpnRouteEvent {
   EvpnRouteEntry previous_route = 9;
   // Stable operator-facing reason/summary string for this event.
   string reason = 10;
+  // Interfaces recorded with the current and previous best-path peers.
+  // Empty for numbered or absent peers, independent of the current roster.
+  string peer_interface = 11;
+  string previous_peer_interface = 12;
 }
 
 message BfdSessionEvent {

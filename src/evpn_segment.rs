@@ -4586,6 +4586,8 @@ mod tests {
                 previous_best: None,
                 peer: Some(ipa("10.0.0.2")),
                 previous_peer: None,
+                peer_interface: None,
+                previous_peer_interface: None,
                 timestamp_unix_ms: rustbgpd_rib::event::unix_time_ms_now(),
             }))
             .expect("segment actor subscribed");
@@ -5027,6 +5029,8 @@ mod tests {
                     previous_best: None,
                     peer: Some(route.peer.addr()),
                     previous_peer: None,
+                    peer_interface: None,
+                    previous_peer_interface: None,
                     timestamp_unix_ms: rustbgpd_rib::event::unix_time_ms_now(),
                 }))
                 .unwrap();

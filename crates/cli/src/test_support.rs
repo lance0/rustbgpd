@@ -144,6 +144,7 @@ pub(crate) struct MockState {
     pub(crate) metrics_text: Mutex<Option<String>>,
     pub(crate) session_events: Mutex<Vec<server_proto::BgpEvent>>,
     pub(crate) policy_events: Mutex<Vec<server_proto::BgpEvent>>,
+    pub(crate) evpn_events: Mutex<Vec<server_proto::BgpEvent>>,
     pub(crate) session_events_error: Mutex<Option<(Code, String)>>,
     pub(crate) policy_events_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_confirm_error: Mutex<Option<(Code, String)>>,
@@ -2013,7 +2014,7 @@ impl rustbgpd_api::proto::event_service_server::EventService for MockEventServic
         _request: Request<server_proto::ListEvpnEventsRequest>,
     ) -> Result<Response<server_proto::ListEvpnEventsResponse>, Status> {
         Ok(Response::new(server_proto::ListEvpnEventsResponse {
-            events: vec![],
+            events: self.state.evpn_events.lock().await.clone(),
         }))
     }
 

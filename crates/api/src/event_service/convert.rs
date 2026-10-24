@@ -113,6 +113,16 @@ pub fn evpn_event_to_bgp_event(event: &rustbgpd_rib::EvpnRouteEvent) -> proto::B
         route,
         previous_route,
         reason: summary.clone(),
+        peer_interface: event
+            .peer_interface
+            .as_deref()
+            .unwrap_or_default()
+            .to_string(),
+        previous_peer_interface: event
+            .previous_peer_interface
+            .as_deref()
+            .unwrap_or_default()
+            .to_string(),
     };
 
     proto::BgpEvent {
@@ -420,6 +430,8 @@ mod tests {
         let moved = rustbgpd_rib::PeerId::from_addr("192.0.2.9".parse().unwrap());
         event.best.as_mut().unwrap().peer = moved;
         event.previous_best.as_mut().unwrap().peer = moved;
+        event.peer_interface = Some("eth0".into());
+        event.previous_peer_interface = Some("eth1".into());
         let Some(proto::bgp_event::Payload::Evpn(payload)) =
             evpn_event_to_bgp_event(&event).payload
         else {
@@ -429,6 +441,8 @@ mod tests {
         assert_eq!(payload.route.unwrap().peer_address, "192.0.2.1");
         assert_eq!(payload.previous_peer_address, "192.0.2.2");
         assert_eq!(payload.previous_route.unwrap().peer_address, "192.0.2.2");
+        assert_eq!(payload.peer_interface, "eth0");
+        assert_eq!(payload.previous_peer_interface, "eth1");
     }
 
     #[test]
@@ -463,7 +477,6 @@ mod tests {
                         rd_filter,
                         ..Default::default()
                     },
-                    None,
                 )
                 .unwrap();
                 assert_eq!(filter.rd, Some(rd));

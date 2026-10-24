@@ -1,4 +1,4 @@
-//! Exact EVPN selectors and explain output through the real binary and RPC.
+//! EVPN selectors, explanations and history through the real binary and RPC.
 use rustbgpd_api::proto;
 use std::process::Command;
 
@@ -8,6 +8,40 @@ use std::process::Command;
     reason = "shared CLI mock includes services unused by this contract"
 )]
 mod test_support;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evpn_history_command_preserves_current_and_previous_interfaces() {
+    let server = test_support::spawn_mock_server(None).await;
+    let route = proto::EvpnRouteEntry {
+        peer_address: "fe80::1".into(),
+        route_type: 2,
+        ..Default::default()
+    };
+    server.state.evpn_events.lock().await.push(proto::BgpEvent {
+        category: proto::EventCategory::Evpn as i32,
+        event_type: proto::BgpEventType::EvpnRouteBestChanged as i32,
+        peer_address: "fe80::1".into(),
+        previous_peer_address: "fe80::1".into(),
+        payload: Some(proto::bgp_event::Payload::Evpn(proto::EvpnRouteEvent {
+            peer_address: "fe80::1".into(),
+            previous_peer_address: "fe80::1".into(),
+            peer_interface: "eth1".into(),
+            previous_peer_interface: "eth0".into(),
+            route: Some(route.clone()),
+            previous_route: Some(route),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+
+    let output = run(&server.addr, &["--json", "events", "evpn"]);
+    assert!(output.status.success(), "{output:?}");
+    let event: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(event["peer_address"], "fe80::1%eth1");
+    assert_eq!(event["previous_peer_address"], "fe80::1%eth0");
+    assert_eq!(event["route"]["peer"], "fe80::1%eth1");
+    assert_eq!(event["previous_route"]["peer"], "fe80::1%eth0");
+}
 
 fn run(addr: &str, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_rbgp"))

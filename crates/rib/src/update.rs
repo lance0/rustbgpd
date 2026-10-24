@@ -3297,6 +3297,8 @@ pub enum RibUpdate {
         /// An address, not a handle: history also names neighbors since
         /// deleted or re-added.
         peer: Option<IpAddr>,
+        /// Event-time scope of `peer`, empty for a numbered neighbor.
+        peer_interface: Option<Arc<str>>,
         /// Optional EVPN route type filter. `None` = all route types.
         route_type: Option<u8>,
         /// Optional Route Distinguisher filter. `None` = all RDs.

@@ -164,6 +164,8 @@ pub(crate) fn evpn_event(
         previous_best,
         peer,
         previous_peer,
+        peer_interface: None,
+        previous_peer_interface: None,
         timestamp_unix_ms: 123_000,
     }
 }
@@ -207,6 +209,7 @@ pub(crate) fn spawn_fake_rib_with_evpn_history(
                 }
                 RibUpdate::QueryEvpnRouteEventHistory {
                     peer,
+                    peer_interface,
                     route_type,
                     rd,
                     event_types,
@@ -229,10 +232,7 @@ pub(crate) fn spawn_fake_rib_with_evpn_history(
                             event_types.is_empty() || event_types.contains(&event.event_type)
                         })
                         .filter(|event| match peer {
-                            Some(peer) => [event.peer, event.previous_peer]
-                                .into_iter()
-                                .flatten()
-                                .any(|named| named == peer),
+                            Some(peer) => event.involves(peer, peer_interface.as_deref()),
                             None => true,
                         })
                         .take(limit)

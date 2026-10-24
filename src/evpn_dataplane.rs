@@ -6014,6 +6014,8 @@ mod tests {
             key: route.key(),
             peer: Some(route.peer.addr()),
             previous_peer: None,
+            peer_interface: None,
+            previous_peer_interface: None,
             best: Some(route),
             previous_best: None,
             timestamp_unix_ms: 0,

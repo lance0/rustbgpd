@@ -15,8 +15,9 @@ fn event_storage_layout_and_lazy_history_capacity_are_pinned() {
     // 68 B; the millisecond `i64` event time replaced a 24 B `String`; the
     // two routes' peer handles are 8 B where addresses were 17 B, and the
     // event's own two peers are event-time addresses.
+    // Their frozen interface Arcs add 32 B, independently of handle reuse.
     // Neither Arc slots nor the lazy history's initial capacity grow.
-    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 400);
+    assert_eq!(size_of::<crate::event::EvpnRouteEvent>(), 432);
     assert_eq!(size_of::<Arc<crate::event::RouteEvent>>(), 8);
     assert_eq!(size_of::<Arc<crate::event::EvpnRouteEvent>>(), 8);
 
