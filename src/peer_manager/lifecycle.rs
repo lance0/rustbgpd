@@ -126,10 +126,15 @@ impl PeerManager {
             let _ = self
                 .shutdown_handle_bounded(peer.address, context, handle)
                 .await;
-            self.metrics.reap_peer_identity_series(
-                &self.peer_metric_label(peer),
-                peer.interface.as_deref().unwrap_or(""),
-            );
+            // An interface-only neighbor's identity series belong to the
+            // neighbor, not to this endpoint: a failed start keeps them, its
+            // down history included, for the retry.
+            if !self.interface_only_owns(peer.interface.as_deref()) {
+                self.metrics.reap_peer_identity_series(
+                    &self.peer_metric_label(peer),
+                    peer.interface.as_deref().unwrap_or(""),
+                );
+            }
             return Err(error);
         }
         Ok(handle)

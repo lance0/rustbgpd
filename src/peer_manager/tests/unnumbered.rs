@@ -1738,3 +1738,35 @@ async fn a_recovered_endpoint_outlives_an_expired_discovery_binding() {
         rustbgpd_transport::StateQueryOutcome::State(_)
     ));
 }
+
+/// A failed start of an interface-only neighbor's replacement endpoint
+/// keeps the neighbor's identity series, its down history included; the
+/// retry's peer reports under the same series.
+#[tokio::test]
+async fn a_failed_endpoint_start_keeps_the_neighbors_identity_series() {
+    let mut h = harness(&["swp1"], &[("swp1", 7, true)]);
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.mgr.metrics.record_session_down(
+        "interface:swp1",
+        "swp1",
+        rustbgpd_telemetry::reason_labels::SessionDownReason::TransportError,
+    );
+    let down = |h: &Harness| {
+        sample(
+            h,
+            "bgp_session_down_total",
+            &[("peer", "interface:swp1"), ("reason", "transport_error")],
+        )
+    };
+    assert_eq!(down(&h), Some(1.0));
+    let failed = h
+        .mgr
+        .provision_new_peer_session(&swp1_key(3), true, true, closed_peer_handle(), "test start")
+        .await;
+    assert!(failed.is_err(), "the closed session cannot start");
+    // Mutation-red: reaping on this path drops the down counter.
+    assert_eq!(down(&h), Some(1.0));
+    h.bind("swp1", Some(endpoint(3, 7))).await;
+    assert_eq!(h.peers_at(ll(3)), [swp1_key(3)], "the retry binds");
+    assert_eq!(down(&h), Some(1.0));
+}
