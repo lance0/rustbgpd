@@ -836,9 +836,12 @@ pub struct NoParams {}
 /// One configured neighbor.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PeerLine {
-    /// Neighbor address.
+    /// Neighbor address. An interface-only neighbor reads as its learned
+    /// address on its interface (`fe80::2%swp1`), or its interface until it
+    /// learns one.
     pub address: String,
-    /// Peer AS.
+    /// Peer AS: the configured number, or the AS the session negotiated for
+    /// `remote_asn = "external"`/`"internal"` (0 while it is down).
     pub peer_as: u32,
     /// BGP FSM state.
     pub state: String,
@@ -848,6 +851,36 @@ pub struct PeerLine {
     pub routes_received: u64,
     /// Routes advertised to this peer.
     pub routes_advertised: u64,
+}
+
+/// See [`PeerLine::address`].
+fn neighbor_address(neighbor: &proto::NeighborState) -> String {
+    let Some(config) = neighbor.config.as_ref() else {
+        return String::new();
+    };
+    match (
+        config.address.is_empty(),
+        neighbor.learned_peer_address.is_empty(),
+    ) {
+        (true, true) => config.interface.clone(),
+        (true, false) => format!("{}%{}", neighbor.learned_peer_address, config.interface),
+        (false, _) => config.address.clone(),
+    }
+}
+
+/// See [`PeerLine::peer_as`].
+fn neighbor_peer_as(neighbor: &proto::NeighborState) -> u32 {
+    let Some(config) = neighbor.config.as_ref() else {
+        return 0;
+    };
+    match proto::RemoteAsnMode::try_from(config.remote_asn_mode) {
+        Ok(proto::RemoteAsnMode::External | proto::RemoteAsnMode::Internal) => neighbor
+            .negotiated_session
+            .as_ref()
+            .and_then(|negotiated| negotiated.remote_asn)
+            .unwrap_or(0),
+        _ => config.remote_asn,
+    }
 }
 
 /// The neighbor table.
@@ -1353,10 +1386,11 @@ impl RustbgpdMcp {
                 .neighbors
                 .into_iter()
                 .map(|neighbor| {
-                    let config = neighbor.config.unwrap_or_default();
+                    let address = neighbor_address(&neighbor);
+                    let peer_as = neighbor_peer_as(&neighbor);
                     PeerLine {
-                        address: config.address,
-                        peer_as: config.remote_asn,
+                        address,
+                        peer_as,
                         state: session_state_label(neighbor.state),
                         uptime_seconds: neighbor.uptime_seconds,
                         routes_received: neighbor.prefixes_received,
@@ -1998,6 +2032,42 @@ fn push_list<T: std::fmt::Display>(lines: &mut Vec<String>, label: &str, values:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An interface-only neighbor reads as its learned endpoint, and a
+    /// non-numeric remote ASN as the session's AS.
+    #[test]
+    fn list_peers_rows_follow_interface_only_and_asn_modes() {
+        let mut bound = proto::NeighborState {
+            config: Some(proto::NeighborConfig {
+                interface: "swp1".into(),
+                remote_asn_mode: proto::RemoteAsnMode::External as i32,
+                ..Default::default()
+            }),
+            learned_peer_address: "fe80::2".into(),
+            negotiated_session: Some(proto::NegotiatedSessionState {
+                remote_asn: Some(65009),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Mutation-red: reading the config fields gives "" and 0.
+        assert_eq!(neighbor_address(&bound), "fe80::2%swp1");
+        assert_eq!(neighbor_peer_as(&bound), 65009);
+        bound.learned_peer_address.clear();
+        bound.negotiated_session = None;
+        assert_eq!(neighbor_address(&bound), "swp1");
+        assert_eq!(neighbor_peer_as(&bound), 0);
+        let numeric = proto::NeighborState {
+            config: Some(proto::NeighborConfig {
+                address: "192.0.2.1".into(),
+                remote_asn: 65001,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(neighbor_address(&numeric), "192.0.2.1");
+        assert_eq!(neighbor_peer_as(&numeric), 65001);
+    }
 
     #[test]
     fn bearer_file_value_and_sensitivity_survive_interceptor_cloning() {

@@ -501,6 +501,15 @@ impl PeerManager {
                         rustbgpd_api::peer_types::RemoteAsnMode::Numeric
                     }
                 };
+                // A max-prefix shutdown held across the endpoint is still
+                // the neighbor's state: its reason and restart countdown.
+                if let Some(latch) = port.held.as_ref().and_then(|held| held.latch.as_ref()) {
+                    super::snapshot::apply_max_prefix_latch(
+                        &mut info,
+                        &latch.error,
+                        latch.deadline,
+                    );
+                }
                 Some(info)
             })
             .collect()

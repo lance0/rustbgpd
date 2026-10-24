@@ -882,6 +882,21 @@ pub(crate) fn remote_asn_label(config: &proto::NeighborConfig) -> String {
     }
 }
 
+/// `remote_asn` as configured, with the session's AS beside a mode that is
+/// not that number: `external (session 65009)`. `None` without a config.
+pub(crate) fn remote_asn_with_session(n: &proto::NeighborState) -> Option<String> {
+    let remote_asn = remote_asn_label(n.config.as_ref()?);
+    let negotiated = n
+        .negotiated_session
+        .as_ref()
+        .and_then(|negotiated| negotiated.remote_asn)
+        .filter(|asn| remote_asn != asn.to_string());
+    Some(match negotiated {
+        Some(asn) => format!("{remote_asn} (session {asn})"),
+        None => remote_asn,
+    })
+}
+
 /// `numeric`, `external` or `internal`, for JSON.
 pub(crate) fn remote_asn_mode_label(config: Option<&proto::NeighborConfig>) -> &'static str {
     match config.map(|c| proto::RemoteAsnMode::try_from(c.remote_asn_mode)) {

@@ -580,7 +580,20 @@ impl DetailRows {
 fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
     let cfg = n.config.as_ref();
     let mut rows = DetailRows::default();
-    rows.field(0, "Neighbor", cfg.map(|c| c.address.as_str()).unwrap_or(""));
+    // An interface-only neighbor has no address of its own; its interface
+    // names it, and Learned Address below carries the endpoint.
+    rows.field(
+        0,
+        "Neighbor",
+        cfg.map(|c| {
+            if c.address.is_empty() {
+                c.interface.as_str()
+            } else {
+                c.address.as_str()
+            }
+        })
+        .unwrap_or(""),
+    );
     let interface = cfg.map(|c| c.interface.as_str()).unwrap_or("");
     if !interface.is_empty() {
         rows.field(0, "Interface", interface);
@@ -594,16 +607,11 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
         rows.field(0, "Learned Address", learned);
         rows.field(0, "Discovery", discovery);
     }
-    let remote_asn = cfg.map(output::remote_asn_label).unwrap_or_default();
-    let negotiated_asn = n
-        .negotiated_session
-        .as_ref()
-        .and_then(|negotiated| negotiated.remote_asn)
-        .filter(|asn| remote_asn != asn.to_string());
-    match negotiated_asn {
-        Some(asn) => rows.field(0, "Remote ASN", format!("{remote_asn} (session {asn})")),
-        None => rows.field(0, "Remote ASN", remote_asn),
-    }
+    rows.field(
+        0,
+        "Remote ASN",
+        output::remote_asn_with_session(n).unwrap_or_default(),
+    );
     rows.field(
         0,
         "Description",
@@ -1837,6 +1845,14 @@ mod tests {
             "external"
         );
         let detail = render_neighbor_detail_human(&state);
+        // Mutation-red: the empty address leaves the Neighbor row blank.
+        assert!(
+            detail
+                .lines()
+                .next()
+                .is_some_and(|row| row.contains("swp1")),
+            "{detail}"
+        );
         assert!(detail.contains("Learned Address:"), "{detail}");
         assert!(detail.contains("fe80::2"), "{detail}");
         assert!(detail.contains("Discovery:"), "{detail}");

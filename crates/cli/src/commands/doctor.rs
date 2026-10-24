@@ -1008,12 +1008,12 @@ fn outbound_resync_check(identity: &str, n: &crate::proto::NeighborState) -> Opt
             ),
         )
     } else if n.outbound_dirty_seconds.unwrap_or(0) >= OUTBOUND_RESYNC_WARN_SECS {
-        // Metric `peer` labels carry the bare IP, never the `%interface` scope.
-        let label = n.config.as_ref().map_or(identity, |c| c.address.as_str());
+        // The `peer` metric label is the neighbor's identity, scoped for a
+        // link-local neighbor.
         (
             CheckStatus::Warn,
             format!(
-                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{label}\"}} and the peer's receive path"
+                "peer {identity} outbound resync has been pending for {age} (retried every second); inspect bgp_peer_outbound_queue_depth{{peer=\"{identity}\"}} and the peer's receive path"
             ),
         )
     } else {
@@ -1207,10 +1207,16 @@ fn inbound_prefix_bound_check(
     local_asn: Option<u32>,
 ) -> Option<Check> {
     let config = neighbor.config.as_ref()?;
-    let local_asn = local_asn?;
-    if neighbor.stale
+    // `remote_asn = "internal"` reads remote_asn 0 with its mode; a numeric
+    // neighbor (or an older daemon without the mode) is iBGP on the local AS.
+    let ibgp = match crate::proto::RemoteAsnMode::try_from(config.remote_asn_mode) {
+        Ok(crate::proto::RemoteAsnMode::Internal) => true,
+        Ok(crate::proto::RemoteAsnMode::External) => false,
+        _ => config.remote_asn == local_asn?,
+    };
+    if ibgp
+        || neighbor.stale
         || neighbor.state != crate::proto::SessionState::Established as i32
-        || config.remote_asn == local_asn
         || neighbor.route_reflector_client
         || config.max_prefixes != 0
         || has_inbound_bound(neighbor, "aggregate")
@@ -1329,6 +1335,17 @@ fn latest_admin_state_by_peer(events: &[serde_json::Value]) -> HashMap<String, R
         map.insert(peer.to_string(), state);
     }
     map
+}
+
+/// A neighbor's identity in check names: its address, scoped for a
+/// link-local neighbor; for an interface-only neighbor (empty address), its
+/// learned address on its interface, or the interface while unbound.
+fn neighbor_identity(config: &crate::proto::NeighborConfig, learned: &str) -> String {
+    match (config.address.is_empty(), learned.is_empty()) {
+        (true, true) if !config.interface.is_empty() => config.interface.clone(),
+        (true, false) => peer_identity(learned, &config.interface),
+        _ => peer_identity(&config.address, &config.interface),
+    }
 }
 
 fn peer_identity(address: &str, interface: &str) -> String {
@@ -3875,7 +3892,7 @@ async fn run_with_deadlines(
                     for n in &neighbors.neighbors {
                         let cfg = n.config.as_ref();
                         let identity = cfg.map_or_else(String::new, |config| {
-                            peer_identity(&config.address, &config.interface)
+                            neighbor_identity(config, &n.learned_peer_address)
                         });
                         // A down dynamic neighbor whose routes are still
                         // retained has no session or configuration to check:
@@ -3970,10 +3987,15 @@ async fn run_with_deadlines(
                             )?,
                         }
                     }
-                    for record in records
-                        .iter()
-                        .filter(|record| record.support.retention_only != Some(true))
-                    {
+                    // An unbound interface-only neighbor has no session to
+                    // check (ADR-0142); it is listed for its discovery state.
+                    for record in records.iter().filter(|record| {
+                        record.support.retention_only != Some(true)
+                            && record
+                                .support
+                                .discovery_state
+                                .is_none_or(|discovery| discovery == "bound")
+                    }) {
                         let session_evidence = if session_history_available {
                             SessionHistoryEvidence::Retained {
                                 last_transition_unix: transitions.get(&record.identity).copied(),
@@ -5213,6 +5235,19 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 "case {case}"
             );
         }
+
+        // `remote_asn = "internal"` reads remote_asn 0 with its mode: iBGP,
+        // not an unbounded eBGP session. Mutation-red: deciding iBGP from the
+        // number alone warns here.
+        let mut internal = peer.clone();
+        let config = internal.config.as_mut().unwrap();
+        config.remote_asn = 0;
+        config.remote_asn_mode = crate::proto::RemoteAsnMode::Internal as i32;
+        assert!(inbound_prefix_bound_check("fe80::1%eth0", &internal, Some(65001)).is_none());
+        let mut external = internal.clone();
+        external.config.as_mut().unwrap().remote_asn_mode =
+            crate::proto::RemoteAsnMode::External as i32;
+        assert!(inbound_prefix_bound_check("fe80::1%eth0", &external, Some(65001)).is_some());
     }
 
     #[test]
@@ -6521,8 +6556,8 @@ paths = ["x"]
             long.detail
         );
 
-        // A link-local neighbor keeps its scope in the name and description,
-        // but the metric selector must use the bare `peer` label value.
+        // A link-local neighbor keeps its scope in the name, the description
+        // and the metric selector: its `peer` label value is scoped.
         let mut scoped = n.clone();
         scoped.config = Some(crate::proto::NeighborConfig {
             address: "fe80::1".to_string(),
@@ -6535,7 +6570,7 @@ paths = ["x"]
         assert!(
             scoped
                 .detail
-                .contains("bgp_peer_outbound_queue_depth{peer=\"fe80::1\"}"),
+                .contains("bgp_peer_outbound_queue_depth{peer=\"fe80::1%eth0\"}"),
             "{}",
             scoped.detail
         );
@@ -8927,6 +8962,70 @@ paths = ["x"]
                  and logs for actual dial-out state; troubleshoot the CLI path only when rbgp \
                  and rustbgpd are expected to share a network vantage"
             )
+        );
+    }
+
+    /// An interface-only neighbor is checked under its learned address on
+    /// its interface; an unbound one has no session to report stuck.
+    #[tokio::test]
+    async fn doctor_checks_interface_only_neighbors_by_their_endpoint() {
+        let server = spawn_mock_server(None).await;
+        let state_dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
+            state_dir.path().display()
+        ));
+        let interface_only = |interface: &str, learned: &str, state: i32, discovery| {
+            let mut row = neighbor("", state, 0, "fabric");
+            row.config.as_mut().unwrap().interface = interface.to_string();
+            row.learned_peer_address = learned.to_string();
+            row.discovery_state = discovery as i32;
+            row
+        };
+        use rustbgpd_api::proto::NeighborDiscoveryState as D;
+        *server.state.list_neighbors_response.lock().await = vec![
+            interface_only("swp1", "fe80::2", 6, D::Bound),
+            interface_only("swp2", "", 1, D::AwaitingDiscovery),
+        ];
+        let connection = connect(&server.addr, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        run(
+            connection,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+                pre_upgrade: None,
+            },
+        )
+        .await
+        .unwrap();
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        let names: Vec<&str> = manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|check| check["name"].as_str())
+            .collect();
+        // Mutation-red: keying by the empty address names it `peer.%swp1`,
+        // and checking the unbound row reports it stuck in Idle.
+        assert!(names.contains(&"peer.fe80::2%swp1.session"), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("%swp1.") && !name.contains("fe80::2")),
+            "{names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("swp2") && name.ends_with(".session")),
+            "{names:?}"
         );
     }
 

@@ -636,6 +636,17 @@ async fn operator_and_max_prefix_state_survive_endpoint_retirement() {
     h.links_changed(snapshot(true, &[("swp1", 7, false)]));
     h.reconcile().await;
     assert!(!h.mgr.peers.contains_key(&old));
+    // Unbound, the row still reports the shutdown and its countdown.
+    // Mutation-red: projecting only `held.enabled` drops both.
+    let rows = h.mgr.list_peers().await;
+    let unbound = rows
+        .iter()
+        .find(|info| info.interface.as_deref() == Some("swp1"))
+        .expect("the unbound row");
+    assert!(!unbound.enabled);
+    assert_eq!(unbound.last_error, "max-prefix");
+    assert_eq!(unbound.max_prefix_action, "restart");
+    assert!(unbound.max_prefix_restart_remaining_millis.is_some());
     h.links_changed(snapshot(true, &[("swp1", 7, true)]));
     h.bind("swp1", Some(endpoint(2, 7))).await;
     // Mutation-red: a fresh peer comes back enabled with no latch.
