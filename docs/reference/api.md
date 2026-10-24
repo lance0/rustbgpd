@@ -1266,6 +1266,10 @@ runtime, with the same effect as a SIGHUP reload of the stanza (see the
 - A `SetPeerGroup` edit that changes an interface-only member's session
   settings rebinds that member, as a reload does; members whose settings do
   not change keep their sessions.
+- `SetNeighborPeerGroup` and `ClearNeighborPeerGroup` take an `interface`
+  field. With an empty address it selects that interface's interface-only
+  neighbor, which rebinds under its new group; with a link-local address it
+  is the address's scope, as for `DeleteNeighbor`.
 
 ### Add a neighbor
 

@@ -4213,3 +4213,57 @@ async fn an_rpc_delete_reaps_the_neighbors_interface_labelled_series() {
         "the RIB reaps the bound neighbor's series under its interface label"
     );
 }
+
+/// `SetNeighborPeerGroup` and `ClearNeighborPeerGroup` select an
+/// interface-only neighbor by interface: the member rebinds into and out of
+/// the group on the reconcile, and the other neighbor keeps its session.
+#[tokio::test]
+async fn a_membership_rpc_moves_an_interface_only_neighbor_between_groups() {
+    use rustbgpd_api::peer_types::{OwnedCatalogMutation, OwnedCatalogMutationOutcome};
+    let config = config_with(&format!(
+        "[peer_groups.fabric]\nhold_time = 30\n{}{}",
+        port_stanza("swp1", ""),
+        port_stanza("swp2", "")
+    ));
+    let mut h = harness(&[], &[("swp1", 7, true), ("swp2", 8, true)]);
+    h.reload(config).await;
+    h.bind("swp1", Some(endpoint(2, 7))).await;
+    h.bind("swp2", Some(endpoint(3, 8))).await;
+    let swp2 = PeerKey::new(IpAddr::V6(ll(3)), Some("swp2".into()));
+    let swp1_session = h.session(&swp1_key(2));
+    let selector = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+    for (mutation, hold) in [
+        (
+            OwnedCatalogMutation::SetNeighborPeerGroup {
+                address: selector,
+                interface: Some("swp2".into()),
+                peer_group: "fabric".into(),
+            },
+            Some(30),
+        ),
+        (
+            OwnedCatalogMutation::ClearNeighborPeerGroup {
+                address: selector,
+                interface: Some("swp2".into()),
+            },
+            Some(90),
+        ),
+    ] {
+        let session = h.session(&swp2);
+        let (reply, outcome) = oneshot::channel();
+        let _ = Box::pin(
+            h.mgr
+                .dispatch_command(PeerManagerCommand::OwnedCatalogMutation { mutation, reply }),
+        )
+        .await;
+        let outcome = outcome.await.unwrap();
+        assert!(
+            matches!(outcome, OwnedCatalogMutationOutcome::Success),
+            "{outcome:?}"
+        );
+        h.reconcile().await;
+        assert_ne!(h.session(&swp2), session, "swp2 rebound");
+        assert_eq!(h.mgr.peers[&swp2].hold_time, hold);
+        assert_eq!(h.session(&swp1_key(2)), swp1_session, "swp1 kept");
+    }
+}

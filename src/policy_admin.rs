@@ -317,10 +317,20 @@ fn neighbor_mut<'a>(
     interface: Option<&String>,
 ) -> Result<&'a mut Neighbor, ConfigError> {
     let addr = address.to_string();
+    // ADR-0142: the unspecified address with an interface names that
+    // interface's interface-only neighbor, as the neighbor RPCs select it.
+    let interface_only = address.is_unspecified() && interface.is_some();
     config
         .neighbors
-        .iter_mut()
-        .find(|neighbor| neighbor.address == addr && neighbor.interface.as_ref() == interface)
+        .all_mut()
+        .find(|neighbor| {
+            neighbor.interface.as_ref() == interface
+                && if interface_only {
+                    neighbor.address.is_empty()
+                } else {
+                    neighbor.address == addr
+                }
+        })
         .ok_or_else(|| ConfigError::InvalidNeighborAddress {
             value: addr,
             reason: NEIGHBOR_NOT_FOUND_REASON.to_string(),
@@ -1160,6 +1170,52 @@ remote_asn = 65002
         .unwrap();
         assert_eq!(config.neighbors.interface_only(), []);
         assert_eq!(config.neighbors.len(), addressed);
+    }
+
+    /// ADR-0142: a membership event naming the unspecified address with an
+    /// interface edits that interface's interface-only stanza.
+    #[test]
+    fn membership_events_edit_the_interface_only_stanza() {
+        let mut config = minimal_config();
+        let stanza: Neighbor =
+            toml::from_str("interface = \"swp1\"\nremote_asn = \"external\"\n").unwrap();
+        config.neighbors.set_interface_only("swp1", Some(stanza));
+        config.peer_groups.insert(
+            "fabric".to_string(),
+            toml::from_str("hold_time = 30\n").unwrap(),
+        );
+        let address = IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED);
+        let interface = Some("swp1".to_string());
+        // Mutation-red: matching the address text finds no neighbor.
+        apply_config_event(
+            &mut config,
+            &ConfigEvent::SetNeighborPeerGroup {
+                address,
+                interface: interface.clone(),
+                peer_group: "fabric".to_string(),
+                ack: None,
+            },
+        )
+        .unwrap();
+        let group = |config: &Config| {
+            config
+                .neighbors
+                .interface_only_on("swp1")
+                .unwrap()
+                .peer_group
+                .clone()
+        };
+        assert_eq!(group(&config).as_deref(), Some("fabric"));
+        apply_config_event(
+            &mut config,
+            &ConfigEvent::ClearNeighborPeerGroup {
+                address,
+                interface,
+                ack: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(group(&config), None);
     }
 
     #[test]

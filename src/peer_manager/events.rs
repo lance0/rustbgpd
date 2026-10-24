@@ -72,6 +72,11 @@ impl PeerManager {
                         target_type: &'static str,
                         address: &IpAddr,
                         interface: &Option<String>| {
+            // ADR-0142: the unspecified address names the interface-only
+            // neighbor on `interface`, which has no peer key of its own.
+            if let Some(name) = interface.as_ref().filter(|_| address.is_unspecified()) {
+                return (operation, target_type, format!("interface {name}"), None);
+            }
             let peer = PeerKey::new(*address, interface.clone());
             (operation, target_type, address.to_string(), Some(peer))
         };

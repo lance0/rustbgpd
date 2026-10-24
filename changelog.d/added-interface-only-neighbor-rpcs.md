@@ -4,7 +4,9 @@
   at runtime. An empty `address` with an `interface` names the neighbor, and
   `remote_asn_mode` `EXTERNAL`/`INTERNAL` is carried on the add. A
   `SetPeerGroup` edit that changes an interface-only member's session
-  settings rebinds that member instead of being refused. See
+  settings rebinds that member instead of being refused, and the new
+  `interface` field of `SetNeighborPeerGroup` and `ClearNeighborPeerGroup`
+  moves an interface-only neighbor between groups. See
   [interface-only neighbors](../docs/reference/api.md#interface-only-neighbors).
   **Operator-visible:** the first interface-only neighbor added without
   `CAP_NET_RAW` or the link monitor, and a static link-local add whose
