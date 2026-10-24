@@ -395,7 +395,7 @@ fn family_label(value: i32) -> String {
 /// "Why is this prefix not advertised to that peer?"
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ExplainExportParams {
-    /// IPv4 or IPv6 literal of the peer the route would be advertised to.
+    /// Peer the route would be advertised to; link-local IPv6 uses `fe80::1%eth0`.
     pub peer_address: String,
     /// Prefix to explain, without the length (e.g. `203.0.113.0`).
     pub prefix: String,
@@ -460,7 +460,7 @@ pub struct ReasonLine {
 /// "Why didn't this prefix come in?"
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ExplainImportParams {
-    /// IPv4 or IPv6 literal of the peer whose import-decision cache to consult.
+    /// Peer whose cache to consult; link-local IPv6 uses `fe80::1%eth0`.
     pub peer_address: String,
     /// Prefix to explain, without the length.
     pub prefix: String,
@@ -572,7 +572,7 @@ pub struct ExplainBestPathResult {
 /// "What did this peer send that we threw away?"
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListRejectedParams {
-    /// IPv4 or IPv6 literal of the peer whose retention store to list.
+    /// Peer whose retention store to list; link-local IPv6 uses `fe80::1%eth0`.
     pub peer_address: String,
     /// Maximum rejections to return. `0` or omitted returns everything the
     /// daemon retained; a smaller value sets `truncated` when it bites.
@@ -836,7 +836,8 @@ pub struct NoParams {}
 /// One configured neighbor.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PeerLine {
-    /// Neighbor address. An interface-only neighbor reads as its learned
+    /// Neighbor address, scoped as `fe80::1%eth0` for a link-local neighbor.
+    /// An interface-only neighbor reads as its learned
     /// address on its interface (`fe80::2%swp1`), or its interface until it
     /// learns one.
     pub address: String,
@@ -853,6 +854,15 @@ pub struct PeerLine {
     pub routes_advertised: u64,
 }
 
+/// Keep empty/local sources empty and preserve already scoped responses.
+fn scoped_peer_address(address: &str, interface: &str) -> String {
+    if address.is_empty() || interface.is_empty() || address.contains('%') {
+        address.to_owned()
+    } else {
+        format!("{address}%{interface}")
+    }
+}
+
 /// See [`PeerLine::address`].
 fn neighbor_address(neighbor: &proto::NeighborState) -> String {
     let Some(config) = neighbor.config.as_ref() else {
@@ -863,8 +873,8 @@ fn neighbor_address(neighbor: &proto::NeighborState) -> String {
         neighbor.learned_peer_address.is_empty(),
     ) {
         (true, true) => config.interface.clone(),
-        (true, false) => format!("{}%{}", neighbor.learned_peer_address, config.interface),
-        (false, _) => config.address.clone(),
+        (true, false) => scoped_peer_address(&neighbor.learned_peer_address, &config.interface),
+        (false, _) => scoped_peer_address(&config.address, &config.interface),
     }
 }
 
@@ -1183,27 +1193,7 @@ impl RustbgpdMcp {
             )
             .await?;
 
-        let gates = gate_ladder(&response.gates);
-
-        Ok(Json(ExplainExportResult {
-            decision: decision_label(response.decision),
-            peer_address: response.peer_address,
-            prefix: format!("{}/{}", response.prefix, response.prefix_length),
-            next_hop: response.next_hop,
-            route_peer_address: response.route_peer_address,
-            stopped_at_gate: stopped_at_gate(&gates),
-            gates,
-            reasons: response
-                .reasons
-                .into_iter()
-                .map(|reason| ReasonLine {
-                    code: reason.code,
-                    message: reason.message,
-                })
-                .collect(),
-            modifications: render_modifications(response.modifications.as_ref()),
-            already_advertised: response.already_advertised,
-        }))
+        Ok(Json(explain_export_result(response)))
     }
 
     /// Explain the cached import decision for one prefix on one session.
@@ -1233,26 +1223,7 @@ impl RustbgpdMcp {
             )
             .await?;
 
-        Ok(Json(ExplainImportResult {
-            peer_address: response.peer_address,
-            prefix: format!("{}/{}", response.prefix, response.prefix_length),
-            family: family_label(response.afi_safi),
-            current_policy_generation: response.current_policy_generation,
-            matches: response
-                .matches
-                .into_iter()
-                .map(|entry| ImportMatch {
-                    outcome: import_outcome_label(entry.outcome),
-                    prefix: format!("{}/{}", entry.prefix, entry.prefix_length),
-                    path_id: entry.path_id,
-                    matched_policy: entry.matched_policy,
-                    rpki_validation: entry.rpki_validation,
-                    aspa_validation: entry.aspa_validation,
-                    modifications: render_modifications(entry.modifications.as_ref()),
-                    statements: render_statements(&entry.statements),
-                })
-                .collect(),
-        }))
+        Ok(Json(explain_import_result(response)))
     }
 
     /// Explain best-path selection and retained eligibility reasons for a prefix.
@@ -1276,31 +1247,7 @@ impl RustbgpdMcp {
             }))
             .await?;
 
-        let best = response.best_route.unwrap_or_default();
-        Ok(Json(ExplainBestPathResult {
-            prefix: format!("{}/{}", response.prefix, response.prefix_length),
-            peer_address: response.peer_address,
-            best_as_path: render_as_path(&best.as_path),
-            best_peer_address: best.peer_address,
-            best_next_hop: best.next_hop,
-            best_reason: response.best_reason,
-            best_reason_detail: response.best_reason_detail,
-            candidates: response
-                .candidates
-                .into_iter()
-                .map(|candidate| {
-                    let route = candidate.route.unwrap_or_default();
-                    BestPathCandidateLine {
-                        as_path: render_as_path(&route.as_path),
-                        peer_address: route.peer_address,
-                        next_hop: route.next_hop,
-                        vs_best_reason: candidate.vs_best_reason,
-                        vs_best_detail: candidate.vs_best_detail,
-                        multipath: candidate.multipath,
-                    }
-                })
-                .collect(),
-        }))
+        Ok(Json(explain_best_path_result(response)))
     }
 
     /// List the rejections one peer's session retained.
@@ -1325,44 +1272,7 @@ impl RustbgpdMcp {
             )
             .await?;
 
-        let retained = response.routes.len();
-        let limit = params
-            .limit
-            .filter(|limit| *limit > 0)
-            .map_or(retained, |limit| limit as usize);
-        let truncated_by_limit = retained.saturating_sub(limit);
-        let at_capacity = response.capacity > 0 && retained >= response.capacity as usize;
-
-        Ok(Json(ListRejectedResult {
-            retention_note: retention_note(
-                response.retention_enabled,
-                at_capacity,
-                retained,
-                response.evictions_since_reset,
-                truncated_by_limit,
-            ),
-            peer_address: response.peer_address,
-            retention_enabled: response.retention_enabled,
-            capacity: response.capacity,
-            routes: response
-                .routes
-                .into_iter()
-                .take(limit)
-                .map(|route| RejectedRouteLine {
-                    prefix: format!("{}/{}", route.prefix, route.prefix_length),
-                    path_id: route.path_id,
-                    reason: route.reason,
-                    reason_detail: route.reason_detail,
-                    next_hop: route.next_hop,
-                    as_path: route.as_path,
-                    rpki_validation: route.rpki_validation,
-                    aspa_validation: route.aspa_validation,
-                    rejected_at_unix_ns: route.rejected_at_unix_ns,
-                })
-                .collect(),
-            truncated_by_limit,
-            evictions_since_reset: response.evictions_since_reset,
-        }))
+        Ok(Json(list_rejected_result(response, params.limit)))
     }
 
     /// List configured neighbors and their session state.
@@ -1932,6 +1842,127 @@ fn stopped_at_gate(gates: &[GateStep]) -> Option<String> {
         .map(|step| step.gate.clone())
 }
 
+fn explain_export_result(response: proto::ExplainAdvertisedRouteResponse) -> ExplainExportResult {
+    let gates = gate_ladder(&response.gates);
+
+    ExplainExportResult {
+        decision: decision_label(response.decision),
+        peer_address: scoped_peer_address(&response.peer_address, &response.peer_interface),
+        prefix: format!("{}/{}", response.prefix, response.prefix_length),
+        next_hop: response.next_hop,
+        route_peer_address: scoped_peer_address(
+            &response.route_peer_address,
+            &response.route_peer_interface,
+        ),
+        stopped_at_gate: stopped_at_gate(&gates),
+        gates,
+        reasons: response
+            .reasons
+            .into_iter()
+            .map(|reason| ReasonLine {
+                code: reason.code,
+                message: reason.message,
+            })
+            .collect(),
+        modifications: render_modifications(response.modifications.as_ref()),
+        already_advertised: response.already_advertised,
+    }
+}
+
+fn explain_import_result(response: proto::ExplainImportPolicyResponse) -> ExplainImportResult {
+    ExplainImportResult {
+        peer_address: scoped_peer_address(&response.peer_address, &response.peer_interface),
+        prefix: format!("{}/{}", response.prefix, response.prefix_length),
+        family: family_label(response.afi_safi),
+        current_policy_generation: response.current_policy_generation,
+        matches: response
+            .matches
+            .into_iter()
+            .map(|entry| ImportMatch {
+                outcome: import_outcome_label(entry.outcome),
+                prefix: format!("{}/{}", entry.prefix, entry.prefix_length),
+                path_id: entry.path_id,
+                matched_policy: entry.matched_policy,
+                rpki_validation: entry.rpki_validation,
+                aspa_validation: entry.aspa_validation,
+                modifications: render_modifications(entry.modifications.as_ref()),
+                statements: render_statements(&entry.statements),
+            })
+            .collect(),
+    }
+}
+
+fn explain_best_path_result(response: proto::ExplainBestPathResponse) -> ExplainBestPathResult {
+    let best = response.best_route.unwrap_or_default();
+    ExplainBestPathResult {
+        prefix: format!("{}/{}", response.prefix, response.prefix_length),
+        peer_address: scoped_peer_address(&response.peer_address, &response.peer_interface),
+        best_as_path: render_as_path(&best.as_path),
+        best_peer_address: scoped_peer_address(&best.peer_address, &best.peer_interface),
+        best_next_hop: best.next_hop,
+        best_reason: response.best_reason,
+        best_reason_detail: response.best_reason_detail,
+        candidates: response
+            .candidates
+            .into_iter()
+            .map(|candidate| {
+                let route = candidate.route.unwrap_or_default();
+                BestPathCandidateLine {
+                    as_path: render_as_path(&route.as_path),
+                    peer_address: scoped_peer_address(&route.peer_address, &route.peer_interface),
+                    next_hop: route.next_hop,
+                    vs_best_reason: candidate.vs_best_reason,
+                    vs_best_detail: candidate.vs_best_detail,
+                    multipath: candidate.multipath,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn list_rejected_result(
+    response: proto::ListRejectedRoutesResponse,
+    requested_limit: Option<u32>,
+) -> ListRejectedResult {
+    let retained = response.routes.len();
+    let limit = requested_limit
+        .filter(|limit| *limit > 0)
+        .map_or(retained, |limit| limit as usize);
+    let truncated_by_limit = retained.saturating_sub(limit);
+    let at_capacity = response.capacity > 0 && retained >= response.capacity as usize;
+
+    ListRejectedResult {
+        retention_note: retention_note(
+            response.retention_enabled,
+            at_capacity,
+            retained,
+            response.evictions_since_reset,
+            truncated_by_limit,
+        ),
+        peer_address: scoped_peer_address(&response.peer_address, &response.peer_interface),
+        retention_enabled: response.retention_enabled,
+        capacity: response.capacity,
+        routes: response
+            .routes
+            .into_iter()
+            .take(limit)
+            .map(|route| RejectedRouteLine {
+                prefix: format!("{}/{}", route.prefix, route.prefix_length),
+                path_id: route.path_id,
+                reason: route.reason,
+                reason_detail: route.reason_detail,
+                next_hop: route.next_hop,
+                as_path: route.as_path,
+                rpki_validation: route.rpki_validation,
+                aspa_validation: route.aspa_validation,
+                rejected_at_unix_ns: route.rejected_at_unix_ns,
+            })
+            .collect(),
+        truncated_by_limit,
+        evictions_since_reset: response.evictions_since_reset,
+    }
+}
+
 fn evpn_route_line(entry: &proto::EvpnRouteEntry) -> EvpnRouteLine {
     EvpnRouteLine {
         route_type: entry.route_type,
@@ -2067,6 +2098,133 @@ mod tests {
         };
         assert_eq!(neighbor_address(&numeric), "192.0.2.1");
         assert_eq!(neighbor_peer_as(&numeric), 65001);
+        for interface in ["eth0", "eth1"] {
+            let scoped = proto::NeighborState {
+                config: Some(proto::NeighborConfig {
+                    address: "fe80::1".into(),
+                    interface: interface.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert_eq!(neighbor_address(&scoped), format!("fe80::1%{interface}"));
+        }
+    }
+
+    #[test]
+    fn explain_projections_keep_same_address_neighbors_distinct() {
+        let export = explain_export_result(proto::ExplainAdvertisedRouteResponse {
+            peer_address: "fe80::1".into(),
+            peer_interface: "eth0".into(),
+            route_peer_address: "fe80::1".into(),
+            route_peer_interface: "eth1".into(),
+            ..Default::default()
+        });
+        assert_eq!(export.peer_address, "fe80::1%eth0");
+        assert_eq!(export.route_peer_address, "fe80::1%eth1");
+        let import = explain_import_result(proto::ExplainImportPolicyResponse {
+            peer_address: "fe80::1".into(),
+            peer_interface: "eth1".into(),
+            ..Default::default()
+        });
+        assert_eq!(import.peer_address, "fe80::1%eth1");
+        let best = explain_best_path_result(proto::ExplainBestPathResponse {
+            peer_address: "fe80::1".into(),
+            peer_interface: "eth2".into(),
+            best_route: Some(proto::Route {
+                peer_address: "fe80::1".into(),
+                peer_interface: "eth0".into(),
+                ..Default::default()
+            }),
+            candidates: vec![proto::BestPathCandidate {
+                route: Some(proto::Route {
+                    peer_address: "fe80::1".into(),
+                    peer_interface: "eth1".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert_eq!(best.peer_address, "fe80::1%eth2");
+        assert_eq!(best.best_peer_address, "fe80::1%eth0");
+        assert_eq!(best.candidates[0].peer_address, "fe80::1%eth1");
+        for (peer, interface, expected) in [
+            ("fe80::1", "eth0", "fe80::1%eth0"),
+            ("fe80::1", "eth1", "fe80::1%eth1"),
+            ("192.0.2.1", "", "192.0.2.1"),
+            ("", "eth0", ""),
+        ] {
+            let rejected = list_rejected_result(
+                proto::ListRejectedRoutesResponse {
+                    peer_address: peer.into(),
+                    peer_interface: interface.into(),
+                    retention_enabled: false,
+                    ..Default::default()
+                },
+                None,
+            );
+            assert_eq!(rejected.peer_address, expected);
+            assert!(!rejected.retention_enabled);
+            assert!(rejected.retention_note.contains("retention is disabled"));
+            assert!(rejected.routes.is_empty());
+        }
+        // EVPN entries already carry a scoped address in the upstream response.
+        for peer in ["fe80::1%eth0", "fe80::1%eth1", "192.0.2.1", ""] {
+            assert_eq!(
+                evpn_route_line(&proto::EvpnRouteEntry {
+                    peer_address: peer.into(),
+                    ..Default::default()
+                })
+                .peer_address,
+                peer
+            );
+        }
+        assert_eq!(scoped_peer_address("192.0.2.1", ""), "192.0.2.1");
+        assert_eq!(scoped_peer_address("", "eth0"), "");
+        assert_eq!(scoped_peer_address("fe80::1%eth0", "eth0"), "fe80::1%eth0");
+    }
+
+    #[tokio::test]
+    async fn listed_scoped_peers_pass_the_upstream_explain_parser() {
+        use proto::rib_service_server::RibService as _;
+        let (rib_tx, rib_rx) = tokio::sync::mpsc::channel(1);
+        drop(rib_rx);
+        let service = rustbgpd_api::rib_service::RibService::with_status_snapshots(
+            rib_tx,
+            std::sync::Arc::new(Vec::new),
+            std::sync::Arc::new(Vec::new),
+        );
+        for (address, learned, interface) in [
+            ("fe80::1", "", "eth0"),
+            ("fe80::1", "", "eth1"),
+            ("", "fe80::1", "swp1"),
+            ("192.0.2.1", "", ""),
+        ] {
+            let selector = neighbor_address(&proto::NeighborState {
+                config: Some(proto::NeighborConfig {
+                    address: address.into(),
+                    interface: interface.into(),
+                    ..Default::default()
+                }),
+                learned_peer_address: learned.into(),
+                ..Default::default()
+            });
+            let error = service
+                .explain_best_path(Request::new(proto::ExplainBestPathRequest {
+                    peer_address: selector.clone(),
+                    prefix: "203.0.113.0".into(),
+                    prefix_length: 24,
+                }))
+                .await
+                .unwrap_err();
+            // The closed backend is reached only after the upstream parser accepts it.
+            assert_eq!(
+                error.code(),
+                tonic::Code::Unavailable,
+                "{selector}: {error}"
+            );
+        }
     }
 
     #[test]

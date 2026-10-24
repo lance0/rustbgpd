@@ -141,6 +141,12 @@ path returns an error; the MCP server does not retry the call automatically.
 | `rbgp_get_policy_stats` | Which installed policy terms matched, and did evaluations error? |
 | `rbgp_test_policy` | What does a candidate rpol do to a bounded current route snapshot? |
 
+Link-local neighbor selectors include their interface, as `fe80::1%eth0`.
+Peer listings and explanations preserve this scope for the target, winner,
+and other route sources. An interface-only neighbor lists its learned scoped
+address while bound, or its interface name until discovery supplies an address;
+explain tools need the learned scoped address.
+
 `rbgp_explain_export` returns the full export-gate ladder in live evaluation
 order. Against a daemon whose export policy blocks the prefix:
 
