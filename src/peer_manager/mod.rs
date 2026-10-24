@@ -2042,7 +2042,7 @@ impl PeerManager {
                         OperatorReadAdmission::Served,
                     )
                     .await
-                    .map_err(|failure| failure.message);
+                    .map_err(policy::PolicySnapshotFailure::into_apply_error);
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ApplyPolicyImpactSnapshot {

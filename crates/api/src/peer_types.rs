@@ -680,6 +680,27 @@ pub struct ResolvedPeerPolicy {
     pub export_policy: Option<PolicyChain>,
 }
 
+/// A failed [`PeerManagerCommand::ApplyResolvedPolicySnapshot`] or
+/// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`], classified by what it
+/// left on the live sessions, so the caller can settle without parsing text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicySnapshotApplyError {
+    /// No session effect remains: rejected before any effect, or every peer
+    /// already changed was restored.
+    NoEffect(String),
+    /// A restore of a peer already changed failed: a live session may still
+    /// run the requested chains.
+    CompensationAmbiguous(String),
+}
+
+impl std::fmt::Display for PolicySnapshotApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoEffect(message) | Self::CompensationAmbiguous(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Reply payload of [`PeerManagerCommand::RuntimeConfigSnapshot`]: the
 /// normalized runtime TOML plus the live compiled `.rpol` registry
 /// (which the TOML deliberately excludes — see the command docs).
@@ -986,7 +1007,7 @@ pub enum PeerManagerCommand {
         /// Resolved chains to apply, one entry per concrete live peer.
         targets: Vec<ResolvedPeerPolicy>,
         /// Reply returns the captured prior chains (the rollback token).
-        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
+        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError>>,
     },
     /// Apply resolved import/export policy chains for a live-impact
     /// transaction that may include static neighbors and dynamic ranges.
@@ -1003,7 +1024,7 @@ pub enum PeerManagerCommand {
         /// Dynamic-range selectors to expand against live dynamic peers.
         dynamic_ranges: Vec<DynamicRangeTarget>,
         /// Reply returns the captured prior chains (the rollback token).
-        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, String>>,
+        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError>>,
     },
     /// Gracefully reset the live dynamic sessions accepted by the given
     /// `[[dynamic_neighbors]]` ranges so they re-accept under the committed

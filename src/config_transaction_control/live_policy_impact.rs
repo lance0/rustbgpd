@@ -1,7 +1,8 @@
 use tokio::sync::{mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicRangeTarget, PeerManagerCommand, ResolvedPeerPolicy,
+    ConfigEvent, DynamicRangeTarget, PeerManagerCommand, PolicySnapshotApplyError,
+    ResolvedPeerPolicy,
 };
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::server::ConfigTransactionApplyError;
@@ -59,7 +60,8 @@ pub(super) async fn commit_live_policy_impact_locked(
         Err(error) => {
             // The peer-manager command self-heals its live mutations on a
             // mid-fanout failure, so only the staged snapshot needs rollback.
-            // A lost reply is fenced instead: its live mutations are unknown.
+            // A lost reply or a failed self-heal is fenced instead: its live
+            // mutations are unknown.
             progress.begin_settling();
             return Err(rollback_snapshot_after_error(
                 peer_mgr_internal_tx,
@@ -215,7 +217,7 @@ async fn send_apply_policy_impact_snapshot(
             reason: RuntimeConfigFenceReason::AcknowledgementLost,
             message: "peer manager accepted policy-impact apply but dropped its reply".to_string(),
         })?
-        .map_err(ConfigTransactionApplyError::Internal)
+        .map_err(snapshot_apply_error)
 }
 
 /// Send `ApplyResolvedPolicySnapshot` and return the captured prior chains.
@@ -241,7 +243,24 @@ async fn send_apply_resolved_policy_snapshot(
             message: "peer manager accepted resolved-policy apply but dropped its reply"
                 .to_string(),
         })?
-        .map_err(ConfigTransactionApplyError::Internal)
+        .map_err(snapshot_apply_error)
+}
+
+/// A delivered failure settles cleanly only when the actor restored every
+/// peer it changed; otherwise a session may run chains no config names, so
+/// the owner fences instead of rolling back.
+fn snapshot_apply_error(error: PolicySnapshotApplyError) -> ConfigTransactionApplyError {
+    match error {
+        PolicySnapshotApplyError::NoEffect(message) => {
+            ConfigTransactionApplyError::Internal(message)
+        }
+        PolicySnapshotApplyError::CompensationAmbiguous(message) => {
+            ConfigTransactionApplyError::RecoveryRequired {
+                reason: RuntimeConfigFenceReason::KnownDivergence,
+                message,
+            }
+        }
+    }
 }
 
 async fn rollback_live_policy_and_snapshot(

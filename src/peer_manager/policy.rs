@@ -7,7 +7,7 @@ use std::time::Instant;
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, DynamicRangeTarget, ImportValidationDependency,
     OwnedCatalogMutationOutcome, PeerGroupDefinition, PeerKey, PeerManagerNeighborConfig,
-    ResolvedPeerPolicy,
+    PolicySnapshotApplyError, ResolvedPeerPolicy,
 };
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 use rustbgpd_fsm::SessionState;
@@ -344,6 +344,20 @@ impl PolicySnapshotFailure {
             PolicySnapshotFailureKind::FullyCompensated
             | PolicySnapshotFailureKind::CompensationAmbiguous => {
                 CatalogMutationError::internal(self.code.as_str())
+            }
+        }
+    }
+
+    /// The reply a config transaction settles from: an ambiguous restore
+    /// keeps its classification across the actor boundary.
+    pub(super) fn into_apply_error(self) -> PolicySnapshotApplyError {
+        match self.kind {
+            PolicySnapshotFailureKind::RejectedNoEffect
+            | PolicySnapshotFailureKind::FullyCompensated => {
+                PolicySnapshotApplyError::NoEffect(self.message)
+            }
+            PolicySnapshotFailureKind::CompensationAmbiguous => {
+                PolicySnapshotApplyError::CompensationAmbiguous(self.message)
             }
         }
     }
@@ -2318,7 +2332,7 @@ impl PeerManager {
         &mut self,
         static_targets: Vec<ResolvedPeerPolicy>,
         dynamic_ranges: Vec<DynamicRangeTarget>,
-    ) -> Result<Vec<ResolvedPeerPolicy>, String> {
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError> {
         // ADR-0142: an interface-only neighbor's target names its interface
         // with an unspecified address; it applies to the bound peer, and an
         // unbound neighbor takes the chains when it binds.
@@ -2333,7 +2347,9 @@ impl PeerManager {
                 Some(target)
             })
             .collect();
-        let mut dynamic_targets = self.resolve_dynamic_policy_targets(&dynamic_ranges)?;
+        let mut dynamic_targets = self
+            .resolve_dynamic_policy_targets(&dynamic_ranges)
+            .map_err(PolicySnapshotApplyError::NoEffect)?;
         static_targets.append(&mut dynamic_targets);
         self.apply_resolved_policy_snapshot_with_prestage_reads(
             static_targets,
@@ -2341,7 +2357,7 @@ impl PeerManager {
             OperatorReadAdmission::Served,
         )
         .await
-        .map_err(|failure| failure.message)
+        .map_err(PolicySnapshotFailure::into_apply_error)
     }
 
     fn resolve_dynamic_policy_targets(
