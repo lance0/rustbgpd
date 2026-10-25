@@ -459,6 +459,63 @@ impl NetlinkSubscriber {
     }
 }
 
+/// Closed `kind` vocabulary of `bgp_rib_actor_turn_duration_seconds`: the
+/// inbound RIB message class one actor turn handled. The RIB maps every
+/// message variant here with an exhaustive match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RibActorTurnKind {
+    Routes,
+    EndOfRib,
+    PeerUp,
+    PeerDown,
+    PeerLifecycle,
+    PeerState,
+    OutboundPolicy,
+    OutboundReplay,
+    RouteRefresh,
+    Injection,
+    Validation,
+    Dampening,
+    Query,
+}
+
+impl RibActorTurnKind {
+    pub const ALL: [Self; 13] = [
+        Self::Routes,
+        Self::EndOfRib,
+        Self::PeerUp,
+        Self::PeerDown,
+        Self::PeerLifecycle,
+        Self::PeerState,
+        Self::OutboundPolicy,
+        Self::OutboundReplay,
+        Self::RouteRefresh,
+        Self::Injection,
+        Self::Validation,
+        Self::Dampening,
+        Self::Query,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Routes => "routes",
+            Self::EndOfRib => "end_of_rib",
+            Self::PeerUp => "peer_up",
+            Self::PeerDown => "peer_down",
+            Self::PeerLifecycle => "peer_lifecycle",
+            Self::PeerState => "peer_state",
+            Self::OutboundPolicy => "outbound_policy",
+            Self::OutboundReplay => "outbound_replay",
+            Self::RouteRefresh => "route_refresh",
+            Self::Injection => "injection",
+            Self::Validation => "validation",
+            Self::Dampening => "dampening",
+            Self::Query => "query",
+        }
+    }
+}
+
 /// Closed label vocabulary for stale session-scoped RIB messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaleSessionMessageKind {
@@ -683,6 +740,7 @@ struct BgpMetricsInner {
     rib_outbound_prefix_limit_actor_duration_seconds: HistogramVec,
     rib_route_refresh_actor_duration_seconds: HistogramVec,
     rib_actor_work_duration_seconds: HistogramVec,
+    rib_actor_turn_duration_seconds: HistogramVec,
     rib_readiness_query_wait_seconds: HistogramVec,
     peer_manager_operator_query_wait_seconds: HistogramVec,
     stall: StallMetrics,
@@ -1866,6 +1924,19 @@ impl BgpMetrics {
         .expect("valid metric definition");
         for work_unit in RIB_ACTOR_WORK_UNITS {
             rib_actor_work_duration_seconds.with_label_values(&[work_unit]);
+        }
+
+        let rib_actor_turn_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_actor_turn_duration_seconds",
+                "Wall-clock duration of one RIB actor turn: the synchronous handling of one inbound RIB message, by message kind. A turn never yields, so it is one actor poll's share; readiness queries answered at checkpoints inside the turn are included. Work the message only queues (route chunks, distribution windows, timers, resync ticks, policy-transition polls) runs in later loop iterations and is not in its turn: use bgp_rib_actor_work_duration_seconds for those components. Answers which message kind holds the actor; the work-unit histogram answers which deferred component does.",
+            )
+            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            &["kind"],
+        )
+        .expect("valid metric definition");
+        for kind in RibActorTurnKind::ALL {
+            rib_actor_turn_duration_seconds.with_label_values(&[kind.as_str()]);
         }
 
         let rib_readiness_query_wait_seconds = HistogramVec::new(
@@ -3354,6 +3425,9 @@ impl BgpMetrics {
             .register(Box::new(rib_actor_work_duration_seconds.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_actor_turn_duration_seconds.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_readiness_query_wait_seconds.clone()))
             .expect("metric not already registered");
         registry
@@ -3858,6 +3932,7 @@ impl BgpMetrics {
             rib_outbound_prefix_limit_actor_duration_seconds,
             rib_route_refresh_actor_duration_seconds,
             rib_actor_work_duration_seconds,
+            rib_actor_turn_duration_seconds,
             rib_readiness_query_wait_seconds,
             peer_manager_operator_query_wait_seconds,
             stall,
@@ -6475,6 +6550,15 @@ impl BgpMetrics {
         self.0
             .rib_actor_work_duration_seconds
             .with_label_values(&[work_unit])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Observe one RIB actor turn: the synchronous handling of one inbound
+    /// message of `kind`.
+    pub fn observe_rib_actor_turn(&self, kind: RibActorTurnKind, duration: std::time::Duration) {
+        self.0
+            .rib_actor_turn_duration_seconds
+            .with_label_values(&[kind.as_str()])
             .observe(duration.as_secs_f64());
     }
 
@@ -9101,6 +9185,50 @@ mod tests {
             gathered_histogram_series(&m, "bgp_rib_actor_work_duration_seconds", "work_unit");
         assert_eq!(observed["distribute_flush"].0, 1);
         assert_eq!(observed["route_chunk"].0, 0);
+    }
+
+    /// Dropping the closed-label initialization or the registration makes a
+    /// fresh scrape omit a kind, so a receipt could read "no slow peer-down
+    /// turns" from a series that was never emitted.
+    #[test]
+    fn rib_actor_turn_histogram_registers_closed_zeroed_labels_and_actor_buckets() {
+        let m = BgpMetrics::new();
+        let observed = gathered_histogram_series(&m, "bgp_rib_actor_turn_duration_seconds", "kind");
+        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+
+        let mut kinds = RibActorTurnKind::ALL.map(RibActorTurnKind::as_str).to_vec();
+        kinds.sort_unstable();
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            kinds
+        );
+        for (kind, (sample_count, buckets)) in &observed {
+            assert_eq!(*sample_count, 0, "fresh {kind} series is zeroed");
+            assert_eq!(*buckets, expected_buckets, "actor buckets for {kind}");
+        }
+
+        m.observe_rib_actor_turn(
+            RibActorTurnKind::PeerDown,
+            std::time::Duration::from_millis(70),
+        );
+        let observed = gathered_histogram_series(&m, "bgp_rib_actor_turn_duration_seconds", "kind");
+        assert_eq!(observed["peer_down"].0, 1);
+        assert_eq!(observed["peer_up"].0, 0);
+    }
+
+    #[test]
+    fn rib_actor_turn_kinds_match_operations_inventory() {
+        let operations = repo_doc("docs/reference/operations.md");
+        let row = operations
+            .lines()
+            .find(|line| line.starts_with("| `bgp_rib_actor_turn_duration_seconds{kind}` |"))
+            .expect("actor-turn metric row exists");
+        let inventory = RibActorTurnKind::ALL
+            .iter()
+            .map(|kind| format!("`{}`", kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(row.contains(&format!("The closed `kind` set is {inventory}.")));
     }
 
     #[test]

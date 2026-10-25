@@ -3,6 +3,7 @@
 //! and summary channels. Family distribution, graceful restart, route
 //! refresh, queries and update groups live in submodules.
 
+mod actor_turn;
 #[cfg(feature = "bench-internals")]
 mod bench_support;
 #[cfg(feature = "bench-internals")]
@@ -1001,6 +1002,8 @@ pub struct RibManager {
     /// Runs synchronously at the start of every applied primary update.
     #[cfg(test)]
     test_primary_update_hook: Option<PrimaryUpdateHook>,
+    /// Rate limit of the slow actor-turn WARN.
+    slow_actor_turn_log: actor_turn::SlowActorTurnLog,
     #[cfg(test)]
     replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
@@ -2547,6 +2550,7 @@ impl RibManager {
             replacement_readiness_test_hook: None,
             #[cfg(test)]
             test_primary_update_hook: None,
+            slow_actor_turn_log: actor_turn::SlowActorTurnLog::default(),
             #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
@@ -3842,7 +3846,17 @@ impl RibManager {
         true
     }
 
-    /// Process a single `RibUpdate` message.
+    /// Process a single `RibUpdate` message: one actor turn, timed by kind
+    /// into `bgp_rib_actor_turn_duration_seconds`. Every message lane
+    /// (primary, general and summary queries) dispatches through here.
+    fn handle_update(&mut self, update: RibUpdate) {
+        let turn = actor_turn::ActorTurn::new(&update, &self.ribs);
+        let started = std::time::Instant::now();
+        self.handle_update_untimed(update);
+        self.finish_actor_turn(turn, started.elapsed());
+    }
+
+    /// Apply one message without turn timing.
     ///
     /// The typed-family receipts, `PeerUp` and the refresh boundaries change
     /// a peer's stale routes in this turn without publishing
@@ -3851,7 +3865,7 @@ impl RibManager {
     /// queued and republish per chunk (`process_next_route_chunk`). GR
     /// entry, the timer sweeps, End-of-RIB and teardown publish at their
     /// own sites.
-    fn handle_update(&mut self, update: RibUpdate) {
+    fn handle_update_untimed(&mut self, update: RibUpdate) {
         if let Some(peer) = update.session_peer()
             && !peer.is_live()
         {
