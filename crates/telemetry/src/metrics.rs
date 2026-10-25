@@ -5278,6 +5278,29 @@ impl BgpMetrics {
         }
     }
 
+    /// [`Self::set_outbound_prefix_capacity`] for a family that was already
+    /// unlimited: its limit and headroom series are absent, so the frequent
+    /// per-envelope refresh skips removing them (a failed removal formats an
+    /// error message).
+    pub fn set_outbound_prefix_usage(
+        &self,
+        peer: &str,
+        family: &str,
+        usage: usize,
+        blocking: bool,
+    ) {
+        debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
+        let labels = [peer, family];
+        self.0
+            .outbound_prefix_usage
+            .with_label_values(&labels)
+            .set(i64::try_from(usage).unwrap_or(i64::MAX));
+        self.0
+            .outbound_prefix_blocking
+            .with_label_values(&labels)
+            .set(i64::from(blocking));
+    }
+
     /// Count net-new prefixes one batch dropped for a peer and family.
     /// Deliberately carries no prefix label: the blocked set is exactly the
     /// unbounded quantity ADR-0113 refuses to inventory.
@@ -5292,11 +5315,18 @@ impl BgpMetrics {
     /// Remove every outbound capacity gauge owned by one live session.
     /// The blocked-attempt counter is durable peer history and survives, as
     /// `max_prefix_exceeded` does across an inbound teardown.
+    ///
+    /// The family set is closed (see [`Self::set_outbound_prefix_capacity`]),
+    /// so exact tuples are removed instead of scanning every peer's series:
+    /// each departure in a burst of session downs must not cost O(peers).
     pub fn reap_outbound_prefix_capacity(&self, peer: &str) {
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_usage, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_limit, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
-        Self::reap_peer_series_from_vec(&self.0.outbound_prefix_blocking, peer);
+        for family in ["ipv4_unicast", "ipv6_unicast"] {
+            let labels = [peer, family];
+            let _ = self.0.outbound_prefix_usage.remove_label_values(&labels);
+            let _ = self.0.outbound_prefix_limit.remove_label_values(&labels);
+            let _ = self.0.outbound_prefix_headroom.remove_label_values(&labels);
+            let _ = self.0.outbound_prefix_blocking.remove_label_values(&labels);
+        }
     }
 
     /// Record a rejected ORF update, preserving the installed family filter.
@@ -10538,9 +10568,22 @@ mod tests {
             text.contains(r#"bgp_outbound_prefix_usage{family="ipv4_unicast",peer="10.0.0.1"} 9"#)
         );
 
+        m.set_outbound_prefix_capacity("10.0.0.2", "ipv6_unicast", 4, Some(8), false);
+        REAP_SERIES_VISITED.set(0);
         m.reap_outbound_prefix_capacity(peer);
+        assert_eq!(
+            REAP_SERIES_VISITED.get(),
+            0,
+            "reaping one peer must not scan other peers' series"
+        );
+        let text = gather_text(&m);
+        assert!(
+            text.contains(r#"bgp_outbound_prefix_usage{family="ipv6_unicast",peer="10.0.0.2"} 4"#)
+        );
+        m.reap_outbound_prefix_capacity("10.0.0.2");
         let text = gather_text(&m);
         assert!(!text.contains("bgp_outbound_prefix_usage{"));
+        assert!(!text.contains("bgp_outbound_prefix_limit{"));
         assert!(!text.contains("bgp_outbound_prefix_blocking{"));
         assert!(text.contains(
             r#"bgp_outbound_prefix_blocked_total{family="ipv4_unicast",peer="10.0.0.1"} 3"#

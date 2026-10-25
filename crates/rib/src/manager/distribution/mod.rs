@@ -3365,11 +3365,20 @@ impl RibManager {
         let grouped_unicast_count = self.grouped_advertised_count(peer);
         // Plain untagged, unrejected and unlimited emitters already resolved
         // source exclusion. Their withdrawals need no per-member prior set.
+        // An rs-control member counts as untagged on a clean shared pass
+        // whose priors carry no control community for its RS ASN: building
+        // that set per member made a burst of N peer downs cost
+        // N x members x withdrawals hash work.
         let plain_withdraws_prechecked = self
             .grouped_member_of(peer)
             .and_then(|gid| self.group_ribs.get(&gid))
             .is_some_and(|group| !group.per_client_best)
-            && !self.peer_rs_control.contains_key(&peer)
+            && self.peer_rs_control.get(&peer).is_none_or(|&rs_asn| {
+                shared_unicast_precommit
+                    .as_ref()
+                    .is_some_and(|precommit| precommit.lazy_group_prior.is_some())
+                    && group_stage.is_some_and(|stage| stage.prior_untagged_for(rs_asn))
+            })
             && !self.peer_unexportable.contains_key(&peer)
             && !self.outbound_prefix_limits.contains_key(&peer);
         let mut capture_refresh_prior =
@@ -3479,63 +3488,71 @@ impl RibManager {
         // transport snapshot or empty wire message.
         let mut overlay_changes = HashMap::new();
         let mut exact_rejections = Vec::new();
-        let rejected = self.peer_unexportable.get(&peer);
-        withdraw.retain(|(prefix, path_id)| {
-            !stage_exact_export_overlay_change(
-                rejected,
-                &mut overlay_changes,
-                crate::update::ExactExportKey::Unicast(*prefix, *path_id),
-                false,
-            )
-        });
-        flowspec_withdraw.retain(|key| {
-            !stage_exact_export_overlay_change(
-                rejected,
-                &mut overlay_changes,
-                crate::update::ExactExportKey::FlowSpec(key.clone()),
-                false,
-            )
-        });
-        evpn_withdraw.retain(|key| {
-            !stage_exact_export_overlay_change(
-                rejected,
-                &mut overlay_changes,
-                crate::update::ExactExportKey::Evpn(*key),
-                false,
-            )
-        });
-        bgpls_withdraw.retain(|key| {
-            !stage_exact_export_overlay_change(
-                rejected,
-                &mut overlay_changes,
-                crate::update::ExactExportKey::BgpLs(key.clone()),
-                false,
-            )
-        });
-        vpn_withdraw.retain(|key| {
-            !stage_exact_export_overlay_change(
-                rejected,
-                &mut overlay_changes,
-                crate::update::ExactExportKey::Vpn(key.clone()),
-                false,
-            )
-        });
-        labeled_withdraw.retain(|key| {
-            !stage_exact_export_overlay_change(
-                rejected,
-                &mut overlay_changes,
-                crate::update::ExactExportKey::Labeled(*key),
-                false,
-            )
-        });
-        rtc_withdraw.retain(|key| {
-            !stage_exact_export_overlay_change(
-                rejected,
-                &mut overlay_changes,
-                crate::update::ExactExportKey::Rtc(key.clone()),
-                false,
-            )
-        });
+        // Without a rejected key every call below is a no-op; skip the
+        // per-withdrawal hashing that each member of a pass would repeat.
+        if let Some(rejected) = self
+            .peer_unexportable
+            .get(&peer)
+            .filter(|rejected| !rejected.is_empty())
+        {
+            let rejected = Some(rejected);
+            withdraw.retain(|(prefix, path_id)| {
+                !stage_exact_export_overlay_change(
+                    rejected,
+                    &mut overlay_changes,
+                    crate::update::ExactExportKey::Unicast(*prefix, *path_id),
+                    false,
+                )
+            });
+            flowspec_withdraw.retain(|key| {
+                !stage_exact_export_overlay_change(
+                    rejected,
+                    &mut overlay_changes,
+                    crate::update::ExactExportKey::FlowSpec(key.clone()),
+                    false,
+                )
+            });
+            evpn_withdraw.retain(|key| {
+                !stage_exact_export_overlay_change(
+                    rejected,
+                    &mut overlay_changes,
+                    crate::update::ExactExportKey::Evpn(*key),
+                    false,
+                )
+            });
+            bgpls_withdraw.retain(|key| {
+                !stage_exact_export_overlay_change(
+                    rejected,
+                    &mut overlay_changes,
+                    crate::update::ExactExportKey::BgpLs(key.clone()),
+                    false,
+                )
+            });
+            vpn_withdraw.retain(|key| {
+                !stage_exact_export_overlay_change(
+                    rejected,
+                    &mut overlay_changes,
+                    crate::update::ExactExportKey::Vpn(key.clone()),
+                    false,
+                )
+            });
+            labeled_withdraw.retain(|key| {
+                !stage_exact_export_overlay_change(
+                    rejected,
+                    &mut overlay_changes,
+                    crate::update::ExactExportKey::Labeled(*key),
+                    false,
+                )
+            });
+            rtc_withdraw.retain(|key| {
+                !stage_exact_export_overlay_change(
+                    rejected,
+                    &mut overlay_changes,
+                    crate::update::ExactExportKey::Rtc(key.clone()),
+                    false,
+                )
+            });
+        }
 
         let has_candidate_announcement_payload = !announce.is_empty()
             || !flowspec_announce.is_empty()
@@ -4689,9 +4706,11 @@ impl RibManager {
         // runs before this commit. A limited peer republishes on every
         // envelope — an entirely blocked batch commits nothing and still
         // opens its episode — while an unlimited one pays only when its
-        // unicast state actually moved.
-        if unicast_changed || limited {
+        // unicast state actually moved, and then only for its usage series.
+        if limited {
             self.refresh_outbound_limit_gauges(peer);
+        } else if unicast_changed {
+            self.refresh_outbound_usage_gauges(peer);
         }
 
         if let Some(pending) = self.pending_otc_blocked.get_mut(&peer) {
