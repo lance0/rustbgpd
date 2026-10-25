@@ -233,7 +233,11 @@ fn exact_evpn_explain_preserves_policy_counters_events_and_committed_state() {
             .registry()
             .gather()
             .into_iter()
-            .filter(|family| family.name().starts_with("bgp_"))
+            // Every query is an actor turn, so only the turn timing moves.
+            .filter(|family| {
+                family.name().starts_with("bgp_")
+                    && family.name() != "bgp_rib_actor_turn_duration_seconds"
+            })
             .map(|family| (family.name().to_string(), format!("{family:?}")))
             .collect::<BTreeMap<_, _>>()
     };

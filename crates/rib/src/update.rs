@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::{AspaTable, VrpTable};
+use rustbgpd_telemetry::metrics::RibActorTurnKind;
 use rustbgpd_wire::{
     AddressPrefixOrf, Afi, BgpRole, EvpnRouteKey, Prefix, RouteRefreshSubtype, RpkiValidation,
     Safi, WhenToRefresh,
@@ -4163,6 +4164,155 @@ impl RibUpdate {
             | Self::EndRouteRefresh { peer, .. }
             | Self::RouteRefreshTimeout { peer, .. } => Some(*peer),
             _ => None,
+        }
+    }
+
+    /// The `bgp_rib_actor_turn_duration_seconds` kind of this message.
+    ///
+    /// Deliberately exhaustive with no wildcard arm: a new variant does not
+    /// compile until it is given a kind, so every actor turn stays timed.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per RibUpdate variant keeps the label set exhaustive"
+    )]
+    pub(crate) const fn actor_turn_kind(&self) -> RibActorTurnKind {
+        match self {
+            Self::WireRoutesReceived(_)
+            | Self::RoutesReceived { .. }
+            | Self::BgpLsRoutesReceived { .. }
+            | Self::VpnRoutesReceived { .. }
+            | Self::LabeledRoutesReceived { .. }
+            | Self::RtcRoutesReceived { .. } => RibActorTurnKind::Routes,
+            // Bench-only wrapper around a route message; the wrapped message
+            // is handled, and timed, as its own nested turn.
+            #[cfg(feature = "bench-internals")]
+            Self::BenchVpnAdmissionWithCredit { .. } => RibActorTurnKind::Routes,
+            Self::EndOfRib { .. } => RibActorTurnKind::EndOfRib,
+            Self::PeerUp { .. } => RibActorTurnKind::PeerUp,
+            Self::PeerDown { .. } => RibActorTurnKind::PeerDown,
+            Self::PeerDeleted { .. }
+            | Self::RetireEorGraceInterface { .. }
+            | Self::ReleasePeer { .. }
+            | Self::RebindPeer { .. }
+            | Self::PeerGracefulRestart { .. } => RibActorTurnKind::PeerLifecycle,
+            Self::PeerAddPathLimits { .. }
+            | Self::PeerFamilySendable { .. }
+            | Self::PeerOrfUpdate { .. }
+            | Self::PeerSlowState { .. }
+            | Self::SetPeerSessionExportPolicy { .. }
+            | Self::SetPeerSourceContext { .. }
+            | Self::SetPeerPolicyContext { .. }
+            | Self::SetPeerExportPolicyCounters { .. }
+            | Self::SetPeerExportContext { .. }
+            | Self::SetPeerWithheldFamilies { .. }
+            | Self::SetPeerRsControl { .. }
+            | Self::SetPeerExportEncoder { .. }
+            | Self::SetPeerGracefulRestartContext { .. } => RibActorTurnKind::PeerState,
+            Self::PrepareOutboundPrefixLimits { .. }
+            | Self::ApplyOutboundPrefixLimits { .. }
+            | Self::ReplacePeerExportPolicy { .. }
+            | Self::ReplacePeerExportPolicies { .. }
+            | Self::ReplacePeerExportPoliciesAuthoritatively { .. }
+            | Self::RestorePeerExportPoliciesAuthoritatively { .. }
+            | Self::PrepareExportPolicyDestination { .. }
+            | Self::DiscardPreparedExportPolicyDestination { .. }
+            | Self::ReevaluatePeerExportPolicies { .. }
+            | Self::InstallConditionalAdvertisements { .. }
+            | Self::RestoreConditionalAdvertisements { .. }
+            | Self::ReobserveConditionalAdvertisements { .. } => RibActorTurnKind::OutboundPolicy,
+            Self::ReplayPeerOutbound { .. } | Self::RefreshPeerOutbound { .. } => {
+                RibActorTurnKind::OutboundReplay
+            }
+            Self::RouteRefreshRequest { .. }
+            | Self::BeginRouteRefresh { .. }
+            | Self::EndRouteRefresh { .. }
+            | Self::RouteRefreshTimeout { .. } => RibActorTurnKind::RouteRefresh,
+            Self::InjectRoute { .. }
+            | Self::WithdrawInjected { .. }
+            | Self::InjectLeasedRoute { .. }
+            | Self::ExpireInjectionLeases { .. }
+            | Self::MarkReplayComplete { .. }
+            | Self::InjectFlowSpec { .. }
+            | Self::WithdrawFlowSpec { .. }
+            | Self::InjectLeasedFlowSpec { .. }
+            | Self::InjectEvpn { .. }
+            | Self::WithdrawEvpn { .. } => RibActorTurnKind::Injection,
+            Self::RpkiCacheUpdate { .. } | Self::AspaTableUpdate { .. } => {
+                RibActorTurnKind::Validation
+            }
+            Self::PublishDampeningOwners { .. }
+            | Self::PrepareDampeningEnable { .. }
+            | Self::CompleteDampeningEnable { .. } => RibActorTurnKind::Dampening,
+            Self::QueryRoutesPage { .. }
+            | Self::QueryBestRoutes { .. }
+            | Self::QueryBestRoutesPage { .. }
+            | Self::QueryFibInstallCandidates { .. }
+            | Self::QueryFibInstallCandidatesPage { .. }
+            | Self::QueryDataplaneVersions { .. }
+            | Self::QueryPeerGroupsVersioned { .. }
+            | Self::QueryBestRoutesExact { .. }
+            | Self::QueryFibInstallCandidatesExact { .. }
+            | Self::QueryInstalledExportChain { .. }
+            | Self::QueryPeerGroups { .. }
+            | Self::ExplainBestPath { .. }
+            | Self::LookupBestPath { .. }
+            | Self::ExplainAdvertisedRoute { .. }
+            | Self::QueryLocalRouteExport { .. }
+            | Self::QueryLocalFlowSpecExport { .. }
+            | Self::QueryLeasedKeys { .. }
+            | Self::SubscribeRouteEvents { .. }
+            | Self::SubscribeFibCandidateChanges { .. }
+            | Self::QueryRouteEventHistory { .. }
+            | Self::SubscribeEvpnRouteEvents { .. }
+            | Self::QueryEvpnRouteEventHistory { .. }
+            | Self::QueryLocRibCount { .. }
+            | Self::QueryBmpPeerStats { .. }
+            | Self::QueryAdvertisedCount { .. }
+            | Self::QueryPeerRetainedStale { .. }
+            | Self::QueryPeerRetention { .. }
+            | Self::QueryNeighborPolicyStats { .. }
+            | Self::QueryPeerUpdateGroup { .. }
+            | Self::QueryPeerOutboundState { .. }
+            | Self::QueryNeighborRibSnapshots { .. }
+            | Self::QueryOutboundConvergence { .. }
+            | Self::QueryUpdateGroupSnapshot { .. }
+            | Self::QueryUpdateGroupComparison { .. }
+            | Self::QueryFlowSpecRoutes { .. }
+            | Self::QueryAdvertisedFlowSpecRoutes { .. }
+            | Self::QueryReceivedFlowSpecRoutes { .. }
+            | Self::ExplainEvpnRoute { .. }
+            | Self::QueryEvpnRoutes { .. }
+            | Self::QueryEvpnSessionsSynced { .. }
+            | Self::QueryEvpnEsSnapshot { .. }
+            | Self::QueryEvpnRoutesPage { .. }
+            | Self::QueryEvpnDataplaneRoutes { .. }
+            | Self::QueryBgpLsRoutes { .. }
+            | Self::QueryVpnRoutes { .. }
+            | Self::QueryLabeledRoutes { .. }
+            | Self::QueryRtcRoutes { .. }
+            | Self::QueryVpnRoutesPage { .. }
+            | Self::QueryLabeledRoutesPage { .. }
+            | Self::QueryBgpLsRoutesPage { .. }
+            | Self::QueryRtcRoutesPage { .. }
+            | Self::QueryOrrTopology { .. }
+            | Self::QueryOrrTopologyNodesPage { .. }
+            | Self::QueryOrrTopologyLinksPage { .. }
+            | Self::QueryOrrStatus { .. }
+            | Self::QueryConditionalAdvertisements { .. }
+            | Self::QueryMrtSnapshot { .. }
+            | Self::QueryWarmMrtSnapshot { .. }
+            | Self::QueryBmpLocRibDump { .. }
+            | Self::QueryBmpLocRibStats { .. } => RibActorTurnKind::Query,
+            #[cfg(test)]
+            Self::TestQueryVpnAdvertised { .. } => RibActorTurnKind::Query,
+            #[cfg(any(test, feature = "bench-internals"))]
+            Self::TestQueryOutboundHealth { .. } => RibActorTurnKind::Query,
+            #[cfg(test)]
+            Self::TestQueryPeerOutboundDirty { .. } => RibActorTurnKind::Query,
+            #[cfg(test)]
+            Self::TestQueryPolicyTransitionStats { .. } => RibActorTurnKind::Query,
+            #[cfg(test)]
+            Self::TestQueryUncommittedPolicyTransitionGroups { .. } => RibActorTurnKind::Query,
         }
     }
 }
