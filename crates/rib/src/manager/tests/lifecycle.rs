@@ -1898,7 +1898,7 @@ async fn unregistered_session_message_keeps_legacy_accept_behavior() {
 // the reconnecting peers' full-table initial dumps.
 // ---------------------------------------------------------------------------
 
-fn test_peer_up(
+pub(super) fn test_peer_up(
     peer: PeerId,
     session_id: u64,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
@@ -1923,7 +1923,7 @@ fn test_peer_up(
     }
 }
 
-fn test_routes_received(peer: PeerId, announced: Vec<Route>) -> RibUpdate {
+pub(super) fn test_routes_received(peer: PeerId, announced: Vec<Route>) -> RibUpdate {
     RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -2261,7 +2261,7 @@ fn policy_chain(action: rustbgpd_policy::PolicyAction) -> rustbgpd_policy::Polic
 
 /// Drive a parked clean transition to its terminal reply, as the run loop
 /// does between polls.
-fn finish_clean_transition(manager: &mut RibManager) {
+pub(super) fn finish_clean_transition(manager: &mut RibManager) {
     use crate::manager::distribution::CleanPolicyTransitionAdvance;
     use crate::update::ExportPolicyCohortOutcome;
     while let Some(pending) = manager.pending_clean_policy_transition.take() {
