@@ -201,7 +201,12 @@ fn peer_down_burst(size: usize) -> Work {
         manager.handle_update(routes_from(member(source), 1, source, ROUTES * size));
         drain_route_chunks(&mut manager);
     }
-    drain(&mut receivers);
+    // Every member holds every source's routes but its own.
+    assert_eq!(
+        drain(&mut receivers),
+        (BURST * ROUTES * size * (size - 1), 0),
+        "setup, size {size}"
+    );
     let work = checkpoints_in(|| {
         for source in 0..BURST {
             manager.handle_update(RibUpdate::PeerDown {
@@ -226,7 +231,11 @@ fn peer_up_initial_table(size: usize) -> Work {
     let mut receivers = members(&mut manager, size, false, None);
     manager.handle_update(routes_from(external(), 0, 1, ROUTES * size));
     drain_route_chunks(&mut manager);
-    drain(&mut receivers);
+    assert_eq!(
+        drain(&mut receivers),
+        (size * ROUTES * size, 0),
+        "setup, size {size}"
+    );
     let mut joiners = Vec::new();
     let work = checkpoints_in(|| {
         joiners.extend((size..size + BURST).map(|index| join(&mut manager, index, false, None)));
@@ -249,7 +258,11 @@ fn policy_reload(size: usize) -> Work {
     let mut receivers = members(&mut manager, size, false, Some(&old));
     manager.handle_update(routes_from(external(), 0, 1, ROUTES * size));
     drain_route_chunks(&mut manager);
-    drain(&mut receivers);
+    assert_eq!(
+        drain(&mut receivers),
+        (size * ROUTES * size, 0),
+        "setup, size {size}"
+    );
     let new = deny_prefixes_chain(&[Prefix::V4(prefix(1, 0))]);
     let replacements: Vec<_> = (0..size)
         .map(|index| crate::update::PeerExportPolicyReplacement {
@@ -285,7 +298,7 @@ fn policy_reload(size: usize) -> Work {
 fn inbound_update_distribution(size: usize) -> Work {
     let (tx, mut manager) = manager();
     let mut receivers = members(&mut manager, size, false, None);
-    drain(&mut receivers);
+    assert_eq!(drain(&mut receivers), (0, 0), "setup, size {size}");
     for index in 0..size {
         let mut update = routes_from(external(), 0, 1, 0);
         if let RibUpdate::RoutesReceived { announced, .. } = &mut update {
