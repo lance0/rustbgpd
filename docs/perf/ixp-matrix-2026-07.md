@@ -824,3 +824,7 @@ in-repo rrharness rungs against the v0.64.0 table above. Results, method and
 the cross-night context are in the
 [v0.80.0 cross-daemon receipt](cross-daemon-v0800-2026-10.md). The sections
 above are unchanged as history.
+
+The same day, S3 alone was re-measured on the v0.80.1 tag, which fixes the
+withdraw regression: withdraw p50 0.24–0.30 s, three runs on the same host,
+in the [v0.80.1 flap-storm addendum](cross-daemon-v0801-s3-2026-10.md).

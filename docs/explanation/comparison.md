@@ -22,7 +22,7 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | Primary interface | gRPC | CLI (vtysh) | CLI (birdc) | gRPC | CLI (bgpctl) |
 | First release | 2026 | 2017 | 1998 | 2014 | 2004 |
 | Multithreaded | Yes (tokio) | Partial (packet I/O + keepalive pthreads; route processing single-threaded) | Yes (BIRD 3) | Yes (goroutines) | Yes (3-process) |
-| Latest release (verified 2026-10-18)[^versions] | v0.78.0 (2026-10-18) | 10.7.1 (2026-08-31) | 3.4.0 (2026-10-12) | v4.10.0 (2026-10-04) | 9.3 (2026-09-30) |
+| Latest release (verified 2026-10-25)[^versions] | v0.80.1 (2026-10-25) | 10.7.1 (2026-08-31) | 3.4.0 (2026-10-12) | v4.10.0 (2026-10-04) | 9.3 (2026-09-30) |
 
 [^versions]: Dates are the upstream release announcements: FRR
     [frr-10.7.1](https://github.com/FRRouting/frr/releases/tag/frr-10.7.1),
@@ -663,8 +663,11 @@ convergence, and RSS — with identical wire inputs, config disclosure,
 and the losses published alongside the wins. The current rows are the
 [v0.80.0 cross-daemon receipt](../perf/cross-daemon-v0800-2026-10.md), measured 2026-10-25,
 which ran rustbgpd v0.80.0 and OpenBGPD 9.3 on one host in the same night. Its
-S3 withdraw p50, 3.42–3.56 s, is a regression from v0.75.0's 0.20–0.26 s in the
+S3 withdraw p50, 3.42–3.56 s, was a regression from v0.75.0's 0.20–0.26 s in the
 [v0.75.0 cross-daemon receipt](../perf/cross-daemon-v0750-2026-10.md), measured 2026-10-04 to 2026-10-05.
+v0.80.1 fixes it: the [v0.80.1 flap-storm addendum](../perf/cross-daemon-v0801-s3-2026-10.md),
+measured 2026-10-25 on the same host, puts the S3 withdraw p50 at 0.24–0.30 s against
+OpenBGPD 9.3's 8.46–9.60 s from the v0.80.0 queue.
 BIRD's current matrix rows are BIRD 3.3.2 in the
 [v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04
 against rustbgpd v0.74.0; BIRD 3.3.3 and BIRD 3.4.0 are not yet measured in the matrix. The matrix's earlier rows are dated, last measured 2026-08-30,

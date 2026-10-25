@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "cell": "rustbgpd",
+  "git": {
+    "commit": "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+    "tree": "5c455c47d9b69fb4349533e98ece21e2a1b48f63",
+    "dirty": false
+  },
+  "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "host": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
+  "sources": {
+    "common": {
+      "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+      "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+      "bench/scale/matrix/run-matrix.sh": "d8e6f9462a7f14e6a22c2e40e387bbbbf19cee2c17e56107b2a8e40b65d78401",
+      "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+      "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+      "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+      "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    "generator": {
+      "bench/scale/reloadstall/gen-scenario.py": "c308a9602997e0abd79d99e502894a53f3df690d9a8f3433b43f5e750cbe32ca"
+    },
+    "reloadstall": {
+      "path": "target/scale/reloadstall",
+      "sha256": "ecc160fc03cd2d54be596b3afc06c1918d7207901230bc45c4749a5b6fd77fcf"
+    }
+  },
+  "workload": {
+    "binary": "target/release/rustbgpd",
+    "sha256": "32ab97e3432d6e1f3e4b4491f92a1b5fb42f618974233e1464334e5192591fb1",
+    "inputs": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "50",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": ""
+    }
+  }
+}
