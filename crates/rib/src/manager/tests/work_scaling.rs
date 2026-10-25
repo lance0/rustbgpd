@@ -14,10 +14,13 @@
 //! bounds the total and, where the path has one, the named stage that is
 //! its unit of work: a members x routes term with a small coefficient can
 //! stay under the bar in the total at these sizes, but not in its own
-//! stage. Inbound distribution counts member envelopes instead: the
-//! regression shape there is one distribution pass per message, which
-//! multiplies passes, and every member is sent every announced route, so
-//! its checkpoint total grows with members x routes by design.
+//! stage. Inbound distribution also counts member envelopes: its regression
+//! shape is one distribution pass per message, which multiplies passes.
+//!
+//! Members share one exact-export wire profile, as route-server sessions on
+//! one LAN do, so a grouped pass probes the shared payload once and every
+//! other member reuses that result. A per-member probe of every route would
+//! be a members x routes term.
 //!
 //! Every scenario also pins its exact wire output, so a setup that stops
 //! installing routes cannot pass as flat work.
@@ -25,7 +28,7 @@
 use crate::PeerId;
 use crate::test_support::peer_v4;
 
-use super::exportability::MockExactExportEncoder;
+use super::exportability::ReusableExactExportEncoder;
 use super::lifecycle::{finish_clean_transition, test_peer_up, test_routes_received};
 use super::*;
 use crate::manager::slice_timing::{self, checkpoints};
@@ -108,8 +111,12 @@ fn manager() -> (mpsc::Sender<RibUpdate>, RibManager) {
     (tx, manager)
 }
 
-/// Register member `index` the way a session does: exact-export encoder,
-/// optional RFC 7947 control, then `PeerUp`.
+/// The exact-export wire profile every member shares.
+const WIRE_PROFILE: u64 = 1;
+
+/// Register member `index` the way a session does: its own exact-export
+/// encoder with the shared wire profile, optional RFC 7947 control, then
+/// `PeerUp`.
 fn join(
     manager: &mut RibManager,
     index: usize,
@@ -120,7 +127,7 @@ fn join(
     manager.handle_update(RibUpdate::SetPeerExportEncoder {
         peer,
         session_id: 1,
-        encoder: MockExactExportEncoder::accepting(1),
+        encoder: ReusableExactExportEncoder::new(u64::try_from(index).unwrap() + 1, WIRE_PROFILE),
     });
     if rs_control {
         manager.handle_update(RibUpdate::SetPeerRsControl {
@@ -273,7 +280,8 @@ fn policy_reload(size: usize) -> Work {
 
 /// `size` one-prefix UPDATEs arrive already queued for a group of `size`
 /// members. They share distribution passes, so the member envelopes grow
-/// with the members, not messages x members.
+/// with the members, not messages x members, and the members share the
+/// pass's exact-export probes, so the checkpoints do too.
 fn inbound_update_distribution(size: usize) -> Work {
     let (tx, mut manager) = manager();
     let mut receivers = members(&mut manager, size, false, None);
@@ -327,10 +335,10 @@ fn policy_reload_work_is_linear() {
 }
 
 #[test]
-fn inbound_update_distribution_envelopes_are_linear() {
+fn inbound_update_distribution_work_is_linear() {
     assert_linear(
         "inbound UPDATE distribution",
-        &[ENVELOPES],
+        &[ALL, "exact_probe_retirement", ENVELOPES],
         inbound_update_distribution,
     );
 }

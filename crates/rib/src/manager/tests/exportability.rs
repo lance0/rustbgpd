@@ -168,7 +168,7 @@ impl ExactExportEncoder for MockExactExportEncoder {
     }
 }
 
-struct ReusableExactExportEncoder {
+pub(super) struct ReusableExactExportEncoder {
     owner_id: u64,
     wire_profile: u64,
     encoded_len: usize,
@@ -178,7 +178,7 @@ struct ReusableExactExportEncoder {
 }
 
 impl ReusableExactExportEncoder {
-    fn new(owner_id: u64, wire_profile: u64) -> Arc<Self> {
+    pub(super) fn new(owner_id: u64, wire_profile: u64) -> Arc<Self> {
         Arc::new(Self {
             owner_id,
             wire_profile,
