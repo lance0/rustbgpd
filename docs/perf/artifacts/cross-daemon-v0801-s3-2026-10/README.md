@@ -13,8 +13,8 @@ and inputs of the [v0.80.0 bundle](../cross-daemon-v0800-2026-10/README.md).
   daemon log. These follow the v0.80.0 bundle, which also commits its raw leg files; this
   addendum has no CI run to hold them.
 - **`summary.csv`, `report.md`, `establishment-span.csv`** are
-  [`summarize.py`](../../../../bench/scale/headline/summarize.py) output; `summarize.py <bundle>`
-  reproduces every row of `summary.csv` (in a different row order); `establishment-span.csv`
+  [`summarize.py`](../../../../bench/scale/headline/summarize.py) output; `summarize.py <bundle> --out
+  <output-dir>` reproduces every row of `summary.csv` (in a different row order); `establishment-span.csv`
   needs the daemon logs uncompressed.
 - **`identity.txt`** records commit, tree, binary SHA-256s, build commands, CPUs and kernel.
 
