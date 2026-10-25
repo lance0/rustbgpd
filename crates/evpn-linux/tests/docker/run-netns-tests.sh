@@ -285,6 +285,12 @@ DOCKER_ARGS=(
     -e EVPN_LINUX_NETNS=1
     # Honour a caller's build-parallelism cap (unset passes nothing).
     -e CARGO_BUILD_JOBS
+    # A CI job builds every test binary once from an empty target, so skip
+    # debuginfo and incremental state to make that cold build cheaper.
+    # Backtraces still name functions; no selector reads file:line from them.
+    # A caller can override either (e.g. CARGO_INCREMENTAL=1 for local edits).
+    -e CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
+    -e CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
     -e RUST_BACKTRACE=1
     -e CARGO_TERM_COLOR=always
     -v "${REPO_ROOT}:/work"
