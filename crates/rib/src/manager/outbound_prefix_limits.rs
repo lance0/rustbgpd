@@ -887,6 +887,24 @@ impl RibManager {
         self.replacement_checkpoint(true);
     }
 
+    /// [`Self::refresh_outbound_limit_gauges`] for a peer with no outbound
+    /// limit record. Its limit and headroom series are already absent: only a
+    /// limit creates them, and every limit apply, including the removal of
+    /// the last one, refreshes all live peers. Per-envelope commits of every
+    /// member of a pass then skip removing series that do not exist.
+    pub(in crate::manager) fn refresh_outbound_usage_gauges(&self, peer: PeerId) {
+        let peer_label = peer.label();
+        for row in self.outbound_prefix_limit_rows(peer) {
+            debug_assert!(row.limit.is_none());
+            self.metrics.set_outbound_prefix_usage(
+                &peer_label,
+                &row.family,
+                usize::try_from(row.usage).unwrap_or(usize::MAX),
+                row.blocking,
+            );
+        }
+    }
+
     /// Install this registration's effective limits before its initial feed
     /// is built, so a reconnect starts empty and admits up to the cap
     /// instead of flooding and then discovering it is over one.

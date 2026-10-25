@@ -449,9 +449,23 @@ pub(in crate::manager) struct GroupStageOutput {
     /// all-own-source no-op test O(1): emitting an otherwise empty envelope
     /// changes marker ordering even though transport would encode no UPDATE.
     shared_source_counts: HashMap<PeerId, usize>,
+    /// RS ASNs for which some delta's prior source carried a control-form
+    /// community. Recorded by [`Self::build_shared_emit`]; `None` before
+    /// that, or when a delta keeps a per-member prior snapshot.
+    prior_control_tags: Option<crate::manager::distribution::rs_control::ControlTagInventory>,
 }
 
 impl GroupStageOutput {
+    /// Whether no prior of this pass was control-tagged for `rs_asn`. Only a
+    /// tagged prior can have been suppressed toward an rs-control member, so
+    /// such a member's withdrawals here are admitted exactly like a plain
+    /// member's.
+    pub(in crate::manager) fn prior_untagged_for(&self, rs_asn: u32) -> bool {
+        self.prior_control_tags
+            .as_ref()
+            .is_some_and(|tags| !tags.tagged(rs_asn))
+    }
+
     pub(in crate::manager) fn prior_slots(
         &self,
         member: PeerId,
@@ -663,8 +677,15 @@ impl GroupStageOutput {
         self.shared_withdraw
             .reserve_exact(self.deltas.len() - announce_count);
         checkpoint(true);
+        let mut prior_tags =
+            crate::manager::distribution::rs_control::ControlTagInventory::default();
+        let mut prior_snapshot = false;
         for delta in &self.deltas {
             checkpoint(false);
+            let (communities, large_communities) =
+                source_control_input(delta.prior_source_attrs.as_ref());
+            prior_tags.record(communities, large_communities);
+            prior_snapshot |= delta.prior.is_some();
             self.has_next_hop_actions |= delta.new.as_ref().is_some_and(|(_, nh)| nh.is_some())
                 || delta.prior.as_ref().is_some_and(|old| {
                     old.nh.is_some() || old.lane.as_ref().is_some_and(|lane| lane.nh.is_some())
@@ -707,6 +728,7 @@ impl GroupStageOutput {
                 self.source_exclusion_unsafe.insert(target);
             }
         }
+        self.prior_control_tags = (!prior_snapshot).then_some(prior_tags);
         checkpoint(true);
         self.shared_announce = announce.into();
         checkpoint(true);

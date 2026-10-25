@@ -659,3 +659,153 @@ async fn grouped_matches_ungrouped_for_stripped_suppression_tag() {
         "grouped and ungrouped paths must agree on source-based RFC 7947 decisions"
     );
 }
+
+/// `SetPeerRsControl` + `PeerUp` on a synchronous manager, so a test can
+/// install its readiness observer between the two halves of a scenario.
+fn rs_member_up(
+    manager: &mut RibManager,
+    peer: PeerId,
+    peer_asn: u32,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    manager.handle_update(RibUpdate::SetPeerRsControl {
+        peer,
+        session_id: 1,
+        rs_control_asn: Some(RS_AS),
+    });
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 1,
+        peer_asn,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while out_rx.try_recv().is_ok() {}
+    out_rx
+}
+
+fn drain_withdrawn(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> BTreeSet<Prefix> {
+    let mut withdrawn = BTreeSet::new();
+    while let Ok(update) = out_rx.try_recv() {
+        withdrawn.extend(update.withdraw.iter().map(|(prefix, _)| *prefix));
+    }
+    withdrawn
+}
+
+/// A burst of route-server client downs costs each departing source its
+/// own withdrawals, not members x withdrawals: on a pass whose prior
+/// sources carry no control community, an rs-control member takes the
+/// plain shared withdrawal with no per-member admitted-prior set. A
+/// control-tagged prior still builds that set, so the member the route
+/// was suppressed toward is not sent a withdrawal for it.
+#[test]
+fn rs_member_down_skips_per_member_priors_unless_a_prior_is_tagged() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let members: Vec<(PeerId, Ipv4Addr, u32)> = (1..=6u8)
+        .map(|index| {
+            let addr = Ipv4Addr::new(192, 0, 2, 200 + index);
+            (peer_v4(addr), addr, 65_000 + u32::from(index))
+        })
+        .collect();
+    let mut receivers: Vec<_> = members
+        .iter()
+        .map(|&(peer, _, asn)| rs_member_up(&mut manager, peer, asn))
+        .collect();
+    let gid = manager.grouped_member_of(members[0].0).unwrap();
+    assert!(
+        members
+            .iter()
+            .all(|&(peer, ..)| manager.grouped_member_of(peer) == Some(gid))
+    );
+
+    let untagged: Vec<Ipv4Prefix> = (0..3u8)
+        .map(|index| Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, index), 32))
+        .collect();
+    let routes = untagged
+        .iter()
+        .map(|&prefix| make_route(prefix, members[0].1))
+        .collect();
+    let tagged_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let steered = tagged(
+        make_route(tagged_prefix, members[1].1),
+        vec![],
+        vec![large(0, members[2].2)],
+    );
+    for (source, announced) in [(members[0].0, routes), (members[1].0, vec![steered])] {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 1,
+            peer: source,
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        while manager.process_next_route_chunk() {}
+    }
+    for out_rx in &mut receivers {
+        while out_rx.try_recv().is_ok() {}
+    }
+
+    let prior_visits = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let prior_visits = Arc::clone(&prior_visits);
+        move |stage| {
+            if stage == "group_prior_materialization" {
+                prior_visits.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }));
+    let visits = || prior_visits.load(Ordering::Relaxed);
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: members[0].0,
+        session_id: 1,
+    });
+    assert_eq!(
+        visits(),
+        0,
+        "an untagged withdrawal pass must not build a prior set per rs-control member"
+    );
+    let untagged: BTreeSet<Prefix> = untagged.into_iter().map(Prefix::V4).collect();
+    for out_rx in &mut receivers[1..] {
+        assert_eq!(drain_withdrawn(out_rx), untagged);
+    }
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: members[1].0,
+        session_id: 1,
+    });
+    for (index, out_rx) in receivers.iter_mut().enumerate().skip(2) {
+        let expected = if index == 2 {
+            BTreeSet::new()
+        } else {
+            BTreeSet::from([Prefix::V4(tagged_prefix)])
+        };
+        assert_eq!(
+            drain_withdrawn(out_rx),
+            expected,
+            "member {index}: only members the route reached are sent its withdrawal"
+        );
+    }
+    assert!(
+        visits() > 0,
+        "a tagged prior keeps the per-member admission check"
+    );
+}
