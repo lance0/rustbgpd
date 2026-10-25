@@ -29,6 +29,11 @@
       "measured_on": "2026-10-25"
     },
     {
+      "path": "docs/perf/cross-daemon-v0801-s3-2026-10.md",
+      "measured_commit": "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+      "measured_on": "2026-10-25"
+    },
+    {
       "path": "docs/perf/fib-kernel-dump-2026-08.md",
       "measured_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
       "measured_on": "2026-08-30"
@@ -133,6 +138,11 @@
     {
       "source": "docs/explanation/comparison.md",
       "anchor": "At route-server scale, the [IXP receipt",
+      "receipt": "docs/perf/cross-daemon-v0801-s3-2026-10.md"
+    },
+    {
+      "source": "docs/explanation/comparison.md",
+      "anchor": "At route-server scale, the [IXP receipt",
       "receipt": "docs/perf/headline-refresh-jemalloc-2026-10.md"
     },
     {
@@ -174,6 +184,21 @@
       "source": "docs/perf/README.md",
       "anchor": "- **IRR-scale filter reload**",
       "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "- **Member-flap propagation**",
+      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "- **Member-flap propagation**",
+      "receipt": "docs/perf/cross-daemon-v0800-2026-10.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "- **Member-flap propagation**",
+      "receipt": "docs/perf/cross-daemon-v0801-s3-2026-10.md"
     },
     {
       "source": "docs/perf/README.md",

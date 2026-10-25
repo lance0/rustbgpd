@@ -1,5 +1,7 @@
 # Cross-daemon refresh at v0.80.0: rustbgpd, OpenBGPD 9.3 and BIRD 3.3.3 on one night — 2026-10-25
 
+> v0.80.1 fixes the S3 withdraw regression below; see the [v0.80.1 flap-storm addendum](cross-daemon-v0801-s3-2026-10.md).
+
 One sequential overnight queue on 2026-10-25 (UTC) measured the v0.80.0 tag (`871d9d269`)
 against OpenBGPD 9.3 on the IXP matrix and against OpenBGPD 9.3 and BIRD 3.3.3 in the IRR
 reload roots. It also ran a Criterion A/B against v0.79.0, the in-repo rrharness flood rungs
