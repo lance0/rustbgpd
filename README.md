@@ -21,7 +21,7 @@ them, and stream routing events to your own tools.
 
 **Stability:** inventoried route-server, route-reflector, and scoped FlowSpec
 controller surfaces have a [narrow v1 compatibility contract](docs/reference/v1-stable-contract.md),
-with release baseline v0.80.0. The project remains alpha overall; unlisted surfaces,
+with release baseline v0.80.1. The project remains alpha overall; unlisted surfaces,
 EVPN outside scoped Types 1–5 reflection, and Linux dataplane features are
 outside that promise.
 [Stability and compatibility](docs/reference/stability.md) explains the boundaries.
