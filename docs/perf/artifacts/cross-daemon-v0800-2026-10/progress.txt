@@ -1,0 +1,76 @@
+[2026-10-25T00:47:13Z] queue start base=<campaign> go=<campaign>/GO deadline=2026-10-25T12:50:00Z blocks='crit s2 s3 irr0 irr10 irr50 rr bgp' smoke=0 dry=0 cpus=0-63
+[2026-10-25T00:47:13Z] waiting for GO (poll 60s); GO must hold 871d9d269dd791d6f600236a9445af8767bf7cc5
+[2026-10-25T00:48:13Z] GO received: 871d9d269dd791d6f600236a9445af8767bf7cc5
+[2026-10-25T00:48:37Z] inputs verified: 39 ok, 0 FAIL (<campaign>/verify.txt)
+[2026-10-25T00:48:37Z] plan: 24 legs, estimated 11h40m, 12h01m to deadline
+[2026-10-25T00:48:37Z] block crit start est=3h40m
+[2026-10-25T00:48:37Z] criterion-ab start load=1.75 2.21 2.73 own_deadline=2026-10-25T05:12:37Z
+[2026-10-25T04:31:30Z] criterion-ab rc=0 secs=13373 VERDICT v0.80.0 criterion: INVALID (10 of 109 benches have invalid evidence: adj_rib_in_insert/100000: per-mode slow: ss n=1, ab n=3, adj_rib_in_insert/500000: per-mode mode evidence but no supported split in pooled samples, attr_intern/typical_shared_arc/10000: per-mode mode evidence but no support 
+[2026-10-25T04:31:30Z] block crit done
+[2026-10-25T04:31:30Z] block s2 start est=1h50m
+[2026-10-25T04:31:30Z] matrix-s2-r1-openbgpd start attempt=1 load=2.13 2.27 2.27
+[2026-10-25T05:00:35Z] matrix-s2-r1-openbgpd rc=0 status=pass secs=1745 load=1.07 1.63 2.00
+[2026-10-25T05:00:35Z] matrix-s2-r1-rustbgpd start attempt=1 load=1.07 1.63 2.00
+[2026-10-25T05:08:19Z] matrix-s2-r1-rustbgpd rc=0 status=pass secs=464 load=1.15 1.50 1.84
+[2026-10-25T05:08:19Z] matrix-s2-r2-rustbgpd start attempt=1 load=1.15 1.50 1.84
+[2026-10-25T05:16:03Z] matrix-s2-r2-rustbgpd rc=0 status=pass secs=464 load=1.05 1.39 1.71
+[2026-10-25T05:16:04Z] matrix-s2-r2-openbgpd start attempt=1 load=1.05 1.39 1.71
+[2026-10-25T05:43:59Z] matrix-s2-r2-openbgpd rc=0 status=pass secs=1675 load=1.04 1.60 1.96
+[2026-10-25T05:43:59Z] matrix-s2-r3-openbgpd start attempt=1 load=1.04 1.60 1.96
+[2026-10-25T06:12:09Z] matrix-s2-r3-openbgpd rc=0 status=pass secs=1690 load=1.23 1.63 1.97
+[2026-10-25T06:12:09Z] matrix-s2-r3-rustbgpd start attempt=1 load=1.23 1.63 1.97
+[2026-10-25T06:19:53Z] matrix-s2-r3-rustbgpd rc=0 status=pass secs=464 load=1.02 1.29 1.69
+[2026-10-25T06:19:53Z] block s2 done
+[2026-10-25T06:19:53Z] block s3 start est=1h10m
+[2026-10-25T06:19:53Z] matrix-s3-r1-openbgpd start attempt=1 load=1.02 1.29 1.69
+[2026-10-25T06:35:58Z] matrix-s3-r1-openbgpd rc=0 status=pass secs=965 load=1.19 1.68 1.80
+[2026-10-25T06:35:58Z] matrix-s3-r1-rustbgpd start attempt=1 load=1.19 1.68 1.80
+[2026-10-25T06:43:42Z] matrix-s3-r1-rustbgpd rc=0 status=pass secs=464 load=1.06 1.42 1.68
+[2026-10-25T06:43:42Z] matrix-s3-r2-rustbgpd start attempt=1 load=1.14 1.43 1.68
+[2026-10-25T06:51:26Z] matrix-s3-r2-rustbgpd rc=0 status=pass secs=464 load=1.25 1.34 1.56
+[2026-10-25T06:51:26Z] matrix-s3-r2-openbgpd start attempt=1 load=1.25 1.34 1.56
+[2026-10-25T07:06:06Z] matrix-s3-r2-openbgpd rc=0 status=pass secs=880 load=1.05 1.61 1.75
+[2026-10-25T07:06:06Z] matrix-s3-r3-openbgpd start attempt=1 load=1.05 1.61 1.75
+[2026-10-25T07:21:01Z] matrix-s3-r3-openbgpd rc=0 status=pass secs=895 load=1.11 1.62 1.79
+[2026-10-25T07:21:01Z] matrix-s3-r3-rustbgpd start attempt=1 load=1.11 1.62 1.79
+[2026-10-25T07:28:45Z] matrix-s3-r3-rustbgpd rc=0 status=pass secs=464 load=1.33 1.52 1.69
+[2026-10-25T07:28:45Z] block s3 done
+[2026-10-25T07:28:45Z] block irr0 start est=1h35m
+[2026-10-25T07:28:45Z] reparented tree of 871d9d269dd791d6f600236a9445af8767bf7cc5 onto origin/main 00cfdbb1546f4f007add5e637341315d3edf56e4 as b2500a316a10d441064ba1d9fbf36f7847f6f7a7
+[2026-10-25T07:28:45Z] irr-ov0-r1 start attempt=1 load=1.33 1.52 1.69
+[2026-10-25T07:58:57Z] irr-ov0-r1 rc=0 status=pass secs=1812 load=1.04 1.37 1.54
+[2026-10-25T07:58:58Z] irr-ov0-r2 start attempt=1 load=1.03 1.36 1.54
+[2026-10-25T08:28:55Z] irr-ov0-r2 rc=0 status=pass secs=1797 load=1.14 1.57 1.65
+[2026-10-25T08:28:55Z] irr-ov0-r3 start attempt=1 load=1.14 1.57 1.65
+[2026-10-25T08:58:22Z] irr-ov0-r3 rc=0 status=pass secs=1767 load=1.16 1.53 1.66
+[2026-10-25T08:58:22Z] block irr0 done
+[2026-10-25T08:58:22Z] block irr10 start est=1h35m
+[2026-10-25T08:58:22Z] irr-ov10-r1 start attempt=1 load=1.16 1.53 1.66
+[2026-10-25T09:28:49Z] irr-ov10-r1 rc=0 status=pass secs=1827 load=1.07 1.54 1.72
+[2026-10-25T09:28:50Z] irr-ov10-r2 start attempt=1 load=1.07 1.54 1.72
+[2026-10-25T09:59:28Z] irr-ov10-r2 rc=0 status=pass secs=1838 load=1.07 1.43 1.60
+[2026-10-25T09:59:28Z] irr-ov10-r3 start attempt=1 load=1.07 1.43 1.60
+[2026-10-25T10:30:06Z] irr-ov10-r3 rc=0 status=pass secs=1838 load=1.14 1.43 1.56
+[2026-10-25T10:30:06Z] block irr10 done
+[2026-10-25T10:30:06Z] block irr50 start est=1h35m
+[2026-10-25T10:30:06Z] irr-ov50-r1 start attempt=1 load=1.14 1.43 1.56
+[2026-10-25T11:01:16Z] irr-ov50-r1 rc=0 status=pass secs=1870 load=1.07 1.41 1.59
+[2026-10-25T11:01:16Z] irr-ov50-r2 start attempt=1 load=1.07 1.41 1.59
+[2026-10-25T11:32:46Z] irr-ov50-r2 rc=0 status=pass secs=1889 load=1.13 1.39 1.52
+[2026-10-25T11:32:46Z] irr-ov50-r3 start attempt=1 load=1.28 1.42 1.53
+[2026-10-25T12:03:55Z] irr-ov50-r3 rc=0 status=pass secs=1869 load=1.27 1.47 1.59
+[2026-10-25T12:03:55Z] block irr50 done
+[2026-10-25T12:03:55Z] block rr start est=0h10m
+[2026-10-25T12:04:17Z] rr runA-256 rc=0 secs=22 cold_staged_s 0.230 rss_converged_mib 120 sustained_blocks 82 mgr_busy_frac 0.985 
+[2026-10-25T12:04:39Z] rr runA-512 rc=0 secs=22 cold_staged_s 0.329 rss_converged_mib 133 sustained_blocks 73 mgr_busy_frac 0.989 
+[2026-10-25T12:05:01Z] rr runA-1000 rc=0 secs=22 cold_staged_s 0.448 rss_converged_mib 157 sustained_blocks 52 mgr_busy_frac 0.992 
+[2026-10-25T12:05:22Z] rr runB-256 rc=0 secs=21 cold_staged_s 0.230 rss_converged_mib 120 sustained_blocks 82 mgr_busy_frac 0.986 
+[2026-10-25T12:05:44Z] rr runB-512 rc=0 secs=22 cold_staged_s 0.304 rss_converged_mib 133 sustained_blocks 71 mgr_busy_frac 0.989 
+[2026-10-25T12:06:06Z] rr runB-1000 rc=0 secs=22 cold_staged_s 0.474 rss_converged_mib 157 sustained_blocks 52 mgr_busy_frac 0.992 
+[2026-10-25T12:06:06Z] block rr done
+[2026-10-25T12:06:06Z] block bgp start est=0h05m
+[2026-10-25T12:06:17Z] bgp r1-rustbgpd-10x1000 rc=0 secs=10 total time: 8.36s target read pairing: 7 samples paired, 0 unpaired, start offset -2.5..2.3 ms (window [-500.0, 50.0] ms) 
+[2026-10-25T12:06:28Z] bgp r1-rustbgpd-2x10000 rc=0 secs=10 total time: 8.47s target read pairing: 7 samples paired, 0 unpaired, start offset -6.1..3.1 ms (window [-500.0, 50.0] ms) 
+[2026-10-25T12:06:44Z] bgp r1-rustbgpd-2x100000 rc=0 secs=14 total time: 12.70s target read pairing: 8 samples paired, 0 unpaired, start offset -270.7..2.4 ms (window [-500.0, 50.0] ms) 
+[2026-10-25T12:06:44Z] block bgp done
+[2026-10-25T12:06:44Z] QUEUE DONE failed=none skipped=none

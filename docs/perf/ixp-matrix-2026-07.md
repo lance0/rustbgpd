@@ -812,3 +812,15 @@ that night; its current rows are BIRD 3.3.2 in the v0.74.0 refresh above.
 Results, method and the cross-night context are in the
 [v0.75.0 cross-daemon receipt](cross-daemon-v0750-2026-10.md). The sections
 above are unchanged as history.
+
+## v0.80.0 cross-daemon refresh — 2026-10-25
+
+rustbgpd and OpenBGPD 9.3 were re-measured on 2026-10-25 at the v0.80.0 tag
+(`871d9d269`), three runs each with the daemon order alternated, on the
+phased-churner `reloadstall` harness. BIRD did not run in the matrix; its
+current rows are BIRD 3.3.2 in the v0.74.0 refresh above. The S3 withdraw p50
+regressed from 0.20–0.26 s to 3.42–3.56 s. The receipt also carries the
+in-repo rrharness rungs against the v0.64.0 table above. Results, method and
+the cross-night context are in the
+[v0.80.0 cross-daemon receipt](cross-daemon-v0800-2026-10.md). The sections
+above are unchanged as history.

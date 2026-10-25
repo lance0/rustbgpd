@@ -1,0 +1,103 @@
+# reloadstall peers=320 changed_peers=320 stable_peers=0 prefixes=183040 per_peer=572 pid=0
+established 320 at 7.4s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=reload,peers=320,total=183040,per_peer=572,expected=182468,completed=320,min_unique=182388,max_unique=182432
+converged (>= 182468/observer) at 19.9s rss_mib=0
+control_maxgap_ms: p50=31.65 p95=32.88 max=48.65 (n=320)
+control_rss_mib 0
+control_churn_write_maxgap_ms 16.6 bound_ms 31.25 writes 1921
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 reload_cmd wall_us=1792922950794820 policy=/tmp/irr-bird/gen-b.conf
+BIRD 3.3.3 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 1 progress: complete=27/320
+reload 1 completion_s: p50=14.70 p95=15.55 max=15.63 (n=320)
+reload 1 maxgap_ms: p50=846.45 p95=1589.24 max=2090.43 (n=320)
+reload 1 all_observer_maxgap_ms: p50=847.43 p95=1589.24 max=2090.43 (n=320)
+reload 1 changed_first_generation_update_ms: p50=1697.13 p95=2096.47 max=3253.10 (n=320)
+reload 1 rss_mib before=0 after=0 comms_sample=[4286056400]
+reload 1 sessions_up 320/320
+reload 1 stable_marker_peers 0/0
+reload 1 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,1,320,320,0,183040,14.703025,15.548626,15.634325,846.448,1589.239,2090.435,847.434,1589.239,2090.435,1697.132,2096.471,3253.102,0,0,0,320,0
+reload 2 reload_cmd wall_us=1792922986489919 policy=/tmp/irr-bird/gen-a.conf
+BIRD 3.3.3 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 2 progress: complete=16/320
+reload 2 completion_s: p50=13.82 p95=15.00 max=15.05 (n=320)
+reload 2 maxgap_ms: p50=864.40 p95=1777.52 max=2644.29 (n=320)
+reload 2 all_observer_maxgap_ms: p50=878.91 p95=1777.52 max=2644.29 (n=320)
+reload 2 changed_first_generation_update_ms: p50=1554.34 p95=1982.10 max=2848.53 (n=320)
+reload 2 rss_mib before=0 after=0 comms_sample=[4286055400]
+reload 2 sessions_up 320/320
+reload 2 stable_marker_peers 0/0
+reload 2 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,2,320,320,0,183040,13.817209,15.000940,15.054457,864.404,1777.519,2644.286,878.910,1777.519,2644.286,1554.336,1982.099,2848.535,0,0,0,320,0
+reload 3 reload_cmd wall_us=1792923021657401 policy=/tmp/irr-bird/gen-b.conf
+BIRD 3.3.3 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 3 progress: complete=1/320
+reload 3 completion_s: p50=13.58 p95=14.95 max=15.05 (n=320)
+reload 3 maxgap_ms: p50=859.93 p95=1471.81 max=2412.36 (n=320)
+reload 3 all_observer_maxgap_ms: p50=862.75 p95=1471.81 max=2412.36 (n=320)
+reload 3 changed_first_generation_update_ms: p50=1551.91 p95=1954.92 max=2848.51 (n=320)
+reload 3 rss_mib before=0 after=0 comms_sample=[4286056400]
+reload 3 sessions_up 320/320
+reload 3 stable_marker_peers 0/0
+reload 3 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,3,320,320,0,183040,13.578857,14.945977,15.049951,859.932,1471.805,2412.359,862.750,1471.805,2412.359,1551.912,1954.916,2848.506,0,0,0,320,0
+reload 4 reload_cmd wall_us=1792923056831505 policy=/tmp/irr-bird/gen-a.conf
+BIRD 3.3.3 ready.
+Reading configuration from /etc/bird/bird.conf
+Reconfigured
+reload 4 progress: complete=29/320
+reload 4 completion_s: p50=13.95 p95=15.19 max=15.28 (n=320)
+reload 4 maxgap_ms: p50=872.78 p95=1680.85 max=2223.38 (n=320)
+reload 4 all_observer_maxgap_ms: p50=1106.09 p95=1685.24 max=2223.38 (n=320)
+reload 4 changed_first_generation_update_ms: p50=1586.17 p95=2014.44 max=2939.25 (n=320)
+reload 4 rss_mib before=0 after=0 comms_sample=[4286055400]
+reload 4 sessions_up 320/320
+reload 4 stable_marker_peers 0/0
+reload 4 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,4,320,320,0,183040,13.945479,15.192920,15.281118,872.781,1680.847,2223.376,1106.091,1685.240,2223.376,1586.168,2014.443,2939.250,0,0,0,320,0
+final sessions_up 320/320 parse_errors=0
+done rss_mib=0
+route_refresh_accounting,peer=4,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2488
+route_refresh_accounting,peer=8,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2532
+route_refresh_accounting,peer=25,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2476
+route_refresh_accounting,peer=27,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2552
+route_refresh_accounting,peer=49,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2484
+route_refresh_accounting,peer=53,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2596
+route_refresh_accounting,peer=62,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2580
+route_refresh_accounting,peer=64,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2476
+route_refresh_accounting,peer=66,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2500
+route_refresh_accounting,peer=70,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2520
+route_refresh_accounting,peer=84,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2452
+route_refresh_accounting,peer=96,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2572
+route_refresh_accounting,peer=102,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2524
+route_refresh_accounting,peer=117,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2512
+route_refresh_accounting,peer=122,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2472
+route_refresh_accounting,peer=128,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2528
+route_refresh_accounting,peer=133,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2536
+route_refresh_accounting,peer=137,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2556
+route_refresh_accounting,peer=149,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2548
+route_refresh_accounting,peer=153,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2512
+route_refresh_accounting,peer=164,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2548
+route_refresh_accounting,peer=165,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2484
+route_refresh_accounting,peer=166,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2492
+route_refresh_accounting,peer=169,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2556
+route_refresh_accounting,peer=177,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2568
+route_refresh_accounting,peer=209,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2504
+route_refresh_accounting,peer=219,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2532
+route_refresh_accounting,peer=223,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2512
+route_refresh_accounting,peer=227,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2504
+route_refresh_accounting,peer=249,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2548
+route_refresh_accounting,peer=251,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2540
+route_refresh_accounting,peer=254,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2508
+route_refresh_accounting,peer=266,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2492
+route_refresh_accounting,peer=310,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2472
+route_refresh_accounting,peer=311,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2496
+route_refresh_accounting,peer=317,family=ipv4,received=4,suppressed=0,completed=4,sent_nlri=2480

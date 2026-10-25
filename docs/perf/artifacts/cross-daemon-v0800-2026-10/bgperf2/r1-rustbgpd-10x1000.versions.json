@@ -1,0 +1,44 @@
+{
+  "bgperf2": {
+    "event_schema": "bgperf2/measurement-events/v1alpha1",
+    "findings_policy": "conservative/v1",
+    "findings_schema": "bgperf2/measurement-findings/v1alpha1",
+    "revision": "1a2648da73b4e89e2a6ad0ce00367ca8f665eb73"
+  },
+  "monitor": {
+    "daemon": "gobgp",
+    "image": "bgperf/gobgp:4.8.0",
+    "image_id": "sha256:f91cfada87a38ad9de62ec4bae6f59e83745f1da9c7dd4616541b51a30d312f8",
+    "version": "4.8.0"
+  },
+  "run": {
+    "churn_bursts": 1,
+    "churn_prefixes": 0,
+    "date": "2026-10-25",
+    "filter_test": null,
+    "name": "rustbgpd",
+    "path_diversity": 1,
+    "peers": 10,
+    "policy_reload_blocks": 0,
+    "prefixes_per_peer": 1000,
+    "receivers": 0,
+    "repetition": null,
+    "tester_type": "bird"
+  },
+  "target": {
+    "daemon": "rustbgpd",
+    "image": "bgperf/rustbgpd:v0800-871d9d269",
+    "image_id": "sha256:eab8a2504fcb16840fdfcbcd1ea127c43bdc854f770f6853f23099460b08da7e",
+    "neighbor_poll_mode": "poll1",
+    "version": "rustbgpd 0.80.0"
+  },
+  "testers": [
+    {
+      "count": 1,
+      "daemon": "bird",
+      "image": "bgperf/bird:latest",
+      "image_id": "sha256:e5e814ba77bae6cfbc9ced5a0efff591b6c69511deab94d76b13b0dfd8c3d795",
+      "version": "2.19.2"
+    }
+  ]
+}

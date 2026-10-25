@@ -1,0 +1,79 @@
+# reloadstall peers=320 changed_peers=320 stable_peers=0 prefixes=183040 per_peer=572 pid=0
+established 320 at 58.1s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=reload,peers=320,total=183040,per_peer=572,expected=182468,completed=320,min_unique=182130,max_unique=182224
+converged (>= 182468/observer) at 114.4s rss_mib=0
+control_maxgap_ms: p50=14.47 p95=14.93 max=30.27 (n=320)
+control_rss_mib 0
+control_churn_write_maxgap_ms 17.0 bound_ms 31.25 writes 1921
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 reload_cmd wall_us=1792929198699367 policy=/tmp/irr-openbgpd/gen-b.conf
+reload request sent.
+request processed
+reload 1 progress: complete=0/320
+reload 1 progress: complete=0/320
+reload 1 progress: complete=0/320
+reload 1 progress: complete=0/320
+reload 1 progress: complete=0/320
+reload 1 completion_s: p50=56.55 p95=56.55 max=56.56 (n=320)
+reload 1 maxgap_ms: p50=365.45 p95=365.73 max=377.17 (n=320)
+reload 1 all_observer_maxgap_ms: p50=365.45 p95=365.73 max=377.17 (n=320)
+reload 1 changed_first_generation_update_ms: p50=7651.16 p95=7651.91 max=7751.45 (n=320)
+reload 1 rss_mib before=0 after=0 comms_sample=[4286056400]
+reload 1 sessions_up 320/320
+reload 1 stable_marker_peers 0/0
+reload 1 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,1,320,320,0,183040,56.548635,56.552777,56.559637,365.448,365.728,377.167,365.448,365.728,377.167,7651.164,7651.907,7751.448,0,0,0,320,0
+reload 2 reload_cmd wall_us=1792929275396184 policy=/tmp/irr-openbgpd/gen-a.conf
+reload request sent.
+request processed
+reload 2 progress: complete=0/320
+reload 2 progress: complete=0/320
+reload 2 progress: complete=0/320
+reload 2 progress: complete=0/320
+reload 2 progress: complete=0/320
+reload 2 completion_s: p50=61.46 p95=61.47 max=61.47 (n=320)
+reload 2 maxgap_ms: p50=418.31 p95=418.71 max=435.15 (n=320)
+reload 2 all_observer_maxgap_ms: p50=418.31 p95=418.71 max=435.15 (n=320)
+reload 2 changed_first_generation_update_ms: p50=7748.18 p95=7749.17 max=7932.47 (n=320)
+reload 2 rss_mib before=0 after=0 comms_sample=[4286055400]
+reload 2 sessions_up 320/320
+reload 2 stable_marker_peers 0/0
+reload 2 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,2,320,320,0,183040,61.461629,61.465100,61.466214,418.313,418.715,435.146,418.313,418.715,435.146,7748.176,7749.168,7932.469,0,0,0,320,0
+reload 3 reload_cmd wall_us=1792929356999203 policy=/tmp/irr-openbgpd/gen-b.conf
+reload request sent.
+request processed
+reload 3 progress: complete=0/320
+reload 3 progress: complete=0/320
+reload 3 progress: complete=0/320
+reload 3 progress: complete=0/320
+reload 3 progress: complete=0/320
+reload 3 completion_s: p50=64.45 p95=64.45 max=64.45 (n=320)
+reload 3 maxgap_ms: p50=413.00 p95=413.46 max=426.23 (n=320)
+reload 3 all_observer_maxgap_ms: p50=413.00 p95=413.46 max=426.23 (n=320)
+reload 3 changed_first_generation_update_ms: p50=8133.94 p95=8134.85 max=8399.79 (n=320)
+reload 3 rss_mib before=0 after=0 comms_sample=[4286056400]
+reload 3 sessions_up 320/320
+reload 3 stable_marker_peers 0/0
+reload 3 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,3,320,320,0,183040,64.450567,64.453023,64.454410,413.004,413.460,426.232,413.004,413.460,426.232,8133.936,8134.848,8399.790,0,0,0,320,0
+reload 4 reload_cmd wall_us=1792929441537420 policy=/tmp/irr-openbgpd/gen-a.conf
+reload request sent.
+request processed
+reload 4 progress: complete=0/320
+reload 4 progress: complete=0/320
+reload 4 progress: complete=0/320
+reload 4 progress: complete=0/320
+reload 4 progress: complete=0/320
+reload 4 completion_s: p50=62.40 p95=62.41 max=62.41 (n=320)
+reload 4 maxgap_ms: p50=441.02 p95=441.53 max=456.88 (n=320)
+reload 4 all_observer_maxgap_ms: p50=441.02 p95=441.53 max=456.88 (n=320)
+reload 4 changed_first_generation_update_ms: p50=8011.09 p95=8012.25 max=8144.20 (n=320)
+reload 4 rss_mib before=0 after=0 comms_sample=[4286055400]
+reload 4 sessions_up 320/320
+reload 4 stable_marker_peers 0/0
+reload 4 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,4,320,320,0,183040,62.403775,62.405133,62.406370,441.025,441.533,456.882,441.025,441.533,456.882,8011.092,8012.254,8144.204,0,0,0,320,0
+final sessions_up 320/320 parse_errors=0
+done rss_mib=0
