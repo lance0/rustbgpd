@@ -666,7 +666,7 @@ which ran rustbgpd v0.80.0 and OpenBGPD 9.3 on one host in the same night. Its
 S3 withdraw p50, 3.42–3.56 s, was a regression from v0.75.0's 0.20–0.26 s in the
 [v0.75.0 cross-daemon receipt](../perf/cross-daemon-v0750-2026-10.md), measured 2026-10-04 to 2026-10-05.
 v0.80.1 fixes it: the [v0.80.1 flap-storm addendum](../perf/cross-daemon-v0801-s3-2026-10.md),
-measured 2026-10-25 on the same host, puts the S3 withdraw p50 at 0.25–0.30 s against
+measured 2026-10-25 on the same host, puts the S3 withdraw p50 at 0.24–0.30 s against
 OpenBGPD 9.3's 8.46–9.60 s from the v0.80.0 queue.
 BIRD's current matrix rows are BIRD 3.3.2 in the
 [v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04

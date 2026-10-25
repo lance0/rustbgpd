@@ -2,9 +2,9 @@
   "schema": 1,
   "cell": "rustbgpd",
   "git": {
-    "commit": "00cfdbb1546f4f007add5e637341315d3edf56e4",
-    "tree": "18a78d0f9ac644672e8861a7f93e5284933df536",
-    "dirty": true
+    "commit": "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+    "tree": "5c455c47d9b69fb4349533e98ece21e2a1b48f63",
+    "dirty": false
   },
   "toolchain": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
   "host": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
@@ -23,12 +23,12 @@
     },
     "reloadstall": {
       "path": "target/scale/reloadstall",
-      "sha256": "e3a480817fe8f1401c8e1f11d0e5bab6a60cdc80edc05a73d3b545140b03b6a2"
+      "sha256": "ecc160fc03cd2d54be596b3afc06c1918d7207901230bc45c4749a5b6fd77fcf"
     }
   },
   "workload": {
     "binary": "target/release/rustbgpd",
-    "sha256": "adc2180980e6c77d92545f28cd8ce42a18f52fcb904f4174c2129d12882a75c8",
+    "sha256": "32ab97e3432d6e1f3e4b4491f92a1b5fb42f618974233e1464334e5192591fb1",
     "inputs": {
       "N_PEERS": "700",
       "TOTAL_PREFIXES": "400400",

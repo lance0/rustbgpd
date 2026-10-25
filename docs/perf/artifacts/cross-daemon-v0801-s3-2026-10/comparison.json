@@ -1,0 +1,276 @@
+{
+ "receipt": "v0.80.1 flap-storm (S3) addendum",
+ "measured_on": "2026-10-25",
+ "source": {
+  "tag": "v0.80.1",
+  "commit": "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+  "tree": "5c455c47d9b69fb4349533e98ece21e2a1b48f63",
+  "dirty": false,
+  "rustbgpd_sha256": "32ab97e3432d6e1f3e4b4491f92a1b5fb42f618974233e1464334e5192591fb1",
+  "reloadstall_sha256": "ecc160fc03cd2d54be596b3afc06c1918d7207901230bc45c4749a5b6fd77fcf"
+ },
+ "shape": {
+  "N_PEERS": "700",
+  "TOTAL_PREFIXES": "400400",
+  "PORT": "1790",
+  "RELOADS": "4",
+  "CONTROL_SECS": "30",
+  "FLAPSTORM": "50",
+  "BIRD_THREADS": "8"
+ },
+ "verdict": "PASS",
+ "bands_of_round_p50s": {
+  "withdraw_p50_s": {
+   "min": 0.24,
+   "max": 0.3,
+   "median": 0.25,
+   "n": 9
+  },
+  "reannounce_p50_s": {
+   "min": 0.36,
+   "max": 1.02,
+   "median": 0.39,
+   "n": 9
+  },
+  "first_reannounce_p50_s": {
+   "min": 0.24,
+   "max": 0.9,
+   "median": 0.25,
+   "n": 9
+  },
+  "reannounce_max_s": {
+   "min": 0.39,
+   "max": 1.05,
+   "median": 0.42,
+   "n": 9
+  }
+ },
+ "legs": [
+  {
+   "run": 1,
+   "status": "PASS",
+   "reason": "runner status 'pass'; 3 flap rounds, 700/700 sessions up, zero parse errors",
+   "git": {
+    "commit": "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+    "tree": "5c455c47d9b69fb4349533e98ece21e2a1b48f63",
+    "dirty": false
+   },
+   "rounds": [
+    {
+     "round": 1,
+     "withdraw_p50_s": 0.249303,
+     "withdraw_p95_s": 0.25352,
+     "withdraw_max_s": 0.267699,
+     "reannounce_p50_s": 0.398747,
+     "reannounce_p95_s": 0.401486,
+     "reannounce_max_s": 0.410867,
+     "first_reannounce_p50_s": 0.25,
+     "rss_mib": 385,
+     "sessions_up": 700,
+     "parse_errors": 0
+    },
+    {
+     "round": 2,
+     "withdraw_p50_s": 0.252872,
+     "withdraw_p95_s": 0.26785,
+     "withdraw_max_s": 0.269529,
+     "reannounce_p50_s": 0.987644,
+     "reannounce_p95_s": 0.989239,
+     "reannounce_max_s": 1.023779,
+     "first_reannounce_p50_s": 0.86,
+     "rss_mib": 385,
+     "sessions_up": 700,
+     "parse_errors": 0
+    },
+    {
+     "round": 3,
+     "withdraw_p50_s": 0.252194,
+     "withdraw_p95_s": 0.254422,
+     "withdraw_max_s": 0.280512,
+     "reannounce_p50_s": 1.021249,
+     "reannounce_p95_s": 1.036492,
+     "reannounce_max_s": 1.052365,
+     "first_reannounce_p50_s": 0.9,
+     "rss_mib": 398,
+     "sessions_up": 700,
+     "parse_errors": 0
+    }
+   ],
+   "daemon_cgroup_peak_kib": 474684,
+   "settled_rss_last_sample_kib": 421524,
+   "vmhwm_kib": 483220
+  },
+  {
+   "run": 2,
+   "status": "PASS",
+   "reason": "runner status 'pass'; 3 flap rounds, 700/700 sessions up, zero parse errors",
+   "git": {
+    "commit": "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+    "tree": "5c455c47d9b69fb4349533e98ece21e2a1b48f63",
+    "dirty": false
+   },
+   "rounds": [
+    {
+     "round": 1,
+     "withdraw_p50_s": 0.241493,
+     "withdraw_p95_s": 0.250429,
+     "withdraw_max_s": 0.269237,
+     "reannounce_p50_s": 0.386997,
+     "reannounce_p95_s": 0.393907,
+     "reannounce_max_s": 0.412717,
+     "first_reannounce_p50_s": 0.24,
+     "rss_mib": 385,
+     "sessions_up": 700,
+     "parse_errors": 0
+    },
+    {
+     "round": 2,
+     "withdraw_p50_s": 0.255087,
+     "withdraw_p95_s": 0.258368,
+     "withdraw_max_s": 0.263281,
+     "reannounce_p50_s": 0.393515,
+     "reannounce_p95_s": 0.394951,
+     "reannounce_max_s": 0.423418,
+     "first_reannounce_p50_s": 0.25,
+     "rss_mib": 400,
+     "sessions_up": 700,
+     "parse_errors": 0
+    },
+    {
+     "round": 3,
+     "withdraw_p50_s": 0.258304,
+     "withdraw_p95_s": 0.260771,
+     "withdraw_max_s": 0.273504,
+     "reannounce_p50_s": 0.376616,
+     "reannounce_p95_s": 0.378376,
+     "reannounce_max_s": 0.410853,
+     "first_reannounce_p50_s": 0.24,
+     "rss_mib": 397,
+     "sessions_up": 700,
+     "parse_errors": 0
+    }
+   ],
+   "daemon_cgroup_peak_kib": 473112,
+   "settled_rss_last_sample_kib": 427956,
+   "vmhwm_kib": 479760
+  },
+  {
+   "run": 3,
+   "status": "PASS",
+   "reason": "runner status 'pass'; 3 flap rounds, 700/700 sessions up, zero parse errors",
+   "git": {
+    "commit": "2fb2cbf276eaa6a2eb6005e956ce47b23a377dc3",
+    "tree": "5c455c47d9b69fb4349533e98ece21e2a1b48f63",
+    "dirty": false
+   },
+   "rounds": [
+    {
+     "round": 1,
+     "withdraw_p50_s": 0.261311,
+     "withdraw_p95_s": 0.295825,
+     "withdraw_max_s": 0.29784,
+     "reannounce_p50_s": 0.390137,
+     "reannounce_p95_s": 0.391715,
+     "reannounce_max_s": 0.421538,
+     "first_reannounce_p50_s": 0.25,
+     "rss_mib": 377,
+     "sessions_up": 700,
+     "parse_errors": 0
+    },
+    {
+     "round": 2,
+     "withdraw_p50_s": 0.254217,
+     "withdraw_p95_s": 0.257781,
+     "withdraw_max_s": 0.278581,
+     "reannounce_p50_s": 0.66624,
+     "reannounce_p95_s": 0.6675,
+     "reannounce_max_s": 0.694479,
+     "first_reannounce_p50_s": 0.55,
+     "rss_mib": 389,
+     "sessions_up": 700,
+     "parse_errors": 0
+    },
+    {
+     "round": 3,
+     "withdraw_p50_s": 0.299818,
+     "withdraw_p95_s": 0.302108,
+     "withdraw_max_s": 0.304531,
+     "reannounce_p50_s": 0.361637,
+     "reannounce_p95_s": 0.363019,
+     "reannounce_max_s": 0.392377,
+     "first_reannounce_p50_s": 0.24,
+     "rss_mib": 391,
+     "sessions_up": 700,
+     "parse_errors": 0
+    }
+   ],
+   "daemon_cgroup_peak_kib": 473628,
+   "settled_rss_last_sample_kib": 419788,
+   "vmhwm_kib": 479252
+  }
+ ],
+ "comparators": {
+  "openbgpd_9_3_v0800_queue": {
+   "withdraw_p50_s": [
+    8.46,
+    9.6
+   ],
+   "reannounce_p50_s": [
+    17.88,
+    18.55
+   ],
+   "reannounce_worst_s": 18.57,
+   "first_reannounce_p50_s": [
+    0.1,
+    0.16
+   ],
+   "source": "docs/perf/cross-daemon-v0800-2026-10.md"
+  },
+  "rustbgpd_v0_80_0": {
+   "withdraw_p50_s": [
+    3.42,
+    3.56
+   ],
+   "reannounce_p50_s": [
+    0.39,
+    0.55
+   ],
+   "first_reannounce_p50_s": [
+    0.25,
+    0.42
+   ],
+   "source": "docs/perf/cross-daemon-v0800-2026-10.md"
+  },
+  "rustbgpd_v0_75_0": {
+   "withdraw_p50_s": [
+    0.2,
+    0.26
+   ],
+   "reannounce_p50_s": [
+    0.29,
+    0.33
+   ],
+   "first_reannounce_p50_s": [
+    0.16,
+    0.17
+   ],
+   "source": "docs/perf/cross-daemon-v0750-2026-10.md"
+  },
+  "pre_release_fix_commit": {
+   "withdraw_p50_s": [
+    0.25,
+    0.3
+   ],
+   "reannounce_p50_s": [
+    0.38,
+    1.17
+   ],
+   "first_reannounce_p50_s": [
+    0.24,
+    1.04
+   ],
+   "n": 9,
+   "note": "fix applied to 00cfdbb15 before release; raw files not retained here"
+  }
+ }
+}

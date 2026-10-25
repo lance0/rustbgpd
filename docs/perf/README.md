@@ -67,8 +67,8 @@ Each result below links to its published, reproducible receipt:
   measured 2026-08-30 (0.852–1.085 s), are dated, on the earlier harness —
   [v0.68.0 receipt](irr-reload-v0680-2026-08.md)
 - **Member-flap propagation** (50 members flap, 650 observers): rustbgpd
-  v0.80.1 withdraw p50 **0.25–0.30 s** vs OpenBGPD 9.3 8.46–9.60 s, and
-  re-announce p50 **0.38–1.17 s** (median 0.39) against 17.88–18.55 s,
+  v0.80.1 withdraw p50 **0.24–0.30 s** vs OpenBGPD 9.3 8.46–9.60 s, and
+  re-announce p50 **0.36–1.02 s** (median 0.39) against 17.88–18.55 s,
   measured 2026-10-25 — [v0.80.1 flap-storm addendum](cross-daemon-v0801-s3-2026-10.md),
   three runs on the host of the
   [v0.80.0 cross-daemon receipt](cross-daemon-v0800-2026-10.md), whose
@@ -101,7 +101,7 @@ Each result below links to its published, reproducible receipt:
   so the stall is compared within one night only
 - **The losses, stated plainly**: OpenBGPD 9.3 delivers the first
   re-announced route sooner after a member flap (p50 0.10–0.16 s in the
-  v0.80.0 queue against rustbgpd v0.80.1's 0.24–1.04 s, median 0.25,
+  v0.80.0 queue against rustbgpd v0.80.1's 0.24–0.90 s, median 0.25,
   measured 2026-10-25 —
   [v0.80.1 flap-storm addendum](cross-daemon-v0801-s3-2026-10.md)). From
   the same-night v0.80.0 campaign, it has the shorter changed-observer gap
@@ -120,8 +120,8 @@ Each result below links to its published, reproducible receipt:
 
 The v0.80.0 rows above measure the v0.80.0 tag (`871d9d269`) on 2026-10-25
 on one host, three runs per daemon. The member-flap rustbgpd rows are
-v0.80.1's daemon source, re-measured later the same day on the same host
-and inputs; the other matrix cells were not re-run. OpenBGPD 9.3 ran in
+the v0.80.1 tag (`2fb2cbf27`), re-measured later the same day on the same
+host and inputs; the other matrix cells were not re-run. OpenBGPD 9.3 ran in
 every cell with the matrix daemon order alternated; BIRD 3.3.3 ran in the IRR roots only, so its
 matrix rows are BIRD 3.3.2 from the v0.74.0 night. BIRD 3.4.0 (released
 2026-10-12) and GoBGP v4.10.0 (released 2026-10-04) are not yet measured.
@@ -295,7 +295,7 @@ records.
 | [`competitive-bgperf2-v0680-2026-08.md`][competitive-bgperf2-v0680-2026-08.md] | 2026-08-30 | Four daemons, five import shapes, four counterbalanced repetitions | All 80 cells reached the exact expected table | Universal throughput, memory, or CPU ranking; BIRD 2.19.3, FRR 10.7.1 or GoBGP v4.10.0 |
 | [`config-persistence-2026-07.md`][config-persistence-2026-07.md] | 2026-07-25 | Pinned persistence, history, rollback, and commit-confirm lifecycle harness | Behavioral assertions preserved by the workspace integration test | Timing or performance |
 | [`controller-injection-2026-09.md`](controller-injection-2026-09.md) | 2026-09-20–21 | Unary inserts, replacements and deletes through 100k routes, one passive client | Scoped CPU reduction from deferred controller attribute collection; existing local-route reconciliation | Batch packing, multi-client scale or isolated-host latency |
-| [`cross-daemon-v0801-s3-2026-10.md`](cross-daemon-v0801-s3-2026-10.md) | 2026-10-25 | rustbgpd v0.80.1 daemon source at IXP-700 S3 (50 members flap), three runs of three flaps, against the v0.80.0 queue's OpenBGPD 9.3 rows on the same host | The v0.80.0 S3 withdraw regression is fixed: withdraw p50 0.25–0.30 s against 3.42–3.56 s at v0.80.0 and OpenBGPD's 8.46–9.60 s; OpenBGPD keeps the earlier first re-announcement | Any cell other than S3, a same-session OpenBGPD comparison, BIRD, or IPv6 |
+| [`cross-daemon-v0801-s3-2026-10.md`](cross-daemon-v0801-s3-2026-10.md) | 2026-10-25 | rustbgpd v0.80.1 (`2fb2cbf27`) at IXP-700 S3 (50 members flap), three runs of three flaps, against the v0.80.0 queue's OpenBGPD 9.3 rows on the same host | The v0.80.0 S3 withdraw regression is fixed: withdraw p50 0.24–0.30 s against 3.42–3.56 s at v0.80.0 and OpenBGPD's 8.46–9.60 s; OpenBGPD keeps the earlier first re-announcement | Any cell other than S3, a same-session OpenBGPD comparison, BIRD, or IPv6 |
 | [`cross-daemon-v0800-2026-10.md`](cross-daemon-v0800-2026-10.md) | 2026-10-25 | rustbgpd v0.80.0 (`871d9d269`) and OpenBGPD 9.3 at IXP-700 S1/S2/S3, and those two plus BIRD 3.3.3 in IRR reload at 0%, 10% and 50% overlap, three runs per daemon, 21 legs; Criterion A/B against v0.79.0, rrharness rungs and a bgperf2 spot-check | Same-night rows against OpenBGPD 9.3 for every matrix cell and against both competitors for IRR reload, including the losses and the S3 withdraw regression, with cgroup peaks for matrix and IRR memory | BIRD in the matrix, BIRD 3.4.0, RR1000, IPv6, or attribution of any change |
 | [`cross-daemon-v0750-2026-10.md`](cross-daemon-v0750-2026-10.md) | 2026-10-04 to 2026-10-05 | rustbgpd v0.75.0 daemon source (`319d14e4b`) and OpenBGPD 9.3 at IXP-700 S1/S2/S3, and those two plus BIRD 3.3.2 in IRR reload at 0%, 10% and 50% overlap, three runs per daemon, 21 legs | Same-night rows against OpenBGPD 9.3 for every matrix cell and against both competitors for IRR reload, including the losses, with cgroup peaks for the matrix memory rows | BIRD in the matrix, BIRD 3.3.3, RR1000, IPv6, or attribution of any change |
 | [`cross-daemon-v0740-2026-10.md`](cross-daemon-v0740-2026-10.md) | 2026-10-03 to 2026-10-04 | rustbgpd v0.74.0, BIRD 3.3.2 and OpenBGPD 9.2 at IXP-700 S1/S2/S3 and IRR reload at 0%, 10% and 50% overlap, three runs per daemon, 27 legs | Same-night cross-daemon rows for every published comparison cell, including the losses | BIRD 3.3.3, OpenBGPD 9.3, RR1000, IPv6, or attribution of any change |
@@ -472,7 +472,7 @@ from that file; a directory name does not fill a missing date.
 | [`artifacts/competitive-bgperf2-2026-07/README.md`](artifacts/competitive-bgperf2-2026-07/README.md) | 2026-07 | Four daemons, five fleet shapes, and three runs per shape | The retained inputs can recompute the linked receipt | Unstated |
 | [`artifacts/competitive-bgperf2-v0680-2026-08/README.md`](artifacts/competitive-bgperf2-v0680-2026-08/README.md) | Unstated | Eighty rows across five fixed import shapes | The retained row and image inventory | A full-table campaign |
 | [`artifacts/controller-injection-2026-09/README.md`](artifacts/controller-injection-2026-09/README.md) | Unstated | Eight completed controller-injection cells with passive-receiver counts, paginated reconciliation, and metrics snapshots | The retained result and evidence inventory for the linked receipt | Unstated |
-| [`artifacts/cross-daemon-v0801-s3-2026-10/README.md`](artifacts/cross-daemon-v0801-s3-2026-10/README.md) | 2026-10-25 | The three rustbgpd S3 legs of the v0.80.1 flap-storm addendum | Harness logs, status, RSS samples, VmHWM and cgroup readouts, provenance, gzipped daemon logs and the summarizer output | Competitor legs, scenario configurations or other cells |
+| [`artifacts/cross-daemon-v0801-s3-2026-10/README.md`](artifacts/cross-daemon-v0801-s3-2026-10/README.md) | 2026-10-25 | The three rustbgpd S3 legs of the v0.80.1 flap-storm addendum | Curated `comparison.json`, harness logs, status, RSS samples, VmHWM and cgroup readouts, provenance, gzipped daemon logs and the summarizer output | Competitor legs, scenario configurations or other cells |
 | [`artifacts/cross-daemon-v0800-2026-10/README.md`](artifacts/cross-daemon-v0800-2026-10/README.md) | 2026-10-25 | All 12 matrix legs and 9 IRR roots of the v0.80.0 cross-daemon campaign, plus its Criterion, rrharness and bgperf2 outputs | Harness logs, status, RSS samples, VmHWM and cgroup readouts, provenance, IRR rows, gzipped rustbgpd daemon logs, and the extracted summary and tail CSVs | Scenario configurations or competitor daemon logs |
 | [`artifacts/cross-daemon-v0750-2026-10/README.md`](artifacts/cross-daemon-v0750-2026-10/README.md) | 2026-10-04 to 2026-10-05 | All 12 matrix legs and 9 IRR roots of the v0.75.0 cross-daemon campaign | Harness logs, status, RSS samples, VmHWM and cgroup readouts, provenance, IRR rows, and the extracted summary and tail CSVs | Daemon logs or scenario configurations |
 | [`artifacts/cross-daemon-v0740-2026-10/README.md`](artifacts/cross-daemon-v0740-2026-10/README.md) | 2026-10-03 to 2026-10-04 | All 18 matrix legs and 9 IRR roots of the v0.74.0 cross-daemon campaign | Harness logs, status, RSS samples, provenance, IRR rows, and the extracted summary and tail CSVs | Daemon logs or scenario configurations |

@@ -112,7 +112,7 @@ Inspect the receipts behind protocol, performance, and operational claims.
 | [Interoperability](interop.md) | Validation against real BGP peers and network operating systems. |
 | [Benchmarks](benchmarks.md) | Microbenchmarks and their measured scope. |
 | [Performance archive](perf/README.md) | Dated performance receipts and their supporting artifacts. |
-| [v0.80.1 flap-storm addendum](perf/cross-daemon-v0801-s3-2026-10.md) | S3-only re-measurement at v0.80.1 (measured 2026-10-25): the member-flap withdraw p50 is 0.25–0.30 s again after the v0.80.0 regression, against the v0.80.0 queue's OpenBGPD 9.3 rows. |
+| [v0.80.1 flap-storm addendum](perf/cross-daemon-v0801-s3-2026-10.md) | S3-only re-measurement at v0.80.1 (measured 2026-10-25): the member-flap withdraw p50 is 0.24–0.30 s again after the v0.80.0 regression, against the v0.80.0 queue's OpenBGPD 9.3 rows. |
 | [v0.80.0 cross-daemon refresh](perf/cross-daemon-v0800-2026-10.md) | Latest cross-daemon measurement (v0.80.0, measured 2026-10-25): rustbgpd v0.80.0 against OpenBGPD 9.3 on the IXP matrix, with BIRD 3.3.3 added in the IRR reload roots, measured on one host, including an S3 withdraw regression from v0.75.0. |
 | [v0.75.0 cross-daemon refresh](perf/cross-daemon-v0750-2026-10.md) | The previous cross-daemon measurement (v0.75.0, measured 2026-10-04 to 2026-10-05), with BIRD 3.3.2 in the IRR roots. |
 | [Reload boundary measurement null result](perf/reload-boundary-attribution-2026-10.md) | Six-process receiver/publication method fails both stall-overhead bars; complete diagnostic evidence retained without production attribution. |
