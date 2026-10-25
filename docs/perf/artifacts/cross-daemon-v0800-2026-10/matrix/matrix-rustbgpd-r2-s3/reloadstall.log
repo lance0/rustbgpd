@@ -1,0 +1,194 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=1739017
+established 700 at 0.8s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=flapstorm,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828
+converged (>= 399828/observer) at 3.3s rss_mib=417
+control_maxgap_ms: p50=19.02 p95=19.97 max=42.00 (n=700)
+control_rss_mib 353
+control_churn_write_maxgap_ms 16.5 bound_ms 31.25 writes 1920
+flapstorm_failover_csv_header,round,peers_total,peers_flapped,flap_prefixes,alternate_prefixes,alternate_sources,daemon_cpu_s,scrape_bracketed_flush_sum_s,scrape_bracketed_flush_count,withdraw_p50_s,withdraw_max_s,window_s,background_cpu_s_per_s
+flapstorm_csv_header,round,peers_total,peers_flapped,prefixes,flap_prefixes,withdraw_p50_s,withdraw_p95_s,withdraw_max_s,reannounce_p50_s,reannounce_p95_s,reannounce_max_s,rss_mib,sessions_up,parse_errors
+flap 1 close wall_us=1792910694658432
+flap 1 withdraw_s: p50=3.54 p95=3.57 max=3.57 (n=650)
+flapstorm_failover_csv,1,700,50,28600,0,0,4.690,NaN,0,3.537380,3.571801,3.636087,0.979
+flap 1 reconnect transport_retries=0 recovered_peers=0
+flap 1 reannounce wall_us=1792910704684826
+flap 1 peer 0 rejoin_complete_s=0.423207 eor_before_full_table=true eor=present
+flap 1 peer 1 rejoin_complete_s=0.773267 eor_before_full_table=false eor=present
+flap 1 peer 2 rejoin_complete_s=0.884677 eor_before_full_table=false eor=present
+flap 1 peer 3 rejoin_complete_s=1.052079 eor_before_full_table=false eor=present
+flap 1 peer 4 rejoin_complete_s=1.221620 eor_before_full_table=false eor=present
+flap 1 peer 5 rejoin_complete_s=1.390241 eor_before_full_table=false eor=present
+flap 1 peer 6 rejoin_complete_s=1.559210 eor_before_full_table=false eor=present
+flap 1 peer 7 rejoin_complete_s=1.727923 eor_before_full_table=false eor=present
+flap 1 peer 8 rejoin_complete_s=1.901290 eor_before_full_table=false eor=present
+flap 1 peer 9 rejoin_complete_s=2.071169 eor_before_full_table=false eor=present
+flap 1 peer 10 rejoin_complete_s=2.250443 eor_before_full_table=false eor=present
+flap 1 peer 11 rejoin_complete_s=2.429640 eor_before_full_table=false eor=present
+flap 1 peer 12 rejoin_complete_s=2.598359 eor_before_full_table=false eor=present
+flap 1 peer 13 rejoin_complete_s=2.767215 eor_before_full_table=false eor=present
+flap 1 peer 14 rejoin_complete_s=2.935634 eor_before_full_table=false eor=present
+flap 1 peer 15 rejoin_complete_s=3.103848 eor_before_full_table=false eor=present
+flap 1 peer 16 rejoin_complete_s=3.274692 eor_before_full_table=false eor=present
+flap 1 peer 17 rejoin_complete_s=3.444203 eor_before_full_table=false eor=present
+flap 1 peer 18 rejoin_complete_s=3.612190 eor_before_full_table=false eor=present
+flap 1 peer 19 rejoin_complete_s=3.789962 eor_before_full_table=false eor=present
+flap 1 peer 20 rejoin_complete_s=3.958950 eor_before_full_table=false eor=present
+flap 1 peer 21 rejoin_complete_s=4.126147 eor_before_full_table=false eor=present
+flap 1 peer 22 rejoin_complete_s=4.296532 eor_before_full_table=false eor=present
+flap 1 peer 23 rejoin_complete_s=4.464627 eor_before_full_table=false eor=present
+flap 1 peer 24 rejoin_complete_s=4.632644 eor_before_full_table=false eor=present
+flap 1 peer 25 rejoin_complete_s=4.800872 eor_before_full_table=false eor=present
+flap 1 peer 26 rejoin_complete_s=4.968717 eor_before_full_table=false eor=present
+flap 1 peer 27 rejoin_complete_s=5.136321 eor_before_full_table=false eor=present
+flap 1 peer 28 rejoin_complete_s=5.305103 eor_before_full_table=false eor=present
+flap 1 peer 29 rejoin_complete_s=5.473214 eor_before_full_table=false eor=present
+flap 1 peer 30 rejoin_complete_s=5.640968 eor_before_full_table=false eor=present
+flap 1 peer 31 rejoin_complete_s=5.809049 eor_before_full_table=false eor=present
+flap 1 peer 32 rejoin_complete_s=5.977546 eor_before_full_table=false eor=present
+flap 1 peer 33 rejoin_complete_s=6.145893 eor_before_full_table=false eor=present
+flap 1 peer 34 rejoin_complete_s=6.314000 eor_before_full_table=false eor=present
+flap 1 peer 35 rejoin_complete_s=6.481307 eor_before_full_table=false eor=present
+flap 1 peer 36 rejoin_complete_s=6.649038 eor_before_full_table=false eor=present
+flap 1 peer 37 rejoin_complete_s=6.818583 eor_before_full_table=false eor=present
+flap 1 peer 38 rejoin_complete_s=6.991425 eor_before_full_table=false eor=present
+flap 1 peer 39 rejoin_complete_s=7.159603 eor_before_full_table=false eor=present
+flap 1 peer 40 rejoin_complete_s=7.327987 eor_before_full_table=false eor=present
+flap 1 peer 41 rejoin_complete_s=7.495275 eor_before_full_table=false eor=present
+flap 1 peer 42 rejoin_complete_s=7.662281 eor_before_full_table=false eor=present
+flap 1 peer 43 rejoin_complete_s=7.828675 eor_before_full_table=false eor=present
+flap 1 peer 44 rejoin_complete_s=7.995367 eor_before_full_table=false eor=present
+flap 1 peer 45 rejoin_complete_s=8.161892 eor_before_full_table=false eor=present
+flap 1 peer 46 rejoin_complete_s=8.328999 eor_before_full_table=false eor=present
+flap 1 peer 47 rejoin_complete_s=8.495822 eor_before_full_table=false eor=present
+flap 1 peer 48 rejoin_complete_s=8.662391 eor_before_full_table=false eor=present
+flap 1 peer 49 rejoin_complete_s=8.827914 eor_before_full_table=false eor=present
+flap 1 rejoin_complete_s: p50=4.80 p95=8.50 max=8.83 (n=50)
+flap 1 reannounce_s: p50=0.40 p95=0.40 max=0.43 (n=650)
+flap 1 first_reann_s: p50=0.25 p95=0.26 max=0.29 (n=650)
+flap 1 sessions_up 700/700 rss_mib=382
+flap 1 heap allocated_mib=326 active_mib=348 resident_mib=403 mapped_mib=434
+flapstorm_csv,1,700,50,400400,28600,3.537380,3.568444,3.571801,0.402172,0.403614,0.429173,382,700,0
+flap 2 close wall_us=1792910725653798
+flap 2 withdraw_s: p50=3.49 p95=3.52 max=3.53 (n=650)
+flapstorm_failover_csv,2,700,50,28600,0,0,4.570,NaN,0,3.493864,3.527535,3.535319,0.900
+flap 2 reconnect transport_retries=0 recovered_peers=0
+flap 2 reannounce wall_us=1792910735678902
+flap 2 peer 0 rejoin_complete_s=0.415112 eor_before_full_table=true eor=present
+flap 2 peer 1 rejoin_complete_s=0.769835 eor_before_full_table=false eor=present
+flap 2 peer 2 rejoin_complete_s=0.881863 eor_before_full_table=false eor=present
+flap 2 peer 3 rejoin_complete_s=1.056577 eor_before_full_table=false eor=present
+flap 2 peer 4 rejoin_complete_s=1.227148 eor_before_full_table=false eor=present
+flap 2 peer 5 rejoin_complete_s=1.397740 eor_before_full_table=false eor=present
+flap 2 peer 6 rejoin_complete_s=1.570458 eor_before_full_table=false eor=present
+flap 2 peer 7 rejoin_complete_s=1.741095 eor_before_full_table=false eor=present
+flap 2 peer 8 rejoin_complete_s=1.915379 eor_before_full_table=false eor=present
+flap 2 peer 9 rejoin_complete_s=2.097582 eor_before_full_table=false eor=present
+flap 2 peer 10 rejoin_complete_s=2.268698 eor_before_full_table=false eor=present
+flap 2 peer 11 rejoin_complete_s=2.439244 eor_before_full_table=false eor=present
+flap 2 peer 12 rejoin_complete_s=2.613674 eor_before_full_table=false eor=present
+flap 2 peer 13 rejoin_complete_s=2.783015 eor_before_full_table=false eor=present
+flap 2 peer 14 rejoin_complete_s=2.953348 eor_before_full_table=false eor=present
+flap 2 peer 15 rejoin_complete_s=3.124345 eor_before_full_table=false eor=present
+flap 2 peer 16 rejoin_complete_s=3.300434 eor_before_full_table=false eor=present
+flap 2 peer 17 rejoin_complete_s=3.470013 eor_before_full_table=false eor=present
+flap 2 peer 18 rejoin_complete_s=3.638868 eor_before_full_table=false eor=present
+flap 2 peer 19 rejoin_complete_s=3.808847 eor_before_full_table=false eor=present
+flap 2 peer 20 rejoin_complete_s=3.977623 eor_before_full_table=false eor=present
+flap 2 peer 21 rejoin_complete_s=4.146144 eor_before_full_table=false eor=present
+flap 2 peer 22 rejoin_complete_s=4.316194 eor_before_full_table=false eor=present
+flap 2 peer 23 rejoin_complete_s=4.484790 eor_before_full_table=false eor=present
+flap 2 peer 24 rejoin_complete_s=4.654421 eor_before_full_table=false eor=present
+flap 2 peer 25 rejoin_complete_s=4.823180 eor_before_full_table=false eor=present
+flap 2 peer 26 rejoin_complete_s=4.991489 eor_before_full_table=false eor=present
+flap 2 peer 27 rejoin_complete_s=5.159501 eor_before_full_table=false eor=present
+flap 2 peer 28 rejoin_complete_s=5.329545 eor_before_full_table=false eor=present
+flap 2 peer 29 rejoin_complete_s=5.498210 eor_before_full_table=false eor=present
+flap 2 peer 30 rejoin_complete_s=5.666246 eor_before_full_table=false eor=present
+flap 2 peer 31 rejoin_complete_s=5.835773 eor_before_full_table=false eor=present
+flap 2 peer 32 rejoin_complete_s=6.005380 eor_before_full_table=false eor=present
+flap 2 peer 33 rejoin_complete_s=6.179623 eor_before_full_table=false eor=present
+flap 2 peer 34 rejoin_complete_s=6.348356 eor_before_full_table=false eor=present
+flap 2 peer 35 rejoin_complete_s=6.516832 eor_before_full_table=false eor=present
+flap 2 peer 36 rejoin_complete_s=6.684973 eor_before_full_table=false eor=present
+flap 2 peer 37 rejoin_complete_s=6.853189 eor_before_full_table=false eor=present
+flap 2 peer 38 rejoin_complete_s=7.020794 eor_before_full_table=false eor=present
+flap 2 peer 39 rejoin_complete_s=7.189802 eor_before_full_table=false eor=present
+flap 2 peer 40 rejoin_complete_s=7.359491 eor_before_full_table=false eor=present
+flap 2 peer 41 rejoin_complete_s=7.528047 eor_before_full_table=false eor=present
+flap 2 peer 42 rejoin_complete_s=7.695925 eor_before_full_table=false eor=present
+flap 2 peer 43 rejoin_complete_s=7.863164 eor_before_full_table=false eor=present
+flap 2 peer 44 rejoin_complete_s=8.030387 eor_before_full_table=false eor=present
+flap 2 peer 45 rejoin_complete_s=8.198887 eor_before_full_table=false eor=present
+flap 2 peer 46 rejoin_complete_s=8.367010 eor_before_full_table=false eor=present
+flap 2 peer 47 rejoin_complete_s=8.535573 eor_before_full_table=false eor=present
+flap 2 peer 48 rejoin_complete_s=8.703097 eor_before_full_table=false eor=present
+flap 2 peer 49 rejoin_complete_s=8.869494 eor_before_full_table=false eor=present
+flap 2 rejoin_complete_s: p50=4.82 p95=8.54 max=8.87 (n=50)
+flap 2 reannounce_s: p50=0.39 p95=0.39 max=0.43 (n=650)
+flap 2 first_reann_s: p50=0.25 p95=0.25 max=0.28 (n=650)
+flap 2 sessions_up 700/700 rss_mib=383
+flap 2 heap allocated_mib=326 active_mib=349 resident_mib=400 mapped_mib=431
+flapstorm_csv,2,700,50,400400,28600,3.493864,3.524258,3.527535,0.392524,0.394034,0.428084,383,700,0
+flap 3 close wall_us=1792910756641060
+flap 3 withdraw_s: p50=3.55 p95=3.58 max=3.58 (n=650)
+flapstorm_failover_csv,3,700,50,28600,0,0,4.730,NaN,0,3.547335,3.580887,3.635469,0.890
+flap 3 reconnect transport_retries=0 recovered_peers=0
+flap 3 reannounce wall_us=1792910766666300
+flap 3 peer 0 rejoin_complete_s=0.427318 eor_before_full_table=true eor=present
+flap 3 peer 1 rejoin_complete_s=0.776066 eor_before_full_table=false eor=present
+flap 3 peer 2 rejoin_complete_s=0.890561 eor_before_full_table=false eor=present
+flap 3 peer 3 rejoin_complete_s=1.060127 eor_before_full_table=false eor=present
+flap 3 peer 4 rejoin_complete_s=1.229503 eor_before_full_table=false eor=present
+flap 3 peer 5 rejoin_complete_s=1.400983 eor_before_full_table=false eor=present
+flap 3 peer 6 rejoin_complete_s=1.580833 eor_before_full_table=false eor=present
+flap 3 peer 7 rejoin_complete_s=1.756604 eor_before_full_table=false eor=present
+flap 3 peer 8 rejoin_complete_s=1.934771 eor_before_full_table=false eor=present
+flap 3 peer 9 rejoin_complete_s=2.105306 eor_before_full_table=false eor=present
+flap 3 peer 10 rejoin_complete_s=2.277613 eor_before_full_table=false eor=present
+flap 3 peer 11 rejoin_complete_s=2.450759 eor_before_full_table=false eor=present
+flap 3 peer 12 rejoin_complete_s=2.621275 eor_before_full_table=false eor=present
+flap 3 peer 13 rejoin_complete_s=2.791507 eor_before_full_table=false eor=present
+flap 3 peer 14 rejoin_complete_s=2.962265 eor_before_full_table=false eor=present
+flap 3 peer 15 rejoin_complete_s=3.132682 eor_before_full_table=false eor=present
+flap 3 peer 16 rejoin_complete_s=3.305422 eor_before_full_table=false eor=present
+flap 3 peer 17 rejoin_complete_s=3.475939 eor_before_full_table=false eor=present
+flap 3 peer 18 rejoin_complete_s=3.646491 eor_before_full_table=false eor=present
+flap 3 peer 19 rejoin_complete_s=3.817202 eor_before_full_table=false eor=present
+flap 3 peer 20 rejoin_complete_s=3.987314 eor_before_full_table=false eor=present
+flap 3 peer 21 rejoin_complete_s=4.157882 eor_before_full_table=false eor=present
+flap 3 peer 22 rejoin_complete_s=4.330680 eor_before_full_table=false eor=present
+flap 3 peer 23 rejoin_complete_s=4.501046 eor_before_full_table=false eor=present
+flap 3 peer 24 rejoin_complete_s=4.671519 eor_before_full_table=false eor=present
+flap 3 peer 25 rejoin_complete_s=4.843555 eor_before_full_table=false eor=present
+flap 3 peer 26 rejoin_complete_s=5.014105 eor_before_full_table=false eor=present
+flap 3 peer 27 rejoin_complete_s=5.190165 eor_before_full_table=false eor=present
+flap 3 peer 28 rejoin_complete_s=5.361139 eor_before_full_table=false eor=present
+flap 3 peer 29 rejoin_complete_s=5.530905 eor_before_full_table=false eor=present
+flap 3 peer 30 rejoin_complete_s=5.700576 eor_before_full_table=false eor=present
+flap 3 peer 31 rejoin_complete_s=5.870085 eor_before_full_table=false eor=present
+flap 3 peer 32 rejoin_complete_s=6.039720 eor_before_full_table=false eor=present
+flap 3 peer 33 rejoin_complete_s=6.209080 eor_before_full_table=false eor=present
+flap 3 peer 34 rejoin_complete_s=6.379063 eor_before_full_table=false eor=present
+flap 3 peer 35 rejoin_complete_s=6.548984 eor_before_full_table=false eor=present
+flap 3 peer 36 rejoin_complete_s=6.718668 eor_before_full_table=false eor=present
+flap 3 peer 37 rejoin_complete_s=6.889007 eor_before_full_table=false eor=present
+flap 3 peer 38 rejoin_complete_s=7.059560 eor_before_full_table=false eor=present
+flap 3 peer 39 rejoin_complete_s=7.229865 eor_before_full_table=false eor=present
+flap 3 peer 40 rejoin_complete_s=7.400655 eor_before_full_table=false eor=present
+flap 3 peer 41 rejoin_complete_s=7.570801 eor_before_full_table=false eor=present
+flap 3 peer 42 rejoin_complete_s=7.739670 eor_before_full_table=false eor=present
+flap 3 peer 43 rejoin_complete_s=7.908599 eor_before_full_table=false eor=present
+flap 3 peer 44 rejoin_complete_s=8.077562 eor_before_full_table=false eor=present
+flap 3 peer 45 rejoin_complete_s=8.247337 eor_before_full_table=false eor=present
+flap 3 peer 46 rejoin_complete_s=8.416280 eor_before_full_table=false eor=present
+flap 3 peer 47 rejoin_complete_s=8.584951 eor_before_full_table=false eor=present
+flap 3 peer 48 rejoin_complete_s=8.752929 eor_before_full_table=false eor=present
+flap 3 peer 49 rejoin_complete_s=8.921858 eor_before_full_table=false eor=present
+flap 3 rejoin_complete_s: p50=4.84 p95=8.58 max=8.92 (n=50)
+flap 3 reannounce_s: p50=0.43 p95=0.43 max=0.43 (n=650)
+flap 3 first_reann_s: p50=0.26 p95=0.26 max=0.29 (n=650)
+flap 3 sessions_up 700/700 rss_mib=376
+flap 3 heap allocated_mib=326 active_mib=349 resident_mib=393 mapped_mib=424
+flapstorm_csv,3,700,50,400400,28600,3.547335,3.577598,3.580887,0.431508,0.433919,0.434045,376,700,0
+done rss_mib=370

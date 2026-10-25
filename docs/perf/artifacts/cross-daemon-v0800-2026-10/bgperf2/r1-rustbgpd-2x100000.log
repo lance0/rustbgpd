@@ -1,0 +1,42 @@
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+chdir: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+WARNING: this machine is busy -- 112% CPU (1.1 cores) used by processes outside the benchmark: <process names omitted>
+         timings will not be comparable with runs made on an idle machine
+Tester Type: bird
+creating Docker network "bgperf2-br" with subnet 10.10.0.0/16
+run monitor
+image: bgperf/gobgp:4.8.0
+image: bgperf/bird
+run tester tester type bird
+run rustbgpd
+image: bgperf/rustbgpd:v0800-871d9d269
+Waiting 0 seconds for monitor
+launched 1 testers
+elapsed: 0sec, cpu: 0.00%, mem: 9.70MB, mon recved: 0, neighbors_received: 0, neighbors_accepted: 0, %idle 0, free mem 108.30GB
+elapsed: 1sec, cpu: 8.49%, mem: 27.00MB, mon recved: 10752, neighbors_received: 2, neighbors_accepted: 2, %idle 97.56, free mem 108.23GB
+elapsed: 2sec, cpu: 48.41%, mem: 181.27MB, mon recved: 200000, neighbors_received: 2, neighbors_accepted: 2, %idle 91.19, free mem 107.80GB
+elapsed: 3sec, cpu: 1.13%, mem: 181.15MB, mon recved: 200000, neighbors_received: 2, neighbors_accepted: 2, %idle 98.08, free mem 107.80GB
+elapsed: 4sec, cpu: 1.19%, mem: 182.02MB, mon recved: 200000, neighbors_received: 2, neighbors_accepted: 2, %idle 98.14, free mem 107.82GB
+elapsed: 5sec, cpu: 1.18%, mem: 182.17MB, mon recved: 200000, neighbors_received: 2, neighbors_accepted: 2, %idle 97.53, free mem 107.84GB
+elapsed: 6sec, cpu: 1.26%, mem: 182.64MB, mon recved: 200000, neighbors_received: 2, neighbors_accepted: 2, %idle 96.78, free mem 107.83GB
+elapsed: 7sec, cpu: 1.22%, mem: 182.76MB, mon recved: 200000, neighbors_received: 2, neighbors_accepted: 2, %idle 98.01, free mem 107.84GB
+last recevied: 5
+rustbgpd: rustbgpd 0.80.0
+Max cpu: 48.41, max mem: 182.76MB
+Min %idle 91.19, Min mem free 107.80GB
+Time since first received prefix: 2
+total time: 12.70s
+elasped time: 3s
+tester errors: 0
+tester timeouts: 0
+
+target read pairing: 8 samples paired, 0 unpaired, start offset -270.7..2.4 ms (window [-500.0, 50.0] ms)
+bgperf_bird_tester_bgperf_bird_tester: ready after 1.1s, offered 200000 prefixes, injection shorter than the 1.0s poll resolution
+post-injection tail not resolved at the 1.0s poll resolution (the last generator finished and the monitor reached the required count within one look of each other)
+limiting component: unresolved -- the generators offered 200000 prefixes and only 0 of them crossed the measured interval, and none of them timed its own send, so completion may precede the end of their sending
+finding: the fleet injection was not resolved at this poll resolution, so the generators cannot be shown to have cost the run anything (injection_unresolved)
+finding: the whole run finished inside what these poll loops can resolve, so neither the generators nor the target can be shown to have held it up (no_dominant_interval)
+finding: processes outside the benchmark used up to 1.1 cores during this run, led by <process names omitted> (foreign_cpu_contention)
+name, target, version, peers, prefixes per peer, required, received, monitor (s), elapsed (s), prefix received (s), testers (s), total time, max cpu %, max mem (GB), min idle%, min free mem (GB), flags, date, cores, Mem (GB), tester errors, tester timeouts, failed, MSG, filters, max foreign cpu %, neighbor poll mode, target image, tester version, monitor version
+rustbgpd,rustbgpd,rustbgpd 0.80.0,2,100000,198000,200000,0,3,1,2,12.7,48,0.178,91,107.801,,2026-10-25,64,125.29GB,0,0,,,,109,poll1,bgperf/rustbgpd:v0800-871d9d269,2.19.2,4.8.0
+

@@ -1,0 +1,232 @@
+# v0.80.0 Criterion A/B analysis (2026-10-25T04:31:29Z)
+control v0.79.0 60cb5c9910eb1380661dd4c80d55563b2d80099a; candidate v0.80.0 871d9d269dd791d6f600236a9445af8767bf7cc5; core 8; rustc 1.99.1 (58cf8f9c3 2026-10-13); cargo bench --locked: rustbgpd-rib (bench-internals) rib_ops+export_roster+gr_end_of_rib(+contested_prefix_scoped cand), rustbgpd-transport (bench-internals) fanout, rustbgpd-wire codec; separate worktree + CARGO_TARGET_DIR per side
+# RIB ids: ctl 68 cand 72 shared 68 cand-only 4 ctl-only 0
+# ROSTER ids: ctl 5 cand 5 shared 5 cand-only 0 ctl-only 0
+# FANOUT ids: ctl 4 cand 4 shared 4 cand-only 0 ctl-only 0
+# CODEC ids: ctl 32 cand 32 shared 32 cand-only 0 ctl-only 0
+BAR: no regression beyond same-SHA band + 5 points on any shared id; multimodal ids per mode (summarizer), else INVALID with reason.
+
+## queue notes
+
+## criterion runs
+ss1-a RIB rc=0 789s
+ss1-a ROSTER rc=0 62s
+ss1-a FANOUT rc=0 60s
+ss1-a CODEC rc=0 382s
+ss1-a GR rc=0 6s
+ss1-b RIB rc=0 790s
+ss1-b ROSTER rc=0 62s
+ss1-b FANOUT rc=0 59s
+ss1-b CODEC rc=0 378s
+ss1-b GR rc=0 6s
+ss2-a RIB rc=0 788s
+ss2-a ROSTER rc=0 63s
+ss2-a FANOUT rc=0 59s
+ss2-a CODEC rc=0 384s
+ss2-a GR rc=0 6s
+ss2-b RIB rc=0 786s
+ss2-b ROSTER rc=0 62s
+ss2-b FANOUT rc=0 60s
+ss2-b CODEC rc=0 381s
+ss2-b GR rc=0 6s
+ab1-ctl RIB rc=0 789s
+ab1-ctl ROSTER rc=0 62s
+ab1-ctl FANOUT rc=0 59s
+ab1-ctl CODEC rc=0 382s
+ab1-ctl GR rc=0 6s
+ab1-cand RIB rc=0 794s
+ab1-cand ROSTER rc=0 62s
+ab1-cand FANOUT rc=0 56s
+ab1-cand CODEC rc=0 386s
+ab1-cand GR rc=0 5s
+ab1-cand SCOPED rc=0 51s
+ab1-cand RIB-candonly rc=0 64s
+ab2-cand RIB rc=0 793s
+ab2-cand ROSTER rc=0 62s
+ab2-cand FANOUT rc=0 56s
+ab2-cand CODEC rc=0 386s
+ab2-cand GR rc=0 5s
+ab2-cand SCOPED rc=0 50s
+ab2-cand RIB-candonly rc=0 64s
+ab2-ctl RIB rc=0 788s
+ab2-ctl ROSTER rc=0 62s
+ab2-ctl FANOUT rc=0 58s
+ab2-ctl CODEC rc=0 379s
+ab2-ctl GR rc=0 6s
+ab3-ctl RIB rc=0 804s
+ab3-ctl ROSTER rc=0 62s
+ab3-ctl FANOUT rc=0 60s
+ab3-ctl CODEC rc=0 378s
+ab3-ctl GR rc=0 6s
+ab3-cand RIB rc=0 797s
+ab3-cand ROSTER rc=0 62s
+ab3-cand FANOUT rc=0 56s
+ab3-cand CODEC rc=0 383s
+ab3-cand GR rc=0 5s
+ab3-cand SCOPED rc=0 51s
+ab3-cand RIB-candonly rc=0 67s
+
+## criterion verdict (per-mode summarizer; criterion section only)
+
+criterion: 2 same-SHA pairs, 3 A/B pairs, 109 bench ids
+bench | band % | delta % (min..max) | ss n | ab n | verdict
+  per-mode rows: bench [mode] | band % | delta % (min..max) | ss n | ab n | verdict | occupancy
+adj_rib_in_insert/10000 | 0.25 | +0.49 (-0.66..+1.84) | 2 | 3 | PASS
+adj_rib_in_insert/100000 | - | - | 2 | 3 | INVALID (per-mode; multimodal within ab2-cand: 11024873.094 ns n=6, 14159072.030 ns n=4 -> slow: ss n=1, ab n=3)
+  adj_rib_in_insert/100000 [fast < 11631864.756 ns] | - | - | 0 | 0 | PASS (minority mode, unscored) | occ ctl 11% cand 17% (ss spread 70)
+  adj_rib_in_insert/100000 [slow >= 11631864.756 ns] | - | - | 1 | 3 | INVALID (ss n=1 < 2 or ab n=3 < 3) | occ ctl 89% cand 83% (ss spread 70)
+  adj_rib_in_insert/100000 [slow-mode occupancy] | cand pooled 83% vs ctl run max 100% (bar +20) | PASS
+adj_rib_in_insert/500000 | - | - | 2 | 3 | INVALID (per-mode; multimodal within ab1-ctl: 84236237.589 ns n=8, 89494481.000 ns n=2 -> mode evidence but no supported split in pooled samples)
+announce_validation/revalidate/100000 | 1.88 | -2.28 (-3.55..-2.11) | 2 | 3 | PASS
+announce_validation/session_validated/100000 | 3.15 | -2.09 (-3.24..-1.02) | 2 | 3 | PASS
+announce_validation/table_off/100000 | 2.87 | -1.47 (-1.82..-0.47) | 2 | 3 | PASS
+attr_decode/as_set_revised/1 | 6.08 | -1.01 (-3.25..+1.69) | 2 | 3 | PASS
+attr_decode/rich/11 | 0.72 | -1.90 (-2.80..-1.84) | 2 | 3 | PASS
+attr_decode/typical/6 | 2.68 | +0.45 (-1.03..+2.23) | 2 | 3 | PASS
+attr_decode_revised/rich/11 | 7.88 | -0.66 (-2.74..-0.47) | 2 | 3 | PASS
+attr_decode_revised/typical/6 | 1.59 | -0.28 (-1.49..+0.20) | 2 | 3 | PASS
+attr_encode/rich/11 | 9.30 | -0.62 (-0.83..+3.46) | 2 | 3 | PASS
+attr_encode/typical/6 | 1.76 | +2.16 (+1.76..+4.43) | 2 | 3 | PASS
+attr_hash_only/many_unique/10000 | 0.31 | -0.33 (-0.91..-0.09) | 2 | 3 | PASS
+attr_hash_only/rich_independent_equal/10000 | 0.79 | +0.14 (+0.02..+0.31) | 2 | 3 | PASS
+attr_hash_only/rich_shared_arc/10000 | 1.42 | -0.68 (-2.44..-0.45) | 2 | 3 | PASS
+attr_hash_only/typical_independent_equal/10000 | 0.34 | -0.92 (-1.00..-0.24) | 2 | 3 | PASS
+attr_hash_only/typical_independent_equal/100000 | 1.78 | -0.15 (-6.06..+0.09) | 2 | 3 | PASS
+attr_hash_only/typical_shared_arc/10000 | 13.87 | -0.16 (-0.87..-0.02) | 2 | 3 | PASS
+attr_hash_only/typical_shared_arc/100000 | 0.08 | +0.01 (-0.07..+0.02) | 2 | 3 | PASS
+attr_hashing_adj_rib_in_insert/many_unique/10000 | 0.48 | -0.04 (-0.72..+0.36) | 2 | 3 | PASS
+attr_hashing_adj_rib_in_insert/rich_independent_equal/10000 | 0.08 | -0.09 (-0.35..-0.01) | 2 | 3 | PASS
+attr_hashing_adj_rib_in_insert/rich_shared_arc/10000 | 0.18 | -0.00 (-0.12..+0.10) | 2 | 3 | PASS
+attr_hashing_adj_rib_in_insert/typical_independent_equal/10000 | 0.89 | +0.65 (+0.51..+2.05) | 2 | 3 | PASS
+attr_hashing_adj_rib_in_insert/typical_independent_equal/100000 | 0.88 | -3.27 (-3.90..-2.77) | 2 | 3 | PASS
+attr_hashing_adj_rib_in_insert/typical_shared_arc/10000 | 0.44 | +0.21 (+0.17..+2.23) | 2 | 3 | PASS
+attr_hashing_adj_rib_in_insert/typical_shared_arc/100000 | 0.03 | -3.20 (-3.46..-3.06) | 2 | 3 | PASS
+attr_hashing_bulk_initial_load/many_unique/10000 | 0.69 | -0.95 (-11.82..-0.78) | 2 | 3 | PASS
+attr_hashing_bulk_initial_load/rich_independent_equal/10000 | 1.48 | -0.60 (-6.27..-0.24) | 2 | 3 | PASS
+attr_hashing_bulk_initial_load/rich_shared_arc/10000 | 1.17 | -0.80 (-10.15..+0.52) | 2 | 3 | PASS
+attr_hashing_bulk_initial_load/typical_independent_equal/10000 | 1.62 | -0.38 (-12.74..+0.04) | 2 | 3 | PASS
+attr_hashing_bulk_initial_load/typical_independent_equal/100000 | 0.38 | -4.67 (-9.51..-3.92) | 2 | 3 | PASS
+attr_hashing_bulk_initial_load/typical_shared_arc/10000 | 2.42 | -0.98 (-16.01..-0.22) | 2 | 3 | PASS
+attr_hashing_bulk_initial_load/typical_shared_arc/100000 | 0.43 | -5.48 (-11.76..-5.12) | 2 | 3 | PASS
+attr_hashing_route_churn/many_unique/10000 | 0.23 | -2.42 (-2.46..-2.22) | 2 | 3 | PASS
+attr_hashing_route_churn/rich_independent_equal/10000 | 0.26 | -2.41 (-2.58..-2.26) | 2 | 3 | PASS
+attr_hashing_route_churn/rich_shared_arc/10000 | 0.21 | -2.41 (-2.64..-0.86) | 2 | 3 | PASS
+attr_hashing_route_churn/typical_independent_equal/10000 | 0.57 | -2.90 (-3.13..-2.89) | 2 | 3 | PASS
+attr_hashing_route_churn/typical_independent_equal/100000 | 0.82 | -5.21 (-5.75..-4.51) | 2 | 3 | PASS
+attr_hashing_route_churn/typical_shared_arc/10000 | 0.91 | -3.32 (-5.15..-2.65) | 2 | 3 | PASS
+attr_hashing_route_churn/typical_shared_arc/100000 | 0.59 | -6.58 (-6.78..-6.28) | 2 | 3 | PASS
+attr_intern/many_unique/10000 | 0.10 | -0.07 (-1.04..+0.71) | 2 | 3 | PASS
+attr_intern/rich_independent_equal/10000 | 0.05 | -0.21 (-0.24..+0.09) | 2 | 3 | PASS
+attr_intern/rich_shared_arc/10000 | 0.34 | -0.39 (-0.74..-0.03) | 2 | 3 | PASS
+attr_intern/typical_independent_equal/10000 | 0.36 | -0.05 (-0.19..+0.67) | 2 | 3 | PASS
+attr_intern/typical_independent_equal/100000 | 0.68 | +0.56 (-1.66..+2.19) | 2 | 3 | PASS
+attr_intern/typical_shared_arc/10000 | - | - | 2 | 3 | INVALID (per-mode; multimodal within ab2-cand: 145287.642 ns n=6, 163350.331 ns n=4 -> mode evidence but no supported split in pooled samples)
+attr_intern/typical_shared_arc/100000 | 0.04 | -0.59 (-0.64..-0.43) | 2 | 3 | PASS
+attr_intern_manager_churn/replace/1000 | 1.83 | -7.11 (-7.29..-6.55) | 2 | 3 | PASS
+attr_intern_manager_churn/replace/1000000 | 1.09 | -1.48 (-1.54..+0.34) | 2 | 3 | PASS
+attr_intern_manager_churn/replace/200000 | 3.58 | -0.36 (-3.29..+1.54) | 2 | 3 | PASS
+attr_intern_manager_churn/withdraw/1000 | 1.85 | -6.27 (-7.52..-6.24) | 2 | 3 | PASS
+attr_intern_manager_churn/withdraw/1000000 | 1.69 | +0.08 (-0.37..+0.26) | 2 | 3 | PASS
+attr_intern_manager_churn/withdraw/200000 | 5.08 | -0.83 (-2.09..+0.44) | 2 | 3 | PASS
+best_path_cmp/equal | 0.31 | -53.65 (-53.71..-53.64) | 2 | 3 | PASS
+best_path_cmp/full_tiebreak | 1.39 | -69.83 (-70.01..-69.68) | 2 | 3 | PASS
+best_path_cmp/local_pref_diff | 0.66 | +0.48 (-0.24..+0.83) | 2 | 3 | PASS
+best_path_cmp/rich_full_tiebreak | 0.01 | -54.51 (-54.53..-54.42) | 2 | 3 | PASS
+bulk_initial_load/10000 | 2.99 | -0.97 (-2.33..-0.60) | 2 | 3 | PASS
+bulk_initial_load/100000 | 0.84 | -5.29 (-6.40..-4.99) | 2 | 3 | PASS
+export_policy_eval/eager_as_path_string | 0.31 | -1.08 (-2.78..-0.54) | 2 | 3 | PASS
+export_policy_eval/lazy_as_path_string | - | - | 2 | 3 | PASS (per-mode; multimodal within ab2-cand: 243894.652 ns n=68, 314038.083 ns n=32)
+  export_policy_eval/lazy_as_path_string [fast < 288151.717 ns] | 1.88 | +0.23 (-1.59..+0.54) | 2 | 3 | PASS | occ ctl 91% cand 89% (ss spread 64)
+  export_policy_eval/lazy_as_path_string [slow >= 288151.717 ns] | - | - | 0 | 0 | PASS (minority mode, unscored) | occ ctl 9% cand 11% (ss spread 64)
+  export_policy_eval/lazy_as_path_string [slow-mode occupancy] | cand pooled 11% vs ctl run max 64% (bar +20) | PASS
+export_roster_capture/10000_peers_2_terms | 0.72 | +2.18 (+2.00..+2.49) | 2 | 3 | PASS
+export_roster_capture/1000_peers_2_terms | 1.43 | +1.80 (+1.31..+2.22) | 2 | 3 | PASS
+export_roster_capture/1000_peers_32_terms_256b_labels | 11.58 | -3.22 (-5.26..-1.11) | 2 | 3 | PASS
+export_roster_publish/10000_peers | 0.36 | -67.70 (-67.90..-67.62) | 2 | 3 | PASS
+export_roster_publish/1000_peers | 1.16 | -65.60 (-65.86..-65.29) | 2 | 3 | PASS
+initial_table_peer_join/rr_client_ipv4_unicast/4096 | 0.75 | -2.21 (-2.60..-1.17) | 2 | 3 | PASS
+initial_table_peer_join/rr_client_ipv4_unicast/65536 | 4.31 | -4.70 (-5.36..-2.98) | 2 | 3 | PASS
+loc_rib_lookup/100000_hits | 0.67 | -1.45 (-7.23..-1.34) | 2 | 3 | PASS
+loc_rib_recompute/1 | - | - | 2 | 3 | INVALID (per-mode; multimodal within ab1-cand: 104.074 ns n=73, 450.122 ns n=27 -> fast: third mode within ss2-b (103.893/114.303 ns); fast: third mode across control runs (105.193/112.824 ns))
+  loc_rib_recompute/1 [fast < 318.123 ns] | 8.58 | -3.72 (-5.23..-1.11) | 2 | 3 | INVALID (fast: third mode within ss2-b (103.893/114.303 ns); fast: third mode across control runs (105.193/112.824 ns)) | occ ctl 87% cand 89% (ss spread 9)
+  loc_rib_recompute/1 [slow >= 318.123 ns] | - | - | 0 | 1 | PASS (minority mode, unscored) | occ ctl 13% cand 11% (ss spread 9)
+  loc_rib_recompute/1 [slow-mode occupancy] | cand pooled 11% vs ctl run max 37% (bar +20) | PASS
+loc_rib_recompute/2 | - | - | 2 | 3 | INVALID (per-mode; multimodal within ab3-cand: 108.209 ns n=50, 460.231 ns n=50 -> fast: third mode across control runs (117.884/125.168 ns))
+  loc_rib_recompute/2 [fast < 289.550 ns] | 6.94 | -8.39 (-8.48..-3.56) | 2 | 3 | INVALID (fast: third mode across control runs (117.884/125.168 ns)) | occ ctl 83% cand 81% (ss spread 3)
+  loc_rib_recompute/2 [slow >= 289.550 ns] | - | - | 2 | 0 | PASS (minority mode, unscored) | occ ctl 17% cand 19% (ss spread 3)
+  loc_rib_recompute/2 [slow-mode occupancy] | cand pooled 19% vs ctl run max 37% (bar +20) | PASS
+loc_rib_recompute/4 | - | - | 2 | 3 | PASS (per-mode; multimodal within ab1-ctl: 147.782 ns n=76, 513.502 ns n=24)
+  loc_rib_recompute/4 [fast < 416.161 ns] | 5.42 | -14.37 (-15.01..-12.07) | 2 | 3 | PASS | occ ctl 94% cand 97% (ss spread 4)
+  loc_rib_recompute/4 [slow >= 416.161 ns] | - | - | 0 | 0 | PASS (minority mode, unscored) | occ ctl 6% cand 3% (ss spread 4)
+  loc_rib_recompute/4 [slow-mode occupancy] | cand pooled 3% vs ctl run max 24% (bar +20) | PASS
+loc_rib_recompute/8 | - | - | 2 | 3 | INVALID (per-mode; multimodal within ab1-cand: 164.339 ns n=62, 516.147 ns n=38 -> slow: ss n=0, ab n=1)
+  loc_rib_recompute/8 [fast < 416.329 ns] | 1.94 | -21.74 (-22.39..-19.79) | 2 | 3 | PASS | occ ctl 92% cand 72% (ss spread 3)
+  loc_rib_recompute/8 [slow >= 416.329 ns] | - | - | 0 | 1 | INVALID (ss n=0 < 2 or ab n=1 < 3) | occ ctl 8% cand 28% (ss spread 3)
+  loc_rib_recompute/8 [slow-mode occupancy] | cand pooled 28% vs ctl run max 36% (bar +20) | PASS
+loc_rib_recompute_steady/payload_replace_hit | 1.19 | -6.27 (-8.11..-4.95) | 2 | 3 | PASS
+loc_rib_recompute_steady/unchanged_32_rich_paths | 0.27 | -23.94 (-24.17..-23.20) | 2 | 3 | PASS
+loc_rib_recompute_steady/unchanged_hit | 5.30 | -3.59 (-7.33..-1.96) | 2 | 3 | PASS
+loc_rib_recompute_steady/withdraw_hit | - | - | 2 | 3 | INVALID (per-mode; multimodal within ab1-ctl: 79.621 ns n=76, 114.174 ns n=24 -> fast: third mode within ab1-ctl (79.621/111.227 ns); fast: third mode within ab3-ctl (78.324/114.931 ns); fast: third mode within ss1-a (80.057/132.647 ns))
+  loc_rib_recompute_steady/withdraw_hit [fast < 259.095 ns] | 1.76 | +1.71 (+1.20..+2.12) | 2 | 3 | INVALID (fast: third mode within ab1-ctl (79.621/111.227 ns); fast: third mode within ab3-ctl (78.324/114.931 ns); fast: third mode within ss1-a (80.057/132.647 ns)) | occ ctl 99% cand 99% (ss spread 1)
+  loc_rib_recompute_steady/withdraw_hit [slow >= 259.095 ns] | - | - | 0 | 0 | PASS (minority mode, unscored) | occ ctl 1% cand 1% (ss spread 1)
+  loc_rib_recompute_steady/withdraw_hit [slow-mode occupancy] | cand pooled 1% vs ctl run max 4% (bar +20) | PASS
+nlri_decode/1 | 0.15 | -0.14 (-0.86..+0.00) | 2 | 3 | PASS
+nlri_decode/10 | 6.66 | +0.10 (-0.63..+0.14) | 2 | 3 | PASS
+nlri_decode/100 | 4.31 | -0.04 (-0.15..+0.06) | 2 | 3 | PASS
+nlri_decode/500 | 1.48 | -0.00 (-0.20..+0.16) | 2 | 3 | PASS
+nlri_encode/1 | 0.55 | +0.76 (+0.39..+0.81) | 2 | 3 | PASS
+nlri_encode/10 | - | - | 2 | 3 | INVALID (per-mode; multimodal control runs: 30.622 ns n=5, 32.568 ns n=2 -> mode evidence but no supported split in pooled samples)
+nlri_encode/100 | - | - | 2 | 3 | INVALID (per-mode; multimodal control runs: 264.704 ns n=5, 283.286 ns n=2 -> mode evidence but no supported split in pooled samples)
+nlri_encode/500 | 0.13 | -0.02 (-6.54..+7.34) | 2 | 3 | PASS
+rib_pipeline/1000 | 0.23 | -2.20 (-5.17..-0.49) | 2 | 3 | PASS
+rib_pipeline/10000 | 0.54 | -1.68 (-4.78..-0.14) | 2 | 3 | PASS
+rib_pipeline/50000 | - | - | 2 | 3 | INVALID (per-mode; multimodal within ab2-ctl: 26832549.902 ns n=4, 29362677.194 ns n=6 -> fast: ss n=0, ab n=0; slow: ss n=2, ab n=1)
+  rib_pipeline/50000 [fast < 23918977.281 ns] | - | - | 0 | 0 | INVALID (ss n=0 < 2 or ab n=0 < 3) | occ ctl 0% cand 43% (ss spread 0)
+  rib_pipeline/50000 [slow >= 23918977.281 ns] | - | - | 2 | 1 | INVALID (ss n=2 < 2 or ab n=1 < 3) | occ ctl 100% cand 57% (ss spread 0)
+  rib_pipeline/50000 [slow-mode occupancy] | cand pooled 57% vs ctl run max 100% (bar +20) | PASS
+route_churn/10k_base_1k_churn | 0.32 | -3.09 (-3.09..-2.82) | 2 | 3 | PASS
+route_refresh_group_member/1_sources/65536 | 3.94 | -7.50 (-8.04..-6.30) | 2 | 3 | PASS
+route_refresh_group_member/8_sources/65536 | 2.12 | -6.47 (-7.82..-4.71) | 2 | 3 | PASS
+update_build/1 | 0.96 | +0.52 (+0.26..+0.92) | 2 | 3 | PASS
+update_build/10 | 1.22 | +1.68 (+0.10..+3.91) | 2 | 3 | PASS
+update_build/100 | 0.63 | +0.56 (-0.22..+7.59) | 2 | 3 | PASS
+update_build/500 | 5.44 | +0.16 (+0.16..+0.48) | 2 | 3 | PASS
+update_build/ipv6_mp_add_path | 0.60 | +2.08 (+1.77..+2.32) | 2 | 3 | PASS
+update_parse/1 | 4.26 | -1.78 (-2.08..-1.06) | 2 | 3 | PASS
+update_parse/10 | 6.90 | +1.69 (-1.84..+2.61) | 2 | 3 | PASS
+update_parse/100 | 3.69 | +0.46 (+0.13..+1.01) | 2 | 3 | PASS
+update_parse/500 | 1.81 | +0.46 (-0.43..+0.62) | 2 | 3 | PASS
+update_parse_revised/1 | 1.27 | -0.25 (-0.31..-0.20) | 2 | 3 | PASS
+update_parse_revised/10 | 0.13 | +0.87 (+0.77..+1.08) | 2 | 3 | PASS
+update_parse_revised/100 | 0.54 | +0.54 (-0.17..+1.88) | 2 | 3 | PASS
+update_parse_revised/500 | 0.23 | +0.07 (-0.28..+0.19) | 2 | 3 | PASS
+update_parse_revised/ipv6_mp_add_path | 2.73 | -1.72 (-2.37..+0.01) | 2 | 3 | PASS
+update_parse_revised/ipv6_typical/1 | 0.17 | -2.44 (-3.26..-0.42) | 2 | 3 | PASS
+update_parse_revised/ipv6_typical/100 | 0.26 | +0.32 (-0.46..+0.66) | 2 | 3 | PASS
+validate_update | 0.82 | +1.60 (-5.95..+4.50) | 2 | 3 | PASS
+VERDICT v0.80.0 criterion: INVALID (10 of 109 benches have invalid evidence: adj_rib_in_insert/100000: per-mode slow: ss n=1, ab n=3, adj_rib_in_insert/500000: per-mode mode evidence but no supported split in pooled samples, attr_intern/typical_shared_arc/10000: per-mode mode evidence but no supported split in pooled samples, loc_rib_recompute/1: per-mode fast: third mode within ss2-b (103.893/114.303 ns); fast: third mode across control runs (105.193/112.824 ns), loc_rib_recompute/2: per-mode fast: third mode across control runs (117.884/125.168 ns), loc_rib_recompute/8: per-mode slow: ss n=0, ab n=1)
+
+## candidate-only ids
+candidate-only ids (median over ab cand runs, ns; n runs)
+  best_path_cmp/peer_tiebreak_v6: 7181 (n=3)
+  contested_prefix_selection/numbered_v6/1000: 568078 (n=3)
+  contested_prefix_selection/numbered_v6/100000: 93911138 (n=3)
+  contested_prefix_selection_scoped/allocated_numbered/1000: 514538 (n=3)
+  contested_prefix_selection_scoped/allocated_numbered/100000: 87755470 (n=3)
+  contested_prefix_selection_scoped/scoped_same_address/1000: 515012 (n=3)
+  contested_prefix_selection_scoped/scoped_same_address/100000: 84412169 (n=3)
+  full_table_load/1000000: 1401832915 (n=3)
+  scoped/numbered ratio @1000: 1.001
+  scoped/numbered ratio @100000: 0.962
+
+## gr_end_of_rib --mode ipv4 (JSON per side run; compare by hand)
+ab1-cand.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2279384,"recompute_ns":1041,"distribute_ns":601,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":541,"stale_count_ns":1192,"stale_resolution_ns":2256560,"envelopes":0}]}
+ab1-ctl.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2693315,"recompute_ns":1352,"distribute_ns":1111,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":742,"stale_count_ns":1312,"stale_resolution_ns":2672424,"envelopes":0}]}
+ab2-cand.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2331293,"recompute_ns":821,"distribute_ns":1252,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":541,"stale_count_ns":1783,"stale_resolution_ns":2298964,"envelopes":0}]}
+ab2-ctl.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2698742,"recompute_ns":1302,"distribute_ns":1201,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":772,"stale_count_ns":1622,"stale_resolution_ns":2677181,"envelopes":0}]}
+ab3-cand.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2271924,"recompute_ns":1352,"distribute_ns":931,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":551,"stale_count_ns":1081,"stale_resolution_ns":2255199,"envelopes":0}]}
+ab3-ctl.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2678840,"recompute_ns":1142,"distribute_ns":1071,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":752,"stale_count_ns":1202,"stale_resolution_ns":2657588,"envelopes":0}]}
+ss1-a.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2665494,"recompute_ns":871,"distribute_ns":902,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":771,"stale_count_ns":1092,"stale_resolution_ns":2647406,"envelopes":0}]}
+ss1-b.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2673790,"recompute_ns":1342,"distribute_ns":601,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":661,"stale_count_ns":1532,"stale_resolution_ns":2654631,"envelopes":0}]}
+ss2-a.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2706903,"recompute_ns":1101,"distribute_ns":1092,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":571,"stale_count_ns":1452,"stale_resolution_ns":2676056,"envelopes":0}]}
+ss2-b.json: {"mode":"ipv4","ipv4_routes":1000000,"ipv6_routes":0,"attribute_shape":"uniform","requested_attribute_sets":1,"interned_sets":1,"intern_capacity":3,"end_of_rib":[{"family":"Ipv4/Unicast","total_ns":2726415,"recompute_ns":1362,"distribute_ns":822,"affected":0,"changed":0,"retained_stale":0,"gr_complete":1,"attr_gc_ns":721,"stale_count_ns":1262,"stale_resolution_ns":2706617,"envelopes":0}]}

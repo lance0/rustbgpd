@@ -1,0 +1,7 @@
+arm,run,scenario,session_established_log_lines,peers,first_to_nth_established_s
+rustbgpd,1,s2,700,700,0.781
+rustbgpd,2,s2,700,700,0.782
+rustbgpd,3,s2,700,700,0.777
+rustbgpd,1,s3,850,700,0.784
+rustbgpd,2,s3,850,700,0.767
+rustbgpd,3,s3,850,700,0.781

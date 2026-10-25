@@ -661,34 +661,34 @@ OpenBGPD head-to-head at 700 peers × 400k prefixes under live churn
 — policy-reload stall and completion, member-flap propagation,
 convergence, and RSS — with identical wire inputs, config disclosure,
 and the losses published alongside the wins. The current rows are the
-[v0.75.0 cross-daemon receipt](../perf/cross-daemon-v0750-2026-10.md), measured 2026-10-04 to 2026-10-05,
-which ran rustbgpd v0.75.0 and OpenBGPD 9.3 on one host in the same night.
+[v0.80.0 cross-daemon receipt](../perf/cross-daemon-v0800-2026-10.md), measured 2026-10-25,
+which ran rustbgpd v0.80.0 and OpenBGPD 9.3 on one host in the same night. Its
+S3 withdraw p50, 3.42–3.56 s, is a regression from v0.75.0's 0.20–0.26 s in the
+[v0.75.0 cross-daemon receipt](../perf/cross-daemon-v0750-2026-10.md), measured 2026-10-04 to 2026-10-05.
 BIRD's current matrix rows are BIRD 3.3.2 in the
 [v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04
-against rustbgpd v0.74.0; BIRD 3.3.3, released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet
-measured. The matrix's earlier rows are dated, last measured 2026-08-30,
+against rustbgpd v0.74.0; BIRD 3.3.3 and BIRD 3.4.0 are not yet measured in the matrix. The matrix's earlier rows are dated, last measured 2026-08-30,
 and their receiver-bound completion rows used the glibc-malloc harness, so
 they are not directly comparable ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)).
 
-At IRR scale, the [same-night v0.75.0 receipt](../perf/cross-daemon-v0750-2026-10.md) runs three
+At IRR scale, the [same-night v0.80.0 receipt](../perf/cross-daemon-v0800-2026-10.md) runs three
 cross-daemon roots at each of 0%, 10%, and 50% received-view overlap, at
 320 members × 183,040 generated IPv4 prefixes. rustbgpd completion p50 is
-0.584–0.801 seconds across the three overlaps, against BIRD 3.3.2's
-12.926–14.810 seconds and OpenBGPD 9.3's 44.010–63.948 seconds, measured
-2026-10-04 to 2026-10-05. Every row has 320/320 sessions and zero parse errors. At 50%
+0.598–0.853 seconds across the three overlaps, against BIRD 3.3.3's
+12.884–15.858 seconds and OpenBGPD 9.3's 44.921–64.451 seconds, measured
+2026-10-25. Every row has 320/320 sessions and zero parse errors. At 50%
 overlap, OpenBGPD's changed-observer gap p50 is shorter than rustbgpd's
-(377–517 against 591–627 ms). The
+(365–448 against 589–623 ms). The
 [v0.68.0 receipt](../perf/irr-reload-v0680-2026-08.md), measured 2026-08-30,
 keeps the grouped control and its received-view delta verification; the
 older IRR receipts are historical records.
 
-A separate
+An earlier
 [2026-10-06 current-source receipt](../perf/irr-reload-current-comparators-2026-10-06.md)
-measures BIRD 3.3.3, released 2026-10-01, and OpenBGPD 9.3 against unreleased rustbgpd source
+measured BIRD 3.3.3 and OpenBGPD 9.3 against unreleased rustbgpd source
 `dcc9b6384` at 0% overlap only: completion p50 was 0.578–0.606 s for
 rustbgpd, 12.493–14.490 s for BIRD 3.3.3 and 44.429–59.541 s for OpenBGPD
-9.3. It is not a release result, BIRD 3.3.3 has no 10% or 50% overlap
-measurement yet, and BIRD 3.4.0, released 2026-10-12, is not yet measured.
+9.3. BIRD 3.4.0, released 2026-10-12, is not yet measured.
 
 A separate [1,000-peer retained receipt](../perf/route-server-1000-2026-07.md),
 measured 2026-07-20 with a source-equivalent v0.68.0 rerun measured 2026-08-30,
@@ -794,17 +794,16 @@ metric this market has actually selected on — and it is exactly what the
 [IXP receipt matrix](../perf/ixp-matrix-2026-07.md) measures head-to-head at
 700 peers × 400k prefixes: rustbgpd is the only daemon of the three tested
 that holds both sub-second median UPDATE stall and single-digit-seconds
-policy-reload completion (rustbgpd v0.75.0 p50 0.75–0.91 s against
-201.90–208.04 s for OpenBGPD 9.3 in the
-[same-night v0.75.0 receipt](../perf/cross-daemon-v0750-2026-10.md), measured 2026-10-04 to 2026-10-05;
+policy-reload completion (rustbgpd v0.80.0 p50 0.84–0.96 s against
+205.91–215.36 s for OpenBGPD 9.3 in the
+[same-night v0.80.0 receipt](../perf/cross-daemon-v0800-2026-10.md), measured 2026-10-25;
 BIRD 3.3.2 read 89.06–103.61 s against rustbgpd v0.74.0's 0.83–0.90 s in the
 [v0.74.0 receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04; BIRD
-3.3.3, released 2026-10-01, and BIRD 3.4.0, released 2026-10-12, are not yet measured), on the same host and wire
-inputs, with per-daemon wins and losses published in the receipts. OpenBGPD
-9.3 held the smaller S2 stall tail in that v0.75.0 campaign; a
-[2026-10-19 S2 rerun](../perf/artifacts/competitive-bgperf2-paired-s2-2026-10-19/README.md)
-of unreleased rustbgpd `3e3fba0de`, on a newer `reloadstall` harness, measured
-a median p95 of 48.6 ms against OpenBGPD 9.3's 203.1 ms.
+3.3.3 and BIRD 3.4.0 are not yet measured in the matrix), on the same host and wire
+inputs, with per-daemon wins and losses published in the receipts. In the
+v0.80.0 campaign rustbgpd's S2 stall p95 was 36.2–82.0 ms against OpenBGPD
+9.3's 199.8–291.0 ms, on a `reloadstall` harness newer than the v0.75.0
+campaign's, in which OpenBGPD held the smaller tail.
 
 Reload speed is only half the operator concern; the other half is what an
 invalid config does to a running router. FRR's reload driver
