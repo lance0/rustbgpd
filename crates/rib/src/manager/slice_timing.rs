@@ -55,10 +55,28 @@ thread_local! {
     static COUNTDOWN: Cell<Countdown> = const { Cell::new(IDLE) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Checkpoints this thread has passed, by stage name (`""` when
+    /// unnamed). Every long actor loop checkpoints per item, so these are
+    /// the work-count units of the scaling contracts.
+    static CHECKPOINTS: RefCell<std::collections::BTreeMap<&'static str, usize>> =
+        const { RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Checkpoints passed on this thread so far; tests diff two readings.
+#[cfg(test)]
+pub(super) fn checkpoints() -> std::collections::BTreeMap<&'static str, usize> {
+    CHECKPOINTS.with_borrow(Clone::clone)
+}
+
 /// Note a readiness checkpoint. Outside a timed actor poll (direct
-/// unit-test calls, other threads) this records nothing.
+/// unit-test calls, other threads) this records no slice.
 #[inline]
 pub(super) fn checkpoint(stage: Stage) {
+    #[cfg(test)]
+    CHECKPOINTS
+        .with_borrow_mut(|counts| *counts.entry(stage.unwrap_or_default()).or_default() += 1);
     COUNTDOWN.with(|countdown| match countdown.get().remaining {
         0 => {}
         1 => {

@@ -1473,3 +1473,4 @@ mod update_groups_fault_corpus;
 mod update_groups_oracle;
 mod update_groups_recovery;
 mod vpn;
+mod work_scaling;
