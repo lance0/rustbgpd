@@ -3848,7 +3848,8 @@ impl RibManager {
 
     /// Process a single `RibUpdate` message: one actor turn, timed by kind
     /// into `bgp_rib_actor_turn_duration_seconds`. Every message lane
-    /// (primary, general and summary queries) dispatches through here.
+    /// (primary, general and summary queries) dispatches through here, except
+    /// summaries answered from a synchronous replacement's frozen projection.
     fn handle_update(&mut self, update: RibUpdate) {
         let turn = actor_turn::ActorTurn::new(&update, &self.ribs);
         let started = std::time::Instant::now();

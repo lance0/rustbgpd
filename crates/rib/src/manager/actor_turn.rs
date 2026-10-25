@@ -4,9 +4,25 @@
 //! A turn is one call of [`RibManager::handle_update`]: the synchronous
 //! handling of one inbound message. It cannot yield, so it is always inside
 //! one actor poll; readiness queries answered at checkpoints within it are
-//! part of its wall-clock time. Work the message only queues (route chunks,
-//! distribution windows, policy-transition polls, timers) runs in later loop
-//! iterations and is timed by `bgp_rib_actor_work_duration_seconds` instead.
+//! part of its wall-clock time.
+//!
+//! Coverage boundaries:
+//! - VPN, BGP-LS, labeled and RTC receipts are processed and distributed
+//!   inside their `routes` turn. Unicast, `FlowSpec` and EVPN receipts are only
+//!   admitted there; their chunks and distribution windows run later and are
+//!   timed as `route_chunk` / `distribute_flush` work units.
+//! - A clean policy transition's later polls are timed by
+//!   `bgp_rib_policy_transition_actor_poll_duration_seconds`.
+//! - Attribute GC and `FlowSpec` validation slices are their own work units.
+//!   Other timer expiries (GR/LLGR stale sweeps, refresh windows, `EoR` holds,
+//!   selection deferral, conditional advertisement), dirty-resync ticks,
+//!   destination pre-staging and deferred initial dumps are not message
+//!   turns and no histogram covers the whole unit; they appear in
+//!   `bgp_rib_actor_slice_seconds`.
+//! - Operator summaries answered from a synchronous replacement's frozen
+//!   projection (`ReplacementSummaries::drain`) never reach `handle_update`:
+//!   they are part of whatever turn or work unit holds the replacement, and
+//!   are not observed as `query`.
 
 use std::time::{Duration, Instant};
 
