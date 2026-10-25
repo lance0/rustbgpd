@@ -940,7 +940,10 @@ After the tag publishes:
     fixture parse test walks that root, and `scripts/check-v1-stable-surface.py`
     fails until the copies match the tag byte for byte and every role the tag
     carries is present. The next release's consecutive upgrade exercise consumes the
-    `route-server` fixture.
+    `route-server` fixture. A patch tag (`vX.Y.Z` with `Z` above 0) skips this
+    step and its schema-root-keys manifest, as v0.70.1, v0.70.2 and v0.80.1 did:
+    upgrade-exercise endpoints are patch-zero tags, so its archive would only
+    duplicate the `vX.Y.0` one.
 
     In the same commit, freeze the tag's root config-schema manifest beside
     the archived fixture. Derive it from the immutable tag rather than the
