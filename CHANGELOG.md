@@ -11,6 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.80.1] — 2026-10-25
+
+### Fixed
+
+- A burst of route-server client session downs no longer withdraws slowly.
+  With `rs_control_communities` enabled, the default for
+  `route_server_client`, the RIB checked each departing session's
+  withdrawals separately for every remaining client, so concurrent downs
+  queued behind one another. In the scale benchmark's flap-storm cell (700
+  clients, 400,400 prefixes, 50 clients down at once), withdraw p50 fell
+  from about 3.5 s on v0.80.0 to about 0.25 s. Withdrawals now share the
+  update-group path unless a withdrawn route carries a control community
+  for the client's route-server ASN; those keep the per-client check, so a
+  client a route was suppressed toward is still not sent its withdrawal.
+
 ## [0.80.0] — 2026-10-24
 
 ### Security
