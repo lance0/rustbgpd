@@ -21,6 +21,7 @@ rustbgpd-bmp.workspace = true
 bytes.workspace = true
 smallvec.workspace = true
 rustc-hash.workspace = true
+hashbrown.workspace = true
 prefix-trie.workspace = true
 ipnet.workspace = true
 lru.workspace = true

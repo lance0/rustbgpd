@@ -1718,12 +1718,12 @@ impl AdjRibIn {
             self.vpn_routes
                 .shards()
                 .iter()
-                .map(crate::fast_hash::FastMap::capacity)
+                .map(crate::fast_hash::Shard::capacity)
                 .collect(),
             self.vpn_key_index
                 .shards()
                 .iter()
-                .map(crate::fast_hash::FastMap::capacity)
+                .map(crate::fast_hash::Shard::capacity)
                 .collect(),
         ]
     }
@@ -1743,7 +1743,7 @@ impl AdjRibIn {
         if !self.vpn_llgr_stale_local_tags.is_empty() {
             self.vpn_llgr_stale_local_tags.remove(&key);
         }
-        let ids = self.vpn_key_index.entry(key.nlri_key).or_default();
+        let ids = self.vpn_key_index.get_or_default(key.nlri_key);
         if !ids.contains(&key.path_id) {
             ids.push(key.path_id);
         }
@@ -2046,7 +2046,7 @@ impl AdjRibIn {
         if !self.labeled_llgr_stale_local_tags.is_empty() {
             self.labeled_llgr_stale_local_tags.remove(&key);
         }
-        let ids = self.labeled_key_index.entry(key.prefix).or_default();
+        let ids = self.labeled_key_index.get_or_default(key.prefix);
         if !ids.contains(&key.path_id) {
             ids.push(key.path_id);
         }

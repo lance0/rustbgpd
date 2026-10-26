@@ -199,7 +199,15 @@ pub(crate) fn retire_sharded_map<K, V>(
     checkpoint: &mut impl RetirementCheckpoint,
 ) {
     for shard in map.shards_mut() {
-        retire_hash_map(shard, checkpoint);
+        let mut entries = shard.drain();
+        for entry in entries.by_ref() {
+            checkpoint.checkpoint(RetirementProgress::Progress);
+            drop(entry);
+            checkpoint.checkpoint(RetirementProgress::Progress);
+        }
+        checkpoint.checkpoint(RetirementProgress::Boundary);
+        drop(entries);
+        checkpoint.checkpoint(RetirementProgress::Boundary);
     }
 }
 
@@ -214,38 +222,6 @@ pub(crate) fn release_sharded_map<K, V>(
     checkpoint.checkpoint(RetirementProgress::Boundary);
     drop(retired);
     checkpoint.checkpoint(RetirementProgress::Boundary);
-}
-
-/// [`reserve_hash_map`] for a [`ShardedMap`] and the keys a batch inserts.
-/// Missing keys are counted per destination shard, so a skewed batch gets
-/// headroom where it lands and no other shard over-reserves. A batch that
-/// takes the map past one table splits it first; no rebuild moves more
-/// than one shard's entries.
-pub(crate) fn reserve_sharded_map<K: Eq + std::hash::Hash, V>(
-    map: &mut ShardedMap<K, V>,
-    keys: impl IntoIterator<Item = K>,
-    checkpoint: &mut impl FnMut(),
-) {
-    let mut missing = [0_usize; crate::fast_hash::SHARDS];
-    for key in keys {
-        checkpoint();
-        if map.get(&key).is_none() {
-            missing[crate::fast_hash::shard_index(&key)] += 1;
-        }
-    }
-    let total: usize = missing.iter().sum();
-    if map.len().saturating_add(total) >= crate::fast_hash::SHARD_SPLIT_AT {
-        map.split();
-        checkpoint();
-    }
-    match map.shards_mut() {
-        [single] => reserve_hash_map(single, total, checkpoint),
-        shards => {
-            for (shard, additional) in shards.iter_mut().zip(missing) {
-                reserve_hash_map(shard, additional, checkpoint);
-            }
-        }
-    }
 }
 
 impl AdjRibOut {
@@ -666,9 +642,9 @@ impl AdjRibOut {
         checkpoint: &mut impl FnMut(),
     ) {
         let keys = routes.clone().into_iter().map(VpnRibRoute::key);
-        reserve_sharded_map(&mut self.vpn_routes, keys, checkpoint);
+        self.vpn_routes.reserve_with(keys, checkpoint);
         let nlri_keys = routes.into_iter().map(|route| route.nlri.key());
-        reserve_sharded_map(&mut self.vpn_key_path_ids, nlri_keys, checkpoint);
+        self.vpn_key_path_ids.reserve_with(nlri_keys, checkpoint);
     }
 
     #[cfg(test)]
@@ -935,7 +911,7 @@ impl AdjRibOut {
             let v6 = key.afi_safi().0 == Afi::Ipv6;
             track(&mut self.second_family.vpn, v6, true, false);
             self.vpn_keys_changed(Some((key.clone(), true)));
-            let ids = self.vpn_key_path_ids.entry(key.nlri_key).or_default();
+            let ids = self.vpn_key_path_ids.get_or_default(key.nlri_key);
             if !ids.contains(&key.path_id) {
                 ids.push(key.path_id);
             }
@@ -1383,10 +1359,10 @@ mod tests {
                 .vpn_routes
                 .shards()
                 .iter()
-                .map(HashMap::capacity)
+                .map(crate::fast_hash::Shard::capacity)
                 .collect();
             let index: Vec<_> = (rib.vpn_key_path_ids.shards().iter())
-                .map(HashMap::capacity)
+                .map(crate::fast_hash::Shard::capacity)
                 .collect();
             (routes, index)
         };
