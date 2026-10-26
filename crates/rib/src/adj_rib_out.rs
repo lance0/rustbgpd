@@ -739,6 +739,19 @@ impl AdjRibOut {
         )
     }
 
+    /// Backing capacities of the three growable unicast stores: route slab
+    /// slots, prefix-trie bytes and `Self_` flag slots. Capacity-change
+    /// witnesses diff two readings around one write.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub(crate) fn bench_unicast_capacities(&self) -> [usize; 3] {
+        [
+            self.routes.capacity(),
+            self.prefix_path_ids.mem_size(),
+            self.self_next_hop.capacity(),
+        ]
+    }
+
     /// Return the number of exact prefixes in the secondary unicast index.
     #[cfg(feature = "bench-internals")]
     #[must_use]

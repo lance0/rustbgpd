@@ -686,6 +686,42 @@ pub(in crate::manager) struct GroupRibOut {
 /// outbound target.
 const GROUP_FILTERED_PLACEHOLDER: PeerId = LOCAL_PEER;
 
+/// Group-table capacities and a start time, read only while the bench
+/// `map_growth` trace target is enabled.
+#[cfg(feature = "bench-internals")]
+type TableGrowthObservation = Option<([usize; 3], std::time::Instant)>;
+
+#[cfg(feature = "bench-internals")]
+pub(in crate::manager) fn table_growth_observation(table: &AdjRibOut) -> TableGrowthObservation {
+    tracing::enabled!(target: "rustbgpd_rib::map_growth", tracing::Level::TRACE)
+        .then(|| (table.bench_unicast_capacities(), std::time::Instant::now()))
+}
+
+/// Report each group-table store whose capacity changed since `observation`.
+/// `site` separates growth inside one commit write from a checkpointed reserve.
+#[cfg(feature = "bench-internals")]
+pub(in crate::manager) fn observe_table_growth(
+    table: &AdjRibOut,
+    site: &'static str,
+    observation: TableGrowthObservation,
+) {
+    let Some((before, started)) = observation else {
+        return;
+    };
+    let after = table.bench_unicast_capacities();
+    for ((map, before), after) in ["group_slab", "group_prefix_trie", "group_self_next_hop"]
+        .into_iter()
+        .zip(before)
+        .zip(after)
+    {
+        if before != after {
+            tracing::trace!(target: "rustbgpd_rib::map_growth", map, site, before, after,
+                entries = table.len(), elapsed_us = started.elapsed().as_micros(),
+                "update-group map capacity changed");
+        }
+    }
+}
+
 impl GroupRibOut {
     #[cfg(test)]
     pub(in crate::manager) fn recovery_snapshot_for_test(
@@ -1056,8 +1092,12 @@ impl GroupRibOut {
                     }
                 }
             }
+            #[cfg(feature = "bench-internals")]
+            let observation = table_growth_observation(&self.table);
             self.table
                 .insert_with_next_hop(route.clone(), nh.clone(), &mut || {});
+            #[cfg(feature = "bench-internals")]
+            observe_table_growth(&self.table, "commit", observation);
         } else {
             self.table.withdraw(&delta.prefix, delta.path_id);
             if !self.source_control_passthrough {
