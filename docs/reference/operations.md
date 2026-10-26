@@ -1566,6 +1566,13 @@ produces the same wire bytes, including label, Add-Path and next-hop handling;
 otherwise it encodes the member's payload locally. Withdrawals and terminal
 markers remain ordered per member. This does not enable EVPN group ownership.
 
+The analogous EVPN encoder is preparation behind dormant group ownership.
+Production EVPN delivery keeps its existing private path. A benchmark-only
+constructor permits an initially empty, stable non-RTC fixture; it is not a
+daemon setting. Its clean common incremental announcements can share encoding,
+but complete feeds and recovery stay private. No EVPN memory, readiness or
+scale qualification follows from that fixture.
+
 ### Update-group recovery fallback
 
 A grouped member whose outbound UPDATE could not be sent is marked dirty and

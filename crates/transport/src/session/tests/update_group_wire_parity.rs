@@ -37,6 +37,7 @@ fn families() -> Vec<(Afi, Safi)> {
         (Afi::Ipv6, Safi::Unicast),
         (Afi::Ipv4, Safi::MplsVpn),
         (Afi::Ipv6, Safi::MplsVpn),
+        (Afi::L2Vpn, Safi::Evpn),
     ]
 }
 
@@ -216,6 +217,101 @@ fn vpn_key(n: u8) -> rustbgpd_rib::VpnRibRouteKey {
     }
 }
 
+/// Every variant has a stable key across source flips and mutable label data.
+fn evpn_routes(from: Ipv4Addr, n: u8, label: u32, local_pref: u32) -> Vec<EvpnRibRoute> {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEvi, EvpnEs, EvpnImet,
+        EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, MacAddress, MplsLabel,
+    };
+    let rd = RouteDistinguisher([0, 0, 0xfd, 0xe9, 0, 0, 0, n]);
+    let esi = EthernetSegmentIdentifier::new([0, 1, 2, 3, 4, 5, 6, 7, 8, n]);
+    let ethernet_tag = EthernetTagId(u32::from(n));
+    let originator_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, n));
+    let label = MplsLabel::new((label << 4) | 1);
+    let routes = vec![
+        EvpnRoute::EadPerEvi(EvpnEadPerEvi {
+            rd,
+            esi,
+            ethernet_tag,
+            label,
+        }),
+        EvpnRoute::MacIp(EvpnMacIp {
+            rd,
+            esi,
+            ethernet_tag,
+            mac: MacAddress([2, 0, 0, 0, 0, n]),
+            ip: Some(originator_ip),
+            label1: label,
+            label2: None,
+        }),
+        EvpnRoute::Imet(EvpnImet {
+            rd,
+            ethernet_tag,
+            originator_ip,
+        }),
+        EvpnRoute::Es(EvpnEs {
+            rd,
+            esi,
+            originator_ip,
+        }),
+        EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+            rd,
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag,
+            prefix: EvpnIpPrefixValue::V4(v4_prefix(n)),
+            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            label,
+        }),
+        EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+            rd,
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag,
+            prefix: EvpnIpPrefixValue::V6(Ipv6Prefix::new(
+                Ipv6Addr::new(0x2001, 0xdb8, u16::from(n), 0, 0, 0, 0, 0),
+                64,
+            )),
+            gateway: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            label,
+        }),
+    ];
+    let attributes = route(from, Prefix::V4(v4_prefix(n)), local_pref, vec![]).attributes;
+    routes
+        .into_iter()
+        .map(|route| EvpnRibRoute {
+            route,
+            next_hop: if n.is_multiple_of(2) {
+                IpAddr::V6(Ipv6Addr::new(
+                    0x2001,
+                    0xdb8,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    u16::from(from.octets()[3]),
+                ))
+            } else {
+                IpAddr::V4(from)
+            },
+            link_local_next_hop: None,
+            peer: PeerId::from_addr(IpAddr::V4(from)),
+            attributes: Arc::clone(&attributes),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: from,
+            is_stale: false,
+            is_llgr_stale: false,
+        })
+        .collect()
+}
+
+fn evpn_keys(n: u8) -> Vec<rustbgpd_wire::EvpnRouteKey> {
+    evpn_routes(A, n, 100, 100)
+        .iter()
+        .map(EvpnRibRoute::key)
+        .collect()
+}
+
 struct Receiver {
     addr: Ipv4Addr,
     session: PeerSession,
@@ -232,6 +328,7 @@ struct Run {
     settles: usize,
     shared_envelopes: usize,
     shared_vpn_envelopes: usize,
+    shared_evpn_envelopes: usize,
     private_envelopes: usize,
 }
 
@@ -241,6 +338,7 @@ struct RunOutput {
     frames: BTreeMap<Ipv4Addr, Vec<Vec<u8>>>,
     shared_envelopes: usize,
     shared_vpn_envelopes: usize,
+    shared_evpn_envelopes: usize,
     private_envelopes: usize,
 }
 
@@ -248,16 +346,19 @@ impl Run {
     fn start(private: bool) -> Self {
         let (rib_tx, rib_rx) = mpsc::channel(256);
         let (_query_tx, query_rx) = mpsc::channel(1);
-        let manager = tokio::spawn(
-            rustbgpd_rib::RibManager::new(
-                rib_rx,
-                query_rx,
-                None,
-                Some(CLUSTER_ID),
-                BgpMetrics::new(),
-            )
-            .run(),
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            query_rx,
+            None,
+            Some(CLUSTER_ID),
+            BgpMetrics::new(),
         );
+        let manager = if private {
+            manager
+        } else {
+            manager.with_bench_evpn_group_ownership()
+        };
+        let manager = tokio::spawn(manager.run());
         Self {
             private,
             rib_tx,
@@ -266,6 +367,7 @@ impl Run {
             settles: 0,
             shared_envelopes: 0,
             shared_vpn_envelopes: 0,
+            shared_evpn_envelopes: 0,
             private_envelopes: 0,
         }
     }
@@ -353,6 +455,26 @@ impl Run {
         .await;
     }
 
+    async fn evpn_routes(
+        &mut self,
+        from: Ipv4Addr,
+        announced: Vec<EvpnRibRoute>,
+        withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
+    ) {
+        self.send(RibUpdate::RoutesReceived {
+            peer: PeerId::from_addr(IpAddr::V4(from)),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: announced,
+            evpn_withdrawn: withdrawn,
+            validated_with: None,
+        })
+        .await;
+    }
+
     /// Wait until the RIB has processed everything queued so far, then let
     /// each session encode what it received. The drain order rotates, so the
     /// elected shared encoder is not always the same member.
@@ -371,6 +493,7 @@ impl Run {
                 if update.shared_group_encode.is_some() {
                     self.shared_envelopes += 1;
                     self.shared_vpn_envelopes += usize::from(!update.vpn_announce.is_empty());
+                    self.shared_evpn_envelopes += usize::from(!update.evpn_announce.is_empty());
                 } else {
                     self.private_envelopes += 1;
                 }
@@ -418,6 +541,7 @@ impl Run {
             frames,
             shared_envelopes: self.shared_envelopes,
             shared_vpn_envelopes: self.shared_vpn_envelopes,
+            shared_evpn_envelopes: self.shared_evpn_envelopes,
             private_envelopes: self.private_envelopes,
         }
     }
@@ -444,6 +568,8 @@ async fn initial_table(private: bool) -> Run {
         vec![],
     )
     .await;
+    run.evpn_routes(A, evpn_routes(A, 1, 100, 100), vec![])
+        .await;
     run.settle().await;
     run
 }
@@ -455,6 +581,28 @@ async fn initial_table(private: bool) -> Run {
 /// and its time bound makes that run-dependent. Each such group therefore
 /// touches disjoint keys, so coalescing can change packing but never a
 /// key's event sequence.
+/// All three clients originate and receive. Common incremental views share;
+/// initial/full feeds keep each receiver's source-excluded private inventory.
+async fn evpn_changes(run: &mut Run) {
+    let mut from_b = evpn_routes(B, 2, 200, 100);
+    from_b.extend(evpn_routes(B, 1, 150, 200));
+    run.evpn_routes(B, from_b, vec![]).await;
+    run.settle().await;
+    run.evpn_routes(C, evpn_routes(C, 3, 300, 100), vec![])
+        .await;
+    run.settle().await;
+    run.evpn_routes(B, evpn_routes(B, 2, 222, 100), vec![])
+        .await;
+    run.settle().await;
+    // B's withdrawal promotes A's original routes, including toward B itself.
+    run.evpn_routes(B, vec![], evpn_keys(1)).await;
+    run.settle().await;
+    run.evpn_routes(C, vec![], evpn_keys(3)).await;
+    run.evpn_routes(B, vec![], evpn_keys(2)).await;
+    run.evpn_routes(A, vec![], evpn_keys(1)).await;
+    run.settle().await;
+}
+
 async fn scenario(private: bool) -> RunOutput {
     let mut run = initial_table(private).await;
     run.peer_up(B).await;
@@ -554,6 +702,7 @@ async fn scenario(private: bool) -> RunOutput {
     run.vpn_routes(B, vec![], vec![vpn_key(1), vpn_key(2), vpn6_key(2)])
         .await;
     run.settle().await;
+    evpn_changes(&mut run).await;
     run.finish().await
 }
 
@@ -588,9 +737,26 @@ fn split_nlri(mut bytes: &[u8]) -> Vec<&[u8]> {
     rows
 }
 
+fn family_nlri(family: Family, mut bytes: &[u8]) -> Vec<&[u8]> {
+    if family != (25, 70) {
+        return split_nlri(bytes);
+    }
+    let mut routes = Vec::new();
+    while !bytes.is_empty() {
+        let (route, rest) = bytes.split_at(2 + usize::from(bytes[1]));
+        routes.push(route);
+        bytes = rest;
+    }
+    routes
+}
+
 /// Route identity: the NLRI without its VPN label, which is route data.
 fn nlri_key(family: Family, nlri: &[u8]) -> Key {
-    let identity = if family.1 == 128 {
+    let identity = if family == (25, 70) {
+        let routes = rustbgpd_wire::decode_evpn_nlri(nlri).unwrap();
+        assert_eq!(routes.len(), 1, "one supported EVPN route per row");
+        format!("{:?}", routes[0].key()).into_bytes()
+    } else if family.1 == 128 {
         let mut key = vec![nlri[0] - 24];
         key.extend_from_slice(&nlri[4..]);
         key
@@ -672,7 +838,7 @@ fn trace(frames: &[Vec<u8>]) -> WireTrace {
                 trace.end_of_rib(family);
                 continue;
             }
-            for nlri in split_nlri(&value[3..]) {
+            for nlri in family_nlri(family, &value[3..]) {
                 trace.withdraw(family, nlri);
             }
         }
@@ -680,7 +846,7 @@ fn trace(frames: &[Vec<u8>]) -> WireTrace {
             let family = (u16::from_be_bytes([value[0], value[1]]), value[2]);
             let next_hop_len = usize::from(value[3]);
             let attrs = (plain.clone(), value[4..4 + next_hop_len].to_vec());
-            for nlri in split_nlri(&value[5 + next_hop_len..]) {
+            for nlri in family_nlri(family, &value[5 + next_hop_len..]) {
                 trace.announce(family, nlri, &attrs);
             }
         }
@@ -695,7 +861,7 @@ fn trace(frames: &[Vec<u8>]) -> WireTrace {
 /// The scenario must exercise every compared dimension, or a green
 /// comparison proves nothing.
 fn assert_coverage(receiver: Ipv4Addr, trace: &WireTrace) {
-    for family in [(1, 1), (2, 1), (1, 128), (2, 128)] {
+    for family in [(1, 1), (2, 1), (1, 128), (2, 128), (25, 70)] {
         let keys: Vec<_> = trace
             .events
             .iter()
@@ -714,6 +880,23 @@ fn assert_coverage(receiver: Ipv4Addr, trace: &WireTrace) {
         assert!(
             trace.eors.contains_key(&family),
             "{receiver}: no EoR in {family:?}"
+        );
+    }
+    for route_type in 1..=5 {
+        assert!(
+            trace
+                .events
+                .iter()
+                .filter(|((family, _), _)| *family == (25, 70))
+                .any(|(_, events)| {
+                    events
+                        .iter()
+                        .any(|(nlri, attrs)| nlri[0] == route_type && attrs.is_some())
+                        && events
+                            .iter()
+                            .any(|(nlri, attrs)| nlri[0] == route_type && attrs.is_none())
+                }),
+            "{receiver}: EVPN type {route_type} must announce and withdraw"
         );
     }
     assert!(
@@ -741,6 +924,11 @@ async fn grouped_and_private_rib_output_match_on_the_wire() {
         "VPN must reach shared encoding"
     );
     assert_eq!(private.shared_vpn_envelopes, 0);
+    assert!(
+        grouped.shared_evpn_envelopes > 0,
+        "dormant EVPN ownership must reach shared encoding through the real RIB"
+    );
+    assert_eq!(private.shared_evpn_envelopes, 0);
     assert!(private.private_envelopes > 0);
     assert_eq!(
         grouped.frames.keys().collect::<Vec<_>>(),

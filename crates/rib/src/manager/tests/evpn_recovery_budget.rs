@@ -191,7 +191,7 @@ fn outbound_queue_credit_precedes_provenance_growth_and_reset_handoff() {
         manager.group_ribs[&gid].recovery_snapshot_for_test(),
     );
     let batch = || OutboundCommitBatch {
-        evpn_announce: vec![route(1)],
+        evpn_announce: vec![route(1)].into(),
         ..OutboundCommitBatch::with_unicast(Arc::new(vec![unicast.clone()]), Arc::new(vec![None]))
     };
     manager.outbound_peers[&peer]
@@ -270,7 +270,7 @@ fn incomplete_owned_capture_requests_one_fenced_reset_before_mixed_family_admiss
         manager.group_ribs[&gid].recovery_snapshot_for_test(),
     );
     let batch = || OutboundCommitBatch {
-        evpn_announce: vec![route(1)],
+        evpn_announce: vec![route(1)].into(),
         ..OutboundCommitBatch::with_unicast(Arc::new(vec![unicast.clone()]), Arc::new(vec![None]))
     };
     assert!(
@@ -359,7 +359,7 @@ fn reset_refusal_retries_once_accepted_and_stays_exhausted_until_teardown() {
             .try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce: vec![route(1)],
+                    evpn_announce: vec![route(1)].into(),
                     ..OutboundCommitBatch::default()
                 }
             )
@@ -394,7 +394,7 @@ fn reset_execution_receipt_bounds_inflight_and_retries_rejection_and_drop() {
             .try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce: vec![route(1)],
+                    evpn_announce: vec![route(1)].into(),
                     ..OutboundCommitBatch::default()
                 }
             )
@@ -510,7 +510,7 @@ fn final_admission_filters_unknown_withdrawals_and_releases_only_after_settlemen
             .try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce: vec![known.clone()],
+                    evpn_announce: vec![known.clone()].into(),
                     ..OutboundCommitBatch::default()
                 }
             )
@@ -692,7 +692,7 @@ fn duplicate_candidate_announcements_refuse_the_whole_mixed_family_batch_without
             .try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce: vec![route(1), route(1)],
+                    evpn_announce: vec![route(1), route(1)].into(),
                     ..OutboundCommitBatch::with_unicast(
                         Arc::new(vec![unicast.clone()]),
                         Arc::new(vec![None])
@@ -837,7 +837,7 @@ impl FinalTransactionFixture {
                 .try_send_and_commit_outbound_update(
                     peer,
                     OutboundCommitBatch {
-                        evpn_announce: vec![route(1)],
+                        evpn_announce: vec![route(1)].into(),
                         ..OutboundCommitBatch::default()
                     }
                 )
@@ -926,7 +926,7 @@ impl FinalTransactionFixture {
             .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 self.peer,
                 OutboundCommitBatch {
-                    evpn_announce: vec![route(1), route(2)],
+                    evpn_announce: vec![route(1), route(2)].into(),
                     withdraw: vec![(self.rejected.prefix, self.rejected.path_id)],
                     end_of_rib: vec![(Afi::L2Vpn, Safi::Evpn)],
                     defer_grouped_refresh_prior: true,

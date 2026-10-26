@@ -591,7 +591,155 @@ mod retirement_readiness_tests {
     }
 }
 
+/// One active outbound peer's current EVPN ownership and ledger readout.
+/// Peer peak covers the currently retained ledger generations; it disappears
+/// after all records for that peer retire. Consumers must retain active samples.
+#[derive(Clone, Debug)]
+pub struct EvpnPeerBenchReceipt {
+    pub peer: PeerId,
+    pub owned_group: Option<usize>,
+    pub dirty: bool,
+    /// The current recovery handle has not returned to its dormant state.
+    pub retained_recovery: bool,
+    pub retained_provenance_bytes: usize,
+    pub peak_provenance_bytes: usize,
+    pub owed_markers: u8,
+    pub pending_reset: bool,
+}
+
+/// Read-only fixture observation. Counts use existing map lengths and peer
+/// metadata, never walk route bodies. No field proves deployment qualification.
+#[derive(Clone, Debug)]
+pub struct EvpnGroupBenchReceipt {
+    pub owned_groups: usize,
+    pub owned_members: usize,
+    pub owned_routes: usize,
+    pub private_routes: usize,
+    pub dirty_owned_members: usize,
+    pub retained_recovery_members: usize,
+    pub retained_provenance_bytes: usize,
+    pub peak_provenance_bytes: usize,
+    pub max_peer_retained_provenance_bytes: usize,
+    pub max_peer_peak_provenance_bytes: usize,
+    pub peer_budget_bytes: usize,
+    pub daemon_budget_bytes: usize,
+    pub pending_recovery_resets: usize,
+    pub completion_receipts: usize,
+    pub owed_marker_members: usize,
+    pub peers: Vec<EvpnPeerBenchReceipt>,
+}
+
 impl RibManager {
+    /// Enable dormant EVPN ownership for a closed, EVPN-capable test cohort.
+    /// RTC and per-client-best groups remain private, and ordinary group
+    /// eligibility (including Add-Path exclusion) is unchanged. This hook is
+    /// compiled out of normal builds and has no configuration/RPC/environment
+    /// entry point. It establishes no deployment or resource qualification.
+    ///
+    /// # Panics
+    ///
+    /// Panics if active or deferred peer registrations already exist. Every
+    /// grouped fixture peer must negotiate EVPN. New owned groups must form
+    /// during initial registration before EVPN routes arrive; regrouping into
+    /// an absent destination is unsupported and asserts before handoff planning.
+    /// Existing unit-only regroup controls do not use this hook.
+    #[must_use]
+    pub fn with_bench_evpn_group_ownership(mut self) -> Self {
+        assert!(
+            self.outbound_peers.is_empty()
+                && self.live_sessions.is_empty()
+                && self.pending_initial_registrations.is_empty(),
+            "enable the fixture before peer registration"
+        );
+        self.bench_evpn_group_ownership = true;
+        self
+    }
+
+    /// Observe actual ownership, simultaneous dirty membership and existing
+    /// provenance charge. Settled primary-record metadata may remain charged;
+    /// consumers must retain that baseline and sample peer peaks while active.
+    /// Pending reset count is current state, not an execution counter; use all
+    /// existing cause-labelled executed-reset metrics to establish zero resets.
+    #[must_use]
+    pub fn bench_evpn_group_receipt(&self) -> EvpnGroupBenchReceipt {
+        let mut peers = self
+            .outbound_peers
+            .keys()
+            .map(|&peer| {
+                let usage = self.evpn_recovery.peer_usage(peer);
+                EvpnPeerBenchReceipt {
+                    peer,
+                    owned_group: self.evpn_grouped_member_of(peer),
+                    dirty: self.dirty_peers.contains(&peer),
+                    retained_recovery: self
+                        .evpn_recovery_handle(peer)
+                        .is_some_and(|handle| !self.evpn_recovery.is_dormant(handle)),
+                    retained_provenance_bytes: usage.retained,
+                    peak_provenance_bytes: usage.peak,
+                    owed_markers: self.bench_evpn_owed_markers(peer),
+                    pending_reset: self.evpn_recovery_reset_pending(peer),
+                }
+            })
+            .collect::<Vec<_>>();
+        peers.sort_unstable_by_key(|row| row.peer);
+        let daemon = self.evpn_recovery.daemon_usage();
+        let (peer_budget_bytes, daemon_budget_bytes) = self.evpn_recovery.limits();
+        EvpnGroupBenchReceipt {
+            owned_groups: self
+                .group_ribs
+                .values()
+                .filter(|group| group.owns_evpn_routes())
+                .count(),
+            owned_members: peers.iter().filter(|row| row.owned_group.is_some()).count(),
+            owned_routes: self
+                .group_ribs
+                .values()
+                .filter(|group| group.owns_evpn_routes())
+                .map(|group| group.table.evpn_len())
+                .sum(),
+            private_routes: self
+                .adj_ribs_out
+                .values()
+                .map(crate::adj_rib_out::AdjRibOut::evpn_len)
+                .sum(),
+            dirty_owned_members: peers
+                .iter()
+                .filter(|row| row.owned_group.is_some() && row.dirty)
+                .count(),
+            retained_recovery_members: peers.iter().filter(|row| row.retained_recovery).count(),
+            retained_provenance_bytes: daemon.retained,
+            peak_provenance_bytes: daemon.peak,
+            max_peer_retained_provenance_bytes: peers
+                .iter()
+                .map(|row| row.retained_provenance_bytes)
+                .max()
+                .unwrap_or(0),
+            max_peer_peak_provenance_bytes: peers
+                .iter()
+                .map(|row| row.peak_provenance_bytes)
+                .max()
+                .unwrap_or(0),
+            peer_budget_bytes,
+            daemon_budget_bytes,
+            pending_recovery_resets: peers.iter().filter(|row| row.pending_reset).count(),
+            completion_receipts: self.evpn_feed_receipt_count,
+            owed_marker_members: peers.iter().filter(|row| row.owed_markers != 0).count(),
+            peers,
+        }
+    }
+
+    pub(in crate::manager) fn bench_evpn_ownership_candidate(&self, peer: PeerId) -> bool {
+        self.bench_evpn_group_ownership
+            && !self.peer_per_client_best.contains(&peer)
+            && self
+                .peer_sendable_families
+                .get(&peer)
+                .is_some_and(|families| {
+                    families.contains(&(Afi::L2Vpn, Safi::Evpn))
+                        && !families.contains(&(Afi::Ipv4, Safi::RtConstrain))
+                })
+    }
+
     /// Start one process-local, bench-only capture after fixture convergence.
     /// Correctness mode exposes inventories and counters without durations.
     ///

@@ -78,10 +78,10 @@ pub use manager::{
 };
 #[cfg(feature = "bench-internals")]
 pub use manager::{
-    DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt, RecoveryScanReceipt,
-    RecoveryScanSpec, bench_evpn_dataplane_generation_query,
-    bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
-    bench_recovery_capture_scan,
+    DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt, EvpnGroupBenchReceipt,
+    EvpnPeerBenchReceipt, RecoveryScanReceipt, RecoveryScanSpec,
+    bench_evpn_dataplane_generation_query, bench_evpn_dataplane_generation_snapshot,
+    bench_evpn_dataplane_legacy_snapshot, bench_recovery_capture_scan,
 };
 pub use manager::{
     EorGraceConfig, EorGracePeerConfig, EorGraceTarget, ReplayComplete, SelectionDeferralConfig,

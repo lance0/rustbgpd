@@ -8,9 +8,9 @@
 //! encodes that fair-shared the cores and delayed everyone's first wire
 //! UPDATE by the total encode time divided by the core count.
 //!
-//! VPN fanout shares the same stream machinery for members with identical
-//! source/RT-filtered payloads. VPN withdrawals stay ahead of the shared
-//! announce phase; label and next-hop preparation uses the private encoder.
+//! VPN and dormant EVPN fanout share the same stream machinery for members
+//! with identical eligible payloads. Family withdrawals stay ahead of the
+//! shared announce phase; preparation uses the private encoder.
 //!
 //! The first member to consume its envelope is elected encoder through the
 //! envelope's [`rustbgpd_rib::SharedGroupEncode`] cell, a synchronous `OnceLock`.
@@ -252,17 +252,20 @@ impl Drop for EncoderGuard<'_> {
 /// cursor; only the announce inventory is shared. Anything richer
 /// keeps the ordinary path, which handles every payload kind.
 fn shared_encode_eligible(update: &OutboundRouteUpdate) -> bool {
+    let family_payload = match (
+        !update.announce.is_empty(),
+        !update.vpn_announce.is_empty(),
+        !update.evpn_announce.is_empty(),
+    ) {
+        (true, false, false) => update.vpn_withdraw.is_empty() && update.evpn_withdraw.is_empty(),
+        (false, true, false) => update.withdraw.is_empty() && update.evpn_withdraw.is_empty(),
+        (false, false, true) => update.withdraw.is_empty() && update.vpn_withdraw.is_empty(),
+        _ => false,
+    };
     update.shared_group_encode.is_some()
-        && ((!update.announce.is_empty()
-            && update.vpn_announce.is_empty()
-            && update.vpn_withdraw.is_empty())
-            || (!update.vpn_announce.is_empty()
-                && update.announce.is_empty()
-                && update.withdraw.is_empty()))
+        && family_payload
         && update.flowspec_announce.is_empty()
         && update.flowspec_withdraw.is_empty()
-        && update.evpn_announce.is_empty()
-        && update.evpn_withdraw.is_empty()
         && update.bgpls_announce.is_empty()
         && update.bgpls_withdraw.is_empty()
         && update.labeled_announce.is_empty()
@@ -550,6 +553,64 @@ pub(super) fn encode_shared_vpn_slice(
     Some(chunks)
 }
 
+/// Reuse private EVPN reflection/next-hop preparation, retaining source
+/// separation and the same standard message ceiling as other shared families.
+pub(super) fn encode_shared_evpn_slice(
+    export: &SessionExportProfile,
+    announce: &[rustbgpd_rib::EvpnRibRoute],
+    indices: &[usize],
+) -> Option<Vec<SharedAnnounceChunk>> {
+    use super::outbound::{MpGroupIndex, MpRouteGroup};
+    let family = (Afi::L2Vpn, Safi::Evpn);
+    if export.add_path_send(family) {
+        return None;
+    }
+    let mut cache = MpAttrCache::default();
+    let mut sources: HashMap<PeerId, (MpGroupIndex, Vec<MpRouteGroup<rustbgpd_wire::EvpnRoute>>)> =
+        HashMap::default();
+    for &i in indices {
+        let route = &announce[i];
+        let prepared = SessionExportProfile::prepare_evpn_candidate_with(route, || {
+            export.prepare_mp_attributes_cached(
+                &mut cache,
+                &route.attributes,
+                route.origin_type,
+                route.peer_router_id,
+                family,
+            )
+        });
+        let (index, groups) = sources.entry(route.peer).or_default();
+        index.push(groups, family, prepared);
+    }
+    let mut chunks = Vec::new();
+    for (source, (_, groups)) in sources {
+        for ((afi, safi), next_hop, link_local, attrs, routes) in groups {
+            let encoded = encode_chunks(
+                &routes,
+                usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                |routes| {
+                    export.build_mp_reach(
+                        afi,
+                        safi,
+                        next_hop,
+                        link_local,
+                        &attrs,
+                        ReachNlri::Evpn(routes),
+                        Ipv4UnicastMode::Body,
+                    )
+                },
+            )?;
+            chunks.extend(encoded.into_iter().map(|bytes| SharedAnnounceChunk {
+                source,
+                afi,
+                safi,
+                bytes,
+            }));
+        }
+    }
+    Some(chunks)
+}
+
 impl PeerSession {
     /// Only small operator snapshots may interleave an owned wait. Discard
     /// abandoned snapshots; preserve all other commands and their FIFO successors.
@@ -647,7 +708,10 @@ impl PeerSession {
         // is safe to reorder: the inventory carries one route per prefix,
         // and announcements of distinct prefixes are order-independent.
         let vpn = !update.vpn_announce.is_empty();
-        let order = if vpn {
+        let evpn = !update.evpn_announce.is_empty();
+        let order = if evpn {
+            source_grouped_indices(update.evpn_announce.iter().map(|route| route.peer))
+        } else if vpn {
             source_grouped_indices(update.vpn_announce.iter().map(|route| route.peer))
         } else {
             source_grouped_order(&update.announce)
@@ -661,6 +725,7 @@ impl PeerSession {
         // Requests remain excluded by shared_encode_eligible.
         let mut own_send_healthy = update.withdraw.is_empty()
             && update.vpn_withdraw.is_empty()
+            && update.evpn_withdraw.is_empty()
             && !update
                 .refresh_markers
                 .iter()
@@ -671,7 +736,9 @@ impl PeerSession {
         while idx < order.len() {
             self.poll_shared_group_command();
             let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());
-            let chunks = if vpn {
+            let chunks = if evpn {
+                encode_shared_evpn_slice(export, &update.evpn_announce, &order[idx..end])
+            } else if vpn {
                 encode_shared_vpn_slice(export, &update.vpn_announce, &order[idx..end])
             } else {
                 encode_shared_unicast_slice(

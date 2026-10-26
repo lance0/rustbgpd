@@ -1662,15 +1662,34 @@ pub(in crate::manager) struct EvpnGroupDelta {
     pub(in crate::manager) new: Option<EvpnGroupEntry>,
 }
 
+impl EvpnGroupDelta {
+    /// The canonical changed announcement before per-member eligibility.
+    pub(in crate::manager) fn changed_announce(&self) -> Option<&crate::route::EvpnRibRoute> {
+        let new = self.new.as_ref()?;
+        self.old
+            .as_ref()
+            .is_none_or(|old| !crate::manager::helpers::evpn_routes_equal(&old.route, &new.route))
+            .then_some(&new.route)
+    }
+}
+
 #[derive(Default)]
 pub(in crate::manager) struct EvpnGroupStageOutput {
     pub(in crate::manager) deltas: Vec<EvpnGroupDelta>,
     pub(in crate::manager) evals: GroupEvalAccumulator,
+    pub(in crate::manager) shared_announce:
+        std::sync::OnceLock<Arc<Vec<crate::route::EvpnRibRoute>>>,
+    pub(in crate::manager) shared_encode: Arc<crate::update::SharedGroupEncode>,
 }
 
 impl EvpnGroupStageOutput {
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
         crate::manager::retire_vec(&mut self.deltas, &mut || checkpoint(false));
+        if let Some(announce) = self.shared_announce.take()
+            && let Some(mut announce) = Arc::into_inner(announce)
+        {
+            crate::manager::retire_vec(&mut announce, &mut || checkpoint(false));
+        }
         self.evals.retire_with(checkpoint);
     }
 }
@@ -1699,7 +1718,7 @@ pub(in crate::manager) fn emit_evpn_group_deltas_for_member(
         cluster_id,
         membership,
         rejected,
-        announce,
+        &mut |route| announce.push(route.clone()),
         withdraw,
         &mut || {},
     );
@@ -1716,7 +1735,7 @@ pub(in crate::manager) fn emit_evpn_group_deltas_for_member_with_checkpoint(
     cluster_id: Option<std::net::Ipv4Addr>,
     membership: Option<&super::RtcMembership>,
     rejected: Option<&HashSet<crate::update::ExactExportKey>>,
-    announce: &mut Vec<crate::route::EvpnRibRoute>,
+    announce: &mut impl FnMut(&crate::route::EvpnRibRoute),
     withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
     checkpoint: &mut impl FnMut(),
 ) {
@@ -1746,7 +1765,7 @@ pub(in crate::manager) fn emit_evpn_group_deltas_for_member_with_checkpoint(
                     !crate::manager::helpers::evpn_routes_equal(&old.route, &new.route)
                 }) =>
             {
-                announce.push(new.route.clone());
+                announce(&new.route);
             }
             _ => {}
         }

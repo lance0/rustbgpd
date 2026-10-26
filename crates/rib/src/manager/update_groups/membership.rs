@@ -43,6 +43,20 @@ impl RibManager {
             GroupMembership::Grouped(id) => Some(id),
             _ => None,
         };
+        #[cfg(feature = "bench-internals")]
+        if self.bench_evpn_ownership_candidate(peer)
+            && new_gid.is_some_and(|gid| !self.group_ribs.contains_key(&gid))
+        {
+            assert!(
+                !self.update_groups.members.contains_key(&peer)
+                    && self.loc_rib.evpn_len() == 0
+                    && self
+                        .adj_ribs_out
+                        .get(&peer)
+                        .is_none_or(|rib| rib.evpn_len() == 0),
+                "the stable EVPN fixture cannot regroup or join a new owned destination after EVPN population"
+            );
+        }
         let old_evpn_owned = prev_gid.is_some_and(|gid| {
             self.group_ribs
                 .get(&gid)
@@ -60,7 +74,9 @@ impl RibManager {
                 || prev_gid
                     .is_some_and(|gid| !self.group_ribs[&gid].dirty_members.contains(&peer))))
             || (old_evpn_owned && self.evpn_feed_is_current(peer));
-        // New groups are EVPN-private. Inspect installed destinations only;
+        // Production new groups are EVPN-private. The feature-only stable
+        // fixture permits only an initially empty new group above.
+        // Inspect installed destinations only;
         // join_group builds an absent table after the last OLD member leaves.
         let new_evpn_owned = new_gid.is_some_and(|gid| {
             self.group_ribs
@@ -525,7 +541,24 @@ impl RibManager {
     /// join-time build pass (one shared staging walk, deltas discarded:
     /// correct only while the group is memberless). `peer` is the
     /// exemplar whose group-uniform staging inputs seed the profile.
+    #[cfg_attr(
+        feature = "bench-internals",
+        expect(
+            clippy::too_many_lines,
+            reason = "the benchmark-only ownership assertions extend the existing coupled group-table installation"
+        )
+    )]
     pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: PeerId) {
+        #[cfg(feature = "bench-internals")]
+        if self.bench_evpn_group_ownership {
+            assert!(
+                self.peer_sendable_families
+                    .get(&peer)
+                    .is_some_and(|families| families
+                        .contains(&(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn))),
+                "the EVPN ownership fixture requires every grouped peer to negotiate EVPN"
+            );
+        }
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
         if !self.group_ribs.contains_key(&gid) {
@@ -562,6 +595,11 @@ impl RibManager {
                 self.loc_rib.len(),
             );
             self.replacement_checkpoint(true);
+            #[cfg(feature = "bench-internals")]
+            if self.bench_evpn_group_ownership && !group.rtc_negotiated() && !group.per_client_best
+            {
+                group.owns_evpn = true;
+            }
             group.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
             self.group_ribs.insert(gid, group);
             self.replacement_checkpoint(true);

@@ -809,7 +809,7 @@ fn family_messages() -> Vec<(NormMsg, NormMsg)> {
         ),
         (
             normalize(&OutboundRouteUpdate {
-                evpn_announce: vec![evpn.clone()],
+                evpn_announce: vec![evpn.clone()].into(),
                 ..Default::default()
             }),
             normalize(&OutboundRouteUpdate {

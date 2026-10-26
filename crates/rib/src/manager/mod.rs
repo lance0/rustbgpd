@@ -9,8 +9,8 @@ mod bench_support;
 #[cfg(feature = "bench-internals")]
 pub use bench_support::{
     AdjRibOutFanoutBenchReceipt, DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt,
-    PolicyTransitionBenchReceipt, RecoveryScanReceipt, RecoveryScanSpec,
-    UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
+    EvpnGroupBenchReceipt, EvpnPeerBenchReceipt, PolicyTransitionBenchReceipt, RecoveryScanReceipt,
+    RecoveryScanSpec, UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
     bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
     bench_recovery_capture_scan,
 };
@@ -565,6 +565,13 @@ enum FullPassPath {
 ///
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
 /// No `Arc<RwLock>` — all state is owned by this task.
+#[cfg_attr(
+    all(test, feature = "bench-internals"),
+    expect(
+        clippy::struct_excessive_bools,
+        reason = "independent fixture switches coexist with the production event-ID exhaustion flag"
+    )
+)]
 pub struct RibManager {
     ribs: HashMap<PeerId, AdjRibIn>,
     /// Global cross-peer attribute intern table (LAN-336). Owned by this
@@ -1151,6 +1158,9 @@ pub struct RibManager {
     evpn_table_stamp: u64,
     /// Fairness position for marker-only completion retries on the resync timer.
     evpn_marker_cursor: Option<PeerId>,
+    /// Closed-cohort wire-oracle preparation only. Never configured by the daemon.
+    #[cfg(feature = "bench-internals")]
+    bench_evpn_group_ownership: bool,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
@@ -2496,6 +2506,8 @@ impl RibManager {
             evpn_recovery_reset: None,
             evpn_table_stamp: 0,
             evpn_marker_cursor: None,
+            #[cfg(feature = "bench-internals")]
+            bench_evpn_group_ownership: false,
             #[cfg(test)]
             test_force_ungrouped: false,
             #[cfg(any(test, feature = "bench-internals"))]

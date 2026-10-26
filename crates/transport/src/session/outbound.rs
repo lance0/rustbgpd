@@ -95,6 +95,11 @@ const OUTBOUND_PHASES: &[OutboundPhase] = &[
 
 const ANNOUNCE_PHASE: usize = 3;
 const VPN_ANNOUNCE_PHASE: usize = 12;
+const EVPN_ANNOUNCE_PHASE: usize = 10;
+const _: () = assert!(matches!(
+    OUTBOUND_PHASES[EVPN_ANNOUNCE_PHASE],
+    OutboundPhase::EvpnAnnounce
+));
 const _: () = assert!(matches!(
     OUTBOUND_PHASES[VPN_ANNOUNCE_PHASE],
     OutboundPhase::VpnAnnounce
@@ -104,12 +109,32 @@ const _: () = assert!(matches!(
     OutboundPhase::Announce
 ));
 
+/// Private payloads retain slice-by-slice ownership and retirement; shared
+/// payloads stay borrowed for streaming and complete local fallback.
+fn take_private_announcements<T>(
+    announce: &mut Arc<Vec<T>>,
+    shared: bool,
+) -> std::vec::IntoIter<T> {
+    if shared {
+        return Vec::new().into_iter();
+    }
+    match Arc::try_unwrap(std::mem::take(announce)) {
+        Ok(routes) => routes.into_iter(),
+        Err(routes) => {
+            *announce = routes;
+            Vec::new().into_iter()
+        }
+    }
+}
+
 impl PendingOutbound {
     fn shared_announce_phase(&self) -> usize {
-        if self.update.vpn_announce.is_empty() {
-            ANNOUNCE_PHASE
-        } else {
+        if !self.update.evpn_announce.is_empty() {
+            EVPN_ANNOUNCE_PHASE
+        } else if !self.update.vpn_announce.is_empty() {
             VPN_ANNOUNCE_PHASE
+        } else {
+            ANNOUNCE_PHASE
         }
     }
 
@@ -169,7 +194,11 @@ impl PendingOutbound {
                 OutboundPhase::VpnWithdraw => self.update.vpn_withdraw.len(),
                 OutboundPhase::LabeledWithdraw => self.update.labeled_withdraw.len(),
                 OutboundPhase::RtcWithdraw => self.update.rtc_withdraw.len(),
-                OutboundPhase::EvpnAnnounce => self.offset + self.evpn_announce.len(),
+                OutboundPhase::EvpnAnnounce => self
+                    .update
+                    .evpn_announce
+                    .len()
+                    .max(self.offset + self.evpn_announce.len()),
                 OutboundPhase::BgplsAnnounce => self.update.bgpls_announce.len(),
                 OutboundPhase::VpnAnnounce => self
                     .update
@@ -210,6 +239,16 @@ impl PendingOutbound {
                     self.offset + slice.$field.len()
                 }};
             }
+            macro_rules! shared_or_moved {
+                ($field:ident) => {{
+                    if self.update.$field.is_empty() {
+                        slice.$field = self.$field.by_ref().take(budget).collect::<Vec<_>>().into();
+                        self.offset + slice.$field.len()
+                    } else {
+                        payload!($field)
+                    }
+                }};
+            }
             let end = match phase {
                 // Requests are sent directly, one frame at a time by advance.
                 OutboundPhase::Requests => self.requests.len(),
@@ -248,21 +287,9 @@ impl PendingOutbound {
                 OutboundPhase::VpnWithdraw => payload!(vpn_withdraw),
                 OutboundPhase::LabeledWithdraw => payload!(labeled_withdraw),
                 OutboundPhase::RtcWithdraw => payload!(rtc_withdraw),
-                OutboundPhase::EvpnAnnounce => moved!(evpn_announce),
+                OutboundPhase::EvpnAnnounce => shared_or_moved!(evpn_announce),
                 OutboundPhase::BgplsAnnounce => payload!(bgpls_announce),
-                OutboundPhase::VpnAnnounce => {
-                    if self.update.vpn_announce.is_empty() {
-                        slice.vpn_announce = self
-                            .vpn_announce
-                            .by_ref()
-                            .take(budget)
-                            .collect::<Vec<_>>()
-                            .into();
-                        self.offset + slice.vpn_announce.len()
-                    } else {
-                        payload!(vpn_announce)
-                    }
-                }
+                OutboundPhase::VpnAnnounce => shared_or_moved!(vpn_announce),
                 OutboundPhase::LabeledAnnounce => moved!(labeled_announce),
                 OutboundPhase::RtcAnnounce => payload!(rtc_announce),
                 OutboundPhase::FlowspecAnnounce => payload!(flowspec_announce),
@@ -333,21 +360,10 @@ impl PeerSession {
                 self.record_otc_egress_block(&route);
             }
         }
-        // Private payloads retain slice-by-slice ownership and retirement.
-        // Shared payloads stay borrowed for streaming and possible fallback.
-        let vpn_announce = if shared.is_some() {
-            Vec::new().into_iter()
-        } else {
-            match Arc::try_unwrap(std::mem::take(&mut update.vpn_announce)) {
-                Ok(routes) => routes.into_iter(),
-                Err(routes) => {
-                    update.vpn_announce = routes;
-                    Vec::new().into_iter()
-                }
-            }
-        };
+        let evpn_announce = take_private_announcements(&mut update.evpn_announce, shared.is_some());
+        let vpn_announce = take_private_announcements(&mut update.vpn_announce, shared.is_some());
         self.pending_outbound = Some(PendingOutbound {
-            evpn_announce: std::mem::take(&mut update.evpn_announce).into_iter(),
+            evpn_announce,
             vpn_announce,
             labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
             update,
@@ -1559,7 +1575,7 @@ impl PeerSession {
             let mut index = AttrGroupIndex::default();
             let mut evpn_groups: Vec<(IpAddr, Arc<Vec<PathAttribute>>, Vec<EvpnRoute>)> =
                 Vec::new();
-            for evpn_route in &update.evpn_announce {
+            for evpn_route in update.evpn_announce.iter() {
                 let prepared =
                     SessionExportProfile::prepare_evpn_candidate_with(evpn_route, || {
                         export.prepare_mp_attributes_cached(

@@ -560,7 +560,7 @@ async fn outbound_evpn_update_emits_rib_out_bmp_byte_exact() {
     };
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
-    update.evpn_announce = vec![evpn_route];
+    update.evpn_announce = vec![evpn_route].into();
     session.send_route_update(update);
     let wire = read_single_raw_bgp_message(&mut server).await;
     let pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());
@@ -604,7 +604,7 @@ async fn smet_bmp_preserves_inbound_and_post_policy_outbound_bytes() {
         let mut outbound = empty_outbound_update();
         outbound.exact_export_snapshot = Some(session.publish_export_profile());
         if let Some(flags) = flags {
-            outbound.evpn_announce = vec![make_smet_route(flags)];
+            outbound.evpn_announce = vec![make_smet_route(flags)].into();
         } else {
             outbound.evpn_withdraw = vec![key];
         }

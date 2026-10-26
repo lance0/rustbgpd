@@ -1235,7 +1235,7 @@ fn empty_outbound_update() -> OutboundRouteUpdate {
         next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
-        evpn_announce: vec![],
+        evpn_announce: vec![].into(),
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],

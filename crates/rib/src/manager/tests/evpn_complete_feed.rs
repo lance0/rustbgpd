@@ -36,7 +36,7 @@ fn admit_waiting_for_marker(
             .try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce: feed.announce,
+                    evpn_announce: feed.announce.into(),
                     evpn_withdraw: feed.withdraw,
                     evpn_complete_feed: Some(feed.seal),
                     ..OutboundCommitBatch::default()
@@ -342,7 +342,7 @@ fn owned_initial_postadmission_mismatch_keeps_enqueue_truth_but_holds_terminal()
     while let Ok(update) = output.try_recv() {
         assert!(!update.end_of_rib.contains(&EVPN));
         assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
-        data.extend(update.evpn_announce);
+        data.extend(update.evpn_announce.iter().cloned());
     }
     assert_eq!(
         data.len(),
@@ -377,9 +377,9 @@ fn admit_converged_owned(
         .entry(route.peer)
         .or_insert_with(|| AdjRibIn::new(route.peer));
     manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
-    let mut update = output.try_recv().unwrap();
+    let update = output.try_recv().unwrap();
     assert_eq!(update.evpn_announce.len(), 1);
-    let admitted = update.evpn_announce.pop().unwrap();
+    let admitted = update.evpn_announce[0].clone();
     assert!(matches!(
         output.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
@@ -695,7 +695,7 @@ fn private_join_refusal_retains_old_values_until_changed_and_removed_routes_are_
             .try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce: feed.announce,
+                    evpn_announce: feed.announce.into(),
                     evpn_withdraw: feed.withdraw,
                     evpn_complete_feed: Some(feed.seal),
                     ..OutboundCommitBatch::default()
@@ -792,7 +792,7 @@ fn private_join_refusal_retains_old_values_until_changed_and_removed_routes_are_
             .try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce: feed.announce,
+                    evpn_announce: feed.announce.into(),
                     evpn_withdraw: feed.withdraw,
                     evpn_complete_feed: Some(feed.seal),
                     ..OutboundCommitBatch::default()
@@ -1030,7 +1030,7 @@ fn settled_private_handoff_does_not_gate_ordinary_dirty_private_admission() {
     manager.resync_dirty_peers_bounded();
     let mut announced = Vec::new();
     while let Ok(update) = output.try_recv() {
-        announced.extend(update.evpn_announce);
+        announced.extend(update.evpn_announce.iter().cloned());
     }
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].key(), changed.key());
@@ -1463,7 +1463,7 @@ fn successful_replacement_during_held_eor_or_eorr_preserves_sparse_sequence() {
                 .try_send_and_commit_outbound_update(
                     peer,
                     OutboundCommitBatch {
-                        evpn_announce: feed.announce,
+                        evpn_announce: feed.announce.into(),
                         evpn_withdraw: feed.withdraw,
                         evpn_complete_feed: Some(feed.seal),
                         ..OutboundCommitBatch::default()

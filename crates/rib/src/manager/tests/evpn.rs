@@ -50,7 +50,7 @@ fn smet_obeys_family_export_policy_and_rr_client_gates() {
         manager.process_evpn_announce_chunk(route.peer, vec![route.clone()]);
         assert!(manager.loc_rib.get_evpn(&route.key()).is_some());
         let announcements: Vec<_> = std::iter::from_fn(|| out.try_recv().ok())
-            .flat_map(|update| update.evpn_announce)
+            .flat_map(|update| Arc::unwrap_or_clone(update.evpn_announce))
             .collect();
         assert_eq!(
             announcements.len(),
@@ -324,7 +324,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
     query(&mut manager, Some(invalid.peer));
     let mut announced = Vec::new();
     while let Ok(update) = out.try_recv() {
-        announced.extend(update.evpn_announce);
+        announced.extend(update.evpn_announce.iter().cloned());
     }
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].attributes, invalid.attributes);
@@ -1069,7 +1069,7 @@ async fn drain_view(
                 for key in &update.evpn_withdraw {
                     view.remove(key);
                 }
-                for route in &update.evpn_announce {
+                for route in update.evpn_announce.iter() {
                     view.insert(route.route.key(), route.route.clone());
                 }
             }

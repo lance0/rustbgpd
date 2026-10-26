@@ -2780,3 +2780,232 @@ async fn shared_vpn_canceled_producer_falls_back_after_withdrawals_without_missi
     }
     assert_eq!(announced.values().sum::<usize>(), 4096 + routes.len());
 }
+
+fn shared_evpn_route(tag: u32) -> rustbgpd_rib::EvpnRibRoute {
+    let mut route = make_smet_route(2);
+    route.route = EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+        rd: "65000:100".parse().unwrap(),
+        ethernet_tag: rustbgpd_wire::EthernetTagId(tag),
+        originator_ip: "192.0.2.10".parse().unwrap(),
+    });
+    route
+}
+
+#[tokio::test]
+async fn shared_evpn_withdrawals_and_terminals_keep_order_at_one_slot_capacity() {
+    let family = (Afi::L2Vpn, Safi::Evpn);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let mut route = shared_evpn_route(101);
+    let withdrawn = route.key();
+    route.route = shared_evpn_route(102).route;
+    let announce = Arc::new(vec![route.clone()]);
+    for producer in [true, false] {
+        let mut member = make_test_session(65001, 65002);
+        install_enhanced_refresh_session(&mut member, vec![family], false);
+        let (bulk, mut frames) = mpsc::channel(1);
+        member.writer_bulk_tx = Some(bulk);
+        let update = OutboundRouteUpdate {
+            exact_export_snapshot: Some(member.publish_export_profile()),
+            refresh_markers: vec![
+                (family.0, family.1, RouteRefreshSubtype::BoRR),
+                (family.0, family.1, RouteRefreshSubtype::EoRR),
+            ],
+            evpn_announce: Arc::clone(&announce),
+            evpn_withdraw: vec![withdrawn],
+            shared_group_encode: Some(Arc::clone(&shared)),
+            ..OutboundRouteUpdate::default()
+        };
+        let previous = shared.cell.get().cloned();
+        member.handle_outbound_route_update(update).await;
+        assert!(member.pending_outbound.as_ref().unwrap().shared.is_some());
+        if !producer {
+            assert!(Arc::ptr_eq(
+                previous.as_ref().unwrap(),
+                shared.cell.get().unwrap()
+            ));
+        }
+        let mut observed = Vec::new();
+        for _ in 0..12 {
+            while let Ok(frame) = frames.try_recv() {
+                if frame[18] == 5 {
+                    observed.push(refresh_frame_kind(frame));
+                } else {
+                    let parsed = parse_frame(&frame, false);
+                    for attr in parsed.attributes {
+                        match attr {
+                            PathAttribute::MpUnreachNlri(mp) => {
+                                assert_eq!(mp.evpn_withdrawn.len(), 1);
+                                observed.push("withdraw".to_owned());
+                            }
+                            PathAttribute::MpReachNlri(mp) => {
+                                assert_eq!(mp.evpn_announced.len(), 1);
+                                assert_eq!(mp.evpn_announced[0], route.route);
+                                assert_eq!(mp.next_hop, route.next_hop);
+                                observed.push("announce".to_owned());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if member.pending_outbound.is_none() {
+                break;
+            }
+            member.advance_pending_outbound();
+        }
+        assert!(member.pending_outbound.is_none());
+        assert_eq!(
+            observed,
+            ["refresh:1", "withdraw", "announce", "refresh:2"],
+            "producer={producer}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shared_evpn_profile_mismatch_falls_back_to_private_encoding() {
+    let family = (Afi::L2Vpn, Safi::Evpn);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let routes = Arc::new(vec![shared_evpn_route(101)]);
+    for local_asn in [65001, 65003] {
+        let mut member = make_test_session(local_asn, 65002);
+        install_enhanced_refresh_session(&mut member, vec![family], false);
+        let (bulk, mut frames) = mpsc::channel(4);
+        member.writer_bulk_tx = Some(bulk);
+        let mut update = OutboundRouteUpdate {
+            exact_export_snapshot: Some(member.publish_export_profile()),
+            evpn_announce: Arc::clone(&routes),
+            shared_group_encode: Some(Arc::clone(&shared)),
+            ..OutboundRouteUpdate::default()
+        };
+        let prepared = member.prepare_shared_group(&update).await;
+        assert_eq!(prepared.is_some(), local_asn == 65001);
+        if prepared.is_none() {
+            update.shared_group_encode = None;
+            member.test_drain_outbound(update).await;
+        }
+        let frame = frames.try_recv().unwrap();
+        let parsed = parse_frame(&frame, false);
+        assert!(parsed.attributes.iter().any(|attr| matches!(attr,
+            PathAttribute::MpReachNlri(mp) if mp.evpn_announced == vec![routes[0].route.clone()])));
+        assert!(parsed.attributes.iter().any(|attr| matches!(attr,
+            PathAttribute::AsPath(path) if path.segments.iter().any(|segment|
+                matches!(segment, AsPathSegment::AsSequence(asns) if asns.first() == Some(&local_asn))))));
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the controlled cancellation keeps partial publication, follower withdrawal, private fallback and terminal ordering in one scenario"
+)]
+#[tokio::test]
+async fn shared_evpn_canceled_producer_falls_back_after_withdrawals_without_missing_keys() {
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let family = (Afi::L2Vpn, Safi::Evpn);
+    let (mut encoder, _commands, _own_frames) = shared_fairness_member();
+    let (mut follower, _commands, mut frames) = shared_fairness_member();
+    for member in [&mut encoder, &mut follower] {
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        member.negotiated = Some(Arc::new(negotiated));
+    }
+    let routes: Arc<Vec<_>> = Arc::new(
+        (0..4097u32)
+            .map(|i| {
+                let mut route = shared_evpn_route(i);
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(PathAttribute::Med(i));
+                });
+                route
+            })
+            .collect(),
+    );
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let withdrawn = shared_evpn_route(5000).key();
+    let update = |member: &PeerSession| OutboundRouteUpdate {
+        exact_export_snapshot: Some(member.publish_export_profile()),
+        end_of_rib: vec![family],
+        evpn_announce: Arc::clone(&routes),
+        evpn_withdraw: vec![withdrawn],
+        shared_group_encode: Some(Arc::clone(&shared)),
+        ..OutboundRouteUpdate::default()
+    };
+    let envelope = update(&encoder);
+    let mut producer = Box::pin(encoder.handle_outbound_route_update(envelope));
+    assert!(
+        producer
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    let stream = shared
+        .cell
+        .get()
+        .unwrap()
+        .downcast_ref::<ProgressiveGroupEncode>()
+        .unwrap();
+    assert_eq!(stream.test_snapshot(), (4096, None));
+    follower
+        .handle_outbound_route_update(update(&follower))
+        .await;
+    follower.advance_pending_outbound();
+    follower.advance_pending_outbound();
+    assert_eq!(
+        follower.config.neighbor_counters.updates_sent(),
+        4097,
+        "one withdrawal plus two shared slices admitted before cancellation"
+    );
+    drop(producer);
+    assert_eq!(stream.test_snapshot().1, Some(StreamTerminal::Failed));
+    for _ in 0..12 {
+        if follower.pending_outbound.is_none() {
+            break;
+        }
+        follower.advance_pending_outbound();
+    }
+    assert!(follower.pending_outbound.is_none());
+    let mut announced = std::collections::BTreeMap::<String, usize>::new();
+    let mut withdrawals = 0;
+    let mut terminal = false;
+    while let Ok(frame) = frames.try_recv() {
+        let parsed = parse_frame(&frame, false);
+        for attr in parsed.attributes {
+            match attr {
+                PathAttribute::MpReachNlri(mp) => {
+                    assert!(!terminal, "EVPN announcement after terminal");
+                    assert_eq!(
+                        withdrawals, 1,
+                        "EVPN withdrawal must precede shared and private announcements"
+                    );
+                    for entry in mp.evpn_announced {
+                        *announced.entry(format!("{:?}", entry.key())).or_default() += 1;
+                    }
+                }
+                PathAttribute::MpUnreachNlri(mp) if mp.evpn_withdrawn.is_empty() => {
+                    assert_eq!(announced.len(), routes.len());
+                    assert!(!terminal, "one terminal only");
+                    terminal = true;
+                }
+                PathAttribute::MpUnreachNlri(mp) => {
+                    assert!(announced.is_empty(), "fallback must not repeat withdrawals");
+                    assert_eq!(mp.evpn_withdrawn.len(), 1);
+                    assert_eq!(mp.evpn_withdrawn[0].key(), withdrawn);
+                    withdrawals += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(terminal);
+    assert_eq!(withdrawals, 1);
+    assert_eq!(announced.len(), routes.len());
+    for route in routes.iter() {
+        assert!(matches!(
+            announced.get(&format!("{:?}", route.route.key())),
+            Some(1 | 2)
+        ));
+    }
+    assert_eq!(announced.values().sum::<usize>(), 4096 + routes.len());
+}
