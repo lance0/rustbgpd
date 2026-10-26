@@ -188,6 +188,8 @@ pub(crate) struct MockState {
     pub(crate) refresh_outbound_calls: AtomicUsize,
     pub(crate) refresh_outbound_declined: AtomicBool,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
+    pub(crate) explain_advertised_response:
+        Mutex<Option<server_proto::ExplainAdvertisedRouteResponse>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
     pub(crate) explain_best_path_response: Mutex<Option<server_proto::ExplainBestPathResponse>>,
     pub(crate) last_lookup_best_path: Mutex<Option<server_proto::LookupBestPathRequest>>,
@@ -2199,6 +2201,10 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         }
         let req = request.into_inner();
         *self.state.last_explain_advertised.lock().await = Some(req.clone());
+        if let Some(response) = self.state.explain_advertised_response.lock().await.clone() {
+            active.complete();
+            return Ok(Response::new(response));
+        }
         let (response_peer, response_interface) = daemon_peer(&req.peer_address);
         let response_source = req.source.as_ref().map(|source| {
             let (peer_address, scope) = daemon_peer(&source.peer_address);
@@ -2274,6 +2280,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             source: response_source,
             peer_interface: response_interface,
             route_peer_interface,
+            deny_validation: vec![],
         });
         active.complete();
         Ok(response)

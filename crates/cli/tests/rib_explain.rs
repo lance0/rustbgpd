@@ -11,6 +11,60 @@ use rustbgpd_api::proto;
 mod test_support;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advertised_explain_shows_deny_validation_in_text_and_json() {
+    let server = test_support::spawn_mock_server(None).await;
+    *server.state.explain_advertised_response.lock().await =
+        Some(proto::ExplainAdvertisedRouteResponse {
+            decision: proto::ExplainDecision::Deny as i32,
+            peer_address: "192.0.2.1".into(),
+            prefix: "203.0.113.0".into(),
+            prefix_length: 24,
+            deny_validation: vec!["rpki_invalid".into(), "aspa_unknown".into()],
+            gates: vec![proto::ExportGateStep {
+                gate: "export_policy".into(),
+                code: "policy_denied".into(),
+                verdict: proto::ExportGateVerdict::Stop as i32,
+                detail: "export policy denied this route".into(),
+            }],
+            ..Default::default()
+        });
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rbgp"));
+        command.args(["--addr", &server.addr]);
+        if json {
+            command.arg("--json");
+        }
+        let output = command
+            .args([
+                "rib",
+                "--prefix",
+                "203.0.113.0/24",
+                "advertised",
+                "192.0.2.1",
+                "--explain",
+            ])
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        if json {
+            let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(
+                value["deny_validation"],
+                serde_json::json!(["rpki_invalid", "aspa_unknown"])
+            );
+        } else {
+            assert!(stdout.contains("[STOP] export_policy  export policy denied this route (rpki_invalid, aspa_unknown)"), "{stdout}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn srv6_invalid_only_explain_keeps_candidate_details_in_text_and_json() {
     let server = test_support::spawn_mock_server(None).await;
     *server.state.explain_best_path_response.lock().await = Some(proto::ExplainBestPathResponse {

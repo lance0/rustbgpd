@@ -782,6 +782,8 @@ pub struct JsonExplainAdvertisedRoute {
     /// Export gate ladder in live evaluation order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<JsonExportGateStep>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deny_validation: Vec<String>,
     /// Update group the peer's export is staged under; absent when the
     /// peer takes the per-peer export path.
     #[serde(skip_serializing_if = "Option::is_none")]

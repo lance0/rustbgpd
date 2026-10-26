@@ -1888,7 +1888,9 @@ surfaces (ADR-0073 / ADR-0096 Decision 3.3):
   TOML members render unchanged. A Permit after a nonempty export chain uses
   `chain_default_permit`; the modification list and live term counters retain
   the proof of which terms ran without mislabelling the final member as the
-  source of the chain decision.
+  source of the chain decision. When the deciding deny term tests validation
+  state, `rpki_<state>` / `aspa_<state>` codes appear beside the export-policy
+  stop and in JSON as `deny_validation`. The list is empty on other stops.
 
 ### Live per-term policy counters
 

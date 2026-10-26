@@ -825,7 +825,7 @@ impl Neighbor {
             .parse()
             .map_err(
                 |error: std::net::AddrParseError| ConfigError::InvalidNeighborAddress {
-                    value: self.address.clone(),
+                    value: self.label(),
                     reason: error.to_string(),
                 },
             )
@@ -837,12 +837,12 @@ impl Neighbor {
         self.address.is_empty() && self.interface.is_some()
     }
 
-    /// Operator name for messages: the address, or `interface <name>`.
+    /// Operator name for messages: the scoped address, or `interface <name>`.
     #[must_use]
     pub fn label(&self) -> String {
         match (&self.interface, self.address.is_empty()) {
             (Some(interface), true) => format!("interface {interface}"),
-            _ => self.address.clone(),
+            _ => super::scoped_neighbor_label(&self.address, self.interface.as_deref()),
         }
     }
 }
