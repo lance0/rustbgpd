@@ -29,7 +29,7 @@ mod peer_lifecycle;
 mod queries;
 mod replacement_summaries;
 use crate::PeerId;
-use peer_lifecycle::SessionTeardownDisposition;
+use peer_lifecycle::{PeerUpRegistration, SessionTeardownDisposition};
 mod route_refresh;
 mod selection_deferral;
 mod slice_timing;
@@ -4083,21 +4083,23 @@ impl RibManager {
                 negotiated_llgr_families,
             } => self.handle_peer_up(
                 peer,
-                session_id,
-                peer_asn,
-                peer_router_id,
-                outbound_tx,
-                export_policy,
-                sendable_families,
-                is_ebgp,
-                route_reflector_client,
-                orr_vantage,
-                per_client_best,
-                interpret_rfc1997,
-                add_path_send_families,
-                add_path_send_max,
-                negotiated_orf_recv,
-                negotiated_llgr_families,
+                PeerUpRegistration {
+                    session_id,
+                    peer_asn,
+                    peer_router_id,
+                    outbound_tx,
+                    export_policy,
+                    sendable_families,
+                    is_ebgp,
+                    route_reflector_client,
+                    orr_vantage,
+                    per_client_best,
+                    interpret_rfc1997,
+                    add_path_send_families,
+                    add_path_send_max,
+                    negotiated_orf_recv,
+                    negotiated_llgr_families,
+                },
             ),
             RibUpdate::PeerAddPathLimits {
                 peer,

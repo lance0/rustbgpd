@@ -49,6 +49,32 @@ enum ActiveSessionRegistration {
     CollisionFailback,
 }
 
+/// Session registration fields of a `RibUpdate::PeerUp`, passed by name to
+/// [`RibManager::handle_peer_up`] so same-typed flags and family lists
+/// cannot be transposed at a call site. Field meanings follow
+/// `RibUpdate::PeerUp`.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent PeerUp registration booleans"
+)]
+pub(super) struct PeerUpRegistration {
+    pub(super) session_id: u64,
+    pub(super) peer_asn: u32,
+    pub(super) peer_router_id: Ipv4Addr,
+    pub(super) outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+    pub(super) export_policy: Option<PolicyChain>,
+    pub(super) sendable_families: Vec<(Afi, Safi)>,
+    pub(super) is_ebgp: bool,
+    pub(super) route_reflector_client: bool,
+    pub(super) orr_vantage: Option<IpAddr>,
+    pub(super) per_client_best: bool,
+    pub(super) interpret_rfc1997: bool,
+    pub(super) add_path_send_families: Vec<(Afi, Safi)>,
+    pub(super) add_path_send_max: u32,
+    pub(super) negotiated_orf_recv: Vec<(Afi, Safi)>,
+    pub(super) negotiated_llgr_families: Vec<(Afi, Safi)>,
+}
+
 /// Most registrations, leader included, one deferred-registration turn
 /// completes together. The cohort runs as one synchronous actor turn, so
 /// this bounds how long a mass rejoin holds survivors' queued mutations
@@ -1038,30 +1064,27 @@ impl RibManager {
     }
 
     #[expect(
-        clippy::fn_params_excessive_bools,
-        clippy::too_many_arguments,
         clippy::too_many_lines,
-        reason = "PeerUp mirrors registration payload and keeps connection ownership transfer in one pass"
+        reason = "PeerUp keeps connection ownership transfer in one pass"
     )]
-    pub(super) fn handle_peer_up(
-        &mut self,
-        peer: PeerId,
-        session_id: u64,
-        peer_asn: u32,
-        peer_router_id: Ipv4Addr,
-        outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
-        export_policy: Option<PolicyChain>,
-        sendable_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
-        is_ebgp: bool,
-        route_reflector_client: bool,
-        orr_vantage: Option<IpAddr>,
-        per_client_best: bool,
-        interpret_rfc1997: bool,
-        add_path_send_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
-        add_path_send_max: u32,
-        negotiated_orf_recv: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
-        negotiated_llgr_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
-    ) {
+    pub(super) fn handle_peer_up(&mut self, peer: PeerId, registration: PeerUpRegistration) {
+        let PeerUpRegistration {
+            session_id,
+            peer_asn,
+            peer_router_id,
+            outbound_tx,
+            export_policy,
+            sendable_families,
+            is_ebgp,
+            route_reflector_client,
+            orr_vantage,
+            per_client_best,
+            interpret_rfc1997,
+            add_path_send_families,
+            add_path_send_max,
+            negotiated_orf_recv,
+            negotiated_llgr_families,
+        } = registration;
         // Two live sessions for one peer address can overlap during the
         // RFC 4271 §6.8 collision window. A `PeerUp` that finds a
         // still-registered sender is a NEW session taking over from a

@@ -1060,21 +1060,23 @@ fn peer_up_initializes_every_adj_rib_out_family_series() {
 
     manager.handle_peer_up(
         peer,
-        1,
-        65_000,
-        Ipv4Addr::new(192, 0, 2, 2),
-        outbound_tx,
-        None,
-        ipv4_sendable(),
-        true,
-        false,
-        None,
-        false,
-        true,
-        Vec::new(),
-        0,
-        Vec::new(),
-        Vec::new(),
+        PeerUpRegistration {
+            session_id: 1,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        },
     );
 
     // Load-bearing proof: deleting any family from PeerUp's eager-zero loop
