@@ -79,12 +79,12 @@ fn shared_query_update(
     member: &PeerSession,
     announce: &[Route],
 ) -> (
-    Arc<super::shared_group::ProgressiveUnicastEncode>,
+    Arc<super::shared_group::ProgressiveGroupEncode>,
     OutboundRouteUpdate,
-    Vec<super::shared_group::SharedUnicastChunk>,
+    Vec<super::shared_group::SharedAnnounceChunk>,
 ) {
     let profile = (*member.publish_export_profile()).clone();
-    let typed = Arc::new(super::shared_group::ProgressiveUnicastEncode::test_new(
+    let typed = Arc::new(super::shared_group::ProgressiveGroupEncode::test_new(
         profile.clone(),
     ));
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
@@ -905,7 +905,7 @@ fn shared_group_benchmark_drives_slice_yields_without_runtime() {
 /// even with enough writer capacity to admit the entire inventory immediately.
 #[tokio::test]
 async fn shared_group_elected_encoder_yields_for_new_reads() {
-    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     use std::future::Future;
     use std::task::{Context, Waker};
 
@@ -920,7 +920,7 @@ async fn shared_group_elected_encoder_yields_for_new_reads() {
         .cell
         .get()
         .unwrap()
-        .downcast_ref::<ProgressiveUnicastEncode>()
+        .downcast_ref::<ProgressiveGroupEncode>()
         .unwrap();
     let (published, terminal) = stream.test_snapshot();
     assert_eq!(published, 2 * super::shared_group::PROGRESSIVE_SLICE_ROUTES);
@@ -1010,7 +1010,7 @@ async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {
 )]
 #[tokio::test]
 async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back() {
-    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
@@ -1048,7 +1048,7 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
         .cell
         .get()
         .unwrap()
-        .downcast_ref::<ProgressiveUnicastEncode>()
+        .downcast_ref::<ProgressiveGroupEncode>()
         .unwrap();
     assert_eq!(
         stream.test_snapshot(),
@@ -1227,7 +1227,7 @@ async fn shared_group_encode_first_member_encodes_and_second_reuses() {
     member_a.test_drain_outbound(update).await;
     let published = shared.cell.get().expect("first member publishes the cell");
     let (chunk_count, terminal) = published
-        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+        .downcast_ref::<super::shared_group::ProgressiveGroupEncode>()
         .expect("cell payload is the transport shared-encode type")
         .test_snapshot();
     assert_eq!(
@@ -1325,7 +1325,7 @@ async fn shared_group_encode_skips_chunks_of_unnegotiated_families() {
     member_a.test_drain_outbound(update).await;
     let published = shared.cell.get().expect("cell published");
     let (chunk_count, terminal) = published
-        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+        .downcast_ref::<super::shared_group::ProgressiveGroupEncode>()
         .unwrap()
         .test_snapshot();
     assert_eq!(
@@ -1359,7 +1359,7 @@ async fn shared_group_encode_skips_chunks_of_unnegotiated_families() {
 /// exactly once — repetition is possible, skipping is not.
 #[tokio::test]
 async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
-    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     let source_a = Ipv4Addr::new(10, 33, 0, 1);
     let source_b = Ipv4Addr::new(10, 33, 0, 2);
     let source_x = Ipv4Addr::new(10, 33, 0, 9);
@@ -1372,7 +1372,7 @@ async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
 
     let (mut member, mut wire) = shared_group_member(65001).await;
     let profile = (*member.publish_export_profile()).clone();
-    let encode = ProgressiveUnicastEncode::test_new(profile.clone());
+    let encode = ProgressiveGroupEncode::test_new(profile.clone());
     // Simulate an encoder that published the first source's chunk and then
     // hit an anomaly.
     let mut cache = super::export::PreparedAttrCache::default();
@@ -1421,9 +1421,9 @@ async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
 /// stream consumers could wait on forever.
 #[tokio::test]
 async fn shared_group_encoder_guard_publishes_failed_on_unwind() {
-    use super::shared_group::{EncoderGuard, ProgressiveUnicastEncode, StreamTerminal};
+    use super::shared_group::{EncoderGuard, ProgressiveGroupEncode, StreamTerminal};
     let (member, _wire) = shared_group_member(65001).await;
-    let encode = ProgressiveUnicastEncode::test_new((*member.publish_export_profile()).clone());
+    let encode = ProgressiveGroupEncode::test_new((*member.publish_export_profile()).clone());
     drop(EncoderGuard(&encode));
     assert_eq!(encode.test_snapshot(), (0, Some(StreamTerminal::Failed)));
 }
@@ -1480,7 +1480,7 @@ async fn shared_group_encode_streams_multiple_slices() {
         .cell
         .get()
         .unwrap()
-        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+        .downcast_ref::<super::shared_group::ProgressiveGroupEncode>()
         .unwrap()
         .test_snapshot();
     assert_eq!(
@@ -1565,7 +1565,7 @@ async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
         .cell
         .get()
         .unwrap()
-        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+        .downcast_ref::<super::shared_group::ProgressiveGroupEncode>()
         .unwrap()
         .test_snapshot();
     assert_eq!(
@@ -1738,7 +1738,7 @@ async fn shared_group_mixed_source_inventory_keeps_minimal_updates_per_member() 
             .cell
             .get()
             .unwrap()
-            .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+            .downcast_ref::<super::shared_group::ProgressiveGroupEncode>()
             .unwrap()
             .test_snapshot();
         assert_eq!(
@@ -1826,7 +1826,7 @@ async fn shared_group_nh_override_alignment_survives_source_sort() {
 /// regression guard).
 #[tokio::test]
 async fn shared_group_consumer_streams_concurrently_with_live_encoder() {
-    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     let source_a = Ipv4Addr::new(10, 42, 0, 1);
     let source_b = Ipv4Addr::new(10, 42, 0, 2);
     let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -1854,7 +1854,7 @@ async fn shared_group_consumer_streams_concurrently_with_live_encoder() {
         &[1],
     )
     .unwrap();
-    let typed = Arc::new(ProgressiveUnicastEncode::test_new(profile));
+    let typed = Arc::new(ProgressiveGroupEncode::test_new(profile));
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     assert!(
         shared
@@ -2180,7 +2180,7 @@ async fn shared_group_encode_per_key_wire_bytes_and_eor_match_private_encode() {
 /// announced prefix carries exactly the ungrouped path's attributes.
 #[tokio::test]
 async fn shared_group_mixed_failover_pass_stays_on_encode_once() {
-    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     let (announce, withdraw) = mixed_failover_pass();
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     let members = [
@@ -2204,7 +2204,7 @@ async fn shared_group_mixed_failover_pass_stays_on_encode_once() {
             );
         }
         let encode = cell
-            .downcast_ref::<ProgressiveUnicastEncode>()
+            .downcast_ref::<ProgressiveGroupEncode>()
             .expect("transport shared-encode payload");
         assert_eq!(
             encode.test_snapshot(),
@@ -2300,12 +2300,12 @@ async fn shared_group_mixed_pass_fallback_members_match_ungrouped_bytes() {
 /// an already-sent shared chunk may repeat, a withdrawal may not follow it.
 #[tokio::test]
 async fn shared_group_mixed_pass_failure_resumes_at_announcements() {
-    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     let (announce, withdraw) = mixed_failover_pass();
     let excluded = Ipv4Addr::new(10, 44, 0, 9);
     let (mut member, mut wire) = shared_group_member(65001).await;
     let profile = (*member.publish_export_profile()).clone();
-    let encode = ProgressiveUnicastEncode::test_new(profile.clone());
+    let encode = ProgressiveGroupEncode::test_new(profile.clone());
     let head = super::shared_group::encode_shared_unicast_slice(
         &profile,
         &mut super::export::PreparedAttrCache::default(),
@@ -2513,7 +2513,7 @@ async fn shared_group_dropped_ipv6_next_hop_warns_once_per_pass() {
         .cell
         .get()
         .expect("the first member publishes the cell")
-        .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
+        .downcast_ref::<super::shared_group::ProgressiveGroupEncode>()
         .unwrap()
         .test_snapshot();
     assert_eq!(
@@ -2528,4 +2528,255 @@ async fn shared_group_dropped_ipv6_next_hop_warns_once_per_pass() {
     for wire in &mut wires {
         assert_eq!(read_announced_prefixes(wire, 3).await.len(), 3);
     }
+}
+
+#[tokio::test]
+async fn shared_vpn_withdrawals_and_terminals_keep_order_at_one_slot_capacity() {
+    let family = (Afi::Ipv4, Safi::MplsVpn);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let mut route = make_vpn_rib_route(101);
+    let withdrawn = route.key();
+    route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::new(10, 253, 0, 0), 24).unwrap();
+    let announce = Arc::new(vec![route.clone()]);
+    for producer in [true, false] {
+        let mut member = make_test_session(65001, 65002);
+        install_enhanced_refresh_session(&mut member, vec![family], false);
+        let (bulk, mut frames) = mpsc::channel(1);
+        member.writer_bulk_tx = Some(bulk);
+        let update = OutboundRouteUpdate {
+            exact_export_snapshot: Some(member.publish_export_profile()),
+            refresh_markers: vec![
+                (family.0, family.1, RouteRefreshSubtype::BoRR),
+                (family.0, family.1, RouteRefreshSubtype::EoRR),
+            ],
+            vpn_announce: Arc::clone(&announce),
+            vpn_withdraw: vec![withdrawn.clone()],
+            shared_group_encode: Some(Arc::clone(&shared)),
+            ..OutboundRouteUpdate::default()
+        };
+        let previous = shared.cell.get().cloned();
+        member.handle_outbound_route_update(update).await;
+        assert!(member.pending_outbound.as_ref().unwrap().shared.is_some());
+        if !producer {
+            assert!(Arc::ptr_eq(
+                previous.as_ref().unwrap(),
+                shared.cell.get().unwrap()
+            ));
+        }
+        let mut observed = Vec::new();
+        for _ in 0..12 {
+            while let Ok(frame) = frames.try_recv() {
+                if frame[18] == 5 {
+                    observed.push(refresh_frame_kind(frame));
+                } else {
+                    let parsed = parse_frame(&frame, false);
+                    for attr in parsed.attributes {
+                        match attr {
+                            PathAttribute::MpUnreachNlri(mp) => {
+                                assert_eq!(mp.vpn_withdrawn.len(), 1);
+                                observed.push("withdraw".to_owned());
+                            }
+                            PathAttribute::MpReachNlri(mp) => {
+                                assert_eq!(mp.vpn_announced.len(), 1);
+                                assert_eq!(mp.vpn_announced[0].nlri, route.nlri);
+                                assert_eq!(mp.next_hop, route.next_hop);
+                                observed.push("announce".to_owned());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if member.pending_outbound.is_none() {
+                break;
+            }
+            member.advance_pending_outbound();
+        }
+        assert!(member.pending_outbound.is_none());
+        assert_eq!(
+            observed,
+            ["refresh:1", "withdraw", "announce", "refresh:2"],
+            "producer={producer}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shared_vpn_profile_mismatch_and_invalid_labels_fall_back() {
+    let family = (Afi::Ipv4, Safi::MplsVpn);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let announce = Arc::new(vec![make_vpn_rib_route(101)]);
+    for add_path in [false, true] {
+        let mut member = make_test_session(65001, 65002);
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        if add_path {
+            negotiated
+                .add_path_families
+                .insert(family, AddPathMode::Send);
+        }
+        member.negotiated = Some(Arc::new(negotiated));
+        let (bulk, mut frames) = mpsc::channel(4);
+        member.writer_bulk_tx = Some(bulk);
+        let mut update = OutboundRouteUpdate {
+            exact_export_snapshot: Some(member.publish_export_profile()),
+            vpn_announce: Arc::clone(&announce),
+            shared_group_encode: Some(Arc::clone(&shared)),
+            ..OutboundRouteUpdate::default()
+        };
+        let prepared = member.prepare_shared_group(&update).await;
+        assert_eq!(prepared.is_some(), !add_path);
+        if add_path {
+            update.shared_group_encode = None;
+            member.test_drain_outbound(update).await;
+        }
+        let mut frame = frames.try_recv().unwrap();
+        let Message::Update(message) =
+            rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("expected VPN UPDATE")
+        };
+        let parsed = message
+            .parse(
+                true,
+                false,
+                if add_path {
+                    std::slice::from_ref(&family)
+                } else {
+                    &[]
+                },
+            )
+            .unwrap();
+        assert!(parsed.attributes.iter().any(|attr| matches!(attr, PathAttribute::MpReachNlri(mp) if mp.vpn_announced.len() == 1 && mp.vpn_announced[0].nlri == announce[0].nlri)));
+    }
+    let member = make_test_session(65001, 65002);
+    let profile = member.publish_export_profile();
+    let mut malformed = announce[0].clone();
+    malformed
+        .nlri
+        .labels
+        .insert(0, MplsLabelEntry::try_new(102, 0, false).unwrap());
+    assert!(super::shared_group::encode_shared_vpn_slice(&profile, &[malformed], &[0]).is_none());
+    let mut extended = announce[0].clone();
+    extended.next_hop = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    assert!(super::shared_group::encode_shared_vpn_slice(&profile, &[extended], &[0]).is_none());
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the controlled cancellation keeps partial publication, follower withdrawal, private fallback and terminal ordering in one scenario"
+)]
+#[tokio::test]
+async fn shared_vpn_canceled_producer_falls_back_after_withdrawals_without_missing_keys() {
+    use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let family = (Afi::Ipv4, Safi::MplsVpn);
+    let (mut encoder, _commands, _own_frames) = shared_fairness_member();
+    let (mut follower, _commands, mut frames) = shared_fairness_member();
+    for member in [&mut encoder, &mut follower] {
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        member.negotiated = Some(Arc::new(negotiated));
+    }
+    let routes: Arc<Vec<_>> = Arc::new(
+        (0..4097u32)
+            .map(|i| {
+                let mut route = make_vpn_rib_route(101);
+                route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0afd_0000 + i), 32).unwrap();
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(PathAttribute::Med(i));
+                });
+                route
+            })
+            .collect(),
+    );
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let withdrawn = make_vpn_rib_route(100).key();
+    let update = |member: &PeerSession| OutboundRouteUpdate {
+        exact_export_snapshot: Some(member.publish_export_profile()),
+        end_of_rib: vec![family],
+        vpn_announce: Arc::clone(&routes),
+        vpn_withdraw: vec![withdrawn.clone()],
+        shared_group_encode: Some(Arc::clone(&shared)),
+        ..OutboundRouteUpdate::default()
+    };
+    let envelope = update(&encoder);
+    let mut producer = Box::pin(encoder.handle_outbound_route_update(envelope));
+    assert!(
+        producer
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    let stream = shared
+        .cell
+        .get()
+        .unwrap()
+        .downcast_ref::<ProgressiveGroupEncode>()
+        .unwrap();
+    assert_eq!(stream.test_snapshot(), (4096, None));
+    follower
+        .handle_outbound_route_update(update(&follower))
+        .await;
+    follower.advance_pending_outbound();
+    follower.advance_pending_outbound();
+    assert_eq!(
+        follower.config.neighbor_counters.updates_sent(),
+        4097,
+        "one withdrawal plus two shared slices admitted before cancellation"
+    );
+    drop(producer);
+    assert_eq!(stream.test_snapshot().1, Some(StreamTerminal::Failed));
+    for _ in 0..12 {
+        if follower.pending_outbound.is_none() {
+            break;
+        }
+        follower.advance_pending_outbound();
+    }
+    assert!(follower.pending_outbound.is_none());
+    let mut announced = std::collections::BTreeMap::<String, usize>::new();
+    let mut withdrawals = 0;
+    let mut terminal = false;
+    while let Ok(frame) = frames.try_recv() {
+        let parsed = parse_frame(&frame, false);
+        for attr in parsed.attributes {
+            match attr {
+                PathAttribute::MpReachNlri(mp) => {
+                    assert!(!terminal, "VPN announcement after terminal");
+                    assert_eq!(
+                        withdrawals, 1,
+                        "VPN withdrawal must precede shared and private announcements"
+                    );
+                    for entry in mp.vpn_announced {
+                        *announced
+                            .entry(format!("{:?}", entry.nlri.key()))
+                            .or_default() += 1;
+                    }
+                }
+                PathAttribute::MpUnreachNlri(mp) if mp.vpn_withdrawn.is_empty() => {
+                    assert_eq!(announced.len(), routes.len());
+                    assert!(!terminal, "one terminal only");
+                    terminal = true;
+                }
+                PathAttribute::MpUnreachNlri(mp) => {
+                    assert!(announced.is_empty(), "fallback must not repeat withdrawals");
+                    assert_eq!(mp.vpn_withdrawn.len(), 1);
+                    assert_eq!(mp.vpn_withdrawn[0].nlri.key(), withdrawn.nlri_key);
+                    withdrawals += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(terminal);
+    assert_eq!(withdrawals, 1);
+    assert_eq!(announced.len(), routes.len());
+    for route in routes.iter() {
+        assert!(matches!(
+            announced.get(&format!("{:?}", route.nlri.key())),
+            Some(1 | 2)
+        ));
+    }
+    assert_eq!(announced.values().sum::<usize>(), 4096 + routes.len());
 }

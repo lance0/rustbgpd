@@ -25,7 +25,7 @@ const MIN_SLICE_ROUTES: usize = 64;
 /// reuse the exact export snapshot, without growing the bounded writer queue.
 pub(super) struct PendingOutbound {
     pub(super) update: OutboundRouteUpdate,
-    pub(super) shared: Option<(Arc<super::shared_group::ProgressiveUnicastEncode>, usize)>,
+    pub(super) shared: Option<(Arc<super::shared_group::ProgressiveGroupEncode>, usize)>,
     requests: Vec<(Afi, Safi)>,
     phase: usize,
     offset: usize,
@@ -94,19 +94,32 @@ const OUTBOUND_PHASES: &[OutboundPhase] = &[
 ];
 
 const ANNOUNCE_PHASE: usize = 3;
+const VPN_ANNOUNCE_PHASE: usize = 12;
+const _: () = assert!(matches!(
+    OUTBOUND_PHASES[VPN_ANNOUNCE_PHASE],
+    OutboundPhase::VpnAnnounce
+));
 const _: () = assert!(matches!(
     OUTBOUND_PHASES[ANNOUNCE_PHASE],
     OutboundPhase::Announce
 ));
 
 impl PendingOutbound {
+    fn shared_announce_phase(&self) -> usize {
+        if self.update.vpn_announce.is_empty() {
+            ANNOUNCE_PHASE
+        } else {
+            VPN_ANNOUNCE_PHASE
+        }
+    }
+
     /// Waits inside the existing run-loop select, never inside a sender.
     /// The shared stream is awaited only once the cursor reaches the announce
     /// phase: a member's own withdrawals go first and must not wait for the
     /// encoder to publish.
     pub(super) async fn ready(&self, writer: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>) {
         if let Some((shared, next)) = &self.shared
-            && self.phase >= ANNOUNCE_PHASE
+            && self.phase >= self.shared_announce_phase()
         {
             shared.ready(*next).await;
         }
@@ -127,7 +140,7 @@ impl PendingOutbound {
     /// member's own withdrawals) is admitted, so withdrawals keep preceding
     /// announcements exactly as on the per-session path.
     fn withdrawals_admitted(&mut self) -> bool {
-        self.skip_empty_phases_before(ANNOUNCE_PHASE)
+        self.skip_empty_phases_before(self.shared_announce_phase())
     }
 
     fn skip_empty_phases_before(&mut self, stop: usize) -> bool {
@@ -158,7 +171,11 @@ impl PendingOutbound {
                 OutboundPhase::RtcWithdraw => self.update.rtc_withdraw.len(),
                 OutboundPhase::EvpnAnnounce => self.offset + self.evpn_announce.len(),
                 OutboundPhase::BgplsAnnounce => self.update.bgpls_announce.len(),
-                OutboundPhase::VpnAnnounce => self.offset + self.vpn_announce.len(),
+                OutboundPhase::VpnAnnounce => self
+                    .update
+                    .vpn_announce
+                    .len()
+                    .max(self.offset + self.vpn_announce.len()),
                 OutboundPhase::LabeledAnnounce => self.offset + self.labeled_announce.len(),
                 OutboundPhase::RtcAnnounce => self.update.rtc_announce.len(),
                 OutboundPhase::FlowspecAnnounce => self.update.flowspec_announce.len(),
@@ -233,7 +250,19 @@ impl PendingOutbound {
                 OutboundPhase::RtcWithdraw => payload!(rtc_withdraw),
                 OutboundPhase::EvpnAnnounce => moved!(evpn_announce),
                 OutboundPhase::BgplsAnnounce => payload!(bgpls_announce),
-                OutboundPhase::VpnAnnounce => moved!(vpn_announce),
+                OutboundPhase::VpnAnnounce => {
+                    if self.update.vpn_announce.is_empty() {
+                        slice.vpn_announce = self
+                            .vpn_announce
+                            .by_ref()
+                            .take(budget)
+                            .collect::<Vec<_>>()
+                            .into();
+                        self.offset + slice.vpn_announce.len()
+                    } else {
+                        payload!(vpn_announce)
+                    }
+                }
                 OutboundPhase::LabeledAnnounce => moved!(labeled_announce),
                 OutboundPhase::RtcAnnounce => payload!(rtc_announce),
                 OutboundPhase::FlowspecAnnounce => payload!(flowspec_announce),
@@ -304,9 +333,22 @@ impl PeerSession {
                 self.record_otc_egress_block(&route);
             }
         }
+        // Private payloads retain slice-by-slice ownership and retirement.
+        // Shared payloads stay borrowed for streaming and possible fallback.
+        let vpn_announce = if shared.is_some() {
+            Vec::new().into_iter()
+        } else {
+            match Arc::try_unwrap(std::mem::take(&mut update.vpn_announce)) {
+                Ok(routes) => routes.into_iter(),
+                Err(routes) => {
+                    update.vpn_announce = routes;
+                    Vec::new().into_iter()
+                }
+            }
+        };
         self.pending_outbound = Some(PendingOutbound {
             evpn_announce: std::mem::take(&mut update.evpn_announce).into_iter(),
-            vpn_announce: std::mem::take(&mut update.vpn_announce).into_iter(),
+            vpn_announce,
             labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
             update,
             shared,
@@ -477,11 +519,11 @@ impl PeerSession {
             if *next == end {
                 match terminal {
                     Some(super::shared_group::StreamTerminal::Complete) => {
-                        // Only Announce was shared. Each member still owes
+                        // Only this announce phase was shared. Each member still owes
                         // its own terminal refresh/EoR phases, under the same
                         // writer capacity and envelope ownership as before.
                         pending.shared = None;
-                        pending.phase = ANNOUNCE_PHASE + 1;
+                        pending.phase = pending.shared_announce_phase() + 1;
                         pending.offset = 0;
                     }
                     Some(super::shared_group::StreamTerminal::Failed) => pending.shared = None,
@@ -756,7 +798,7 @@ struct MpGroup {
 
 /// One VPN or labeled UPDATE group: family, next hop, link-local companion,
 /// prepared attributes, and its routes in arrival order.
-type MpRouteGroup<T> = (
+pub(super) type MpRouteGroup<T> = (
     (Afi, Safi),
     IpAddr,
     Option<Ipv6Addr>,
@@ -768,10 +810,10 @@ type MpRouteGroup<T> = (
 /// families must not share a group, and every family's index registers
 /// positions in one shared group vector so groups keep first-arrival order.
 #[derive(Default)]
-struct MpGroupIndex(HashMap<(Afi, Safi), AttrGroupIndex>);
+pub(super) struct MpGroupIndex(HashMap<(Afi, Safi), AttrGroupIndex>);
 
 impl MpGroupIndex {
-    fn push<T>(
+    pub(super) fn push<T>(
         &mut self,
         groups: &mut Vec<MpRouteGroup<T>>,
         family: (Afi, Safi),
@@ -1592,7 +1634,7 @@ impl PeerSession {
             let mut attr_cache = MpAttrCache::default();
             let mut index = MpGroupIndex::default();
             let mut vpn_groups: Vec<MpRouteGroup<rustbgpd_wire::VpnNlriEntry>> = Vec::new();
-            for vpn_route in &update.vpn_announce {
+            for vpn_route in update.vpn_announce.iter() {
                 let family = vpn_route.afi_safi();
                 if !self.negotiated_families().contains(&family) {
                     continue;

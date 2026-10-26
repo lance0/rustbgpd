@@ -799,7 +799,7 @@ fn family_messages() -> Vec<(NormMsg, NormMsg)> {
         ),
         (
             normalize(&OutboundRouteUpdate {
-                vpn_announce: vec![vpn.clone()],
+                vpn_announce: vec![vpn.clone()].into(),
                 ..Default::default()
             }),
             normalize(&OutboundRouteUpdate {
@@ -928,7 +928,7 @@ fn per_key_trace_recovery_rejects_non_idempotent_announces() {
     };
     let vpn: fn(u32) -> NormMsg = |local_pref| {
         normalize(&OutboundRouteUpdate {
-            vpn_announce: vec![vpn_route(vpn_nlri(40, 16000), A, local_pref, vec![])],
+            vpn_announce: vec![vpn_route(vpn_nlri(40, 16000), A, local_pref, vec![])].into(),
             ..Default::default()
         })
     };

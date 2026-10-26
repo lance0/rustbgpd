@@ -672,7 +672,12 @@ fn vpn_grouped_page_rejects_closed_receiver_until_fresh_session() {
     let mut fresh = register(&mut manager, 1);
     let mut admitted = Vec::new();
     while let Ok(update) = fresh.try_recv() {
-        admitted.extend(update.vpn_announce.into_iter().map(|route| route.key()));
+        admitted.extend(
+            update
+                .vpn_announce
+                .iter()
+                .map(crate::route::VpnRibRoute::key),
+        );
     }
     assert_eq!(admitted, vec![new.key()]);
     let page = vpn_page(&mut manager, scope, None, None, 10).unwrap();

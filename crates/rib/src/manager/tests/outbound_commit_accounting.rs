@@ -89,7 +89,7 @@ fn family_batches() -> Vec<(&'static str, OutboundCommitBatch)> {
         (
             "vpn",
             OutboundCommitBatch {
-                vpn_announce: vec![make_vpn_rib_route(SOURCE, 1, 100, 100)],
+                vpn_announce: vec![make_vpn_rib_route(SOURCE, 1, 100, 100)].into(),
                 ..OutboundCommitBatch::default()
             },
         ),

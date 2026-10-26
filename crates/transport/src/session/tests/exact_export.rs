@@ -221,7 +221,7 @@ async fn exact_export_probe_matches_real_writer_for_every_family_and_limit() {
                 ($candidate:expr, $field:ident, $route:expr) => {{
                     let probe = held.probe_announcement($candidate).unwrap();
                     let mut update = empty_outbound_update();
-                    update.$field = vec![$route.clone()];
+                    update.$field = vec![$route.clone()].into();
                     assert_frame(&mut session, &mut server, probe, update, held_generation).await;
                 }};
             }

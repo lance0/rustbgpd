@@ -1142,7 +1142,7 @@ fn commit_family_gauge_fixture(
             .try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    vpn_announce,
+                    vpn_announce: vpn_announce.into(),
                     ..OutboundCommitBatch::with_unicast(announce.into(), next_hop_override)
                 },
             )

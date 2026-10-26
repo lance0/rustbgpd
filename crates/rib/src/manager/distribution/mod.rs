@@ -264,7 +264,7 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) evpn_complete_feed: Option<super::evpn_recovery::EvpnFeedSeal>,
     pub(in crate::manager) bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
     pub(in crate::manager) bgpls_withdraw: Vec<crate::route::BgpLsRouteKey>,
-    pub(in crate::manager) vpn_announce: Vec<crate::route::VpnRibRoute>,
+    pub(in crate::manager) vpn_announce: Arc<Vec<crate::route::VpnRibRoute>>,
     pub(in crate::manager) vpn_withdraw: Vec<crate::route::VpnRibRouteKey>,
     pub(in crate::manager) labeled_announce: Vec<crate::route::LabeledRibRoute>,
     pub(in crate::manager) labeled_withdraw: Vec<crate::route::LabeledRibRouteKey>,
@@ -330,7 +330,7 @@ impl OutboundCommitBatch {
         drop(self.evpn_complete_feed.take());
         super::retire_vec(&mut self.bgpls_announce, checkpoint);
         super::retire_vec(&mut self.bgpls_withdraw, checkpoint);
-        super::retire_vec(&mut self.vpn_announce, checkpoint);
+        retire_arc_vec(std::mem::take(&mut self.vpn_announce), checkpoint);
         super::retire_vec(&mut self.vpn_withdraw, checkpoint);
         super::retire_vec(&mut self.labeled_announce, checkpoint);
         super::retire_vec(&mut self.labeled_withdraw, checkpoint);
@@ -3933,8 +3933,14 @@ impl RibManager {
                         .zip(unicast_keep.iter().inspect(|_| checkpoint()).copied())
                         .filter_map(|(next_hop, keep)| keep.then_some(next_hop))
                         .collect::<Vec<_>>();
-                    announce = permitted_routes.into();
-                    next_hop_override = permitted_next_hops.into();
+                    retire_arc_vec(
+                        std::mem::replace(&mut announce, permitted_routes.into()),
+                        &mut || checkpoint(),
+                    );
+                    retire_arc_vec(
+                        std::mem::replace(&mut next_hop_override, permitted_next_hops.into()),
+                        &mut || checkpoint(),
+                    );
                 }
 
                 let mut flowspec_keep = keep[offset..offset + family_lengths[1]]
@@ -3955,11 +3961,24 @@ impl RibManager {
                     .copied();
                 bgpls_announce.retain(|_| bgpls_keep.next().unwrap_or(false));
                 offset += family_lengths[3];
-                let mut vpn_keep = keep[offset..offset + family_lengths[4]]
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .copied();
-                vpn_announce.retain(|_| vpn_keep.next().unwrap_or(false));
+                let vpn_keep = &keep[offset..offset + family_lengths[4]];
+                if vpn_keep.iter().inspect(|_| checkpoint()).any(|keep| !keep) {
+                    let permitted = vpn_announce
+                        .iter()
+                        .zip(vpn_keep)
+                        .inspect(|_| checkpoint())
+                        .filter(|(_, keep)| **keep)
+                        .map(|(route, _)| route.clone())
+                        .collect::<Vec<_>>()
+                        .into();
+                    retire_arc_vec(std::mem::replace(&mut vpn_announce, permitted), &mut || {
+                        #[cfg(test)]
+                        if let Some(observer) = &retirement_observer {
+                            observer("exact_vpn_payload_retirement");
+                        }
+                        checkpoint();
+                    });
+                }
                 offset += family_lengths[4];
                 let mut labeled_keep = keep[offset..offset + family_lengths[5]]
                     .iter()
@@ -4552,7 +4571,7 @@ impl RibManager {
                     })
                     .count();
                 rib_out.reserve_bgpls_with(additional, &mut || checkpoint());
-                rib_out.reserve_vpn_with(&vpn_announce, &mut || checkpoint());
+                rib_out.reserve_vpn_with(vpn_announce.iter(), &mut || checkpoint());
                 let additional = labeled_announce
                     .iter()
                     .filter(|route| {
@@ -4611,7 +4630,7 @@ impl RibManager {
                 rib_out.remove_bgpls(key);
             }
             if grouped_vpn_count.is_none() {
-                for route in &vpn_announce {
+                for route in vpn_announce.iter() {
                     super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
                     rib_out.insert_vpn(route.clone());
                 }
@@ -9153,7 +9172,7 @@ impl RibManager {
                                     evpn_complete_feed,
                                     bgpls_announce,
                                     bgpls_withdraw,
-                                    vpn_announce,
+                                    vpn_announce: vpn_announce.into(),
                                     vpn_withdraw,
                                     labeled_announce,
                                     labeled_withdraw,
