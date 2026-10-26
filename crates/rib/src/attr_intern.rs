@@ -30,14 +30,16 @@ use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 use std::sync::Arc;
 
 use crate::attr_set::AttrSet;
-use crate::fast_hash::FastSet;
+use crate::fast_hash::ShardedMap;
 
 /// Deduplicates identical `Arc<AttrSet>` allocations across
 /// all peers and route families. See the module docs for ownership and
 /// reclaim rules.
 #[derive(Debug, Default)]
 pub struct AttrInternTable {
-    set: FastSet<Arc<AttrSet>>,
+    /// Sharded because a rehash hashes every attribute set's full content
+    /// again, and a route server's table holds hundreds of thousands of them.
+    set: ShardedMap<Arc<AttrSet>, ()>,
 }
 
 impl AttrInternTable {
@@ -58,10 +60,10 @@ impl AttrInternTable {
     /// every affected route before distribution. That ordering invalidates any
     /// old pointer-keyed export memo before the transformed route is emitted.
     pub fn intern(&mut self, attrs: &mut Arc<AttrSet>) {
-        if let Some(existing) = self.set.get(attrs) {
+        if let Some((existing, ())) = self.set.get_key_value(attrs) {
             *attrs = Arc::clone(existing);
         } else {
-            self.set.insert(Arc::clone(attrs));
+            self.set.insert(Arc::clone(attrs), ());
         }
     }
 
@@ -74,7 +76,7 @@ impl AttrInternTable {
 
     pub(crate) fn gc_with_checkpoint(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         checkpoint.checkpoint(RetirementProgress::Boundary);
-        self.set.retain(|a| {
+        self.set.retain(|a, ()| {
             checkpoint.checkpoint(RetirementProgress::Progress);
             Arc::strong_count(a) > 1
         });
@@ -111,6 +113,16 @@ mod tests {
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::Med(med),
         ])
+    }
+
+    #[test]
+    fn intern_set_grows_one_shard_per_insert() {
+        crate::fast_hash::assert_growth_bounded(
+            "attribute intern set",
+            &mut AttrInternTable::new(),
+            |table, i| table.intern(&mut attrs(i)),
+            AttrInternTable::capacity,
+        );
     }
 
     #[test]

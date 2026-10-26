@@ -11,7 +11,7 @@ use rustbgpd_wire::{Afi, AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // Aliased to the std name so the storage types read unchanged.
 
 use crate::best_path::{best_path_cmp, best_path_cmp_ranked, compare_bgp_identifier, stale_rank};
-use crate::fast_hash::{FastMap as HashMap, FastState};
+use crate::fast_hash::{FastMap as HashMap, ShardedMap};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -46,7 +46,7 @@ pub struct LocRib {
     /// `loc_rib_recompute/1` by ~14% (extra indirection + a second probe
     /// per hit) for only ~4 MiB of the ~19 MiB the Adj-RIB slab conversion
     /// saved at the 2p×100k profile shape.
-    routes: HashMap<Prefix, (Route, SystemTime)>,
+    routes: ShardedMap<Prefix, (Route, SystemTime)>,
     /// Compact ordered prefix index used only by resumable route listings.
     /// The lookup-hot best-path table stays hash-backed; this second index
     /// adds ordered continuation without retaining per-walk snapshots.
@@ -71,7 +71,7 @@ pub struct LocRib {
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
-    evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
+    evpn_routes: ShardedMap<EvpnRouteKey, EvpnRibRoute>,
     /// Keys of the Type 4 (Ethernet Segment) rows in `evpn_routes`, so ES
     /// readers cost O(Type 4) instead of a walk of a Type 2-dominated table.
     evpn_es_keys: std::collections::BTreeSet<EvpnRouteKey>,
@@ -82,12 +82,12 @@ pub struct LocRib {
     /// selection collapses Add-Path path IDs — the winning route's own
     /// `path_id` records which received path won. Paired with the
     /// wall-clock install time, like `routes`.
-    vpn_routes: crate::fast_hash::ShardedMap<rustbgpd_wire::VpnRouteKey, (VpnRibRoute, SystemTime)>,
+    vpn_routes: ShardedMap<rustbgpd_wire::VpnRouteKey, (VpnRibRoute, SystemTime)>,
     /// Labeled-unicast Loc-RIB: best route per prefix identity, collapsing
     /// Add-Path path IDs like `vpn_routes` — the winning route's own
     /// `path_id` records which received path won. Deliberately separate from
     /// the unicast `routes` map (ADR-0077 §2).
-    labeled_routes: HashMap<Prefix, LabeledRibRoute>,
+    labeled_routes: ShardedMap<Prefix, LabeledRibRoute>,
     /// RT-Constrain Loc-RIB: best route per RFC 4684 RT membership identity.
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
     /// Second-family counts for the mixed-AFI maps, maintained at every
@@ -149,7 +149,7 @@ impl LocRib {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            routes: HashMap::with_capacity_and_hasher(capacity, FastState::default()),
+            routes: ShardedMap::with_capacity(capacity),
             ordered_prefixes: FamilyPrefixMap::default(),
             // Pre-reserve the journal floor so recompute's membership note
             // never allocates on the hot path.
@@ -157,11 +157,11 @@ impl LocRib {
             ordered_rebuild: false,
             dataplane_index_eager: false,
             flowspec_routes: HashMap::default(),
-            evpn_routes: HashMap::default(),
+            evpn_routes: ShardedMap::default(),
             evpn_es_keys: std::collections::BTreeSet::new(),
             bgpls_routes: HashMap::default(),
-            vpn_routes: crate::fast_hash::ShardedMap::default(),
-            labeled_routes: HashMap::default(),
+            vpn_routes: ShardedMap::default(),
+            labeled_routes: ShardedMap::default(),
             rtc_routes: HashMap::default(),
             second_family: SecondFamilyCounts::default(),
         }
@@ -3302,6 +3302,53 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         }
+    }
+
+    fn growth_prefix(i: u32) -> Ipv4Prefix {
+        Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + (i << 8)), 24)
+    }
+
+    #[test]
+    fn unicast_best_route_map_grows_one_shard_per_insert() {
+        crate::fast_hash::assert_growth_bounded(
+            "Loc-RIB unicast",
+            &mut LocRib::new(),
+            |loc, i| {
+                let route = make_route(1, growth_prefix(i), 100);
+                assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+            },
+            |loc| loc.routes.capacity(),
+        );
+    }
+
+    #[test]
+    fn labeled_best_route_map_grows_one_shard_per_insert() {
+        crate::fast_hash::assert_growth_bounded(
+            "Loc-RIB labeled unicast",
+            &mut LocRib::new(),
+            |loc, i| {
+                let nlri = labeled_nlri(growth_prefix(i).addr.octets(), 24, 100);
+                loc.insert_labeled(make_labeled_route(nlri, 1, 100));
+            },
+            |loc| loc.labeled_routes.capacity(),
+        );
+    }
+
+    #[test]
+    fn evpn_best_route_map_grows_one_shard_per_insert() {
+        crate::fast_hash::assert_growth_bounded(
+            "Loc-RIB EVPN",
+            &mut LocRib::new(),
+            |loc, i| {
+                let mut route = make_evpn_type2(1, vec![]);
+                let rustbgpd_wire::EvpnRoute::MacIp(mac_ip) = &mut route.route else {
+                    unreachable!("make_evpn_type2 builds a MAC/IP route");
+                };
+                mac_ip.mac.0[2..].copy_from_slice(&i.to_be_bytes());
+                assert!(loc.recompute_evpn(route.key(), std::iter::once(&route)));
+            },
+            |loc| loc.evpn_routes.capacity(),
+        );
     }
 
     /// ADR-0140: the per-second core-isolation read sees Type 4 rows only

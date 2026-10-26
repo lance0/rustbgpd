@@ -17,73 +17,149 @@ pub(crate) const SHARD_SPLIT_AT: usize = 1 << 14;
 /// of a 1.23M-key load.
 pub(crate) const SHARDS: usize = 16;
 
-/// The shard a key occupies once a [`ShardedMap`] is split: a multiplicative
-/// mix of the key's hash, so each shard still spreads over hashbrown's tag
-/// (top) and bucket (low) bits.
-pub(crate) fn shard_index<Q: std::hash::Hash + ?Sized>(key: &Q) -> usize {
+/// The one hash a [`ShardedMap`] computes per operation. It picks the shard
+/// and probes, inserts into and regrows the shard's table, so the two can
+/// never disagree.
+#[inline]
+fn hash_of<Q: std::hash::Hash + ?Sized>(key: &Q) -> u64 {
     use std::hash::BuildHasher;
-    let mixed = FastState::default()
-        .hash_one(key)
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    // The top four bits select one of 16 shards.
-    usize::try_from(mixed >> 60).expect("four bits fit usize")
+    FastState::default().hash_one(key)
 }
 
-/// A [`FastMap`] that splits into fixed hash shards once it is large.
+/// The shard for `hash` once a map is split: a multiplicative mix, then the
+/// top four bits. The raw top bits are hashbrown's tag and the raw low bits
+/// its bucket index, so neither is used directly.
+#[inline]
+fn shard_of(hash: u64) -> usize {
+    // The top four bits select one of 16 shards.
+    usize::try_from(hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 60).expect("four bits fit usize")
+}
+
+/// The shard a key occupies once a [`ShardedMap`] is split.
+#[cfg(test)]
+pub(crate) fn shard_index<Q: std::hash::Hash + ?Sized>(key: &Q) -> usize {
+    shard_of(hash_of(key))
+}
+
+/// Grow `table` through `insert` past one table's split limit and assert that
+/// no single insert grew `capacity` by more than [`SHARD_SPLIT_AT`] slots.
+/// A plain map that doubles at that size rehashes every entry inside one
+/// insert, which at full-table scale stalls the RIB actor for a whole UPDATE.
+#[cfg(test)]
+pub(crate) fn assert_growth_bounded<T>(
+    name: &str,
+    table: &mut T,
+    mut insert: impl FnMut(&mut T, u32),
+    capacity: impl Fn(&T) -> usize,
+) {
+    let count = u32::try_from(SHARD_SPLIT_AT * 2).expect("test size fits u32");
+    let mut before = capacity(table);
+    for i in 0..count {
+        insert(table, i);
+        let after = capacity(table);
+        assert!(
+            after.saturating_sub(before) <= SHARD_SPLIT_AT,
+            "{name}: insert {i} grew capacity {before} -> {after}, rehashing the whole table"
+        );
+        before = after;
+    }
+}
+
+/// One shard: a hashbrown table of entries probed with [`hash_of`].
+pub(crate) type Shard<K, V> = hashbrown::HashTable<(K, V)>;
+
+/// A hash map that splits into fixed hash shards once it is large.
 ///
 /// A plain map doubles by rehashing every entry inside one insert: about
 /// 180 ms for a 1M-entry VPN route map, and several such maps can grow in
 /// one UPDATE. A split map grows one shard at a time, so an insert rehashes
 /// at most about 1/16 of the entries and the total rehash work is unchanged.
+/// Each operation hashes its key once; the small, unsplit table is stored
+/// inline, so it costs one branch and no indirection over a plain map, and
+/// the table pointer's niche keeps the map the size of one table.
 /// Iteration order is unspecified, as for any hash map.
 #[derive(Debug)]
 pub(crate) enum ShardedMap<K, V> {
-    One(FastMap<K, V>),
-    Split(Box<[FastMap<K, V>]>),
+    One(Shard<K, V>),
+    Split(Box<[Shard<K, V>; SHARDS]>),
 }
 
 impl<K, V> Default for ShardedMap<K, V> {
     fn default() -> Self {
-        Self::One(FastMap::default())
+        Self::One(Shard::new())
     }
 }
 
 impl<K, V> ShardedMap<K, V> {
-    pub(crate) fn shards(&self) -> &[FastMap<K, V>] {
+    pub(crate) fn shards(&self) -> &[Shard<K, V>] {
         match self {
-            Self::One(map) => std::slice::from_ref(map),
-            Self::Split(shards) => shards,
+            Self::One(one) => std::slice::from_ref(one),
+            Self::Split(shards) => &shards[..],
         }
     }
 
-    pub(crate) fn shards_mut(&mut self) -> &mut [FastMap<K, V>] {
+    pub(crate) fn shards_mut(&mut self) -> &mut [Shard<K, V>] {
         match self {
-            Self::One(map) => std::slice::from_mut(map),
-            Self::Split(shards) => shards,
+            Self::One(one) => std::slice::from_mut(one),
+            Self::Split(shards) => &mut shards[..],
+        }
+    }
+
+    #[inline]
+    fn shard(&self, hash: u64) -> &Shard<K, V> {
+        match self {
+            Self::One(one) => one,
+            Self::Split(shards) => &shards[shard_of(hash)],
+        }
+    }
+
+    #[inline]
+    fn shard_mut(&mut self, hash: u64) -> &mut Shard<K, V> {
+        match self {
+            Self::One(one) => one,
+            Self::Split(shards) => &mut shards[shard_of(hash)],
         }
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.shards().iter().map(FastMap::len).sum()
+        self.shards().iter().map(Shard::len).sum()
     }
 
-    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.shards().iter().all(Shard::is_empty)
+    }
+
     pub(crate) fn capacity(&self) -> usize {
-        self.shards().iter().map(FastMap::capacity).sum()
+        self.shards().iter().map(Shard::capacity).sum()
+    }
+
+    /// Keep only the entries `keep` accepts, shard by shard.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
+        for shard in self.shards_mut() {
+            shard.retain(|(key, value)| keep(key, value));
+        }
     }
 
     /// Remove every entry, keeping the shard tables' allocations.
     pub(crate) fn clear(&mut self) {
-        self.shards_mut().iter_mut().for_each(FastMap::clear);
+        self.shards_mut().iter_mut().for_each(Shard::clear);
     }
 
     pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = (&K, &V)> {
-        ShardIter::new(self.len(), self.shards().iter().map(FastMap::iter))
+        let shards = self.shards().iter();
+        ShardIter::new(
+            self.len(),
+            shards.map(|shard| shard.iter().map(|(k, v)| (k, v))),
+        )
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl ExactSizeIterator<Item = (&K, &mut V)> {
         let len = self.len();
-        ShardIter::new(len, self.shards_mut().iter_mut().map(FastMap::iter_mut))
+        let shards = self.shards_mut().iter_mut();
+        ShardIter::new(
+            len,
+            shards.map(|shard| shard.iter_mut().map(|(k, v)| (&*k, v))),
+        )
     }
 
     pub(crate) fn keys(&self) -> impl ExactSizeIterator<Item = &K> {
@@ -98,106 +174,190 @@ impl<K, V> ShardedMap<K, V> {
 impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         if capacity < SHARD_SPLIT_AT {
-            return Self::One(FastMap::with_capacity_and_hasher(
-                capacity,
-                FastState::default(),
-            ));
+            return Self::One(Shard::with_capacity(capacity));
         }
         let per_shard = capacity.div_ceil(SHARDS);
-        Self::Split(
-            (0..SHARDS)
-                .map(|_| FastMap::with_capacity_and_hasher(per_shard, FastState::default()))
-                .collect(),
-        )
-    }
-
-    fn shard<Q>(&self, key: &Q) -> &FastMap<K, V>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        match self {
-            Self::One(map) => map,
-            Self::Split(shards) => &shards[shard_index(key)],
-        }
-    }
-
-    fn shard_mut<Q>(&mut self, key: &Q) -> &mut FastMap<K, V>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        match self {
-            Self::One(map) => map,
-            Self::Split(shards) => &mut shards[shard_index(key)],
-        }
+        Self::Split(Box::new(std::array::from_fn(|_| {
+            Shard::with_capacity(per_shard)
+        })))
     }
 
     /// Split before an insert would grow the single table past the limit.
+    #[inline]
     fn split_if_full(&mut self) {
-        if matches!(self, Self::One(map) if map.len() >= SHARD_SPLIT_AT) {
+        if matches!(self, Self::One(one) if one.len() >= SHARD_SPLIT_AT) {
             self.split();
         }
     }
 
     /// Move a single table's entries into the shards. Inserts split at
     /// `SHARD_SPLIT_AT`, so this moves at most that many entries.
-    pub(crate) fn split(&mut self) {
-        let Self::One(map) = self else {
+    fn split(&mut self) {
+        let Self::One(one) = self else {
             return;
         };
-        let per_shard = map.len().div_ceil(SHARDS);
-        let mut shards: Box<[FastMap<K, V>]> = (0..SHARDS)
-            .map(|_| FastMap::with_capacity_and_hasher(per_shard, FastState::default()))
-            .collect();
-        for (key, value) in std::mem::take(map) {
-            shards[shard_index(&key)].insert(key, value);
+        let one = std::mem::take(one);
+        let per_shard = one.len().div_ceil(SHARDS);
+        let mut shards: Box<[Shard<K, V>; SHARDS]> =
+            Box::new(std::array::from_fn(|_| Shard::with_capacity(per_shard)));
+        for entry in one {
+            let hash = hash_of(&entry.0);
+            shards[shard_of(hash)].insert_unique(hash, entry, |(key, _)| hash_of(key));
         }
         *self = Self::Split(shards);
     }
 
+    #[inline]
     pub(crate) fn get<Q>(&self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.shard(key).get(key)
+        self.get_key_value(key).map(|(_, value)| value)
     }
 
+    /// The stored key and value equal to `key`.
+    #[inline]
+    pub(crate) fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        let hash = hash_of(key);
+        self.shard(hash)
+            .find(hash, |(stored, _)| stored.borrow() == key)
+            .map(|(stored, value)| (stored, value))
+    }
+
+    #[inline]
     pub(crate) fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.shard_mut(key).get_mut(key)
+        let hash = hash_of(key);
+        self.shard_mut(hash)
+            .find_mut(hash, |(stored, _)| stored.borrow() == key)
+            .map(|(_, value)| value)
     }
 
-    #[cfg(test)]
+    #[inline]
     pub(crate) fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.shard(key).contains_key(key)
+        self.get_key_value(key).is_some()
     }
 
+    #[inline]
     pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.split_if_full();
-        self.shard_mut(&key).insert(key, value)
+        let hash = hash_of(&key);
+        match self
+            .shard_mut(hash)
+            .entry(hash, |(stored, _)| *stored == key, |(k, _)| hash_of(k))
+        {
+            hashbrown::hash_table::Entry::Occupied(mut entry) => {
+                Some(std::mem::replace(&mut entry.get_mut().1, value))
+            }
+            hashbrown::hash_table::Entry::Vacant(entry) => {
+                entry.insert((key, value));
+                None
+            }
+        }
     }
 
-    pub(crate) fn entry(&mut self, key: K) -> std::collections::hash_map::Entry<'_, K, V> {
+    /// The value for `key`, inserting `V::default()` when it is absent.
+    #[inline]
+    pub(crate) fn get_or_default(&mut self, key: K) -> &mut V
+    where
+        V: Default,
+    {
         self.split_if_full();
-        self.shard_mut(&key).entry(key)
+        let hash = hash_of(&key);
+        let entry = self
+            .shard_mut(hash)
+            .entry(hash, |(stored, _)| *stored == key, |(k, _)| hash_of(k))
+            .or_insert_with(|| (key, V::default()));
+        &mut entry.into_mut().1
     }
 
+    #[inline]
     pub(crate) fn remove<Q>(&mut self, key: &Q) -> Option<V>
     where
         K: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
-        self.shard_mut(key).remove(key)
+        let hash = hash_of(key);
+        self.shard_mut(hash)
+            .find_entry(hash, |(stored, _)| stored.borrow() == key)
+            .ok()
+            .map(|entry| entry.remove().0.1)
     }
+
+    /// Pre-grow for a batch inserting `keys`, so committing it never
+    /// rehashes. Missing keys are counted per destination shard, so a skewed
+    /// batch gets headroom where it lands and no other shard over-reserves.
+    /// A batch that takes the map past one table splits it first, and a
+    /// regrown table moves its entries one at a time between checkpoints, so
+    /// no step moves more than one shard's entries.
+    pub(crate) fn reserve_with(
+        &mut self,
+        keys: impl IntoIterator<Item = K>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let mut missing = [0_usize; SHARDS];
+        let mut total = 0_usize;
+        for key in keys {
+            checkpoint();
+            if !self.contains_key(&key) {
+                missing[shard_of(hash_of(&key))] += 1;
+                total += 1;
+            }
+        }
+        if self.len().saturating_add(total) >= SHARD_SPLIT_AT {
+            self.split();
+            checkpoint();
+        }
+        match self.shards_mut() {
+            [single] => reserve_shard(single, total, checkpoint),
+            shards => {
+                for (shard, additional) in shards.iter_mut().zip(missing) {
+                    reserve_shard(shard, additional, checkpoint);
+                }
+            }
+        }
+    }
+}
+
+/// Rebuild `shard` with room for `additional` more entries, moving entries
+/// one at a time between checkpoints.
+fn reserve_shard<K: std::hash::Hash, V>(
+    shard: &mut Shard<K, V>,
+    additional: usize,
+    checkpoint: &mut impl FnMut(),
+) {
+    let required = shard
+        .len()
+        .checked_add(additional)
+        .expect("sharded map exceeds addressable capacity");
+    if shard.capacity() >= required {
+        return;
+    }
+    let old = std::mem::take(shard);
+    let mut replacement = Shard::with_capacity(required);
+    let mut entries = old.into_iter();
+    for entry in entries.by_ref() {
+        checkpoint();
+        let hash = hash_of(&entry.0);
+        replacement.insert_unique(hash, entry, |(key, _)| hash_of(key));
+        checkpoint();
+    }
+    checkpoint();
+    drop(entries);
+    checkpoint();
+    *shard = replacement;
 }
 
 /// Walks a [`ShardedMap`] shard by shard with an exact remaining count, so
@@ -515,7 +675,7 @@ mod tests {
         let total = u32::try_from(SHARD_SPLIT_AT * 4).unwrap();
         let mut map = ShardedMap::default();
         for i in 0..total {
-            let capacities: Vec<usize> = map.shards().iter().map(FastMap::capacity).collect();
+            let capacities: Vec<usize> = map.shards().iter().map(super::Shard::capacity).collect();
             let was_split = map.shards().len() == SHARDS;
             assert!(map.insert(vpnv4_key(i), i).is_none());
             if !was_split {
@@ -541,7 +701,7 @@ mod tests {
         }
         assert_eq!(map.remove(&vpnv4_key(7)), Some(7));
         assert!(map.get(&vpnv4_key(7)).is_none());
-        *map.entry(vpnv4_key(7)).or_insert(0) += 70;
+        *map.get_or_default(vpnv4_key(7)) += 70;
         assert_eq!(map[&vpnv4_key(7)], 70);
         assert_eq!(map.iter().count(), map.len());
     }
@@ -621,7 +781,7 @@ mod tests {
                 let buckets = u64::try_from(shard.len().next_power_of_two()).unwrap();
                 let mut tags = HashSet::new();
                 let mut starts = HashSet::new();
-                for key in shard.keys() {
+                for (key, ()) in shard {
                     let hash = FastState::default().hash_one(key);
                     tags.insert(hash >> 57);
                     starts.insert(hash & (buckets - 1));

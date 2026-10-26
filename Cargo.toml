@@ -126,6 +126,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
 smallvec = "1"
 rustc-hash = "2"
+# Single-hash shard tables for the RIB's `ShardedMap`; already in the
+# lockfile through `lru`, so this adds no crate.
+hashbrown = { version = "0.17.1", default-features = false }
 # Lock-free snapshot swap for policy dataset handles (LAN-305,
 # ADR-0103 Decision 8.5): evaluation pins a generation with one
 # wait-free load — the Decision 7 purity contract bans lock
