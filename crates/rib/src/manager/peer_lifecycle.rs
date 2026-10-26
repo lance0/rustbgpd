@@ -2221,7 +2221,9 @@ impl RibManager {
             families
                 .iter()
                 .copied()
-                .filter(|family| !self.selection_deferred(*family))
+                // A deferred FlowSpec Loc-RIB holds only injected rules,
+                // which are dumped now; its EoR waits for the release.
+                .filter(|family| family.1 == Safi::FlowSpec || !self.selection_deferred(*family))
                 .collect::<Vec<_>>()
         });
         let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
@@ -2898,7 +2900,14 @@ impl RibManager {
         // will send nothing there, and a restarting peer must not wait out
         // its RFC 4724 §4.1 selection deferral for it. Both go through the
         // same GR/ORF and convergence holds below.
-        let mut eor_families = sendable.clone().unwrap_or_default();
+        // A deferred FlowSpec family is dumped above, but its release queues
+        // the EoR only after the released selection is staged.
+        let mut eor_families: Vec<_> = sendable
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|family| !self.selection_deferred(*family))
+            .collect();
         eor_families.extend(
             self.registered_withheld_families(peer)
                 .iter()

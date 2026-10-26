@@ -3364,6 +3364,16 @@ turn, before the reply, but are deferred while Graceful Restart selection
 deferral is active for the family. `OK` does not mean that a peer received or
 installed the route.
 
+That deferral runs after a planned restart, for up to the maximum effective
+`gr_restart_time`; see
+[Controller upgrade and rollback](v1-stable-contract.md#controller-upgrade-and-rollback).
+While it holds the family, an injected unicast route, an RTBH host route
+included, is not selected and `ListPathExportDispositions` reports it
+`PENDING` with reason `selection_deferred`. `NeighborState.selection_deferral`
+shows an active row for the family. `MarkReplayComplete` does not end it.
+Injected FlowSpec rules are exempt; see the
+[FlowSpec injection contract](#flowspec-injection-contract).
+
 `DeletePath` removes only a route added through `AddPath`; it never removes a
 received route. A key with no local route returns `NOT_FOUND` by default. Set
 `allow_missing: true` to get `OK` with outcome `NOT_PRESENT` instead, so a
@@ -3607,8 +3617,10 @@ returns `INVALID_ARGUMENT`.
 `COMMITTED` means the peer's Adj-RIB-Out holds this key from the local rule,
 with the attributes export would send now. A received rule with the same key
 never counts: when it is the selected rule, the local rule is `WITHHELD` with
-`not_selected`. `advertised_path_id` is always 0. The reasons are a subset of
-the unicast ones:
+`not_selected`. `advertised_path_id` is always 0. Graceful Restart selection
+deferral does not hold a local rule, so `selection_deferred` is not reported;
+a daemon without that exemption reports it as for unicast. The reasons are a
+subset of the unicast ones:
 
 | `reason` | Disposition | FlowSpec meaning |
 |---|---|---|
@@ -3617,7 +3629,7 @@ the unicast ones:
 | `export_policy` | Withheld | Export policy, or the RFC 8212 default deny, rejects the rule. |
 | `export_rule` | Withheld | A gate before or after policy stops it; `explain_code` is `no_advertise_suppressed`, `no_export_suppressed`, `llgr_stale_suppressed`, `ibgp_split_horizon` or `no_advertise_policy_suppressed`. |
 | `exact_export_rejected` | Withheld | The session's encoder refuses the rule. |
-| `selection_deferred`, `outbound_resync`, `not_yet_committed` | Pending | As for unicast. |
+| `outbound_resync`, `not_yet_committed` | Pending | As for unicast. |
 | `not_established` | Not established | As for unicast, with `include_configured`. |
 
 Export policy evaluates a FlowSpec rule with RPKI state `not_found` and ASPA
@@ -3961,12 +3973,24 @@ rule is the selected one: replacing an out-selected local rule still reports
 `REPLACED`, although nothing changes on the wire.
 
 `OK` confirms that the rule was accepted into the local Adj-RIB-In (peer
-`0.0.0.0`). Selection and outbound distribution normally run in the same RIB
-turn, before the reply, but are deferred while Graceful Restart selection
-deferral is active for the family. `OK` does not mean that a peer received or
-installed the rule, and a received rule with the same key can out-select it.
-Injected rules are process-local: after a daemon restart, the controller must
-inject them again.
+`0.0.0.0`). Selection and outbound distribution run in the same RIB turn,
+before the reply. `OK` does not mean that a peer received or installed the
+rule, and a received rule with the same key can out-select it. Injected rules
+are process-local: after a daemon restart, the controller must inject them
+again.
+
+Graceful Restart selection deferral after a planned restart does not hold a
+local rule, leased or not
+([ADR-0141 amendment](../adr/0141-injection-owner-lease.md#amendment-injected-flowspec-skips-selection-deferral-2026-10-26)).
+While deferral holds the FlowSpec family, only local rules are selection
+candidates: a re-injected rule is selected and sent to Established peers at
+once, and a peer whose session comes up later gets it in its initial table.
+Rules received from peers wait for the deferral to release. So does the
+family's End-of-RIB, so a Graceful Restart helper keeps the stale rules from
+the previous session until then. When deferral releases, the ordinary FlowSpec
+best-path order chooses between a local rule and a received rule with the
+same key; a received rule that wins replaces the local one on the wire, and
+the local rule then reads `selected: false` and `not_selected`.
 
 `DeleteFlowSpec` removes only a rule added through `AddFlowSpec`; it never
 removes a received rule. A key with no local rule returns `NOT_FOUND` by
@@ -3990,7 +4014,12 @@ was absent.
 To list exactly the injected rules, call `RibService.ListFlowSpecRoutes`
 with `received_peer_address: "0.0.0.0"`. The received view returns every
 local rule, including one a received rule currently out-selects
-(`selected: false`), with `route.peer_address` set to `0.0.0.0`. Validation
+(`selected: false`), with `route.peer_address` set to `0.0.0.0`. Selection
+deferral never holds a local rule, so `selected: false` on a local rule means
+a received rule with the same key is selected. A rule in a peer's received
+view can also read `selected: false` because deferral still holds its family
+after a planned restart; `NeighborState.selection_deferral` shows an active
+row for the family while it does. Validation
 reads `disabled` by default and `local` when `[flowspec] validation` is
 enabled; local rules never report `feasible` or `infeasible`.
 

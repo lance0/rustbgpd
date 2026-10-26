@@ -2494,7 +2494,9 @@ impl RibManager {
                 },
             },
         };
-        self.selection_deferred_export(family, export)
+        // No `selection_deferred_export`: injected FlowSpec selection is not
+        // deferred (ADR-0141 amendment), so this disposition is already final.
+        export
     }
 
     /// Reason and detail when the peer's session does not export `family`

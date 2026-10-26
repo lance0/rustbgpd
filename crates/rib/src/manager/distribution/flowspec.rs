@@ -552,26 +552,26 @@ impl RibManager {
         };
         checkpoint();
         self.record_deferred_flowspec(affected);
-        let mut affected: HashSet<_> = affected
-            .iter()
-            .inspect(|_| checkpoint())
-            .filter(|key| !self.selection_deferred((key.afi, Safi::FlowSpec)))
-            .cloned()
-            .collect();
         if affected.is_empty() {
             return;
         }
 
         let mut changed_keys: HashSet<FlowSpecKey> = HashSet::new();
 
-        for key in &affected {
+        for key in affected {
             checkpoint();
-            let candidates: Vec<&FlowSpecRoute> = self.flowspec_validation.selection_candidates(
-                key,
-                &self.ribs,
-                &self.loc_rib,
-                &checkpoint,
-            );
+            // ADR-0141 amendment (2026-10-26): while RFC 4724 deferral holds
+            // the family, only API-injected rules are candidates. They do not
+            // depend on routes peers are re-sending, so they are selected and
+            // exported at once; received rules wait for the release sweep,
+            // which reselects every key from the full candidate set.
+            let local_only = self.selection_deferred((key.afi, Safi::FlowSpec));
+            let candidates: Vec<&FlowSpecRoute> = self
+                .flowspec_validation
+                .selection_candidates(key, &self.ribs, &self.loc_rib, &checkpoint)
+                .into_iter()
+                .filter(|route| !local_only || route.peer == LOCAL_PEER)
+                .collect();
             let did_change = self
                 .loc_rib
                 .recompute_flowspec(key.clone(), candidates.into_iter());
@@ -581,7 +581,6 @@ impl RibManager {
         }
 
         if changed_keys.is_empty() {
-            super::super::retire_hash_set(&mut affected, &mut checkpoint);
             return;
         }
 
@@ -674,7 +673,6 @@ impl RibManager {
             }
         }
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
-        super::super::retire_hash_set(&mut affected, &mut checkpoint);
     }
 }
 
