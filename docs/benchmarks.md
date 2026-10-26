@@ -1160,7 +1160,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1536 bytes |
+| `AdjRibIn` | 1544 bytes |
 | `LocRib` | 1104 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
@@ -1213,6 +1213,10 @@ saved per stored path.
 the 17-byte neighbor address to an 8-byte generational handle that a
 process-wide peer table resolves to the neighbor's address and interface.
 `AdjRibIn`, which records its own peer, fell from 1552 to 1536 bytes with it.
+
+`AdjRibIn` then grew from 1536 to 1544 bytes when its route slab split into
+fixed segments (a segment list plus a slot count instead of one slot vector),
+so a full table grows one segment at a time instead of copying every route.
 
 `Route.attributes` is `Arc<AttrSet>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via

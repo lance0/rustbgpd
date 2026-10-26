@@ -699,13 +699,14 @@ impl RibManager {
         }
         // Denial-residue transition scope: this pass's keys replace their
         // prior records (the `record_policy_filtered` shape).
-        group.vpn_policy_denied.retain(|key, _| {
+        for key in keys {
             checkpoint();
-            !keys.contains(key)
-        });
-        group
-            .vpn_policy_denied
-            .extend(denials.into_iter().inspect(|_| checkpoint()));
+            group.vpn_policy_denied.remove(key);
+        }
+        for (key, denial) in denials {
+            checkpoint();
+            group.vpn_policy_denied.insert(key, denial);
+        }
         if !group.dirty_members.is_empty() {
             group.vpn_tombstones.extend(
                 out.deltas

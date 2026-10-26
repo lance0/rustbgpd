@@ -634,6 +634,187 @@ fn empty_group() -> GroupRibOut {
     )
 }
 
+fn growth_prefix(index: u32) -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + index), 32))
+}
+
+#[test]
+fn source_attrs_grows_one_shard_per_insert() {
+    let mut group = plain_group_with_chain(Some(strip_communities_chain(vec![7])));
+    assert!(!group.source_control_passthrough);
+    crate::fast_hash::assert_growth_bounded(
+        "group source attrs",
+        &mut group,
+        |group, index| {
+            let mut delta = announce_route_delta(route_with_comm(growth_prefix(index), OTHER1, 7));
+            delta.policy_label = group.permit_policy_label.clone();
+            group.apply_delta(&delta);
+        },
+        |group| group.source_attrs.capacity(),
+    );
+}
+
+#[test]
+fn runner_up_grows_one_shard_per_insert() {
+    crate::fast_hash::assert_growth_bounded(
+        "group runner up",
+        &mut per_client_best_group(None),
+        |group, index| {
+            let prefix = growth_prefix(index);
+            group.apply_lane(
+                prefix,
+                Some(RunnerUp {
+                    route: route(prefix, OTHER2),
+                    nh: None,
+                    source_attrs: None,
+                    policy_label: None,
+                    winner_source: OTHER1,
+                }),
+            );
+        },
+        |group| group.runner_up.capacity(),
+    );
+}
+
+#[test]
+fn inventory_log_grows_one_shard_per_insert() {
+    let mut group = empty_group();
+    group.inventory_log = Some(ShardedMap::default());
+    crate::fast_hash::assert_growth_bounded(
+        "group inventory log",
+        &mut group,
+        |group, index| group.apply_delta(&announce_delta(growth_prefix(index), OTHER1, None)),
+        |group| group.inventory_log.as_ref().unwrap().capacity(),
+    );
+    assert_eq!(group.inventory_log.as_ref().unwrap().len(), 32_768);
+}
+
+#[test]
+fn prestaged_dirty_union_reserves_before_filling() {
+    let mut manager = staging_manager();
+    for gid in [1, 2] {
+        manager.group_ribs.insert(gid, empty_group());
+    }
+    manager.begin_prestaged_transition_inventory(1, 2);
+    for index in 0..32_768 {
+        let delta = announce_delta(growth_prefix(index), OTHER1, None);
+        for gid in [1, 2] {
+            manager
+                .group_ribs
+                .get_mut(&gid)
+                .unwrap()
+                .apply_delta(&delta);
+        }
+    }
+    while !manager.extend_prestaged_transition_inventory() {}
+    assert!(matches!(
+        manager.take_prestaged_transition_inventory(1, 2, &[]),
+        PrestagedInventoryOutcome::Ready(..)
+    ));
+    assert!(manager.prestaged_inventory.is_none());
+    assert!(
+        manager
+            .group_ribs
+            .values()
+            .all(|group| group.inventory_log.is_none())
+    );
+}
+
+#[test]
+fn policy_filtered_grows_one_shard_per_insert() {
+    crate::fast_hash::assert_growth_bounded(
+        "group policy filtered",
+        &mut empty_group(),
+        |group, index| {
+            let prefix = growth_prefix(index);
+            let key = PolicyFilteredRouteKey {
+                prefix,
+                source_peer: OTHER1,
+                path_id: 0,
+                target_peer: MEMBER,
+            };
+            group.record_policy_filtered(&HashSet::from([prefix]), &[(key, None)], &mut || {});
+        },
+        |group| group.policy_filtered.capacity(),
+    );
+}
+
+#[test]
+fn vpn_policy_denied_grows_one_shard_per_insert() {
+    let mut manager = staging_manager();
+    let mut group = plain_group_with_chain(Some(empty_policy(PolicyAction::Deny)));
+    group.sendable.push((Afi::Ipv4, Safi::MplsVpn));
+    manager.group_ribs.insert(1, group);
+    crate::fast_hash::assert_growth_bounded(
+        "group VPN denials",
+        &mut manager,
+        |manager, index| {
+            let mut route = vpn_route(0, OTHER1);
+            route.origin_type = crate::route::RouteOrigin::Ebgp;
+            route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0a00_0000 + index), 32).unwrap();
+            let key = route.nlri.key();
+            manager.loc_rib.insert_vpn(route);
+            manager.stage_group_vpn_keys(1, &HashSet::from([key]));
+            assert!(manager.group_ribs[&1].vpn_policy_denied.contains_key(&key));
+        },
+        |manager| manager.group_ribs[&1].vpn_policy_denied.capacity(),
+    );
+    assert_eq!(manager.group_ribs[&1].vpn_policy_denied.len(), 32_768);
+    let first = VpnRouteKey {
+        route_distinguisher: vpn_key(0).route_distinguisher,
+        prefix: VpnPrefix::v4(Ipv4Addr::from(0x0a00_0000), 32).unwrap(),
+    };
+    manager.group_ribs.get_mut(&1).unwrap().export_chain = Some(empty_policy(PolicyAction::Permit));
+    manager.stage_group_vpn_keys(1, &HashSet::from([first]));
+    assert!(
+        !manager.group_ribs[&1]
+            .vpn_policy_denied
+            .contains_key(&first)
+    );
+    assert_eq!(manager.group_ribs[&1].vpn_policy_denied.len(), 32_767);
+}
+
+#[test]
+fn regroup_snapshot_reserves_next_hop_overrides_before_filling() {
+    let mut group = empty_group();
+    for index in 0..32_768 {
+        // The member's own half stays out of its view, so a reserve made
+        // before filling leaves more capacity than growth would.
+        let source = if index % 2 == 0 { OTHER1 } else { MEMBER };
+        let mut delta = announce_delta(growth_prefix(index), source, None);
+        delta.new.as_mut().unwrap().1 = Some(NextHopAction::Self_);
+        group.apply_delta(&delta);
+    }
+    let snapshot =
+        group.member_view_snapshot_with_checkpoint(MEMBER, None, &HashSet::new(), &mut |_| {});
+    assert_eq!(snapshot.next_hop_overrides.len(), 16_384);
+    assert_eq!(snapshot.unicast.len(), 16_384);
+    assert!(
+        snapshot.next_hop_overrides.capacity() >= 32_768,
+        "every table override is reserved before filling"
+    );
+}
+
+#[test]
+fn regroup_snapshot_sizes_next_hop_overrides_to_the_override_count() {
+    let mut group = empty_group();
+    for index in 0..32_768 {
+        let mut delta = announce_delta(growth_prefix(index), OTHER1, None);
+        if index < 3 {
+            delta.new.as_mut().unwrap().1 = Some(NextHopAction::Self_);
+        }
+        group.apply_delta(&delta);
+    }
+    let snapshot =
+        group.member_view_snapshot_with_checkpoint(MEMBER, None, &HashSet::new(), &mut |_| {});
+    assert_eq!(snapshot.next_hop_overrides.len(), 3);
+    assert_eq!(snapshot.unicast.len(), 32_768);
+    assert!(
+        snapshot.next_hop_overrides.capacity() < 64,
+        "three overrides do not reserve a full-table map"
+    );
+}
+
 /// Per-client-best sibling of [`empty_group`] with a caller-chosen
 /// export chain — the ONLY way a per-client-best group can exist
 /// until the ADR-0126 Phase 3 classifier flip.

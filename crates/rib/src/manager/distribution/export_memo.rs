@@ -28,13 +28,13 @@ use std::sync::Arc;
 use rustbgpd_policy::{NextHopAction, RouteModifications};
 
 use crate::attr_set::AttrSet;
-use crate::fast_hash::FastMap;
+use crate::fast_hash::ShardedMap;
 use crate::route::Route;
 
 /// Memoized export-tail results for one distribution pass.
 #[derive(Default)]
 pub(in crate::manager) struct ExportMemo {
-    entries: FastMap<usize, MemoEntry>,
+    entries: ShardedMap<usize, MemoEntry>,
 }
 
 struct MemoEntry {
@@ -69,22 +69,19 @@ impl ExportMemo {
     }
 
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
-        for (_, mut entry) in self.entries.drain() {
+        for (_, entry) in self.entries.iter_mut() {
             checkpoint();
             while let Some(modified) = entry.modified.pop() {
                 drop(modified);
                 checkpoint();
             }
-            drop(entry);
-            checkpoint();
         }
-        crate::adj_rib_out::release_hash_map(&mut self.entries, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.entries, checkpoint);
     }
 
     fn entry(&mut self, attrs: &Arc<AttrSet>) -> &mut MemoEntry {
         self.entries
-            .entry(Arc::as_ptr(attrs) as usize)
-            .or_insert_with(|| MemoEntry {
+            .get_or_insert_with(Arc::as_ptr(attrs) as usize, || MemoEntry {
                 _source: Arc::clone(attrs),
                 aspath: None,
                 modified: Vec::new(),
@@ -151,6 +148,18 @@ mod tests {
 
     use super::*;
     use crate::route::RouteOrigin;
+
+    #[test]
+    fn export_memo_grows_one_shard_per_insert() {
+        crate::fast_hash::assert_growth_bounded(
+            "export memo",
+            &mut ExportMemo::default(),
+            |memo, index| {
+                memo.aspath_str(&route(AttrSet::new(attrs(index))));
+            },
+            |memo| memo.entries.capacity(),
+        );
+    }
 
     fn attrs(local_pref: u32) -> Vec<PathAttribute> {
         vec![
