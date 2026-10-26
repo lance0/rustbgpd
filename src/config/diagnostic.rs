@@ -397,10 +397,16 @@ fn find_neighbor_field_span(
             continue;
         };
         let record_interface = neighbor.get("interface").and_then(|item| item.as_str());
-        if super::scoped_neighbor_label(record_address, record_interface) == address
-            && let Some(span) = neighbor.get(field_name).and_then(toml_edit::Item::span)
-        {
-            return Some((span, label.to_string()));
+        if super::scoped_neighbor_label(record_address, record_interface) == address {
+            let mut keys = field_name.split('.');
+            let span = keys
+                .next()
+                .and_then(|first| neighbor.get(first))
+                .and_then(|item| keys.try_fold(item, |item, key| item.as_table_like()?.get(key)))
+                .and_then(toml_edit::Item::span);
+            if let Some(span) = span {
+                return Some((span, label.to_string()));
+            }
         }
     }
     None
@@ -531,6 +537,39 @@ hold_time = 2
         assert!(rendered.contains("--> config.toml:19:"), "{rendered}");
         assert!(rendered.contains("admin_down_reason ="), "{rendered}");
         assert!(rendered.contains('^'), "{rendered}");
+    }
+
+    #[test]
+    fn scoped_redacted_secret_diagnostics_point_at_matching_record() {
+        for (field, secret) in [
+            ("md5_password", "md5_password = \"<redacted>\"\n"),
+            (
+                "tcp_ao.key",
+                "[neighbors.tcp_ao]\nkey = \"<redacted>\"\nsend_id = 1\nrecv_id = 2\nalgorithm = \"hmac(sha256)\"\n",
+            ),
+        ] {
+            let source = format!(
+                "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\nlisten_port = 179\n\n[global.telemetry]\nlog_format = \"json\"\n\n\
+                 [[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth0\"\nremote_asn = 65001\n\n\
+                 [[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth1\"\nremote_asn = 65001\n{secret}"
+            );
+            let line = source[..source.find("<redacted>").unwrap()]
+                .matches('\n')
+                .count()
+                + 1;
+            let rendered = super::super::Config::load_toml_with_diagnostics(&source, "config.toml")
+                .expect_err(field);
+            assert!(rendered.contains("fe80::1%eth1"), "{field}: {rendered}");
+            assert!(
+                rendered.contains(&format!("--> config.toml:{line}:")),
+                "{field}: {rendered}"
+            );
+            assert!(
+                rendered.contains("<line contains sensitive material, redacted>"),
+                "{field}: {rendered}"
+            );
+            assert!(rendered.contains("| ^"), "{field}: {rendered}");
+        }
     }
 
     #[test]

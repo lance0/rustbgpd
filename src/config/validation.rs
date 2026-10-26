@@ -2252,14 +2252,14 @@ impl Config {
         };
         for neighbor in &self.neighbors {
             if neighbor.md5_password.as_deref() == Some(super::REDACTED_SECRET) {
-                return Err(placeholder_error(&neighbor.address, "md5_password"));
+                return Err(placeholder_error(&neighbor.label(), "md5_password"));
             }
             if neighbor
                 .tcp_ao
                 .as_ref()
                 .is_some_and(|tcp_ao| tcp_ao.iter().any(|key| key.key == super::REDACTED_SECRET))
             {
-                return Err(placeholder_error(&neighbor.address, "tcp_ao.key"));
+                return Err(placeholder_error(&neighbor.label(), "tcp_ao.key"));
             }
         }
         for range in &self.dynamic_neighbors {
