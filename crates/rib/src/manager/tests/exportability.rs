@@ -216,7 +216,7 @@ impl ReusableExactExportEncoder {
         })
     }
 
-    fn probe_count(&self) -> usize {
+    pub(super) fn probe_count(&self) -> usize {
         self.probed.load(Ordering::Relaxed)
     }
 }
@@ -1042,6 +1042,95 @@ async fn peer_up_with_encoder(
     .unwrap();
     drain_eor(&mut out_rx).await;
     out_rx
+}
+
+#[tokio::test]
+async fn confirmed_ipv6_unlock_probes_restored_table_once() {
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let actor = tokio::spawn(manager.run());
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 81));
+    let encoder = ReusableExactExportEncoder::new(81, 81);
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    tx.send(RibUpdate::SetPeerWithheldFamilies {
+        peer,
+        session_id: 7,
+        families: vec![(ipv6, ExactExportErrorCode::MissingIpv6NextHop)],
+    })
+    .await
+    .unwrap();
+    let mut outbound = peer_up_with_encoder(&tx, peer, encoder.clone()).await;
+    let source = Ipv4Addr::new(198, 51, 100, 81);
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6 = Ipv6Prefix::new("2001:db8:81::".parse().unwrap(), 48);
+    let mut route = make_route(v4, source);
+    route.prefix = Prefix::V6(v6);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer_v4(source),
+        session_id: 0,
+        announced: vec![route],
+        withdrawn: Vec::new(),
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    query_best_routes(&tx).await;
+    assert_eq!(encoder.probe_count(), 0, "withheld table stays unprobed");
+
+    tx.send(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 7,
+        family: ipv6,
+        add_path_send_limit: None,
+    })
+    .await
+    .unwrap();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::ConfirmPeerOutbound {
+        peer,
+        session_id: 7,
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let update = outbound.recv().await.unwrap();
+    assert_eq!(update.announce.len(), 1, "restored route exported");
+    assert_eq!(update.announce[0].prefix, Prefix::V6(v6));
+    assert_eq!(encoder.probe_count(), 1, "one route, one encode probe");
+
+    let (reply, response) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::ConfirmPeerOutbound {
+        peer,
+        session_id: 8,
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(
+        response.await.unwrap().is_err(),
+        "stale session cannot confirm unlock"
+    );
+    assert_eq!(encoder.probe_count(), 1, "confirmation never re-encodes");
+
+    // The old unconditional refresh forced the same table through a second
+    // encode even though Adj-RIB-Out already held its route.
+    let (reply, response) = tokio::sync::oneshot::channel();
+    tx.send(RibUpdate::RefreshPeerOutbound { peer, reply })
+        .await
+        .unwrap();
+    response.await.unwrap().unwrap();
+    assert_eq!(
+        encoder.probe_count(),
+        2,
+        "control demonstrates duplicate work"
+    );
+    drop(tx);
+    actor.await.unwrap();
 }
 
 async fn vpn_peer_up_with_encoder(

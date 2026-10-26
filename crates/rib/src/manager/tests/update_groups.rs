@@ -1422,6 +1422,49 @@ fn withheld_family_unlock_after_its_eor_still_exports_the_table() {
     assert_eq!(manager.registered_withheld_families(peer), []);
 }
 
+#[test]
+fn deferred_ipv6_unlock_confirmation_keeps_next_registration_sendable() {
+    let (tx, rx) = mpsc::channel(4);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.initial_dump_defer_min_routes = 0;
+    let v4 = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let v6 = Ipv6Prefix::new("2001:db8:82::".parse().unwrap(), 48);
+    distribute_dual_stack_routes(&mut manager, Ipv4Addr::new(198, 51, 100, 82), v4, v6);
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 82));
+    // A queued primary update makes PeerUp defer its first outbound dump.
+    tx.try_send(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 0,
+        slow: false,
+    })
+    .unwrap();
+    let mut outbound = register_withheld_v6_peer(&mut manager, peer);
+    assert!(!manager.outbound_peers.contains_key(&peer));
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 0,
+        family: (Afi::Ipv6, Safi::Unicast),
+        add_path_send_limit: None,
+    });
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    manager.handle_update(RibUpdate::ConfirmPeerOutbound {
+        peer,
+        session_id: 0,
+        reply,
+    });
+    assert!(matches!(
+        response.try_recv(),
+        Ok(Err(crate::RibCommandError::NotFound(_)))
+    ));
+    manager.advance_pending_initial_registration();
+    assert!(
+        std::iter::from_fn(|| outbound.try_recv().ok()).any(|update| update
+            .announce
+            .iter()
+            .any(|route| route.prefix == Prefix::V6(v6)))
+    );
+}
+
 /// A family the session withheld at `PeerUp` (eBGP IPv6 unicast without a
 /// next hop) becomes sendable mid-session: the peer regroups and receives
 /// that family's table then its `EoR`, without re-sending IPv4 and without

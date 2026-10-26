@@ -1040,9 +1040,11 @@ async fn production_collision_promotion_transfers_capacity_after_primary_termina
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
                 | PeerCommand::UpdateExportPolicy { reply, .. }
-                | PeerCommand::UpdateGracefulShutdown { reply, .. }
-                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                | PeerCommand::UpdateGracefulShutdown { reply, .. } => {
                     let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(false));
                 }
                 PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
                     if !candidate_terminated.load(Ordering::SeqCst) {
@@ -2521,9 +2523,11 @@ async fn candidate_dropping_claim_reply_keeps_primary() {
                 // The promotion sync precedes the claim.
                 PeerCommand::UpdateImportPolicy { reply, .. }
                 | PeerCommand::UpdateExportPolicy { reply, .. }
-                | PeerCommand::UpdateGracefulShutdown { reply, .. }
-                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                | PeerCommand::UpdateGracefulShutdown { reply, .. } => {
                     let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(false));
                 }
                 PeerCommand::ClaimCollisionPromotion { reply } => {
                     candidate_claims.fetch_add(1, Ordering::SeqCst);
@@ -3287,9 +3291,11 @@ async fn candidate_lost_during_promotion_sync_keeps_primary() {
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
-                | PeerCommand::UpdateGracefulShutdown { reply, .. }
-                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                | PeerCommand::UpdateGracefulShutdown { reply, .. } => {
                     let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(false));
                 }
                 PeerCommand::ClaimCollisionPromotion { reply } => {
                     let _ = reply.send(!lost);

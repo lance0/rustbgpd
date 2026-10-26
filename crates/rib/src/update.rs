@@ -3723,6 +3723,16 @@ pub enum RibUpdate {
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
     },
+    /// Acknowledge that an earlier `PeerFamilySendable` has finished its RIB
+    /// turn, without encoding the table again. Sent on the same RIB channel.
+    ConfirmPeerOutbound {
+        /// The peer whose table was unlocked.
+        peer: PeerId,
+        /// Exact session whose IPv6 family must now be sendable.
+        session_id: u64,
+        /// Reports whether the expected outbound registration was observed.
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
+    },
     /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
     RouteRefreshRequest {
         /// The requesting peer.
@@ -4220,9 +4230,9 @@ impl RibUpdate {
             | Self::InstallConditionalAdvertisements { .. }
             | Self::RestoreConditionalAdvertisements { .. }
             | Self::ReobserveConditionalAdvertisements { .. } => RibActorTurnKind::OutboundPolicy,
-            Self::ReplayPeerOutbound { .. } | Self::RefreshPeerOutbound { .. } => {
-                RibActorTurnKind::OutboundReplay
-            }
+            Self::ReplayPeerOutbound { .. }
+            | Self::RefreshPeerOutbound { .. }
+            | Self::ConfirmPeerOutbound { .. } => RibActorTurnKind::OutboundReplay,
             Self::RouteRefreshRequest { .. }
             | Self::BeginRouteRefresh { .. }
             | Self::EndRouteRefresh { .. }

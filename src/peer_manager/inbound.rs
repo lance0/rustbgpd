@@ -1337,6 +1337,7 @@ impl PeerManager {
                 PEER_POLICY_UPDATE_TIMEOUT,
             )
             .await
+            .map(|_| ())
     }
 
     pub(super) async fn promote_pending_inbound(

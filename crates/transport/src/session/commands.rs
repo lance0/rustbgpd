@@ -1695,12 +1695,10 @@ impl PeerSession {
                 // doc) — no FSM event, no TCP impact. A lowered
                 // `max_prefixes` trips on the next received UPDATE,
                 // matching the reload matrix's documented semantics.
-                // For the export-affecting knobs (`local_ipv6_nexthop`,
-                // `remove_private_as`) the swap alone is NOT the whole
-                // apply: the peer manager follows it with a
-                // `RibUpdate::RefreshPeerOutbound` so preflight-suppressed
-                // routes are re-probed and advertised AS_PATHs re-encoded
-                // under the new values.
+                // For export-affecting knobs, the peer manager refreshes
+                // outbound routes after this swap, except when this command
+                // queues the IPv6 unlock's own resync and no other export
+                // knob changed.
                 let received_was_tracked = [
                     (Afi::Ipv4, self.config.max_prefixes_received_ipv4.is_some()),
                     (Afi::Ipv6, self.config.max_prefixes_received_ipv6.is_some()),
@@ -1750,10 +1748,22 @@ impl PeerSession {
                 // configured, before the reply lets the peer manager's
                 // outbound refresh follow. The reverse change keeps the
                 // family; its routes are then refused one at a time.
+                let mut ipv6_unlock_only = false;
                 if let Some(neg) = self.negotiated.clone()
                     && self.ipv6_unicast_withheld
                     && !self.withholds_ipv6_unicast_export(&neg)
                 {
+                    // Scoped IPv4 Extended Next Hop may already be exporting
+                    // with the socket's link-local address. The new global
+                    // IPv6 next hop changes that existing family too.
+                    let ipv4_next_hop_changes = self.is_scoped_link_local_peer()
+                        && neg
+                            .negotiated_families
+                            .contains(&(Afi::Ipv4, Safi::Unicast))
+                        && neg
+                            .extended_nexthop_families
+                            .get(&(Afi::Ipv4, Safi::Unicast))
+                            == Some(&Afi::Ipv6);
                     self.ipv6_unicast_withheld = false;
                     let family = (Afi::Ipv6, Safi::Unicast);
                     info!(
@@ -1761,7 +1771,7 @@ impl PeerSession {
                         family = "ipv6_unicast",
                         "local_ipv6_nexthop now provides an IPv6 next hop: exporting IPv6 unicast"
                     );
-                    let _ = self
+                    let queued = self
                         .rib_tx
                         .send(RibUpdate::PeerFamilySendable {
                             peer: self.rib_peer(),
@@ -1773,10 +1783,12 @@ impl PeerSession {
                                 .copied()
                                 .filter(|_| self.config.peer.add_path_send),
                         })
-                        .await;
+                        .await
+                        .is_ok();
+                    ipv6_unlock_only = queued && !ipv4_next_hop_changes;
                 }
                 info!(peer = %self.peer_label, "hot-applied runtime config knobs");
-                let _ = reply.send(Ok(()));
+                let _ = reply.send(Ok(ipv6_unlock_only));
                 // ADR-0108: a per-family limit lowered below the family's
                 // current unique-prefix count enforces immediately, not on
                 // the next UPDATE — a quiet peer must not keep a table that

@@ -1308,6 +1308,7 @@ impl PeerManager {
         let (
             knobs_changed,
             export_knobs_changed,
+            remove_private_as_changed,
             policies_changed,
             restart_policy_changed,
             admin_enable,
@@ -1338,6 +1339,7 @@ impl PeerManager {
                     || tc.gr_peer_restart_time_max != config.gr_peer_restart_time_max
                     || export_knobs_changed,
                 export_knobs_changed,
+                tc.remove_private_as != config.remove_private_as,
                 managed.import_policy != config.import_policy
                     || managed.export_policy != config.export_policy,
                 managed.max_prefix_restart_seconds != config.max_prefix_restart_seconds,
@@ -1358,12 +1360,13 @@ impl PeerManager {
             .map_err(PeerLifecycleError::Internal)?;
         }
 
+        let mut ipv6_unlock_only = false;
         if knobs_changed {
             let managed = self
                 .peers
                 .get(&peer)
                 .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
-            managed
+            ipv6_unlock_only = managed
                 .handle()
                 .update_runtime_config_timeout(
                     config.max_prefixes,
@@ -1388,7 +1391,10 @@ impl PeerManager {
                 })?;
         }
 
-        // Force re-emission after an export-affecting knob swap — the same
+        // Force re-emission after an export-affecting knob swap unless the
+        // session already queued the IPv6 family unlock's full-table resync.
+        // A simultaneous remove_private_as change still needs the refresh
+        // for other already-sendable families. This is the same
         // reason the gshut toggle and live-policy apply refresh: routes the
         // exact-export preflight suppressed under the OLD knobs (e.g.
         // `MissingIpv6NextHop`) are only re-probed, and already-advertised
@@ -1400,12 +1406,14 @@ impl PeerManager {
         // prove restoration; owned callers must fence this uncertainty.
         if export_knobs_changed {
             let addr = peer.address;
+            let confirm_unlock = ipv6_unlock_only && !remove_private_as_changed;
             match self
                 .refresh_peer_outbound_in_rib(
                     &peer,
                     OperatorReadAdmission::Fenced {
                         reason: "session knobs changed but manager metadata awaits refresh acknowledgement",
                     },
+                    confirm_unlock,
                 )
                 .await
             {
@@ -1415,6 +1423,11 @@ impl PeerManager {
                     )));
                 }
                 Ok(Err(error)) => {
+                    if confirm_unlock && !matches!(error, RibCommandError::NotFound(_)) {
+                        return Err(PeerLifecycleError::Internal(format!(
+                            "RIB did not confirm IPv6 unlock for {peer}: {error}"
+                        )));
+                    }
                     // "not registered for outbound updates" is expected for a
                     // peer not yet Established — the next PeerUp emits from
                     // the updated config.
@@ -2560,7 +2573,7 @@ impl PeerManager {
             // registered for outbound (newly added, not Established
             // yet) — that's fine, the next PeerUp will emit fresh.
             match self
-                .refresh_peer_outbound_in_rib(peer, OperatorReadAdmission::Served)
+                .refresh_peer_outbound_in_rib(peer, OperatorReadAdmission::Served, false)
                 .await
             {
                 Err(error) => {
@@ -2616,9 +2629,11 @@ impl PeerManager {
         &mut self,
         peer: &PeerKey,
         admission: OperatorReadAdmission,
+        confirm_unlock: bool,
     ) -> Result<Result<(), RibCommandError>, String> {
         let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
         let rib_peer = self.rib_peer_of(peer);
+        let session_id = self.peers.get(peer).map_or(0, ManagedPeer::session_id);
         let timed_out = || {
             format!(
                 "outbound refresh for peer {peer} timed out after {:?}",
@@ -2636,9 +2651,17 @@ impl PeerManager {
                 return Err(timed_out());
             }
             let (reply, response) = oneshot::channel();
-            permit.send(RibUpdate::RefreshPeerOutbound {
-                peer: rib_peer,
-                reply,
+            permit.send(if confirm_unlock {
+                RibUpdate::ConfirmPeerOutbound {
+                    peer: rib_peer,
+                    session_id,
+                    reply,
+                }
+            } else {
+                RibUpdate::RefreshPeerOutbound {
+                    peer: rib_peer,
+                    reply,
+                }
             });
             response
                 .await
@@ -2668,7 +2691,7 @@ impl PeerManager {
         }
 
         match self
-            .refresh_peer_outbound_in_rib(&peer, OperatorReadAdmission::Served)
+            .refresh_peer_outbound_in_rib(&peer, OperatorReadAdmission::Served, false)
             .await
             .map_err(OutboundRefreshError::Internal)?
         {
