@@ -127,6 +127,8 @@ fn capture_session_logs(action: impl FnOnce()) -> Vec<SessionLogFields> {
             .is_none(),
         "session log capture bucket was already armed for this thread"
     );
+    // An earlier registration can overwrite subscriber installation's rebuild.
+    tracing::callsite::rebuild_interest_cache();
     action();
     capture
         .events
@@ -1519,25 +1521,92 @@ async fn promotion_keeps_the_longer_notification_streak() {
     }
 }
 
+/// Hold the first registration until the capture has rebuilt callsite interest.
+struct DelayedWriterCallsite {
+    first: std::sync::atomic::AtomicBool,
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl tracing::Subscriber for DelayedWriterCallsite {
+    fn register_callsite(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        if writer_failure_log_metadata(metadata)
+            && self.first.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("capture must install before registration finishes");
+        }
+        tracing::subscriber::Interest::never()
+    }
+
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 /// A TCP write failure is logged with the peer and the OS error, like the
 /// connect-failure and OPEN-send warnings, so the operator can tell which
 /// session failed and why without correlating a bare `error_kind`.
 #[test]
 fn writer_failure_log_names_peer_and_error() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let events = capture_session_logs(|| {
+    // Callsite registration and the global subscriber are process-wide.
+    const CHILD: &str = "RUSTBGPD_WRITER_LOG_REGISTRATION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session::tests::notification::writer_failure_log_names_peer_and_error",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let fail_writer = || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let connect =
                 tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
-            let (server, _) = listener.accept().await.unwrap();
-            // Close the peer end first: the peer's kernel answers the next
-            // write with a reset, and the write after that fails.
-            drop(connect.await.unwrap());
+            let (mut server, _) = listener.accept().await.unwrap();
+            let peer = connect.await.unwrap();
+            socket2::SockRef::from(&peer)
+                .set_linger(Some(Duration::ZERO))
+                .unwrap();
+            drop(peer);
+            // Consume the peer's reset before asking the writer to send.
+            let reset = tokio::time::timeout(Duration::from_secs(5), server.read_u8())
+                .await
+                .expect("peer reset must arrive")
+                .unwrap_err();
+            assert_eq!(reset.kind(), std::io::ErrorKind::ConnectionReset);
             let (_read, write) = server.into_split();
             let handle = super::writer::spawn(
                 write,
@@ -1546,20 +1615,37 @@ fn writer_failure_log_names_peer_and_error() {
                 "10.0.0.2".to_string(),
                 None,
             );
-            let exit = tokio::time::timeout(Duration::from_secs(5), async {
-                while handle.priority_tx.send(Bytes::from_static(&[0])).is_ok() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                handle.join.await.unwrap()
-            })
-            .await
-            .expect("writer must exit once the peer resets the connection");
+            handle.priority_tx.send(Bytes::from_static(&[0])).unwrap();
+            let exit = tokio::time::timeout(Duration::from_secs(5), handle.join)
+                .await
+                .expect("writer must exit once the peer resets the connection")
+                .unwrap();
             assert!(
                 matches!(exit, Err(super::writer::WriterExit::Io(_))),
                 "expected an I/O writer exit, got {exit:?}"
             );
         });
+    };
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let registering = std::thread::spawn(move || {
+        tracing::subscriber::with_default(
+            DelayedWriterCallsite {
+                first: std::sync::atomic::AtomicBool::new(true),
+                entered: entered_tx,
+                release: std::sync::Mutex::new(release_rx),
+            },
+            fail_writer,
+        );
     });
+    entered
+        .recv_timeout(Duration::from_secs(5))
+        .expect("writer warning must start registering before capture installation");
+    session_log_capture();
+    // The old registration now overwrites the new capture's cached interest.
+    release.send(()).unwrap();
+    registering.join().unwrap();
+    let events = capture_session_logs(fail_writer);
     let event = events
         .iter()
         .find(|event| {
