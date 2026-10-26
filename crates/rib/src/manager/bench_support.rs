@@ -20,7 +20,7 @@ use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::{mpsc, oneshot};
 
-use super::RibManager;
+use super::{PeerUpRegistration, RibManager};
 use crate::route::Route;
 use crate::update::{
     BestRoutesPage, DataplanePageError, ExactExportEncoder, FibInstallCandidatesPage,
@@ -1660,21 +1660,23 @@ impl RibManager {
                 .insert((peer, session_id), make_exact_export_encoder(peer_asn));
             self.handle_peer_up(
                 peer,
-                session_id,
-                peer_asn,
-                Ipv4Addr::new(192, 0, 2, 1),
-                outbound_tx,
-                None,
-                sendable_families.to_vec(),
-                true,
-                false,
-                None,
-                false,
-                false,
-                Vec::new(),
-                0,
-                Vec::new(),
-                Vec::new(),
+                PeerUpRegistration {
+                    session_id,
+                    peer_asn,
+                    peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                    outbound_tx,
+                    export_policy: None,
+                    sendable_families: sendable_families.to_vec(),
+                    is_ebgp: true,
+                    route_reflector_client: false,
+                    orr_vantage: None,
+                    per_client_best: false,
+                    interpret_rfc1997: false,
+                    add_path_send_families: Vec::new(),
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: Vec::new(),
+                    negotiated_llgr_families: Vec::new(),
+                },
             );
             while outbound_rx.try_recv().is_ok() {}
             receivers.push(outbound_rx);
@@ -1981,21 +1983,23 @@ impl RibManager {
             .insert((peer, session_id), exact_export_encoder);
         self.handle_peer_up(
             peer,
-            session_id,
-            64_512,
-            Ipv4Addr::new(192, 0, 2, 1),
-            outbound_tx,
-            None,
-            vec![(Afi::Ipv4, Safi::Unicast)],
-            false,
-            true,
-            None,
-            false,
-            true,
-            Vec::new(),
-            0,
-            Vec::new(),
-            Vec::new(),
+            PeerUpRegistration {
+                session_id,
+                peer_asn: 64_512,
+                peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                outbound_tx,
+                export_policy: None,
+                sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                is_ebgp: false,
+                route_reflector_client: true,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: Vec::new(),
+                add_path_send_max: 0,
+                negotiated_orf_recv: Vec::new(),
+                negotiated_llgr_families: Vec::new(),
+            },
         );
     }
 
@@ -2116,21 +2120,23 @@ impl RibManager {
             .insert((peer, session_id), exact_export_encoder);
         self.handle_peer_up(
             peer,
-            session_id,
-            64_512,
-            Ipv4Addr::new(192, 0, 2, 1),
-            tx,
-            export_policy.cloned(),
-            vec![(Afi::Ipv4, Safi::Unicast)],
-            false,
-            true,
-            None,
-            false,
-            true,
-            vec![(Afi::Ipv4, Safi::Unicast)],
-            send_max,
-            Vec::new(),
-            Vec::new(),
+            PeerUpRegistration {
+                session_id,
+                peer_asn: 64_512,
+                peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                outbound_tx: tx,
+                export_policy: export_policy.cloned(),
+                sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                is_ebgp: false,
+                route_reflector_client: true,
+                orr_vantage: None,
+                per_client_best: false,
+                interpret_rfc1997: true,
+                add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                add_path_send_max: send_max,
+                negotiated_orf_recv: Vec::new(),
+                negotiated_llgr_families: Vec::new(),
+            },
         );
         rx
     }
@@ -2178,21 +2184,23 @@ impl RibManager {
             };
             self.handle_peer_up(
                 peer,
-                session_id,
-                peer_asn,
-                Ipv4Addr::new(192, 0, 2, 1), // shared bgp-id (irrelevant to fanout cost)
-                tx,
-                export_policy.cloned(),
-                sendable_families,
-                is_ebgp,
-                is_rr_client,
-                None, // no ORR vantage
-                per_client_best,
-                true,       // interpret RFC 1997 (production default)
-                Vec::new(), // no Add-Path send
-                0,
-                Vec::new(), // no negotiated receive-side ORF
-                Vec::new(), // no negotiated LLGR families
+                PeerUpRegistration {
+                    session_id,
+                    peer_asn,
+                    peer_router_id: Ipv4Addr::new(192, 0, 2, 1), // shared bgp-id (irrelevant to fanout cost)
+                    outbound_tx: tx,
+                    export_policy: export_policy.cloned(),
+                    sendable_families,
+                    is_ebgp,
+                    route_reflector_client: is_rr_client,
+                    orr_vantage: None, // no ORR vantage
+                    per_client_best,
+                    interpret_rfc1997: true, // interpret RFC 1997 (production default)
+                    add_path_send_families: Vec::new(), // no Add-Path send
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: Vec::new(), // no negotiated receive-side ORF
+                    negotiated_llgr_families: Vec::new(), // no negotiated LLGR families
+                },
             );
             // Drain the initial-table dump's End-of-RIB marker so the channel
             // starts empty for the measured fanout pass.
@@ -2316,21 +2324,23 @@ impl RibManager {
                     .insert((peer, session_id), make_exact_export_encoder(peer_asn));
                 self.handle_peer_up(
                     peer,
-                    session_id,
-                    peer_asn,
-                    Ipv4Addr::new(192, 0, 2, 1),
-                    tx,
-                    None,
-                    families.to_vec(),
-                    true,
-                    false,
-                    None,
-                    per_client_best,
-                    true,
-                    Vec::new(),
-                    0,
-                    Vec::new(),
-                    Vec::new(),
+                    PeerUpRegistration {
+                        session_id,
+                        peer_asn,
+                        peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+                        outbound_tx: tx,
+                        export_policy: None,
+                        sendable_families: families.to_vec(),
+                        is_ebgp: true,
+                        route_reflector_client: false,
+                        orr_vantage: None,
+                        per_client_best,
+                        interpret_rfc1997: true,
+                        add_path_send_families: Vec::new(),
+                        add_path_send_max: 0,
+                        negotiated_orf_recv: Vec::new(),
+                        negotiated_llgr_families: Vec::new(),
+                    },
                 );
                 while rx.try_recv().is_ok() {}
                 rx
