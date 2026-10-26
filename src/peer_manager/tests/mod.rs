@@ -586,7 +586,7 @@ fn recording_runtime_config_handle() -> (PeerHandle, mpsc::UnboundedReceiver<u16
             match command {
                 PeerCommand::UpdateRuntimeConfig { config, reply } => {
                     let _ = seen_tx.send(config.gr_peer_restart_time_max);
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(Ok(false));
                 }
                 PeerCommand::Shutdown => break,
                 _ => {}
@@ -1165,9 +1165,11 @@ fn fake_peer_handle_with_route_refresh_reply(
                 // before promotion (LAN-2512).
                 PeerCommand::UpdateImportPolicy { reply, .. }
                 | PeerCommand::UpdateExportPolicy { reply, .. }
-                | PeerCommand::UpdateGracefulShutdown { reply, .. }
-                | PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                | PeerCommand::UpdateGracefulShutdown { reply, .. } => {
                     let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(false));
                 }
                 PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
                     counters

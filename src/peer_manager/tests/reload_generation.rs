@@ -71,7 +71,7 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                         .fetch_add(1, Ordering::SeqCst);
                     in_task.runtime_knobs.lock().unwrap().push(*config);
                     if !in_task.drop_runtime_reply.load(Ordering::SeqCst) {
-                        let _ = reply.send(Ok(()));
+                        let _ = reply.send(Ok(false));
                     }
                 }
                 PeerCommand::SendRouteRefresh { afi, safi, reply } => {

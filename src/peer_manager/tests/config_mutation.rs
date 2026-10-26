@@ -407,7 +407,7 @@ async fn hot_update_peer_forwards_and_records_family_max_prefix_limits() {
             match command {
                 PeerCommand::UpdateRuntimeConfig { config, reply } => {
                     let _ = seen_tx.send(config.max_prefixes_family);
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(Ok(false));
                 }
                 PeerCommand::Shutdown => break,
                 _ => {}
@@ -766,6 +766,169 @@ async fn hot_update_peer_refreshes_outbound_for_export_affecting_knobs() {
             .try_recv()
             .expect("hot-applying remove_private_as must force an outbound refresh"),
         mgr.rib_peer_of(&PeerKey::new(addr.addr(), None))
+    );
+}
+
+#[tokio::test]
+async fn ipv6_unlock_queues_one_table_walk_unless_other_export_knobs_change() {
+    for (already_sendable, unlocked, remove_private_as, deferred, expected) in [
+        (false, true, false, false, [1, 0]),
+        (true, false, false, false, [0, 1]),
+        (false, true, true, false, [1, 1]),
+        (false, true, false, true, [1, 0]),
+    ] {
+        let mut mgr = test_peer_manager();
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        mgr.rib_tx = rib_tx.clone();
+        let (events_tx, mut events_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::PeerFamilySendable { .. } => {
+                        events_tx.send("unlock").await.unwrap();
+                    }
+                    RibUpdate::RefreshPeerOutbound { reply, .. } => {
+                        events_tx.send("refresh").await.unwrap();
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::ConfirmPeerOutbound { reply, .. } => {
+                        events_tx.send("confirm").await.unwrap();
+                        let _ = reply.send(if deferred {
+                            Err(rustbgpd_rib::RibCommandError::not_found(
+                                "peer not yet registered for outbound updates",
+                            ))
+                        } else {
+                            Ok(())
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let (commands, mut command_rx) = mpsc::channel(8);
+        let addr: IpAddr = "10.0.0.90".parse().unwrap();
+        let peer = PeerId::from_addr(addr);
+        let session_rib_tx = rib_tx.clone();
+        let task = tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                if let PeerCommand::UpdateRuntimeConfig { reply, .. } = command {
+                    if unlocked {
+                        session_rib_tx
+                            .send(RibUpdate::PeerFamilySendable {
+                                peer,
+                                session_id: 1,
+                                family: (Afi::Ipv6, Safi::Unicast),
+                                add_path_send_limit: None,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    let _ = reply.send(Ok(unlocked));
+                }
+            }
+            Ok(())
+        });
+        insert_test_managed_peer(
+            &mut mgr,
+            addr,
+            PeerHandle::from_parts(commands, task),
+            false,
+        );
+        if already_sendable {
+            mgr.peers
+                .get_mut(&key(addr))
+                .unwrap()
+                .transport_config
+                .local_ipv6_nexthop = Some("2001:db8::2".parse().unwrap());
+        }
+        let mut updated = make_config(addr, 65002);
+        updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+        if remove_private_as {
+            updated.remove_private_as = rustbgpd_transport::RemovePrivateAs::All;
+        }
+        mgr.hot_update_peer(updated).await.unwrap();
+        let mut counts = [0, 0];
+        let mut seen = Vec::new();
+        let confirmations = usize::from(unlocked && !remove_private_as);
+        for _ in 0..expected.iter().sum::<usize>() + confirmations {
+            let event = events_rx
+                .try_recv()
+                .expect("RIB work request before apply reply");
+            seen.push(event);
+            match event {
+                "unlock" => counts[0] += 1,
+                "refresh" => counts[1] += 1,
+                "confirm" => {}
+                other => panic!("unexpected RIB work request: {other}"),
+            }
+        }
+        assert_eq!(counts, expected);
+        if confirmations == 1 {
+            assert_eq!(seen, ["unlock", "confirm"]);
+        }
+        assert!(
+            events_rx.try_recv().is_err(),
+            "unexpected second table walk"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ipv6_unlock_waits_for_rib_confirmation_before_bookkeeping() {
+    let mut mgr = test_peer_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
+    mgr.rib_tx = rib_tx.clone();
+    let (commands, mut command_rx) = mpsc::channel(8);
+    let addr: IpAddr = "10.0.0.91".parse().unwrap();
+    let peer = PeerId::from_addr(addr);
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            if let PeerCommand::UpdateRuntimeConfig { reply, .. } = command {
+                rib_tx
+                    .send(RibUpdate::PeerFamilySendable {
+                        peer,
+                        session_id: 1,
+                        family: (Afi::Ipv6, Safi::Unicast),
+                        add_path_send_limit: None,
+                    })
+                    .await
+                    .unwrap();
+                let _ = reply.send(Ok(true));
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(commands, task),
+        false,
+    );
+    let mut updated = make_config(addr, 65002);
+    updated.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    let apply = tokio::spawn(async move {
+        let result = mgr.hot_update_peer(updated).await;
+        (result, mgr)
+    });
+    assert!(matches!(
+        rib_rx.recv().await,
+        Some(RibUpdate::PeerFamilySendable { .. })
+    ));
+    let Some(RibUpdate::ConfirmPeerOutbound { reply, .. }) = rib_rx.recv().await else {
+        panic!("unlock must await the ordered RIB confirmation");
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !apply.is_finished(),
+        "bookkeeping preceded RIB confirmation"
+    );
+    drop(reply);
+    let (result, mgr) = apply.await.unwrap();
+    assert!(result.is_err(), "dropped confirmation must fail the apply");
+    assert_eq!(
+        mgr.peers[&key(addr)].transport_config.local_ipv6_nexthop,
+        None,
+        "metadata must retain the old value on ambiguous RIB completion"
     );
 }
 

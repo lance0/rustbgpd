@@ -2236,7 +2236,7 @@ async fn withheld_ipv6_unicast_is_staged_before_peer_up() {
 }
 
 /// Hot-apply `local_ipv6_nexthop`, keeping every other runtime knob as is.
-async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<Ipv6Addr>) {
+async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<Ipv6Addr>) -> bool {
     let config = &session.config;
     let update = crate::handle::PeerRuntimeConfigUpdate {
         max_prefixes: config.max_prefixes,
@@ -2262,7 +2262,7 @@ async fn hot_apply_local_ipv6_nexthop(session: &mut PeerSession, value: Option<I
             .await,
         ControlFlow::Continue(())
     );
-    done.await.unwrap().unwrap();
+    done.await.unwrap().unwrap()
 }
 
 /// The `PeerFamilySendable` `(family, add_path_send_limit)` pairs the
@@ -2308,10 +2308,12 @@ async fn hot_applied_ipv6_next_hop_unlocks_withheld_family_without_reset() {
     let session_id = session.session_identity.id;
 
     // Control: a reload that still leaves no IPv6 next hop changes nothing.
-    hot_apply_local_ipv6_nexthop(&mut session, None).await;
+    assert!(!hot_apply_local_ipv6_nexthop(&mut session, None).await);
     assert_eq!(drain_family_sendable(&mut rib_rx), vec![]);
 
-    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await;
+    assert!(
+        hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await
+    );
     assert_eq!(
         drain_family_sendable(&mut rib_rx),
         vec![((Afi::Ipv6, Safi::Unicast), None)]
@@ -2322,10 +2324,35 @@ async fn hot_applied_ipv6_next_hop_unlocks_withheld_family_without_reset() {
 
     // Once unlocked, neither the same value nor removing and re-setting it
     // is a new unlock.
-    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await;
-    hot_apply_local_ipv6_nexthop(&mut session, None).await;
-    hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:2::1".parse().unwrap())).await;
+    assert!(
+        !hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:1::1".parse().unwrap())).await
+    );
+    assert!(!hot_apply_local_ipv6_nexthop(&mut session, None).await);
+    assert!(
+        !hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8:0:2::1".parse().unwrap())).await
+    );
     assert_eq!(drain_family_sendable(&mut rib_rx), vec![]);
+}
+
+#[tokio::test]
+async fn ipv6_unlock_keeps_refresh_for_sendable_scoped_ipv4_extended_next_hop() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    let mut neg = negotiated_session(65002, true);
+    neg.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    let families = establish_with(&mut session, &mut rib_rx, neg).await;
+    assert!(families.contains(&(Afi::Ipv4, Safi::Unicast)));
+    assert!(!families.contains(&(Afi::Ipv6, Safi::Unicast)));
+
+    // IPv4's existing MP_REACH next hop also changes to the configured
+    // global IPv6 address, so the manager must still force a refresh.
+    assert!(
+        !hot_apply_local_ipv6_nexthop(&mut session, Some("2001:db8::1".parse().unwrap())).await
+    );
+    assert_eq!(
+        drain_family_sendable(&mut rib_rx),
+        vec![((Afi::Ipv6, Safi::Unicast), None)]
+    );
 }
 
 /// Only a session that withheld IPv6 unicast at establishment unlocks it.

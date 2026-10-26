@@ -1166,10 +1166,18 @@ fn answer_session(command: PeerCommand, addr: IpAddr, established: bool, fail: b
         PeerCommand::UpdateExportPolicy { reply, .. }
         | PeerCommand::UpdateImportPolicy { reply, .. }
         | PeerCommand::ReplayOutbound { reply }
-        | PeerCommand::UpdateRuntimeConfig { reply, .. }
         | PeerCommand::UpdateGracefulShutdown { reply, .. }
         | PeerCommand::SendRouteRefresh { reply, .. } => {
             let _ = reply.send(if fail { failed() } else { Ok(()) });
+        }
+        PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+            let _ = reply.send(if fail {
+                Err(rustbgpd_transport::PeerCommandError::CommandFailed(
+                    "test: injected failure".to_string(),
+                ))
+            } else {
+                Ok(false)
+            });
         }
         PeerCommand::RevalidateImport { reply, .. } => {
             let _ = reply.send(if established {

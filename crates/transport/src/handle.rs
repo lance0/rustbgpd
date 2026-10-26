@@ -620,8 +620,9 @@ pub enum PeerCommand {
     UpdateRuntimeConfig {
         /// Runtime configuration carried out of the inline command envelope.
         config: Box<PeerRuntimeConfigUpdate>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), PeerCommandError>>,
+        /// Whether this update queued an IPv6 family unlock and no other
+        /// sendable family's wire form requires a refresh.
+        reply: oneshot::Sender<Result<bool, PeerCommandError>>,
     },
     /// Install the add-only portion of one immutable TCP-AO generation on the
     /// currently owned connected socket, then advance future active-open
@@ -2701,6 +2702,8 @@ impl PeerHandle {
     /// [`Self::update_import_policy_timeout`]'s bounded shape for the
     /// same reason: the peer-manager actor calls this and must not park
     /// behind a wedged session task.
+    /// `Ok(true)` means an IPv6 unlock was queued and no other family needs
+    /// a forced refresh; the caller must still await the RIB's ordered reply.
     ///
     /// # Errors
     ///
@@ -2725,7 +2728,7 @@ impl PeerHandle {
         local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
         remove_private_as: crate::config::RemovePrivateAs,
         deadline: Duration,
-    ) -> Result<(), PeerCommandError> {
+    ) -> Result<bool, PeerCommandError> {
         let commands = self.commands.clone();
         match tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();

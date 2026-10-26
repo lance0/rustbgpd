@@ -4709,6 +4709,29 @@ impl RibManager {
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);
             }
+            RibUpdate::ConfirmPeerOutbound {
+                peer,
+                session_id,
+                reply,
+            } => {
+                let result = if !self.outbound_peers.contains_key(&peer) {
+                    Err(crate::RibCommandError::not_found(format!(
+                        "peer {peer} not registered for outbound updates"
+                    )))
+                } else if self.outbound_session_ids.get(&peer) == Some(&session_id)
+                    && self
+                        .peer_sendable_families
+                        .get(&peer)
+                        .is_some_and(|families| families.contains(&(Afi::Ipv6, Safi::Unicast)))
+                {
+                    Ok(())
+                } else {
+                    Err(crate::RibCommandError::internal(format!(
+                        "peer {peer} session {session_id} has no outbound IPv6 unlock"
+                    )))
+                };
+                let _ = reply.send(result);
+            }
             RibUpdate::ReevaluatePeerExportPolicies {
                 peers,
                 swaps,

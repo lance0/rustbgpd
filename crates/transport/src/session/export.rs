@@ -3522,6 +3522,46 @@ mod tests {
     }
 
     #[test]
+    fn scoped_ipv4_extended_next_hop_changes_when_global_ipv6_is_set() {
+        let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
+        let mut config = TransportConfig::new(peer, "[fe80::2]:179".parse().unwrap());
+        config.peer_interface = Some("eth1".to_string());
+        config.peer_scope_id = Some(7);
+        let socket_local: IpAddr = "fe80::1".parse().unwrap();
+        let mut profile = SessionExportProfile::initial(&config, Some(socket_local), false);
+        profile.four_octet_as = true;
+        profile.extended_nexthop_ipv4 = true;
+        let route = as4_projection_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            "192.0.2.1".parse().unwrap(),
+        );
+        for (configured, expected) in [
+            (None, socket_local),
+            (
+                Some("2001:db8::1".parse().unwrap()),
+                "2001:db8::1".parse().unwrap(),
+            ),
+        ] {
+            profile.configured_local_ipv6_nexthop = configured;
+            let probe = profile
+                .probe_announcement(ExportCandidate::Unicast {
+                    route: &route,
+                    next_hop_override: None,
+                })
+                .unwrap();
+            let parsed = probe.message.parse(true, false, &[]).unwrap();
+            let next_hop = parsed
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    PathAttribute::MpReachNlri(mp) => Some(mp.next_hop),
+                    _ => None,
+                });
+            assert_eq!(next_hop, Some(expected));
+        }
+    }
+
+    #[test]
     fn ipv4_extended_next_hop_self_uses_socket_ipv4_on_route_server_target() {
         let peer = PeerConfig::new(65_001, 65_002, Ipv4Addr::new(10, 0, 0, 1));
         let mut config = TransportConfig::new(peer, "10.0.0.2:179".parse().unwrap());
