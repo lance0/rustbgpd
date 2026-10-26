@@ -13,7 +13,7 @@
 //! Freed slots are pushed onto a free list and reused by later inserts, so
 //! sustained insert/withdraw churn does not grow the slot count.
 //!
-//! Slots live in fixed segments of [`SEGMENT`] slots. A single `Vec` doubled
+//! Slots live in fixed segments of `SEGMENT` slots. A single `Vec` doubled
 //! by copying every route inside one insert: about 100 MiB and 50-60 ms at
 //! 1M routes, a RIB actor stall no checkpoint could split. Growth now copies
 //! at most one segment, and the tail slack is at most one segment instead of
@@ -34,7 +34,7 @@ pub(crate) struct RouteSlab<T> {
     /// Slot `h` is `segments[h / SEGMENT][h % SEGMENT]`. Only the segment
     /// holding the next new slot can be partly filled; segments after it are
     /// empty preallocations. A small table keeps one segment that grows like
-    /// a `Vec` up to [`SEGMENT`] slots.
+    /// a `Vec` up to `SEGMENT` slots.
     segments: Vec<Vec<Option<T>>>,
     /// Slots ever allocated (occupied + free): the next new handle.
     slots: usize,
