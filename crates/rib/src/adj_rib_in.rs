@@ -32,7 +32,7 @@ use rustbgpd_wire::{
 use smallvec::SmallVec;
 
 use crate::attr_set::AttrSet;
-use crate::fast_hash::{FastMap as HashMap, FastSet as HashSet, ShardedMap};
+use crate::fast_hash::{FastSet as HashSet, ShardedMap};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -338,7 +338,7 @@ pub struct AdjRibIn {
     labeled_routes: StaleTracked<LabeledRibRouteKey, LabeledRibRoute>,
     /// Secondary index: labeled prefix → Add-Path path IDs stored for it
     /// (the SAFI 4 analog of `vpn_key_index`).
-    labeled_key_index: HashMap<Prefix, SmallVec<[u32; 1]>>,
+    labeled_key_index: ShardedMap<Prefix, SmallVec<[u32; 1]>>,
     /// RT-Constrain routes keyed by RFC 4684 RT membership identity.
     rtc_routes: StaleTracked<RtcRibRouteKey, RtcRibRoute>,
     /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
@@ -371,7 +371,7 @@ impl AdjRibIn {
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_routes.map, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_key_index, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.labeled_routes.map, checkpoint);
-        crate::adj_rib_out::release_hash_map(&mut self.labeled_key_index, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.labeled_key_index, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.rtc_routes.map, checkpoint);
         retire_local_tags(&mut self.llgr_stale_local_tags, checkpoint);
         retire_local_tags(&mut self.flowspec_llgr_stale_local_tags, checkpoint);
@@ -411,7 +411,7 @@ impl AdjRibIn {
             vpn_routes: StaleTracked::default(),
             vpn_key_index: ShardedMap::default(),
             labeled_routes: StaleTracked::default(),
-            labeled_key_index: HashMap::default(),
+            labeled_key_index: ShardedMap::default(),
             rtc_routes: StaleTracked::default(),
             evpn_llgr_stale_local_tags: HashSet::default(),
             bgpls_llgr_stale_local_tags: HashSet::default(),
@@ -1718,12 +1718,12 @@ impl AdjRibIn {
             self.vpn_routes
                 .shards()
                 .iter()
-                .map(HashMap::capacity)
+                .map(crate::fast_hash::FastMap::capacity)
                 .collect(),
             self.vpn_key_index
                 .shards()
                 .iter()
-                .map(HashMap::capacity)
+                .map(crate::fast_hash::FastMap::capacity)
                 .collect(),
         ]
     }
@@ -4925,6 +4925,19 @@ mod tests {
                 len,
             )),
         }
+    }
+
+    #[test]
+    fn labeled_key_index_grows_one_shard_per_insert() {
+        crate::fast_hash::assert_growth_bounded(
+            "Adj-RIB-In labeled key index",
+            &mut AdjRibIn::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))),
+            |rib, i| {
+                let addr = (0x0a00_0000 + (i << 8)).to_be_bytes();
+                rib.insert_labeled(make_labeled_route(labeled_nlri(addr, 24, 100), 1));
+            },
+            |rib| rib.labeled_key_index.capacity(),
+        );
     }
 
     fn make_labeled_route(nlri: LabeledNlri, peer_oct: u8) -> LabeledRibRoute {

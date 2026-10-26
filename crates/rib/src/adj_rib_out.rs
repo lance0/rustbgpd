@@ -39,7 +39,7 @@ pub struct AdjRibOut {
     /// `Self_` lives in `self_next_hop`. A hashed entry is 44 B plus one
     /// control byte, about 51-103 B per action with hashbrown's power-of-two
     /// growth (94 B per route measured at 1M entries).
-    next_hop_overrides: HashMap<(Prefix, u32), NextHopAction>,
+    next_hop_overrides: ShardedMap<(Prefix, u32), NextHopAction>,
     /// `Self_` action per slab slot, indexed by route handle. Allocated only
     /// once a `Self_` action is admitted, so it costs 1 B per slot (plus `Vec`
     /// growth slack) instead of a hashed entry per route.
@@ -268,7 +268,7 @@ impl AdjRibOut {
         Self {
             peer,
             routes: RouteSlab::with_capacity(capacity),
-            next_hop_overrides: HashMap::default(),
+            next_hop_overrides: ShardedMap::default(),
             self_next_hop: Vec::new(),
             self_next_hop_count: 0,
             prefix_path_ids: FamilyPrefixMap::default(),
@@ -592,7 +592,7 @@ impl AdjRibOut {
     pub fn release_unicast(&mut self) {
         self.second_family.unicast = 0;
         self.routes = RouteSlab::default();
-        self.next_hop_overrides = HashMap::default();
+        self.next_hop_overrides = ShardedMap::default();
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids = FamilyPrefixMap::default();
@@ -603,7 +603,7 @@ impl AdjRibOut {
     pub(crate) fn release_unicast_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.second_family.unicast = 0;
         self.routes.release_with(checkpoint);
-        release_hash_map(&mut self.next_hop_overrides, checkpoint);
+        release_sharded_map(&mut self.next_hop_overrides, checkpoint);
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.release_with(checkpoint);
@@ -705,7 +705,7 @@ impl AdjRibOut {
     pub(crate) fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.second_family = SecondFamilyCounts::default();
         self.routes.retire_with(checkpoint);
-        retire_hash_map(&mut self.next_hop_overrides, checkpoint);
+        retire_sharded_map(&mut self.next_hop_overrides, checkpoint);
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);
@@ -1272,6 +1272,23 @@ mod tests {
         assert_eq!(
             rib.next_hop_override(&prefix, 1023),
             Some(&NextHopAction::Self_)
+        );
+    }
+
+    /// An export policy that sets a specific next hop stores one override
+    /// per advertised route, so this map reaches full-table size.
+    #[test]
+    fn next_hop_override_map_grows_one_shard_per_insert() {
+        let action = NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
+        crate::fast_hash::assert_growth_bounded(
+            "Adj-RIB-Out next-hop overrides",
+            &mut AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+            |rib, i| {
+                let prefix =
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + (i << 8)), 24));
+                rib.insert_with_next_hop(make_route(prefix, 0), Some(action.clone()), &mut || {});
+            },
+            |rib| rib.next_hop_overrides.capacity(),
         );
     }
 

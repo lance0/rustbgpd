@@ -29,6 +29,30 @@ pub(crate) fn shard_index<Q: std::hash::Hash + ?Sized>(key: &Q) -> usize {
     usize::try_from(mixed >> 60).expect("four bits fit usize")
 }
 
+/// Grow `table` through `insert` past one table's split limit and assert that
+/// no single insert grew `capacity` by more than [`SHARD_SPLIT_AT`] slots.
+/// A plain map that doubles at that size rehashes every entry inside one
+/// insert, which at full-table scale stalls the RIB actor for a whole UPDATE.
+#[cfg(test)]
+pub(crate) fn assert_growth_bounded<T>(
+    name: &str,
+    table: &mut T,
+    mut insert: impl FnMut(&mut T, u32),
+    capacity: impl Fn(&T) -> usize,
+) {
+    let count = u32::try_from(SHARD_SPLIT_AT * 2).expect("test size fits u32");
+    let mut before = capacity(table);
+    for i in 0..count {
+        insert(table, i);
+        let after = capacity(table);
+        assert!(
+            after.saturating_sub(before) <= SHARD_SPLIT_AT,
+            "{name}: insert {i} grew capacity {before} -> {after}, rehashing the whole table"
+        );
+        before = after;
+    }
+}
+
 /// A [`FastMap`] that splits into fixed hash shards once it is large.
 ///
 /// A plain map doubles by rehashing every entry inside one insert: about
@@ -67,9 +91,19 @@ impl<K, V> ShardedMap<K, V> {
         self.shards().iter().map(FastMap::len).sum()
     }
 
-    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.shards().iter().all(FastMap::is_empty)
+    }
+
     pub(crate) fn capacity(&self) -> usize {
         self.shards().iter().map(FastMap::capacity).sum()
+    }
+
+    /// Keep only the entries `keep` accepts, shard by shard.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
+        for shard in self.shards_mut() {
+            shard.retain(&mut keep);
+        }
     }
 
     /// Remove every entry, keeping the shard tables' allocations.
@@ -164,6 +198,15 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
         self.shard(key).get(key)
     }
 
+    /// The stored key and value equal to `key`.
+    pub(crate) fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.shard(key).get_key_value(key)
+    }
+
     pub(crate) fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: std::borrow::Borrow<Q>,
@@ -172,7 +215,6 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
         self.shard_mut(key).get_mut(key)
     }
 
-    #[cfg(test)]
     pub(crate) fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
