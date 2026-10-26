@@ -32,12 +32,13 @@ The daemon binary (`src/`) depends on every crate above except `cli`; it wires t
 together and owns the runtime actors that are not themselves crates (the
 unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
 The other workspace members, the `bench/` harnesses, the `examples/`
-programs and the `tools/` binaries (`rs-config-render`, the MCP server),
-consume these crates or the gRPC API from outside the daemon; the daemon does
-not depend on them (root integration tests use `rs-config-render` and `cli`
-as dev-dependencies). Root actor tests also enable the RIB's `bench-internals`
-feature to install explicitly bounded history consumers. The normal daemon
-feature dependency tree excludes that test-only feature.
+programs and the `tools/` binaries (`rs-config-render`, the MCP server, the
+GoBGP `AddPath` bridge for RTBH detectors), consume these crates or the gRPC
+API from outside the daemon; the daemon does not depend on them (root
+integration tests use `rs-config-render` and `cli` as dev-dependencies).
+Root actor tests also enable the RIB's `bench-internals` feature to install
+explicitly bounded history consumers. The normal daemon feature dependency
+tree excludes that test-only feature.
 
 ### Crate summary
 

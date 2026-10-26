@@ -510,7 +510,7 @@ proto/                   # gRPC proto definitions (rustbgpd.v1)
 tests/interop/           # Containerlab topologies and configs
 examples/                # Runnable configurations and client examples
 labs/                    # Containerlab labs (quickstart, RR, IXP, monitoring)
-tools/                   # Companion tools: rs-config-render, MCP server
+tools/                   # Companion tools: rs-config-render, MCP server, GoBGP bridge
 integrations/            # Third-party integrations (IXP Manager)
 docs/README.md           # Documentation table of contents
   tutorials/             # Learn by running an example
