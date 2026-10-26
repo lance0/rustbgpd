@@ -1595,6 +1595,12 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
                 .configured_owner_publication(Publication::Begin)
                 .await
                 .map_err(|error| error.to_string())?;
+            // A session capture keeps the RIB barrier; an unchanged roster
+            // with no capture would settle without this wait.
+            let asn = manager.current_config.global.asn;
+            manager
+                .configured_owner_admission_for_static(key(peers[0]), asn)
+                .map_err(|error| format!("{error:?}"))?;
             let published = manager
                 .configured_owner_publication(Publication::Publish(receipt))
                 .await

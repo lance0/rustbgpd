@@ -34,6 +34,9 @@ struct OwnerEntry {
 struct PendingPublication {
     receipt: PublicationReceipt,
     reservations: BTreeMap<OwnerIdentity, OwnerEntry>,
+    /// A session took a tentative admission from this publication, so its
+    /// acknowledgement must wait behind the RIB's primary-lane barrier.
+    session_captured: bool,
 }
 
 pub(super) struct ConfiguredOwners {
@@ -110,6 +113,7 @@ impl ConfiguredOwners {
         self.pending = Some(PendingPublication {
             receipt,
             reservations: BTreeMap::new(),
+            session_captured: false,
         });
         Ok(receipt)
     }
@@ -154,6 +158,29 @@ impl ConfiguredOwners {
         Ok(())
     }
 
+    /// A session-owned capture: the admission reaches transport and must not
+    /// be acknowledged before the RIB has drained the input queued ahead of it.
+    fn capture_for_session(
+        &mut self,
+        identity: OwnerIdentity,
+    ) -> Result<Option<OwnerEntry>, PublicationError> {
+        let entry = self.capture(identity)?;
+        if let Some(pending) = &mut self.pending {
+            pending.session_captured = true;
+        }
+        Ok(entry)
+    }
+
+    /// Whether publishing `next` would leave the RIB exactly as it is: the
+    /// same owner roster it last acknowledged, and no session admission
+    /// waiting on the RIB barrier.
+    fn publication_is_noop(&self, next: &BTreeMap<OwnerIdentity, OwnerEntry>) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| !pending.session_captured)
+            && next.keys().eq(self.committed.keys())
+    }
+
     fn prepare(
         &mut self,
         receipt: PublicationReceipt,
@@ -182,7 +209,7 @@ impl PeerManager {
     ) -> Result<Option<DampeningAdmission>, PublicationError> {
         Ok(self
             .configured_owners
-            .capture(OwnerIdentity::Static(peer, asn))?
+            .capture_for_session(OwnerIdentity::Static(peer, asn))?
             .map(|entry| entry.admission))
     }
 
@@ -193,7 +220,7 @@ impl PeerManager {
     ) -> Result<Option<DampeningAdmission>, PublicationError> {
         Ok(self
             .configured_owners
-            .capture(OwnerIdentity::Dynamic(
+            .capture_for_session(OwnerIdentity::Dynamic(
                 range.addr,
                 range.prefix_len,
                 range.peer_group.clone(),
@@ -263,19 +290,25 @@ impl PeerManager {
                 let next = self
                     .configured_owners
                     .prepare(receipt, &self.current_config)?;
-                let send = Self::send_configured_owners(
-                    self.rib_tx.clone(),
-                    receipt,
-                    next.values()
-                        .map(|entry| Arc::clone(&entry.owner))
-                        .collect(),
-                );
-                // SIGHUP settlement runs this after a reload completes, when
-                // the RIB's primary queue can hold seconds of post-commit
-                // export work. The configuration is already committed and
-                // reads never touch the owner catalogue, so serve them too.
-                self.await_with_readiness(send, OperatorReadAdmission::Served)
-                    .await?;
+                // A reload that keeps every configured owner and started no
+                // session leaves nothing for the RIB to install or order, so
+                // settlement does not queue behind post-commit export work.
+                if !self.configured_owners.publication_is_noop(&next) {
+                    let send = Self::send_configured_owners(
+                        self.rib_tx.clone(),
+                        receipt,
+                        next.values()
+                            .map(|entry| Arc::clone(&entry.owner))
+                            .collect(),
+                    );
+                    // SIGHUP settlement runs this after a reload completes,
+                    // when the RIB's primary queue can hold seconds of
+                    // post-commit export work. The configuration is already
+                    // committed and reads never touch the owner catalogue, so
+                    // serve them too.
+                    self.await_with_readiness(send, OperatorReadAdmission::Served)
+                        .await?;
+                }
                 for entry in next.values() {
                     entry.admission.acknowledge_publication();
                 }

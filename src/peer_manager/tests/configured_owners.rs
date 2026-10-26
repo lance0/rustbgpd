@@ -132,8 +132,58 @@ async fn configured_owner_tentative_delete_and_compensation_preserve_incarnation
 
     let unchanged = begin(&mut manager).await;
     manager.current_config.neighbors[0].description = Some("new label".into());
-    publish(&mut manager, &mut rib_rx, unchanged).await;
+    assert_eq!(
+        manager
+            .configured_owner_publication(PublicationOperation::Publish(unchanged))
+            .await,
+        Ok(unchanged)
+    );
     assert_eq!(static_owner(&mut manager, 65002).unwrap(), first);
+}
+
+/// A reload that keeps every configured owner and starts no session (a
+/// policy-only SIGHUP) settles without the RIB round trip: the RIB already
+/// holds that roster, and the acknowledgement would otherwise queue behind
+/// the reload's own post-commit export work. Membership changes still
+/// publish, and a session capture with an unchanged roster still waits for
+/// the RIB barrier (`configured_owner_static_role_change_waits_for_publication_ack`).
+#[tokio::test]
+async fn configured_owner_unchanged_roster_settles_without_rib_round_trip() {
+    let (mut manager, mut rib_rx) = owner_manager();
+    manager.replace_current_config(static_config(65002));
+    let initial = begin(&mut manager).await;
+    let first = static_owner(&mut manager, 65002).unwrap();
+    publish(&mut manager, &mut rib_rx, initial).await;
+
+    let policy_only = begin(&mut manager).await;
+    // Nobody answers the RIB lane: a publication that waited on it would
+    // hold this future until the timeout.
+    let settled = tokio::time::timeout(
+        Duration::from_secs(5),
+        manager.configured_owner_publication(PublicationOperation::Publish(policy_only)),
+    )
+    .await
+    .expect("an unchanged roster must not wait on the RIB primary lane");
+    assert_eq!(settled, Ok(policy_only));
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    let committed = manager
+        .configured_owner_admission_for_static(key("192.0.2.1".parse().unwrap()), 65002)
+        .unwrap()
+        .unwrap();
+    assert_eq!(committed.owner, first);
+    assert!(committed.is_published());
+
+    // A later membership change publishes a newer receipt over the skip.
+    let changed = begin(&mut manager).await;
+    manager.current_config.neighbors.clear();
+    assert_eq!(
+        publish(&mut manager, &mut rib_rx, changed).await,
+        Vec::new()
+    );
+    assert!(changed.0 > policy_only.0);
 }
 
 #[tokio::test]
@@ -189,7 +239,14 @@ async fn configured_owner_dynamic_prefix_spelling_preserves_captured_range() {
         .unwrap();
     let receipt = begin(&mut manager).await;
     manager.current_config.dynamic_neighbors[0].prefix = "127.99.12.34/8".into();
-    publish(&mut manager, &mut rib_rx, receipt).await;
+    // The same effective range keeps the roster, so nothing reaches the RIB.
+    assert_eq!(
+        manager
+            .configured_owner_publication(PublicationOperation::Publish(receipt))
+            .await,
+        Ok(receipt)
+    );
+    assert!(rib_rx.try_recv().is_err());
     let same = manager
         .configured_owner_admission_for_dynamic(&accepted, 0)
         .unwrap()
@@ -456,6 +513,8 @@ async fn configured_owner_publication_serves_readiness_while_rib_acknowledgement
     use rustbgpd_api::peer_types::PeerManagerReadinessQuery;
 
     let (mut manager, mut rib_rx) = owner_manager();
+    // A roster change, so the publication must wait for the RIB.
+    manager.replace_current_config(static_config(65002));
     let (tx, rx) = mpsc::channel(4);
     manager.rx = rx;
     let (readiness_tx, readiness_rx) = mpsc::channel(1);
