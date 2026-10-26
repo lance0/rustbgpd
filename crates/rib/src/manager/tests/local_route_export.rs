@@ -1612,25 +1612,33 @@ fn injected_flowspec_is_exported_during_selection_deferral() {
         "no EoR and no unicast payload may leave before release"
     );
     // A peer established inside the window gets the rule in its initial
-    // table, and a dirty resync keeps it; neither sends our FlowSpec EoR.
+    // table, and a dirty resync re-sends it; neither withdraws it or sends
+    // our FlowSpec EoR. Each path is drained and checked on its own.
     let late = PeerId::from_addr(v4(3));
     let mut late_rx = peer_up(&mut manager, late, ipv4_flowspec_sendable(), None, 0, 64);
+    let assert_window_sends_rule = |late_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+                                    path: &str| {
+        let sent: Vec<_> = std::iter::from_fn(|| late_rx.try_recv().ok()).collect();
+        let announced: Vec<_> = sent
+            .iter()
+            .flat_map(|update| &update.flowspec_announce)
+            .map(|route| (route.selection_key(), route.peer))
+            .collect();
+        assert_eq!(
+            announced,
+            vec![(key.clone(), LOCAL_PEER)],
+            "{path} must send the injected rule"
+        );
+        assert!(
+            sent.iter().all(|update| update.flowspec_withdraw.is_empty()
+                && !update.end_of_rib.contains(&FLOWSPEC)),
+            "{path}: no withdrawal and no FlowSpec EoR inside the window"
+        );
+    };
+    assert_window_sends_rule(&mut late_rx, "the initial table");
     manager.mark_outbound_dirty(late);
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    let window: Vec<_> = std::iter::from_fn(|| late_rx.try_recv().ok()).collect();
-    assert!(window.iter().any(|update| {
-        update
-            .flowspec_announce
-            .iter()
-            .any(|r| r.peer == LOCAL_PEER)
-    }));
-    assert!(
-        window
-            .iter()
-            .all(|update| update.flowspec_withdraw.is_empty()
-                && !update.end_of_rib.contains(&FLOWSPEC)),
-        "no withdrawal and no FlowSpec EoR inside the window"
-    );
+    assert_window_sends_rule(&mut late_rx, "the dirty resync");
     let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
     assert_eq!(
         row(&page, late).disposition,
