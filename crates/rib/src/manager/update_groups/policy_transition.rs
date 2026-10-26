@@ -430,14 +430,11 @@ impl RibManager {
             && rs_asns
                 .iter()
                 .all(|asn| prestaged.rs_asns.binary_search(asn).is_ok());
-        self.replacement_checkpoint(true);
-        let capacity = logs.iter().flatten().map(ShardedMap::len).sum();
-        let mut dirty = FastSet::with_capacity_and_hasher(capacity, FastState::default());
-        self.replacement_checkpoint(true);
+        let mut dirty = self.reserve_dirty_union(&logs);
         for mut log in logs.into_iter().flatten() {
             for &key in log.keys() {
                 self.replacement_checkpoint(false);
-                debug_assert!(dirty.len() < dirty.capacity());
+                debug_assert!(dirty.len() < dirty.capacity() || dirty.contains(&key));
                 dirty.insert(key);
             }
             crate::adj_rib_out::release_sharded_map(&mut log, &mut || {
@@ -453,6 +450,32 @@ impl RibManager {
         self.prestaged_inventory = Some(prestaged);
         self.retire_prestaged_transition_inventory();
         outcome
+    }
+
+    /// An empty set sized for the union of both key logs: keys churned in
+    /// both groups count once, at one lookup per key of the smaller log.
+    fn reserve_dirty_union(
+        &self,
+        logs: &[Option<ShardedMap<(Prefix, u32), ()>>; 2],
+    ) -> FastSet<(Prefix, u32)> {
+        self.replacement_checkpoint(true);
+        let capacity = match logs {
+            [Some(a), Some(b)] => {
+                let (large, small) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+                large.len()
+                    + small
+                        .keys()
+                        .filter(|key| {
+                            self.replacement_checkpoint(false);
+                            !large.contains_key(*key)
+                        })
+                        .count()
+            }
+            _ => logs.iter().flatten().map(ShardedMap::len).sum(),
+        };
+        let dirty = FastSet::with_capacity_and_hasher(capacity, FastState::default());
+        self.replacement_checkpoint(true);
+        dirty
     }
 
     /// Compact rows and their successful lengths together, then re-probe only
@@ -1258,6 +1281,27 @@ mod growth_tests {
     use crate::test_support::make_route_with_lp;
     use rustbgpd_wire::{Afi, Ipv4Prefix, PathAttribute, Safi};
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn dirty_union_reserves_overlap_once_before_filling() {
+        let prefix =
+            |index: u32| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + index), 32));
+        let mut logs = [ShardedMap::default(), ShardedMap::default()];
+        for index in 0..32_768 {
+            logs[0].insert((prefix(index), 0), ());
+            logs[1].insert((prefix(index + 16_384), 0), ());
+        }
+        let dirty = inventory_manager().reserve_dirty_union(&logs.map(Some));
+        assert!(dirty.is_empty());
+        assert!(
+            dirty.capacity() >= 49_152,
+            "the union is reserved before filling"
+        );
+        assert!(
+            dirty.capacity() < 65_536,
+            "keys churned in both groups count once"
+        );
+    }
 
     fn inventory_manager() -> RibManager {
         let (_, updates) = tokio::sync::mpsc::channel(1);

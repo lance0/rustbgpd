@@ -778,14 +778,41 @@ fn vpn_policy_denied_grows_one_shard_per_insert() {
 fn regroup_snapshot_reserves_next_hop_overrides_before_filling() {
     let mut group = empty_group();
     for index in 0..32_768 {
-        let mut delta = announce_delta(growth_prefix(index), OTHER1, None);
+        // The member's own half stays out of its view, so a reserve made
+        // before filling leaves more capacity than growth would.
+        let source = if index % 2 == 0 { OTHER1 } else { MEMBER };
+        let mut delta = announce_delta(growth_prefix(index), source, None);
         delta.new.as_mut().unwrap().1 = Some(NextHopAction::Self_);
         group.apply_delta(&delta);
     }
     let snapshot =
         group.member_view_snapshot_with_checkpoint(MEMBER, None, &HashSet::new(), &mut |_| {});
-    assert_eq!(snapshot.next_hop_overrides.len(), 32_768);
+    assert_eq!(snapshot.next_hop_overrides.len(), 16_384);
+    assert_eq!(snapshot.unicast.len(), 16_384);
+    assert!(
+        snapshot.next_hop_overrides.capacity() >= 32_768,
+        "every table override is reserved before filling"
+    );
+}
+
+#[test]
+fn regroup_snapshot_sizes_next_hop_overrides_to_the_override_count() {
+    let mut group = empty_group();
+    for index in 0..32_768 {
+        let mut delta = announce_delta(growth_prefix(index), OTHER1, None);
+        if index < 3 {
+            delta.new.as_mut().unwrap().1 = Some(NextHopAction::Self_);
+        }
+        group.apply_delta(&delta);
+    }
+    let snapshot =
+        group.member_view_snapshot_with_checkpoint(MEMBER, None, &HashSet::new(), &mut |_| {});
+    assert_eq!(snapshot.next_hop_overrides.len(), 3);
     assert_eq!(snapshot.unicast.len(), 32_768);
+    assert!(
+        snapshot.next_hop_overrides.capacity() < 64,
+        "three overrides do not reserve a full-table map"
+    );
 }
 
 /// Per-client-best sibling of [`empty_group`] with a caller-chosen

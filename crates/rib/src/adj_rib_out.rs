@@ -389,6 +389,11 @@ impl AdjRibOut {
         }
     }
 
+    /// Routes carrying an explicit next-hop action, `Self_` included.
+    pub(crate) fn next_hop_override_count(&self) -> usize {
+        self.self_next_hop_count + self.next_hop_overrides.len()
+    }
+
     pub(crate) fn has_next_hop_overrides(&self) -> bool {
         self.self_next_hop_count != 0 || !self.next_hop_overrides.is_empty()
     }

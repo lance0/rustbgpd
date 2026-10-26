@@ -698,7 +698,7 @@ pub(in crate::manager) fn table_growth_observation(table: &AdjRibOut) -> TableGr
 }
 
 /// Report each group-table store whose capacity changed since `observation`.
-/// `site` separates growth inside one commit write from a checkpointed reserve.
+/// `site` names the write that grew it.
 #[cfg(feature = "bench-internals")]
 pub(in crate::manager) fn observe_table_growth(
     table: &AdjRibOut,
@@ -1594,8 +1594,14 @@ impl GroupRibOut {
             rs_control_route_rewrite(&mut route, large_communities, rs_control);
             if let Some(action) = entry.nh {
                 if next_hop_overrides.capacity() == 0 {
+                    // Every override is a table override or a lane entry's,
+                    // so this bound stays near the override count when
+                    // policy sets a next hop on only a few routes.
                     checkpoint(true);
-                    next_hop_overrides.reserve(self.table.len());
+                    next_hop_overrides.reserve(
+                        (self.table.next_hop_override_count() + self.runner_up.len())
+                            .min(self.table.len()),
+                    );
                     checkpoint(true);
                 }
                 debug_assert!(next_hop_overrides.len() < next_hop_overrides.capacity());

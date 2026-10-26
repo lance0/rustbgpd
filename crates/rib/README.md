@@ -69,9 +69,9 @@ The update-group and manager inventory has these boundaries:
 | Group `policy_filtered` | Sharded outer prefix map; the existing checkpointed writer replaces each affected prefix's candidate denials. |
 | Group `vpn_policy_denied` | Sharded; remove affected keys directly, then insert denials between checkpoints. |
 | Route slabs (Adj-RIB-In, Adj-RIB-Out, group table) | Fixed 64Ki-slot segments: growth allocates one segment and copies at most one, so a group that joins before the feed fills without whole-table copies. The prefix trie and `Self_` flags still double inside one insert; their entries are a fraction of a route body's size. |
-| Regroup snapshot `next_hop_overrides` | Reserve the staged table's size on the first override, before filling the empty map. Snapshots without overrides allocate nothing. |
+| Regroup snapshot `next_hop_overrides` | On the first override, reserve the table's override count plus exception-lane entries, before filling the empty map. Snapshots without overrides allocate nothing. |
 | Policy-transition prestage `failed` and `tagged` | Sharded; bounded inventory slices and dirty-key reconciliation retain checkpoints, including retirement. |
-| Group `inventory_log` and its dirty-key union | Logs are sharded and retire between checkpoints. The empty union reserves the sum of both log lengths before checkpointed insertion. |
+| Group `inventory_log` and its dirty-key union | Logs are sharded and retire between checkpoints. The empty union reserves the union of both logs, counting keys churned in both groups once, before checkpointed insertion. |
 | `ExportMemo.entries` | Sharded; full-table export callers already checkpoint per route or candidate. Distinct source attribute allocations can fill the map. |
 | BoRR `refresh_stale_*` | Still requires readiness ownership and checkpoints across snapshot retain, clearing and construction before bounding set growth. |
 | LLGR `*_llgr_stale_local_tags` | Still requires checkpoint-aware promotion through removal, attribute mutation/interning, selection and cleanup before bounding set growth. |
