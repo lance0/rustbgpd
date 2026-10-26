@@ -77,6 +77,10 @@ RR benchmarking and the soak gates. It is not a BGP implementation and
 not an operator tool; see the crate docs in `evpn-load/src/lib.rs` for
 scope.
 
+The [EVPN qualification runner](scale/evpn-qualification/README.md) compares
+owned and private output for initial-load memory, policy regroup and recovery
+over real sessions. Its results do not authorize production ownership.
+
 The tester validates the workload before listening for BGP. `--batch` must
 be non-zero, and an enabled churn phase requires both a non-zero `--count`
 and `--churn-rate`. A zero count remains useful for a session-only peer, and
