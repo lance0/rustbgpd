@@ -886,66 +886,100 @@ pub(crate) mod tests {
         assert!(std::net::TcpStream::connect(addr).is_err());
     }
 
-    #[test]
-    fn livez_answers_while_scrapes_fill_the_connection_budget() {
+    #[tokio::test(start_paused = true)]
+    async fn livez_answers_while_scrapes_fill_the_connection_budget() {
         use rustbgpd_api::metrics_render::RENDER_DEADLINE;
         use std::io::{Read, Write};
 
-        let (addr, entered, release) = start_gated_server();
-        let send_scrape = || {
-            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let metrics = BgpMetrics::new();
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        metrics
+            .registry()
+            .register(Box::new(GatedCollector {
+                gauge: prometheus::IntGauge::new("test_gated_render", "test").unwrap(),
+                entered: entered_tx,
+                release: std::sync::Mutex::new(release_rx),
+            }))
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        let incoming = TcpListenerStream::new(listener).map(move |stream| {
+            accepted_tx.send(()).unwrap();
             stream
-                .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .unwrap();
-            stream
-        };
-        let mut scrapes = vec![send_scrape()];
-        entered
-            .recv_timeout(Duration::from_secs(5))
-            .expect("first render must start");
-        // One scrape per connection permit, all behind the held render. The
-        // accept queue is FIFO, so the server takes every scrape before it
-        // can take the probe connected after them.
-        scrapes.extend((1..MAX_CONNECTIONS).map(|_| send_scrape()));
+        });
+        let http_task = tokio::spawn(serve_incoming(
+            incoming,
+            addr.to_string(),
+            metrics,
+            unused_probe(),
+            None,
+        ));
 
-        let livez = (|| {
-            let mut stream = std::net::TcpStream::connect(addr)?;
-            // Below the render deadline: the probe must not depend on queued
-            // scrapes timing out to get a connection permit.
-            stream.set_read_timeout(Some(RENDER_DEADLINE / 2))?;
-            stream.write_all(b"GET /livez HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
-            let mut response = String::new();
-            stream.read_to_string(&mut response)?;
-            std::io::Result::Ok(response)
-        })();
-        for _ in 0..MAX_SCRAPES {
-            release.send(()).unwrap();
-        }
-        let livez = livez.expect("/livez must answer while scrapes fill the connection budget");
-        assert!(livez.starts_with("HTTP/1.1 200 OK"), "{livez}");
+        // A blocking client inhibits paused-clock auto-advance for the whole
+        // interleaving; socket read timeouts still bound a broken server.
+        tokio::task::spawn_blocking(move || {
+            let send_scrape = || {
+                let mut stream = std::net::TcpStream::connect(addr).unwrap();
+                stream
+                    .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .unwrap();
+                accepted_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("scrape connection must be admitted");
+                stream
+            };
+            let mut scrapes = vec![send_scrape()];
+            entered
+                .recv_timeout(Duration::from_secs(5))
+                .expect("first render must start");
+            // Each scrape is accepted before the probe connects; their render
+            // deadlines cannot expire while this blocking client drives the test.
+            scrapes.extend((1..MAX_CONNECTIONS).map(|_| send_scrape()));
 
-        let (mut served, mut rejected) = (0, 0);
-        for mut stream in scrapes {
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            let mut response = String::new();
-            stream.read_to_string(&mut response).unwrap();
-            if response.starts_with("HTTP/1.1 200 OK") {
-                served += 1;
-            } else {
-                assert!(
-                    response.starts_with("HTTP/1.1 503 Service Unavailable")
-                        && response.ends_with("too many concurrent scrapes\n"),
-                    "{response}"
-                );
-                rejected += 1;
+            let livez = (|| {
+                let mut stream = std::net::TcpStream::connect(addr)?;
+                // Below the render deadline: the probe must not depend on queued
+                // scrapes timing out to get a connection permit.
+                stream.set_read_timeout(Some(RENDER_DEADLINE / 2))?;
+                stream.write_all(b"GET /livez HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+                let mut response = String::new();
+                stream.read_to_string(&mut response)?;
+                std::io::Result::Ok(response)
+            })();
+            for _ in 0..MAX_SCRAPES {
+                release.send(()).unwrap();
             }
-        }
-        assert_eq!(
-            (served, rejected),
-            (MAX_SCRAPES, MAX_CONNECTIONS - MAX_SCRAPES)
-        );
+            let livez = livez.expect("/livez must answer while scrapes fill the connection budget");
+            assert!(livez.starts_with("HTTP/1.1 200 OK"), "{livez}");
+
+            let (mut served, mut rejected) = (0, 0);
+            for mut stream in scrapes {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut response = String::new();
+                stream.read_to_string(&mut response).unwrap();
+                if response.starts_with("HTTP/1.1 200 OK") {
+                    served += 1;
+                } else {
+                    assert!(
+                        response.starts_with("HTTP/1.1 503 Service Unavailable")
+                            && response.ends_with("too many concurrent scrapes\n"),
+                        "{response}"
+                    );
+                    rejected += 1;
+                }
+            }
+            assert_eq!(
+                (served, rejected),
+                (MAX_SCRAPES, MAX_CONNECTIONS - MAX_SCRAPES)
+            );
+        })
+        .await
+        .unwrap();
+        http_task.abort();
     }
 
     #[test]
