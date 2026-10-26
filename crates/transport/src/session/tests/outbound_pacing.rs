@@ -300,17 +300,20 @@ async fn outbound_pacing_releases_deadline_after_filtered_slice() {
             route.peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
         }
         let update = if shared_fallback {
-            let encode =
-                ProgressiveGroupEncode::test_new((*session.publish_export_profile()).clone());
-            encode.test_finish(StreamTerminal::Failed);
             let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+            let update = shared_group_envelope(&session, &shared, excluded, &Arc::new(routes));
+            let encode = ProgressiveGroupEncode::test_new(
+                (*session.publish_export_profile()).clone(),
+                &update,
+            );
+            encode.test_finish(StreamTerminal::Failed);
             assert!(
                 shared
                     .cell
                     .set(Arc::new(encode) as Arc<dyn std::any::Any + Send + Sync>)
                     .is_ok()
             );
-            shared_group_envelope(&session, &shared, excluded, &routes)
+            update
         } else {
             let mut update = pacing_update(&session, routes);
             update.end_of_rib.clear();
@@ -384,6 +387,7 @@ async fn outbound_pacing_shared_encoder_full_does_not_truncate_group() {
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     let routes = pacing_routes(5_000, true);
     let excluded = Ipv4Addr::new(192, 0, 2, 254);
+    let routes = Arc::new(routes);
     let update = shared_group_envelope(&encoder, &shared, excluded, &routes);
     encoder.handle_outbound_route_update(update).await;
     assert!(encoder.pending_outbound.is_some());

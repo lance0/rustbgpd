@@ -1102,8 +1102,11 @@ Clean members share one route payload and encode cell when they admit the same
 changed inventory. Source-excluded views, retained recovery, complete feeds and
 exact-export refusals remain private. The shared inventory is sorted once;
 member-specific filtering detaches it, and retirement checkpoints release route
-bodies cooperatively. Transport checks the complete export profile before
-reuse, sends each member's withdrawals first, and keeps terminal markers last.
+bodies cooperatively. Before reuse, transport checks the complete export
+profile and that the envelope carries the same family payload allocation the
+encoder bound at election, so a cell that reaches a different unicast, VPN or
+EVPN inventory falls back to private encoding. It sends each member's
+withdrawals first and keeps terminal markers last.
 A failed or canceled producer wakes followers to complete private encoding.
 
 The real-RIB-to-session socket comparison covers Types 1–5, IPv4 and IPv6 next

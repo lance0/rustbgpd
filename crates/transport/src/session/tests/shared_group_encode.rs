@@ -84,17 +84,23 @@ fn shared_query_update(
     Vec<super::shared_group::SharedAnnounceChunk>,
 ) {
     let profile = (*member.publish_export_profile()).clone();
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let update = shared_group_envelope(
+        member,
+        &shared,
+        Ipv4Addr::new(10, 43, 0, 254),
+        &Arc::new(announce.to_vec()),
+    );
     let typed = Arc::new(super::shared_group::ProgressiveGroupEncode::test_new(
         profile.clone(),
+        &update,
     ));
-    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     assert!(
         shared
             .cell
             .set(Arc::clone(&typed) as Arc<dyn std::any::Any + Send + Sync>)
             .is_ok()
     );
-    let update = shared_group_envelope(member, &shared, Ipv4Addr::new(10, 43, 0, 254), announce);
     let chunks = super::shared_group::encode_shared_unicast_slice(
         &profile,
         &mut super::export::PreparedAttrCache::default(),
@@ -143,6 +149,7 @@ async fn shared_group_refresh_terminals_follow_chunks_at_one_slot_capacity() {
                     route
                 })
                 .collect();
+            let routes = Arc::new(routes);
             for producer in [true, false] {
                 let (mut member, _commands, _) = shared_fairness_member();
                 if enhanced {
@@ -259,6 +266,7 @@ async fn shared_group_initial_eor_precedes_queued_refresh_in_real_actor() {
         let (bulk, mut frames) = mpsc::channel(1);
         member.writer_bulk_tx = Some(bulk);
         let routes = [make_route(100)];
+        let routes = Arc::new(routes.to_vec());
         let mut initial = if producer {
             shared_group_envelope(
                 &member,
@@ -797,6 +805,7 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
             })
             .collect();
         let mut held_writer = None;
+        let announce = Arc::new(announce);
         let update = if elected_encoder {
             shared_group_envelope(
                 &member,
@@ -912,6 +921,7 @@ async fn shared_group_elected_encoder_yields_for_new_reads() {
     let (mut member, commands, _frames) = shared_fairness_member();
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     let routes = shared_fairness_routes();
+    let routes = Arc::new(routes);
     let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 44, 0, 2), &routes);
     let mut delivery = Box::pin(member.handle_outbound_route_update(update));
     let mut cx = Context::from_waker(Waker::noop());
@@ -953,7 +963,7 @@ async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {
         &member,
         &shared,
         Ipv4Addr::new(10, 44, 0, 2),
-        &shared_fairness_routes(),
+        &Arc::new(shared_fairness_routes()),
     );
     let mut delivery = Box::pin(member.handle_outbound_route_update(update));
     let mut cx = Context::from_waker(Waker::noop());
@@ -1032,6 +1042,7 @@ async fn shared_group_elected_encoder_cancellation_wakes_follower_and_falls_back
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     let routes = shared_fairness_routes();
     let excluded = Ipv4Addr::new(10, 44, 0, 2);
+    let routes = Arc::new(routes);
     let mut update = shared_group_envelope(&encoder, &shared, excluded, &routes);
     update.refresh_markers = vec![
         (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR),
@@ -1223,6 +1234,7 @@ async fn shared_group_encode_first_member_encodes_and_second_reuses() {
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
 
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let announce = Arc::new(announce);
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
     member_a.test_drain_outbound(update).await;
     let published = shared.cell.get().expect("first member publishes the cell");
@@ -1280,6 +1292,7 @@ async fn shared_group_encode_profile_mismatch_falls_back_to_local_encode() {
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
 
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let announce = Arc::new(announce);
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
     member_a.test_drain_outbound(update).await;
     assert!(shared.cell.get().is_some());
@@ -1321,6 +1334,7 @@ async fn shared_group_encode_skips_chunks_of_unnegotiated_families() {
     // Encoder negotiated IPv4 only, and its own source is excluded — its
     // wire stream must skip the IPv6 chunk it still encoded for the group.
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let announce = Arc::new(announce);
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
     member_a.test_drain_outbound(update).await;
     let published = shared.cell.get().expect("cell published");
@@ -1372,7 +1386,12 @@ async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
 
     let (mut member, mut wire) = shared_group_member(65001).await;
     let profile = (*member.publish_export_profile()).clone();
-    let encode = ProgressiveGroupEncode::test_new(profile.clone());
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    // Exclusion targets an uninvolved source, so this member wants both
+    // routes.
+    let announce = Arc::new(announce);
+    let update = shared_group_envelope(&member, &shared, source_x, &announce);
+    let encode = ProgressiveGroupEncode::test_new(profile.clone(), &update);
     // Simulate an encoder that published the first source's chunk and then
     // hit an anomaly.
     let mut cache = super::export::PreparedAttrCache::default();
@@ -1386,7 +1405,6 @@ async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
     .expect("head slice encodes");
     encode.test_publish(head);
     encode.test_finish(StreamTerminal::Failed);
-    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     assert!(
         shared
             .cell
@@ -1394,10 +1412,6 @@ async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
             .is_ok(),
         "fresh cell"
     );
-
-    // Exclusion targets an uninvolved source, so this member wants both
-    // routes.
-    let update = shared_group_envelope(&member, &shared, source_x, &announce);
     member.test_drain_outbound(update).await;
 
     // Wire: the shared head chunk (prefix A), then the full local fallback
@@ -1423,7 +1437,10 @@ async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
 async fn shared_group_encoder_guard_publishes_failed_on_unwind() {
     use super::shared_group::{EncoderGuard, ProgressiveGroupEncode, StreamTerminal};
     let (member, _wire) = shared_group_member(65001).await;
-    let encode = ProgressiveGroupEncode::test_new((*member.publish_export_profile()).clone());
+    let encode = ProgressiveGroupEncode::test_new(
+        (*member.publish_export_profile()).clone(),
+        &empty_outbound_update(),
+    );
     drop(EncoderGuard(&encode));
     assert_eq!(encode.test_snapshot(), (0, Some(StreamTerminal::Failed)));
 }
@@ -1474,6 +1491,7 @@ async fn shared_group_encode_streams_multiple_slices() {
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
 
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let announce = Arc::new(announce);
     let update = shared_group_envelope(&member_a, &shared, sources[0], &announce);
     member_a.test_drain_outbound(update).await;
     let (chunk_count, terminal) = shared
@@ -1559,6 +1577,7 @@ async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
 
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
+    let announce = Arc::new(announce);
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
     member_a.test_drain_outbound(update).await;
     let (chunk_count, terminal) = shared
@@ -1730,6 +1749,7 @@ async fn shared_group_mixed_source_inventory_keeps_minimal_updates_per_member() 
     );
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
 
+    let announce = Arc::new(announce);
     for excluded in [sources[0], sources[1]] {
         let (mut member, mut wire) = shared_group_member(65001).await;
         let update = shared_group_envelope(&member, &shared, excluded, &announce);
@@ -1783,6 +1803,7 @@ async fn shared_group_nh_override_alignment_survives_source_sort() {
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
 
     let (mut member, mut wire) = shared_group_member(65001).await;
+    let announce = Arc::new(announce);
     let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
     update.next_hop_override = overrides.clone().into();
     member.test_drain_outbound(update).await;
@@ -1854,15 +1875,16 @@ async fn shared_group_consumer_streams_concurrently_with_live_encoder() {
         &[1],
     )
     .unwrap();
-    let typed = Arc::new(ProgressiveGroupEncode::test_new(profile));
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let announce = Arc::new(announce);
+    let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 42, 0, 9), &announce);
+    let typed = Arc::new(ProgressiveGroupEncode::test_new(profile, &update));
     assert!(
         shared
             .cell
             .set(Arc::clone(&typed) as Arc<dyn std::any::Any + Send + Sync>)
             .is_ok()
     );
-    let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 42, 0, 9), &announce);
     let mut member = member;
     // The consumer hands the member back: dropping a session aborts its writer.
     let consumer = tokio::spawn(async move {
@@ -2017,7 +2039,8 @@ async fn ungrouped_frames(
 ) -> Vec<Vec<u8>> {
     let (mut control, mut wire) = shared_group_member(local_asn).await;
     let unused = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
-    let mut update = shared_group_envelope(&control, &unused, excluded, announce);
+    let mut update =
+        shared_group_envelope(&control, &unused, excluded, &Arc::new(announce.to_vec()));
     update.shared_group_encode = None;
     update.withdraw = withdraw.to_vec();
     control.test_drain_outbound(update).await;
@@ -2090,6 +2113,7 @@ async fn shared_group_encode_per_key_wire_bytes_and_eor_match_private_encode() {
     let (mut private, mut private_wire) = shared_group_member(65001).await;
     let mut streams = [Vec::new(), Vec::new(), Vec::new()];
     for ((announce, withdraw, eor, frame_count), shared) in passes.iter().zip(&shared_cells) {
+        let announce = Arc::new(announce.clone());
         for (index, (member, wire)) in [
             (&mut encoder, &mut encoder_wire),
             (&mut follower, &mut follower_wire),
@@ -2098,7 +2122,7 @@ async fn shared_group_encode_per_key_wire_bytes_and_eor_match_private_encode() {
         .into_iter()
         .enumerate()
         {
-            let mut update = shared_group_envelope(member, shared, excluded, announce);
+            let mut update = shared_group_envelope(member, shared, excluded, &announce);
             update.withdraw.clone_from(withdraw);
             if *eor {
                 update.end_of_rib = vec![(Afi::Ipv4, Safi::Unicast)];
@@ -2182,6 +2206,7 @@ async fn shared_group_encode_per_key_wire_bytes_and_eor_match_private_encode() {
 async fn shared_group_mixed_failover_pass_stays_on_encode_once() {
     use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     let (announce, withdraw) = mixed_failover_pass();
+    let announce = Arc::new(announce);
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     let members = [
         (Ipv4Addr::new(10, 44, 0, 1), true),
@@ -2254,6 +2279,7 @@ async fn shared_group_mixed_failover_pass_stays_on_encode_once() {
 #[tokio::test]
 async fn shared_group_mixed_pass_fallback_members_match_ungrouped_bytes() {
     let (announce, withdraw) = mixed_failover_pass();
+    let announce = Arc::new(announce);
     let excluded = Ipv4Addr::new(10, 44, 0, 9);
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     let (mut encoder, mut encoder_wire) = shared_group_member(65001).await;
@@ -2302,10 +2328,13 @@ async fn shared_group_mixed_pass_fallback_members_match_ungrouped_bytes() {
 async fn shared_group_mixed_pass_failure_resumes_at_announcements() {
     use super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     let (announce, withdraw) = mixed_failover_pass();
+    let announce = Arc::new(announce);
     let excluded = Ipv4Addr::new(10, 44, 0, 9);
     let (mut member, mut wire) = shared_group_member(65001).await;
     let profile = (*member.publish_export_profile()).clone();
-    let encode = ProgressiveGroupEncode::test_new(profile.clone());
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
+    let encode = ProgressiveGroupEncode::test_new(profile.clone(), &update);
     let head = super::shared_group::encode_shared_unicast_slice(
         &profile,
         &mut super::export::PreparedAttrCache::default(),
@@ -2317,14 +2346,12 @@ async fn shared_group_mixed_pass_failure_resumes_at_announcements() {
     let head_bytes = head[0].bytes.to_vec();
     encode.test_publish(head);
     encode.test_finish(StreamTerminal::Failed);
-    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     assert!(
         shared
             .cell
             .set(Arc::new(encode) as Arc<dyn std::any::Any + Send + Sync>)
             .is_ok()
     );
-    let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
     update.withdraw.clone_from(&withdraw);
     member.test_drain_outbound(update).await;
 
@@ -2418,6 +2445,7 @@ async fn shared_group_withdrawals_do_not_wait_for_the_first_shared_chunk() {
 #[tokio::test]
 async fn shared_group_mixed_pass_rib_out_bmp_mirrors_emitted_frames() {
     let (announce, withdraw) = mixed_failover_pass();
+    let announce = Arc::new(announce);
     let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
     let members = [
         (Ipv4Addr::new(10, 44, 0, 2), true),
@@ -2501,6 +2529,7 @@ async fn shared_group_dropped_ipv6_next_hop_warns_once_per_pass() {
 
     // Members stay alive: dropping a session aborts its writer.
     let (mut members, mut wires) = (Vec::new(), Vec::new());
+    let announce = Arc::new(announce);
     for _ in 0..2 {
         let (mut member, wire) = shared_group_member(65001).await;
         let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
@@ -3008,4 +3037,68 @@ async fn shared_evpn_canceled_producer_falls_back_after_withdrawals_without_miss
         ));
     }
     assert_eq!(announced.values().sum::<usize>(), 4096 + routes.len());
+}
+
+/// One encode cell reaching envelopes with different announce payloads must
+/// not let a member stream another member's inventory. Whether the cell was
+/// elected by a unicast cohort payload or by another EVPN inventory, a member
+/// carrying its own EVPN routes refuses the stream and encodes privately.
+#[tokio::test]
+async fn shared_encode_cell_refuses_a_mismatched_payload() {
+    let families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::L2Vpn, Safi::Evpn)];
+    let member = || {
+        let mut member = make_test_session(65001, 65002);
+        install_enhanced_refresh_session(&mut member, families.clone(), false);
+        let (bulk, frames) = mpsc::channel(8);
+        member.writer_bulk_tx = Some(bulk);
+        (member, frames)
+    };
+    for elect_unicast in [true, false] {
+        let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+        let (mut encoder, _encoder_frames) = member();
+        let mut electing = OutboundRouteUpdate {
+            exact_export_snapshot: Some(encoder.publish_export_profile()),
+            shared_group_encode: Some(Arc::clone(&shared)),
+            ..OutboundRouteUpdate::default()
+        };
+        if elect_unicast {
+            electing.announce = Arc::new(vec![make_sourced_route(
+                Ipv4Addr::new(10, 45, 0, 1),
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+                64_601,
+            )]);
+            electing.next_hop_override = Arc::new(vec![None]);
+        } else {
+            electing.evpn_announce = Arc::new(vec![shared_evpn_route(101)]);
+        }
+        encoder.test_drain_outbound(electing).await;
+        assert!(shared.cell.get().is_some(), "the first envelope elects");
+
+        let (mut follower, mut frames) = member();
+        let routes = Arc::new(vec![shared_evpn_route(202)]);
+        let update = OutboundRouteUpdate {
+            exact_export_snapshot: Some(follower.publish_export_profile()),
+            evpn_announce: Arc::clone(&routes),
+            shared_group_encode: Some(Arc::clone(&shared)),
+            ..OutboundRouteUpdate::default()
+        };
+        assert!(
+            follower.prepare_shared_group(&update).await.is_none(),
+            "elect_unicast={elect_unicast}: a different payload must not join the stream"
+        );
+        follower.test_drain_outbound(update).await;
+        let mut announced = Vec::new();
+        while let Ok(frame) = frames.try_recv() {
+            for attr in parse_frame(&frame, false).attributes {
+                if let PathAttribute::MpReachNlri(mp) = attr {
+                    announced.extend(mp.evpn_announced);
+                }
+            }
+        }
+        assert_eq!(
+            announced,
+            vec![routes[0].route.clone()],
+            "elect_unicast={elect_unicast}: the member sends exactly its own routes"
+        );
+    }
 }

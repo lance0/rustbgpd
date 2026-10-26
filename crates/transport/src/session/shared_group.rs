@@ -19,8 +19,9 @@
 //! has either a live encoder or a terminal stream. After grouping the whole
 //! inventory by source, the encoder prepares, groups, and encodes bounded
 //! route slices, publishing each slice's chunks as they are produced. Every
-//! other member proves byte-equivalence with
-//! [`SessionExportProfile::has_same_wire_encoding`] and then *streams* the
+//! other member proves it carries the same family payload allocation the
+//! encoder bound at election, proves byte-equivalence with
+//! [`SessionExportProfile::has_same_wire_encoding`], and then *streams* the
 //! chunks — sending chunk `i` as soon as it exists instead of awaiting the
 //! whole payload — skipping the chunks of its own source (split horizon)
 //! and of families it did not negotiate. This makes a member's longest wire
@@ -63,7 +64,7 @@ use crate::fast_hash::FastMap as HashMap;
 use bytes::Bytes;
 use rustbgpd_rib::PeerId;
 use std::any::Any;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Routes per encoder slice: each slice is prepared, grouped, encoded, and
 /// published as one unit, so consumers' streaming granularity (and the gap
@@ -141,19 +142,57 @@ struct ProgressiveStateInner {
     terminal: Option<StreamTerminal>,
 }
 
+/// The one announce inventory a shared stream encodes: its family and its
+/// `Arc` allocation. The RIB cell carries no payload, so without this a cell
+/// reaching envelopes with different inventories (or another family) would
+/// let one member stream another member's routes. `Weak` pins the
+/// allocation address, so a freed and reused address cannot match, without
+/// retaining the routes.
+enum SharedPayload {
+    Unicast(Weak<Vec<Route>>),
+    Vpn(Weak<Vec<rustbgpd_rib::VpnRibRoute>>),
+    Evpn(Weak<Vec<rustbgpd_rib::EvpnRibRoute>>),
+}
+
+impl SharedPayload {
+    /// Eligibility admits exactly one non-empty announce family.
+    fn of(update: &OutboundRouteUpdate) -> Self {
+        if !update.evpn_announce.is_empty() {
+            Self::Evpn(Arc::downgrade(&update.evpn_announce))
+        } else if !update.vpn_announce.is_empty() {
+            Self::Vpn(Arc::downgrade(&update.vpn_announce))
+        } else {
+            Self::Unicast(Arc::downgrade(&update.announce))
+        }
+    }
+
+    fn matches(&self, update: &OutboundRouteUpdate) -> bool {
+        match self {
+            Self::Unicast(payload) => std::ptr::eq(payload.as_ptr(), Arc::as_ptr(&update.announce)),
+            Self::Vpn(payload) => std::ptr::eq(payload.as_ptr(), Arc::as_ptr(&update.vpn_announce)),
+            Self::Evpn(payload) => {
+                std::ptr::eq(payload.as_ptr(), Arc::as_ptr(&update.evpn_announce))
+            }
+        }
+    }
+}
+
 /// Cell payload created by the elected encoder *before* it encodes anything.
 pub(super) struct ProgressiveGroupEncode {
     /// The encoder's profile; consumers reuse chunks only after proving
     /// [`SessionExportProfile::has_same_wire_encoding`] against it.
     profile: SessionExportProfile,
+    /// The electing envelope's payload; consumers must carry the same one.
+    payload: SharedPayload,
     state: Mutex<ProgressiveStateInner>,
     progress: tokio::sync::Notify,
 }
 
 impl ProgressiveGroupEncode {
-    fn new(profile: SessionExportProfile) -> Self {
+    fn new(profile: SessionExportProfile, update: &OutboundRouteUpdate) -> Self {
         Self {
             profile,
+            payload: SharedPayload::of(update),
             state: Mutex::new(ProgressiveStateInner::default()),
             progress: tokio::sync::Notify::new(),
         }
@@ -216,8 +255,8 @@ impl ProgressiveGroupEncode {
     }
 
     #[cfg(test)]
-    pub(super) fn test_new(profile: SessionExportProfile) -> Self {
-        Self::new(profile)
+    pub(super) fn test_new(profile: SessionExportProfile, update: &OutboundRouteUpdate) -> Self {
+        Self::new(profile, update)
     }
     #[cfg(test)]
     pub(super) fn test_publish(&self, chunks: Vec<SharedAnnounceChunk>) {
@@ -246,7 +285,7 @@ impl Drop for EncoderGuard<'_> {
     }
 }
 
-/// Whether an envelope carries grouped unicast or VPN announcements, optionally
+/// Whether an envelope carries grouped unicast, VPN or EVPN announcements, optionally
 /// bracketed by refresh markers or `EoR` and preceded by that family's
 /// withdrawals. Those phases stay per member in the ordinary
 /// cursor; only the announce inventory is shared. Anything richer
@@ -663,7 +702,8 @@ impl PeerSession {
         let mut elected_encoder = false;
         let cell = shared.cell.get_or_init(|| {
             elected_encoder = true;
-            Arc::new(ProgressiveGroupEncode::new(export.clone())) as Arc<dyn Any + Send + Sync>
+            Arc::new(ProgressiveGroupEncode::new(export.clone(), update))
+                as Arc<dyn Any + Send + Sync>
         });
         let encode = Arc::clone(cell).downcast::<ProgressiveGroupEncode>().ok()?;
         if elected_encoder {
@@ -671,7 +711,7 @@ impl PeerSession {
                 .encode_and_send_shared_group(&encode, update, export)
                 .await?;
             Some((encode, next))
-        } else if export.has_same_wire_encoding(&encode.profile) {
+        } else if encode.payload.matches(update) && export.has_same_wire_encoding(&encode.profile) {
             Some((encode, 0))
         } else {
             None
