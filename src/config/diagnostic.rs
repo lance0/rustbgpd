@@ -383,7 +383,7 @@ fn match_field_value(
     }
 }
 
-/// Find a neighbor by address, then look up a specific field.
+/// Find a neighbor by address and optional interface, then look up a field.
 fn find_neighbor_field_span(
     source: &str,
     address: &str,
@@ -393,8 +393,13 @@ fn find_neighbor_field_span(
     let doc = parse_im(source)?;
     let neighbors = doc.get("neighbors")?.as_array_of_tables()?;
     for neighbor in neighbors {
-        if neighbor.get("address")?.as_str()? == address {
-            let span = neighbor.get(field_name)?.span()?;
+        let Some(record_address) = neighbor.get("address").and_then(|item| item.as_str()) else {
+            continue;
+        };
+        let record_interface = neighbor.get("interface").and_then(|item| item.as_str());
+        if super::scoped_neighbor_label(record_address, record_interface) == address
+            && let Some(span) = neighbor.get(field_name).and_then(toml_edit::Item::span)
+        {
             return Some((span, label.to_string()));
         }
     }
@@ -503,6 +508,29 @@ hold_time = 2
         assert!(rendered.contains("hold_time = 2"), "got: {rendered}");
         assert!(rendered.contains('^'), "got: {rendered}");
         assert!(rendered.contains("must be 0 or >= 3"), "got: {rendered}");
+    }
+
+    #[test]
+    fn scoped_neighbor_error_points_at_matching_record_even_if_first_lacks_field() {
+        let source = format!(
+            "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\nlisten_port = 179\n\n[global.telemetry]\nprometheus_addr = \"0.0.0.0:9179\"\nlog_format = \"json\"\n\n\
+                      [[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth0\"\nremote_asn = 65001\n\n\
+                      [[neighbors]]\naddress = \"fe80::1\"\ninterface = \"eth1\"\nremote_asn = 65001\nadmin_down_reason = \"{}\"\n",
+            "x".repeat(129)
+        );
+        let validated = crate::test_support::tier_authorized_uds_test_config(&source);
+        let config: super::super::Config = toml::from_str(&validated).unwrap();
+        let error = config.validate().unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::InvalidNeighborConfig { address, field, .. }
+            if address == "fe80::1%eth1" && field == "admin_down_reason"),
+            "{error}"
+        );
+        let rendered = render_diagnostic(&source, "config.toml", &error).unwrap();
+        assert!(rendered.contains("fe80::1%eth1"), "{rendered}");
+        assert!(rendered.contains("--> config.toml:19:"), "{rendered}");
+        assert!(rendered.contains("admin_down_reason ="), "{rendered}");
+        assert!(rendered.contains('^'), "{rendered}");
     }
 
     #[test]

@@ -2929,6 +2929,10 @@ message ExplainAdvertisedRouteResponse {
   // numbered neighbors. The addresses stay bare IP literals.
   string peer_interface = 18;
   string route_peer_interface = 19;
+  // Validation states tested by the deciding export-policy deny term.
+  // Empty unless the export policy gate stopped with policy_denied;
+  // uses the same codes and semantics as PathExportDispositionEntry.
+  repeated string deny_validation = 20;
 }
 
 message ExplainBestPathRequest {

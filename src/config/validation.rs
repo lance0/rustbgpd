@@ -959,7 +959,7 @@ impl Config {
                 }
                 let addr = neighbor.address.parse::<IpAddr>().map_err(|e| {
                     ConfigError::InvalidNeighborAddress {
-                        value: neighbor.address.clone(),
+                        value: neighbor.label(),
                         reason: e.to_string(),
                     }
                 })?;
@@ -967,7 +967,7 @@ impl Config {
                 match (&neighbor.interface, is_link_local) {
                     (Some(interface), true) if interface.trim().is_empty() => {
                         return Err(ConfigError::InvalidNeighborConfig {
-                            address: neighbor.address.clone(),
+                            address: neighbor.label(),
                             field: "interface".to_string(),
                             reason: "interface must not be empty".to_string(),
                         });
@@ -976,14 +976,14 @@ impl Config {
                     // would never match the interface the kernel reports.
                     (Some(interface), true) if interface.contains(char::is_whitespace) => {
                         return Err(ConfigError::InvalidNeighborConfig {
-                            address: neighbor.address.clone(),
+                            address: neighbor.label(),
                             field: "interface".to_string(),
                             reason: "interface must not contain whitespace".to_string(),
                         });
                     }
                     (Some(_), false) => {
                         return Err(ConfigError::InvalidNeighborConfig {
-                            address: neighbor.address.clone(),
+                            address: neighbor.label(),
                             field: "interface".to_string(),
                             reason: "interface is only valid for IPv6 link-local neighbors"
                                 .to_string(),
@@ -991,7 +991,7 @@ impl Config {
                     }
                     (None, true) => {
                         return Err(ConfigError::InvalidNeighborConfig {
-                            address: neighbor.address.clone(),
+                            address: neighbor.label(),
                             field: "interface".to_string(),
                             reason: "IPv6 link-local neighbors require an interface".to_string(),
                         });
@@ -1008,7 +1008,7 @@ impl Config {
                 );
                 if !seen.insert(key) {
                     return Err(ConfigError::InvalidNeighborAddress {
-                        value: neighbor.address.clone(),
+                        value: neighbor.label(),
                         reason: "duplicate neighbor address/interface".to_string(),
                     });
                 }
@@ -2184,7 +2184,7 @@ fn validate_listen_addresses(config: &Config) -> Result<(), ConfigError> {
     for neighbor in &config.neighbors {
         let address = neighbor.address.parse::<IpAddr>().map_err(|error| {
             ConfigError::InvalidNeighborAddress {
-                value: neighbor.address.clone(),
+                value: neighbor.label(),
                 reason: error.to_string(),
             }
         })?;

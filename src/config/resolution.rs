@@ -953,7 +953,7 @@ impl Config {
             || neighbor.interface != accepted.peer_interface
         {
             return Err(ConfigError::InvalidNeighborConfig {
-                address: neighbor.address.clone(),
+                address: neighbor.label(),
                 field: "interface".to_string(),
                 reason: "hot update does not match the accepted peer identity".to_string(),
             });
@@ -1052,7 +1052,7 @@ impl Config {
                     Some(scope) => scope,
                     None => Self::interface_index(interface).map_err(|err| {
                         ConfigError::InvalidNeighborConfig {
-                            address: neighbor.address.clone(),
+                            address: neighbor.label(),
                             field: "interface".to_string(),
                             reason: err,
                         }
@@ -1969,7 +1969,7 @@ impl Config {
                     .address
                     .parse()
                     .map_err(|_| ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
+                        address: neighbor.label(),
                         field: "address".to_string(),
                         reason: "not an IP address".to_string(),
                     })?;

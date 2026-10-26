@@ -1589,6 +1589,7 @@ pub(crate) fn explain_to_json(
                 detail: step.detail.clone(),
             })
             .collect(),
+        deny_validation: explain.deny_validation.clone(),
         update_group_id: explain.update_group_id,
         already_advertised: explain.already_advertised,
         rd: explain.rd.clone(),
@@ -1615,6 +1616,20 @@ fn gate_verdict_label(verdict: i32) -> &'static str {
         ExportGateVerdict::NotApplicable => "not_applicable",
         ExportGateVerdict::Unspecified => "unspecified",
     }
+}
+
+fn export_gate_line(step: &crate::proto::ExportGateStep, deny_validation: &[String]) -> String {
+    let mark =
+        match ExportGateVerdict::try_from(step.verdict).unwrap_or(ExportGateVerdict::Unspecified) {
+            ExportGateVerdict::Pass => "pass",
+            ExportGateVerdict::Stop => "STOP",
+            ExportGateVerdict::NotApplicable | ExportGateVerdict::Unspecified => "n/a ",
+        };
+    let mut line = format!("  [{mark}] {:<14} {}", step.gate, step.detail);
+    if step.gate == "export_policy" && step.code == "policy_denied" && !deny_validation.is_empty() {
+        line.push_str(&format!(" ({})", deny_validation.join(", ")));
+    }
+    line
 }
 
 /// Render an ORR vantage cost for text output (`12` / `unreachable`).
@@ -1702,14 +1717,7 @@ fn print_explain_advertised(
     if !explain.gates.is_empty() {
         outln!("Gate ladder (live evaluation order):")?;
         for step in &explain.gates {
-            let mark = match ExportGateVerdict::try_from(step.verdict)
-                .unwrap_or(ExportGateVerdict::Unspecified)
-            {
-                ExportGateVerdict::Pass => "pass",
-                ExportGateVerdict::Stop => "STOP",
-                ExportGateVerdict::NotApplicable | ExportGateVerdict::Unspecified => "n/a ",
-            };
-            outln!("  [{mark}] {:<14} {}", step.gate, step.detail)?;
+            outln!("{}", export_gate_line(step, &explain.deny_validation))?;
         }
     }
     if explain.already_advertised {
@@ -4151,6 +4159,7 @@ mod tests {
                 verdict: ExportGateVerdict::Pass as i32,
                 detail: "unicast enabled".into(),
             }],
+            deny_validation: vec![],
             update_group_id: Some(u64::MAX),
             already_advertised: true,
             rd: "65001:36".into(),
@@ -4204,6 +4213,7 @@ mod tests {
         // The gate-ladder fields are likewise absent when unset, so the
         // pre-ladder JSON shape is unchanged.
         assert!(value.get("gates").is_none());
+        assert!(value.get("deny_validation").is_none());
         assert!(value.get("update_group_id").is_none());
         assert!(value.get("already_advertised").is_none());
         assert!(value.get("rd").is_none());
@@ -4264,6 +4274,27 @@ mod tests {
         assert_eq!(value["gates"][1]["code"], "rt_membership_miss");
         assert_eq!(value["gates"][1]["verdict"], "stop");
         assert_eq!(value["gates"][2]["verdict"], "not_applicable");
+    }
+
+    #[test]
+    fn export_policy_stop_places_validation_codes_beside_reason() {
+        let step = crate::proto::ExportGateStep {
+            gate: "export_policy".into(),
+            code: "policy_denied".into(),
+            verdict: ExportGateVerdict::Stop as i32,
+            detail: "export policy denied this route".into(),
+        };
+        let codes = vec!["rpki_invalid".into(), "aspa_unknown".into()];
+        assert_eq!(
+            export_gate_line(&step, &codes),
+            "  [STOP] export_policy  export policy denied this route (rpki_invalid, aspa_unknown)"
+        );
+        assert!(!export_gate_line(&step, &[]).contains("rpki_invalid"));
+        let permitted = crate::proto::ExportGateStep {
+            code: "policy_permitted".into(),
+            ..step
+        };
+        assert!(!export_gate_line(&permitted, &codes).contains("rpki_invalid"));
     }
 
     #[test]

@@ -2182,6 +2182,7 @@ mod tests {
                 ],
                 update_group_id: Some(7),
                 already_advertised: true,
+                deny_validation: vec![],
                 reasons: vec![crate::proto::ExplainReason {
                     code: "policy_denied".into(),
                     message: "term reject-bogon".into(),

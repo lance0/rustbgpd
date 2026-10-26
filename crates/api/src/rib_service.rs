@@ -2366,6 +2366,15 @@ fn export_gate_to_proto(step: rustbgpd_rib::update::ExportGateStep) -> proto::Ex
 fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertisedRouteResponse {
     // Handles resolve as they were when the RIB built the explanation.
     let peers = &explain.peer_scope;
+    let deny_validation = if explain.gates.iter().any(|step| {
+        step.gate == "export_policy"
+            && step.code == "policy_denied"
+            && step.verdict == ExportGateVerdict::Stop
+    }) {
+        explain.deny_validation
+    } else {
+        Vec::new()
+    };
     proto::ExplainAdvertisedRouteResponse {
         decision: explain_decision_to_proto(explain.decision),
         peer_address: peers.display(explain.peer),
@@ -2425,6 +2434,7 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
             .collect(),
         update_group_id: explain.update_group_id,
         already_advertised: explain.already_advertised,
+        deny_validation,
         rd: explain.rd.map_or_else(String::new, format_rd),
         // The explained route is the requested source, so it shares the
         // selected route's recorded scope.
@@ -9569,58 +9579,72 @@ mod tests {
             }
             _ => panic!("unexpected update variant"),
         };
-        reply
-            .send(Ok(ExplainAdvertisedRoute {
-                peer_scope: rustbgpd_rib::PeerScope::default(),
-                decision: ExplainDecision::Advertise,
-                peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
-                prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
-                next_hop: Some("198.51.100.1".parse().unwrap()),
-                path_id: 0,
-                route_peer: Some(PeerId::from_addr("198.51.100.2".parse().unwrap())),
-                route_path_id: Some(0),
-                route_peer_interface: None,
-                route_type: Some(rustbgpd_policy::RouteType::External),
-                reasons: vec![rustbgpd_rib::ExplainReason {
-                    code: "policy_permitted",
-                    message: "export policy permitted this route".to_string(),
-                }],
-                modifications: rustbgpd_policy::RouteModifications::default(),
-                orr_vantage: Some("10.0.1.1".parse().unwrap()),
-                orr_candidates: vec![
-                    rustbgpd_rib::OrrExplainCandidate {
-                        peer: PeerId::from_addr("198.51.100.2".parse().unwrap()),
-                        peer_interface: None,
-                        path_id: 0,
-                        next_hop: "198.51.100.1".parse().unwrap(),
-                        cost: Some(12),
-                        selected: true,
-                    },
-                    rustbgpd_rib::OrrExplainCandidate {
-                        peer: PeerId::from_addr("198.51.100.3".parse().unwrap()),
-                        peer_interface: None,
-                        path_id: 0,
-                        next_hop: "198.51.100.4".parse().unwrap(),
-                        cost: None,
-                        selected: false,
-                    },
-                ],
-                deny_validation: Vec::new(),
-                gates: vec![rustbgpd_rib::ExportGateStep {
-                    gate: "export_policy",
-                    code: "policy_permitted",
-                    verdict: rustbgpd_rib::ExportGateVerdict::Pass,
-                    detail: "export policy permitted this route".to_string(),
-                }],
-                update_group_id: Some(3),
-                already_advertised: true,
-                rd: None,
-                source: Some(RouteSourceIdentity {
+        let explanation = ExplainAdvertisedRoute {
+            peer_scope: rustbgpd_rib::PeerScope::default(),
+            decision: ExplainDecision::Advertise,
+            peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
+            prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
+            next_hop: Some("198.51.100.1".parse().unwrap()),
+            path_id: 0,
+            route_peer: Some(PeerId::from_addr("198.51.100.2".parse().unwrap())),
+            route_path_id: Some(0),
+            route_peer_interface: None,
+            route_type: Some(rustbgpd_policy::RouteType::External),
+            reasons: vec![rustbgpd_rib::ExplainReason {
+                code: "policy_permitted",
+                message: "export policy permitted this route".to_string(),
+            }],
+            modifications: rustbgpd_policy::RouteModifications::default(),
+            orr_vantage: Some("10.0.1.1".parse().unwrap()),
+            orr_candidates: vec![
+                rustbgpd_rib::OrrExplainCandidate {
                     peer: PeerId::from_addr("198.51.100.2".parse().unwrap()),
+                    peer_interface: None,
                     path_id: 0,
-                }),
-            }))
-            .unwrap();
+                    next_hop: "198.51.100.1".parse().unwrap(),
+                    cost: Some(12),
+                    selected: true,
+                },
+                rustbgpd_rib::OrrExplainCandidate {
+                    peer: PeerId::from_addr("198.51.100.3".parse().unwrap()),
+                    peer_interface: None,
+                    path_id: 0,
+                    next_hop: "198.51.100.4".parse().unwrap(),
+                    cost: None,
+                    selected: false,
+                },
+            ],
+            deny_validation: Vec::new(),
+            gates: vec![rustbgpd_rib::ExportGateStep {
+                gate: "export_policy",
+                code: "policy_permitted",
+                verdict: rustbgpd_rib::ExportGateVerdict::Pass,
+                detail: "export policy permitted this route".to_string(),
+            }],
+            update_group_id: Some(3),
+            already_advertised: true,
+            rd: None,
+            source: Some(RouteSourceIdentity {
+                peer: PeerId::from_addr("198.51.100.2".parse().unwrap()),
+                path_id: 0,
+            }),
+        };
+        let mut denied = explanation.clone();
+        denied.decision = ExplainDecision::Deny;
+        denied.deny_validation = vec!["rpki_invalid".to_string(), "aspa_unknown".to_string()];
+        denied.gates[0].code = "policy_denied";
+        denied.gates[0].verdict = rustbgpd_rib::ExportGateVerdict::Stop;
+        assert_eq!(
+            explain_to_proto(denied).deny_validation,
+            ["rpki_invalid", "aspa_unknown"]
+        );
+        let mut permitted_with_codes = explanation.clone();
+        permitted_with_codes.deny_validation = vec!["rpki_invalid".to_string()];
+        assert_eq!(
+            explain_to_proto(permitted_with_codes).deny_validation.len(),
+            0
+        );
+        reply.send(Ok(explanation)).unwrap();
 
         let resp = call.await.unwrap().unwrap().into_inner();
         assert_eq!(resp.decision, proto::ExplainDecision::Advertise as i32);
@@ -9642,6 +9666,7 @@ mod tests {
         assert_eq!(resp.gates.len(), 1);
         assert_eq!(resp.gates[0].gate, "export_policy");
         assert_eq!(resp.gates[0].code, "policy_permitted");
+        assert_eq!(resp.deny_validation.len(), 0);
         assert_eq!(resp.gates[0].verdict, proto::ExportGateVerdict::Pass as i32);
         assert_eq!(resp.update_group_id, Some(3));
         assert!(resp.already_advertised);
