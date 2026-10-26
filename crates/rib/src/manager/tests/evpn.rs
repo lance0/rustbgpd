@@ -4035,3 +4035,80 @@ async fn evpn_sessions_synced_resets_on_collision_replacement_and_failover() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Readiness queries answered while one inbound EVPN chunk fans out to
+/// `receivers` private Adj-RIB-Outs, with `queued` queries already waiting.
+/// The chunk is applied directly, without the actor loop, so only seams
+/// inside the chunk can answer.
+fn readiness_answered_during_evpn_fanout(receivers: u8, queued: usize) -> usize {
+    let (_tx, rx) = mpsc::channel(8);
+    let (readiness_tx, readiness_rx) = mpsc::channel(queued.max(1));
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx);
+    let mut outbound = Vec::new();
+    for index in 0..receivers {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        let mut up = super::lifecycle::test_peer_up(
+            peer_v4(Ipv4Addr::new(10, 0, 2, index + 2)),
+            0,
+            outbound_tx,
+        );
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = evpn_sendable();
+        }
+        manager.handle_update(up);
+        outbound.push(outbound_rx);
+    }
+    let mut responses: Vec<_> = (0..queued)
+        .map(|_| {
+            let (reply, response) = oneshot::channel();
+            readiness_tx
+                .try_send(RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: Instant::now(),
+                })
+                .unwrap();
+            response
+        })
+        .collect();
+    let source = Ipv4Addr::new(10, 0, 2, 1);
+    let routes: Vec<_> = (0..4).map(|tag| make_evpn_imet(source, tag)).collect();
+    let mut update = super::lifecycle::test_routes_received(peer_v4(source), vec![]);
+    if let RibUpdate::RoutesReceived { evpn_announced, .. } = &mut update {
+        evpn_announced.clone_from(&routes);
+    }
+    manager.handle_update(update);
+    assert!(manager.process_next_route_chunk(), "one EVPN chunk queued");
+    for outbound_rx in &mut outbound {
+        let announced: usize = std::iter::from_fn(|| outbound_rx.try_recv().ok())
+            .map(|update| update.evpn_announce.len())
+            .sum();
+        assert_eq!(announced, routes.len(), "every receiver got the chunk");
+    }
+    responses
+        .iter_mut()
+        .filter_map(|response| response.try_recv().ok())
+        .count()
+}
+
+/// The private EVPN fanout commits one Adj-RIB-Out per receiver inside one
+/// route chunk, and receivers that learn the same table resize their EVPN
+/// maps in the same chunk: a 75-receiver initial load held the actor past
+/// the 200 ms readiness deadline. Each receiver boundary must serve one
+/// readiness batch, so with more queries queued than the fanout can drain,
+/// exactly one batch per receiver is answered; with no receiver, none.
+#[test]
+fn evpn_fanout_serves_readiness_at_each_receiver_boundary() {
+    let batch = QUERY_BUDGET_PER_CHUNK;
+    for receivers in [0_u8, 1, 3, 8] {
+        let per_receiver = usize::from(receivers) * batch;
+        assert_eq!(
+            readiness_answered_during_evpn_fanout(receivers, per_receiver + batch),
+            per_receiver,
+            "{receivers} receivers"
+        );
+    }
+}

@@ -780,6 +780,17 @@ impl RibManager {
         }
         for peer in peers {
             checkpoint();
+            // EVPN ingest distributes each chunk here without a readiness
+            // owner, and the private fanout costs one Adj-RIB-Out commit per
+            // receiver: receivers that learn the same table resize their EVPN
+            // maps in the same chunk. Service the dedicated read-only lane at
+            // each receiver boundary, as VPN and unicast cold ingest do; while
+            // an owner holds the lane this is a no-op and its checkpoints serve.
+            let transition_elapsed = self
+                .pending_clean_policy_transition
+                .as_ref()
+                .map(super::PendingCleanPolicyTransition::elapsed);
+            self.drain_readiness_queries(transition_elapsed);
             if self.evpn_grouped_member_of(peer).is_none() {
                 self.distribute_evpn_keys_to_peer(peer, &changed_keys, &mut checkpoint);
             }
