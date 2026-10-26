@@ -1507,6 +1507,209 @@ fn received_flowspec_rule_out_selecting_the_local_one_is_not_selected() {
     assert_eq!(export.reason, "not_selected");
 }
 
+/// Selection flag of each candidate in `peer`'s Adj-RIB-In, by key.
+fn received_flowspec_selected(
+    manager: &mut RibManager,
+    peer: PeerId,
+) -> HashMap<crate::route::FlowSpecKey, bool> {
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryReceivedFlowSpecRoutes {
+        peer,
+        filter: None,
+        reply,
+    });
+    rx.try_recv()
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.route.selection_key(), row.selected))
+        .collect()
+}
+
+/// ADR-0141 amendment (2026-10-26): after a planned restart, a static GR
+/// waiter that never comes up holds RFC 4724 selection deferral. An injected
+/// `FlowSpec` rule is still selected and committed to an Established peer at
+/// once. Received rules wait, including one with the injected rule's key
+/// that out-selects it only at release; our `FlowSpec` `EoR` waits for the
+/// release; injected unicast stays deferred. Red proof: dropping the
+/// injected-rule exemption from `FlowSpec` selection leaves the rule
+/// unselected and its export pending.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one restart transcript pins the window and its release in order"
+)]
+fn injected_flowspec_is_exported_during_selection_deferral() {
+    const FLOWSPEC: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpec);
+    const UNICAST: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: std::time::Duration::from_mins(2),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+                families: vec![FLOWSPEC, UNICAST],
+            }],
+        });
+    let target = PeerId::from_addr(v4(2));
+    let source_addr = Ipv4Addr::new(10, 0, 0, 9);
+    let source = peer_v4(source_addr);
+    let mut target_rx = peer_up(&mut manager, target, vec![FLOWSPEC, UNICAST], None, 0, 64);
+    let _source_rx = peer_up(&mut manager, source, ipv4_flowspec_sendable(), None, 0, 64);
+
+    let rule = local_rule(&[]);
+    let key = rule.selection_key();
+    inject_rule(&mut manager, rule);
+    let unicast = v4_prefix();
+    inject(&mut manager, local_route(unicast, 0));
+    // A received rule with the injected key that wins best path, and one
+    // with a key of its own.
+    let mut same = crate::test_support::make_flowspec_route(source_addr);
+    same.origin_type = crate::route::RouteOrigin::Ibgp;
+    same.attributes.push(PathAttribute::LocalPref(200));
+    let mut other = crate::test_support::make_flowspec_route(source_addr);
+    other.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+        rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
+    )];
+    let other_key = other.selection_key();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source,
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![same, other],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+
+    // The window: the injected rule is selected and committed.
+    assert!(manager.selection_deferred(FLOWSPEC));
+    assert_eq!(
+        received_flowspec_selected(&mut manager, LOCAL_PEER),
+        HashMap::from([(key.clone(), true)])
+    );
+    assert_eq!(
+        received_flowspec_selected(&mut manager, source),
+        HashMap::from([(key.clone(), false), (other_key.clone(), false)])
+    );
+    let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
+    let export = row(&page, target);
+    assert_eq!(export.disposition, RouteExportDisposition::Committed);
+    assert_eq!(export.reason, "");
+    let window: Vec<_> = std::iter::from_fn(|| target_rx.try_recv().ok()).collect();
+    let announced: Vec<_> = window
+        .iter()
+        .flat_map(|update| &update.flowspec_announce)
+        .map(|route| (route.selection_key(), route.peer))
+        .collect();
+    assert_eq!(announced, vec![(key.clone(), LOCAL_PEER)]);
+    assert!(
+        window
+            .iter()
+            .all(|update| update.end_of_rib.is_empty() && update.announce.is_empty()),
+        "no EoR and no unicast payload may leave before release"
+    );
+    // A peer established inside the window gets the rule in its initial
+    // table, and a dirty resync re-sends it; neither withdraws it or sends
+    // our FlowSpec EoR. Each path is drained and checked on its own.
+    let late = PeerId::from_addr(v4(3));
+    let mut late_rx = peer_up(&mut manager, late, ipv4_flowspec_sendable(), None, 0, 64);
+    let assert_window_sends_rule = |late_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+                                    path: &str| {
+        let sent: Vec<_> = std::iter::from_fn(|| late_rx.try_recv().ok()).collect();
+        let announced: Vec<_> = sent
+            .iter()
+            .flat_map(|update| &update.flowspec_announce)
+            .map(|route| (route.selection_key(), route.peer))
+            .collect();
+        assert_eq!(
+            announced,
+            vec![(key.clone(), LOCAL_PEER)],
+            "{path} must send the injected rule"
+        );
+        assert!(
+            sent.iter().all(|update| update.flowspec_withdraw.is_empty()
+                && !update.end_of_rib.contains(&FLOWSPEC)),
+            "{path}: no withdrawal and no FlowSpec EoR inside the window"
+        );
+    };
+    assert_window_sends_rule(&mut late_rx, "the initial table");
+    manager.mark_outbound_dirty(late);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert_window_sends_rule(&mut late_rx, "the dirty resync");
+    let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
+    assert_eq!(
+        row(&page, late).disposition,
+        RouteExportDisposition::Committed
+    );
+    // The unicast boundary: injected unicast stays deferred.
+    let page = query(&mut manager, unicast, 0, None, 10).unwrap();
+    let export = row(&page, target);
+    assert_eq!(export.disposition, RouteExportDisposition::Pending);
+    assert_eq!(export.reason, "selection_deferred");
+
+    // Release: best path decides the shared key, and each EoR follows its
+    // family's payload. The timer releases both families together; pin the
+    // order in which their completions run so unicast's EoR flush runs
+    // before the FlowSpec release selection.
+    let metrics = manager.metrics.clone();
+    let mut released = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .expire(&metrics);
+    released.sort_by_key(|family| *family != UNICAST);
+    assert_eq!(released, vec![UNICAST, FLOWSPEC]);
+    manager.release_selection_families(&released, "Selection_Deferral_Timer expired");
+    assert!(!manager.selection_deferred(FLOWSPEC));
+    assert_eq!(
+        received_flowspec_selected(&mut manager, source),
+        HashMap::from([(key.clone(), true), (other_key.clone(), true)])
+    );
+    let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
+    assert_eq!(row(&page, target).reason, "not_selected");
+    let page = query(&mut manager, unicast, 0, None, 10).unwrap();
+    assert_eq!(
+        row(&page, target).disposition,
+        RouteExportDisposition::Committed
+    );
+    let release: Vec<_> = std::iter::from_fn(|| target_rx.try_recv().ok()).collect();
+    let mut announced = HashSet::new();
+    let mut eor = Vec::new();
+    for update in &release {
+        for route in &update.flowspec_announce {
+            assert!(
+                !eor.contains(&FLOWSPEC),
+                "a FlowSpec announce followed the FlowSpec EoR"
+            );
+            announced.insert((route.selection_key(), route.peer));
+        }
+        eor.extend(update.end_of_rib.iter().copied());
+    }
+    assert_eq!(
+        announced,
+        HashSet::from([(key, source), (other_key, source)])
+    );
+    assert_eq!(eor.len(), 2, "one EoR per family: {eor:?}");
+    assert_eq!(
+        eor.into_iter().collect::<HashSet<_>>(),
+        HashSet::from([UNICAST, FLOWSPEC])
+    );
+    let release: Vec<_> = std::iter::from_fn(|| late_rx.try_recv().ok()).collect();
+    let eor_at = release
+        .iter()
+        .position(|update| update.end_of_rib.contains(&FLOWSPEC))
+        .expect("the late peer gets its FlowSpec EoR at release");
+    assert!(
+        release[eor_at..]
+            .iter()
+            .all(|update| update.flowspec_announce.is_empty()),
+        "a FlowSpec announce followed the late peer's FlowSpec EoR"
+    );
+}
+
 /// A dirty outbound peer is pending, not committed or withheld; a key with
 /// no local rule is listed as not found, with no rows.
 #[test]

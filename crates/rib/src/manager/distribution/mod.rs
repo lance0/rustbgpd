@@ -3101,16 +3101,17 @@ impl RibManager {
                     .iter()
                     .inspect(|_| checkpoint())
                     .any(|(afi, safi, _)| self.selection_convergence_held((*afi, *safi)))
+                // A deferred FlowSpec Loc-RIB holds only injected rules, so
+                // their announces and withdrawals pass; a received rule here
+                // would be a selection leak.
                 || batch
                     .flowspec_announce
                     .iter()
                     .inspect(|_| checkpoint())
-                    .any(|route| self.selection_deferred((route.afi, Safi::FlowSpec)))
-                || batch
-                    .flowspec_withdraw
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .any(|key| self.selection_deferred((key.afi, Safi::FlowSpec)))
+                    .any(|route| {
+                        route.peer != LOCAL_PEER
+                            && self.selection_deferred((route.afi, Safi::FlowSpec))
+                    })
                 || ((!batch.evpn_announce.is_empty() || !batch.evpn_withdraw.is_empty())
                     && self.selection_deferred((Afi::L2Vpn, Safi::Evpn)))
                 || batch
@@ -7803,10 +7804,8 @@ impl RibManager {
                                     .map(crate::route::FlowSpecRoute::selection_key),
                             );
                         }
-                        all.retain(|key| {
-                            checkpoint();
-                            !self.selection_deferred((key.afi, Safi::FlowSpec))
-                        });
+                        // No deferral filter: a deferred FlowSpec Loc-RIB
+                        // holds only injected rules, which resync like any other.
                         all
                     } else {
                         HashSet::new()

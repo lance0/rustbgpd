@@ -3743,20 +3743,22 @@ message BgpEvent {
 service InjectionService {
   // Inject or replace a locally originated unicast route. The route is an
   // upsert keyed on (prefix, prefix_length, path_id): repeating an identical
-  // request is idempotent, and a request with the same key but a different
-  // next hop or attributes replaces the local route. The response reports
-  // which of these happened. OK confirms that the route was accepted into
-  // the local Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution
-  // normally run in the same RIB turn, before the reply, but are deferred
-  // while Graceful Restart selection deferral is active for the family. OK
-  // does not mean any peer received or installed the route, and a received
+  // request is idempotent, and a request with the same key but a different next
+  // hop or attributes replaces the local route. The response reports which of
+  // these happened. OK confirms that the route was accepted into the local
+  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution normally run
+  // in the same RIB turn, before the reply, but are deferred while Graceful
+  // Restart selection deferral is active for the family: after a planned
+  // restart, for up to the maximum effective gr_restart_time, with export
+  // reason selection_deferred. MarkReplayComplete does not end that deferral.
+  // OK does not mean any peer received or installed the route, and a received
   // route for the same prefix can out-select it. Injected routes are
   // process-local and lost on a daemon restart, so a controller reconciles
-  // periodically and after every reconnect by re-adding its desired routes
-  // (an UNCHANGED re-add is cheap). A lower ControlService.GetHealth
-  // uptime_seconds is an extra trigger, not a reliable restart detector.
-  // A key held by a lease owner (ADR-0141) returns FAILED_PRECONDITION with
-  // ErrorInfo reason OWNER_MISMATCH; see AddLeasedPath.
+  // periodically and after every reconnect by re-adding its desired routes (an
+  // UNCHANGED re-add is cheap). A lower ControlService.GetHealth uptime_seconds
+  // is an extra trigger, not a reliable restart detector. A key held by a lease
+  // owner (ADR-0141) returns FAILED_PRECONDITION with ErrorInfo reason
+  // OWNER_MISMATCH; see AddLeasedPath.
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
   // Withdraw a locally injected unicast route by its (prefix, prefix_length,
   // path_id) key. Only routes added through AddPath are affected; routes
@@ -3819,25 +3821,28 @@ service InjectionService {
   // ListPathExportDispositions for one locally injected FlowSpec rule,
   // identified by its exact AddFlowSpec key (afi_safi, components), with the
   // same rows, peer order, paging, include_configured, ABORTED and
-  // INVALID_ARGUMENT contract. A received rule with the same key never
-  // counts as this rule's export: when it is the selected rule, this rule is
-  // WITHHELD with reason not_selected. Export policy evaluates a FlowSpec
-  // rule with RPKI state not_found and ASPA state unknown, so deny_validation
-  // carries those states when the deciding statement tests them. A key with
-  // no local rule returns NOT_FOUND. This new diagnostic RPC is outside v1.
+  // INVALID_ARGUMENT contract. A received rule with the same key never counts
+  // as this rule's export: when it is the selected rule, this rule is WITHHELD
+  // with reason not_selected. Selection deferral does not hold a local rule, so
+  // selection_deferred is not reported for it. Export policy evaluates a
+  // FlowSpec rule with RPKI state not_found and ASPA state unknown, so
+  // deny_validation carries those states when the deciding statement tests
+  // them. A key with no local rule returns NOT_FOUND. This new diagnostic RPC
+  // is outside v1.
   rpc ListFlowSpecExportDispositions(ListFlowSpecExportDispositionsRequest) returns (ListPathExportDispositionsResponse);
-  // Inject or replace a locally originated FlowSpec rule. The rule is an
-  // upsert keyed on (afi_safi, components): repeating an identical request
-  // is idempotent, and a request with the same key but different actions or
-  // communities replaces the local rule. The response reports which of
-  // these happened. OK confirms that the rule was accepted into the local
-  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution normally
-  // run in the same RIB turn, before the reply, but are deferred while
-  // Graceful Restart selection deferral is active for the family. OK does
-  // not mean any peer received or installed the rule, and a received rule
-  // with the same key can out-select it. Injected rules are process-local:
-  // a controller must re-inject them after a daemon restart. A key held by a
-  // lease owner returns FAILED_PRECONDITION with ErrorInfo reason
+  // Inject or replace a locally originated FlowSpec rule. The rule is an upsert
+  // keyed on (afi_safi, components): repeating an identical request is
+  // idempotent, and a request with the same key but different actions or
+  // communities replaces the local rule. The response reports which of these
+  // happened. OK confirms that the rule was accepted into the local Adj-RIB-In
+  // (peer 0.0.0.0). Selection and outbound distribution run in the same RIB
+  // turn, before the reply, also while Graceful Restart selection deferral
+  // holds the family after a planned restart: local rules are then the only
+  // candidates, while received rules and the family's End-of-RIB wait for the
+  // release. OK does not mean any peer received or installed the rule, and a
+  // received rule with the same key can out-select it. Injected rules are
+  // process-local: a controller must re-inject them after a daemon restart. A
+  // key held by a lease owner returns FAILED_PRECONDITION with ErrorInfo reason
   // OWNER_MISMATCH; see AddLeasedPath.
   rpc AddFlowSpec(AddFlowSpecRequest) returns (AddFlowSpecResponse);
   // Withdraw a locally injected FlowSpec rule by its (afi_safi, components)
@@ -3845,8 +3850,7 @@ service InjectionService {
   // from peers are never removed. A key with no local rule returns
   // NOT_FOUND unless allow_missing is set. As for AddFlowSpec, OK confirms
   // the change to the local Adj-RIB-In; selection and distribution follow
-  // in the same RIB turn unless Graceful Restart selection deferral is
-  // active.
+  // in the same RIB turn, also during Graceful Restart selection deferral.
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
   // Owner-scoped leases (ADR-0141). A leased add is AddPath or AddFlowSpec
   // with the same request, outcome and validation, plus an owner and a
@@ -4487,12 +4491,16 @@ enum FlowSpecDeleteOutcome {
 
 message ListFlowSpecRequest {
   AddressFamily afi_safi = 1;
-  // When both peer selectors are empty, select the Loc-RIB. An IP address here selects retained
-  // received candidates from that peer, including infeasible/nonselected rules.
-  // "0.0.0.0" selects the locally injected rules: exactly what AddFlowSpec
-  // holds, including rules a received candidate currently out-selects
-  // (selected = false). Their validation is DISABLED by default and LOCAL
-  // when receive-side validation is enabled; it is never FEASIBLE or
+  // When both peer selectors are empty, select the Loc-RIB. An IP address here
+  // selects retained received candidates from that peer, including
+  // infeasible/nonselected rules. "0.0.0.0" selects the locally injected rules:
+  // exactly what AddFlowSpec holds, including rules a received candidate
+  // currently out-selects (selected = false). Selection deferral never holds a
+  // local rule, so selected = false there always means such an out-selection. A
+  // received rule can also read selected = false while Graceful Restart
+  // selection deferral holds its family after a planned restart
+  // (NeighborState.selection_deferral). Local validation is DISABLED by default
+  // and LOCAL when receive-side validation is enabled; it is never FEASIBLE or
   // INFEASIBLE. Controllers reconcile against this view.
   string received_peer_address = 2;
   // Destination peer whose committed post-export-policy Adj-RIB-Out is read.

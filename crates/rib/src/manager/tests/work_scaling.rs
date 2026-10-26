@@ -568,3 +568,73 @@ fn destination_prestage_work_is_linear() {
         |size| destination_prestage_churn(size, true),
     );
 }
+
+/// One received `FlowSpec` table replayed while RFC 4724 selection deferral
+/// holds the family, beside one injected rule. Only the injected rule is
+/// selected; every received rule waits for the release. Selection must not
+/// scan the retained table once per replayed key.
+fn deferred_flowspec_replay(size: usize) -> Work {
+    const FLOWSPEC: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpec);
+    let (_tx, manager) = manager();
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_mins(2),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            families: vec![FLOWSPEC],
+        }],
+    });
+    let mut local = crate::test_support::make_flowspec_route(Ipv4Addr::UNSPECIFIED);
+    local.peer = LOCAL_PEER;
+    local.origin_type = crate::route::RouteOrigin::Local;
+    let (reply, mut rx) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectFlowSpec {
+        route: local,
+        reply,
+    });
+    rx.try_recv().unwrap().unwrap();
+    let rules = (0..size * ROUTES)
+        .map(|index| {
+            let mut rule = crate::test_support::make_flowspec_route(Ipv4Addr::new(198, 51, 100, 1));
+            rule.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                rustbgpd_wire::FlowSpecPrefix::V4(prefix(1, index)),
+            )];
+            rule
+        })
+        .collect();
+    let mut update = routes_from(external(), 0, 1, 0);
+    if let RibUpdate::RoutesReceived {
+        flowspec_announced, ..
+    } = &mut update
+    {
+        *flowspec_announced = rules;
+    }
+    let work = checkpoints_in(|| {
+        manager.handle_update(update);
+        while manager.process_next_route_chunk() {}
+    });
+    assert!(manager.selection_deferred(FLOWSPEC));
+    assert_eq!(
+        manager.ribs[&external()].iter_flowspec().count(),
+        size * ROUTES,
+        "size {size}"
+    );
+    assert_eq!(
+        manager
+            .loc_rib
+            .iter_flowspec()
+            .map(|route| route.peer)
+            .collect::<Vec<_>>(),
+        vec![LOCAL_PEER],
+        "size {size}"
+    );
+    work
+}
+
+#[test]
+fn deferred_flowspec_replay_work_is_linear() {
+    assert_linear(
+        "received FlowSpec replay during selection deferral",
+        &[ALL, "selection_flowspec"],
+        deferred_flowspec_replay,
+    );
+}

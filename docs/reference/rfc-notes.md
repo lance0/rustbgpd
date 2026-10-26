@@ -1194,7 +1194,9 @@ the RIB freezes the resolved static GR peer/family roster. Per-family Loc-RIB
 selection and outbound initial table/EoR are held until current-session EoRs
 arrive from every eligible waiter or the marker-bounded selection timer
 expires. Peer Restart State and absent GR families exclude that peer/family;
-superseded-session EoRs are rejected.
+superseded-session EoRs are rejected. FlowSpec rules injected through the API
+are the one exception; see
+[Injected FlowSpec During Selection Deferral](#injected-flowspec-during-selection-deferral).
 
 RFC 4724 has the restarting speaker send End-of-RIB once its initial update is
 complete. With the opt-in
@@ -1297,6 +1299,21 @@ ends (see §4.1 above).
 ---
 
 ## Interpretation Decisions (RFC 4724)
+
+### Injected FlowSpec During Selection Deferral
+
+RFC 4724 §4.1 has the restarting speaker defer route selection for a family
+until every peer has sent End-of-RIB or the Selection_Deferral_Timer expires.
+The deferral keeps a partial Adj-RIB-In from driving selection. rustbgpd
+applies it to every received route and to injected unicast routes, which
+compete with routes peers are re-sending. While it holds a FlowSpec family,
+local FlowSpec rules injected through the API are the only selection
+candidates, so they are selected and advertised at once; this departs from
+§4.1 for those rules only. A rule with no received alternative selects the
+same way at release. For a key that also has a received rule, the local rule
+is advertised until the release, when the ordinary FlowSpec best-path order
+decides. End-of-RIB for the family still waits for the release. See the
+[ADR-0141 amendment](../adr/0141-injection-owner-lease.md#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).
 
 ### Stale Demotion Placement
 

@@ -133,6 +133,26 @@ unsupported server rather than treating an unknown outcome as unchanged or
 absent. After restarting the daemon, re-inject desired rules and verify local
 intent separately from committed advertisements and remote observations.
 
+A planned restart (SIGTERM with a Graceful Restart marker in
+`runtime_state_dir`) arms RFC 4724 selection deferral when any static
+neighbor has Graceful Restart enabled. Re-injected FlowSpec rules are selected
+and sent to Established peers at once; rules received from peers, and the
+FlowSpec End-of-RIB, wait for the deferral to release
+([api.md](api.md#flowspec-injection-contract)). Re-injected unicast routes,
+RTBH host routes included, wait too: `ListPathExportDispositions` reports them
+`PENDING` with reason `selection_deferred`, and
+`NeighborState.selection_deferral` shows the active family rows. The window
+lasts until every static Graceful Restart neighbor has sent End-of-RIB for the
+family or been excluded (for example, its OPEN lacks Graceful Restart for that
+family), and at most the maximum effective `gr_restart_time`, counted from
+shutdown (120 seconds by default). A neighbor that never comes up holds the
+window for the whole time, including toward peers that are already
+Established. `MarkReplayComplete` does not end it; it releases only the
+separate [End-of-RIB grace window](configuration.md#planned-restart-end-of-rib-grace-window).
+To shorten the window, remove placeholder neighbors that will not come up,
+set `graceful_restart = false` on neighbors that are not expected to return,
+or lower `gr_restart_time`.
+
 This promotion changes no configuration shape, default or release anchor.
 The existing consecutive-release configuration fixture chain remains the
 upgrade check; it is not a FlowSpec RPC qualification receipt. Release

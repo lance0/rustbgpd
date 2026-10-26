@@ -296,6 +296,8 @@ Edges:
   `peer_teardown` seam and `RIB peer teardown stalled`.
 - **Graceful Restart selection deferral** delays distribution of the expiry
   withdrawal exactly as it delays an injected add today.
+  *Injected FlowSpec rules no longer wait; see
+  [Amendment: injected FlowSpec skips selection deferral](#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).*
 
 ### 5. Failure direction
 
@@ -546,3 +548,44 @@ re-add. Both limits belong in the bridge's documentation.
   Renewal stays off the RIB actor.
 - Expiry lag under RIB backlog is bounded by RIB queue latency, not by the
   lease. It is reported, not hidden.
+
+## Amendment: injected FlowSpec skips selection deferral (2026-10-26)
+
+After a planned restart, RFC 4724 selection deferral held every injected
+FlowSpec rule until the deferral released. With a static Graceful Restart
+neighbor that never comes up, that took the full maximum effective
+`gr_restart_time`, 120 seconds by default. A controller that re-injected its
+DDoS mitigations at once saw them read `selected: false` and export
+`PENDING`/`selection_deferred`, and no peer received them in that time.
+`MarkReplayComplete` did not help, because it only releases the End-of-RIB
+grace window.
+
+Selection deferral protects best-path choice from a partial Adj-RIB-In while
+peers re-send their tables. A rule the local API injects does not depend on
+those tables, so holding it buys little safety and delays a mitigation.
+
+- **FlowSpec selection.** While deferral holds a FlowSpec family, the only
+  selection candidates are local rules (Adj-RIB-In peer `0.0.0.0`), leased or
+  not. An injected rule is selected and exported to Established peers at
+  once, a peer that establishes later gets it in its initial table, and a
+  dirty resync re-sends it. Its export disposition is final and never
+  `selection_deferred`. An expiry or delete withdraws it at once.
+- **Received rules** still wait. When deferral releases, the release sweep
+  reselects every key of the family from the full candidate set. For a key
+  with both a local and a received rule, the ordinary FlowSpec best-path order
+  decides. During the window the local rule is selected; if the received rule
+  wins at release, it replaces the local one on the wire and the local rule
+  reads `not_selected`.
+- **End-of-RIB.** The family's End-of-RIB still waits for the release, after
+  the release selection has been sent, so a helper keeps the stale rules from
+  the previous session until the restarted table is complete. RFC 4724 allows
+  UPDATEs ahead of End-of-RIB. The helper's stale-route handling is
+  unchanged.
+- **Unicast boundary.** Injected unicast routes, RTBH host routes included,
+  stay deferred. They compete for best path with routes peers are still
+  re-sending, so selecting them early would export a choice the restart has
+  not settled. A separate change can revisit RTBH if a controller needs it.
+- **No configuration.** The exemption has no knob. An operator who needs
+  unicast injection sooner can remove never-up static Graceful Restart
+  neighbors, set `graceful_restart = false` on them, or lower
+  `gr_restart_time`.

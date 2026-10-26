@@ -2284,7 +2284,11 @@ freezes the effective static GR peer/family roster and defers each family's
 route selection plus initial table/EoR until all eligible current sessions
 send EoR or the remaining marker window expires. `gr_restart_time` therefore
 bounds both the advertised restart window and, via the maximum effective value
-across static peers, the process-start selection deferral.
+across static peers, the process-start selection deferral. FlowSpec rules
+injected through the API are the exception: they are selected and sent at
+once, while received FlowSpec rules and the FlowSpec EoR still wait
+([ADR-0141 amendment](../adr/0141-injection-owner-lease.md#amendment-injected-flowspec-skips-selection-deferral-2026-10-26)).
+Injected unicast routes stay deferred.
 
 During a same-address collision, ordinary replacement still re-arms the
 replacement session as an EoR waiter and stale predecessor EoR is rejected. If
@@ -2413,6 +2417,13 @@ configuration and leave a margin. `--check` warns above 240 seconds as a
 heuristic only; it cannot see the upstream's real limit. The local
 `gr_stale_routes_time` is the opposite direction (how long rustbgpd keeps a
 restarting peer's routes) and does not bound this window.
+
+This window is independent of RFC 4724 selection deferral (see the
+implementation note under [Graceful Restart](#graceful-restart-rfc-4724)).
+Deferral holds route selection, and with it injected unicast routes; the grace
+window holds only the End-of-RIB marker. `MarkReplayComplete` and
+`gr_eor_replay_owners` release the grace window and never shorten selection
+deferral. End-of-RIB leaves only when both have released.
 
 A reload stores a new `gr_eor_grace_time` for the next planned restart; it
 does not change a window already running. `gr_eor_replay_owners` is read once
