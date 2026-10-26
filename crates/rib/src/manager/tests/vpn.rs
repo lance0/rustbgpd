@@ -42,7 +42,7 @@ fn drain_vpn_delta(
     let mut announced = Vec::new();
     let mut withdrawn = Vec::new();
     while let Ok(update) = rx.try_recv() {
-        announced.extend(update.vpn_announce);
+        announced.extend(update.vpn_announce.iter().cloned());
         withdrawn.extend(update.vpn_withdraw);
     }
     (announced, withdrawn)

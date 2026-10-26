@@ -2916,7 +2916,7 @@ impl RibManager {
         if let Err(failure) = self.try_send_and_commit_outbound_update(
             peer,
             OutboundCommitBatch {
-                vpn_announce,
+                vpn_announce: vpn_announce.into(),
                 vpn_withdraw,
                 ..OutboundCommitBatch::default()
             },

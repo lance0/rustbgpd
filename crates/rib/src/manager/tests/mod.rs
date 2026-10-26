@@ -959,7 +959,7 @@ fn drain_final_vpn(
 ) -> HashMap<crate::route::VpnRibRouteKey, VpnRibRoute> {
     let mut state = HashMap::new();
     while let Ok(update) = rx.try_recv() {
-        for route in &update.vpn_announce {
+        for route in update.vpn_announce.iter() {
             state.insert(route.key(), route.clone());
         }
         for key in &update.vpn_withdraw {

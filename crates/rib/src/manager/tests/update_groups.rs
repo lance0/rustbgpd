@@ -13976,7 +13976,7 @@ fn replacement_readiness_services_each_family_commit_without_changing_loc_rib_co
                 flowspec_announce: flowspec,
                 evpn_announce: evpn,
                 bgpls_announce: bgpls,
-                vpn_announce: vpn,
+                vpn_announce: vpn.into(),
                 labeled_announce: labeled,
                 rtc_announce: rtc,
                 ..OutboundCommitBatch::default()
@@ -17388,4 +17388,274 @@ fn grouped_vpn_dirty_resync_skips_per_peer_key_enumeration() {
         assert_eq!(update.vpn_announce.len(), 0, "grouped={grouped}");
         assert_eq!(inserts, if grouped { 0 } else { 16 }, "grouped={grouped}");
     }
+}
+
+#[test]
+fn vpn_group_members_share_one_payload_and_encode_cell_with_private_control() {
+    for private in [false, true] {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let peers: Vec<_> = (1..=3)
+            .map(|n| peer_v4(Ipv4Addr::new(10, 252, 0, n)))
+            .collect();
+        let mut receivers: Vec<_> = peers
+            .iter()
+            .map(|peer| {
+                if private {
+                    manager.handle_update(RibUpdate::PeerSlowState {
+                        peer: *peer,
+                        session_id: 0,
+                        slow: true,
+                    });
+                }
+                let mut receiver =
+                    register_direct_peer_with_families(&mut manager, *peer, vpn_sendable());
+                while receiver.try_recv().is_ok() {}
+                receiver
+            })
+            .collect();
+        let source = Ipv4Addr::new(192, 0, 2, 252);
+        let routes: Vec<_> = (1..=3)
+            .map(|n| {
+                let mut route = make_vpn_rib_route(source, n, 100 + u32::from(n), 100);
+                route.origin_type = crate::route::RouteOrigin::Ebgp;
+                route
+            })
+            .collect();
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: peer_v4(source),
+            session_id: 0,
+            announced: routes,
+            withdrawn: vec![],
+        });
+        while manager.process_next_route_chunk() {}
+        let updates: Vec<_> = receivers
+            .iter_mut()
+            .map(|rx| rx.try_recv().unwrap())
+            .collect();
+        assert!(updates.iter().all(|update| update.vpn_announce.len() == 3));
+        for update in &updates[1..] {
+            assert_eq!(
+                Arc::ptr_eq(&updates[0].vpn_announce, &update.vpn_announce),
+                !private,
+                "the private control must not pass the shared payload assertion"
+            );
+            if private {
+                assert!(update.shared_group_encode.is_none());
+            } else {
+                assert!(Arc::ptr_eq(
+                    updates[0].shared_group_encode.as_ref().unwrap(),
+                    update.shared_group_encode.as_ref().unwrap()
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn vpn_shared_fanout_keeps_dirty_and_source_flip_views_private() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peers: Vec<_> = (1..=4)
+        .map(|n| peer_v4(Ipv4Addr::new(10, 252, 1, n)))
+        .collect();
+    let mut receivers: Vec<_> = peers
+        .iter()
+        .map(|peer| {
+            let mut receiver =
+                register_direct_peer_with_families(&mut manager, *peer, vpn_sendable());
+            while receiver.try_recv().is_ok() {}
+            receiver
+        })
+        .collect();
+    let mut route = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 252), 1, 100, 100);
+    route.origin_type = crate::route::RouteOrigin::Ebgp;
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: route.peer,
+        session_id: 0,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    for receiver in &mut receivers {
+        assert_eq!(receiver.try_recv().unwrap().vpn_announce.len(), 1);
+    }
+    assert!(manager.mark_outbound_dirty(peers[3]));
+    // A better route flips the source onto an existing receiver: that member
+    // owes a withdrawal, while the dirty member retains its private payload.
+    route.peer = peers[0];
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        for attr in attrs {
+            if let PathAttribute::LocalPref(value) = attr {
+                *value = 200;
+            }
+        }
+    });
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: route.peer,
+        session_id: 0,
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    let updates: Vec<_> = receivers
+        .iter_mut()
+        .map(|rx| rx.try_recv().unwrap())
+        .collect();
+    assert!(updates[0].vpn_announce.is_empty());
+    assert_eq!(updates[0].vpn_withdraw, vec![route.key()]);
+    assert!(updates[0].shared_group_encode.is_none());
+    assert!(Arc::ptr_eq(
+        &updates[1].vpn_announce,
+        &updates[2].vpn_announce
+    ));
+    assert!(updates[1].shared_group_encode.is_some());
+    assert_eq!(updates[3].vpn_announce.len(), 1);
+    assert!(!Arc::ptr_eq(
+        &updates[1].vpn_announce,
+        &updates[3].vpn_announce
+    ));
+    assert!(updates[3].shared_group_encode.is_none());
+    assert!(manager.dirty_peers.contains(&peers[3]));
+}
+
+#[test]
+fn vpn_shared_fanout_isolates_rtc_and_exact_export_rejections() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peers: Vec<_> = (1..=4)
+        .map(|n| peer_v4(Ipv4Addr::new(10, 252, 2, n)))
+        .collect();
+    let mut families = vpn_sendable();
+    families.push((Afi::Ipv4, Safi::RtConstrain));
+    let mut receivers: Vec<_> = peers
+        .iter()
+        .map(|peer| {
+            let mut receiver =
+                register_direct_peer_with_families(&mut manager, *peer, families.clone());
+            manager.peer_rt_membership.insert(
+                *peer,
+                super::super::RtcMembership {
+                    has_default: true,
+                    entries: vec![],
+                },
+            );
+            while receiver.try_recv().is_ok() {}
+            receiver
+        })
+        .collect();
+    manager.peer_rt_membership.insert(
+        peers[2],
+        super::super::RtcMembership {
+            has_default: false,
+            entries: vec![make_rtc_rib_route(Ipv4Addr::new(192, 0, 2, 252), 100, 100).nlri],
+        },
+    );
+    let source = Ipv4Addr::new(192, 0, 2, 252);
+    let routes: Vec<_> = [(1, 100), (2, 200)]
+        .into_iter()
+        .map(|(n, rt_value)| {
+            let mut route = make_vpn_rib_route_with_rts(source, n, vec![rt(rt_value)]);
+            route.origin_type = crate::route::RouteOrigin::Ebgp;
+            route
+        })
+        .collect();
+    let rejected = crate::update::ExactExportKey::Vpn(routes[1].key());
+    let encoder = super::exportability::MockExactExportEncoder::accepting(1);
+    encoder.set_profile(1, [rejected.clone()]);
+    manager.peer_export_encoders.insert(peers[3], encoder);
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: peer_v4(source),
+        session_id: 0,
+        announced: routes.clone(),
+        withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    let updates: Vec<_> = receivers
+        .iter_mut()
+        .map(|rx| rx.try_recv().unwrap())
+        .collect();
+    assert_eq!(updates[0].vpn_announce.len(), 2);
+    assert!(Arc::ptr_eq(
+        &updates[0].vpn_announce,
+        &updates[1].vpn_announce
+    ));
+    assert!(Arc::ptr_eq(
+        updates[0].shared_group_encode.as_ref().unwrap(),
+        updates[1].shared_group_encode.as_ref().unwrap()
+    ));
+    for update in &updates[2..] {
+        assert_eq!(update.vpn_announce.len(), 1);
+        assert_eq!(update.vpn_announce[0].key(), routes[0].key());
+        assert!(
+            update.vpn_withdraw.is_empty(),
+            "never-admitted keys must not withdraw"
+        );
+        assert!(update.shared_group_encode.is_none());
+        assert!(!Arc::ptr_eq(&updates[0].vpn_announce, &update.vpn_announce));
+    }
+    assert!(manager.peer_unexportable[&peers[3]].contains(&rejected));
+}
+
+#[test]
+fn vpn_shared_fanout_preserves_admitted_keys_after_channel_refusal() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peers: Vec<_> = (1..=3)
+        .map(|n| peer_v4(Ipv4Addr::new(10, 252, 3, n)))
+        .collect();
+    let mut receivers: Vec<_> = peers
+        .iter()
+        .map(|peer| {
+            let mut receiver =
+                register_direct_peer_with_families(&mut manager, *peer, vpn_sendable());
+            while receiver.try_recv().is_ok() {}
+            receiver
+        })
+        .collect();
+    let source = Ipv4Addr::new(192, 0, 2, 252);
+    let route = |n| {
+        let mut route = make_vpn_rib_route(source, n, 100, 100);
+        route.origin_type = crate::route::RouteOrigin::Ebgp;
+        route
+    };
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: peer_v4(source),
+        session_id: 0,
+        announced: vec![route(1)],
+        withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    for receiver in &mut receivers {
+        assert_eq!(receiver.try_recv().unwrap().vpn_announce.len(), 1);
+    }
+    for _ in 0..8 {
+        manager.outbound_peers[&peers[2]]
+            .try_send(OutboundRouteUpdate::default())
+            .unwrap();
+    }
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: peer_v4(source),
+        session_id: 0,
+        announced: vec![route(2)],
+        withdrawn: vec![route(1).key()],
+    });
+    while manager.process_next_route_chunk() {}
+    let a = receivers[0].try_recv().unwrap();
+    let b = receivers[1].try_recv().unwrap();
+    assert!(Arc::ptr_eq(&a.vpn_announce, &b.vpn_announce));
+    assert_eq!(a.vpn_withdraw, vec![route(1).key()]);
+    assert!(manager.dirty_peers.contains(&peers[2]));
+    let proof = manager.pending_group_admitted.get(&peers[2]).unwrap();
+    assert_eq!(proof.len(), 1);
+    assert!(proof.contains(&crate::update::ExactExportKey::Vpn(route(1).key())));
+    for _ in 0..8 {
+        assert!(receivers[2].try_recv().unwrap().vpn_announce.is_empty());
+    }
+    manager.resync_dirty_peers_bounded();
+    let recovered = receivers[2].try_recv().unwrap();
+    assert_eq!(recovered.vpn_withdraw, vec![route(1).key()]);
+    assert_eq!(recovered.vpn_announce.len(), 1);
+    assert_eq!(recovered.vpn_announce[0].key(), route(2).key());
+    assert!(!manager.dirty_peers.contains(&peers[2]));
 }
