@@ -280,7 +280,7 @@ async fn outbound_pacing_exact_capacity_finishes_without_waiting_for_drain() {
 
 #[tokio::test(start_paused = true)]
 async fn outbound_pacing_releases_deadline_after_filtered_slice() {
-    use super::super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use super::super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
 
     for shared_fallback in [false, true] {
         let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -301,7 +301,7 @@ async fn outbound_pacing_releases_deadline_after_filtered_slice() {
         }
         let update = if shared_fallback {
             let encode =
-                ProgressiveUnicastEncode::test_new((*session.publish_export_profile()).clone());
+                ProgressiveGroupEncode::test_new((*session.publish_export_profile()).clone());
             encode.test_finish(StreamTerminal::Failed);
             let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
             assert!(
@@ -372,7 +372,7 @@ async fn outbound_pacing_releases_deadline_after_filtered_slice() {
 
 #[tokio::test]
 async fn outbound_pacing_shared_encoder_full_does_not_truncate_group() {
-    use super::super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    use super::super::shared_group::{ProgressiveGroupEncode, StreamTerminal};
     let (mut encoder, _wire) = shared_group_member(65001).await;
     encoder.writer_join.take().unwrap().abort();
     let (bulk, mut own) = mpsc::channel(1);
@@ -391,7 +391,7 @@ async fn outbound_pacing_shared_encoder_full_does_not_truncate_group() {
         .cell
         .get()
         .unwrap()
-        .downcast_ref::<ProgressiveUnicastEncode>()
+        .downcast_ref::<ProgressiveGroupEncode>()
         .unwrap();
     assert_eq!(
         published.test_snapshot(),

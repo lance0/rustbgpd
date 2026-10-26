@@ -1239,7 +1239,7 @@ fn empty_outbound_update() -> OutboundRouteUpdate {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
-        vpn_announce: vec![],
+        vpn_announce: vec![].into(),
         labeled_announce: vec![],
         rtc_announce: vec![],
         vpn_withdraw: vec![],

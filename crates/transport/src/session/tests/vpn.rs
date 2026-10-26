@@ -35,7 +35,7 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
-        vpn_announce: vec![route.clone()],
+        vpn_announce: vec![route.clone()].into(),
         labeled_announce: vec![],
         rtc_announce: vec![],
         vpn_withdraw: vec![],
@@ -86,7 +86,7 @@ async fn send_route_update_emits_vpn_reach_and_unreach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
-        vpn_announce: vec![],
+        vpn_announce: vec![].into(),
         labeled_announce: vec![],
         rtc_announce: vec![],
         vpn_withdraw: vec![key],
@@ -141,7 +141,7 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(session.publish_export_profile()),
-        vpn_announce: vec![route.clone()],
+        vpn_announce: vec![route.clone()].into(),
         ..empty_outbound_update()
     });
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -181,7 +181,7 @@ async fn send_route_update_emits_vpn_add_path_reach_and_unreach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
-        vpn_announce: vec![],
+        vpn_announce: vec![].into(),
         labeled_announce: vec![],
         rtc_announce: vec![],
         vpn_withdraw: vec![key],
@@ -598,7 +598,7 @@ async fn vpnv4_ipv6_next_hop_reflection_matches_exact_probe() {
                     rustbgpd_wire::encode_message(&Message::Update(probe.message)).unwrap();
                 let mut update = empty_outbound_update();
                 update.exact_export_snapshot = Some(profile.clone());
-                update.vpn_announce = vec![route.clone()];
+                update.vpn_announce = vec![route.clone()].into();
                 session.send_route_update(update);
                 let actual = read_single_raw_bgp_message(&mut server).await;
                 assert_eq!(actual.as_slice(), expected.as_ref());
@@ -691,7 +691,7 @@ async fn vpnv4_ipv6_next_hop_without_peer_capability_rejects_only_announcements(
         let expected = rustbgpd_wire::encode_message(&Message::Update(withdrawal.message)).unwrap();
         let mut update = empty_outbound_update();
         update.exact_export_snapshot = Some(profile);
-        update.vpn_announce = vec![route];
+        update.vpn_announce = vec![route].into();
         update.vpn_withdraw = vec![key];
         session.send_route_update(update);
         assert_eq!(
@@ -889,7 +889,7 @@ async fn vpn_announce_grouping_matches_linear_reference_bytes() {
 
     session.send_route_update(OutboundRouteUpdate {
         exact_export_snapshot: Some(export),
-        vpn_announce: routes,
+        vpn_announce: routes.into(),
         ..OutboundRouteUpdate::default()
     });
     let mut actual = Vec::new();
@@ -934,7 +934,7 @@ async fn vpn_envelope_advances_in_time_budgeted_slices_and_releases_them() {
     session
         .handle_outbound_route_update(OutboundRouteUpdate {
             exact_export_snapshot: Some(session.publish_export_profile()),
-            vpn_announce: routes,
+            vpn_announce: routes.into(),
             end_of_rib: vec![(Afi::Ipv4, Safi::MplsVpn)],
             ..OutboundRouteUpdate::default()
         })

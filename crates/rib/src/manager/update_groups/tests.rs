@@ -6773,7 +6773,7 @@ fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
         .peer_export_encoders
         .insert(OTHER2, super::super::permissive_test_exact_export_encoder());
     let mut batch = OutboundCommitBatch::with_unicast(candidates.into(), vec![None; 128].into());
-    batch.vpn_announce.push(vpn_route(2, OTHER1));
+    std::sync::Arc::make_mut(&mut batch.vpn_announce).push(vpn_route(2, OTHER1));
     batch.withdraw.push((prefix(1), 0));
     batch.vpn_withdraw.push(vpn_route(1, OTHER1).key());
     assert!(

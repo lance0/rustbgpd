@@ -1161,8 +1161,9 @@ pub struct OutboundRouteUpdate {
     pub bgpls_announce: Vec<BgpLsRibRoute>,
     /// BGP-LS route keys to withdraw.
     pub bgpls_withdraw: Vec<BgpLsRouteKey>,
-    /// VPNv4/VPNv6 routes to announce (RFC 4364 / RFC 4659).
-    pub vpn_announce: Vec<VpnRibRoute>,
+    /// VPNv4/VPNv6 routes to announce (RFC 4364 / RFC 4659), shared across
+    /// clean group members with an identical source/RT-filtered view.
+    pub vpn_announce: Arc<Vec<VpnRibRoute>>,
     /// VPNv4/VPNv6 route keys to withdraw.
     pub vpn_withdraw: Vec<VpnRibRouteKey>,
     /// IPv4/IPv6 labeled-unicast routes to announce (RFC 8277).

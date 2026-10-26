@@ -1556,6 +1556,16 @@ The [M112 EVPN receipt](../artifacts/interop/m112-srv6-semantic-20260906T200333Z
 records invalid-candidate exclusion and recovery for one MAC-only Type 2 SID
 Structure replacement.
 
+### Shared VPN encoding
+
+Clean VPNv4/VPNv6 update-group members with the same announcement inventory
+share one route payload and encoded UPDATE stream. Source exclusion, differing
+RT-Constrain membership, dirty recovery and exact-export rejection retain each
+member's own view. Transport reuses the stream only when its export profile
+produces the same wire bytes, including label, Add-Path and next-hop handling;
+otherwise it encodes the member's payload locally. Withdrawals and terminal
+markers remain ordered per member. This does not enable EVPN group ownership.
+
 ### Update-group recovery fallback
 
 A grouped member whose outbound UPDATE could not be sent is marked dirty and

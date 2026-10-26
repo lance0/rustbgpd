@@ -1032,6 +1032,35 @@ impl RibManager {
                 {
                     self.vpn_group_member_emits += 1;
                 }
+                // Share only the complete announce view. Source exclusions,
+                // RTC filtering and recovery keep their per-member payloads.
+                let shared_announce = (!self.dirty_peers.contains(&peer)
+                    && !self.outbound_channel_full(peer)
+                    && stage.deltas.iter().all(|delta| {
+                        checkpoint();
+                        delta.new.as_ref().is_none_or(|route| {
+                            route.peer != peer
+                                && crate::manager::update_groups::rt_passes(
+                                    member_filter.as_ref(),
+                                    route,
+                                )
+                        })
+                    }))
+                .then(|| {
+                    std::sync::Arc::clone(stage.shared_announce.get_or_init(|| {
+                        stage
+                            .deltas
+                            .iter()
+                            .inspect(|_| checkpoint())
+                            .filter_map(|delta| delta.new.clone())
+                            .collect::<Vec<_>>()
+                            .into()
+                    }))
+                });
+                let shared_group_encode = shared_announce
+                    .as_ref()
+                    .filter(|announce| !announce.is_empty())
+                    .map(|_| std::sync::Arc::clone(&stage.shared_encode));
                 let mut vpn_announce = Vec::new();
                 let mut vpn_withdraw = Vec::new();
                 let count_delta =
@@ -1039,10 +1068,15 @@ impl RibManager {
                         &stage.deltas,
                         peer,
                         member_filter.as_ref(),
-                        &mut vpn_announce,
+                        &mut |route| {
+                            if shared_announce.is_none() {
+                                vpn_announce.push(route.clone());
+                            }
+                        },
                         &mut vpn_withdraw,
                         &mut || super::super::replacement_readiness_checkpoint(&readiness, false),
                     );
+                let vpn_announce = shared_announce.unwrap_or_else(|| vpn_announce.into());
                 if vpn_announce.is_empty() && vpn_withdraw.is_empty() {
                     continue;
                 }
@@ -1078,6 +1112,7 @@ impl RibManager {
                     .try_send_and_commit_outbound_update_with_group_prior(
                         peer,
                         OutboundCommitBatch {
+                            shared_group_encode,
                             vpn_announce,
                             vpn_withdraw,
                             ..OutboundCommitBatch::default()
@@ -1234,7 +1269,7 @@ impl RibManager {
                 && let Err(failure) = self.try_send_and_commit_outbound_update(
                     peer,
                     OutboundCommitBatch {
-                        vpn_announce,
+                        vpn_announce: vpn_announce.into(),
                         vpn_withdraw,
                         ..OutboundCommitBatch::default()
                     },

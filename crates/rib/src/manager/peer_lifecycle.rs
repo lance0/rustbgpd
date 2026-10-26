@@ -3015,7 +3015,7 @@ impl RibManager {
                     evpn_complete_feed,
                     bgpls_announce,
                     bgpls_withdraw,
-                    vpn_announce,
+                    vpn_announce: vpn_announce.into(),
                     vpn_withdraw,
                     labeled_announce,
                     labeled_withdraw,

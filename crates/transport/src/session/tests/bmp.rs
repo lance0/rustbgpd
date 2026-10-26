@@ -512,7 +512,7 @@ async fn outbound_vpn_update_emits_rib_out_bmp_byte_exact() {
     session.negotiated = Some(Arc::new(negotiated));
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
-    update.vpn_announce = vec![make_vpn_rib_route(4093)];
+    update.vpn_announce = vec![make_vpn_rib_route(4093)].into();
     session.send_route_update(update);
     let wire = read_single_raw_bgp_message(&mut server).await;
     let pdu = expect_rib_out_rm(bmp_rx.try_recv().unwrap());

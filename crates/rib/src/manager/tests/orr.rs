@@ -2048,7 +2048,7 @@ async fn non_orr_vpn_peer_unchanged() {
     let mut announces = 0;
     let mut last = None;
     while let Ok(update) = out.try_recv() {
-        for route in &update.vpn_announce {
+        for route in update.vpn_announce.iter() {
             announces += 1;
             last = Some(route.clone());
         }

@@ -1078,3 +1078,19 @@ cells were 3.66–4.68×. This closes the component capture-cost question for
 shared unicast and VPN recovery. Whole-system mass-dirty qualification and the
 release-candidate soak are recorded separately. Changes beyond the 4,096-entry
 log still take the exact probe path, and EVPN ownership remains disabled.
+
+## Amendment (2026-10-26): shared VPN announce encoding
+
+Clean VPN members whose source and RT-Constrain filters retain the complete
+announcement inventory now share one `Arc` payload and progressive encode cell.
+Members with a different view or unsettled recovery retain private payloads;
+exact-export reconciliation detaches a changed view before transport can reuse
+another member's chunks. Each member still admits its own withdrawals before
+announcements and its terminal markers afterward.
+
+The existing real-RIB-to-session wire comparison now includes VPNv6, VPN label
+changes and a VPN source flip, with an explicit shared-VPN-envelope witness.
+It compares each receiver's ordered per-key NLRI and prepared attribute bytes,
+including the MP next hop and EoR coverage, against the forced-private run.
+This is correctness coverage for that scenario, not scale qualification or
+permission to enable EVPN ownership.

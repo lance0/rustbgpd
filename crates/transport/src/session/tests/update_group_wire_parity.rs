@@ -36,6 +36,7 @@ fn families() -> Vec<(Afi, Safi)> {
         (Afi::Ipv4, Safi::Unicast),
         (Afi::Ipv6, Safi::Unicast),
         (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv6, Safi::MplsVpn),
     ]
 }
 
@@ -184,6 +185,30 @@ fn vpn_route(src: Ipv4Addr, n: u8, label: u32, local_pref: u32) -> rustbgpd_rib:
     }
 }
 
+fn vpn6_route(src: Ipv4Addr, n: u8, label: u32, local_pref: u32) -> rustbgpd_rib::VpnRibRoute {
+    let mut route = vpn_route(src, n, label, local_pref);
+    route.nlri.prefix = VpnPrefix::v6(
+        Ipv6Addr::new(0x2001, 0xdb8, 0x210, u16::from(n), 0, 0, 0, 0),
+        64,
+    )
+    .unwrap();
+    route.next_hop = IpAddr::V6(Ipv6Addr::new(
+        0x2001,
+        0xdb8,
+        0,
+        0,
+        0,
+        0,
+        0,
+        u16::from(src.octets()[3]),
+    ));
+    route
+}
+
+fn vpn6_key(n: u8) -> rustbgpd_rib::VpnRibRouteKey {
+    vpn6_route(A, n, 0, 100).key()
+}
+
 fn vpn_key(n: u8) -> rustbgpd_rib::VpnRibRouteKey {
     rustbgpd_rib::VpnRibRouteKey {
         nlri_key: vpn_nlri(n, 0).key(),
@@ -206,6 +231,7 @@ struct Run {
     receivers: Vec<Receiver>,
     settles: usize,
     shared_envelopes: usize,
+    shared_vpn_envelopes: usize,
     private_envelopes: usize,
 }
 
@@ -214,6 +240,7 @@ struct Run {
 struct RunOutput {
     frames: BTreeMap<Ipv4Addr, Vec<Vec<u8>>>,
     shared_envelopes: usize,
+    shared_vpn_envelopes: usize,
     private_envelopes: usize,
 }
 
@@ -238,6 +265,7 @@ impl Run {
             receivers: Vec::new(),
             settles: 0,
             shared_envelopes: 0,
+            shared_vpn_envelopes: 0,
             private_envelopes: 0,
         }
     }
@@ -342,6 +370,7 @@ impl Run {
             while let Ok(update) = receiver.session.outbound_rx.try_recv() {
                 if update.shared_group_encode.is_some() {
                     self.shared_envelopes += 1;
+                    self.shared_vpn_envelopes += usize::from(!update.vpn_announce.is_empty());
                 } else {
                     self.private_envelopes += 1;
                 }
@@ -388,19 +417,14 @@ impl Run {
         RunOutput {
             frames,
             shared_envelopes: self.shared_envelopes,
+            shared_vpn_envelopes: self.shared_vpn_envelopes,
             private_envelopes: self.private_envelopes,
         }
     }
 }
 
-/// Initial table, member joins, multi-source passes, a source flip and
-/// back, an attribute change and withdrawals in every family.
-///
-/// A distribution window may coalesce messages queued between two settles,
-/// and its time bound makes that run-dependent. Each such group therefore
-/// touches disjoint keys, so coalescing can change packing but never a
-/// key's event sequence.
-async fn scenario(private: bool) -> RunOutput {
+/// Establish the first source before the remaining members join.
+async fn initial_table(private: bool) -> Run {
     let mut run = Run::start(private);
     run.peer_up(A).await;
     run.routes(
@@ -414,9 +438,25 @@ async fn scenario(private: bool) -> RunOutput {
         vec![],
     )
     .await;
-    run.vpn_routes(A, vec![vpn_route(A, 1, 100, 100)], vec![])
-        .await;
+    run.vpn_routes(
+        A,
+        vec![vpn_route(A, 1, 100, 100), vpn6_route(A, 1, 100, 100)],
+        vec![],
+    )
+    .await;
     run.settle().await;
+    run
+}
+
+/// Initial table, member joins, multi-source passes, a source flip and
+/// back, an attribute change and withdrawals in every family.
+///
+/// A distribution window may coalesce messages queued between two settles,
+/// and its time bound makes that run-dependent. Each such group therefore
+/// touches disjoint keys, so coalescing can change packing but never a
+/// key's event sequence.
+async fn scenario(private: bool) -> RunOutput {
+    let mut run = initial_table(private).await;
     run.peer_up(B).await;
     run.peer_up(C).await;
 
@@ -442,8 +482,16 @@ async fn scenario(private: bool) -> RunOutput {
         vec![],
     )
     .await;
-    run.vpn_routes(B, vec![vpn_route(B, 2, 200, 100)], vec![])
-        .await;
+    run.vpn_routes(
+        B,
+        vec![
+            vpn_route(B, 2, 200, 100),
+            vpn6_route(B, 2, 200, 100),
+            vpn_route(B, 1, 150, 200),
+        ],
+        vec![],
+    )
+    .await;
     run.settle().await;
 
     // Attribute change, withdrawals in every family and a VPN relabel.
@@ -454,9 +502,14 @@ async fn scenario(private: bool) -> RunOutput {
     )
     .await;
     run.routes(B, vec![], vec![v6_prefix(2)]).await;
-    run.vpn_routes(A, vec![], vec![vpn_key(1)]).await;
-    run.vpn_routes(B, vec![vpn_route(B, 2, 222, 100)], vec![])
+    run.vpn_routes(A, vec![], vec![vpn_key(1), vpn6_key(1)])
         .await;
+    run.vpn_routes(
+        B,
+        vec![vpn_route(B, 2, 222, 100), vpn6_route(B, 2, 222, 100)],
+        vec![],
+    )
+    .await;
     run.settle().await;
 
     // A's better paths hide B's and C's runner-ups, then one withdrawal
@@ -498,7 +551,8 @@ async fn scenario(private: bool) -> RunOutput {
     run.routes(B, vec![], vec![Prefix::V4(v4_prefix(1))]).await;
     run.routes(C, vec![], vec![Prefix::V4(v4_prefix(5)), v6_prefix(3)])
         .await;
-    run.vpn_routes(B, vec![], vec![vpn_key(2)]).await;
+    run.vpn_routes(B, vec![], vec![vpn_key(1), vpn_key(2), vpn6_key(2)])
+        .await;
     run.settle().await;
     run.finish().await
 }
@@ -641,7 +695,7 @@ fn trace(frames: &[Vec<u8>]) -> WireTrace {
 /// The scenario must exercise every compared dimension, or a green
 /// comparison proves nothing.
 fn assert_coverage(receiver: Ipv4Addr, trace: &WireTrace) {
-    for family in [(1, 1), (2, 1), (1, 128)] {
+    for family in [(1, 1), (2, 1), (1, 128), (2, 128)] {
         let keys: Vec<_> = trace
             .events
             .iter()
@@ -682,6 +736,11 @@ async fn grouped_and_private_rib_output_match_on_the_wire() {
         private.shared_envelopes, 0,
         "the private run must stay on the per-peer path"
     );
+    assert!(
+        grouped.shared_vpn_envelopes > 0,
+        "VPN must reach shared encoding"
+    );
+    assert_eq!(private.shared_vpn_envelopes, 0);
     assert!(private.private_envelopes > 0);
     assert_eq!(
         grouped.frames.keys().collect::<Vec<_>>(),

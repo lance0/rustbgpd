@@ -1645,7 +1645,7 @@ async fn vpn_addpath_llgr_stale_candidates_gated_individually() {
     assert_eq!(query_vpn_routes(&tx).await.len(), 1);
     let mut ranks_seen: HashSet<u32> = HashSet::new();
     while let Ok(update) = out_rx.try_recv() {
-        for route in &update.vpn_announce {
+        for route in update.vpn_announce.iter() {
             ranks_seen.insert(route.path_id);
         }
     }

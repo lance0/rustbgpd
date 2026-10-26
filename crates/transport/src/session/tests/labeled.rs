@@ -35,7 +35,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
-        vpn_announce: vec![],
+        vpn_announce: vec![].into(),
         labeled_announce: vec![route.clone()],
         rtc_announce: vec![],
         vpn_withdraw: vec![],
@@ -86,7 +86,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
-        vpn_announce: vec![],
+        vpn_announce: vec![].into(),
         labeled_announce: vec![],
         rtc_announce: vec![],
         vpn_withdraw: vec![],
@@ -154,7 +154,7 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
-        vpn_announce: vec![],
+        vpn_announce: vec![].into(),
         labeled_announce: vec![route.clone()],
         rtc_announce: vec![],
         vpn_withdraw: vec![],
@@ -663,7 +663,7 @@ async fn multi_label_routes_are_withheld_for_every_label_stack_family() {
             if safi == Safi::LabeledUnicast {
                 update.labeled_announce = vec![multi_labeled, single_labeled.clone()];
             } else {
-                update.vpn_announce = vec![multi_vpn, single_vpn.clone()];
+                update.vpn_announce = vec![multi_vpn, single_vpn.clone()].into();
             }
             session.send_route_update(update);
             let Message::Update(msg) = read_single_bgp_message(&mut server).await else {

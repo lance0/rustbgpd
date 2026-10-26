@@ -1,12 +1,16 @@
 //! Encode-once fanout for update-group shared envelopes (LAN-455/LAN-458),
 //! with progressive chunk publication (ADR-0109, amended).
 //!
-//! A clean grouped export-policy transition releases the *same* announce
+//! A clean grouped unicast export-policy transition releases the *same* announce
 //! inventory (`Arc`-shared) to every member of an update-group, differing
 //! per member only by `announce_source_exclusion`. Before this seam every
 //! session task re-encoded the full table itself, so N members paid N full
 //! encodes that fair-shared the cores and delayed everyone's first wire
 //! UPDATE by the total encode time divided by the core count.
+//!
+//! VPN fanout shares the same stream machinery for members with identical
+//! source/RT-filtered payloads. VPN withdrawals stay ahead of the shared
+//! announce phase; label and next-hop preparation uses the private encoder.
 //!
 //! The first member to consume its envelope is elected encoder through the
 //! envelope's [`rustbgpd_rib::SharedGroupEncode`] cell, a synchronous `OnceLock`.
@@ -48,7 +52,9 @@
 //! `has_same_wire_encoding` deliberately ignores the negotiated ceiling —
 //! a 4096-byte message is well-formed for an RFC 8654 extended peer too.
 
-use super::export::{PreparedAttrCache, PreparedUnicastCandidate, ReachNlri, SessionExportProfile};
+use super::export::{
+    MpAttrCache, PreparedAttrCache, PreparedUnicastCandidate, ReachNlri, SessionExportProfile,
+};
 use super::{
     Afi, IpAddr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate,
     PathAttribute, PeerSession, Route, Safi, UpdateMessage, debug,
@@ -79,12 +85,15 @@ pub(super) const PROGRESSIVE_SLICE_ROUTES: usize = 2048;
 /// indirect `IpAddr` key costs tens of milliseconds; this pass is linear in
 /// the inventory plus a sort of the distinct sources.
 pub(super) fn source_grouped_order(announce: &[Route]) -> Vec<usize> {
+    source_grouped_indices(announce.iter().map(|route| route.peer))
+}
+
+fn source_grouped_indices(peers: impl Iterator<Item = PeerId>) -> Vec<usize> {
     let mut ids: HashMap<IpAddr, usize> = HashMap::default();
-    let source_ids: Vec<usize> = announce
-        .iter()
-        .map(|route| {
+    let source_ids: Vec<usize> = peers
+        .map(|peer| {
             let next = ids.len();
-            *ids.entry(route.peer.addr()).or_insert(next)
+            *ids.entry(peer.addr()).or_insert(next)
         })
         .collect();
     let mut sources: Vec<(IpAddr, usize)> = ids.into_iter().collect();
@@ -99,7 +108,7 @@ pub(super) fn source_grouped_order(announce: &[Route]) -> Vec<usize> {
         slot[id] = start;
         start += count;
     }
-    let mut order = vec![0usize; announce.len()];
+    let mut order = vec![0usize; source_ids.len()];
     for (i, &id) in source_ids.iter().enumerate() {
         order[slot[id]] = i;
         slot[id] += 1;
@@ -108,11 +117,12 @@ pub(super) fn source_grouped_order(announce: &[Route]) -> Vec<usize> {
 }
 
 /// One pre-encoded wire UPDATE carrying routes from exactly one source peer
-/// and one unicast family.
+/// and one address family.
 #[derive(Clone)]
-pub(super) struct SharedUnicastChunk {
+pub(super) struct SharedAnnounceChunk {
     pub(super) source: PeerId,
     pub(super) afi: Afi,
+    pub(super) safi: Safi,
     pub(super) bytes: Bytes,
 }
 
@@ -127,12 +137,12 @@ pub(super) enum StreamTerminal {
 
 #[derive(Default)]
 struct ProgressiveStateInner {
-    chunks: Vec<SharedUnicastChunk>,
+    chunks: Vec<SharedAnnounceChunk>,
     terminal: Option<StreamTerminal>,
 }
 
 /// Cell payload created by the elected encoder *before* it encodes anything.
-pub(super) struct ProgressiveUnicastEncode {
+pub(super) struct ProgressiveGroupEncode {
     /// The encoder's profile; consumers reuse chunks only after proving
     /// [`SessionExportProfile::has_same_wire_encoding`] against it.
     profile: SessionExportProfile,
@@ -140,7 +150,7 @@ pub(super) struct ProgressiveUnicastEncode {
     progress: tokio::sync::Notify,
 }
 
-impl ProgressiveUnicastEncode {
+impl ProgressiveGroupEncode {
     fn new(profile: SessionExportProfile) -> Self {
         Self {
             profile,
@@ -149,7 +159,7 @@ impl ProgressiveUnicastEncode {
         }
     }
 
-    fn publish(&self, chunks: Vec<SharedUnicastChunk>) {
+    fn publish(&self, chunks: Vec<SharedAnnounceChunk>) {
         {
             let mut state = self
                 .state
@@ -181,7 +191,7 @@ impl ProgressiveUnicastEncode {
         &self,
         from: usize,
         limit: usize,
-    ) -> (Vec<SharedUnicastChunk>, Option<StreamTerminal>) {
+    ) -> (Vec<SharedAnnounceChunk>, Option<StreamTerminal>) {
         let state = self
             .state
             .lock()
@@ -210,7 +220,7 @@ impl ProgressiveUnicastEncode {
         Self::new(profile)
     }
     #[cfg(test)]
-    pub(super) fn test_publish(&self, chunks: Vec<SharedUnicastChunk>) {
+    pub(super) fn test_publish(&self, chunks: Vec<SharedAnnounceChunk>) {
         self.publish(chunks);
     }
     #[cfg(test)]
@@ -228,7 +238,7 @@ impl ProgressiveUnicastEncode {
 /// unwinds, or is cancelled before its explicit `finish(Complete)`. Installed
 /// before the first suspension and retained across slice yields, the guard
 /// keeps the stream backed by either a live encoder or a terminal result.
-pub(super) struct EncoderGuard<'cell>(pub(super) &'cell ProgressiveUnicastEncode);
+pub(super) struct EncoderGuard<'cell>(pub(super) &'cell ProgressiveGroupEncode);
 
 impl Drop for EncoderGuard<'_> {
     fn drop(&mut self) {
@@ -236,22 +246,25 @@ impl Drop for EncoderGuard<'_> {
     }
 }
 
-/// Whether an envelope is shaped like a grouped unicast fanout: unicast
-/// announcements, optionally bracketed by refresh markers or `EoR` and preceded
-/// by unicast withdrawals. Those phases stay per member in the ordinary
+/// Whether an envelope carries grouped unicast or VPN announcements, optionally
+/// bracketed by refresh markers or `EoR` and preceded by that family's
+/// withdrawals. Those phases stay per member in the ordinary
 /// cursor; only the announce inventory is shared. Anything richer
 /// keeps the ordinary path, which handles every payload kind.
 fn shared_encode_eligible(update: &OutboundRouteUpdate) -> bool {
     update.shared_group_encode.is_some()
-        && !update.announce.is_empty()
+        && ((!update.announce.is_empty()
+            && update.vpn_announce.is_empty()
+            && update.vpn_withdraw.is_empty())
+            || (!update.vpn_announce.is_empty()
+                && update.announce.is_empty()
+                && update.withdraw.is_empty()))
         && update.flowspec_announce.is_empty()
         && update.flowspec_withdraw.is_empty()
         && update.evpn_announce.is_empty()
         && update.evpn_withdraw.is_empty()
         && update.bgpls_announce.is_empty()
         && update.bgpls_withdraw.is_empty()
-        && update.vpn_announce.is_empty()
-        && update.vpn_withdraw.is_empty()
         && update.labeled_announce.is_empty()
         && update.labeled_withdraw.is_empty()
         && update.rtc_announce.is_empty()
@@ -337,7 +350,7 @@ pub(super) fn encode_shared_unicast_slice<'r>(
     announce: &'r [Route],
     next_hop_override: &[Option<rustbgpd_policy::NextHopAction>],
     indices: &[usize],
-) -> Option<Vec<SharedUnicastChunk>> {
+) -> Option<Vec<SharedAnnounceChunk>> {
     let max_len = usize::from(rustbgpd_wire::MAX_MESSAGE_LEN);
     let local_ipv4 = export.local_ipv4();
     let mut index: HashMap<SharedGroupKey, usize> = HashMap::default();
@@ -463,11 +476,76 @@ pub(super) fn encode_shared_unicast_slice<'r>(
                 }),
             ),
         };
-        chunks.extend(encoded?.into_iter().map(|bytes| SharedUnicastChunk {
+        chunks.extend(encoded?.into_iter().map(|bytes| SharedAnnounceChunk {
             source: group.source,
             afi,
+            safi: Safi::Unicast,
             bytes,
         }));
+    }
+    Some(chunks)
+}
+
+/// Use the same label, Add-Path and scoped next-hop preparation as the
+/// private encoder. Source-separated groups keep split horizon explicit.
+pub(super) fn encode_shared_vpn_slice(
+    export: &SessionExportProfile,
+    announce: &[rustbgpd_rib::VpnRibRoute],
+    indices: &[usize],
+) -> Option<Vec<SharedAnnounceChunk>> {
+    use super::outbound::{MpGroupIndex, MpRouteGroup};
+    let mut cache = MpAttrCache::default();
+    let mut sources: HashMap<
+        PeerId,
+        (MpGroupIndex, Vec<MpRouteGroup<rustbgpd_wire::VpnNlriEntry>>),
+    > = HashMap::default();
+    for &i in indices {
+        let route = &announce[i];
+        let family = route.afi_safi();
+        // Add-Path disqualifies a peer from the RIB's group. Refuse an
+        // inconsistent envelope rather than share path identifiers.
+        if route.path_id != 0 || export.add_path_send(family) {
+            return None;
+        }
+        let prepared = export
+            .prepare_vpn_candidate_with(route, || {
+                export.prepare_mp_attributes_cached(
+                    &mut cache,
+                    &route.attributes,
+                    route.origin_type,
+                    route.peer_router_id,
+                    family,
+                )
+            })
+            .ok()?;
+        let (index, groups) = sources.entry(route.peer).or_default();
+        index.push(groups, family, prepared);
+    }
+    let mut chunks = Vec::new();
+    for (source, (_, groups)) in sources {
+        for ((afi, safi), next_hop, link_local, attrs, entries) in groups {
+            let encoded = encode_chunks(
+                &entries,
+                usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                |entries| {
+                    export.build_mp_reach(
+                        afi,
+                        safi,
+                        next_hop,
+                        link_local,
+                        &attrs,
+                        ReachNlri::Vpn(entries),
+                        Ipv4UnicastMode::Body,
+                    )
+                },
+            )?;
+            chunks.extend(encoded.into_iter().map(|bytes| SharedAnnounceChunk {
+                source,
+                afi,
+                safi,
+                bytes,
+            }));
+        }
     }
     Some(chunks)
 }
@@ -509,7 +587,7 @@ impl PeerSession {
     pub(super) async fn prepare_shared_group(
         &mut self,
         update: &OutboundRouteUpdate,
-    ) -> Option<(Arc<ProgressiveUnicastEncode>, usize)> {
+    ) -> Option<(Arc<ProgressiveGroupEncode>, usize)> {
         if !shared_encode_eligible(update) {
             return None;
         }
@@ -524,11 +602,9 @@ impl PeerSession {
         let mut elected_encoder = false;
         let cell = shared.cell.get_or_init(|| {
             elected_encoder = true;
-            Arc::new(ProgressiveUnicastEncode::new(export.clone())) as Arc<dyn Any + Send + Sync>
+            Arc::new(ProgressiveGroupEncode::new(export.clone())) as Arc<dyn Any + Send + Sync>
         });
-        let encode = Arc::clone(cell)
-            .downcast::<ProgressiveUnicastEncode>()
-            .ok()?;
+        let encode = Arc::clone(cell).downcast::<ProgressiveGroupEncode>().ok()?;
         if elected_encoder {
             let next = self
                 .encode_and_send_shared_group(&encode, update, export)
@@ -552,7 +628,7 @@ impl PeerSession {
     /// chunks are published and the stream mutex has been released.
     async fn encode_and_send_shared_group(
         &mut self,
-        encode: &ProgressiveUnicastEncode,
+        encode: &ProgressiveGroupEncode,
         update: &OutboundRouteUpdate,
         export: &SessionExportProfile,
     ) -> Option<usize> {
@@ -570,7 +646,12 @@ impl PeerSession {
         // Permuting an index keeps announce/next-hop-override alignment and
         // is safe to reorder: the inventory carries one route per prefix,
         // and announcements of distinct prefixes are order-independent.
-        let order = source_grouped_order(&update.announce);
+        let vpn = !update.vpn_announce.is_empty();
+        let order = if vpn {
+            source_grouped_indices(update.vpn_announce.iter().map(|route| route.peer))
+        } else {
+            source_grouped_order(&update.announce)
+        };
         // Keep publishing after this member runs out of writer capacity.
         // Its first unsent chunk becomes the same pending cursor consumers use;
         // the group's publication cannot depend on one member's reader.
@@ -579,6 +660,7 @@ impl PeerSession {
         // from chunk 0 once the ordinary cursor has admitted those phases.
         // Requests remain excluded by shared_encode_eligible.
         let mut own_send_healthy = update.withdraw.is_empty()
+            && update.vpn_withdraw.is_empty()
             && !update
                 .refresh_markers
                 .iter()
@@ -589,13 +671,17 @@ impl PeerSession {
         while idx < order.len() {
             self.poll_shared_group_command();
             let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());
-            let chunks = encode_shared_unicast_slice(
-                export,
-                &mut cache,
-                &update.announce,
-                &update.next_hop_override,
-                &order[idx..end],
-            )?;
+            let chunks = if vpn {
+                encode_shared_vpn_slice(export, &update.vpn_announce, &order[idx..end])
+            } else {
+                encode_shared_unicast_slice(
+                    export,
+                    &mut cache,
+                    &update.announce,
+                    &update.next_hop_override,
+                    &order[idx..end],
+                )
+            }?;
             if own_send_healthy {
                 for chunk in &chunks {
                     if self.wants_shared_chunk(update, chunk) {
@@ -639,11 +725,11 @@ impl PeerSession {
     pub(super) fn wants_shared_chunk(
         &self,
         update: &OutboundRouteUpdate,
-        chunk: &SharedUnicastChunk,
+        chunk: &SharedAnnounceChunk,
     ) -> bool {
         update.announce_source_exclusion != Some(chunk.source)
             && self
                 .negotiated_families()
-                .contains(&(chunk.afi, Safi::Unicast))
+                .contains(&(chunk.afi, chunk.safi))
     }
 }

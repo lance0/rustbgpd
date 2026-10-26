@@ -445,7 +445,7 @@ impl Inventory {
             );
             self.event(family, index, true);
         }
-        for value in update.vpn_announce {
+        for value in update.vpn_announce.iter() {
             let (family, index) = vpn_index(&value.key());
             assert_eq!(
                 value.nlri,
@@ -1647,7 +1647,7 @@ mod tests {
         for f in 0..2 {
             inventory.apply(OutboundRouteUpdate {
                 announce: vec![fixture_route(f, 99)].into(),
-                vpn_announce: vec![fixture_vpn_route(f, 98), fixture_vpn_route(f, 99)],
+                vpn_announce: vec![fixture_vpn_route(f, 98), fixture_vpn_route(f, 99)].into(),
                 ..Default::default()
             });
         }
@@ -1684,7 +1684,7 @@ mod tests {
         let mut inventory = Inventory::new([100; 4], None);
         let value = fixture_vpn_route(1, 1);
         inventory.apply(OutboundRouteUpdate {
-            vpn_announce: vec![value.clone()],
+            vpn_announce: vec![value.clone()].into(),
             ..Default::default()
         });
         for _ in 0..2 {
@@ -1700,7 +1700,7 @@ mod tests {
         let mut value = fixture_vpn_route(0, 0);
         value.nlri.labels[0].label += 1;
         Inventory::new([100; 4], None).apply(OutboundRouteUpdate {
-            vpn_announce: vec![value],
+            vpn_announce: vec![value].into(),
             ..Default::default()
         });
     }
@@ -1710,7 +1710,7 @@ mod tests {
         let mut value = fixture_vpn_route(0, 0);
         value.attributes = expected_attributes(false, 0);
         Inventory::new([100; 4], None).apply(OutboundRouteUpdate {
-            vpn_announce: vec![value],
+            vpn_announce: vec![value].into(),
             ..Default::default()
         });
     }

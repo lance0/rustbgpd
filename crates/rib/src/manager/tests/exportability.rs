@@ -418,7 +418,7 @@ fn commit_batch(manager: &mut RibManager, peer: PeerId, batch: ExactBatch) -> bo
                 evpn_withdraw: batch.evpn_withdraw,
                 bgpls_announce: batch.bgpls_announce,
                 bgpls_withdraw: batch.bgpls_withdraw,
-                vpn_announce: batch.vpn_announce,
+                vpn_announce: batch.vpn_announce.into(),
                 vpn_withdraw: batch.vpn_withdraw,
                 labeled_announce: batch.labeled_announce,
                 labeled_withdraw: batch.labeled_withdraw,
@@ -2408,4 +2408,57 @@ fn action_only_equivalent_form_needs_no_queue_admission() {
     let rejected = receiver.try_recv().unwrap();
     assert!(rejected.announce.is_empty());
     assert_eq!(rejected.withdraw, vec![(route.prefix, route.path_id)]);
+}
+
+#[test]
+fn rejected_private_vpn_payload_retires_at_each_checkpoint() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let encoder = MockExactExportEncoder::accepting(1);
+    let peer = peer_v4(Ipv4Addr::new(10, 252, 4, 1));
+    let mut receiver = register_exact_target(&mut manager, peer, encoder.clone());
+    let routes: Vec<_> = (0..128)
+        .map(|n| make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 252), n, 100, 100))
+        .collect();
+    encoder.set_profile(
+        1,
+        routes.iter().map(|route| ExactExportKey::Vpn(route.key())),
+    );
+    let weak: Vec<_> = routes
+        .iter()
+        .map(|route| Arc::downgrade(&route.attributes))
+        .collect();
+    let retired = Arc::new(Mutex::new(Vec::new()));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let retired = Arc::clone(&retired);
+        move |site| {
+            if site == "exact_vpn_payload_retirement" {
+                retired.lock().unwrap().push(
+                    weak.iter()
+                        .filter(|attrs| attrs.strong_count() == 0)
+                        .count(),
+                );
+            }
+        }
+    }));
+    assert!(
+        manager
+            .try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    vpn_announce: routes.into(),
+                    ..OutboundCommitBatch::default()
+                }
+            )
+            .is_ok()
+    );
+    let update = receiver.try_recv().unwrap();
+    assert!(update.vpn_announce.is_empty() && update.vpn_withdraw.is_empty());
+    let mut retired = retired.lock().unwrap().clone();
+    retired.dedup();
+    assert_eq!(
+        retired,
+        (0..=128).collect::<Vec<_>>(),
+        "each released route must be followed by a checkpoint"
+    );
 }

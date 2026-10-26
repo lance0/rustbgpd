@@ -1484,14 +1484,14 @@ pub(in crate::manager) struct VpnGroupDelta {
 
 /// Result of one shared VPN staging pass over a group: deltas (already
 /// committed to the group table) plus the accumulated export-policy
-/// verdicts for per-member counter replay. No shared-`Arc` payload — the
-/// outbound envelope's VPN queue is a `Vec`, so members clone per route
-/// either way; the receipt-proven win is collapsing the *staging* (policy
-/// eval + suppression per peer), not the emit clones.
+/// verdicts for per-member counter replay. Clean members with the complete
+/// announce view reuse one payload and progressive encoding cell.
 #[derive(Default)]
 pub(in crate::manager) struct VpnGroupStageOutput {
     pub(in crate::manager) deltas: Vec<VpnGroupDelta>,
     pub(in crate::manager) evals: GroupEvalAccumulator,
+    pub(in crate::manager) shared_announce: std::sync::OnceLock<std::sync::Arc<Vec<VpnRibRoute>>>,
+    pub(in crate::manager) shared_encode: std::sync::Arc<crate::update::SharedGroupEncode>,
 }
 
 impl VpnGroupStageOutput {
@@ -1499,6 +1499,11 @@ impl VpnGroupStageOutput {
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
         checkpoint(true);
         crate::manager::retire_vec(&mut self.deltas, &mut || checkpoint(false));
+        if let Some(announce) = self.shared_announce.take()
+            && let Some(mut announce) = std::sync::Arc::into_inner(announce)
+        {
+            crate::manager::retire_vec(&mut announce, &mut || checkpoint(false));
+        }
         self.evals.retire_with(checkpoint);
         checkpoint(true);
     }
@@ -1567,7 +1572,7 @@ pub(in crate::manager) fn emit_vpn_group_deltas_for_member(
         deltas,
         member,
         filter,
-        vpn_announce,
+        &mut |route| vpn_announce.push(route.clone()),
         vpn_withdraw,
         &mut || {},
     )
@@ -1577,7 +1582,7 @@ pub(in crate::manager) fn emit_vpn_group_deltas_for_member_with_checkpoint(
     deltas: &[VpnGroupDelta],
     member: PeerId,
     filter: Option<&RtcMembership>,
-    vpn_announce: &mut Vec<VpnRibRoute>,
+    announce: &mut impl FnMut(&VpnRibRoute),
     vpn_withdraw: &mut Vec<VpnRibRouteKey>,
     checkpoint: &mut impl FnMut(),
 ) -> [i64; 2] {
@@ -1594,7 +1599,7 @@ pub(in crate::manager) fn emit_vpn_group_deltas_for_member_with_checkpoint(
             .is_some_and(|new| new.peer != member && rt_passes(filter, new));
         let slot = GroupRibOut::vpn_count_slot(&delta.key) - 2;
         if gets {
-            vpn_announce.push(delta.new.clone().expect("gets implies new exists"));
+            announce(delta.new.as_ref().expect("gets implies new exists"));
             if !had {
                 count_delta[slot] += 1;
             }
