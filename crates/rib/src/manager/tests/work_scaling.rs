@@ -122,12 +122,16 @@ fn join(
     index: usize,
     rs_control: bool,
     export_policy: Option<rustbgpd_policy::PolicyChain>,
-) -> mpsc::Receiver<OutboundRouteUpdate> {
+) -> (
+    mpsc::Receiver<OutboundRouteUpdate>,
+    Arc<ReusableExactExportEncoder>,
+) {
     let peer = member(index);
+    let encoder = ReusableExactExportEncoder::new(u64::try_from(index).unwrap() + 1, WIRE_PROFILE);
     manager.handle_update(RibUpdate::SetPeerExportEncoder {
         peer,
         session_id: 1,
-        encoder: ReusableExactExportEncoder::new(u64::try_from(index).unwrap() + 1, WIRE_PROFILE),
+        encoder: encoder.clone(),
     });
     if rs_control {
         manager.handle_update(RibUpdate::SetPeerRsControl {
@@ -148,7 +152,7 @@ fn join(
         *peer_asn = 65_100 + u32::try_from(index).unwrap();
     }
     manager.handle_update(up);
-    outbound_rx
+    (outbound_rx, encoder)
 }
 
 fn members(
@@ -158,7 +162,7 @@ fn members(
     export_policy: Option<&rustbgpd_policy::PolicyChain>,
 ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>> {
     (0..count)
-        .map(|index| join(manager, index, rs_control, export_policy.cloned()))
+        .map(|index| join(manager, index, rs_control, export_policy.cloned()).0)
         .collect()
 }
 
@@ -238,7 +242,7 @@ fn peer_up_initial_table(size: usize) -> Work {
     );
     let mut joiners = Vec::new();
     let work = checkpoints_in(|| {
-        joiners.extend((size..size + BURST).map(|index| join(&mut manager, index, false, None)));
+        joiners.extend((size..size + BURST).map(|index| join(&mut manager, index, false, None).0));
     });
     assert_eq!(
         drain(&mut joiners),
@@ -369,5 +373,198 @@ fn checkpoint_tally_counts_this_thread_by_stage() {
     assert_eq!(
         work,
         BTreeMap::from([("", 1), ("peer_adj_out_retirement", 1), (ALL, 2)])
+    );
+}
+
+/// Churn updates the live source and the memberless prepared destination.
+/// Only the source needs an emission payload; the destination's table and
+/// inventory journal must still carry that churn into the later transition.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture attributes prestage phases and checks churn through the committing cohort"
+)]
+fn destination_prestage_churn(size: usize, prepare: bool) -> Work {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0002;
+    let (tx, mut manager) = manager();
+    manager.flush_poll_budget = Duration::ZERO;
+    let old = super::update_groups::community_chain(OLD);
+    let new = super::update_groups::community_chain(NEW);
+    let (mut receivers, encoders): (Vec<_>, Vec<_>) = (0..size)
+        .map(|index| join(&mut manager, index, true, Some(old.clone())))
+        .unzip();
+    let routes = ROUTES * size;
+    manager.handle_update(routes_from(external(), 0, 1, routes));
+    drain_route_chunks(&mut manager);
+    assert_eq!(drain(&mut receivers), (size * routes, 0));
+    let (reply, mut response) = oneshot::channel();
+    let mut work = Work::new();
+    if prepare {
+        let begin = checkpoints_in(|| {
+            manager.begin_destination_prestage(member(0), Some(&new), reply);
+        });
+        work.insert("prestage begin", begin[ALL]);
+        let staging = checkpoints_in(|| {
+            while manager.prestaged_inventory.is_none() {
+                assert!(manager.pending_destination_prestage.is_some());
+                manager.advance_destination_prestage();
+            }
+        });
+        work.insert("prestage staging", staging[ALL]);
+        // Visit one inventory slot before churn, so reconciliation must
+        // replace an already-captured row as well as see later rows.
+        let first_inventory = checkpoints_in(|| manager.advance_destination_prestage());
+        work.insert("prestage inventory", first_inventory[ALL]);
+    }
+    let mut changed: BTreeSet<_> = (0..size).map(|index| prefix(1, index)).collect();
+    if prepare {
+        let Prefix::V4(captured) = manager.prestaged_inventory.as_ref().unwrap().announce[0].prefix
+        else {
+            unreachable!("IPv4 fixture")
+        };
+        if !changed.contains(&captured) {
+            changed.pop_last();
+            changed.insert(captured);
+        }
+    }
+    let before = manager.adj_rib_out_commit_stats.successful_enqueues;
+    for &prefix in &changed {
+        let mut update = routes_from(external(), 0, 1, 0);
+        if let RibUpdate::RoutesReceived { announced, .. } = &mut update {
+            announced.push(make_route_with_lp(
+                prefix,
+                Ipv4Addr::new(198, 51, 100, 1),
+                200,
+            ));
+        }
+        tx.try_send(update).unwrap();
+    }
+    let churn = checkpoints_in(|| {
+        while let Some(update) = manager.try_recv_primary() {
+            manager.handle_update(update);
+            drain_route_chunks(&mut manager);
+        }
+    });
+    work.insert("churn checkpoints", churn[ALL]);
+    work.insert("staging_shared_emit", churn["staging_shared_emit"]);
+    work.insert(
+        ENVELOPES,
+        manager.adj_rib_out_commit_stats.successful_enqueues - before,
+    );
+    for rx in &mut receivers {
+        let update = rx.try_recv().unwrap();
+        assert_eq!(update.withdraw.len(), 0);
+        assert_eq!(update.announce.len(), size);
+        assert_eq!(
+            update
+                .announce
+                .iter()
+                .map(|route| route.prefix)
+                .collect::<BTreeSet<_>>(),
+            changed.iter().copied().map(Prefix::V4).collect(),
+        );
+        assert!(
+            update
+                .announce
+                .iter()
+                .all(|route| { route.local_pref() == 200 && route.communities() == [OLD] })
+        );
+        assert!(rx.try_recv().is_err());
+    }
+    if prepare {
+        let before: usize = encoders.iter().map(|encoder| encoder.probe_count()).sum();
+        let inventory = checkpoints_in(|| {
+            while manager.prestaged_inventory.as_ref().unwrap().announce.len() < routes {
+                manager.advance_destination_prestage();
+            }
+        });
+        *work.get_mut("prestage inventory").unwrap() += inventory[ALL];
+        let probes = checkpoints_in(|| {
+            while manager.pending_destination_prestage.is_some() {
+                manager.advance_destination_prestage();
+            }
+        });
+        work.insert("prestage probe checkpoints", probes[ALL]);
+        let after: usize = encoders.iter().map(|encoder| encoder.probe_count()).sum();
+        work.insert("prestage exact probes", after - before);
+        assert_eq!(after - before, routes, "one probe per destination row");
+        assert_eq!(response.try_recv().unwrap(), Ok(()));
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPolicies {
+            replacements: (0..size)
+                .map(|index| crate::update::PeerExportPolicyReplacement {
+                    peer: member(index),
+                    export_policy: Some(new.clone()),
+                })
+                .collect(),
+            reply,
+        });
+        finish_clean_transition(&mut manager);
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            crate::update::ExportPolicyCohortOutcome::Committed
+        );
+        // The dirty set exceeds the test-sized retained-proof bound (one),
+        // so the fenced fallback probes once; all members reuse that proof.
+        let committed: usize = encoders.iter().map(|encoder| encoder.probe_count()).sum();
+        work.insert("transition exact probes", committed - after);
+        assert_eq!(committed - after, routes);
+        for rx in &mut receivers {
+            let update = rx.try_recv().unwrap();
+            assert_eq!(update.withdraw.len(), 0);
+            assert_eq!(update.announce.len(), routes);
+            assert_eq!(
+                update
+                    .announce
+                    .iter()
+                    .map(|route| route.prefix)
+                    .collect::<BTreeSet<_>>(),
+                (0..routes)
+                    .map(|index| Prefix::V4(prefix(1, index)))
+                    .collect(),
+            );
+            for route in update.announce.iter() {
+                let was_changed = changed
+                    .iter()
+                    .any(|prefix| route.prefix == Prefix::V4(*prefix));
+                assert_eq!(route.local_pref(), if was_changed { 200 } else { 100 });
+                assert_eq!(route.communities(), [NEW]);
+            }
+            assert!(rx.try_recv().is_err());
+        }
+    }
+    eprintln!("prestage={prepare}, size={size}: {work:?}");
+    work
+}
+
+#[test]
+fn destination_prestage_churn_builds_only_owned_emission() {
+    for size in [SMALL, LARGE] {
+        let ordinary = destination_prestage_churn(size, false);
+        let prepared = destination_prestage_churn(size, true);
+        assert_eq!(
+            prepared["staging_shared_emit"], ordinary["staging_shared_emit"],
+            "a memberless destination must not build another wire payload"
+        );
+        assert_eq!(prepared[ENVELOPES], size);
+    }
+}
+
+#[test]
+fn destination_prestage_work_is_linear() {
+    assert_linear(
+        "destination prestage",
+        &[
+            "prestage begin",
+            "prestage staging",
+            "prestage inventory",
+            "prestage probe checkpoints",
+            "prestage exact probes",
+            "churn checkpoints",
+            "staging_shared_emit",
+            "transition exact probes",
+            ENVELOPES,
+        ],
+        |size| destination_prestage_churn(size, true),
     );
 }

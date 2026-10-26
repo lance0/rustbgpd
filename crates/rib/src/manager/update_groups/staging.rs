@@ -96,9 +96,17 @@ impl RibManager {
                 continue;
             }
             let mut out = self.stage_group_prefixes(gid, prefixes, memo);
-            // Built here (the fanout path) and not inside the staging
-            // pass: `join_group`'s table-build pass discards its output.
-            out.build_shared_emit(&mut |force| self.replacement_checkpoint(force));
+            // A memberless prestaged destination needs live table updates,
+            // but no wire payload until a member adopts it.
+            if self
+                .group_ribs
+                .get(&gid)
+                .is_some_and(|group| !group.members.is_empty())
+            {
+                out.build_shared_emit(&mut |force| {
+                    self.replacement_checkpoint_at("staging_shared_emit", force);
+                });
+            }
             staged.insert(gid, out);
         }
         // The staging commit is the one lane mutation site outside the

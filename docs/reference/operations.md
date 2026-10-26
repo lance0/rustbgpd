@@ -796,7 +796,10 @@ update, serves bounded reads where the transaction permits, then yields.
 Timer, destination-prestage and deferred-registration callers preserve
 route-before-EoR ordering while allowing reads between units. This removes
 a full-backlog drain fence; individual unit cost and sustained input can
-still delay a response or destination preparation.
+still delay a response or destination preparation. While a prepared
+export-policy destination has no members, churn updates its table and
+reconciliation journal without building an unused shared wire payload.
+The later transition derives its announcements from that current table.
 
 gNMI neighbor snapshots use the same live operator lane on listeners and
 dial-out, retaining their two-second budget and snapshot failure behavior.

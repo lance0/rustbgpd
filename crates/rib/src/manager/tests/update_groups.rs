@@ -441,7 +441,7 @@ fn deny_chain(prefix: Ipv4Prefix) -> PolicyChain {
     }])
 }
 
-fn community_chain(community: u32) -> PolicyChain {
+pub(super) fn community_chain(community: u32) -> PolicyChain {
     let mut statement = deny_statement(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
     statement.prefix = None;
     statement.action = PolicyAction::Permit;

@@ -216,7 +216,7 @@ impl ReusableExactExportEncoder {
         })
     }
 
-    fn probe_count(&self) -> usize {
+    pub(super) fn probe_count(&self) -> usize {
         self.probed.load(Ordering::Relaxed)
     }
 }
