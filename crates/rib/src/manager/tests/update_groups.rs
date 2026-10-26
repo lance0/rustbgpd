@@ -11799,7 +11799,7 @@ async fn evpn_refusal_prior_retirement_readiness(
                     peer,
                     OutboundCommitBatch {
                         withdraw: vec![key],
-                        evpn_announce: vec![make_evpn_imet(source, 1)],
+                        evpn_announce: vec![make_evpn_imet(source, 1)].into(),
                         end_of_rib: vec![(Afi::L2Vpn, Safi::Evpn)],
                         ..OutboundCommitBatch::default()
                     },
@@ -12476,7 +12476,7 @@ async fn evpn_refused_arc_retirement(
             manager.try_send_and_commit_outbound_update_with_group_prior(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce: vec![make_evpn_imet(source, 1)],
+                    evpn_announce: vec![make_evpn_imet(source, 1)].into(),
                     end_of_rib: vec![(Afi::L2Vpn, Safi::Evpn)],
                     ..OutboundCommitBatch::with_unicast(announce, vec![None; 128].into())
                 },
@@ -13974,7 +13974,7 @@ fn replacement_readiness_services_each_family_commit_without_changing_loc_rib_co
         } else {
             OutboundCommitBatch {
                 flowspec_announce: flowspec,
-                evpn_announce: evpn,
+                evpn_announce: evpn.into(),
                 bgpls_announce: bgpls,
                 vpn_announce: vpn.into(),
                 labeled_announce: labeled,

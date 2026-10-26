@@ -259,7 +259,7 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
     pub(in crate::manager) flowspec_announce: Vec<crate::route::FlowSpecRoute>,
     pub(in crate::manager) flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
-    pub(in crate::manager) evpn_announce: Vec<crate::route::EvpnRibRoute>,
+    pub(in crate::manager) evpn_announce: Arc<Vec<crate::route::EvpnRibRoute>>,
     pub(in crate::manager) evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
     pub(in crate::manager) evpn_complete_feed: Option<super::evpn_recovery::EvpnFeedSeal>,
     pub(in crate::manager) bgpls_announce: Vec<crate::route::BgpLsRibRoute>,
@@ -290,6 +290,34 @@ fn retire_arc_vec<T>(values: Arc<Vec<T>>, checkpoint: &mut impl FnMut()) {
     } else {
         checkpoint();
     }
+}
+
+/// Shared group payloads arrive key-sorted. Preserve their allocation; a
+/// private or detached view retains the existing sort before recovery proof.
+pub(in crate::manager) fn sort_evpn_announcements(
+    announce: &mut Arc<Vec<crate::route::EvpnRibRoute>>,
+    checkpoint: &mut impl FnMut(),
+) {
+    if announce
+        .iter()
+        .inspect(|_| checkpoint())
+        .map(crate::route::EvpnRibRoute::key)
+        .is_sorted()
+    {
+        return;
+    }
+    if Arc::get_mut(announce).is_none() {
+        let private = announce
+            .iter()
+            .inspect(|_| checkpoint())
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        retire_arc_vec(std::mem::replace(announce, private), checkpoint);
+    }
+    Arc::get_mut(announce)
+        .expect("private payload after detachment")
+        .sort_unstable_by_key(crate::route::EvpnRibRoute::key);
 }
 
 impl OutboundCommitBatch {
@@ -325,7 +353,7 @@ impl OutboundCommitBatch {
         super::retire_vec(&mut self.refresh_markers, checkpoint);
         super::retire_vec(&mut self.flowspec_announce, checkpoint);
         super::retire_vec(&mut self.flowspec_withdraw, checkpoint);
-        super::retire_vec(&mut self.evpn_announce, checkpoint);
+        retire_arc_vec(std::mem::take(&mut self.evpn_announce), checkpoint);
         super::retire_vec(&mut self.evpn_withdraw, checkpoint);
         drop(self.evpn_complete_feed.take());
         super::retire_vec(&mut self.bgpls_announce, checkpoint);
@@ -3950,11 +3978,27 @@ impl RibManager {
                     .copied();
                 flowspec_announce.retain(|_| flowspec_keep.next().unwrap_or(false));
                 offset += family_lengths[1];
-                let mut evpn_keep = keep[offset..offset + family_lengths[2]]
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .copied();
-                evpn_announce.retain(|_| evpn_keep.next().unwrap_or(false));
+                let evpn_keep = &keep[offset..offset + family_lengths[2]];
+                if evpn_keep.iter().inspect(|_| checkpoint()).any(|keep| !keep) {
+                    let permitted = evpn_announce
+                        .iter()
+                        .zip(evpn_keep)
+                        .inspect(|_| checkpoint())
+                        .filter(|(_, keep)| **keep)
+                        .map(|(route, _)| route.clone())
+                        .collect::<Vec<_>>()
+                        .into();
+                    retire_arc_vec(
+                        std::mem::replace(&mut evpn_announce, permitted),
+                        &mut || {
+                            #[cfg(test)]
+                            if let Some(observer) = &retirement_observer {
+                                observer("exact_evpn_payload_retirement");
+                            }
+                            checkpoint();
+                        },
+                    );
+                }
                 offset += family_lengths[2];
                 let mut bgpls_keep = keep[offset..offset + family_lengths[3]]
                     .iter()
@@ -4097,7 +4141,7 @@ impl RibManager {
         // common-family proof, diagnostic and advertised state for retry.
         self.retain_evpn_recovery_withdrawals(peer, &mut evpn_withdraw);
         let staged_evpn_count = if self.evpn_grouped_member_of(peer).is_some() {
-            evpn_announce.sort_unstable_by_key(crate::route::EvpnRibRoute::key);
+            sort_evpn_announcements(&mut evpn_announce, &mut || checkpoint());
             evpn_withdraw.sort_unstable();
             evpn_withdraw.dedup();
             let Some(count) =
@@ -9166,7 +9210,7 @@ impl RibManager {
                                     end_of_rib: pending_eor.clone(),
                                     flowspec_announce: fs_announce,
                                     flowspec_withdraw: fs_withdraw,
-                                    evpn_announce,
+                                    evpn_announce: evpn_announce.into(),
                                     evpn_withdraw,
                                     evpn_complete_feed,
                                     bgpls_announce,

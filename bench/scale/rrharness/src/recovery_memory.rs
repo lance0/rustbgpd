@@ -390,7 +390,7 @@ impl Inventory {
         for key in update.evpn_withdraw {
             self.evpn_event(key, false);
         }
-        for value in update.evpn_announce {
+        for value in update.evpn_announce.iter() {
             // IMET's entire NLRI payload is its key; evpn_event checks the raw
             // RD, originator, tag and exact finite bitmap position.
             assert_eq!(
@@ -1488,7 +1488,7 @@ mod tests {
         let first = fixture_evpn_route(0);
         let second = fixture_evpn_route(1);
         inventory.apply(OutboundRouteUpdate {
-            evpn_announce: vec![first.clone(), second.clone()],
+            evpn_announce: vec![first.clone(), second.clone()].into(),
             ..Default::default()
         });
         assert_eq!(
@@ -1525,7 +1525,7 @@ mod tests {
         assert_eq!(RDS[0].to_string(), RDS[1].to_string());
         imet.rd = RDS[1];
         Inventory::new([0; 4], Some(1)).apply(OutboundRouteUpdate {
-            evpn_announce: vec![value],
+            evpn_announce: vec![value].into(),
             ..Default::default()
         });
     }
@@ -1536,7 +1536,7 @@ mod tests {
         let mut value = fixture_evpn_route(0);
         value.attributes = expected_attributes(false, 0);
         Inventory::new([0; 4], Some(1)).apply(OutboundRouteUpdate {
-            evpn_announce: vec![value],
+            evpn_announce: vec![value].into(),
             ..Default::default()
         });
     }
@@ -1554,7 +1554,7 @@ mod tests {
     #[should_panic(expected = "unexpected fixture family")]
     fn ordinary_recovery_bitmap_still_rejects_evpn() {
         Inventory::new([0; 4], None).apply(OutboundRouteUpdate {
-            evpn_announce: vec![fixture_evpn_route(0)],
+            evpn_announce: vec![fixture_evpn_route(0)].into(),
             ..Default::default()
         });
     }

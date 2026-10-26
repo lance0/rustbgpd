@@ -878,7 +878,7 @@ impl RibManager {
             && let Err(failure) = self.try_send_and_commit_outbound_update(
                 peer,
                 OutboundCommitBatch {
-                    evpn_announce,
+                    evpn_announce: evpn_announce.into(),
                     evpn_withdraw,
                     ..OutboundCommitBatch::default()
                 },
@@ -893,6 +893,10 @@ impl RibManager {
 impl RibManager {
     /// One shared stage retains displaced OLD until every member's existing
     /// transaction has either admitted its sparse payload or captured retry.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps shared-inventory eligibility, complete-feed fallback and admitted-state commit in one transaction"
+    )]
     fn distribute_owned_evpn_group(
         &mut self,
         gid: usize,
@@ -923,6 +927,54 @@ impl RibManager {
             }
             self.apply_group_policy_counters(peer, &stage.evals);
             let filter = self.member_rt_filter(peer);
+            let retained = self
+                .evpn_recovery_handle(peer)
+                .is_some_and(|handle| !self.evpn_recovery.is_dormant(handle));
+            let group = &self.group_ribs[&gid];
+            // Share the canonical changed inventory only when every new
+            // entry is eligible and unchanged entries remain suppressed.
+            // Retained recovery and narrower member views stay private.
+            let shared_announce = (!retained
+                && stage.deltas.iter().all(|delta| {
+                    checkpoint();
+                    delta.new.as_ref().is_none_or(|new| {
+                        new.input.eligible(
+                            &new.route,
+                            peer,
+                            group,
+                            self.cluster_id,
+                            filter.as_ref(),
+                            None,
+                        ) && (delta.changed_announce().is_some()
+                            || delta.old.as_ref().is_some_and(|old| {
+                                old.input.eligible(
+                                    &old.route,
+                                    peer,
+                                    group,
+                                    self.cluster_id,
+                                    filter.as_ref(),
+                                    self.peer_unexportable.get(&peer),
+                                )
+                            }))
+                    })
+                }))
+            .then(|| {
+                std::sync::Arc::clone(stage.shared_announce.get_or_init(|| {
+                    let mut routes = stage
+                        .deltas
+                        .iter()
+                        .inspect(|_| checkpoint())
+                        .filter_map(crate::manager::update_groups::EvpnGroupDelta::changed_announce)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    routes.sort_unstable_by_key(crate::route::EvpnRibRoute::key);
+                    routes.into()
+                }))
+            });
+            let shared_group_encode = shared_announce
+                .as_ref()
+                .filter(|routes| !routes.is_empty())
+                .map(|_| std::sync::Arc::clone(&stage.shared_encode));
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
             crate::manager::update_groups::emit_evpn_group_deltas_for_member_with_checkpoint(
@@ -932,13 +984,14 @@ impl RibManager {
                 self.cluster_id,
                 filter.as_ref(),
                 self.peer_unexportable.get(&peer),
-                &mut announce,
+                &mut |route| {
+                    if shared_announce.is_none() {
+                        announce.push(route.clone());
+                    }
+                },
                 &mut withdraw,
                 checkpoint,
             );
-            let retained = self
-                .evpn_recovery_handle(peer)
-                .is_some_and(|handle| !self.evpn_recovery.is_dormant(handle));
             let complete = if retained {
                 // Full borrowed OLD proves coverage for successful clean
                 // updates too, without replaying unchanged keys during debt.
@@ -960,15 +1013,22 @@ impl RibManager {
                 withdraw = feed.withdraw;
                 Some(feed.seal)
             } else {
-                if announce.is_empty() && withdraw.is_empty() {
+                if announce.is_empty()
+                    && shared_announce
+                        .as_ref()
+                        .is_none_or(|routes| routes.is_empty())
+                    && withdraw.is_empty()
+                {
                     continue;
                 }
                 None
             };
+            let announce = shared_announce.unwrap_or_else(|| announce.into());
             if self
                 .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                     peer,
                     OutboundCommitBatch {
+                        shared_group_encode,
                         evpn_announce: announce,
                         evpn_withdraw: withdraw,
                         evpn_complete_feed: complete,

@@ -337,7 +337,7 @@ fn exact_export_overlay_filters_admitted_views_but_changed_candidates_are_reprob
         .try_send_and_commit_outbound_update(
             member,
             OutboundCommitBatch {
-                evpn_announce: candidate.0,
+                evpn_announce: candidate.0.into(),
                 ..OutboundCommitBatch::default()
             },
         )
@@ -380,7 +380,7 @@ fn exact_export_overlay_filters_admitted_views_but_changed_candidates_are_reprob
         .try_send_and_commit_outbound_update(
             member,
             OutboundCommitBatch {
-                evpn_announce: reprobed.0,
+                evpn_announce: reprobed.0.into(),
                 evpn_withdraw: reprobed.1,
                 ..OutboundCommitBatch::default()
             },
@@ -627,7 +627,7 @@ fn rejected_metadata_only_update_matches_private_reprobe_and_delivery() {
             .try_send_and_commit_outbound_update(
                 member,
                 OutboundCommitBatch {
-                    evpn_announce: events(&manager, gid, &initial, member, None, None).0,
+                    evpn_announce: events(&manager, gid, &initial, member, None, None).0.into(),
                     ..OutboundCommitBatch::default()
                 }
             )
@@ -679,7 +679,7 @@ fn rejected_metadata_only_update_matches_private_reprobe_and_delivery() {
             .try_send_and_commit_outbound_update(
                 member,
                 OutboundCommitBatch {
-                    evpn_announce: actual.0,
+                    evpn_announce: actual.0.into(),
                     evpn_withdraw: actual.1,
                     ..OutboundCommitBatch::default()
                 }
@@ -1136,7 +1136,7 @@ fn older_universe_fixture() -> (
             .try_send_and_commit_outbound_update(
                 first,
                 OutboundCommitBatch {
-                    evpn_announce: old.clone(),
+                    evpn_announce: old.clone().into(),
                     ..OutboundCommitBatch::default()
                 }
             )
@@ -1211,7 +1211,7 @@ fn older_universe_disjoint_capture_falls_back_before_sparse_exhaustion() {
             .try_send_and_commit_outbound_update(
                 second,
                 OutboundCommitBatch {
-                    evpn_announce: fresh.clone(),
+                    evpn_announce: fresh.clone().into(),
                     ..OutboundCommitBatch::default()
                 }
             )
@@ -1280,7 +1280,7 @@ fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_univers
                     .try_send_and_commit_outbound_update(
                         second,
                         OutboundCommitBatch {
-                            evpn_announce: vec![fresh[0].clone()],
+                            evpn_announce: vec![fresh[0].clone()].into(),
                             ..OutboundCommitBatch::default()
                         }
                     )
@@ -1317,7 +1317,7 @@ fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_univers
                 .try_send_and_commit_outbound_update(
                     second,
                     OutboundCommitBatch {
-                        evpn_announce: fresh.clone(),
+                        evpn_announce: fresh.clone().into(),
                         ..OutboundCommitBatch::default()
                     }
                 )
@@ -1350,4 +1350,341 @@ fn empty_ready_disjoint_admission_falls_back_with_or_without_an_existing_univers
             std::mem::size_of_val(&manager.evpn_recovery)
         );
     }
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy)]
+enum EvpnFixturePeer {
+    Eligible,
+    Rtc,
+    PerClientBest,
+    AddPath,
+    WithoutEvpn,
+}
+
+#[cfg(feature = "bench-internals")]
+fn empty_evpn_fixture() -> RibManager {
+    let (_tx, rx) = mpsc::channel(8);
+    RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        BgpMetrics::new(),
+    )
+}
+
+#[cfg(feature = "bench-internals")]
+fn register_evpn_fixture_peer(
+    manager: &mut RibManager,
+    n: u8,
+    mode: EvpnFixturePeer,
+) -> (PeerId, mpsc::Receiver<OutboundRouteUpdate>) {
+    let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, n)));
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut families = vec![(Afi::Ipv4, Safi::Unicast)];
+    if !matches!(mode, EvpnFixturePeer::WithoutEvpn) {
+        families.push((Afi::L2Vpn, Safi::Evpn));
+    }
+    if matches!(mode, EvpnFixturePeer::Rtc) {
+        families.push((Afi::Ipv4, Safi::RtConstrain));
+    }
+    let add_path = matches!(mode, EvpnFixturePeer::AddPath);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 7,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(192, 0, 2, n),
+        outbound_tx: sender,
+        export_policy: None,
+        sendable_families: families,
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        per_client_best: matches!(mode, EvpnFixturePeer::PerClientBest),
+        interpret_rfc1997: true,
+        add_path_send_families: if add_path {
+            vec![(Afi::L2Vpn, Safi::Evpn)]
+        } else {
+            vec![]
+        },
+        add_path_send_max: if add_path { 2 } else { 0 },
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while receiver.try_recv().is_ok() {}
+    (peer, receiver)
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn shared_evpn_fixture_is_opt_in_and_preserves_ownership_guards() {
+    for (enabled, mode, owned) in [
+        (false, EvpnFixturePeer::Eligible, false),
+        (true, EvpnFixturePeer::Eligible, true),
+        (true, EvpnFixturePeer::Rtc, false),
+        (true, EvpnFixturePeer::PerClientBest, false),
+        (true, EvpnFixturePeer::AddPath, false),
+    ] {
+        let manager = empty_evpn_fixture();
+        let mut manager = if enabled {
+            manager.with_bench_evpn_group_ownership()
+        } else {
+            manager
+        };
+        let (peer, _receiver) = register_evpn_fixture_peer(&mut manager, 30, mode);
+        assert_eq!(manager.evpn_grouped_member_of(peer).is_some(), owned);
+        if owned {
+            let handle = manager
+                .evpn_recovery_handle(peer)
+                .expect("actual owned registration");
+            assert!(manager.evpn_recovery.is_dormant(handle));
+        }
+        if matches!(mode, EvpnFixturePeer::AddPath) {
+            assert!(manager.grouped_member_of(peer).is_none());
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[should_panic(expected = "enable the fixture before peer registration")]
+fn shared_evpn_fixture_rejects_active_registration() {
+    let mut manager = empty_evpn_fixture();
+    let (_peer, _receiver) =
+        register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    let _manager = manager.with_bench_evpn_group_ownership();
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[should_panic(expected = "enable the fixture before peer registration")]
+fn shared_evpn_fixture_rejects_deferred_registration() {
+    let mut manager = empty_evpn_fixture();
+    let (sender, _receiver) = mpsc::channel(8);
+    manager.bench_defer_route_reflector_peers(vec![(
+        0,
+        sender,
+        MockExactExportEncoder::accepting(1),
+    )]);
+    assert!(manager.outbound_peers.is_empty());
+    assert!(!manager.live_sessions.is_empty());
+    assert!(!manager.pending_initial_registrations.is_empty());
+    let _manager = manager.with_bench_evpn_group_ownership();
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[should_panic(expected = "requires every grouped peer to negotiate EVPN")]
+fn shared_evpn_fixture_rejects_non_evpn_join_to_existing_group() {
+    let mut manager = empty_evpn_fixture().with_bench_evpn_group_ownership();
+    let (_peer, _receiver) =
+        register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    let _joined = register_evpn_fixture_peer(&mut manager, 31, EvpnFixturePeer::WithoutEvpn);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[should_panic(expected = "stable EVPN fixture cannot regroup")]
+fn shared_evpn_fixture_rejects_absent_destination_before_handoff() {
+    let mut manager = empty_evpn_fixture().with_bench_evpn_group_ownership();
+    let (peer, _receiver) = register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    let route = received(100);
+    manager
+        .ribs
+        .entry(route.peer)
+        .or_insert_with(|| AdjRibIn::new(route.peer));
+    manager.process_evpn_announce_chunk(route.peer, vec![route]);
+    assert_eq!(manager.loc_rib.evpn_len(), 1);
+    manager
+        .replace_peer_export_policy_synchronously(peer, Some(strip_rts()))
+        .unwrap();
+}
+
+#[cfg(feature = "bench-internals")]
+fn shared_evpn_fanout_fixture(
+    owned: bool,
+    count: u8,
+) -> (
+    RibManager,
+    Vec<PeerId>,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let manager = empty_evpn_fixture();
+    let mut manager = if owned {
+        manager.with_bench_evpn_group_ownership()
+    } else {
+        manager
+    };
+    let (peers, receivers) = (30..30 + count)
+        .map(|n| register_evpn_fixture_peer(&mut manager, n, EvpnFixturePeer::Eligible))
+        .unzip();
+    (manager, peers, receivers)
+}
+
+#[cfg(feature = "bench-internals")]
+fn inject_shared_evpn(manager: &mut RibManager, routes: Vec<EvpnRibRoute>) {
+    let source = routes[0].peer;
+    manager
+        .ribs
+        .entry(source)
+        .or_insert_with(|| AdjRibIn::new(source));
+    manager.process_evpn_announce_chunk(source, routes);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn evpn_group_members_share_one_payload_and_encode_cell_with_private_control() {
+    for owned in [false, true] {
+        let (mut manager, peers, mut receivers) = shared_evpn_fanout_fixture(owned, 3);
+        let routes = (1..=3)
+            .map(|n| make_evpn_imet(Ipv4Addr::new(192, 0, 2, 10), n))
+            .collect();
+        inject_shared_evpn(&mut manager, routes);
+        let updates: Vec<_> = receivers
+            .iter_mut()
+            .map(|rx| rx.try_recv().unwrap())
+            .collect();
+        for update in &updates {
+            assert_eq!(update.evpn_announce.len(), 3);
+        }
+        for update in &updates[1..] {
+            assert_eq!(
+                Arc::ptr_eq(&updates[0].evpn_announce, &update.evpn_announce),
+                owned,
+                "the private control must not pass the shared payload assertion"
+            );
+            if owned {
+                assert!(Arc::ptr_eq(
+                    updates[0].shared_group_encode.as_ref().unwrap(),
+                    update.shared_group_encode.as_ref().unwrap()
+                ));
+            } else {
+                assert!(update.shared_group_encode.is_none());
+            }
+        }
+        for peer in peers {
+            assert_eq!(
+                manager.adj_ribs_out[&peer].evpn_len(),
+                if owned { 0 } else { 3 }
+            );
+            if owned {
+                assert_eq!(manager.evpn_admitted_count(peer), 3);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn evpn_shared_fanout_detaches_exact_export_rejections() {
+    let (mut manager, peers, mut receivers) = shared_evpn_fanout_fixture(true, 3);
+    let mut routes: Vec<_> = (1..=2)
+        .map(|n| make_evpn_imet(Ipv4Addr::new(192, 0, 2, 10), n))
+        .collect();
+    let rejected = ExactExportKey::Evpn(routes[1].key());
+    let encoder = MockExactExportEncoder::accepting(1);
+    encoder.set_profile(1, [rejected.clone()]);
+    manager
+        .peer_export_encoders
+        .insert(peers[2], encoder.clone());
+    inject_shared_evpn(&mut manager, routes.clone());
+    let updates: Vec<_> = receivers
+        .iter_mut()
+        .map(|rx| rx.try_recv().unwrap())
+        .collect();
+    assert!(Arc::ptr_eq(
+        &updates[0].evpn_announce,
+        &updates[1].evpn_announce
+    ));
+    assert_eq!(updates[0].evpn_announce.len(), 2);
+    assert_eq!(updates[2].evpn_announce.len(), 1);
+    assert_eq!(updates[2].evpn_announce[0].key(), routes[0].key());
+    assert!(
+        updates[2].evpn_withdraw.is_empty(),
+        "never-admitted keys must not withdraw"
+    );
+    assert!(!Arc::ptr_eq(
+        &updates[0].evpn_announce,
+        &updates[2].evpn_announce
+    ));
+    assert!(updates[2].shared_group_encode.is_none());
+    assert!(manager.peer_unexportable[&peers[2]].contains(&rejected));
+
+    // Storage metadata changes without changing ordinary wire identity. Clean
+    // members suppress that key, but its previously rejected member must probe
+    // it again and cannot reuse the narrower canonical changed inventory.
+    encoder.set_profile(2, []);
+    routes[1].is_stale = true;
+    let added = make_evpn_imet(Ipv4Addr::new(192, 0, 2, 10), 3);
+    inject_shared_evpn(&mut manager, vec![routes[1].clone(), added.clone()]);
+    let retried: Vec<_> = receivers
+        .iter_mut()
+        .map(|rx| rx.try_recv().unwrap())
+        .collect();
+    assert!(Arc::ptr_eq(
+        &retried[0].evpn_announce,
+        &retried[1].evpn_announce
+    ));
+    assert_eq!(retried[0].evpn_announce.len(), 1);
+    assert_eq!(retried[0].evpn_announce[0].key(), added.key());
+    assert_eq!(retried[2].evpn_announce.len(), 2);
+    assert!(
+        retried[2]
+            .evpn_announce
+            .iter()
+            .any(|route| route.key() == routes[1].key())
+    );
+    assert!(retried[2].shared_group_encode.is_none());
+    assert_eq!(
+        retried[2].evpn_withdraw,
+        [] as [rustbgpd_wire::EvpnRouteKey; 0]
+    );
+    assert!(
+        !manager
+            .peer_unexportable
+            .get(&peers[2])
+            .is_some_and(|keys| keys.contains(&rejected))
+    );
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn evpn_shared_fanout_keeps_dirty_and_source_flip_views_private() {
+    let (mut manager, peers, mut receivers) = shared_evpn_fanout_fixture(true, 4);
+    let mut route = received(100);
+    inject_shared_evpn(&mut manager, vec![route.clone()]);
+    for receiver in &mut receivers {
+        assert_eq!(receiver.try_recv().unwrap().evpn_announce.len(), 1);
+    }
+    assert!(manager.mark_outbound_dirty(peers[3]));
+    route.peer = peers[0];
+    route.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
+    route.peer_router_id = Ipv4Addr::new(192, 0, 2, 30);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(200));
+    });
+    inject_shared_evpn(&mut manager, vec![route.clone()]);
+    let updates: Vec<_> = receivers
+        .iter_mut()
+        .map(|rx| rx.try_recv().unwrap())
+        .collect();
+    assert!(updates[0].evpn_announce.is_empty());
+    assert_eq!(updates[0].evpn_withdraw, vec![route.key()]);
+    assert!(updates[0].shared_group_encode.is_none());
+    assert!(Arc::ptr_eq(
+        &updates[1].evpn_announce,
+        &updates[2].evpn_announce
+    ));
+    assert!(updates[1].shared_group_encode.is_some());
+    assert_eq!(updates[3].evpn_announce.len(), 1);
+    assert!(!Arc::ptr_eq(
+        &updates[1].evpn_announce,
+        &updates[3].evpn_announce
+    ));
+    assert!(updates[3].shared_group_encode.is_none());
+    assert!(
+        !manager.dirty_peers.contains(&peers[3]),
+        "the private recovery feed settles after admission"
+    );
 }

@@ -1154,7 +1154,7 @@ pub struct OutboundRouteUpdate {
     /// `FlowSpec` rules to withdraw.
     pub flowspec_withdraw: Vec<crate::route::FlowSpecKey>,
     /// EVPN routes to announce (RFC 7432).
-    pub evpn_announce: Vec<EvpnRibRoute>,
+    pub evpn_announce: Arc<Vec<EvpnRibRoute>>,
     /// EVPN route keys to withdraw.
     pub evpn_withdraw: Vec<EvpnRouteKey>,
     /// BGP-LS routes to announce (RFC 9552).

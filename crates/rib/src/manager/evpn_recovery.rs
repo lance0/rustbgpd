@@ -90,6 +90,13 @@ impl RibManager {
         })
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(in crate::manager) fn bench_evpn_owed_markers(&self, peer: PeerId) -> u8 {
+        self.evpn_completion_record(peer)
+            .and_then(|record| record.evpn_feed_completion.as_ref())
+            .map_or(0, |completion| completion.owed_markers)
+    }
+
     fn evpn_completion_record_mut(
         &mut self,
         peer: PeerId,
@@ -1502,7 +1509,7 @@ impl RibManager {
     pub(in crate::manager) fn reserve_evpn_recovery_admission(
         &mut self,
         peer: PeerId,
-        announce: &mut [EvpnRibRoute],
+        announce: &mut std::sync::Arc<Vec<EvpnRibRoute>>,
         withdraw: &mut Vec<EvpnRouteKey>,
     ) -> bool {
         if self.evpn_recovery_reset_pending(peer) {
@@ -1534,7 +1541,9 @@ impl RibManager {
         withdraw.retain(|key| proof.contains(key));
         withdraw.sort_unstable();
         withdraw.dedup();
-        announce.sort_unstable_by_key(EvpnRibRoute::key);
+        super::distribution::sort_evpn_announcements(announce, &mut || {
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+        });
         if self.evpn_recovery.reserve_admission_with_checkpoint(
             handle,
             announce.iter().map(EvpnRibRoute::key),
@@ -1629,7 +1638,7 @@ impl RibManager {
     pub(in crate::manager) fn preflight_final_evpn_recovery(
         &mut self,
         peer: PeerId,
-        announce: &mut [EvpnRibRoute],
+        announce: &mut std::sync::Arc<Vec<EvpnRibRoute>>,
         withdraw: &mut Vec<EvpnRouteKey>,
     ) -> bool {
         let Some(handle) = self.evpn_recovery_handle(peer) else {
@@ -1638,7 +1647,9 @@ impl RibManager {
         if self.evpn_recovery.is_dormant(handle) {
             return true;
         }
-        announce.sort_unstable_by_key(EvpnRibRoute::key);
+        super::distribution::sort_evpn_announcements(announce, &mut || {
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+        });
         withdraw.sort_unstable();
         withdraw.dedup();
         if self.evpn_recovery.preflight_admitted_with_checkpoint(

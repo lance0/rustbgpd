@@ -1427,6 +1427,7 @@ mod evpn_complete_feed;
 mod evpn_dataplane_query;
 mod evpn_explain;
 mod evpn_group_checkpoints;
+mod evpn_group_fleet;
 mod evpn_group_storage;
 mod evpn_peer_pages;
 mod evpn_recovery_budget;

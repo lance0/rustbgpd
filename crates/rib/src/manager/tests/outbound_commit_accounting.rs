@@ -75,7 +75,7 @@ fn family_batches() -> Vec<(&'static str, OutboundCommitBatch)> {
         (
             "evpn",
             OutboundCommitBatch {
-                evpn_announce: vec![make_evpn_imet(SOURCE, 100)],
+                evpn_announce: vec![make_evpn_imet(SOURCE, 100)].into(),
                 ..OutboundCommitBatch::default()
             },
         ),
@@ -227,7 +227,7 @@ fn evpn_recovery_admission_is_a_refusal_not_a_drop() {
         manager.try_send_and_commit_outbound_update(
             PEER,
             OutboundCommitBatch {
-                evpn_announce: vec![make_evpn_imet(SOURCE, 100)],
+                evpn_announce: vec![make_evpn_imet(SOURCE, 100)].into(),
                 ..OutboundCommitBatch::default()
             },
         ),
