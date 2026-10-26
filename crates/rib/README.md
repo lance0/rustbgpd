@@ -68,6 +68,7 @@ The update-group and manager inventory has these boundaries:
 | Group `runner_up` | Sharded; no full-table reservation of route values for groups without exception lanes. |
 | Group `policy_filtered` | Sharded outer prefix map; the existing checkpointed writer replaces each affected prefix's candidate denials. |
 | Group `vpn_policy_denied` | Sharded; remove affected keys directly, then insert denials between checkpoints. |
+| Route slabs (Adj-RIB-In, Adj-RIB-Out, group table) | Fixed 64Ki-slot segments: growth allocates one segment and copies at most one, so a group that joins before the feed fills without whole-table copies. The prefix trie and `Self_` flags still double inside one insert; their entries are a fraction of a route body's size. |
 | Regroup snapshot `next_hop_overrides` | Reserve the staged table's size on the first override, before filling the empty map. Snapshots without overrides allocate nothing. |
 | Policy-transition prestage `failed` and `tagged` | Sharded; bounded inventory slices and dirty-key reconciliation retain checkpoints, including retirement. |
 | Group `inventory_log` and its dirty-key union | Logs are sharded and retire between checkpoints. The empty union reserves the sum of both log lengths before checkpointed insertion. |
@@ -78,13 +79,15 @@ The update-group and manager inventory has these boundaries:
 | First outbound-limit admitted-set installation | Still requires readiness ownership, per-entry checkpoints and reservation from the known family count. The regroup path already reserves and checkpoints. |
 | `current_policy_filtered_routes` temporaries | Still require bounded set growth and missing candidate-transfer checkpoints. Prefix count alone does not bound multipath rejection identities. |
 
-Production-writer growth regressions cover the sharded maps above. A build with
-`bench-internals` can trace source-attribute capacity changes with
-`RUST_LOG=rustbgpd_rib::map_growth=trace`; each event reports the before/after
-capacity and insertion duration. Correlate these events with actor-turn and
-work-unit observations before attributing a loaded distribution stall to this
-map. Full-table latency, convergence and peak-memory qualification remain
-separate from the deterministic growth checks.
+Production-writer growth regressions cover the sharded maps and the route slab
+above. A build with `bench-internals` can trace source-attribute and group-table
+capacity changes with `RUST_LOG=rustbgpd_rib::map_growth=trace`; each event
+names the map, the before/after capacity and the write's duration. Correlate
+these events with actor-turn and work-unit observations before attributing a
+loaded distribution stall to a map. Passthrough groups never write
+`source_attrs`, so that witness is silent for them. Full-table latency,
+convergence and peak-memory qualification remain separate from the
+deterministic growth checks.
 
 ## Features
 
