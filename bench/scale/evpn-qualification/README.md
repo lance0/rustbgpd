@@ -80,8 +80,10 @@ Recovery uses two export policies with different delivered communities. Both
 groups must actually exist before traffic; policy names alone are insufficient.
 The measured shape has 150 clients and 37,500 routes. Two clients remain as
 anchors; the other 148 move to the existing second group and back. The smaller
-functional exercise uses three clients and 3,000 routes and reports no timing
-verdict. Neither shape exercises a missing destination group or moves every peer.
+functional exercise uses three clients and 30,000 routes and reports no timing
+verdict. Its route count must fill the real 4,096-message transport writer queue
+within the same fixed churn sequence; smaller inventories can remain fully queued.
+Neither shape exercises a missing destination group or moves every peer.
 
 The controller pauses actual socket readers with acknowledged generation fences,
 then issues 32 fixed full-window churn rounds. Both arms must show all members

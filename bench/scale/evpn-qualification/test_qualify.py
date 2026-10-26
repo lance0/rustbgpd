@@ -156,7 +156,8 @@ class TestQualification(unittest.TestCase):
                 Q.write_json(leg / "result.json", row)
                 Q.write_json(leg / "cgroup.json", cg)
                 (leg / "metrics.txt").write_text(metrics_text(allocated))
-                (leg / "daemon.log").write_text("evpn_qualification " + json.dumps(owned) + "\n")
+                (leg / "observer.log").write_text("evpn_qualification " + json.dumps(owned) + "\n")
+                (leg / "daemon.log").write_text('evpn_qualification {interleaved stdout fragment}\n')
                 (leg / "driver.log").write_text(driver_text(clients, routes))
         return argparse.Namespace(output=str(root))
 

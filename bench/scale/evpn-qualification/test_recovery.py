@@ -167,17 +167,17 @@ class RecoveryTests(unittest.TestCase):
         for index, arm in enumerate(("candidate", "private")):
             leg = root / f"recovery-{index:02}-{arm}"
             leg.mkdir()
-            row = {"status": "PASS", "arm": arm, "clients": 3, "routes": 1000,
+            row = {"status": "PASS", "arm": arm, "clients": 3, "routes": 10_000,
                    "correctness_only": True, "wire": wire_report, "driver_exit": 0,
                    "executed_resets": dict.fromkeys(Q.CAUSES, 0)}
             snapshots = []
             names = ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_dirty_previous", "mass_dirty",
                      "protocol_obligation_before_churn", "protocol_obligation_during_churn", "protocol_obligation_after_churn", "settled")
             for sequence, name in enumerate(names):
-                observation = witness(arm, 3, 1000)
+                observation = witness(arm, 3, 10_000)
                 if arm == "candidate":
                     observation["owned_groups"] = 2
-                    observation["owned_routes"] = 6000
+                    observation["owned_routes"] = 60_000
                     for peer, data in enumerate(observation["peers"]):
                         data[1] = 2 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1
                 observation.update(elapsed_us=sequence * 100, wall_us=sequence * 100)
@@ -196,8 +196,9 @@ class RecoveryTests(unittest.TestCase):
                          "pending_batches": 0, "window_open": False, "window_messages": 0,
                          "window_routes": 0, "pending_withdrawals": 0}
                         for generation in range(1, 4) for peer in range(3)]
-            (leg / "daemon.log").write_text("".join("evpn_qualification " + json.dumps(item) + "\n" for item in snapshots)
+            (leg / "observer.log").write_text("".join("evpn_qualification " + json.dumps(item) + "\n" for item in snapshots)
                 + "".join("evpn_input_barrier " + json.dumps(item) + "\n" for item in barriers))
+            (leg / "daemon.log").write_text('evpn_input_barrier {interleaved stdout fragment}\n')
             events = [{"event": "reload", "generation": "a", "at": 1},
                       {"event": "complete", "command": "policy a", "at": 3},
                       {"event": "reload", "generation": "b", "at": 4},
@@ -232,8 +233,8 @@ class RecoveryTests(unittest.TestCase):
                 R.analyze(root)
                 self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], "PASS")
                 self.assertIs(json.loads((root / "recovery-summary.json").read_text())["terminal_only_qualified"], False)
-                path = root / "recovery-00-candidate/daemon.log"
-                bad = witness("candidate", 3, 1000)
+                path = root / "recovery-00-candidate/observer.log"
+                bad = witness("candidate", 3, 10_000)
                 bad["peak"] = Q.DAEMON_BYTES
                 path.write_text(path.read_text() + "evpn_qualification " + json.dumps(bad) + "\n")
                 with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
@@ -248,15 +249,15 @@ class RecoveryTests(unittest.TestCase):
                 leg = root / "recovery-00-candidate"
                 row = json.loads((leg / "result.json").read_text())
                 if defect == "shape":
-                    row["routes"] = 999
+                    row["routes"] = 1000  # Former smoke shape never filled the real writer queue.
                 elif defect == "reused-marker":
                     row["protocol_obligation_after_churn"] = row["protocol_obligation_during_churn"]
                 else:
                     # Between actual driver completion and Python's delayed
                     # acknowledgement: not an observation during writes.
                     row["protocol_obligation_during_churn"]["wall_us"] = 3950
-                    text = (leg / "daemon.log").read_text().replace('"wall_us": 3000', '"wall_us": 3950')
-                    (leg / "daemon.log").write_text(text)
+                    text = (leg / "observer.log").read_text().replace('"wall_us": 3000', '"wall_us": 3950')
+                    (leg / "observer.log").write_text(text)
                 Q.write_json(leg / "result.json", row)
                 with patch.object(R, "check_wire", return_value=report), self.assertRaises(ValueError):
                     R.analyze(root)

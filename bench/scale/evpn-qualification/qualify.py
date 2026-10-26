@@ -374,7 +374,7 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
                        stdout=subprocess.DEVNULL)
         config = scenario / "config.toml"
         config.write_text(config.read_text().replace("127.0.0.1:9179", "127.0.0.1:19186"))
-        with (leg / "daemon.log").open("x") as log, (leg / "driver.log").open("x") as driver_log:
+        with (leg / "daemon.log").open("x") as log, (leg / "observer.log").open("x") as observer, (leg / "driver.log").open("x") as driver_log:
             subprocess.run(["taskset", "-c", manifest["daemon_cpus"], str(binary), "--check", "--strict", str(config)],
                            stdout=log, stderr=subprocess.STDOUT, check=True, timeout=30)
             command = ["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={DAEMON_BYTES}",
@@ -382,7 +382,7 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
             if not correctness:
                 require_timing_window(manifest)
             record["started_at"] = datetime.now(timezone.utc).isoformat()
-            daemon = COMMON.own_child(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT))
+            daemon = COMMON.own_child(subprocess.Popen(command, stdout=log, stderr=observer))
             pid = COMMON.daemon_pid(binary, time.monotonic() + 120)
             require(pid == daemon.pid, "scope launcher did not retain exact owned PID")
             record["daemon_owner"] = COMMON.process_identity(pid, binary)
@@ -420,7 +420,7 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
             _, body = fetch(19186, "/metrics")
             (leg / "metrics.txt").write_text(body)
             heap = metrics(body)
-            observed = ownership(latest_observation((leg / "daemon.log").read_text()), arm, clients, routes)
+            observed = ownership(latest_observation((leg / "observer.log").read_text()), arm, clients, routes)
             record["ownership"] = observed
             record["executed_resets"] = heap["executed_resets"]
             cg = COMMON.snapshot_cgroup(pid, DAEMON_BYTES)
@@ -496,7 +496,7 @@ def analyze_results(args):
         # The final observer may describe peer teardown; the retained settled
         # observation must occur in the actual daemon log before that teardown.
         observed = [json.loads(line.removeprefix("evpn_qualification "))
-                    for line in (leg / "daemon.log").read_text().splitlines()
+                    for line in (leg / "observer.log").read_text().splitlines()
                     if line.startswith("evpn_qualification ")]
         require(row["ownership"] in observed, "retained ownership witness absent from daemon log")
         heap = metrics((leg / "metrics.txt").read_text())

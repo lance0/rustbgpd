@@ -203,7 +203,7 @@ class Controller:
         self.selector.register(driver.stdout, selectors.EVENT_READ)
         self.last_sample, self.samples, self.observations = 0, [], []
         self.raw = (leg / "driver.log").open("xb")
-        self.observer_log = (leg / "daemon.log").open()
+        self.observer_log = (leg / "observer.log").open()
         self.observer_buffer = ""
         self.input_barriers = []
         self.probes = Readiness(leg / "readiness.jsonl", correctness)
@@ -360,7 +360,9 @@ def check_wire(leg, clients, routes):
 
 
 def run_cell(output, manifest, arm, index, correctness):
-    clients, routes = (3, 1000) if correctness else (150, 250)
+    # The small peer roster still needs enough packed UPDATEs to fill the real
+    # 4,096-message writer queue within 32 rounds; 1,000 routes did not.
+    clients, routes = (3, 10_000) if correctness else (150, 250)
     bars = manifest["recovery"]
     leg = output / f"recovery-{index:02}-{arm}"
     leg.mkdir()
@@ -375,7 +377,7 @@ def run_cell(output, manifest, arm, index, correctness):
         binary, harness = output / "bin" / f"rustbgpd-{arm}", output / "bin/evpn-rr-soak"
         for path in (binary, harness):
             Q.require(Q.digest(path) == identities[path.name], "binary changed after build")
-        with (leg / "daemon.log").open("x") as log:
+        with (leg / "daemon.log").open("x") as log, (leg / "observer.log").open("x") as observer:
             subprocess.run(["taskset", "-c", manifest["daemon_cpus"], str(binary), "--check", "--strict",
                             str(fixture / "config.toml")], stdout=log, stderr=subprocess.STDOUT, check=True)
             if not correctness:
@@ -384,7 +386,7 @@ def run_cell(output, manifest, arm, index, correctness):
             daemon = Q.COMMON.own_child(subprocess.Popen([
                 "systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={Q.DAEMON_BYTES}",
                 "-p", "MemorySwapMax=0", "--", "taskset", "-c", manifest["daemon_cpus"],
-                str(binary), str(fixture / "config.toml")], stdout=log, stderr=subprocess.STDOUT))
+                str(binary), str(fixture / "config.toml")], stdout=log, stderr=observer))
             pid = Q.COMMON.daemon_pid(binary, time.monotonic() + 120)
             Q.require(pid == daemon.pid, "scope launcher changed PID")
             record["daemon_owner"] = Q.COMMON.process_identity(pid, binary)
@@ -517,7 +519,7 @@ def analyze_results(output):
     for path, row in zip(paths, rows, strict=True):
         leg, clients = path.parent, row["clients"]
         Q.require(row["driver_exit"] == 0, "driver did not finish successfully")
-        Q.require((clients, row["routes"]) == ((3, 1000) if correctness else (150, 250)),
+        Q.require((clients, row["routes"]) == ((3, 10_000) if correctness else (150, 250)),
                   "recovery cell shape differs from fixed campaign")
         Q.require(row["wire"] == check_wire(leg, clients, row["routes"]), "wire receipt differs from raw captures")
         Q.require(row["executed_resets"] == Q.metrics((leg / "metrics.txt").read_text())["executed_resets"],
@@ -526,7 +528,7 @@ def analyze_results(output):
         Q.require(row["cgroup"] == cgroup, "cgroup receipt differs from raw observation")
         Q.check_cgroup(cgroup)
         observed = [json.loads(line.removeprefix("evpn_qualification ")) for line in
-                    (leg / "daemon.log").read_text().splitlines() if line.startswith("evpn_qualification ")]
+                    (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_qualification ")]
         for observation in observed:
             if observation["members"] == clients:
                 roster(observation, row["arm"], clients)
@@ -556,7 +558,7 @@ def analyze_results(output):
                     (leg / "driver.log").read_text().splitlines() if line.startswith("evpn_control ")]
         protocol_overlap(row, events, controls)
         barriers = [json.loads(line.removeprefix("evpn_input_barrier ")) for line in
-                    (leg / "daemon.log").read_text().splitlines() if line.startswith("evpn_input_barrier ")]
+                    (leg / "observer.log").read_text().splitlines() if line.startswith("evpn_input_barrier ")]
         Q.require(input_applied(barriers, clients, 3), "missing actor-applied input barriers")
         applied = [event for event in events if event["event"] == "input-applied"]
         Q.require([event["generation"] for event in applied] == [1, 2, 3]
