@@ -837,7 +837,10 @@ impl RibManager {
         };
         // Owned groups keep their single-turn recovery pass below.
         if paced && !owned_pass {
-            debug_assert!(self.pending_evpn_fanout.is_none());
+            assert!(
+                self.pending_evpn_fanout.is_none(),
+                "a parked EVPN fanout must drain before another chunk parks"
+            );
             self.pending_evpn_fanout = Some(fanout);
             self.advance_evpn_fanout();
             return;

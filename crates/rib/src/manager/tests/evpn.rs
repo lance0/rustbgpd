@@ -4204,6 +4204,21 @@ fn evpn_inbound_fanout_parks_at_receiver_boundaries() {
             manager.pending_evpn_fanout.is_some(),
             step < usize::from(receivers)
         );
+        if step < usize::from(receivers) {
+            // The parked batch's message stays open: finishing it would
+            // settle the distribution window and admit later input early.
+            assert!(
+                manager
+                    .pending_route_batches
+                    .front()
+                    .is_some_and(|pending| pending.fanout_parked),
+                "step {step}: the parked batch keeps its place"
+            );
+            assert!(
+                manager.distribution_window.started.is_some(),
+                "step {step}: the window settles only after the fanout"
+            );
+        }
     }
     assert_eq!(manager.pending_route_batches.len(), 1, "the second message");
     while manager.process_next_route_chunk() {}
