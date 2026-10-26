@@ -51,6 +51,41 @@ counts can require route-overlay scans. This mechanism does not by itself prove
 a latency bound at every scale. Peer-manager/session fields in the same RPC are
 independent observations; no fleet-wide atomic snapshot is implied.
 
+### Map growth and checkpoint boundaries
+
+Large maps with checkpointed writers use `ShardedMap`: after 16,384 entries,
+an insertion grows one of 16 hash tables instead of rehashing the complete map.
+The split itself moves at most 16,384 entries. This bounds the amount of data
+rehash moves; it does not guarantee a fixed elapsed time for every insertion.
+Maps that only fill an empty snapshot can instead reserve their known upper
+bound before the walk. Retirement must retain its per-entry checkpoints.
+
+The update-group and manager inventory has these boundaries:
+
+| Map or set | Growth and walk handling |
+| --- | --- |
+| Group `source_attrs` | Sharded; both route deltas and source-tag transitions use the same writer. Passthrough groups keep the map empty. |
+| Group `runner_up` | Sharded; no full-table reservation of route values for groups without exception lanes. |
+| Group `policy_filtered` | Sharded outer prefix map; the existing checkpointed writer replaces each affected prefix's candidate denials. |
+| Group `vpn_policy_denied` | Sharded; remove affected keys directly, then insert denials between checkpoints. |
+| Regroup snapshot `next_hop_overrides` | Reserve the staged table's size on the first override, before filling the empty map. Snapshots without overrides allocate nothing. |
+| Policy-transition prestage `failed` and `tagged` | Sharded; bounded inventory slices and dirty-key reconciliation retain checkpoints, including retirement. |
+| Group `inventory_log` and its dirty-key union | Logs are sharded and retire between checkpoints. The empty union reserves the sum of both log lengths before checkpointed insertion. |
+| `ExportMemo.entries` | Sharded; full-table export callers already checkpoint per route or candidate. Distinct source attribute allocations can fill the map. |
+| BoRR `refresh_stale_*` | Still requires readiness ownership and checkpoints across snapshot retain, clearing and construction before bounding set growth. |
+| LLGR `*_llgr_stale_local_tags` | Still requires checkpoint-aware promotion through removal, attribute mutation/interning, selection and cleanup before bounding set growth. |
+| Selection-deferral identity sets | Retained identities have admission limits, but resize work is not bounded. EVPN and RTC recorders also need input checkpoints. |
+| First outbound-limit admitted-set installation | Still requires readiness ownership, per-entry checkpoints and reservation from the known family count. The regroup path already reserves and checkpoints. |
+| `current_policy_filtered_routes` temporaries | Still require bounded set growth and missing candidate-transfer checkpoints. Prefix count alone does not bound multipath rejection identities. |
+
+Production-writer growth regressions cover the sharded maps above. A build with
+`bench-internals` can trace source-attribute capacity changes with
+`RUST_LOG=rustbgpd_rib::map_growth=trace`; each event reports the before/after
+capacity and insertion duration. Correlate these events with actor-turn and
+work-unit observations before attributing a loaded distribution stall to this
+map. Full-table latency, convergence and peak-memory qualification remain
+separate from the deterministic growth checks.
+
 ## Features
 
 - **Adj-RIB-In** — per-peer inbound route storage with stale marking

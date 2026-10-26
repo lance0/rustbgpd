@@ -274,12 +274,16 @@ impl<K: Eq + std::hash::Hash, V> ShardedMap<K, V> {
     where
         V: Default,
     {
+        self.get_or_insert_with(key, V::default)
+    }
+
+    pub(crate) fn get_or_insert_with(&mut self, key: K, value: impl FnOnce() -> V) -> &mut V {
         self.split_if_full();
         let hash = hash_of(&key);
         let entry = self
             .shard_mut(hash)
             .entry(hash, |(stored, _)| *stored == key, |(k, _)| hash_of(k))
-            .or_insert_with(|| (key, V::default()));
+            .or_insert_with(|| (key, value()));
         &mut entry.into_mut().1
     }
 

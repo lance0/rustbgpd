@@ -8,7 +8,7 @@ use super::{
 use crate::PeerId;
 use tracing::info;
 
-use crate::fast_hash::{AddrMap, FastSet};
+use crate::fast_hash::{AddrMap, FastSet, FastState, ShardedMap};
 
 /// One `None` arm of the clean-transition inventory walk. Every arm
 /// degrades the WHOLE cohort back to the authoritative per-peer path,
@@ -98,9 +98,9 @@ pub(in crate::manager) struct PrestagedTransitionInventory {
     pub(in crate::manager) next_hop_override: Vec<Option<NextHopAction>>,
     pub(in crate::manager) probe: Option<crate::manager::distribution::PrestagedTransitionProbe>,
     /// Keys failing a drift check as of their last visit.
-    failed: FastMap<(Prefix, u32), &'static str>,
+    failed: ShardedMap<(Prefix, u32), &'static str>,
     /// Changed keys tagged for an ASN in `rs_asns`.
-    tagged: FastSet<(Prefix, u32)>,
+    tagged: ShardedMap<(Prefix, u32), ()>,
 }
 
 /// What the fenced re-check made of a prestaged inventory.
@@ -313,7 +313,7 @@ impl RibManager {
         rs_asns.dedup();
         for gid in [source, destination] {
             if let Some(group) = self.group_ribs.get_mut(&gid) {
-                group.inventory_log = Some(FastSet::default());
+                group.inventory_log = Some(ShardedMap::default());
             }
         }
         self.prestaged_inventory = Some(PrestagedTransitionInventory {
@@ -325,8 +325,8 @@ impl RibManager {
             announce: Vec::new(),
             next_hop_override: Vec::new(),
             probe: None,
-            failed: FastMap::default(),
-            tagged: FastSet::default(),
+            failed: ShardedMap::default(),
+            tagged: ShardedMap::default(),
         });
     }
 
@@ -396,7 +396,7 @@ impl RibManager {
                     prestaged.announce.push(route.clone());
                     prestaged.next_hop_override.push(next_hop);
                     if tagged {
-                        prestaged.tagged.insert(key);
+                        prestaged.tagged.insert(key, ());
                     }
                 }
             }
@@ -430,9 +430,19 @@ impl RibManager {
             && rs_asns
                 .iter()
                 .all(|asn| prestaged.rs_asns.binary_search(asn).is_ok());
-        let mut dirty = FastSet::default();
-        for log in logs.into_iter().flatten() {
-            dirty.extend(log);
+        self.replacement_checkpoint(true);
+        let capacity = logs.iter().flatten().map(ShardedMap::len).sum();
+        let mut dirty = FastSet::with_capacity_and_hasher(capacity, FastState::default());
+        self.replacement_checkpoint(true);
+        for mut log in logs.into_iter().flatten() {
+            for &key in log.keys() {
+                self.replacement_checkpoint(false);
+                debug_assert!(dirty.len() < dirty.capacity());
+                dirty.insert(key);
+            }
+            crate::adj_rib_out::release_sharded_map(&mut log, &mut || {
+                self.replacement_checkpoint(false);
+            });
         }
         let outcome = if usable {
             self.recheck_prestaged_transition_inventory(&mut prestaged, &dirty, rs_asns)
@@ -479,8 +489,14 @@ impl RibManager {
             }
             prestaged.announce.truncate(kept);
             prestaged.next_hop_override.truncate(kept);
-            prestaged.failed.retain(|key, _| !dirty.contains(key));
-            prestaged.tagged.retain(|key| !dirty.contains(key));
+            prestaged.failed.retain(|key, _| {
+                checkpoint();
+                !dirty.contains(key)
+            });
+            prestaged.tagged.retain(|key, ()| {
+                checkpoint();
+                !dirty.contains(key)
+            });
         }
         for &key in dirty {
             checkpoint();
@@ -496,7 +512,7 @@ impl RibManager {
                     prestaged.announce.push(route.clone());
                     prestaged.next_hop_override.push(next_hop);
                     if tagged {
-                        prestaged.tagged.insert(key);
+                        prestaged.tagged.insert(key, ());
                     }
                 }
             }
@@ -575,7 +591,7 @@ impl RibManager {
         // `tagged` is relative to the walk's ASN superset: re-ask each
         // tagged key about the cohort's own ASNs (none ⇒ no tag check).
         if !rs_asns.is_empty() {
-            for &key in &prestaged.tagged {
+            for &key in prestaged.tagged.keys() {
                 checkpoint();
                 let tagged = new.table.get(&key.0, key.1).is_some_and(|route| {
                     matches!(
@@ -625,7 +641,7 @@ impl RibManager {
                 .get_mut(&gid)
                 .and_then(|group| group.inventory_log.take())
             {
-                crate::manager::retire_hash_set(&mut log, &mut || {
+                crate::adj_rib_out::release_sharded_map(&mut log, &mut || {
                     self.replacement_checkpoint(false);
                 });
             }
@@ -633,6 +649,12 @@ impl RibManager {
         if let Some(mut probe) = prestaged.probe.take() {
             probe.retire_with(&mut || self.replacement_checkpoint(false));
         }
+        crate::adj_rib_out::release_sharded_map(&mut prestaged.failed, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        crate::adj_rib_out::release_sharded_map(&mut prestaged.tagged, &mut || {
+            self.replacement_checkpoint(false);
+        });
         self.replacement_checkpoint(true);
         crate::manager::retire_vec(&mut prestaged.announce, &mut || {
             self.replacement_checkpoint(false);
@@ -1226,5 +1248,104 @@ impl RibManager {
         if !rows.is_empty() {
             self.bump_export_counters(peer, &rows);
         }
+    }
+}
+
+#[cfg(test)]
+mod growth_tests {
+    use super::*;
+    use crate::fast_hash::assert_growth_bounded;
+    use crate::test_support::make_route_with_lp;
+    use rustbgpd_wire::{Afi, Ipv4Prefix, PathAttribute, Safi};
+    use std::net::Ipv4Addr;
+
+    fn inventory_manager() -> RibManager {
+        let (_, updates) = tokio::sync::mpsc::channel(1);
+        let (_, queries) = tokio::sync::mpsc::channel(1);
+        let mut manager = RibManager::new(
+            updates,
+            queries,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        for gid in [1, 2] {
+            manager.group_ribs.insert(
+                gid,
+                GroupRibOut::new(
+                    None,
+                    false,
+                    false,
+                    true,
+                    None,
+                    vec![(Afi::Ipv4, Safi::Unicast)],
+                    vec![],
+                    false,
+                    0,
+                ),
+            );
+        }
+        manager
+            .peer_rs_control
+            .insert(PeerId::from_addr(Ipv4Addr::LOCALHOST.into()), 65_000);
+        manager.begin_prestaged_transition_inventory(1, 2);
+        manager
+    }
+
+    fn append_inventory_row(manager: &mut RibManager, index: u32, source_flip: bool) {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + index), 32);
+        let old = make_route_with_lp(prefix, Ipv4Addr::new(192, 0, 2, 1), 100);
+        let mut new = make_route_with_lp(
+            prefix,
+            Ipv4Addr::new(192, 0, 2, if source_flip { 2 } else { 1 }),
+            200,
+        );
+        let mut attrs = new.attributes.to_vec();
+        attrs.push(PathAttribute::Communities(vec![(65_000 << 16) | 7]));
+        new.attributes = crate::attr_set::AttrSet::new(attrs);
+        manager.group_ribs.get_mut(&1).unwrap().table.insert(old);
+        manager.group_ribs.get_mut(&2).unwrap().table.insert(new);
+        assert!(manager.extend_prestaged_transition_inventory());
+        let inventory = manager.prestaged_inventory.as_ref().unwrap();
+        let count = if source_flip {
+            inventory.failed.len()
+        } else {
+            inventory.tagged.len()
+        };
+        assert_eq!(count, usize::try_from(index).unwrap() + 1);
+    }
+
+    #[test]
+    fn prestaged_failed_grows_one_shard_per_insert() {
+        assert_growth_bounded(
+            "prestaged failures",
+            &mut inventory_manager(),
+            |manager, index| append_inventory_row(manager, index, true),
+            |manager| {
+                manager
+                    .prestaged_inventory
+                    .as_ref()
+                    .unwrap()
+                    .failed
+                    .capacity()
+            },
+        );
+    }
+
+    #[test]
+    fn prestaged_tagged_grows_one_shard_per_insert() {
+        assert_growth_bounded(
+            "prestaged tagged",
+            &mut inventory_manager(),
+            |manager, index| append_inventory_row(manager, index, false),
+            |manager| {
+                manager
+                    .prestaged_inventory
+                    .as_ref()
+                    .unwrap()
+                    .tagged
+                    .capacity()
+            },
+        );
     }
 }

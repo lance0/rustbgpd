@@ -15276,7 +15276,7 @@ fn prestaged_inventory_recheck_catches_source_only_change() {
         manager.group_ribs[&gid]
             .inventory_log
             .as_ref()
-            .is_some_and(|log| log.contains(&key))
+            .is_some_and(|log| log.contains_key(&key))
     };
     assert!(logged(source), "the source restaged the key");
     assert!(

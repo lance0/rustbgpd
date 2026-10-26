@@ -405,7 +405,7 @@ impl RibManager {
             let mut bump = |policy: &Option<PolicyLabel>, action: PolicyAction| {
                 bump_counter_row(&mut rows, policy.as_ref(), action);
             };
-            for (prefix, denials) in &group.policy_filtered {
+            for (prefix, denials) in group.policy_filtered.iter() {
                 self.replacement_checkpoint(false);
                 if !in_family(prefix) {
                     continue;
@@ -442,7 +442,7 @@ impl RibManager {
                 let label = group.permit_policy_label.clone();
                 bump(&label, PolicyAction::Permit);
             }
-            for (key, (source, label, rts)) in &group.vpn_policy_denied {
+            for (key, (source, label, rts)) in group.vpn_policy_denied.iter() {
                 self.replacement_checkpoint(false);
                 if *source == peer
                     || !in_vpn_family(key)

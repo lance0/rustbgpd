@@ -43,7 +43,7 @@ use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
 use crate::attr_set::AttrSet;
-use crate::fast_hash::{AddrMap, FastMap, FastState};
+use crate::fast_hash::{AddrMap, FastMap, FastState, ShardedMap};
 
 #[cfg(test)]
 use rustbgpd_wire::ExtendedCommunity;
@@ -556,7 +556,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// staged route: policy may have stripped a control community (deciding
     /// post-policy leaks a source-prohibited route) or added one (spurious
     /// steering). Proven passthrough groups leave this map empty.
-    source_attrs: FastMap<(Prefix, u32), Arc<AttrSet>>,
+    source_attrs: ShardedMap<(Prefix, u32), Arc<AttrSet>>,
     /// Group-uniform proof that export policy preserves the standard and
     /// large communities used by RFC 7947 control. Such groups derive the
     /// control input from their staged route and keep `source_attrs` empty.
@@ -589,7 +589,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// readers restamp the concrete member. Inner maps are never left
     /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
     /// so outer emptiness remains "no denials".
-    policy_filtered: FastMap<Prefix, AddrMap<(PeerId, u32), Option<PolicyLabel>>>,
+    policy_filtered: ShardedMap<Prefix, AddrMap<(PeerId, u32), Option<PolicyLabel>>>,
     /// Default-Permit label for every staged unicast and VPN entry.
     /// Export-chain identity is group-uniform and immutable, and a chain
     /// Permit is always attributed to the shared chain sentinel, so retaining
@@ -604,7 +604,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// parity. The extended communities let an RTC member's replay skip
     /// denials its Φ would have RT-gated before the eval (the per-peer
     /// path's RT gate precedes the policy evaluation).
-    vpn_policy_denied: FastMap<VpnRouteKey, VpnDenialRecord>,
+    vpn_policy_denied: ShardedMap<VpnRouteKey, VpnDenialRecord>,
     /// Persistent RFC 9234 denial residue for join/resync diagnostics.
     otc_blocked: FastMap<(Prefix, u32), Route>,
     /// Count aggregates beside `otc_blocked`, per unicast family
@@ -638,7 +638,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// prefixes), never per member — and recomputed alongside the
     /// winner on every staging of the prefix. Always empty for plain
     /// groups.
-    runner_up: FastMap<Prefix, RunnerUp>,
+    runner_up: ShardedMap<Prefix, RunnerUp>,
     /// ADR-0126 Decision 4 count residue: per-winner-source lane-entry
     /// counts `[v4, v6]` — how many lane entries currently substitute
     /// for member m (m receives the runner-up exactly where it sourced
@@ -678,7 +678,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// this group; `None` while no such inventory tracks it. Both table
     /// writers ([`Self::apply_delta`], [`Self::commit_rs_transitions`])
     /// record here, so the fenced re-check revisits exactly these keys.
-    pub(in crate::manager) inventory_log: Option<crate::fast_hash::FastSet<(Prefix, u32)>>,
+    pub(in crate::manager) inventory_log: Option<ShardedMap<(Prefix, u32), ()>>,
 }
 
 /// Placeholder target for group-level policy-denial records; restamped
@@ -715,18 +715,18 @@ impl GroupRibOut {
         self.table.retire_with(checkpoint);
         release_hash_map(&mut self.evpn_inputs, checkpoint);
         release_hash_map(&mut self.evpn_policy_denied, checkpoint);
-        release_hash_map(&mut self.source_attrs, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.source_attrs, checkpoint);
         release_hash_map(&mut self.source_counts, checkpoint);
-        for (_, mut paths) in self.policy_filtered.drain() {
-            release_hash_map(&mut paths, checkpoint);
+        for (_, paths) in self.policy_filtered.iter_mut() {
+            release_hash_map(paths, checkpoint);
         }
-        release_hash_map(&mut self.policy_filtered, checkpoint);
-        release_hash_map(&mut self.vpn_policy_denied, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.policy_filtered, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.vpn_policy_denied, checkpoint);
         release_hash_map(&mut self.otc_blocked, checkpoint);
         release_hash_map(&mut self.otc_blocked_sources, checkpoint);
         release_hash_map(&mut self.lane_otc_blocked_counts, checkpoint);
         release_hash_map(&mut self.vpn_member_counts, checkpoint);
-        release_hash_map(&mut self.runner_up, checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.runner_up, checkpoint);
         release_hash_map(&mut self.lane_counts, checkpoint);
         for _ in self.tombstones.drain() {
             checkpoint();
@@ -743,7 +743,9 @@ impl GroupRibOut {
         checkpoint();
         drop(self.export_chain.take());
         checkpoint();
-        drop(self.inventory_log.take());
+        if let Some(mut log) = self.inventory_log.take() {
+            crate::adj_rib_out::release_sharded_map(&mut log, checkpoint);
+        }
         checkpoint();
     }
     #[expect(
@@ -777,7 +779,7 @@ impl GroupRibOut {
             evpn_inputs: FastMap::default(),
             evpn_recovery_universe: None,
             evpn_policy_denied: FastMap::default(),
-            source_attrs: FastMap::default(),
+            source_attrs: ShardedMap::default(),
             source_control_passthrough,
             source_counts: AddrMap::default(),
             family_totals: [0; 4],
@@ -785,15 +787,15 @@ impl GroupRibOut {
             vpn_tombstones: HashSet::new(),
             members: HashSet::new(),
             dirty_members: HashSet::new(),
-            policy_filtered: FastMap::default(),
+            policy_filtered: ShardedMap::default(),
             permit_policy_label,
-            vpn_policy_denied: FastMap::default(),
+            vpn_policy_denied: ShardedMap::default(),
             otc_blocked: FastMap::default(),
             otc_blocked_totals: [0; 2],
             otc_blocked_sources: AddrMap::default(),
             lane_otc_blocked_counts: AddrMap::default(),
             vpn_member_counts: AddrMap::default(),
-            runner_up: FastMap::default(),
+            runner_up: ShardedMap::default(),
             lane_counts: AddrMap::default(),
             export_chain,
             is_ebgp,
@@ -941,7 +943,7 @@ impl GroupRibOut {
                 // scope wider than the lane keeps the scan for the same
                 // reason.
                 _ => {
-                    for (prefix, entry) in &self.runner_up {
+                    for (prefix, entry) in self.runner_up.iter() {
                         checkpoint();
                         #[cfg(any(test, feature = "bench-internals"))]
                         {
@@ -1009,12 +1011,29 @@ impl GroupRibOut {
         self.inc_source_slot(peer, Self::count_slot(prefix));
     }
 
+    fn insert_source_attrs(&mut self, key: (Prefix, u32), attrs: &Arc<AttrSet>) {
+        #[cfg(feature = "bench-internals")]
+        let observation =
+            tracing::enabled!(target: "rustbgpd_rib::map_growth", tracing::Level::TRACE)
+                .then(|| (self.source_attrs.capacity(), std::time::Instant::now()));
+        self.source_attrs.insert(key, Arc::clone(attrs));
+        #[cfg(feature = "bench-internals")]
+        if let Some((before, started)) = observation {
+            let after = self.source_attrs.capacity();
+            if after != before {
+                tracing::trace!(target: "rustbgpd_rib::map_growth", map = "source_attrs", before, after,
+                    entries = self.source_attrs.len(), elapsed_us = started.elapsed().as_micros(),
+                    "update-group map capacity changed");
+            }
+        }
+    }
+
     /// Commit one staged delta into the group table, keeping the
     /// source-count and next-hop-override residue in sync.
     fn apply_delta(&mut self, delta: &GroupDelta) {
         let key = (delta.prefix, delta.path_id);
         if let Some(log) = &mut self.inventory_log {
-            log.insert(key);
+            log.insert(key, ());
         }
         if let Some(old) = self.table.get(&delta.prefix, delta.path_id) {
             let old_peer = old.peer;
@@ -1030,7 +1049,7 @@ impl GroupRibOut {
             if !self.source_control_passthrough {
                 match &delta.source_attrs {
                     Some(attrs) => {
-                        self.source_attrs.insert(key, Arc::clone(attrs));
+                        self.insert_source_attrs(key, attrs);
                     }
                     None => {
                         self.source_attrs.remove(&key);
@@ -1197,11 +1216,11 @@ impl GroupRibOut {
             checkpoint();
             let key = (transition.prefix, transition.path_id);
             if let Some(log) = &mut self.inventory_log {
-                log.insert(key);
+                log.insert(key, ());
             }
             match &transition.source_attrs {
                 Some(attrs) => {
-                    self.source_attrs.insert(key, Arc::clone(attrs));
+                    self.insert_source_attrs(key, attrs);
                 }
                 None => {
                     self.source_attrs.remove(&key);
@@ -1511,15 +1530,17 @@ impl GroupRibOut {
         let mut snapshot =
             FastMap::with_capacity_and_hasher(self.table.len(), FastState::default());
         let mut next_hop_overrides = FastMap::default();
-        for entry in self.table.iter().filter_map(|staged| {
+        for staged in self.table.iter() {
             checkpoint(false);
             let key = (staged.prefix, staged.path_id);
             // The substitution shares the staged slot's key, so the
             // member-local rejection overlay applies identically.
             if rejected.contains(&ExactExportKey::Unicast(key.0, key.1)) {
-                return None;
+                continue;
             }
-            let entry = self.adv_entry(member, &staged.prefix, staged.path_id)?;
+            let Some(entry) = self.adv_entry(member, &staged.prefix, staged.path_id) else {
+                continue;
+            };
             let (communities, large_communities) =
                 self.source_control_for_route(entry.route, entry.source_attrs);
             // LAN-474: a key whose SOURCE communities suppress it
@@ -1527,16 +1548,20 @@ impl GroupRibOut {
             // snapshot records true wire state, not the shared
             // table.
             if rs_control_suppressed(communities, large_communities, rs_control) {
-                return None;
+                continue;
             }
             let mut route = entry.route.clone();
             rs_control_route_rewrite(&mut route, large_communities, rs_control);
-            Some((key, route, entry.nh.cloned()))
-        }) {
-            if let Some(action) = entry.2 {
-                next_hop_overrides.insert(entry.0, action);
+            if let Some(action) = entry.nh {
+                if next_hop_overrides.capacity() == 0 {
+                    checkpoint(true);
+                    next_hop_overrides.reserve(self.table.len());
+                    checkpoint(true);
+                }
+                debug_assert!(next_hop_overrides.len() < next_hop_overrides.capacity());
+                next_hop_overrides.insert(key, action.clone());
             }
-            snapshot.insert(entry.0, entry.1);
+            snapshot.insert(key, route);
         }
         checkpoint(true);
         RegroupBaseline {
@@ -1601,8 +1626,7 @@ impl GroupRibOut {
         for (key, label) in current {
             checkpoint();
             self.policy_filtered
-                .entry(key.prefix)
-                .or_default()
+                .get_or_default(key.prefix)
                 .insert((key.source_peer, key.path_id), label.clone());
         }
     }
@@ -1689,7 +1713,7 @@ impl GroupRibOut {
                 }
             }
         } else {
-            for (prefix, denials) in &self.policy_filtered {
+            for (prefix, denials) in self.policy_filtered.iter() {
                 checkpoint();
                 #[cfg(any(test, feature = "bench-internals"))]
                 {
