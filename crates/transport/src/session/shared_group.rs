@@ -8,9 +8,9 @@
 //! encodes that fair-shared the cores and delayed everyone's first wire
 //! UPDATE by the total encode time divided by the core count.
 //!
-//! VPN fanout shares the same stream machinery for members with identical
-//! source/RT-filtered payloads. VPN withdrawals stay ahead of the shared
-//! announce phase; label and next-hop preparation uses the private encoder.
+//! VPN and dormant EVPN fanout share the same stream machinery for members
+//! with identical eligible payloads. Family withdrawals stay ahead of the
+//! shared announce phase; preparation uses the private encoder.
 //!
 //! The first member to consume its envelope is elected encoder through the
 //! envelope's [`rustbgpd_rib::SharedGroupEncode`] cell, a synchronous `OnceLock`.
@@ -19,8 +19,9 @@
 //! has either a live encoder or a terminal stream. After grouping the whole
 //! inventory by source, the encoder prepares, groups, and encodes bounded
 //! route slices, publishing each slice's chunks as they are produced. Every
-//! other member proves byte-equivalence with
-//! [`SessionExportProfile::has_same_wire_encoding`] and then *streams* the
+//! other member proves it carries the same family payload allocation the
+//! encoder bound at election, proves byte-equivalence with
+//! [`SessionExportProfile::has_same_wire_encoding`], and then *streams* the
 //! chunks — sending chunk `i` as soon as it exists instead of awaiting the
 //! whole payload — skipping the chunks of its own source (split horizon)
 //! and of families it did not negotiate. This makes a member's longest wire
@@ -63,7 +64,7 @@ use crate::fast_hash::FastMap as HashMap;
 use bytes::Bytes;
 use rustbgpd_rib::PeerId;
 use std::any::Any;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Routes per encoder slice: each slice is prepared, grouped, encoded, and
 /// published as one unit, so consumers' streaming granularity (and the gap
@@ -141,19 +142,57 @@ struct ProgressiveStateInner {
     terminal: Option<StreamTerminal>,
 }
 
+/// The one announce inventory a shared stream encodes: its family and its
+/// `Arc` allocation. The RIB cell carries no payload, so without this a cell
+/// reaching envelopes with different inventories (or another family) would
+/// let one member stream another member's routes. `Weak` pins the
+/// allocation address, so a freed and reused address cannot match, without
+/// retaining the routes.
+enum SharedPayload {
+    Unicast(Weak<Vec<Route>>),
+    Vpn(Weak<Vec<rustbgpd_rib::VpnRibRoute>>),
+    Evpn(Weak<Vec<rustbgpd_rib::EvpnRibRoute>>),
+}
+
+impl SharedPayload {
+    /// Eligibility admits exactly one non-empty announce family.
+    fn of(update: &OutboundRouteUpdate) -> Self {
+        if !update.evpn_announce.is_empty() {
+            Self::Evpn(Arc::downgrade(&update.evpn_announce))
+        } else if !update.vpn_announce.is_empty() {
+            Self::Vpn(Arc::downgrade(&update.vpn_announce))
+        } else {
+            Self::Unicast(Arc::downgrade(&update.announce))
+        }
+    }
+
+    fn matches(&self, update: &OutboundRouteUpdate) -> bool {
+        match self {
+            Self::Unicast(payload) => std::ptr::eq(payload.as_ptr(), Arc::as_ptr(&update.announce)),
+            Self::Vpn(payload) => std::ptr::eq(payload.as_ptr(), Arc::as_ptr(&update.vpn_announce)),
+            Self::Evpn(payload) => {
+                std::ptr::eq(payload.as_ptr(), Arc::as_ptr(&update.evpn_announce))
+            }
+        }
+    }
+}
+
 /// Cell payload created by the elected encoder *before* it encodes anything.
 pub(super) struct ProgressiveGroupEncode {
     /// The encoder's profile; consumers reuse chunks only after proving
     /// [`SessionExportProfile::has_same_wire_encoding`] against it.
     profile: SessionExportProfile,
+    /// The electing envelope's payload; consumers must carry the same one.
+    payload: SharedPayload,
     state: Mutex<ProgressiveStateInner>,
     progress: tokio::sync::Notify,
 }
 
 impl ProgressiveGroupEncode {
-    fn new(profile: SessionExportProfile) -> Self {
+    fn new(profile: SessionExportProfile, update: &OutboundRouteUpdate) -> Self {
         Self {
             profile,
+            payload: SharedPayload::of(update),
             state: Mutex::new(ProgressiveStateInner::default()),
             progress: tokio::sync::Notify::new(),
         }
@@ -216,8 +255,8 @@ impl ProgressiveGroupEncode {
     }
 
     #[cfg(test)]
-    pub(super) fn test_new(profile: SessionExportProfile) -> Self {
-        Self::new(profile)
+    pub(super) fn test_new(profile: SessionExportProfile, update: &OutboundRouteUpdate) -> Self {
+        Self::new(profile, update)
     }
     #[cfg(test)]
     pub(super) fn test_publish(&self, chunks: Vec<SharedAnnounceChunk>) {
@@ -246,23 +285,26 @@ impl Drop for EncoderGuard<'_> {
     }
 }
 
-/// Whether an envelope carries grouped unicast or VPN announcements, optionally
+/// Whether an envelope carries grouped unicast, VPN or EVPN announcements, optionally
 /// bracketed by refresh markers or `EoR` and preceded by that family's
 /// withdrawals. Those phases stay per member in the ordinary
 /// cursor; only the announce inventory is shared. Anything richer
 /// keeps the ordinary path, which handles every payload kind.
 fn shared_encode_eligible(update: &OutboundRouteUpdate) -> bool {
+    let family_payload = match (
+        !update.announce.is_empty(),
+        !update.vpn_announce.is_empty(),
+        !update.evpn_announce.is_empty(),
+    ) {
+        (true, false, false) => update.vpn_withdraw.is_empty() && update.evpn_withdraw.is_empty(),
+        (false, true, false) => update.withdraw.is_empty() && update.evpn_withdraw.is_empty(),
+        (false, false, true) => update.withdraw.is_empty() && update.vpn_withdraw.is_empty(),
+        _ => false,
+    };
     update.shared_group_encode.is_some()
-        && ((!update.announce.is_empty()
-            && update.vpn_announce.is_empty()
-            && update.vpn_withdraw.is_empty())
-            || (!update.vpn_announce.is_empty()
-                && update.announce.is_empty()
-                && update.withdraw.is_empty()))
+        && family_payload
         && update.flowspec_announce.is_empty()
         && update.flowspec_withdraw.is_empty()
-        && update.evpn_announce.is_empty()
-        && update.evpn_withdraw.is_empty()
         && update.bgpls_announce.is_empty()
         && update.bgpls_withdraw.is_empty()
         && update.labeled_announce.is_empty()
@@ -550,6 +592,64 @@ pub(super) fn encode_shared_vpn_slice(
     Some(chunks)
 }
 
+/// Reuse private EVPN reflection/next-hop preparation, retaining source
+/// separation and the same standard message ceiling as other shared families.
+pub(super) fn encode_shared_evpn_slice(
+    export: &SessionExportProfile,
+    announce: &[rustbgpd_rib::EvpnRibRoute],
+    indices: &[usize],
+) -> Option<Vec<SharedAnnounceChunk>> {
+    use super::outbound::{MpGroupIndex, MpRouteGroup};
+    let family = (Afi::L2Vpn, Safi::Evpn);
+    if export.add_path_send(family) {
+        return None;
+    }
+    let mut cache = MpAttrCache::default();
+    let mut sources: HashMap<PeerId, (MpGroupIndex, Vec<MpRouteGroup<rustbgpd_wire::EvpnRoute>>)> =
+        HashMap::default();
+    for &i in indices {
+        let route = &announce[i];
+        let prepared = SessionExportProfile::prepare_evpn_candidate_with(route, || {
+            export.prepare_mp_attributes_cached(
+                &mut cache,
+                &route.attributes,
+                route.origin_type,
+                route.peer_router_id,
+                family,
+            )
+        });
+        let (index, groups) = sources.entry(route.peer).or_default();
+        index.push(groups, family, prepared);
+    }
+    let mut chunks = Vec::new();
+    for (source, (_, groups)) in sources {
+        for ((afi, safi), next_hop, link_local, attrs, routes) in groups {
+            let encoded = encode_chunks(
+                &routes,
+                usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                |routes| {
+                    export.build_mp_reach(
+                        afi,
+                        safi,
+                        next_hop,
+                        link_local,
+                        &attrs,
+                        ReachNlri::Evpn(routes),
+                        Ipv4UnicastMode::Body,
+                    )
+                },
+            )?;
+            chunks.extend(encoded.into_iter().map(|bytes| SharedAnnounceChunk {
+                source,
+                afi,
+                safi,
+                bytes,
+            }));
+        }
+    }
+    Some(chunks)
+}
+
 impl PeerSession {
     /// Only small operator snapshots may interleave an owned wait. Discard
     /// abandoned snapshots; preserve all other commands and their FIFO successors.
@@ -602,7 +702,8 @@ impl PeerSession {
         let mut elected_encoder = false;
         let cell = shared.cell.get_or_init(|| {
             elected_encoder = true;
-            Arc::new(ProgressiveGroupEncode::new(export.clone())) as Arc<dyn Any + Send + Sync>
+            Arc::new(ProgressiveGroupEncode::new(export.clone(), update))
+                as Arc<dyn Any + Send + Sync>
         });
         let encode = Arc::clone(cell).downcast::<ProgressiveGroupEncode>().ok()?;
         if elected_encoder {
@@ -610,7 +711,7 @@ impl PeerSession {
                 .encode_and_send_shared_group(&encode, update, export)
                 .await?;
             Some((encode, next))
-        } else if export.has_same_wire_encoding(&encode.profile) {
+        } else if encode.payload.matches(update) && export.has_same_wire_encoding(&encode.profile) {
             Some((encode, 0))
         } else {
             None
@@ -647,7 +748,10 @@ impl PeerSession {
         // is safe to reorder: the inventory carries one route per prefix,
         // and announcements of distinct prefixes are order-independent.
         let vpn = !update.vpn_announce.is_empty();
-        let order = if vpn {
+        let evpn = !update.evpn_announce.is_empty();
+        let order = if evpn {
+            source_grouped_indices(update.evpn_announce.iter().map(|route| route.peer))
+        } else if vpn {
             source_grouped_indices(update.vpn_announce.iter().map(|route| route.peer))
         } else {
             source_grouped_order(&update.announce)
@@ -661,6 +765,7 @@ impl PeerSession {
         // Requests remain excluded by shared_encode_eligible.
         let mut own_send_healthy = update.withdraw.is_empty()
             && update.vpn_withdraw.is_empty()
+            && update.evpn_withdraw.is_empty()
             && !update
                 .refresh_markers
                 .iter()
@@ -671,7 +776,9 @@ impl PeerSession {
         while idx < order.len() {
             self.poll_shared_group_command();
             let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());
-            let chunks = if vpn {
+            let chunks = if evpn {
+                encode_shared_evpn_slice(export, &update.evpn_announce, &order[idx..end])
+            } else if vpn {
                 encode_shared_vpn_slice(export, &update.vpn_announce, &order[idx..end])
             } else {
                 encode_shared_unicast_slice(

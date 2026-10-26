@@ -1235,7 +1235,7 @@ fn empty_outbound_update() -> OutboundRouteUpdate {
         next_hop_override: vec![].into(),
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
-        evpn_announce: vec![],
+        evpn_announce: vec![].into(),
         evpn_withdraw: vec![],
         bgpls_announce: vec![],
         bgpls_withdraw: vec![],
@@ -1426,12 +1426,13 @@ fn shared_group_envelope(
     session: &PeerSession,
     shared: &Arc<rustbgpd_rib::SharedGroupEncode>,
     excluded_source: Ipv4Addr,
-    announce: &[Route],
+    announce: &Arc<Vec<Route>>,
 ) -> OutboundRouteUpdate {
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
     update.announce_source_exclusion = Some(PeerId::from_addr(IpAddr::V4(excluded_source)));
-    update.announce = announce.to_vec().into();
+    // Group members share one inventory allocation, as the RIB fans it out.
+    update.announce = Arc::clone(announce);
     update.next_hop_override = vec![None; announce.len()].into();
     update.shared_group_encode = Some(Arc::clone(shared));
     update

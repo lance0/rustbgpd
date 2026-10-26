@@ -3019,7 +3019,7 @@ impl RibManager {
                     withdraw: unicast.withdraw,
                     flowspec_announce: fs_announce,
                     flowspec_withdraw: fs_withdraw,
-                    evpn_announce,
+                    evpn_announce: evpn_announce.into(),
                     evpn_withdraw,
                     evpn_complete_feed,
                     bgpls_announce,

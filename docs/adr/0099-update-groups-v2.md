@@ -1094,3 +1094,36 @@ It compares each receiver's ordered per-key NLRI and prepared attribute bytes,
 including the MP next hop and EoR coverage, against the forced-private run.
 This is correctness coverage for that scenario, not scale qualification or
 permission to enable EVPN ownership.
+
+## Amendment (2026-10-26): dormant shared EVPN announce encoding
+
+The dormant owned-EVPN path now reuses the progressive announcement encoder.
+Clean members share one route payload and encode cell when they admit the same
+changed inventory. Source-excluded views, retained recovery, complete feeds and
+exact-export refusals remain private. The shared inventory is sorted once;
+member-specific filtering detaches it, and retirement checkpoints release route
+bodies cooperatively. Before reuse, transport checks the complete export
+profile and that the envelope carries the same family payload allocation the
+encoder bound at election, so a cell that reaches a different unicast, VPN or
+EVPN inventory falls back to private encoding. It sends each member's
+withdrawals first and keeps terminal markers last.
+A failed or canceled producer wakes followers to complete private encoding.
+
+The real-RIB-to-session socket comparison covers Types 1–5, IPv4 and IPv6 next
+hops, source changes, label changes, withdrawals and EoR coverage. All three
+peers originate and receive routes. It requires an actual shared-EVPN-envelope
+witness in the owned run and none in the private control. Separate component
+controls cover shared payload identity, member-local rejection, one-slot writer
+ordering and cancellation after partial publication.
+
+Production `owns_evpn` remains false. A constructor available only with
+`bench-internals` enables a stable, initially empty non-RTC fixture; it rejects
+late activation and creation of an owned destination after EVPN population.
+It adds no daemon configuration, RPC or environment switch. RTC, Add-Path and
+per-client-best exclusions remain in force. The fixture receipt reports actual
+ownership, dirty state and recovery-ledger charge; logical charge is not RSS.
+
+These are preparation and correctness controls. They establish no memory,
+readiness, throughput or scale result. Full feeds still encode privately, so a
+large initial feed is not an encode-once qualification. Production activation
+still requires the separately accepted qualification and approval.

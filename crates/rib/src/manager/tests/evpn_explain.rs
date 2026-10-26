@@ -674,7 +674,7 @@ fn srv6_p2mp_imet_replacement_withdrawal_and_recovery_reach_export_and_inspectio
         let mut announced = Vec::new();
         let mut withdrawn = Vec::new();
         while let Ok(update) = out.try_recv() {
-            announced.extend(update.evpn_announce);
+            announced.extend(update.evpn_announce.iter().cloned());
             withdrawn.extend(update.evpn_withdraw);
         }
         if expected.is_some() {
