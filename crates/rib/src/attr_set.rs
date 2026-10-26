@@ -98,11 +98,29 @@ fn saturating_u32(len: usize) -> u32 {
 /// An immutable path-attribute list plus its [`SelectionSummary`].
 ///
 /// Routes hold it as `Arc<AttrSet>`. Equality, hashing and `Debug` cover the
-/// attribute list only; the summary is a pure function of it.
+/// attribute list only; the summary and the cached hash are pure functions of
+/// it.
 #[derive(Clone)]
 pub struct AttrSet {
     attrs: Vec<PathAttribute>,
     summary: SelectionSummary,
+    /// The attribute list's hash, so a sharded intern lookup (shard choice
+    /// plus table probe) and a rehash never walk the list again.
+    hash: u64,
+}
+
+/// Fx over the attribute list, finished with the murmur3 64-bit mixer. The
+/// table hashes this value again with Fx, whose multiply carries only low
+/// bits upward; the mixer makes every bit of the cached value depend on every
+/// input bit, so that second pass still spreads the bucket bits.
+fn content_hash(attrs: &Vec<PathAttribute>) -> u64 {
+    use std::hash::BuildHasher;
+    let mut hash = crate::fast_hash::FastState::default().hash_one(attrs);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^ (hash >> 33)
 }
 
 impl AttrSet {
@@ -110,7 +128,12 @@ impl AttrSet {
     #[must_use]
     pub fn new(attrs: Vec<PathAttribute>) -> Arc<Self> {
         let summary = SelectionSummary::compute(&attrs);
-        Arc::new(Self { attrs, summary })
+        let hash = content_hash(&attrs);
+        Arc::new(Self {
+            attrs,
+            summary,
+            hash,
+        })
     }
 
     /// The cached selection summary.
@@ -122,18 +145,20 @@ impl AttrSet {
             SelectionSummary::compute(&self.attrs),
             "stale attribute selection summary"
         );
+        debug_assert_eq!(self.hash, content_hash(&self.attrs), "stale attribute hash");
         &self.summary
     }
 
     /// Edit the attribute list copy-on-write (`Arc::make_mut`) and rebuild
-    /// the summary, including if the callback unwinds. This is the only
-    /// way to mutate an `AttrSet`.
+    /// the summary and hash, including if the callback unwinds. This is the
+    /// only way to mutate an `AttrSet`.
     pub fn edit<R>(this: &mut Arc<Self>, f: impl FnOnce(&mut Vec<PathAttribute>) -> R) -> R {
         struct RebuildSummary<'a>(&'a mut AttrSet);
 
         impl Drop for RebuildSummary<'_> {
             fn drop(&mut self) {
                 self.0.summary = SelectionSummary::compute(&self.0.attrs);
+                self.0.hash = content_hash(&self.0.attrs);
             }
         }
 
@@ -168,7 +193,7 @@ impl Deref for AttrSet {
 
 impl PartialEq for AttrSet {
     fn eq(&self, other: &Self) -> bool {
-        self.attrs == other.attrs
+        self.hash == other.hash && self.attrs == other.attrs
     }
 }
 
@@ -182,7 +207,7 @@ impl PartialEq<Vec<PathAttribute>> for AttrSet {
 
 impl std::hash::Hash for AttrSet {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.attrs.hash(state);
+        state.write_u64(self.hash);
     }
 }
 
@@ -194,6 +219,8 @@ impl std::fmt::Debug for AttrSet {
 
 #[cfg(test)]
 mod tests {
+    use std::hash::BuildHasher;
+
     use rustbgpd_wire::{AsPath, AsPathSegment};
 
     use super::*;
@@ -256,5 +283,77 @@ mod tests {
         assert_eq!(set.summary().local_pref, 200);
         assert_eq!(shared[0], PathAttribute::LocalPref(50));
         assert_eq!(shared.summary().local_pref, 50);
+    }
+
+    /// The cached hash follows every edit, including one whose callback
+    /// unwinds, so an edited set still hashes and compares equal to a fresh
+    /// set with the same attributes and unequal to its former sharers.
+    #[test]
+    fn cached_hash_follows_edits_and_unwinds() {
+        let hash = |set: &AttrSet| crate::fast_hash::FastState::default().hash_one(set);
+        let mut set = AttrSet::new(vec![PathAttribute::LocalPref(50)]);
+        let shared = Arc::clone(&set);
+        AttrSet::edit(&mut set, |attrs| attrs.push(PathAttribute::Med(7)));
+        let fresh = AttrSet::new(vec![PathAttribute::LocalPref(50), PathAttribute::Med(7)]);
+        assert_eq!(set.hash, content_hash(&set.attrs));
+        assert_eq!(hash(&set), hash(&fresh));
+        assert_eq!(set, fresh);
+        assert_ne!(set, shared);
+        assert_ne!(hash(&set), hash(&shared));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            AttrSet::edit(&mut set, |attrs| {
+                attrs.push(PathAttribute::Med(9));
+                panic!("edit interrupted after changing attributes");
+            });
+        }));
+        assert!(result.is_err());
+        let fresh = AttrSet::new(vec![
+            PathAttribute::LocalPref(50),
+            PathAttribute::Med(7),
+            PathAttribute::Med(9),
+        ]);
+        assert_eq!(set.hash, content_hash(&set.attrs));
+        assert_eq!(hash(&set), hash(&fresh));
+        assert_eq!(set, fresh);
+    }
+
+    /// The table hashes the cached `u64` again with Fx. Sets that differ in
+    /// one field must still spread over hashbrown's top-7 tag bits, its low
+    /// bucket bits and the `ShardedMap` shard bits.
+    #[test]
+    fn cached_hashes_spread_tag_bucket_and_shard_bits() {
+        use std::collections::HashSet;
+        const KEYS: u64 = 4096;
+        let sets: Vec<Arc<AttrSet>> = (0..KEYS)
+            .map(|med| {
+                AttrSet::new(vec![
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::Med(u32::try_from(med).unwrap()),
+                ])
+            })
+            .collect();
+        let hashes: Vec<u64> = sets
+            .iter()
+            .map(|set| crate::fast_hash::FastState::default().hash_one(&**set))
+            .collect();
+        let tags = hashes.iter().map(|h| h >> 57).collect::<HashSet<_>>();
+        let starts = hashes
+            .iter()
+            .map(|h| h & (KEYS - 1))
+            .collect::<HashSet<_>>();
+        let shards = sets
+            .iter()
+            .map(|set| crate::fast_hash::shard_index(&**set))
+            .collect::<HashSet<_>>();
+        // Uniform hashing gives all 128 tags, about 63% of the 4096 starting
+        // buckets and all 16 shards.
+        assert!(tags.len() >= 120, "{} distinct tags", tags.len());
+        assert!(
+            starts.len() >= 2300,
+            "{} distinct starting buckets",
+            starts.len()
+        );
+        assert_eq!(shards.len(), crate::fast_hash::SHARDS);
     }
 }
