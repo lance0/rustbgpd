@@ -107,3 +107,17 @@ fn ipv6_targets_travel_in_attribute_25_without_truncation_or_invented_partial() 
         }
     }
 }
+
+#[test]
+fn empty_ipv6_extended_communities_cannot_be_encoded() {
+    for attribute in [
+        PathAttribute::Ipv6ExtendedCommunities(Vec::new()),
+        PathAttribute::Ipv6ExtendedCommunitiesPartial(Vec::new()),
+    ] {
+        let mut encoded = Vec::new();
+        assert!(matches!(
+            encode_path_attributes(&[attribute], &mut encoded, true, false),
+            Err(rustbgpd_wire::EncodeError::ValueOutOfRange { .. })
+        ));
+    }
+}

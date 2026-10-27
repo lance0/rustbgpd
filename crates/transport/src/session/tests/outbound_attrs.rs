@@ -456,6 +456,116 @@ fn non_transitive_extended_communities_preserve_on_exempt_or_opted_in_export() {
     }
 }
 
+#[test]
+fn ipv6_extended_communities_filter_on_unicast_and_mp_export() {
+    let session = make_test_session(65001, 65002);
+    let transitive = rustbgpd_wire::Ipv6ExtendedCommunity::from_flowspec_redirect_to_ip(
+        "2001:db8::10".parse().unwrap(),
+        false,
+    );
+    let other = rustbgpd_wire::Ipv6ExtendedCommunity::from_flowspec_redirect_to_ip(
+        "2001:db8::20".parse().unwrap(),
+        true,
+    );
+    let mut raw = *transitive.as_bytes();
+    raw[0] = 0x40;
+    let non_transitive = rustbgpd_wire::Ipv6ExtendedCommunity::new(raw);
+    for partial in [false, true] {
+        let attribute = |values| {
+            if partial {
+                PathAttribute::Ipv6ExtendedCommunitiesPartial(values)
+            } else {
+                PathAttribute::Ipv6ExtendedCommunities(values)
+            }
+        };
+        for (values, retained) in [
+            (
+                vec![transitive, other, transitive],
+                vec![transitive, other, transitive],
+            ),
+            (
+                vec![
+                    non_transitive,
+                    transitive,
+                    other,
+                    non_transitive,
+                    transitive,
+                ],
+                vec![transitive, other, transitive],
+            ),
+            (vec![non_transitive, non_transitive], vec![]),
+        ] {
+            let mut route = make_route(100);
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(attribute(values.clone()));
+            });
+            let mut flowspec = make_flowspec_route();
+            flowspec.attributes.push(attribute(values));
+            let expected = (!retained.is_empty()).then(|| attribute(retained));
+            for attrs in [
+                session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None),
+                session.prepare_outbound_attributes_flowspec(&flowspec, true),
+            ] {
+                assert_eq!(
+                    attrs.iter().find(|attr| attr.type_code() == 25),
+                    expected.as_ref(),
+                    "Partial={partial} must retain only transitive values, in order"
+                );
+                let mut encoded = Vec::new();
+                rustbgpd_wire::attribute::encode_path_attributes(&attrs, &mut encoded, true, false)
+                    .unwrap();
+                let decoded =
+                    rustbgpd_wire::attribute::decode_path_attributes(&encoded, true, &[]).unwrap();
+                assert_eq!(
+                    decoded.iter().find(|attr| attr.type_code() == 25),
+                    expected.as_ref()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ipv6_extended_communities_preserve_on_exempt_or_opted_in_export() {
+    let mut raw = [0x5a; 20];
+    raw[0] = 0x40;
+    let non_transitive = rustbgpd_wire::Ipv6ExtendedCommunity::new(raw);
+    for partial in [false, true] {
+        let attribute = if partial {
+            PathAttribute::Ipv6ExtendedCommunitiesPartial(vec![non_transitive])
+        } else {
+            PathAttribute::Ipv6ExtendedCommunities(vec![non_transitive])
+        };
+        let mut route = make_route(100);
+        AttrSet::edit(&mut route.attributes, |attrs| attrs.push(attribute.clone()));
+        let mut flowspec = make_flowspec_route();
+        flowspec.attributes.push(attribute.clone());
+        for (local_asn, remote_asn, route_server_client, opted_in) in [
+            (65001, 65001, false, false),
+            (65001, 65002, true, false),
+            (65001, 65002, false, true),
+        ] {
+            let mut session = make_test_session(local_asn, remote_asn);
+            session.config.route_server_client = route_server_client;
+            session.config.send_non_transitive_extended_communities = opted_in;
+            for attrs in [
+                session.prepare_outbound_attributes(
+                    &route,
+                    local_asn != remote_asn,
+                    Ipv4Addr::new(10, 0, 0, 1),
+                    None,
+                ),
+                session.prepare_outbound_attributes_flowspec(&flowspec, local_asn != remote_asn),
+            ] {
+                assert_eq!(
+                    attrs.iter().find(|attr| attr.type_code() == 25),
+                    Some(&attribute)
+                );
+            }
+        }
+    }
+}
+
 /// A fresh (non-LLGR-stale) route toward the same non-LLGR iBGP peer is
 /// untouched by the §4.6 rewrite: no `NO_EXPORT`, `LOCAL_PREF` preserved.
 #[test]

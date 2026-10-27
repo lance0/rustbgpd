@@ -3354,6 +3354,12 @@ fn encode_path_attributes_with_scratch<'a>(
             }
             PathAttribute::Ipv6ExtendedCommunities(communities)
             | PathAttribute::Ipv6ExtendedCommunitiesPartial(communities) => {
+                if communities.is_empty() {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY",
+                        value: "empty attribute is prohibited by RFC 7606 section 7.15".to_string(),
+                    });
+                }
                 flags = attr_flags::OPTIONAL
                     | attr_flags::TRANSITIVE
                     | if matches!(attr, PathAttribute::Ipv6ExtendedCommunitiesPartial(_)) {
