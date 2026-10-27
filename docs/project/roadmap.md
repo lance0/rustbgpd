@@ -243,7 +243,12 @@ FSM 0.13.1 and RPKI 0.8.1. It ships on its per-change regression tests and
 main CI; no flagship receipt covers it. v0.80.1 (2026-10-25) is a patch
 release that fixes slow route-server withdrawals when many client sessions
 go down at once. It publishes no library crate and ships on its per-change
-regression tests and main CI; no flagship receipt covers it. Under the
+regression tests and main CI. The
+[2026-10-26 run](../soaks/soak-rs-flagship-24h-2026-10-26.md) on the v0.80.1
+tag is recorded as a pass with one accepted exception: its on-host verdict
+fails the doctor and management-correctness gates on one `rbgp doctor`
+health check that missed its peer-manager probe deadline just after a reload
+committed, with a fix in progress. Under the
 [release checklist](release-checklist.md#flagship-operating-proof), a
 qualifying 24-hour management-load soak on the selected candidate is what a
 flagship operating claim requires; a release may ship without one when this
