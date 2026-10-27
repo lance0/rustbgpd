@@ -4,12 +4,14 @@
 
 This directory contains local tooling for repeatable performance checks.
 
-**Development tooling only.** Nothing in this directory is production
-surface: it is excluded from the default `cargo build`, the release
-binary tarballs, and the default (runtime) container image. The
-`evpn-load` crate's `evpn-tester` / `evpn-monitor` binaries are built
-only with `--workspace` and ship only in the `dev` image target used
-by the interop/soak labs.
+**Development tooling only.** The `evpn-load` crate is a default workspace
+member: `cargo build` builds `evpn-tester`, `evpn-monitor`, and `evpn-rr-soak`.
+The four `bench/scale` crates are workspace members excluded from the default
+build; select them with `--workspace` or `-p <package>`.
+
+Release binary tarballs and the default runtime container image exclude these
+tools. The `dev` image target used by the interop/soak labs includes
+`evpn-tester` and `evpn-monitor`; it does not copy `evpn-rr-soak`.
 
 ## Recipes
 
