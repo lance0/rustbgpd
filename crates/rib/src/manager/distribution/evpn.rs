@@ -44,7 +44,7 @@ impl RibManager {
                     affected.insert(key);
                     if evpn_refresh_active
                         && let Some(stale) = self.refresh_stale_evpn.get_mut(&peer)
-                        && stale.remove(&key)
+                        && stale.remove(&key).is_some()
                     {
                         removed_stale_count += 1;
                     }
@@ -108,7 +108,7 @@ impl RibManager {
                 // the stale set so EoRR's sweep doesn't withdraw it.
                 if evpn_refresh_active
                     && let Some(stale) = self.refresh_stale_evpn.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     removed_stale_count += 1;
                 }

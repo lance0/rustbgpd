@@ -73,7 +73,7 @@ The update-group and manager inventory has these boundaries:
 | Policy-transition prestage `failed` and `tagged` | Sharded; bounded inventory slices and dirty-key reconciliation retain checkpoints, including retirement. |
 | Group `inventory_log` and its dirty-key union | Logs are sharded and retire between checkpoints. The empty union reserves the union of both logs, counting keys churned in both groups once, before checkpointed insertion. |
 | `ExportMemo.entries` | Sharded; full-table export callers already checkpoint per route or candidate. Distinct source attribute allocations can fill the map. |
-| BoRR `refresh_stale_*` | Still requires readiness ownership and checkpoints across snapshot retain, clearing and construction before bounding set growth. |
+| BoRR `refresh_stale_*` | All seven inventories are sharded. The snapshot caller holds executor/readiness ownership and checkpoints every visited input and old snapshot key, including excluded routes and retained sibling families. |
 | LLGR `*_llgr_stale_local_tags` | Still requires checkpoint-aware promotion through removal, attribute mutation/interning, selection and cleanup before bounding set growth. |
 | Selection-deferral identity sets | Retained identities have admission limits, but resize work is not bounded. EVPN and RTC recorders also need input checkpoints. |
 | First outbound-limit admitted-set installation | Still requires readiness ownership, per-entry checkpoints and reservation from the known family count. The regroup path already reserves and checkpoints. |

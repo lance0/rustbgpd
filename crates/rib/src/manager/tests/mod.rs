@@ -1460,6 +1460,7 @@ mod per_client_best;
 mod policy;
 mod ready_drain;
 mod refresh;
+mod refresh_snapshot;
 mod replay;
 mod rpki;
 mod rs_control;
