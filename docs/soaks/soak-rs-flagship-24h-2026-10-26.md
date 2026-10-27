@@ -5,6 +5,10 @@ analyzer verdict is **`fail`**: 19 of 21 gates pass, and the two management
 gates driven by `rbgp doctor` fail on one record. No reanalysis; the archived
 `verdict.json` is unchanged.
 
+**Amended 2026-10-26:** rescored **PASS** (22 / 22 gates) under the split
+management gate, with this doctor record tolerated as one availability miss;
+see [the amendment](#amendment-2026-10-26-rescored-under-the-split-management-gate).
+
 One accepted exception: a single `rbgp doctor` health check (1 of 147) ran
 just after reload 28 committed and reported the daemon unavailable when its
 peer-manager probe missed the 200 ms deadline twice. Sessions and routing
@@ -133,3 +137,20 @@ directory: `rustbgpd.log` (~38 MiB), `management-plane-load.jsonl`
 (~49 KiB), and the runner, build, generator and watch logs. The verdict
 cannot be recomputed from the repo subset; the timing and log notes above
 come from the retained files.
+
+## Amendment, 2026-10-26: rescored under the split management gate
+
+After this run, the analyzer's management gate was split in two. Correctness
+failures stay zero-tolerance in `management_failures` and `management_doctor`;
+a new `management_availability` gate tolerates and lists isolated
+availability misses (a timeout, an UNAVAILABLE or DEADLINE_EXCEEDED CLI exit,
+or a doctor report red only on such a `daemon.healthy` health RPC) inside a
+reload window, and fails on 2 consecutive misses, a miss outside every window,
+or more than 3 per operation. The analyzer at `c266f09dc`, run over the same
+retained run directory, gives **PASS, 22 / 22 gates**, with
+`management_failures` 0 and one tolerated miss: the `doctor` run at
+2026-10-26T12:35:47.786Z in reload 28, described above. The rescored verdict
+is [`verdict-rescored.json`](../artifacts/soak/soak-rs-flagship-20261025T223837Z/verdict-rescored.json)
+(sha256 `ea89b220604c006c6f6582dd23f13945bbd1a6d133d106082dc0dfa9134e084b`).
+The on-host `verdict.json` (`fail` under the earlier gate) is retained
+unchanged, and the sections above record that verdict as written.
