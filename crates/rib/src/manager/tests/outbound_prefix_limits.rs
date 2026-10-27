@@ -67,7 +67,7 @@ fn grouped_admitted_storage_is_family_typed_and_mixed_afi_exact() {
     assert!(!limits.grouped_contains(&v4(1)));
     assert!(limits.grouped_contains(&v6(1)));
 
-    limits.grouped_clear(Afi::Ipv6);
+    limits.grouped_clear_with_checkpoint(Afi::Ipv6, &mut || {});
     assert_eq!(limits.grouped_len(Afi::Ipv4), 1);
     assert_eq!(limits.grouped_len(Afi::Ipv6), 0);
     assert!(limits.grouped_contains(&v4(2)));
@@ -169,7 +169,7 @@ fn register_peer(manager: &mut RibManager, peer: PeerId) -> mpsc::Receiver<Outbo
     register_peer_with_families(manager, peer, &ipv4_sendable())
 }
 
-fn register_peer_with_families(
+pub(super) fn register_peer_with_families(
     manager: &mut RibManager,
     peer: PeerId,
     sendable_families: &[(Afi, Safi)],
@@ -222,7 +222,7 @@ fn set_ipv4_limit(manager: &mut RibManager, peer: PeerId, cap: u32) {
         .limit = Some(limit(cap));
 }
 
-fn announce(manager: &mut RibManager, source: PeerId, announced: Vec<Route>) {
+pub(super) fn announce(manager: &mut RibManager, source: PeerId, announced: Vec<Route>) {
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 0,
@@ -850,7 +850,7 @@ fn peer_teardown_clears_admission_state() {
 
 // --- configuration, transaction, and observability ---
 
-fn limit_config(
+pub(super) fn limit_config(
     neighbors: &[(PeerId, Option<u32>, Option<u32>)],
     groups: &[(&str, Option<u32>, Option<u32>)],
 ) -> OutboundPrefixLimitConfig {
@@ -871,7 +871,7 @@ fn limit_config(
     }
 }
 
-fn prepare(
+pub(super) fn prepare(
     manager: &mut RibManager,
     txn: u64,
     config: OutboundPrefixLimitConfig,
@@ -881,7 +881,7 @@ fn prepare(
     rx.try_recv().expect("prepare replies synchronously")
 }
 
-fn apply(manager: &mut RibManager, txn: u64, activate: bool) -> Result<(), String> {
+pub(super) fn apply(manager: &mut RibManager, txn: u64, activate: bool) -> Result<(), String> {
     let (reply, mut rx) = tokio::sync::oneshot::channel();
     manager.handle_update(RibUpdate::ApplyOutboundPrefixLimits {
         txn,

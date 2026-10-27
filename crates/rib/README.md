@@ -76,7 +76,7 @@ The update-group and manager inventory has these boundaries:
 | BoRR `refresh_stale_*` | All seven inventories are sharded. The snapshot caller holds executor/readiness ownership and checkpoints every visited input and old snapshot key, including excluded routes and retained sibling families. |
 | LLGR `*_llgr_stale_local_tags` | Still requires checkpoint-aware promotion through removal, attribute mutation/interning, selection and cleanup before bounding set growth. |
 | Selection-deferral identity sets | Retained identities have admission limits, but resize work is not bounded. EVPN and RTC recorders also need input checkpoints. |
-| First outbound-limit admitted-set installation | Still requires readiness ownership, per-entry checkpoints and reservation from the known family count. The regroup path already reserves and checkpoints. |
+| First outbound-limit admitted-set installation | The actual Apply command owns readiness through preflight, allocation, inventory fill and retirement. Each typed set reserves the shared table's distinct prefix count for its own AFI before the pre-exclusion route walk; removal retires each retained prefix between checkpoints. Regroup uses the same reserved collector. |
 | `current_policy_filtered_routes` temporaries | Still require bounded set growth and missing candidate-transfer checkpoints. Prefix count alone does not bound multipath rejection identities. |
 
 Production-writer growth regressions cover the sharded maps and the route slab
