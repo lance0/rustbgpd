@@ -1507,11 +1507,23 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
         "observer retry missed the staged table"
     );
 
-    tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::task::yield_now().await;
+    // Let the actor arm dirty resync before advancing the paused clock.
     let _ = query_state(&tx, observer).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let resync_at = tokio::time::Instant::now();
+    let first = tokio::time::timeout(Duration::from_secs(1), observer_retry_rx.recv())
+        .await
+        .expect("dirty resync must send its staged route")
+        .expect("observer stays registered");
+    assert_eq!(
+        tokio::time::Instant::now(),
+        resync_at,
+        "dirty resync must run at the already-advanced deadline"
+    );
     let mut resync_saw_remaining = false;
-    while let Ok(update) = observer_retry_rx.try_recv() {
+    for update in
+        std::iter::once(first).chain(std::iter::from_fn(|| observer_retry_rx.try_recv().ok()))
+    {
         assert!(
             !update.end_of_rib.contains(&FAMILY),
             "dirty resync flushed EoR before collision-failback convergence"

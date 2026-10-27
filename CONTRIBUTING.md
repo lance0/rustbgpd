@@ -22,6 +22,7 @@ cargo test --workspace
 
 ```bash
 cargo fmt                                              # Format
+cargo clippy -p rustbgpd-rib --all-targets -- -D warnings # RIB default features
 cargo clippy --workspace --all-targets -- -D warnings  # Lint with warnings as errors
 cargo test --workspace                                 # All tests
 ```
@@ -29,6 +30,7 @@ cargo test --workspace                                 # All tests
 All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 - `cargo fmt --check`
 - `python3 scripts/check-clippy-reasons.py`
+- `cargo clippy -p rustbgpd-rib --all-targets -- -D warnings`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 

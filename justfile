@@ -124,8 +124,9 @@ check-changelog-fragments:
 assemble-changelog:
     python3 scripts/assemble-changelog.py
 
-# Lint every workspace target with warnings denied.
+# Lint the RIB's default feature configuration and every workspace target.
 check-clippy:
+    cargo clippy --locked -p rustbgpd-rib --all-targets -- -D warnings
     cargo clippy --locked --workspace --all-targets -- -D warnings
 
 # Run the library unit tests of every workspace crate (the daemon's unit tests live in its binary; see test-bins).
@@ -151,9 +152,9 @@ test-integration:
 # runs the update-group, oracle, outbound-commit and timer modules again with
 # the budget forced to 5 µs, so every update paces.
 
-# Rerun the RIB update-group, oracle, outbound-commit and timer tests with the actor's flush budget forced to 5 µs (seconds, after the rib build).
+# Rerun the RIB update-group, oracle, outbound-commit, timer and collision-failback tests with the actor's flush budget forced to 5 µs (seconds, after the rib build).
 test-rib-paced:
-    RUSTBGPD_TEST_FLUSH_BUDGET_US=5 cargo test --locked -p rustbgpd-rib --lib -- manager::tests::update_groups:: manager::tests::update_groups_oracle:: manager::tests::outbound_commit_accounting:: manager::tests::timer_cutoffs::
+    RUSTBGPD_TEST_FLUSH_BUDGET_US=5 cargo test --locked -p rustbgpd-rib --lib -- manager::tests::update_groups:: manager::tests::update_groups_oracle:: manager::tests::outbound_commit_accounting:: manager::tests::timer_cutoffs:: manager::tests::selection_deferral::collision_failback_withholds_eor_until_survivor_refresh_converges
 
 # The library and binary docs are selected together so the binary docs reuse
 # the same private library docs.
