@@ -638,3 +638,221 @@ fn deferred_flowspec_replay_work_is_linear() {
         deferred_flowspec_replay,
     );
 }
+
+fn deferred_unicast_manager() -> (mpsc::Sender<RibUpdate>, RibManager) {
+    let (tx, manager) = manager();
+    (
+        tx,
+        manager.with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: Duration::from_mins(2),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+                families: vec![(Afi::Ipv4, Safi::Unicast)],
+            }],
+        }),
+    )
+}
+
+fn deferred_local_unicast(prefix: Ipv4Prefix) -> Route {
+    let mut route = make_route(prefix, Ipv4Addr::UNSPECIFIED);
+    route.peer = LOCAL_PEER;
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.path_id = 17;
+    route.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        PathAttribute::NextHop(Ipv4Addr::UNSPECIFIED),
+        PathAttribute::Communities(vec![0xFFFF_029A]),
+    ]);
+    route
+}
+
+fn inject_deferred_unicast(manager: &mut RibManager, route: Route) -> crate::update::InjectOutcome {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route, reply });
+    response.try_recv().unwrap().unwrap()
+}
+
+/// A received-only prefix must not start an Add-Path candidate walk for
+/// every receiver during the hold. The measured local replacement keeps
+/// selection and output live, so skipping all work cannot satisfy the bar.
+fn deferred_unicast_received_replay(size: usize) -> Work {
+    let (_tx, mut manager) = deferred_unicast_manager();
+    let mut receivers = Vec::new();
+    for index in 0..size {
+        let peer = member(index);
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 1,
+            encoder: ReusableExactExportEncoder::new(
+                u64::try_from(index).unwrap() + 1,
+                WIRE_PROFILE,
+            ),
+        });
+        let (outbound_tx, rx) = mpsc::channel(4096);
+        let mut up = test_peer_up(peer, 1, outbound_tx);
+        if let RibUpdate::PeerUp {
+            add_path_send_families,
+            add_path_send_max,
+            ..
+        } = &mut up
+        {
+            *add_path_send_families = vec![(Afi::Ipv4, Safi::Unicast)];
+            *add_path_send_max = 2;
+        }
+        manager.handle_update(up);
+        receivers.push(rx);
+    }
+    let mut local = deferred_local_unicast(prefix(200, 0));
+    assert_eq!(
+        inject_deferred_unicast(&mut manager, local.clone()),
+        crate::update::InjectOutcome::Created
+    );
+    for receiver in &mut receivers {
+        assert_eq!(drain(std::slice::from_mut(receiver)), (1, 0));
+    }
+
+    let work = checkpoints_in(|| {
+        manager.handle_update(routes_from(external(), 0, 1, size * ROUTES));
+        drain_route_chunks(&mut manager);
+        AttrSet::edit(&mut local.attributes, |attributes| {
+            attributes.push(PathAttribute::Med(17));
+        });
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, local),
+            crate::update::InjectOutcome::Replaced
+        );
+    });
+
+    assert!(manager.selection_deferred((Afi::Ipv4, Safi::Unicast)));
+    assert_eq!(manager.ribs[&external()].len(), size * ROUTES);
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), 1);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        size * ROUTES + 1
+    );
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    let selected: Vec<_> = manager.loc_rib.iter().collect();
+    assert_eq!(selected.len(), 1);
+    assert_eq!((selected[0].peer, selected[0].path_id), (LOCAL_PEER, 17));
+    assert!(!selected[0].is_stale && !selected[0].is_llgr_stale);
+    for receiver in &mut receivers {
+        let mut announcements = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            assert_eq!(update.withdraw, Vec::new());
+            assert_eq!(update.end_of_rib, Vec::new());
+            announcements.extend(update.announce.iter().cloned());
+        }
+        assert_eq!(
+            announcements.len(),
+            1,
+            "one changed local announcement per receiver"
+        );
+        assert_eq!(
+            (
+                announcements[0].peer,
+                announcements[0].prefix,
+                announcements[0].path_id
+            ),
+            (LOCAL_PEER, Prefix::V4(prefix(200, 0)), 1)
+        );
+    }
+    eprintln!("deferred unicast received replay size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn deferred_unicast_received_replay_work_is_linear() {
+    assert_linear(
+        "received unicast replay during selection deferral",
+        &[ALL, "selection_candidates"],
+        deferred_unicast_received_replay,
+    );
+}
+
+/// Grow retained source RIBs alongside distinct local injections, keeping
+/// one outbound receiver. A local lookup must not scan every retained RIB
+/// for every injected prefix.
+fn deferred_unicast_local_replay(size: usize) -> Work {
+    let (_tx, mut manager) = deferred_unicast_manager();
+    let mut receivers = members(&mut manager, 1, false, None);
+    for index in 0..size {
+        let source = peer_v4(Ipv4Addr::new(
+            198,
+            51,
+            100,
+            u8::try_from(index + 1).unwrap(),
+        ));
+        manager.handle_update(routes_from(source, 0, index, ROUTES));
+        drain_route_chunks(&mut manager);
+        assert_eq!(manager.ribs[&source].len(), ROUTES);
+    }
+    assert_eq!(drain(&mut receivers), (0, 0));
+    assert_eq!(manager.loc_rib.len(), 0);
+
+    let work = checkpoints_in(|| {
+        for index in 0..size * ROUTES {
+            assert_eq!(
+                inject_deferred_unicast(&mut manager, deferred_local_unicast(prefix(200, index))),
+                crate::update::InjectOutcome::Created
+            );
+        }
+    });
+
+    assert!(manager.selection_deferred((Afi::Ipv4, Safi::Unicast)));
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), size * ROUTES);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        2 * size * ROUTES
+    );
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    assert_eq!(manager.loc_rib.len(), size * ROUTES);
+    assert!(manager.loc_rib.iter().all(|route| {
+        route.peer == LOCAL_PEER && route.path_id == 17 && !route.is_stale && !route.is_llgr_stale
+    }));
+    let mut announcements = Vec::new();
+    while let Ok(update) = receivers[0].try_recv() {
+        assert_eq!(update.withdraw, Vec::new());
+        assert_eq!(update.end_of_rib, Vec::new());
+        announcements.extend(update.announce.iter().cloned());
+    }
+    assert_eq!(announcements.len(), size * ROUTES);
+    assert!(
+        announcements
+            .iter()
+            .all(|route| route.peer == LOCAL_PEER && route.path_id == 0)
+    );
+    let actual: BTreeSet<_> = announcements
+        .into_iter()
+        .map(|route| route.prefix)
+        .collect();
+    let expected: BTreeSet<_> = (0..size * ROUTES)
+        .map(|index| Prefix::V4(prefix(200, index)))
+        .collect();
+    assert_eq!(actual, expected);
+    eprintln!("deferred unicast local replay size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn deferred_unicast_local_replay_work_is_linear() {
+    assert_linear(
+        "local unicast replay during selection deferral",
+        &[ALL, "selection_candidates"],
+        deferred_unicast_local_replay,
+    );
+}

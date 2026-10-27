@@ -297,7 +297,9 @@ Edges:
 - **Graceful Restart selection deferral** delays distribution of the expiry
   withdrawal exactly as it delays an injected add today.
   *Injected FlowSpec rules no longer wait; see
-  [Amendment: injected FlowSpec skips selection deferral](#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).*
+  [Amendment: injected FlowSpec skips selection deferral](#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).
+  Injected unicast routes no longer wait either; see
+  [the subsequent amendment](#amendment-injected-unicast-skips-selection-deferral-2026-10-27).*
 
 ### 5. Failure direction
 
@@ -551,6 +553,10 @@ re-add. Both limits belong in the bridge's documentation.
 
 ## Amendment: injected FlowSpec skips selection deferral (2026-10-26)
 
+*The unicast boundary below records the decision on this date. The
+[subsequent amendment](#amendment-injected-unicast-skips-selection-deferral-2026-10-27)
+extends the exemption to injected unicast routes.*
+
 After a planned restart, RFC 4724 selection deferral held every injected
 FlowSpec rule until the deferral released. With a static Graceful Restart
 neighbor that never comes up, that took the full maximum effective
@@ -589,3 +595,52 @@ those tables, so holding it buys little safety and delays a mitigation.
   unicast injection sooner can remove never-up static Graceful Restart
   neighbors, set `graceful_restart = false` on them, or lower
   `gr_restart_time`.
+
+## Amendment: injected unicast skips selection deferral (2026-10-27)
+
+Controllers replaying RTBH host routes after a planned restart need those
+routes advertised while a Graceful Restart neighbor remains down. The
+previous unicast boundary delayed that local intent along with received
+routes. The exemption now covers all API-injected IPv4 and IPv6 unicast
+routes from the local Adj-RIB-In peer `0.0.0.0`, leased and unleased, with
+every injection `path_id`. It is not restricted by prefix length or the
+presence of the RFC 7999 BLACKHOLE community. No RPC, flag or configuration
+option is added.
+
+- **Candidate competition.** While selection is deferred for the family,
+  only local candidates participate in ordinary best path, Add-Path, ORR and
+  per-client best selection. Received candidates remain retained and
+  ineligible, even when their attributes would beat a local route. Local
+  candidates compete under the existing rules and export policies. Initial
+  tables, dirty resyncs and explanations use the same candidate boundary.
+  When selection becomes available, ordinary competition resumes over the
+  full candidate set. This includes collision failback that stages selection
+  while completion markers remain held. A received winner can then replace
+  a local route, which reads `not_selected` for that destination.
+- **Removal and leases.** Delete and lease expiry remove local intent and
+  distribute the resulting withdrawal or another eligible local path during
+  deferral. Removing the last local path does not expose a received fallback
+  until selection becomes available. Ownership, generation fencing,
+  renewal, expiry lag and refusal semantics are unchanged.
+- **Export and completion.** Existing family, policy, next-hop-self and
+  admission checks still apply. `COMMITTED` describes the exact route admitted
+  to the peer's outbound channel and recorded in its Adj-RIB-Out, not remote receipt,
+  acceptance or forwarding. End-of-RIB remains behind release selection and
+  all existing convergence and refresh holds. `MarkReplayComplete` releases
+  only the separate replay grace window; it does not release selection
+  deferral or the other completion gates.
+- **Standards and tradeoff.**
+  [RFC 4724 §4.1](https://www.rfc-editor.org/rfc/rfc4724.html#section-4.1)
+  requires family-wide route selection deferral and gives no explicit
+  local-origin exception. This policy deliberately departs from that
+  requirement, extending the existing FlowSpec exception.
+  UPDATE-before-End-of-RIB ordering does not itself authorize the departure.
+  It permits an injected ordinary prefix, including a default route, to
+  become a temporary winner before received alternatives settle. A helper
+  can retain other stale Add-Path advertisements alongside
+  newly replayed paths until End-of-RIB or its stale-route timer removes
+  them ([RFC 4724 §4.2](https://www.rfc-editor.org/rfc/rfc4724.html#section-4.2),
+  [RFC 7911 §5](https://www.rfc-editor.org/rfc/rfc7911.html#section-5)).
+  The [RFC 7999 BLACKHOLE community](https://www.rfc-editor.org/rfc/rfc7999.html#section-2)
+  remains advisory; early local export promises no remote discard or
+  forwarding outcome.

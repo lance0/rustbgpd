@@ -1640,9 +1640,12 @@ impl RibManager {
                         return None;
                     }
                 }
-                for route in
-                    Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &best.prefix)
-                {
+                for route in Self::unicast_candidates(
+                    &self.ribs,
+                    &self.unicast_prefix_peers,
+                    &best.prefix,
+                    self.selection_deferred(prefix_family(&best.prefix)),
+                ) {
                     #[cfg(test)]
                     self.dataplane_page_sibling_visits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1869,9 +1872,12 @@ impl RibManager {
                         return;
                     }
                 }
-                for route in
-                    Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &prefix)
-                {
+                for route in Self::unicast_candidates(
+                    &self.ribs,
+                    &self.unicast_prefix_peers,
+                    &prefix,
+                    self.selection_deferred(prefix_family(&prefix)),
+                ) {
                     visits += 1;
                     if canceled_at_stride(visits, &mut || {
                         reply.is_closed()
@@ -2344,7 +2350,7 @@ impl RibManager {
             && explanation.route_peer.is_some()
             && (explanation.route_peer, explanation.route_path_id)
                 != (Some(LOCAL_PEER), Some(route.path_id));
-        let export = if other_source {
+        if other_source {
             row(
                 Withheld,
                 "not_selected",
@@ -2375,35 +2381,7 @@ impl RibManager {
                 deny_validation: explanation.deny_validation.clone(),
                 ..row(disposition, &reason, code, stop_detail)
             }
-        };
-        self.selection_deferred_export(family, export)
-    }
-
-    /// `export`, reported as pending while graceful-restart selection
-    /// deferral holds `family` and it is not committed.
-    fn selection_deferred_export(
-        &self,
-        family: (Afi, Safi),
-        mut export: PeerRouteExport,
-    ) -> PeerRouteExport {
-        if export.disposition != RouteExportDisposition::Committed
-            && self
-                .selection_deferral
-                .as_ref()
-                .is_some_and(|deferral| deferral.is_gated(family))
-        {
-            export.disposition = RouteExportDisposition::Pending;
-            export.reason = "selection_deferred".to_string();
-            export.detail = format!(
-                "graceful-restart selection deferral holds this family; export would be {}",
-                if export.detail.is_empty() {
-                    "decided after it"
-                } else {
-                    &export.detail
-                }
-            );
         }
-        export
     }
 
     /// The export disposition of the local `FlowSpec` `rule` toward one
@@ -3026,6 +3004,7 @@ impl RibManager {
                     .as_ref()
                     .or_else(|| self.adj_ribs_out.get(&peer)),
                 prefix,
+                self.selection_deferred(family),
                 peer,
                 peer_asn,
                 peer_group,
@@ -3078,6 +3057,7 @@ impl RibManager {
             rib_out,
             &self.peer_is_rr_client,
             &prefix,
+            self.selection_deferred(prefix_family(&prefix)),
             &mut target,
             target_is_ebgp,
             interpret_rfc1997,
@@ -3395,11 +3375,19 @@ impl RibManager {
         });
 
         // Collect all candidates from all Adj-RIB-In tables.
-        let mut all_candidates: Vec<crate::route::Route> = self
-            .ribs
-            .values()
-            .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
-            .collect();
+        let mut all_candidates: Vec<crate::route::Route> =
+            if self.selection_deferred(prefix_family(&prefix)) {
+                self.ribs
+                    .get(&LOCAL_PEER)
+                    .into_iter()
+                    .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
+                    .collect()
+            } else {
+                self.ribs
+                    .values()
+                    .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
+                    .collect()
+            };
 
         if let (Some(peer_addr), Some(_)) = (peer, orr_ctx) {
             let target_is_ebgp = self.peer_is_ebgp.get(&peer_addr).copied().unwrap_or(true);
@@ -3723,9 +3711,17 @@ impl RibManager {
             return;
         };
         let best = best.clone();
-        let candidates: Vec<BestPathCandidate> = self
-            .ribs
-            .values()
+        let local_only = self.selection_deferred(prefix_family(&prefix));
+        let candidates: Vec<BestPathCandidate> = local_only
+            .then(|| self.ribs.get(&LOCAL_PEER))
+            .flatten()
+            .into_iter()
+            .chain(
+                (!local_only)
+                    .then(|| self.ribs.values())
+                    .into_iter()
+                    .flatten(),
+            )
             .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
             .filter(|route| !(route.peer == best.peer && route.path_id == best.path_id))
             .map(|route| {
