@@ -248,7 +248,7 @@ class EvpnRrAnalyzerContracts(unittest.TestCase):
             "evpn_deferral_recovery", "daemon_log",
             "management_evidence", "management_lifetime", "management_operations",
             "management_completion", "management_cadence", "management_failures",
-            "management_doctor",
+            "management_availability", "management_doctor",
         })
         self.assertTrue(all(g["pass"] for g in payload["gates"].values()))
 

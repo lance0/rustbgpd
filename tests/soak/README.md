@@ -1057,7 +1057,8 @@ nonzero keeps its `--json` report, capped at 4 MiB, as `doctor-report-NNNN.json`
 beside the JSONL. When that report is a red verdict (`doctor_check_failed`),
 the record also names up to four red checks outside the `peer.` namespace.
 Preserve these reports with the run artifacts; the bundle keeps only the last
-attempt. A red check outside the `peer.` namespace fails the run. Per-peer
+attempt. A red check outside the `peer.` namespace fails the run, except the
+availability miss described below. Per-peer
 session and flap checks are deliberately excluded: the scenario tears the
 designated member down on purpose, and the session-floor, flap-budget, and
 trip-evidence gates measure peer health far more exactly than `doctor`'s
@@ -1070,6 +1071,30 @@ does not replace host isolation: `preflight.sh` refuses a live `rustbgpd`, and
 the host mutex coordinates cooperating workloads. A red
 `daemon.rlimit.nofile.<pid>` naming an unknown pid means another daemon on the
 host has insufficient descriptor headroom.
+
+The analyzer splits non-ok management results into two classes. Correctness
+(`management_failures`, `management_doctor`) is zero-tolerance: a wrong or
+inconsistent answer, an invalid success, or any red `doctor` check other than
+the availability case fails the run. Availability (`management_availability`)
+covers transient misses only: a probe timeout, an `rbgp` exit reporting gRPC
+UNAVAILABLE or DEADLINE_EXCEEDED, or a `doctor` report whose only red non-peer
+check is `daemon.healthy` with its health RPC UNAVAILABLE or past its deadline.
+These are judged like `/readyz`, with bars fixed before any replay:
+
+- 2 consecutive misses of one operation fail (each `doctor` run, each 5 s CLI
+  query and `/metrics` alike);
+- a miss that does not overlap a reload window fails, as does one that cannot
+  be placed on the wall clock. A reload window runs from `reload N issued` in
+  `cycles.log` to the later of `reload N complete` and the daemon's SIGHUP
+  settlement (`runtime config settlement settled`, kind `sighup`, in
+  `rustbgpd.log`, before the next reload is issued), plus 10 s;
+- more than 3 misses of one operation in the run fail (at most 3 per 24 h per
+  operation).
+
+Every miss, tolerated or not, is listed with its UTC timestamp, operation,
+result and overlapped reload. `/readyz` breaches carry the same reload-window
+annotation, because `/readyz` and the `doctor` health RPC share the
+peer-manager probe; the readyz pass rule is unchanged.
 
 ```bash
 # Full 24 h flagship run (defaults):

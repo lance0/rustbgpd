@@ -260,9 +260,11 @@ DAEMON_BANNER = (
 
 
 def run_analyzer(rows, cycles, meta, fields=FIELDS, management=None, daemon=CLEAN_DAEMON,
-                 shutdown_elapsed=None):
+                 shutdown_elapsed=None, files=None):
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
+        for name, content in (files or {}).items():
+            (run_dir / name).write_bytes(content)
         with (run_dir / "samples.csv").open("w", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields,
                                     extrasaction="ignore")
@@ -431,10 +433,13 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertEqual(gate["value"]["longest_consecutive"], 1)
         self.assertEqual(gate["value"]["limit_ms"],
                          analyzer.READYZ_MS_LIMIT)
+        # Each breach names the availability reload window it fell in:
+        # 210 s is inside reload 4 (200 .. 205 + 10 s margin).
         self.assertEqual(
-            [(s["elapsed_sec"], s["kind"]) for s in gate["value"]["first"]],
-            [(30.0, "status"), (90.0, "latency"), (210.0, "status")],
+            [(s["elapsed_sec"], s["kind"], s["reload"]) for s in gate["value"]["first"]],
+            [(30.0, "status", None), (90.0, "latency", None), (210.0, "status", 4)],
         )
+        self.assertEqual(gate["value"]["in_reload_window"], 1)
 
     def test_three_consecutive_readyz_breaches_fail(self):
         for start in (0, 3, 6):
@@ -1184,8 +1189,9 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         )
 
     def test_management_operation_failure_dispositions_fail(self):
+        # `timeout` is an availability miss; its rules are pinned below.
         for disposition in (
-            "http_status", "empty", "cli_exit", "timeout", "json",
+            "http_status", "empty", "cli_exit", "json",
             "schema", "cardinality", "route",
         ):
             with self.subTest(disposition=disposition):
@@ -1200,6 +1206,232 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
                 self.assertFalse(
                     payload["gates"]["management_failures"]["pass"]
                 )
+
+    # Availability misses. Smoke slots: neighbor every 60 s and doctor every
+    # 120 s from monotonic 1000, metrics every 30 s; the fixture's wall clock
+    # is T0 + monotonic, so reload 4 can be placed around any slot.
+
+    def with_indexed_fields(self, meta, operation, by_index, raw=None):
+        records = [json.loads(line) for line in
+                   (raw or management_jsonl(meta)).splitlines()]
+        seen = 0
+        for record in records:
+            if record.get("record") == "operation" and record["operation"] == operation:
+                record.update(by_index.get(seen, {}))
+                seen += 1
+        return b"".join((json.dumps(record) + "\n").encode() for record in records)
+
+    def doctor_miss(self, detail, *extra_red):
+        """Driver fields plus the saved report for one red doctor run."""
+        checks = [
+            {"name": "daemon.healthy", "status": "fail", "detail": detail},
+            {"name": "peer.127.1.0.1.session", "status": "fail", "detail": "d"},
+        ] + [{"name": name, "status": "fail", "detail": "d"} for name in extra_red]
+        report = json.dumps({"bundle": "/run/doctor.tar.gz", "ok": False,
+                             "checks": checks})
+        probe = load.run_cli_command(
+            [sys.executable, "-c", f"print({report!r}); raise SystemExit(2)"],
+            "doctor", 5, 1, "20.0.0.0/24",
+        )
+        fields = {
+            "exit": probe.exit_code, "result": probe.result,
+            "bytes": probe.byte_count, "sha256": probe.sha256,
+            "doctor_output": "doctor-report-0002.json",
+            "failed_checks": list(probe.failed_checks),
+        }
+        return fields, {"doctor-report-0002.json": probe.doctor_output}
+
+    def cli_unavailable(self):
+        probe = load.run_cli_command(
+            [sys.executable, "-c",
+             "import sys; sys.stderr.write('Error: temporarily unavailable: "
+             "peer manager probe timed out'); raise SystemExit(1)"],
+            "neighbor", 5, 1, "20.0.0.0/24",
+        )
+        return {"exit": probe.exit_code, "result": probe.result,
+                "bytes": probe.byte_count, "sha256": probe.sha256,
+                "stderr_excerpt": probe.stderr_excerpt}
+
+    UNAVAILABLE_HEALTH = (
+        "health RPC failed: code: 'The service is currently unavailable', "
+        'message: "peer manager probe timed out (200ms deadline)"'
+    )
+    TIMEOUT = {"exit": None, "result": "timeout"}
+
+    def assert_only_failure(self, payload, gate):
+        self.assertEqual(
+            [name for name, item in payload["gates"].items() if not item["pass"]],
+            [gate],
+        )
+
+    def test_isolated_in_reload_availability_miss_passes_and_is_listed(self):
+        doctor_fields, doctor_files = self.doctor_miss(self.UNAVAILABLE_HEALTH)
+        for operation, index, fields, files, result_name in (
+            ("doctor", 1, doctor_fields, doctor_files, "doctor_check_failed"),
+            ("neighbor", 2, self.cli_unavailable(), {}, "cli_exit"),
+            ("rib_prefix", 2, self.TIMEOUT, {}, "timeout"),
+        ):
+            with self.subTest(operation=operation):
+                meta = smoke_meta()
+                # Slot 1120 lands 9 s after reload 4 completes: inside the
+                # 10 s margin.
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(reload4=(1100, 1111)), meta,
+                    management=self.with_indexed_fields(meta, operation, {index: fields}),
+                    files=files,
+                )
+                self.assertEqual(result.returncode, 0, payload["gates"])
+                gate = payload["gates"]["management_availability"]
+                self.assertTrue(gate["pass"])
+                self.assertEqual(gate["value"]["count"], 1)
+                miss = gate["value"]["misses"][0]
+                self.assertEqual(
+                    (miss["operation"], miss["result"], miss["reload"], miss["timestamp"]),
+                    (operation, result_name, 4, "2026-01-01T00:18:40.001Z"),
+                )
+                self.assertEqual(payload["gates"]["management_failures"]["value"]["count"], 0)
+                if operation == "doctor":
+                    self.assertEqual(miss["detail"], self.UNAVAILABLE_HEALTH)
+                    self.assertEqual(payload["gates"]["management_doctor"]["value"],
+                                     {"attempts": 3, "failures": [],
+                                      "availability_misses": 1})
+
+    def test_two_consecutive_availability_misses_fail(self):
+        for operation, indices, reload4 in (
+            ("neighbor", (1, 2), (1058, 1118)),
+            ("doctor", (0, 1), (999, 1118)),
+        ):
+            with self.subTest(operation=operation):
+                meta = smoke_meta()
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(reload4=reload4), meta,
+                    management=self.with_indexed_fields(
+                        meta, operation, {i: self.TIMEOUT for i in indices}
+                    ),
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assert_only_failure(payload, "management_availability")
+                gate = payload["gates"]["management_availability"]
+                self.assertEqual([m["reload"] for m in gate["value"]["misses"]], [4, 4])
+                self.assertEqual(len(gate["value"]["violations"]), 1)
+                self.assertIn(f"{operation}: 2 consecutive misses",
+                              gate["value"]["violations"][0])
+
+    def test_availability_miss_outside_reload_window_fails(self):
+        # Reload 4 completes at 1108: slot 1120 is just past the 10 s margin.
+        for reload4 in ((1100, 1108), (200, 205)):
+            with self.subTest(reload4=reload4):
+                meta = smoke_meta()
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(reload4=reload4), meta,
+                    management=self.with_indexed_fields(meta, "neighbor", {2: self.TIMEOUT}),
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assert_only_failure(payload, "management_availability")
+                gate = payload["gates"]["management_availability"]
+                self.assertIsNone(gate["value"]["misses"][0]["reload"])
+                self.assertEqual(gate["value"]["violations"], [
+                    "neighbor: miss at 2026-01-01T00:18:40.001Z outside every reload window"
+                ])
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(reload4=(1100, 1111)), meta,
+            management=self.with_indexed_fields(
+                meta, "neighbor", {2: self.TIMEOUT},
+                raw=management_jsonl(meta, unix_anchor=False),
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_availability"]["pass"])
+
+    def test_reload_window_extends_to_daemon_sighup_settlement(self):
+        # reload 4 completes at 1105 in cycles.log, so 1120 is outside
+        # 1105 + 10 s; the daemon's SIGHUP settlement at 1112 extends the
+        # window to 1122. Other settlement kinds do not.
+        for kind, accepted in (("sighup", True), ("grpc", False), (None, False)):
+            with self.subTest(kind=kind):
+                daemon = daemon_record()
+                if kind is not None:
+                    daemon += daemon_record(
+                        message="runtime config settlement settled",
+                        elapsed=1112, kind=kind, operation_id=4,
+                    )
+                meta = smoke_meta()
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(reload4=(1100, 1105)), meta,
+                    management=self.with_indexed_fields(meta, "neighbor", {2: self.TIMEOUT}),
+                    daemon=daemon + FINAL_SHUTDOWN,
+                )
+                gate = payload["gates"]["management_availability"]
+                self.assertEqual(result.returncode, 0 if accepted else 1, gate)
+                self.assertEqual(gate["value"]["misses"][0]["reload"],
+                                 4 if accepted else None)
+
+    def test_correctness_doctor_failure_fails_inside_a_reload_window(self):
+        # Inside reload 4's window, so only the classification decides.
+        unhealthy, unhealthy_files = self.doctor_miss("daemon reports UNHEALTHY (uptime 1m)")
+        extra, extra_files = self.doctor_miss(
+            self.UNAVAILABLE_HEALTH, "daemon.rlimit.nofile.7"
+        )
+        unread, _ = self.doctor_miss(self.UNAVAILABLE_HEALTH)
+        # A substituted report: same red check and an availability detail, so
+        # its content alone would be tolerated, but not the stdout the record
+        # fingerprints.
+        recorded, _ = self.doctor_miss(self.UNAVAILABLE_HEALTH)
+        _, substituted_files = self.doctor_miss(self.UNAVAILABLE_HEALTH + " (substituted)")
+        for name, fields, files in (
+            ("unhealthy", unhealthy, unhealthy_files),
+            ("second_red_check", extra, extra_files),
+            ("report_missing", unread, {}),
+            ("report_substituted", recorded, substituted_files),
+        ):
+            with self.subTest(name=name):
+                meta = smoke_meta()
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(reload4=(1119, 1121)), meta,
+                    management=self.with_indexed_fields(meta, "doctor", {1: fields}),
+                    files=files,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(payload["gates"]["management_doctor"]["pass"])
+                self.assertFalse(payload["gates"]["management_failures"]["pass"])
+                self.assertEqual(
+                    payload["gates"]["management_availability"]["value"]["count"], 0
+                )
+        meta = smoke_meta()
+        cli_error = {"exit": 1, "result": "cli_exit",
+                     "stderr_excerpt": "Error: daemon error: snapshot mismatch"}
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(reload4=(1119, 1121)), meta,
+            management=self.with_indexed_fields(meta, "neighbor", {2: cli_error}),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_failures"]["pass"])
+        self.assertTrue(payload["gates"]["management_availability"]["pass"])
+
+    def test_availability_budget_per_operation(self):
+        # Metrics slots 1000, 1060, 1120, 1180 (indices 0, 2, 4, 6), each
+        # inside its own reload window and none adjacent.
+        cycles = smoke_cycles()
+        for n, at in enumerate((999, 1059, 1119, 1179), 5):
+            cycles += [cline(at, f"reload {n} issued"), cline(at + 1, f"reload {n} complete")]
+        for indices, accepted in (((0, 2, 4), True), ((0, 2, 4, 6), False)):
+            with self.subTest(misses=len(indices)):
+                meta = smoke_meta()
+                result, payload = run_analyzer(
+                    smoke_rows(), cycles, meta,
+                    management=self.with_indexed_fields(
+                        meta, "metrics", {i: self.TIMEOUT for i in indices}
+                    ),
+                )
+                gate = payload["gates"]["management_availability"]
+                self.assertEqual(result.returncode, 0 if accepted else 1, gate)
+                self.assertEqual(gate["pass"], accepted)
+                self.assertEqual([m["reload"] for m in gate["value"]["misses"]],
+                                 [5, 6, 7, 8][:len(indices)])
+                self.assertEqual(gate["value"]["violations"], [] if accepted else [
+                    "metrics: 4 misses exceed the budget of 3"
+                ])
 
     def test_registration_wait_max_is_recorded_and_passes_at_the_bound(self):
         rows = smoke_rows()
