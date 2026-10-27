@@ -795,7 +795,7 @@ async fn export_policy_totals_follow_the_interface_bound_neighbor() {
     }
 }
 
-/// The session fan-out behind `ListPeers` (and so behind `GetHealth`) is
+/// The session fan-out behind `ListPeers` is
 /// bounded by one deadline measured from the start of the snapshot. Its
 /// query tasks first run only when the runtime reaches them, which a
 /// reload's export burst can delay; a timeout started at each task's first

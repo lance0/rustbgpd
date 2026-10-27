@@ -1007,46 +1007,47 @@ fn core_probe(
         .with_peer_manager_readiness(readiness_tx.clone())
 }
 
-/// Issue `GetHealth` first, then `/readyz`, and require `/readyz` to answer
-/// before the health snapshot's held session fan-out can end. Answered in
-/// place, the snapshot held the readiness lane for the whole fan-out, so the
-/// ping queued behind it missed its own 200 ms deadline; the soak saw this
-/// as `peer manager probe timed out` right after a reload commit.
-async fn readyz_overtakes_a_held_health_snapshot(
+/// Queue a peer snapshot (`ListPeers`) on the readiness lane whose sessions
+/// hold `QueryState`, then issue `GetHealth` and `/readyz`. Both must answer
+/// before the snapshot's session fan-out can end:
+///
+/// - Answered in place, the snapshot held the readiness lane for the whole
+///   fan-out, so a probe queued behind it missed its 200 ms deadline right
+///   after a reload commit.
+/// - `GetHealth` itself must not wait on sessions. When it counted
+///   Established peers from a `QueryState` fan-out, a runtime saturated by
+///   the post-commit export burst woke that fan-out late and `GetHealth`
+///   still missed its deadline.
+async fn health_probes_overtake_a_held_peer_snapshot(
+    readiness_tx: &mpsc::Sender<PeerManagerReadinessQuery>,
     probe: &rustbgpd_api::health_probe::CoreReadinessProbe,
 ) {
     let started = tokio::time::Instant::now();
-    let health = probe.snapshot();
-    tokio::pin!(health);
-    // One poll enqueues the health snapshot on the readiness lane first.
-    tokio::select! {
-        biased;
-        _ = &mut health => panic!("held sessions cannot answer yet"),
-        () = std::future::ready(()) => {}
-    }
-    probe
-        .check()
+    let (reply, peer_snapshot) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::ListPeers { reply })
         .await
-        .expect("readiness inside its deadline while GetHealth waits on sessions");
+        .unwrap();
+    let (health, ready) = tokio::join!(probe.snapshot(), probe.check());
+    ready.expect("readiness inside its deadline while a peer snapshot waits on sessions");
+    let health = health.expect("GetHealth inside its deadline while sessions hold QueryState");
+    assert_eq!(health.active_peers, 0, "no session is Established");
     assert!(
         started.elapsed() < PEER_QUERY_TIMEOUT,
-        "the ping waited {:?} behind the health snapshot's session fan-out",
+        "the health probes waited {:?} on the held sessions",
         started.elapsed()
     );
-    let snapshot = health
-        .await
-        .expect("GetHealth inside its deadline with stale sessions");
-    assert!(snapshot.peers.iter().all(|peer| peer.stale));
-    assert!(started.elapsed() < rustbgpd_api::health_probe::CORE_READINESS_DEADLINE);
+    let peers = peer_snapshot.await.expect("peer snapshot answered");
+    assert!(peers.iter().all(|peer| peer.stale));
 }
 
 #[tokio::test(start_paused = true)]
-async fn readyz_is_not_held_behind_a_health_snapshot_in_the_run_loop() {
+async fn health_probes_are_not_held_behind_a_peer_snapshot_in_the_run_loop() {
     let (manager, command_tx, readiness_tx, _operator_tx) = manager_with_held_session_state();
     let actor = tokio::spawn(manager.run());
     let probe = core_probe(&command_tx, &readiness_tx);
 
-    readyz_overtakes_a_held_health_snapshot(&probe).await;
+    health_probes_overtake_a_held_peer_snapshot(&readiness_tx, &probe).await;
 
     command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     actor.await.unwrap();
@@ -1055,7 +1056,7 @@ async fn readyz_is_not_held_behind_a_health_snapshot_in_the_run_loop() {
 /// The same overlap while a reload's destination prestage reply is withheld:
 /// the owner waits in `await_with_readiness_budget`, which serves both probes.
 #[tokio::test(start_paused = true)]
-async fn readyz_is_not_held_behind_a_health_snapshot_while_prestage_is_withheld() {
+async fn health_probes_are_not_held_behind_a_peer_snapshot_while_prestage_is_withheld() {
     let (mut manager, command_tx, readiness_tx, _operator_tx) = manager_with_held_session_state();
     let probe = core_probe(&command_tx, &readiness_tx);
     let (prestage_reply, prestage_wait) = oneshot::channel::<()>();
@@ -1067,7 +1068,7 @@ async fn readyz_is_not_held_behind_a_health_snapshot_while_prestage_is_withheld(
             OperatorReadAdmission::Served,
         ),
         async {
-            readyz_overtakes_a_held_health_snapshot(&probe).await;
+            health_probes_overtake_a_held_peer_snapshot(&readiness_tx, &probe).await;
             prestage_reply.send(()).unwrap();
         }
     );

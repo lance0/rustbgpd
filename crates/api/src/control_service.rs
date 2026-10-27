@@ -131,22 +131,10 @@ impl proto::control_service_server::ControlService for ControlService {
         }
         let snapshot = probe.snapshot().await.map_err(health_probe_status)?;
 
-        // Only count peers we successfully queried as Established. A
-        // `stale` PeerInfo means the per-peer `query_state` deadline fired
-        // (peer session likely parked on TCP write back-pressure) — its
-        // `state` field is a placeholder Idle, not a real reading, so it
-        // would be misleading either to count it as active or to assert it
-        // is not. Conservative: drop it from the active-peer count.
-        let active_peers = snapshot
-            .peers
-            .iter()
-            .filter(|p| !p.stale && p.state == rustbgpd_fsm::SessionState::Established)
-            .count();
-
         Ok(Response::new(proto::HealthResponse {
             healthy: true,
             uptime_seconds: uptime,
-            active_peers: u32::try_from(active_peers).unwrap_or(u32::MAX),
+            active_peers: u32::try_from(snapshot.active_peers).unwrap_or(u32::MAX),
             total_routes: u32::try_from(snapshot.total_routes).unwrap_or(u32::MAX),
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
         }))
@@ -217,7 +205,6 @@ impl proto::control_service_server::ControlService for ControlService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::peer_info;
     use proto::control_service_server::ControlService as _;
 
     fn make_service() -> ControlService {
@@ -422,7 +409,7 @@ mod tests {
     /// idle, so ready responders always answer first, however the host
     /// schedules this thread.
     #[tokio::test(start_paused = true)]
-    async fn active_peers_counts_only_established() {
+    async fn get_health_reports_the_peer_manager_active_peer_count() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
@@ -437,18 +424,15 @@ mod tests {
             None,
         );
 
-        // Spawn responders
+        // The peer manager counts Established sessions itself; GetHealth
+        // reports that count and never lists peers.
         tokio::spawn(async move {
-            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
-                let mut established = peer_info("10.0.0.1".parse().unwrap());
-                established.remote_asn = 65001;
-                established.prefix_count = 5;
-                let mut active = peer_info("10.0.0.2".parse().unwrap());
-                active.state = rustbgpd_fsm::SessionState::Active;
-                let mut stale_established = peer_info("10.0.0.3".parse().unwrap());
-                stale_established.stale = true;
-                let peers = vec![established, active, stale_established];
-                let _ = reply.send(peers);
+            match peer_rx.recv().await {
+                Some(PeerManagerCommand::ActivePeers { reply }) => {
+                    let _ = reply.send(1);
+                }
+                Some(_) => panic!("GetHealth must ask only for the active-peer count"),
+                None => {}
             }
         });
 
@@ -464,14 +448,8 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert!(
-            resp.healthy,
-            "core snapshot succeeded despite unavailable peer state"
-        );
-        assert_eq!(
-            resp.active_peers, 1,
-            "only non-stale Established peers counted"
-        );
+        assert!(resp.healthy);
+        assert_eq!(resp.active_peers, 1, "active_peers from the peer manager");
         assert_eq!(resp.total_routes, 42, "total_routes from Loc-RIB");
     }
 
@@ -521,8 +499,8 @@ mod tests {
             None,
         );
         tokio::spawn(async move {
-            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
-                let _ = reply.send(Vec::new());
+            if let Some(PeerManagerCommand::ActivePeers { reply }) = peer_rx.recv().await {
+                let _ = reply.send(0);
             }
         });
 
@@ -561,7 +539,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Internal);
         assert_eq!(err.message(), "peer manager unavailable");
 
-        // Dropped RIB reply after a successful peer snapshot.
+        // Dropped RIB reply after a successful peer-manager count.
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
@@ -575,8 +553,8 @@ mod tests {
             None,
         );
         tokio::spawn(async move {
-            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
-                let _ = reply.send(Vec::new());
+            if let Some(PeerManagerCommand::ActivePeers { reply }) = peer_rx.recv().await {
+                let _ = reply.send(0);
             }
         });
         tokio::spawn(async move {

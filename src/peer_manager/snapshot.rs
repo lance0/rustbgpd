@@ -843,6 +843,18 @@ impl PeerManager {
         infos
     }
 
+    /// Configured peers whose session is Established, as `GetHealth` reports
+    /// them. Each session publishes its own state and clears it when it ends,
+    /// so this reads the current peer table and never waits on a session. No
+    /// count is kept, so adding, removing or replacing a peer's session needs
+    /// no bookkeeping here.
+    pub(super) fn active_peer_count(&self) -> usize {
+        self.peers
+            .iter()
+            .filter(|(_, managed)| managed.handle().is_established())
+            .count()
+    }
+
     /// The configured neighbors whose `remote_asn` is `external` or
     /// `internal`, keyed by address (empty for an interface-only neighbor)
     /// and interface: one pass over the configuration per snapshot, and

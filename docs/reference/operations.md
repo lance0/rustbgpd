@@ -47,7 +47,8 @@ configured, use `GET /readyz` on that listener as the orchestrator readiness
 signal; it returns ready once the PeerManager answers an O(1) actor ping and
 the RIB actor answers its O(1) Loc-RIB count query within one shared 200 ms
 deadline. The readiness ping does not collect peer inventory or query session
-state; `GetHealth` continues to return that detailed snapshot. The `starting
+state; `GetHealth` adds the Established-peer count, read from the state each
+session publishes, again without querying sessions. The `starting
 rustbgpd` log line means process startup reached runtime wiring, not that every
 actor has answered a readiness probe yet. Under the shipped `Type=notify`
 systemd unit the daemon also sends `READY=1` only after every configured gRPC

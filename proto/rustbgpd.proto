@@ -5328,9 +5328,9 @@ message HealthResponse {
   // obtain that snapshot is an RPC error, not a successful healthy=false reply.
   bool healthy = 1;
   uint64 uptime_seconds = 2;
-  // Number of non-stale peers observed Established in that snapshot. Peers
-  // whose session state could not be read are excluded even if their last
-  // known state was Established; exclusion does not prove they are down.
+  // Number of configured peers whose session reports Established, from the
+  // state each session publishes on every FSM transition (no per-session
+  // query). A session that has ended is not counted.
   uint32 active_peers = 3;
   uint32 total_routes = 4;
   // Daemon package version (e.g. "0.50.0"). Empty when answered by a

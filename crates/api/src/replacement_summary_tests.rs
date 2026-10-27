@@ -427,10 +427,13 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
     let peer_task = tokio::spawn(async move {
         while let Some(query) = peer_readiness_rx.recv().await {
             match query {
-                PeerManagerReadinessQuery::ListPeers { reply } => {
-                    let _ = reply.send(vec![crate::test_support::peer_info(peer.addr())]);
+                PeerManagerReadinessQuery::ActivePeers { reply } => {
+                    let _ = reply.send(1);
                 }
-                PeerManagerReadinessQuery::Ping { .. } => panic!("unexpected readiness query"),
+                PeerManagerReadinessQuery::Ping { .. }
+                | PeerManagerReadinessQuery::ListPeers { .. } => {
+                    panic!("unexpected readiness query")
+                }
             }
         }
     });
