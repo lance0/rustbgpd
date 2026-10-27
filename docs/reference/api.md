@@ -2311,13 +2311,17 @@ also emits ordered `component_details` records with the API component `type`,
 `prefix`, `value`, and `offset`. The explicit offset preserves the RFC 8956
 IPv6 prefix-match semantics, including zero and nonzero values.
 
-Each row reports its RFC 8955 action communities twice: typed in `actions`,
-and raw in `extended_communities`, which carries every extended community on
-the rule. Only the raw list carries a community the API does not model, so a
+Each row reports its action communities twice: typed in `actions`, and raw
+in `extended_communities` (8-octet values) or `ipv6_extended_communities`
+(20-octet values from path attribute 25). Each entry in the latter protobuf
+bytes list is exactly 20 octets. Unknown values, reserved bits, order and
+duplicates survive in the raw lists. The CLI JSON represents each 20-octet
+value as an array of octets and omits the new list when empty. Only the raw list carries a community the API does not model, so a
 client that cross-checks the two should expect each typed action to have a
 raw twin. `actions` types traffic-rate-bytes (`traffic_rate`),
 traffic-rate-packets (`traffic_rate_packets`), traffic-action,
-traffic-marking and all three redirect forms. A redirect's
+traffic-marking, direct target-IP redirect/copy (`redirect_ip`), and three
+VRF redirect forms. A VRF redirect's
 `route_target` selects its form, on input and in listings:
 
 | `route_target` | Extended community |
@@ -2334,8 +2338,31 @@ the 2-octet-AS community instead, so the asdot+ spelling is what keeps the
 The [v1 controller boundary](v1-stable-contract.md#flowspec-controller-boundary)
 pins these typed actions, packet rate included, as API shape only: it makes
 no forwarding or enforcement guarantee for any action.
-`AddFlowSpec` does not deduplicate `actions` against `extended_communities`:
-send each action once, typed or raw.
+`AddFlowSpec` does not deduplicate the existing actions against raw values:
+send each action once, typed or raw. The new `redirect_ip` rejects any raw
+target-IP action in either list when a typed target-IP action is also present,
+even if the targets or copy bits differ. Raw-only lists remain lossless.
+
+`redirect_ip: { address: "192.0.2.10", copy: false }` originates the direct
+IPv4 target community `0x010c`. An IPv6 literal originates `0x000c` in the
+20-octet IPv6 Address Specific Extended Communities attribute (type 25).
+`copy: true` sets the copy bit; false redirects the original traffic. Target
+addresses must be IP literals; unspecified, multicast and IPv4 broadcast
+addresses, hostnames, CIDRs and scoped literals return `INVALID_ARGUMENT`
+before mutation. Originated reserved bits are zero; received reserved bits
+are ignored by the typed projection and retained raw. This follows
+[draft-ietf-idr-flowspec-redirect-ip-16](https://datatracker.ietf.org/doc/html/draft-ietf-idr-flowspec-redirect-ip-16),
+which is still an Internet-Draft. Neither the existing VRF `redirect` action
+nor the legacy next-hop-based `0x0800` encoding is an alias for this action.
+
+Pin controller stubs to a release that implements these fields: an older
+protobuf server may ignore an unknown action or raw list. An accepted add is
+not a feature probe. These additive fields do not add a bounded authorization
+deadline or per-admission revision to leased mutation; an RPC timeout still
+does not cancel an admitted operation. A safety-sensitive diversion controller
+needs those additional safeguards and exact router/software qualification;
+this action/read-back slice does not provide them. See
+[ADR-0143](../adr/0143-flowspec-direct-ip-actions.md).
 
 The ordinary `ListFlowSpecRoutes` response remains the selected Loc-RIB view
 in `routes`. Set `received_peer_address` to an IP address to inspect that

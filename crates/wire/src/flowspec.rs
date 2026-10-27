@@ -332,6 +332,13 @@ pub enum FlowSpecAction {
         /// Local administrator value.
         value: u16,
     },
+    /// Redirect directly to an IPv4 target (type 0x010c), independently of VRF redirect.
+    RedirectToIp {
+        /// Target address carried inside the action community.
+        addr: Ipv4Addr,
+        /// Mirror matching packets when set; divert the originals otherwise.
+        copy: bool,
+    },
 }
 
 impl crate::attribute::ExtendedCommunity {
@@ -399,6 +406,11 @@ impl crate::attribute::ExtendedCommunity {
                 let value = u16::from_be_bytes([bytes[6], bytes[7]]);
                 Some(FlowSpecAction::RedirectIpv4 { addr, value })
             }
+            // Current-draft direct IPv4 target, not RFC 7674's IPv4 Route Target.
+            (0x01, 0x0c) => Some(FlowSpecAction::RedirectToIp {
+                addr: Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]),
+                copy: bytes[7] & 1 != 0,
+            }),
             // Redirect 4-octet AS: 0x82, 0x08
             (0x82, 0x08) => {
                 let asn = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
@@ -479,8 +491,41 @@ impl crate::attribute::ExtendedCommunity {
                 bytes[2..6].copy_from_slice(&asn.to_be_bytes());
                 bytes[6..8].copy_from_slice(&value.to_be_bytes());
             }
+            FlowSpecAction::RedirectToIp { addr, copy } => {
+                bytes[0] = 0x01;
+                bytes[1] = 0x0c;
+                bytes[2..6].copy_from_slice(&addr.octets());
+                bytes[7] = u8::from(*copy);
+            }
         }
         Self::new(u64::from_be_bytes(bytes))
+    }
+}
+
+impl crate::attribute::Ipv6ExtendedCommunity {
+    /// Decode the current-draft IPv6 redirect-to-IP action (type 0x000c).
+    ///
+    /// Receiving speakers ignore the reserved local-administrator bits. The
+    /// underlying community retains them for lossless observation and propagation.
+    #[must_use]
+    pub fn as_flowspec_redirect_to_ip(&self) -> Option<(std::net::Ipv6Addr, bool)> {
+        let bytes = self.as_bytes();
+        if bytes[..2] != [0x00, 0x0c] {
+            return None;
+        }
+        let mut address = [0_u8; 16];
+        address.copy_from_slice(&bytes[2..18]);
+        Some((std::net::Ipv6Addr::from(address), bytes[19] & 1 != 0))
+    }
+
+    /// Originate one IPv6 redirect-to-IP action, clearing all reserved bits.
+    #[must_use]
+    pub fn from_flowspec_redirect_to_ip(addr: std::net::Ipv6Addr, copy: bool) -> Self {
+        let mut bytes = [0_u8; 20];
+        bytes[1] = 0x0c;
+        bytes[2..18].copy_from_slice(&addr.octets());
+        bytes[19] = u8::from(copy);
+        Self::new(bytes)
     }
 }
 

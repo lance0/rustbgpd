@@ -4212,6 +4212,8 @@ message FlowSpecAction {
     // still finds the action community in
     // FlowSpecRouteEntry.extended_communities.
     FlowSpecTrafficRatePackets traffic_rate_packets = 5;
+    // Direct target-IP action, distinct from route-target/VRF redirect.
+    FlowSpecRedirectIp redirect_ip = 6;
   }
 }
 
@@ -4252,6 +4254,17 @@ message FlowSpecRedirect {
   string route_target = 1;
 }
 
+// Direct IPv4 (0x010c) or IPv6 (0x000c) target from
+// draft-ietf-idr-flowspec-redirect-ip-16. IPv6 uses the twenty-octet
+// RFC 5701 community in path attribute 25, never a uint64 or MP_REACH next hop.
+// The address must be a unicast IP literal. Local acceptance or observation
+// does not establish router installation or forwarding.
+message FlowSpecRedirectIp {
+  string address = 1;
+  // false diverts originals; true mirrors copies.
+  bool copy = 2;
+}
+
 // FlowSpec route as seen in the RIB.
 message FlowSpecRouteEntry {
   repeated FlowSpecComponent components = 1;
@@ -4273,6 +4286,10 @@ message FlowSpecRouteEntry {
   string injection_owner = 8;
   LeaseGeneration lease_generation = 9;
   optional uint32 lease_remaining_ms = 10;
+  // Every RFC 5701 community, including interpreted redirect_ip actions.
+  // Each value contains exactly twenty octets, preserving reserved bits and
+  // unmodelled types independently of extended_communities.
+  repeated bytes ipv6_extended_communities = 11;
 }
 
 message AddFlowSpecRequest {
@@ -4290,6 +4307,10 @@ message AddFlowSpecRequest {
   // AddFlowSpec does not deduplicate the two lists: give an action either
   // typed in actions or raw here, not both.
   repeated uint64 extended_communities = 5;
+  // Raw RFC 5701 communities, each containing exactly twenty octets.
+  // A typed redirect_ip must not also be supplied as a raw target-IP action
+  // in either community list. Other raw communities retain their bytes.
+  repeated bytes ipv6_extended_communities = 6;
 }
 
 message AddFlowSpecResponse {

@@ -552,9 +552,9 @@ in v1.
   re-advertisement.** This covers an unrecognized optional transitive
   attribute and, since v0.67.0, an IANA-assigned optional transitive type
   whose payload semantics are deliberately unsupported: Tunnel Encapsulation
-  (23), IPv6 Address Specific Extended Community (25), PE Distinguisher
-  Labels (27), Community Container (34), D-PATH (36), SFP (37), BFD
-  Discriminator (38), NHC (39), BGP Prefix-SID (40), BIER (41), and ATTR_SET
+  (23), PE Distinguisher Labels (27), Community Container (34), D-PATH (36),
+  SFP (37), BFD Discriminator (38), NHC (39), BGP Prefix-SID (40), BIER (41),
+  and ATTR_SET
   (128). Registry recognition fences those types' class and outer framing; it
   is not a claim to understand the value, so the conservative signal still
   applies. All other flags and the value bytes are preserved unchanged,
@@ -563,8 +563,8 @@ in v1.
   attribute boundary.
 - **Recognized optional transitive attributes — a received Partial is
   preserved, never invented.** AGGREGATOR (7), Communities (8), Extended
-  Communities (16), PMSI Tunnel (22), Large Communities (32), and
-  Only-to-Customer (35) decode into typed values that carry the received
+  Communities (16), PMSI Tunnel (22), IPv6 Address Specific Extended
+  Communities (25), Large Communities (32), and Only-to-Customer (35) decode into typed values that carry the received
   Partial bit as state (`PathAttribute::CommunitiesPartial` and its siblings,
   `Aggregator::partial`), so it survives policy and the RIB and is re-emitted
   on egress under both compact and Extended Length framing. rustbgpd
@@ -690,15 +690,18 @@ message (§3 (h)).
   NEXT_HOP (3/8), not session-reset. Duplicate MP attributes remain 3/1 with
   empty data, and flag conflicts remain 3/4 with exact attribute data.
 
-Assigned attributes whose payload is not parsed (v0.67.0):
+Assigned attributes whose payload is not parsed:
 
-Fifteen IANA-assigned path attribute types are recognized by registry entry
+Fourteen IANA-assigned path attribute types are recognized by registry entry
 only. The class fence and the framing walk below are the whole of that
 recognition — no typed model, no semantic, and no support claim for any of
-them. Before v0.67.0 an unparsed assigned type was either silently ignored or
-retained opaquely regardless of how its flags and framing were encoded.
+them. Type 25, originally part of this group in v0.67.0, now has a typed,
+lossless twenty-octet model; its received Partial bit is preserved rather
+than invented. Before v0.67.0 an unparsed assigned type was either silently
+ignored or retained opaquely regardless of how its flags and framing were
+encoded.
 
-- **Class fencing.** Each of the fifteen carries its registered
+- **Class fencing.** Each of the fourteen carries its registered
   Optional/Transitive class through decode. A class conflict is
   treat-as-withdraw (§3 (c)) instead of being silently accepted, with one
   exception: an AIGP attribute carrying Transitive is attribute-discard,
@@ -706,14 +709,13 @@ retained opaquely regardless of how its flags and framing were encoded.
   values keep their ordinary treatment — the four optional non-transitive
   types (Traffic Engineering 24, AIGP 26, BGPsec_PATH 33, Edge Metadata 42)
   are ignored on receipt and never retained, stored, or emitted, including on
-  egress; the eleven optional transitive types (23, 25, 27, 34, 36-41, 128)
+  egress; the ten optional transitive types (23, 27, 34, 36-41, 128)
   are retained opaquely and re-advertised with the Partial bit.
-- **Structural framing.** Ten of the transitive types additionally get a
+- **Structural framing.** Nine of the opaque transitive types additionally get a
   bounded, syntax-only walk of their outer framing before opaque propagation:
   Tunnel Encapsulation (23) must carry at least one Tunnel TLV, and each
   Tunnel TLV and its sub-TLV stream must frame exactly;
-  IPv6 Address Specific Extended Community (25) must be a non-empty multiple
-  of 20 octets; Community Container (34) walks container headers, its Type 1
+  Community Container (34) walks container headers, its Type 1
   subtypes — which may not repeat — the atom TLV stream, and atom prefix
   lengths; D-PATH (36) walks non-empty 7-octet domain segments; SFP (37)
   requires a Hop TLV and walks its sub-TLVs; BFD Discriminator (38) requires
@@ -723,7 +725,8 @@ retained opaquely regardless of how its flags and framing were encoded.
   nesting; BIER (41) must carry at least one TLV and walks its sub-TLV
   nesting; and ATTR_SET (128) requires its 4-octet Origin AS followed by an
   exactly framed embedded attribute stream that contains no MP_REACH_NLRI or
-  MP_UNREACH_NLRI. Values that pass stay opaque bytes.
+  MP_UNREACH_NLRI. Values that pass stay opaque bytes. Type 25 separately
+  enforces a non-empty multiple of twenty octets before typed decode.
 - **Framing dispositions split by type.** A framing failure in BFD
   Discriminator (38), NHC (39), generic BGP Prefix-SID (40), or BIER (41) is
   attribute-discard: the malformed value cannot affect route selection, so
@@ -731,7 +734,7 @@ retained opaquely regardless of how its flags and framing were encoded.
   malformation instead follows RFC 9252 §7 treat-as-withdraw. A framing failure
   in Tunnel Encapsulation (23), IPv6 Address Specific Extended Community (25),
   Community Container (34), D-PATH (36), SFP (37), or ATTR_SET (128) is
-  treat-as-withdraw. A *class* conflict on any of the ten is
+  treat-as-withdraw. A *class* conflict on any of these transitive types is
   treat-as-withdraw regardless — §3 (h) takes the stronger of the two
   actions. Zero-length BIER is the case that changed disposition in v0.67.0:
   it was previously retained as though it held a valid TLV sequence, and is
