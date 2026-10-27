@@ -956,9 +956,10 @@ fn mp_unreach_nlri_count(mp: &MpUnreachNlri) -> usize {
 /// already combined RFC 6793 types 2/17 and 7/18; this converter stores the
 /// canonical AS path and emits the canonical 8-byte type-7 aggregator.
 /// Attributes the snapshot does not type (`ORIGINATOR_ID`, `CLUSTER_LIST`, OTC,
-/// and anything the wire decoder itself leaves untyped) retain their value
-/// bytes and semantic flags in `unknown_attrs`. The `EXTENDED_LENGTH` bit is
-/// cleared because it is an encoding artifact, not attribute semantics.
+/// IPv6 extended communities, and anything the wire decoder itself leaves
+/// untyped) retain their value bytes and semantic flags in `unknown_attrs`.
+/// The `EXTENDED_LENGTH` bit is cleared because it is an encoding artifact,
+/// not attribute semantics.
 fn convert_attribute<'a>(
     attribute: &'a PathAttribute,
     base: &mut SnapRoute,
@@ -978,6 +979,18 @@ fn convert_attribute<'a>(
         PathAttribute::ExtendedCommunities(communities)
         | PathAttribute::ExtendedCommunitiesPartial(communities) => {
             base.extended_communities = communities.iter().map(|c| c.as_u64()).collect();
+        }
+        PathAttribute::Ipv6ExtendedCommunities(communities)
+        | PathAttribute::Ipv6ExtendedCommunitiesPartial(communities) => {
+            base.unknown_attrs.push((
+                attribute.flags(),
+                attribute.type_code(),
+                communities
+                    .iter()
+                    .flat_map(rustbgpd_wire::Ipv6ExtendedCommunity::as_bytes)
+                    .copied()
+                    .collect(),
+            ));
         }
         PathAttribute::LargeCommunities(communities)
         | PathAttribute::LargeCommunitiesPartial(communities) => {
@@ -1640,6 +1653,77 @@ mod tests {
                 "value": "0000ffdc"
             }])
         );
+    }
+
+    #[test]
+    fn ipv6_extended_communities_snapshot_preserves_raw_values_and_semantic_flags() {
+        // Direct target with copy set, unknown subtype, duplicate target,
+        // and a target carrying reserved local-administrator bits.
+        let target = [
+            0x00, 0x0c, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1,
+        ];
+        let unknown = [
+            0x00, 0xfd, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0x12, 0x34,
+        ];
+        let reserved = [
+            0x00, 0x0c, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0xa5, 0xf3,
+        ];
+        let value = [target, unknown, target, reserved].concat();
+        for partial in [false, true] {
+            for extended_length in [false, true] {
+                let (mut capture, info) = v4_peer_capture();
+                let mut attrs = attr(attr_type::ORIGIN, &[0]);
+                attrs.extend(as_path_attr(&[65500]));
+                attrs.extend(attr(attr_type::NEXT_HOP, &[192, 0, 2, 254]));
+                let semantic_flags = attr_flags::OPTIONAL
+                    | attr_flags::TRANSITIVE
+                    | if partial { attr_flags::PARTIAL } else { 0 };
+                attrs.extend([
+                    semantic_flags
+                        | if extended_length {
+                            attr_flags::EXTENDED_LENGTH
+                        } else {
+                            0
+                        },
+                    attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY,
+                ]);
+                if extended_length {
+                    attrs.extend(u16::try_from(value.len()).unwrap().to_be_bytes());
+                } else {
+                    attrs.push(u8::try_from(value.len()).unwrap());
+                }
+                attrs.extend_from_slice(&value);
+                capture.extend(route_monitoring(
+                    &info,
+                    &update_pdu(&[], &attrs, &v4_nlri([10, 0, 0, 0], 24, None)),
+                ));
+                capture.extend(route_monitoring(&info, &eor_v4()));
+
+                let (snapshot, _) = run_capture(&capture).unwrap();
+                let route: serde_json::Value = serde_json::from_str(
+                    snapshot
+                        .lines()
+                        .find(|line| line.contains("\"record\":\"route\""))
+                        .expect("one route record"),
+                )
+                .unwrap();
+                // Extended length only frames the wire value; Partial is semantic.
+                assert_eq!(
+                    route["unknown_attrs"],
+                    serde_json::json!([{
+                        "flags": semantic_flags,
+                        "type_code": 25,
+                        "value": concat!(
+                            "000c20010db80000000000000000000000010001",
+                            "00fd20010db80000000000000000000000021234",
+                            "000c20010db80000000000000000000000010001",
+                            "000c20010db8000000000000000000000003a5f3"
+                        )
+                    }]),
+                    "partial={partial}, extended_length={extended_length}"
+                );
+            }
+        }
     }
 
     #[test]

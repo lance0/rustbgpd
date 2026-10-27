@@ -7,7 +7,8 @@
   targets and includes nonempty raw values in JSON. Ordinary eBGP export
   filters non-transitive 20-octet values under the existing community policy,
   preserving received Partial flags; empty attribute 25 values cannot be
-  encoded. See the
+  encoded. BMP unicast snapshots retain attribute 25 in `unknown_attrs`,
+  preserving value order, duplicates and received Partial flags. See the
   [API contract](../docs/reference/api.md#list-flowspec-routes) and
   [ADR-0143](../docs/adr/0143-flowspec-direct-ip-actions.md). Controllers need
   an implementing daemon release; an older server may ignore new fields.
