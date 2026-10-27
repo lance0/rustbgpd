@@ -79,8 +79,13 @@ intent before deciding what to retry.
 `FlowSpecAction` is inventoried in both directions: `AddFlowSpec` accepts it
 and `ListFlowSpecRoutes` returns it typed. That includes traffic-rate-bytes,
 traffic-rate-packets (`traffic_rate_packets`), traffic-action,
-traffic-marking and the three redirect forms. Every action community is also
-echoed raw in `FlowSpecRouteEntry.extended_communities`, and that echo stays.
+traffic-marking, the three VRF redirect forms, and direct target-IP
+redirect/copy (`redirect_ip`). Every 8-octet action community is also echoed
+raw in `FlowSpecRouteEntry.extended_communities`; 20-octet IPv6 communities
+are echoed losslessly in `ipv6_extended_communities`. The two raw lists keep
+unknown values, reserved bits, order and duplicates. The additive field and
+message-graph amendment is recorded in
+[ADR-0143](../adr/0143-flowspec-direct-ip-actions.md).
 A redirect read back as `0.ASN:value` uses RFC 5396 asdot+, which keeps the
 4-octet-AS encoding when the rule is re-injected. This pins the API shape
 only: it adds no forwarding, installation or enforcement guarantee for any

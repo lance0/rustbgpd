@@ -498,6 +498,37 @@ impl SessionExportProfile {
     /// is omitted without allocating, and only a mixed attribute builds a
     /// filtered vector.
     fn prepare_extended_communities(&self, attr: &PathAttribute) -> Option<PathAttribute> {
+        fn retain_transitive<T: Copy>(
+            values: &[T],
+            is_transitive: impl Fn(&T) -> bool,
+        ) -> Option<Vec<T>> {
+            let mut has_transitive = false;
+            let mut has_non_transitive = false;
+            for community in values {
+                if is_transitive(community) {
+                    has_transitive = true;
+                } else {
+                    has_non_transitive = true;
+                }
+                if has_transitive && has_non_transitive {
+                    break;
+                }
+            }
+            if !has_non_transitive {
+                return Some(values.to_vec());
+            }
+            if !has_transitive {
+                return None;
+            }
+            Some(
+                values
+                    .iter()
+                    .filter(|value| is_transitive(value))
+                    .copied()
+                    .collect(),
+            )
+        }
+
         if !self.is_ebgp
             || self.route_server_client
             || self.send_non_transitive_extended_communities
@@ -505,40 +536,25 @@ impl SessionExportProfile {
             return Some(attr.clone());
         }
 
-        let (values, partial) = match attr {
-            PathAttribute::ExtendedCommunities(values) => (values, false),
-            PathAttribute::ExtendedCommunitiesPartial(values) => (values, true),
-            _ => return Some(attr.clone()),
-        };
-        let mut has_transitive = false;
-        let mut has_non_transitive = false;
-        for community in values {
-            if community.is_transitive() {
-                has_transitive = true;
-            } else {
-                has_non_transitive = true;
+        match attr {
+            PathAttribute::ExtendedCommunities(values) => {
+                retain_transitive(values, |value| value.is_transitive())
+                    .map(PathAttribute::ExtendedCommunities)
             }
-            if has_transitive && has_non_transitive {
-                break;
+            PathAttribute::ExtendedCommunitiesPartial(values) => {
+                retain_transitive(values, |value| value.is_transitive())
+                    .map(PathAttribute::ExtendedCommunitiesPartial)
             }
+            PathAttribute::Ipv6ExtendedCommunities(values) => {
+                retain_transitive(values, |value| value.as_bytes()[0] & 0x40 == 0)
+                    .map(PathAttribute::Ipv6ExtendedCommunities)
+            }
+            PathAttribute::Ipv6ExtendedCommunitiesPartial(values) => {
+                retain_transitive(values, |value| value.as_bytes()[0] & 0x40 == 0)
+                    .map(PathAttribute::Ipv6ExtendedCommunitiesPartial)
+            }
+            _ => Some(attr.clone()),
         }
-        if !has_non_transitive {
-            return Some(attr.clone());
-        }
-        if !has_transitive {
-            return None;
-        }
-
-        let retained = values
-            .iter()
-            .copied()
-            .filter(|community| community.is_transitive())
-            .collect();
-        Some(if partial {
-            PathAttribute::ExtendedCommunitiesPartial(retained)
-        } else {
-            PathAttribute::ExtendedCommunities(retained)
-        })
     }
 
     /// Prepare the classic unicast attribute set using only this immutable
@@ -615,7 +631,9 @@ impl SessionExportProfile {
                 PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_) => {}
                 PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
                 PathAttribute::ExtendedCommunities(_)
-                | PathAttribute::ExtendedCommunitiesPartial(_) => {
+                | PathAttribute::ExtendedCommunitiesPartial(_)
+                | PathAttribute::Ipv6ExtendedCommunities(_)
+                | PathAttribute::Ipv6ExtendedCommunitiesPartial(_) => {
                     if let Some(attr) = self.prepare_extended_communities(attr) {
                         attrs.push(attr);
                     }
@@ -737,7 +755,9 @@ impl SessionExportProfile {
                 }
                 PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
                 PathAttribute::ExtendedCommunities(_)
-                | PathAttribute::ExtendedCommunitiesPartial(_) => {
+                | PathAttribute::ExtendedCommunitiesPartial(_)
+                | PathAttribute::Ipv6ExtendedCommunities(_)
+                | PathAttribute::Ipv6ExtendedCommunitiesPartial(_) => {
                     if let Some(attr) = self.prepare_extended_communities(attr) {
                         attrs.push(attr);
                     }
