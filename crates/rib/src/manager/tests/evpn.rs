@@ -4082,6 +4082,8 @@ fn readiness_answered_during_evpn_fanout(receivers: u8, queued: usize) -> usize 
     }
     manager.handle_update(update);
     assert!(manager.process_next_route_chunk(), "one EVPN chunk queued");
+    // A fanout parked at a receiver boundary finishes on later steps.
+    while manager.process_next_route_chunk() {}
     for outbound_rx in &mut outbound {
         let announced: usize = std::iter::from_fn(|| outbound_rx.try_recv().ok())
             .map(|update| update.evpn_announce.len())
@@ -4111,4 +4113,148 @@ fn evpn_fanout_serves_readiness_at_each_receiver_boundary() {
             "{receivers} receivers"
         );
     }
+}
+
+/// A manager with `receivers` EVPN-capable eBGP receivers and a flush budget
+/// of zero, so a paced EVPN fanout parks at every receiver boundary.
+fn zero_budget_evpn_fanout(receivers: u8) -> (RibManager, Vec<PeerId>) {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peers: Vec<_> = (0..receivers)
+        .map(|index| peer_v4(Ipv4Addr::new(10, 0, 3, index + 2)))
+        .collect();
+    for &peer in &peers {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        // The receiver end stays open for the manager's lifetime.
+        std::mem::forget(outbound_rx);
+        let mut up = super::lifecycle::test_peer_up(peer, 0, outbound_tx);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = evpn_sendable();
+        }
+        manager.handle_update(up);
+    }
+    manager.flush_poll_budget = Duration::ZERO;
+    (manager, peers)
+}
+
+fn advertised_evpn(manager: &RibManager, peers: &[PeerId]) -> Vec<usize> {
+    peers
+        .iter()
+        .map(|peer| {
+            manager
+                .adj_ribs_out
+                .get(peer)
+                .map_or(0, AdjRibOut::evpn_len)
+        })
+        .collect()
+}
+
+fn evpn_update(
+    source: Ipv4Addr,
+    announced: Vec<EvpnRibRoute>,
+    withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
+) -> RibUpdate {
+    let mut update = super::lifecycle::test_routes_received(peer_v4(source), vec![]);
+    if let RibUpdate::RoutesReceived {
+        evpn_announced,
+        evpn_withdrawn,
+        ..
+    } = &mut update
+    {
+        *evpn_announced = announced;
+        *evpn_withdrawn = withdrawn;
+    }
+    update
+}
+
+/// One inbound EVPN chunk is committed to every private receiver. Without a
+/// cut, receivers that learn the same table resize their EVPN maps in the
+/// same actor step: 75 receivers held the actor for over 300 ms. Once the
+/// flush budget is spent the fanout parks at a receiver boundary, so each
+/// later route-chunk step serves the next receivers, and the batch, with
+/// anything queued behind it, waits until every receiver has the chunk.
+#[test]
+fn evpn_inbound_fanout_parks_at_receiver_boundaries() {
+    let receivers = 4;
+    let (mut manager, peers) = zero_budget_evpn_fanout(receivers);
+    let source = Ipv4Addr::new(10, 0, 3, 1);
+    let routes: Vec<_> = (0..3).map(|tag| make_evpn_imet(source, tag)).collect();
+    manager.handle_update(evpn_update(source, routes.clone(), vec![]));
+    manager.handle_update(evpn_update(source, vec![make_evpn_imet(source, 9)], vec![]));
+    for step in 1..=usize::from(receivers) {
+        assert!(manager.process_next_route_chunk());
+        let delivered = advertised_evpn(&manager, &peers);
+        assert_eq!(
+            delivered
+                .iter()
+                .filter(|&&count| count == routes.len())
+                .count(),
+            step,
+            "step {step} serves one more receiver: {delivered:?}"
+        );
+        assert_eq!(
+            delivered.iter().filter(|&&count| count == 0).count(),
+            usize::from(receivers) - step,
+            "the second message waits for the fanout: {delivered:?}"
+        );
+        assert_eq!(
+            manager.pending_evpn_fanout.is_some(),
+            step < usize::from(receivers)
+        );
+        if step < usize::from(receivers) {
+            // The parked batch's message stays open: finishing it would
+            // settle the distribution window and admit later input early.
+            assert!(
+                manager
+                    .pending_route_batches
+                    .front()
+                    .is_some_and(|pending| pending.fanout_parked),
+                "step {step}: the parked batch keeps its place"
+            );
+            assert!(
+                manager.distribution_window.started.is_some(),
+                "step {step}: the window settles only after the fanout"
+            );
+        }
+    }
+    assert_eq!(manager.pending_route_batches.len(), 1, "the second message");
+    while manager.process_next_route_chunk() {}
+    assert_eq!(
+        advertised_evpn(&manager, &peers),
+        vec![routes.len() + 1; usize::from(receivers)]
+    );
+}
+
+/// A parked withdrawal outlives a purge of its source's batches: the
+/// source's later teardown only recomputes routes it still holds, so the
+/// remaining receivers learn the withdrawal from the parked fanout alone.
+#[test]
+fn parked_evpn_withdrawal_survives_its_source_going_down() {
+    let receivers = 3;
+    let (mut manager, peers) = zero_budget_evpn_fanout(receivers);
+    let source = Ipv4Addr::new(10, 0, 3, 1);
+    let route = make_evpn_imet(source, 1);
+    manager.handle_update(evpn_update(source, vec![route.clone()], vec![]));
+    while manager.process_next_route_chunk() {}
+    assert_eq!(
+        advertised_evpn(&manager, &peers),
+        vec![1; usize::from(receivers)]
+    );
+
+    manager.handle_update(evpn_update(source, vec![], vec![route.key()]));
+    assert!(manager.process_next_route_chunk());
+    assert!(manager.pending_evpn_fanout.is_some());
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: peer_v4(source),
+        session_id: 0,
+    });
+    assert!(manager.pending_route_batches.is_empty(), "batches purged");
+    while manager.process_next_route_chunk() {}
+    assert_eq!(
+        advertised_evpn(&manager, &peers),
+        vec![0; usize::from(receivers)]
+    );
 }

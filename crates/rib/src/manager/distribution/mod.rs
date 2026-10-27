@@ -44,6 +44,7 @@ use crate::update::{
 
 mod bgpls;
 mod evpn;
+pub(in crate::manager) use evpn::PendingEvpnFanout;
 mod export_memo;
 mod flowspec;
 mod labeled;
@@ -6754,6 +6755,10 @@ impl RibManager {
     }
 
     pub(super) fn process_next_route_chunk(&mut self) -> bool {
+        if self.pending_evpn_fanout.is_some() {
+            self.continue_parked_evpn_fanout();
+            return true;
+        }
         let Some(mut pending) = self.pending_route_batches.pop_front() else {
             return false;
         };
@@ -6832,11 +6837,11 @@ impl RibManager {
             PendingRouteChunk::EvpnWithdrawn(evpn_withdrawn) => {
                 self.pending_exact_export_withdrawals
                     .extend(evpn_withdrawn.iter().copied().map(ExactExportKey::Evpn));
-                self.process_evpn_withdraw_chunk(peer, evpn_withdrawn);
+                self.ingest_evpn_withdraw_chunk(peer, evpn_withdrawn, true);
             }
             PendingRouteChunk::EvpnAnnounced(evpn_announced) => {
                 if !Self::dampening_source_blocked(&pending.source) {
-                    self.process_evpn_announce_chunk(peer, evpn_announced);
+                    self.ingest_evpn_announce_chunk(peer, evpn_announced, true);
                 }
             }
         }
@@ -6850,13 +6855,47 @@ impl RibManager {
         // separately from the coalesced outbound pass it triggers.
         let ingest = chunk_started.elapsed();
 
-        if pending.has_more() {
+        if self.pending_evpn_fanout.is_some() {
+            // Keep the batch in place, so its message is not finished and
+            // nothing queued behind it runs, until the fanout drains.
+            pending.fanout_parked = true;
+            self.pending_route_batches.push_front(pending);
+        } else if pending.has_more() {
             self.pending_route_batches.push_front(pending);
         } else {
             self.finish_route_batch();
         }
         self.metrics.observe_rib_actor_work("route_chunk", ingest);
         true
+    }
+
+    /// A parked EVPN fanout is the rest of an earlier chunk: advance it by
+    /// one flush budget, and once it drains resume or finish the batch that
+    /// parked it, before any later chunk runs.
+    fn continue_parked_evpn_fanout(&mut self) {
+        // Observed before the drained-batch tail, as a chunk is.
+        let started = std::time::Instant::now();
+        let parked = self.advance_evpn_fanout();
+        self.metrics
+            .observe_rib_actor_work("route_chunk", started.elapsed());
+        if parked
+            || !self
+                .pending_route_batches
+                .front()
+                .is_some_and(|pending| pending.fanout_parked)
+        {
+            return;
+        }
+        let mut pending = self
+            .pending_route_batches
+            .pop_front()
+            .expect("front batch checked above");
+        pending.fanout_parked = false;
+        if pending.has_more() {
+            self.pending_route_batches.push_front(pending);
+        } else {
+            self.finish_route_batch();
+        }
     }
 
     /// A route batch has drained. Extend the distribution window over the

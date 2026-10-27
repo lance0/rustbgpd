@@ -7,10 +7,23 @@ use crate::PeerId;
 use crate::attr_set::AttrSet;
 
 impl RibManager {
+    /// Unpaced, for tests that apply one chunk directly.
+    #[cfg(test)]
     pub(in crate::manager) fn process_evpn_withdraw_chunk(
         &mut self,
         peer: PeerId,
         evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
+    ) {
+        self.ingest_evpn_withdraw_chunk(peer, evpn_withdrawn, false);
+    }
+
+    /// Apply one withdrawn EVPN chunk; `paced` parks the private fanout as
+    /// in [`Self::recompute_and_distribute_evpn_paced`].
+    pub(in crate::manager) fn ingest_evpn_withdraw_chunk(
+        &mut self,
+        peer: PeerId,
+        evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
+        paced: bool,
     ) {
         let active_refresh = self
             .refresh_in_progress
@@ -44,15 +57,32 @@ impl RibManager {
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
-            self.recompute_and_distribute_evpn(&affected);
+            if paced {
+                self.recompute_and_distribute_evpn_paced(&affected);
+            } else {
+                self.recompute_and_distribute_evpn(&affected);
+            }
             self.gc_attr_intern();
         }
     }
 
+    /// Unpaced, for tests that apply one chunk directly.
+    #[cfg(test)]
     pub(in crate::manager) fn process_evpn_announce_chunk(
         &mut self,
         peer: PeerId,
         evpn_announced: Vec<crate::route::EvpnRibRoute>,
+    ) {
+        self.ingest_evpn_announce_chunk(peer, evpn_announced, false);
+    }
+
+    /// Apply one announced EVPN chunk; `paced` parks the private fanout as
+    /// in [`Self::recompute_and_distribute_evpn_paced`].
+    pub(in crate::manager) fn ingest_evpn_announce_chunk(
+        &mut self,
+        peer: PeerId,
+        evpn_announced: Vec<crate::route::EvpnRibRoute>,
+        paced: bool,
     ) {
         let active_refresh = self
             .refresh_in_progress
@@ -90,7 +120,11 @@ impl RibManager {
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
-            self.recompute_and_distribute_evpn(&affected);
+            if paced {
+                self.recompute_and_distribute_evpn_paced(&affected);
+            } else {
+                self.recompute_and_distribute_evpn(&affected);
+            }
             if any_replaced {
                 self.attr_intern.gc();
             }
@@ -635,13 +669,32 @@ impl RibManager {
     /// gather candidates from all peer Adj-RIB-Ins, run best-path, and if
     /// the selection changed, stage announces/withdraws for each outbound
     /// peer that negotiated the L2VPN/EVPN family.
+    pub(in crate::manager) fn recompute_and_distribute_evpn(
+        &mut self,
+        affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+    ) {
+        self.recompute_and_distribute_evpn_inner(affected, false);
+    }
+
+    /// [`Self::recompute_and_distribute_evpn`] for one inbound route chunk:
+    /// the private fanout parks at a receiver boundary once it has used the
+    /// flush budget, in [`RibManager::pending_evpn_fanout`], and the route
+    /// chunk queue finishes it before any later chunk or message.
+    pub(in crate::manager) fn recompute_and_distribute_evpn_paced(
+        &mut self,
+        affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+    ) {
+        self.recompute_and_distribute_evpn_inner(affected, true);
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one best-path pass preserves displaced group values until every owned and private consumer has admitted or captured OLD"
     )]
-    pub(in crate::manager) fn recompute_and_distribute_evpn(
+    fn recompute_and_distribute_evpn_inner(
         &mut self,
         affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        paced: bool,
     ) {
         use crate::route::EvpnRibRoute;
 
@@ -778,29 +831,80 @@ impl RibManager {
         for gid in owned_groups {
             self.distribute_owned_evpn_group(gid, &changed_keys, &mut checkpoint);
         }
-        for peer in peers {
-            checkpoint();
-            // EVPN ingest distributes each chunk here without a readiness
-            // owner, and the private fanout costs one Adj-RIB-Out commit per
-            // receiver: receivers that learn the same table resize their EVPN
-            // maps in the same chunk. Service the dedicated read-only lane at
-            // each receiver boundary, as VPN and unicast cold ingest do; while
-            // an owner holds the lane this is a no-op and its checkpoints serve.
-            let transition_elapsed = self
-                .pending_clean_policy_transition
-                .as_ref()
-                .map(super::PendingCleanPolicyTransition::elapsed);
-            self.drain_readiness_queries(transition_elapsed);
-            if self.evpn_grouped_member_of(peer).is_none() {
-                self.distribute_evpn_keys_to_peer(peer, &changed_keys, &mut checkpoint);
-            }
+        let mut fanout = PendingEvpnFanout {
+            keys: changed_keys,
+            peers: peers.into(),
+        };
+        // Owned groups keep their single-turn recovery pass below.
+        if paced && !owned_pass {
+            assert!(
+                self.pending_evpn_fanout.is_none(),
+                "a parked EVPN fanout must drain before another chunk parks"
+            );
+            self.pending_evpn_fanout = Some(fanout);
+            self.advance_evpn_fanout();
+            return;
         }
+        self.evpn_fanout_step(&mut fanout, None);
         if owned_pass && !self.dirty_peers.is_empty() {
             // All group OLD consumers have finished before the existing
             // mixed-family recovery pass can settle a missed admission.
             self.distribute_changes(&HashSet::new(), &HashSet::new());
         }
-        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
+    }
+
+    /// Continue the parked inbound EVPN fanout for one flush budget.
+    /// Returns whether receivers remain parked.
+    pub(in crate::manager) fn advance_evpn_fanout(&mut self) -> bool {
+        let Some(mut fanout) = self.pending_evpn_fanout.take() else {
+            return false;
+        };
+        let budget = self.flush_poll_budget;
+        let parked = self.evpn_fanout_step(&mut fanout, Some(budget));
+        if parked {
+            self.pending_evpn_fanout = Some(fanout);
+        }
+        parked
+    }
+
+    /// Send `fanout.keys` to its remaining private receivers. With a budget,
+    /// stop at the first receiver boundary after it elapses and return
+    /// `true`; staging reads the current Loc-RIB, so a later step still
+    /// sends each receiver its current best.
+    fn evpn_fanout_step(
+        &mut self,
+        fanout: &mut PendingEvpnFanout,
+        budget: Option<std::time::Duration>,
+    ) -> bool {
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::super::replacement_readiness_checkpoint_at(&readiness, "selection_evpn", false);
+        };
+        let started = std::time::Instant::now();
+        while let Some(peer) = fanout.peers.pop_front() {
+            checkpoint();
+            // Without a readiness owner, one receiver's Adj-RIB-Out commit
+            // is the unit of this loop. Service the dedicated read-only lane
+            // at each receiver boundary, as VPN and unicast cold ingest do;
+            // while an owner holds the lane this is a no-op and its
+            // checkpoints serve.
+            let transition_elapsed = self
+                .pending_clean_policy_transition
+                .as_ref()
+                .map(super::PendingCleanPolicyTransition::elapsed);
+            self.drain_readiness_queries(transition_elapsed);
+            if self.outbound_peers.contains_key(&peer)
+                && self.evpn_grouped_member_of(peer).is_none()
+            {
+                self.distribute_evpn_keys_to_peer(peer, &fanout.keys, &mut checkpoint);
+            }
+            if !fanout.peers.is_empty() && budget.is_some_and(|budget| started.elapsed() >= budget)
+            {
+                return true;
+            }
+        }
+        super::super::retire_hash_set(&mut fanout.keys, &mut checkpoint);
+        false
     }
 
     /// Stage `keys` toward one outbound peer and send/commit the delta,
@@ -899,6 +1003,12 @@ impl RibManager {
             warn!(%peer, "outbound channel full — EVPN update deferred");
         }
     }
+}
+
+/// An inbound EVPN chunk's private fanout, parked at a receiver boundary.
+pub(in crate::manager) struct PendingEvpnFanout {
+    keys: HashSet<rustbgpd_wire::EvpnRouteKey>,
+    peers: std::collections::VecDeque<PeerId>,
 }
 
 impl RibManager {

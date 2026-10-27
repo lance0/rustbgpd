@@ -1015,6 +1015,11 @@ pub struct RibManager {
     replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    /// An inbound EVPN chunk's private fanout parked at a receiver boundary.
+    /// The route chunk queue finishes it before any other chunk, and it
+    /// survives a purge of its source's batches: a parked withdrawal must
+    /// still reach the remaining receivers.
+    pending_evpn_fanout: Option<distribution::PendingEvpnFanout>,
     /// Retained receive-side `FlowSpec` feasibility; empty when disabled.
     flowspec_validation: flowspec_validation::ValidationState,
     /// One explicit shared policy transition advanced by the actor itself.
@@ -2081,6 +2086,10 @@ struct PendingRoutesReceived {
     evpn_announced: std::vec::IntoIter<crate::route::EvpnRibRoute>,
     validated_with: Option<rustbgpd_rpki::ValidationSnapshot>,
     phase: PendingRoutePhase,
+    /// A chunk of this batch parked its EVPN fanout; the batch continues,
+    /// or finishes its message, once [`RibManager::pending_evpn_fanout`]
+    /// drains.
+    fanout_parked: bool,
 }
 
 impl PendingRoutesReceived {
@@ -2119,6 +2128,7 @@ impl PendingRoutesReceived {
             evpn_announced: evpn_announced.into_iter(),
             validated_with,
             phase: PendingRoutePhase::Withdrawn,
+            fanout_parked: false,
         }
     }
 
@@ -2566,6 +2576,7 @@ impl RibManager {
             #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
+            pending_evpn_fanout: None,
             flowspec_validation: flowspec_validation::ValidationState::default(),
             pending_clean_policy_transition: None,
             post_commit_query_trace: None,
