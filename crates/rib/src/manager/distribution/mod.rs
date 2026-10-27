@@ -7441,19 +7441,17 @@ impl RibManager {
         evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
     ) {
-        // Selection has completed before export. Reuse an outer owner, or
-        // retain the unchanged Loc-RIB count across every temporary writer.
+        // Selection has completed before export. Keep executor opportunities
+        // across staging, independent member transactions and shared cleanup.
         super::with_executor_handoff(|| {
-            self.with_replacement_readiness(|manager| {
-                manager.distribute_changes_with_readiness(
-                    best_changed,
-                    all_affected,
-                    service_ingest_readiness,
-                    advertised_generation_already_advanced,
-                    evpn_feeds,
-                    targets,
-                );
-            });
+            self.distribute_changes_with_readiness(
+                best_changed,
+                all_affected,
+                service_ingest_readiness,
+                advertised_generation_already_advanced,
+                evpn_feeds,
+                targets,
+            );
         });
     }
 
@@ -7470,6 +7468,7 @@ impl RibManager {
         mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
     ) {
+        let prep_installed = self.begin_replacement_readiness();
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -7519,6 +7518,8 @@ impl RibManager {
             && self.force_outbound_peers.is_empty()
             && evpn_feeds.is_empty()
         {
+            drop(readiness);
+            self.finish_readiness_owner(prep_installed);
             return;
         }
 
@@ -7581,81 +7582,80 @@ impl RibManager {
             #[cfg(any(test, feature = "bench-internals"))]
             &mut self.adj_rib_out_commit_stats,
         );
-        // Staging can mark members dirty. Check here, before any peer work;
-        // sends below only dirty their own current member, never a later one.
-        // Clean incremental fanout retains its existing synchronous fast path.
-        let replay_handoff = !self.dirty_peers.is_empty() || !self.force_outbound_peers.is_empty();
+        // Shared preparation cannot donate its age to later independent
+        // member transactions. A genuine outer owner remains unchanged.
+        drop(readiness);
+        self.finish_readiness_owner(prep_installed);
         let distribute_peers = || {
             for peer in peers {
-                checkpoint();
-                // Cold ingest is the path that requires in-pass readiness:
-                // service the dedicated, read-only lane at each peer boundary
-                // without admitting general queries or mutations. Keep the
-                // transition age in direct-drive use so a genuinely stalled
-                // transition still fails closed.
-                if service_ingest_readiness {
-                    let transition_elapsed = self
-                        .pending_clean_policy_transition
-                        .as_ref()
-                        .map(PendingCleanPolicyTransition::elapsed);
-                    self.drain_readiness_queries(transition_elapsed);
-                }
-                // A session closes its receiver before its queued PeerDown is
-                // handled. Other peers' withdrawals must not prepare more work
-                // for that dead receiver; lifecycle cleanup still owns its state.
-                if self.outbound_channel_gone(peer) {
-                    self.drop_gone_dirty_peer(peer);
-                    continue;
-                }
-                let member_of = self.grouped_member_of(peer);
-                let evpn_group_owned = self.evpn_grouped_member_of(peer).is_some();
-                // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
-                if self.evpn_recovery_reset_pending(peer) {
-                    self.retry_evpn_recovery_reset(peer);
-                    continue;
-                }
-                let is_dirty = self.dirty_peers.contains(&peer);
-                // `is_force` peers are dirty-equivalent for prefix enumeration AND
-                // bypass the AdjRibOut equality suppression in the per-prefix
-                // helpers — see `RibUpdate::RefreshPeerOutbound` rationale on
-                // `force_outbound_peers`.
-                let is_force = self.force_outbound_peers.contains(&peer);
-                let evpn_coverage_required =
-                    evpn_group_owned || self.has_private_evpn_handoff(peer);
-                // A grouped force-only resync intentionally re-announces the
-                // current group table and ignores pass tombstones/deltas. Its
-                // setters synchronously run an empty distribution pass, so it
-                // cannot meet a genuine change pass — an all-affected-only
-                // pass included, since that stages real deltas for
-                // per-client-best groups. A failed force send is
-                // also dirty and is valid here: dirty assembly includes the
-                // tombstones needed to heal subsequent churn.
-                debug_assert!(
-                    member_of.is_none()
-                        || !is_force
-                        || is_dirty
-                        || (best_changed.is_empty() && all_affected.is_empty()),
-                    "a grouped force-only resync cannot share a nonempty distribution pass"
-                );
-                // Dirty and forced resyncs build the peer's whole table, then
-                // need one free slot. A full channel makes that send certain to
-                // fail, even on the first forced pass. Keep missed-pass residue
-                // and the force flag for the retry; no drop is counted because
-                // nothing was built. Only this actor sends on the channel, so a
-                // free slot seen here is still free at the send.
-                if (is_dirty || is_force) && self.outbound_channel_full(peer) {
-                    debug!(%peer, "outbound channel still full — deferring resync");
-                    self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
-                    continue;
-                }
-                let resync = is_dirty || is_force;
-                // Ingest and direct callers can replay dirty members without a
-                // timer owner. Bound that readiness episode to this transaction,
-                // retaining any existing outer owner's age and selection mode.
-                let installed = resync && self.begin_replacement_readiness();
+                // Clean and replay members own independent readiness episodes;
+                // an existing outer owner's identity and age are retained.
+                let installed = self.begin_replacement_readiness();
                 'member: {
                     let readiness = self.replacement_readiness.clone();
                     let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+                    checkpoint();
+                    // Cold ingest is the path that requires in-pass readiness:
+                    // service the dedicated, read-only lane at each peer boundary
+                    // without admitting general queries or mutations. Keep the
+                    // transition age in direct-drive use so a genuinely stalled
+                    // transition still fails closed.
+                    if service_ingest_readiness {
+                        let transition_elapsed = self
+                            .pending_clean_policy_transition
+                            .as_ref()
+                            .map(PendingCleanPolicyTransition::elapsed);
+                        self.drain_readiness_queries(transition_elapsed);
+                    }
+                    // A session closes its receiver before its queued PeerDown is
+                    // handled. Other peers' withdrawals must not prepare more work
+                    // for that dead receiver; lifecycle cleanup still owns its state.
+                    if self.outbound_channel_gone(peer) {
+                        self.drop_gone_dirty_peer(peer);
+                        break 'member;
+                    }
+                    let member_of = self.grouped_member_of(peer);
+                    let evpn_group_owned = self.evpn_grouped_member_of(peer).is_some();
+                    // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
+                    if self.evpn_recovery_reset_pending(peer) {
+                        self.retry_evpn_recovery_reset(peer);
+                        break 'member;
+                    }
+                    let is_dirty = self.dirty_peers.contains(&peer);
+                    // `is_force` peers are dirty-equivalent for prefix enumeration AND
+                    // bypass the AdjRibOut equality suppression in the per-prefix
+                    // helpers — see `RibUpdate::RefreshPeerOutbound` rationale on
+                    // `force_outbound_peers`.
+                    let is_force = self.force_outbound_peers.contains(&peer);
+                    let evpn_coverage_required =
+                        evpn_group_owned || self.has_private_evpn_handoff(peer);
+                    // A grouped force-only resync intentionally re-announces the
+                    // current group table and ignores pass tombstones/deltas. Its
+                    // setters synchronously run an empty distribution pass, so it
+                    // cannot meet a genuine change pass — an all-affected-only
+                    // pass included, since that stages real deltas for
+                    // per-client-best groups. A failed force send is
+                    // also dirty and is valid here: dirty assembly includes the
+                    // tombstones needed to heal subsequent churn.
+                    debug_assert!(
+                        member_of.is_none()
+                            || !is_force
+                            || is_dirty
+                            || (best_changed.is_empty() && all_affected.is_empty()),
+                        "a grouped force-only resync cannot share a nonempty distribution pass"
+                    );
+                    // Dirty and forced resyncs build the peer's whole table, then
+                    // need one free slot. A full channel makes that send certain to
+                    // fail, even on the first forced pass. Keep missed-pass residue
+                    // and the force flag for the retry; no drop is counted because
+                    // nothing was built. Only this actor sends on the channel, so a
+                    // free slot seen here is still free at the send.
+                    if (is_dirty || is_force) && self.outbound_channel_full(peer) {
+                        debug!(%peer, "outbound channel still full — deferring resync");
+                        self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
+                        break 'member;
+                    }
+                    let resync = is_dirty || is_force;
                     let private_evpn_recovery = (resync && !evpn_group_owned)
                         .then(|| self.evpn_recovery_handle(peer))
                         .flatten();
@@ -9421,11 +9421,10 @@ impl RibManager {
                 self.finish_readiness_owner(installed);
             }
         };
-        if replay_handoff {
-            super::with_executor_handoff(distribute_peers);
-        } else {
-            distribute_peers();
-        }
+        distribute_peers();
+        let retirement_installed = self.begin_replacement_readiness();
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         // One line per pass that mixes unicast withdrawals and announcements
         // in a group (a failover), so a daemon-level benchmark can count the
         // members on each path without per-pass churn noise.
@@ -9453,5 +9452,7 @@ impl RibManager {
         crate::adj_rib_out::release_hash_map(&mut rs_tagged_pass, &mut || checkpoint());
         self.release_speculative_group_admitted_keys(&speculative_group_admitted);
         self.replacement_checkpoint(true);
+        drop(readiness);
+        self.finish_readiness_owner(retirement_installed);
     }
 }

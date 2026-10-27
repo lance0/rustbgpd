@@ -12923,13 +12923,35 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
 }
 
 #[test]
-fn replay_readiness_restores_empty_and_force_scopes_without_wrapping_clean_fanout() {
+fn replay_readiness_restores_empty_force_and_owned_clean_fanout_scopes() {
     let (mut manager, peers, mut outbound) = direct_clean_transition_manager(2, 0, None);
     let (tx, rx) = mpsc::channel(8);
     manager.readiness_rx = Some(rx);
     manager.replacement_readiness_receipts.clear();
     full_channel_pass(&mut manager, &[20, 21], &[]);
-    assert!(manager.replacement_readiness_receipts.is_empty());
+    assert!(!manager.replacement_readiness_receipts.is_empty());
+    assert!(
+        manager
+            .replacement_readiness_receipts
+            .iter()
+            .all(|receipt| receipt.count == 2)
+    );
+    assert!(manager.replacement_readiness.is_none());
+    assert!(manager.readiness_rx.is_some());
+    manager.replacement_readiness_receipts.clear();
+    let mut response = queue_replacement_readiness(&tx);
+    let prefixes = HashSet::from([full_channel_prefix(20), full_channel_prefix(21)]);
+    manager.distribute_changes(&prefixes, &prefixes);
+    assert_eq!(response.try_recv().unwrap(), Ok(2));
+    assert!(!manager.replacement_readiness_receipts.is_empty());
+    assert!(
+        manager
+            .replacement_readiness_receipts
+            .iter()
+            .all(|receipt| receipt.count == 2)
+    );
+    assert!(manager.replacement_readiness.is_none());
+    assert!(manager.readiness_rx.is_some());
     for rx in &mut outbound {
         while rx.try_recv().is_ok() {}
     }
