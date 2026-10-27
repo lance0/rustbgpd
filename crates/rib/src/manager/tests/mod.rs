@@ -1452,6 +1452,7 @@ mod non_unicast_pushdown;
 mod orf;
 mod orr;
 mod outbound_commit_accounting;
+mod outbound_limit_install;
 mod outbound_prefix_limits;
 mod outbound_resync_state;
 mod paged_query;

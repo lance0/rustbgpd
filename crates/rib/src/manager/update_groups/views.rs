@@ -476,7 +476,7 @@ impl RibManager {
             group
                 .table
                 .iter()
-                .inspect(move |_| self.replacement_checkpoint(false))
+                .inspect(move |_| self.replacement_checkpoint_at("grouped_advertised_input", false))
                 .filter_map(move |staged| {
                     // The substitution sits at the same (prefix, path_id 0)
                     // slot, so the member-local overlays key identically for
@@ -709,7 +709,7 @@ impl RibManager {
         let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
         if let Some(rejected) = self.peer_unexportable.get(&peer) {
             for key in rejected {
-                self.replacement_checkpoint(false);
+                self.replacement_checkpoint_at("grouped_family_count_input", false);
                 let family = match key {
                     // Subtract only while the member's derived view
                     // holds a backstop-delivered route at the rejected
