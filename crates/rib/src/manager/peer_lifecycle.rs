@@ -2289,6 +2289,10 @@ impl RibManager {
             }
             self.mark_outbound_dirty_inner(peer, false);
             self.retry_evpn_recovery_reset(peer);
+            super::retire_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
+                &readiness,
+            );
             return;
         }
         let member_of = self.grouped_member_of(peer);
@@ -2417,15 +2421,16 @@ impl RibManager {
                     vpn_announce.push(route.clone());
                 }
             }
-            current_policy_filtered_routes.extend(
+            super::extend_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
                 group
                     .policy_filtered_for_member_with_checkpoint(
                         peer,
                         &all_prefixes,
                         &mut checkpoint,
                     )
-                    .into_iter()
-                    .inspect(|_| checkpoint()),
+                    .into_iter(),
+                &readiness,
             );
             grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
                 peer,
@@ -2508,7 +2513,11 @@ impl RibManager {
                     false, // initial dump — equality check is correct
                     &mut checkpoint,
                 );
-                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &readiness,
+                );
             } else if per_client_best {
                 // RFC 7947 §2.3.2 per-client best-path: the first
                 // export-policy-permitted candidate from the per-target
@@ -2552,7 +2561,11 @@ impl RibManager {
                     false, // initial dump — equality check is correct
                     &mut checkpoint,
                 );
-                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &readiness,
+                );
             } else if let Some((orr_topology, orr_spf)) = orr_ctx {
                 // ORR peer with a resolved vantage: per-vantage best.
                 Self::distribute_orr_best_prefix_with_checkpoint(
@@ -2585,7 +2598,11 @@ impl RibManager {
                     false, // initial dump — equality check is correct
                     &mut checkpoint,
                 );
-                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &readiness,
+                );
             } else {
                 let mut target = super::distribution::ExportTarget::Peer {
                     peer,
@@ -2618,7 +2635,11 @@ impl RibManager {
                     false, // initial dump — equality check is correct
                     &mut checkpoint,
                 );
-                current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &readiness,
+                );
             }
         }
 
@@ -3048,12 +3069,20 @@ impl RibManager {
                 self.pending_eor.entry(peer).or_default().insert(*f);
             }
             self.mark_outbound_dirty(peer);
+            super::retire_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
+                &readiness,
+            );
             return;
         }
         self.update_policy_filtered_routes_for_prefixes(
             peer,
             &all_prefixes,
             &current_policy_filtered_routes,
+        );
+        super::retire_policy_filtered_routes_with_readiness(
+            &mut current_policy_filtered_routes,
+            &readiness,
         );
         let owned_evpn_covered = !evpn_coverage_required || self.evpn_feed_is_current(peer);
         if !self.dirty_peers.contains(&peer)

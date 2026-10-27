@@ -1459,6 +1459,7 @@ mod paged_query;
 mod peer_identity;
 mod per_client_best;
 mod policy;
+mod policy_filtered_inventory;
 mod ready_drain;
 mod refresh;
 mod refresh_snapshot;
