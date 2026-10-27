@@ -1601,18 +1601,16 @@ impl RibManager {
                         unicast.announce.push(route);
                     }
                 }
-                let mut filtered = group
+                let filtered = group
                     .policy_filtered_for_member_with_checkpoint(peer, &all_prefixes, &mut || {
                         super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     })
                     .into_iter();
-                for key in filtered.by_ref() {
-                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
-                    current_policy_filtered_routes.insert(key);
-                }
-                super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
-                drop(filtered);
-                super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    filtered,
+                    &self.replacement_readiness,
+                );
                 grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
                     peer,
                     Some(&all_prefixes),
@@ -1789,9 +1787,11 @@ impl RibManager {
                         },
                     );
                 }
-                current_policy_filtered_routes.extend(unicast.policy_filtered.drain(..).inspect(
-                    |_| super::replacement_readiness_checkpoint(&self.replacement_readiness, false),
-                ));
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current_policy_filtered_routes,
+                    unicast.policy_filtered.drain(..),
+                    &self.replacement_readiness,
+                );
             }
             // The refresh view is intentionally empty so permitted routes are
             // re-advertised for ROUTE-REFRESH. That empty view cannot discover
@@ -1878,9 +1878,10 @@ impl RibManager {
                 self.replacement_checkpoint(false);
             });
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
-            super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
-                self.replacement_checkpoint(false);
-            });
+            super::retire_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
+                &self.replacement_readiness,
+            );
             self.replacement_checkpoint(true);
             return FamilyReplayOutcome::Failed;
         }
@@ -2050,9 +2051,10 @@ impl RibManager {
                 self.replacement_checkpoint(false);
             });
             super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
-            super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
-                self.replacement_checkpoint(false);
-            });
+            super::retire_policy_filtered_routes_with_readiness(
+                &mut current_policy_filtered_routes,
+                &self.replacement_readiness,
+            );
             self.replacement_checkpoint(true);
             return FamilyReplayOutcome::Failed;
         }
@@ -2089,9 +2091,10 @@ impl RibManager {
             self.replacement_checkpoint(false);
         });
         super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
-        super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
-            self.replacement_checkpoint(false);
-        });
+        super::retire_policy_filtered_routes_with_readiness(
+            &mut current_policy_filtered_routes,
+            &self.replacement_readiness,
+        );
         self.replacement_checkpoint(true);
         FamilyReplayOutcome::Committed
     }
