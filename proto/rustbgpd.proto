@@ -3746,12 +3746,13 @@ service InjectionService {
   // request is idempotent, and a request with the same key but a different next
   // hop or attributes replaces the local route. The response reports which of
   // these happened. OK confirms that the route was accepted into the local
-  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution run in the
-  // same RIB turn, before the reply, also during Graceful Restart selection
-  // deferral. While selection is deferred for the family, only local
-  // candidates compete in ordinary best path, Add-Path, ORR and per-client
-  // best selection. This covers every path_id and prefix length, with no
-  // BLACKHOLE community requirement. Received candidates remain retained
+  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution for an
+  // eligible changed route run in the same RIB turn, before the reply.
+  // During Graceful Restart selection deferral, only local RTBH candidates
+  // compete in ordinary best path, Add-Path, ORR and per-client best selection:
+  // an IPv4 /32, IPv6 /128, or any prefix carrying standard BLACKHOLE
+  // 65535:666. This covers every path_id. Other injected unicast, including
+  // untagged defaults and aggregates, and received candidates remain retained
   // but ineligible until selection becomes available, including staged
   // collision failback. Existing export policy, next-hop-self and admission
   // checks still apply. End-of-RIB and the existing convergence and refresh
@@ -3772,8 +3773,8 @@ service InjectionService {
   // NOT_FOUND unless allow_missing is set. As for AddPath, OK confirms the
   // change to the local Adj-RIB-In; selection and distribution follow in the
   // same RIB turn, also during Graceful Restart selection deferral. Removing
-  // the last local candidate withdraws it without selecting a received
-  // fallback while selection is deferred.
+  // the last eligible local RTBH candidate withdraws it without selecting a
+  // received fallback while selection is deferred.
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
   // Per-peer export disposition of one locally injected unicast route,
   // identified by its exact AddPath key (prefix, prefix_length, path_id).
@@ -3788,8 +3789,9 @@ service InjectionService {
   // means the
   // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
   // not received, accepted or installed by the peer, which BGP does not
-  // report. Selection deferral does not hold local injection, so it no longer
-  // reports selection_deferred; ordinary policy and admission still apply.
+  // report. Selection deferral holds injected unicast except local /32, /128
+  // or BLACKHOLE 65535:666 routes; held routes report selection_deferred.
+  // Ordinary policy and admission still apply.
   // A key with no local route returns NOT_FOUND. A resumed page
   // returns ABORTED when, since the walk's first page, the route's content
   // changed (including its removal), a peer joined or left the Established
@@ -3871,7 +3873,8 @@ service InjectionService {
   // deferral as the unleased RPCs. Expiry withdraws local intent during the
   // hold without selecting a received fallback.
   // Expiry removes local intent only: other eligible routes or rules can
-  // keep applying. During selection deferral only local candidates are
+  // keep applying. During selection deferral only local RTBH unicast
+  // (/32, /128 or BLACKHOLE 65535:666) and local FlowSpec candidates are
   // eligible. The daemon promises no remote acceptance or enforcement.
   // The lease bounds how long a stopped controller's state outlives it;
   // it does not cover the daemon itself stopping.
@@ -3963,8 +3966,9 @@ service InjectionService {
   // the window's deadline, whichever comes first. An empty list keeps the
   // timer-only window.
   // This signal does not release selection deferral or other convergence
-  // and refresh holds. Local unicast and FlowSpec injection are eligible
-  // during selection deferral without it, subject to policy and admission.
+  // and refresh holds. Local RTBH unicast (/32, /128 or BLACKHOLE 65535:666)
+  // and FlowSpec injection are eligible during selection deferral without
+  // it, subject to policy and admission. Other injected unicast waits.
   //
   // Protocol: read incarnation I (CheckLivenessResponse.incarnation or
   // LeaseGeneration.incarnation) before replaying, replay the full desired
@@ -4125,8 +4129,8 @@ message PathExportDispositionEntry {
   // a colon and the exact-export reason, e.g.
   // exact_export_rejected:missing_ipv6_next_hop), export_rule (any other
   // export gate; explain_code names it). PENDING: outbound_resync,
-  // orf_pending, not_yet_committed; older daemons also use selection_deferred
-  // for local injection. NOT_ESTABLISHED:
+  // orf_pending, not_yet_committed, selection_deferred (injected unicast other
+  // than local /32, /128 or BLACKHOLE 65535:666 routes). NOT_ESTABLISHED:
   // not_established. New codes may be added.
   string reason = 3;
   // Stop code of the export explain ladder behind the reason, in the

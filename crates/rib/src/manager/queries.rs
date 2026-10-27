@@ -10,7 +10,7 @@ use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
-use super::helpers::{LOCAL_PEER, prefix_family, unicast_route_family};
+use super::helpers::{LOCAL_PEER, prefix_family, unicast_deferral_exempt, unicast_route_family};
 use super::{
     EVPN_ROUTE_EVENT_HISTORY_CAPACITY, ROUTE_EVENT_HISTORY_CAPACITY, ROUTE_QUERY_MAX_PAGE_SIZE,
     RibManager, distribution, update_groups,
@@ -2324,6 +2324,14 @@ impl RibManager {
         if let Some((reason, detail)) = self.unexported_family(peer, family) {
             return row(Withheld, &reason, "family_not_sendable", detail);
         }
+        if self.selection_deferred(family) && !unicast_deferral_exempt(route) {
+            return row(
+                Pending,
+                "selection_deferred",
+                "selection_deferred",
+                "route awaits graceful-restart selection deferral".to_string(),
+            );
+        }
         if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
             return row(
                 Pending,
@@ -3380,7 +3388,9 @@ impl RibManager {
                 self.ribs
                     .get(&LOCAL_PEER)
                     .into_iter()
-                    .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
+                    .flat_map(|rib| rib.iter_prefix(&prefix))
+                    .filter(|route| unicast_deferral_exempt(route))
+                    .cloned()
                     .collect()
             } else {
                 self.ribs
@@ -3722,8 +3732,10 @@ impl RibManager {
                     .into_iter()
                     .flatten(),
             )
-            .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
+            .flat_map(|rib| rib.iter_prefix(&prefix))
+            .filter(|route| !local_only || unicast_deferral_exempt(route))
             .filter(|route| !(route.peer == best.peer && route.path_id == best.path_id))
+            .cloned()
             .map(|route| {
                 if !crate::srv6::unicast_eligible(&route) {
                     return srv6_ineligible_candidate(route);

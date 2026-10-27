@@ -24,8 +24,9 @@ use tracing::{debug, info, warn};
 use super::helpers::{
     LOCAL_PEER, bgpls_route_family, bgpls_routes_equal, evpn_routes_equal, flowspec_route_family,
     gauge_val, labeled_route_family, labeled_routes_equal, prefix_family, routes_equal,
-    rtc_routes_equal, should_suppress_ibgp_inner, unicast_route_family, unicast_routes_equal,
-    validate_route_aspa, validate_route_rpki, vpn_route_family, vpn_routes_equal,
+    rtc_routes_equal, should_suppress_ibgp_inner, unicast_deferral_exempt, unicast_route_family,
+    unicast_routes_equal, validate_route_aspa, validate_route_rpki, vpn_route_family,
+    vpn_routes_equal,
 };
 use super::{
     AuthoritativeTransitionReceipt, PendingRouteChunk, PendingRoutesReceived,
@@ -34,7 +35,7 @@ use super::{
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
-use crate::fast_hash::FastSet;
+use crate::fast_hash::{FastMap, FastSet};
 use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
@@ -3105,6 +3106,7 @@ impl RibManager {
         // The deferral object intentionally retains released-family history,
         // so `Option::is_some` is too broad after startup convergence: guard
         // on the O(1) active map instead and skip every route-vector scan.
+        let mut unicast_deferral_exemptions = FastMap::default();
         let gated = self
             .selection_deferral
             .as_ref()
@@ -3115,8 +3117,8 @@ impl RibManager {
                 .iter()
                 .inspect(|_| checkpoint())
                 .any(|route| {
-                    route.peer != LOCAL_PEER
-                        && self.selection_deferred(prefix_family(&route.prefix))
+                    self.selection_deferred(prefix_family(&route.prefix))
+                        && !self.unicast_export_deferral_exempt(route, &mut unicast_deferral_exemptions)
                 })
                 || batch
                     .end_of_rib
@@ -7025,7 +7027,25 @@ impl RibManager {
             )
             .filter_map(move |peer| ribs.get(&peer))
             .flat_map(move |rib| rib.iter_prefix(prefix))
+            .filter(move |route| !local_only || unicast_deferral_exempt(route))
             .filter(|route| crate::srv6::unicast_eligible(route))
+    }
+
+    /// Outbound path IDs and attributes may be rewritten by export policy.
+    /// Eligibility still comes from the original injected candidate set.
+    pub(super) fn unicast_export_deferral_exempt(
+        &self,
+        route: &crate::route::Route,
+        exemptions: &mut FastMap<Prefix, bool>,
+    ) -> bool {
+        route.peer == LOCAL_PEER
+            && *exemptions.entry(route.prefix).or_insert_with(|| {
+                self.ribs.get(&LOCAL_PEER).is_some_and(|rib| {
+                    rib.iter_prefix(&route.prefix)
+                        .inspect(|_| self.replacement_checkpoint(false))
+                        .any(unicast_deferral_exempt)
+                })
+            })
     }
 
     /// Announce fast path: full per-prefix rescans only where the
@@ -7203,11 +7223,26 @@ impl RibManager {
                 if self.selection_deferred(prefix_family(prefix)) {
                     checkpoint();
                     if let Some(rib) = ribs.get(&LOCAL_PEER) {
-                        candidates.extend(rib.iter_prefix(prefix).inspect(|_| checkpoint()));
+                        candidates.extend(
+                            rib.iter_prefix(prefix)
+                                .inspect(|_| checkpoint())
+                                .filter(|route| unicast_deferral_exempt(route)),
+                        );
                     }
-                    // Restored received selections stay frozen until release.
+                    // Removing RTBH intent withdraws its old choice; ordinary
+                    // pre-hold choices stay frozen without exposing a fallback.
                     if candidates.is_empty()
-                        && previous_best.is_some_and(|best| best.peer != LOCAL_PEER)
+                        && previous_best.is_some_and(|best| {
+                            best.peer != LOCAL_PEER
+                                || (self
+                                    .loc_rib
+                                    .get(prefix)
+                                    .is_some_and(|route| !unicast_deferral_exempt(route))
+                                    && ribs
+                                        .get(&LOCAL_PEER)
+                                        .and_then(|rib| rib.get(prefix, best.path_id))
+                                        .is_some())
+                        })
                     {
                         continue;
                     }
@@ -7519,7 +7554,7 @@ impl RibManager {
                     || self
                         .ribs
                         .get(&LOCAL_PEER)
-                        .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
+                        .is_some_and(|rib| rib.iter_prefix(prefix).any(unicast_deferral_exempt))
             })
             .copied()
             .collect();

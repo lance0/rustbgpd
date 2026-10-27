@@ -856,3 +856,110 @@ fn deferred_unicast_local_replay_work_is_linear() {
         deferred_unicast_local_replay,
     );
 }
+
+/// All paths share an NLRI. Original ordinary paths precede eligible paths,
+/// so rescanning original intent per outbound rank would add quadratic work.
+fn deferred_unicast_sibling_initial_replay(size: usize) -> Work {
+    let count = size * ROUTES;
+    let (_tx, mut manager) = deferred_unicast_manager();
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24);
+    for index in 0..count {
+        let mut route = deferred_local_unicast(prefix);
+        route.path_id = u32::try_from(index).unwrap();
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+        });
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, route),
+            crate::update::InjectOutcome::Created
+        );
+    }
+    assert_eq!(manager.loc_rib.len(), 0);
+    for index in count..2 * count - 1 {
+        let mut route = deferred_local_unicast(prefix);
+        route.path_id = u32::try_from(index).unwrap();
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, route),
+            crate::update::InjectOutcome::Created
+        );
+    }
+    let target = member(2);
+    let mut receiver = None;
+    let work = checkpoints_in(|| {
+        let mut route = deferred_local_unicast(prefix);
+        route.path_id = u32::try_from(2 * count - 1).unwrap();
+        assert_eq!(
+            inject_deferred_unicast(&mut manager, route),
+            crate::update::InjectOutcome::Created
+        );
+        let (outbound_tx, rx) = mpsc::channel(16);
+        let mut up = test_peer_up(target, 1, outbound_tx);
+        if let RibUpdate::PeerUp {
+            add_path_send_families,
+            add_path_send_max,
+            ..
+        } = &mut up
+        {
+            *add_path_send_families = vec![(Afi::Ipv4, Safi::Unicast)];
+            *add_path_send_max = u32::try_from(count).unwrap();
+        }
+        manager.handle_update(up);
+        receiver = Some(rx);
+    });
+    assert!(manager.selection_deferred((Afi::Ipv4, Safi::Unicast)));
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), 2 * count);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        2 * count
+    );
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    let selected: Vec<_> = manager.loc_rib.iter().collect();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].peer, LOCAL_PEER);
+    assert!(selected[0].path_id >= u32::try_from(count).unwrap());
+    assert!(
+        selected[0]
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+    );
+    let mut paths = BTreeSet::new();
+    while let Ok(update) = receiver.as_mut().unwrap().try_recv() {
+        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(update.end_of_rib, [] as [(Afi, Safi); 0]);
+        for route in update.announce.iter() {
+            assert_eq!(route.prefix, Prefix::V4(prefix));
+            assert_eq!(route.peer, LOCAL_PEER);
+            assert!(
+                route
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+            );
+            assert!(paths.insert(route.path_id), "each wire path appears once");
+        }
+    }
+    assert_eq!(paths, (1..=u32::try_from(count).unwrap()).collect());
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryAdvertisedCount {
+        peer: target,
+        reply,
+    });
+    assert_eq!(response.try_recv().unwrap(), count);
+    eprintln!("deferred unicast sibling initial replay size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn deferred_unicast_sibling_initial_replay_work_is_linear() {
+    assert_linear(
+        "same-prefix RTBH Add-Path initial replay during selection deferral",
+        &[ALL, "selection_candidates"],
+        deferred_unicast_sibling_initial_replay,
+    );
+}

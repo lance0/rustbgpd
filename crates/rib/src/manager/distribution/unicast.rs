@@ -1,4 +1,5 @@
 use super::super::conditional_advertisement::ConditionalGate;
+use super::super::helpers::unicast_deferral_exempt;
 use super::super::update_groups::{
     GroupEvalAccumulator, PerClientBestPrefixStage, PolicyLabel, RunnerUp, capture_source_attrs,
 };
@@ -560,9 +561,13 @@ impl RibManager {
         // `orr_candidates`, same comparator). A plain peer explains the
         // Loc-RIB best, unchanged.
         let best = if let Some(source) = source {
-            if local_only && source.peer != LOCAL_PEER {
-                let message =
-                    "received source awaits graceful-restart selection deferral".to_string();
+            if local_only
+                && !ribs.get(&source.peer).is_some_and(|rib| {
+                    rib.get(&prefix, source.path_id)
+                        .is_some_and(unicast_deferral_exempt)
+                })
+            {
+                let message = "source awaits graceful-restart selection deferral".to_string();
                 gate(
                     &mut explain.gates,
                     "best_route",
@@ -957,7 +962,10 @@ impl RibManager {
             );
             winner
         } else {
-            let Some(best) = loc_rib.get(&prefix) else {
+            let Some(best) = loc_rib
+                .get(&prefix)
+                .filter(|best| !local_only || unicast_deferral_exempt(best))
+            else {
                 gate(
                     &mut explain.gates,
                     "best_route",
@@ -2485,7 +2493,7 @@ impl RibManager {
         checkpoint();
         let Some(best) = loc_rib
             .get(prefix)
-            .filter(|best| !local_only || best.peer == LOCAL_PEER)
+            .filter(|best| !local_only || unicast_deferral_exempt(best))
         else {
             target.gate("best_route", "no_best_route", Stop, || {
                 "no best route exists for this prefix".to_string()

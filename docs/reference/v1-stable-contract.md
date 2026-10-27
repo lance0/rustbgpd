@@ -140,16 +140,19 @@ intent separately from committed advertisements and remote observations.
 
 A planned restart (SIGTERM with a Graceful Restart marker in
 `runtime_state_dir`) arms RFC 4724 selection deferral when any static
-neighbor has Graceful Restart enabled. Re-injected unicast routes and FlowSpec
-rules are eligible for selection and export during that window, subject to
-ordinary policy and admission. For unicast this includes leased and unleased
-routes, every local `path_id`, and host or non-host prefixes, with or without
-the BLACKHOLE community. While selection is deferred, local candidates
-compete only with other local candidates in every selection mode; received
-candidates remain retained and ineligible. `ListPathExportDispositions`
-reports local outbound-channel admission as `COMMITTED`, never remote acceptance
-or enforcement. Other local candidates, policy and admission can still
-withhold or delay an export. See the API contracts for
+neighbor has Graceful Restart enabled. Re-injected RTBH unicast and
+FlowSpec rules are eligible for selection and export during an active
+hold, subject to ordinary policy
+and admission. RTBH eligibility means an IPv4 `/32`, IPv6 `/128`, or any
+prefix carrying standard BLACKHOLE `65535:666`, leased or unleased and with
+any local `path_id`. A host route qualifies without BLACKHOLE; the
+classification promises no remote discard. Other injected unicast, including
+untagged defaults and aggregates, waits like received candidates. While
+selection is deferred, only eligible local candidates compete in every
+selection mode; received candidates remain retained and ineligible.
+`ListPathExportDispositions` reports local outbound-channel admission as
+`COMMITTED`, never remote acceptance or enforcement. Other eligible local
+candidates, policy and admission can still withhold or delay an export. See the API contracts for
 [unicast](api.md#unicast-injection-contract) and
 [FlowSpec](api.md#flowspec-injection-contract).
 
@@ -165,6 +168,9 @@ completion gates. `MarkReplayComplete` releases only the separate
 it does not end selection deferral or the other convergence and refresh
 holds. Delete and lease expiry withdraw local intent during deferral without
 advertising a received fallback.
+
+The unicast RTBH exemption remains a deliberate exception to RFC 4724 §4.1;
+see the [ADR-0141 amendment](../adr/0141-injection-owner-lease.md#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27).
 
 To shorten the window, remove placeholder neighbors that will not come up,
 set `graceful_restart = false` on neighbors that are not expected to return,

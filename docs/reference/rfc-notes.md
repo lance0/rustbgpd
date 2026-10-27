@@ -1197,9 +1197,10 @@ the RIB freezes the resolved static GR peer/family roster. Per-family Loc-RIB
 selection and outbound initial table/EoR are held until current-session EoRs
 arrive from every eligible waiter or the marker-bounded selection timer
 expires. Peer Restart State and absent GR families exclude that peer/family;
-superseded-session EoRs are rejected. API-injected unicast routes and FlowSpec
-rules are exceptions to the selection hold; received candidates and
-completion markers retain their existing gates. See
+superseded-session EoRs are rejected. API-injected RTBH unicast (`/32`, `/128` or standard BLACKHOLE `65535:666`)
+and FlowSpec rules are exceptions to the selection hold; other injected
+unicast, received candidates and completion markers retain their existing
+gates. See
 [Injected FlowSpec During Selection Deferral](#injected-flowspec-during-selection-deferral)
 and [Injected Unicast During Selection Deferral](#injected-unicast-during-selection-deferral).
 
@@ -1321,15 +1322,18 @@ decides. End-of-RIB for the family still waits for the release. See the
 
 ### Injected Unicast During Selection Deferral
 
-API-injected IPv4 and IPv6 unicast routes are also exempt from the selection
-hold, extending the deliberate departure from RFC 4724 §4.1 above. That
-section gives no explicit local-origin exception; UPDATE-before-End-of-RIB
-ordering does not itself authorize one. The exemption covers leased and
-unleased local routes, all injection path IDs and all prefix lengths, with no BLACKHOLE
-community requirement.
+Only API-injected RTBH unicast routes are exempt from the selection hold:
+IPv4 `/32`, IPv6 `/128`, or any prefix carrying the standard BLACKHOLE
+community `65535:666` (RFC 7999). This covers leased and unleased routes and
+all injection path IDs. Untagged defaults, aggregates and other non-host
+injections wait like received candidates. A host route qualifies without a
+BLACKHOLE community; this classification is no promise of remote discard.
+The exemption remains a deliberate departure from RFC 4724 §4.1, which
+gives no explicit local-origin exception. UPDATE-before-End-of-RIB ordering
+does not itself authorize one.
 
-While selection is deferred, only local candidates participate in ordinary
-best path, Add-Path, ORR and per-client best selection, including initial
+While selection is deferred, only eligible local RTBH candidates participate
+in ordinary best path, Add-Path, ORR and per-client best selection, including initial
 tables, dirty resyncs and explanations. Received candidates remain retained
 and ineligible. Existing export and admission checks still apply. Delete or
 expiry withdraws local intent without selecting a received fallback. When
@@ -1337,7 +1341,7 @@ selection becomes available, normal competition resumes, including staged
 collision failback while completion markers remain held. End-of-RIB remains
 behind release selection and the existing convergence and refresh gates.
 `MarkReplayComplete` releases only the separate replay grace window. See the
-[ADR-0141 unicast amendment](../adr/0141-injection-owner-lease.md#amendment-injected-unicast-skips-selection-deferral-2026-10-27)
+[ADR-0141 unicast amendment](../adr/0141-injection-owner-lease.md#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27)
 for the temporary-winner and helper stale-path tradeoffs.
 
 ### Stale Demotion Placement
