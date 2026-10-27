@@ -2039,6 +2039,73 @@ pub(super) struct PolicyFilteredRouteKey {
     pub(super) path_id: u32,
 }
 
+/// A prefix can contribute many rejected source/path identities. Grow an
+/// empty allocation from the exact incoming identity bound, never by
+/// reserving a populated set or assuming prefix cardinality is sufficient.
+#[expect(
+    clippy::ref_option,
+    reason = "inventory work borrows its existing readiness owner"
+)]
+fn extend_policy_filtered_routes_with_readiness(
+    routes: &mut HashSet<PolicyFilteredRouteKey>,
+    mut incoming: impl ExactSizeIterator<Item = PolicyFilteredRouteKey>,
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+) {
+    let required = routes.len().saturating_add(incoming.len());
+    if required > routes.capacity() {
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        let mut replacement = HashSet::with_capacity(required);
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        #[cfg(test)]
+        let capacity = replacement.capacity();
+        for key in routes.drain() {
+            replacement_readiness_checkpoint_at(readiness, "policy_filtered_rebuild", false);
+            replacement.insert(key);
+            #[cfg(test)]
+            assert_eq!(
+                replacement.capacity(),
+                capacity,
+                "policy-filtered inventory grew during old-key rebuild"
+            );
+        }
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        drop(std::mem::replace(routes, replacement));
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+    }
+    #[cfg(test)]
+    let capacity = routes.capacity();
+    for key in incoming.by_ref() {
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_input", false);
+        routes.insert(key);
+        #[cfg(test)]
+        assert_eq!(
+            routes.capacity(),
+            capacity,
+            "policy-filtered inventory grew during candidate insertion"
+        );
+    }
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+    drop(incoming);
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+}
+
+#[expect(
+    clippy::ref_option,
+    reason = "inventory cleanup borrows its existing readiness owner"
+)]
+fn retire_policy_filtered_routes_with_readiness(
+    routes: &mut HashSet<PolicyFilteredRouteKey>,
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+) {
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
+    for _ in routes.drain() {
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", false);
+    }
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
+    drop(std::mem::take(routes));
+    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
+}
+
 enum PendingRouteChunk {
     Withdrawn(Vec<(Prefix, u32)>),
     Announced(Vec<crate::route::Route>),

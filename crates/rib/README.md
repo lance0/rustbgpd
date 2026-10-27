@@ -77,7 +77,7 @@ The update-group and manager inventory has these boundaries:
 | LLGR `*_llgr_stale_local_tags` | Still requires checkpoint-aware promotion through removal, attribute mutation/interning, selection and cleanup before bounding set growth. |
 | Selection-deferral identity sets | Retained identities have admission limits, but resize work is not bounded. EVPN and RTC recorders also need input checkpoints. |
 | First outbound-limit admitted-set installation | Still requires readiness ownership, per-entry checkpoints and reservation from the known family count. The regroup path already reserves and checkpoints. |
-| `current_policy_filtered_routes` temporaries | Still require bounded set growth and missing candidate-transfer checkpoints. Prefix count alone does not bound multipath rejection identities. |
+| `current_policy_filtered_routes` temporaries | Initial, refresh, distribution and transition replay writers allocate from existing identities plus the exact incoming candidate count. Growth rebuilds a fresh set with per-key checkpoints; input transfers and retirement retain the caller's readiness owner. Prefix cardinality does not bound multipath identities. |
 
 Production-writer growth regressions cover the sharded maps and the route slab
 above. A build with `bench-internals` can trace source-attribute and group-table

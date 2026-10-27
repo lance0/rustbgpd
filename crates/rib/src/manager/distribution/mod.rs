@@ -5909,25 +5909,22 @@ impl RibManager {
             }
             receipt.emits_succeeded += 1;
             self.apply_batched_transition_counters(peer, &inventory);
-            let mut current: HashSet<PolicyFilteredRouteKey> = self
-                .group_ribs
-                .get(&destination)
-                .map(|group| {
+            let mut current = HashSet::new();
+            if let Some(group) = self.group_ribs.get(&destination) {
+                super::extend_policy_filtered_routes_with_readiness(
+                    &mut current,
                     group
                         .policy_filtered_for_member_with_checkpoint(
                             peer,
                             &filtered_scope,
                             &mut || checkpoint(),
                         )
-                        .into_iter()
-                        .inspect(|_| checkpoint())
-                        .collect()
-                })
-                .unwrap_or_default();
+                        .into_iter(),
+                    &readiness,
+                );
+            }
             self.update_policy_filtered_routes_for_prefixes(peer, &filtered_scope, &current);
-            self.replacement_checkpoint(true);
-            super::retire_hash_set(&mut current, &mut || checkpoint());
-            self.replacement_checkpoint(true);
+            super::retire_policy_filtered_routes_with_readiness(&mut current, &readiness);
             receipt.filtered_scope_member_visits += filtered_scope.len();
             let advertised = self
                 .grouped_advertised_unicast_lens(peer)
@@ -7435,11 +7432,36 @@ impl RibManager {
         metrics.clone()
     }
 
+    fn distribute_changes_inner(
+        &mut self,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+        service_ingest_readiness: bool,
+        advertised_generation_already_advanced: bool,
+        evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
+        targets: Option<&HashSet<PeerId>>,
+    ) {
+        // Selection has completed before export. Reuse an outer owner, or
+        // retain the unchanged Loc-RIB count across every temporary writer.
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                manager.distribute_changes_with_readiness(
+                    best_changed,
+                    all_affected,
+                    service_ingest_readiness,
+                    advertised_generation_already_advanced,
+                    evpn_feeds,
+                    targets,
+                );
+            });
+        });
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "distribution loop coordinates dirty peers, forced resync, and all families"
     )]
-    fn distribute_changes_inner(
+    fn distribute_changes_with_readiness(
         &mut self,
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
@@ -8317,8 +8339,7 @@ impl RibManager {
                     let mut rtc_announce = Vec::new();
                     let mut rtc_withdraw = Vec::new();
                     let mut group_otc_blocked = Vec::new();
-                    let mut current_policy_filtered_routes: HashSet<PolicyFilteredRouteKey> =
-                        HashSet::with_capacity(effective_prefixes.len());
+                    let mut current_policy_filtered_routes = HashSet::new();
 
                     // Grouped member: the unicast portion comes from the group —
                     // source-flip matrix over this pass's deltas for a clean
@@ -8498,9 +8519,11 @@ impl RibManager {
                                 &effective_prefixes,
                                 &mut || checkpoint(),
                             );
-                            current_policy_filtered_routes.reserve(filtered.len());
-                            current_policy_filtered_routes
-                                .extend(filtered.drain(..).inspect(|_| checkpoint()));
+                            super::extend_policy_filtered_routes_with_readiness(
+                                &mut current_policy_filtered_routes,
+                                filtered.drain(..),
+                                &readiness,
+                            );
                             super::retire_vec(&mut filtered, &mut || checkpoint());
                             group_otc_blocked = if resync {
                                 group.otc_blocked_for_member_with_checkpoint(
@@ -8674,8 +8697,10 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            current_policy_filtered_routes.extend(
-                                unicast.policy_filtered.drain(..).inspect(|_| checkpoint()),
+                            super::extend_policy_filtered_routes_with_readiness(
+                                &mut current_policy_filtered_routes,
+                                unicast.policy_filtered.drain(..),
+                                &readiness,
                             );
                         } else if per_client_best {
                             // RFC 7947 §2.3.2 per-client best-path: the first
@@ -8721,8 +8746,10 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            current_policy_filtered_routes.extend(
-                                unicast.policy_filtered.drain(..).inspect(|_| checkpoint()),
+                            super::extend_policy_filtered_routes_with_readiness(
+                                &mut current_policy_filtered_routes,
+                                unicast.policy_filtered.drain(..),
+                                &readiness,
                             );
                         } else if let Some((orr_topology, orr_spf)) = orr_ctx {
                             // ORR peer with a resolved vantage: per-vantage best.
@@ -8754,8 +8781,10 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            current_policy_filtered_routes.extend(
-                                unicast.policy_filtered.drain(..).inspect(|_| checkpoint()),
+                            super::extend_policy_filtered_routes_with_readiness(
+                                &mut current_policy_filtered_routes,
+                                unicast.policy_filtered.drain(..),
+                                &readiness,
                             );
                         } else {
                             let mut target = ExportTarget::Peer {
@@ -8787,8 +8816,10 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            current_policy_filtered_routes.extend(
-                                unicast.policy_filtered.drain(..).inspect(|_| checkpoint()),
+                            super::extend_policy_filtered_routes_with_readiness(
+                                &mut current_policy_filtered_routes,
+                                unicast.policy_filtered.drain(..),
+                                &readiness,
                             );
                         }
                     }
@@ -9372,9 +9403,10 @@ impl RibManager {
                         current_policy_filtered_routes.len(),
                         current_policy_filtered_routes.capacity(),
                     );
-                    super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
-                        checkpoint();
-                    });
+                    super::retire_policy_filtered_routes_with_readiness(
+                        &mut current_policy_filtered_routes,
+                        &readiness,
+                    );
                     super::retire_hash_set(&mut effective_flowspec_rules, &mut || checkpoint());
                     super::retire_hash_set(&mut effective_evpn_keys, &mut || checkpoint());
                     super::retire_hash_set(&mut effective_bgpls_keys, &mut || checkpoint());
