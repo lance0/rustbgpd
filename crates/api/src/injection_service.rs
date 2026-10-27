@@ -5153,9 +5153,9 @@ mod tests {
                 route.extended_communities,
                 vec![0x010c_c000_020a_0000 | u64::from(copy)]
             );
-            assert!(route.ipv6_extended_communities.is_empty());
+            assert_eq!(route.ipv6_extended_communities, Vec::<Vec<u8>>::new());
         } else {
-            assert!(route.extended_communities.is_empty());
+            assert_eq!(route.extended_communities, Vec::<u64>::new());
             let mut expected = vec![
                 0x00, 0x0c, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0, 0,
             ];
