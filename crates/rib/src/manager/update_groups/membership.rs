@@ -5,6 +5,19 @@ use super::{
 use crate::PeerId;
 
 impl RibManager {
+    /// Planning and allocation share one ownership decision without installing
+    /// the destination table before the last OLD member has left.
+    pub(in crate::manager) fn planned_group_owns_evpn(&self, gid: usize) -> bool {
+        self.group_ribs.get(&gid).map_or_else(
+            || {
+                self.update_groups
+                    .group_key(gid)
+                    .is_some_and(|key| key.owns_evpn)
+            },
+            GroupRibOut::owns_evpn_routes,
+        )
+    }
+
     /// Compute (or recompute) a registered peer's update-group
     /// membership from the fingerprint inputs already in hand, and run
     /// the membership lifecycle (design §4): join = lookup-or-create
@@ -43,20 +56,6 @@ impl RibManager {
             GroupMembership::Grouped(id) => Some(id),
             _ => None,
         };
-        #[cfg(feature = "bench-internals")]
-        if self.bench_evpn_ownership_candidate(peer)
-            && new_gid.is_some_and(|gid| !self.group_ribs.contains_key(&gid))
-        {
-            assert!(
-                !self.update_groups.members.contains_key(&peer)
-                    && self.loc_rib.evpn_len() == 0
-                    && self
-                        .adj_ribs_out
-                        .get(&peer)
-                        .is_none_or(|rib| rib.evpn_len() == 0),
-                "the stable EVPN fixture cannot regroup or join a new owned destination after EVPN population"
-            );
-        }
         let old_evpn_owned = prev_gid.is_some_and(|gid| {
             self.group_ribs
                 .get(&gid)
@@ -74,15 +73,9 @@ impl RibManager {
                 || prev_gid
                     .is_some_and(|gid| !self.group_ribs[&gid].dirty_members.contains(&peer))))
             || (old_evpn_owned && self.evpn_feed_is_current(peer));
-        // Production new groups are EVPN-private. The feature-only stable
-        // fixture permits only an initially empty new group above.
-        // Inspect installed destinations only;
-        // join_group builds an absent table after the last OLD member leaves.
-        let new_evpn_owned = new_gid.is_some_and(|gid| {
-            self.group_ribs
-                .get(&gid)
-                .is_some_and(GroupRibOut::owns_evpn_routes)
-        });
+        let new_evpn_owned = new_gid.is_some_and(|gid| self.planned_group_owns_evpn(gid));
+        let deferred_evpn_destination =
+            new_evpn_owned && new_gid.is_some_and(|gid| !self.group_ribs.contains_key(&gid));
         if new_evpn_owned
             && !old_evpn_owned
             && !self.capture_private_evpn_before_join(peer, new_gid.expect("owned destination"))
@@ -91,10 +84,11 @@ impl RibManager {
             self.mark_outbound_dirty_inner(peer, false);
             return None;
         }
-        let private_evpn_seed = if old_evpn_owned && !new_evpn_owned {
+        let private_evpn_seed = if old_evpn_owned && (!new_evpn_owned || deferred_evpn_destination)
+        {
             let gid = prev_gid.expect("owned OLD has a group");
             let old = &self.group_ribs[&gid];
-            let filter = self.member_rt_filter(peer);
+            let filter = self.rtc_export_filter(peer, Some(&old.sendable));
             let proof = self
                 .evpn_recovery_handle(peer)
                 .and_then(|handle| self.evpn_recovery.proof(handle).ok().flatten());
@@ -124,7 +118,7 @@ impl RibManager {
             };
             if !complete_proof || (old_evpn_clean && count.is_none()) {
                 // An incomplete proof cannot transfer its OLD duties. A
-                // complete dirty proof instead heals through private resync.
+                // complete dirty proof instead heals through destination resync.
                 if let Some(handle) = self.evpn_recovery_handle(peer) {
                     self.evpn_recovery.fail_admission(handle);
                 }
@@ -137,38 +131,40 @@ impl RibManager {
         } else {
             None
         };
-        self.invalidate_evpn_feed_completion(peer);
-        let evpn_feed = if new_evpn_owned {
-            new_gid.and_then(|gid| {
-                self.prepare_complete_evpn_feed(
-                    peer,
-                    gid,
-                    prev_gid.filter(|_| old_evpn_owned),
-                    old_evpn_clean,
-                )
-            })
-        } else {
-            // Restore the existing actual private store before OLD retires;
-            // unchanged admitted routes need storage transfer, not an ANN.
-            if let Some((gid, count)) = private_evpn_seed {
-                let filter = self.member_rt_filter(peer);
-                let rejected = self.peer_unexportable.get(&peer);
-                let old = &self.group_ribs[&gid];
-                let private = self
-                    .adj_ribs_out
-                    .entry(peer)
-                    .or_insert_with(|| AdjRibOut::with_capacity(peer, 0));
-                private.reserve_evpn_with(count, &mut checkpoint);
-                for route in old.evpn_member_projection_with_checkpoint(
-                    peer,
-                    self.cluster_id,
-                    filter.as_ref(),
-                    rejected,
-                    &checkpoint,
-                ) {
-                    private.insert_evpn(route.clone());
-                }
+        // The existing private store carries actual OLD across retirement;
+        // complete mixed admission releases it after an owned destination joins.
+        if let Some((gid, count)) = private_evpn_seed {
+            let old = &self.group_ribs[&gid];
+            let filter = self.rtc_export_filter(peer, Some(&old.sendable));
+            let rejected = self.peer_unexportable.get(&peer);
+            let private = self
+                .adj_ribs_out
+                .entry(peer)
+                .or_insert_with(|| AdjRibOut::with_capacity(peer, 0));
+            private.reserve_evpn_with(count, &mut checkpoint);
+            for route in old.evpn_member_projection_with_checkpoint(
+                peer,
+                self.cluster_id,
+                filter.as_ref(),
+                rejected,
+                &checkpoint,
+            ) {
+                private.insert_evpn(route.clone());
             }
+        }
+        self.invalidate_evpn_feed_completion(peer);
+        let mut evpn_feed = if new_evpn_owned {
+            new_gid
+                .filter(|_| !deferred_evpn_destination)
+                .and_then(|gid| {
+                    self.prepare_complete_evpn_feed(
+                        peer,
+                        gid,
+                        prev_gid.filter(|_| old_evpn_owned),
+                        old_evpn_clean,
+                    )
+                })
+        } else {
             if old_evpn_owned && !self.begin_private_evpn_handoff(peer) {
                 if let Some(handle) = self.evpn_recovery_handle(peer) {
                     self.evpn_recovery.fail_admission(handle);
@@ -517,6 +513,10 @@ impl RibManager {
         if new_gid.is_none() && !self.dirty_peers.contains(&peer) {
             self.release_group_admitted_keys(peer);
         }
+        if deferred_evpn_destination {
+            evpn_feed = new_gid
+                .and_then(|gid| self.prepare_complete_evpn_feed(peer, gid, None, old_evpn_clean));
+        }
         evpn_feed
     }
 
@@ -541,21 +541,7 @@ impl RibManager {
     /// join-time build pass (one shared staging walk, deltas discarded:
     /// correct only while the group is memberless). `peer` is the
     /// exemplar whose group-uniform staging inputs seed the profile.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "group-table allocation and shared staging form one installation step"
-    )]
     pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: PeerId) {
-        #[cfg(feature = "bench-internals")]
-        if self.bench_evpn_group_ownership {
-            assert!(
-                self.peer_sendable_families
-                    .get(&peer)
-                    .is_some_and(|families| families
-                        .contains(&(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn))),
-                "the EVPN ownership fixture requires every grouped peer to negotiate EVPN"
-            );
-        }
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
         if !self.group_ribs.contains_key(&gid) {
@@ -592,11 +578,7 @@ impl RibManager {
                 self.loc_rib.len(),
             );
             self.replacement_checkpoint(true);
-            #[cfg(feature = "bench-internals")]
-            if self.bench_evpn_group_ownership && !group.rtc_negotiated() && !group.per_client_best
-            {
-                group.owns_evpn = true;
-            }
+            group.owns_evpn = self.planned_group_owns_evpn(gid);
             group.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
             self.group_ribs.insert(gid, group);
             self.replacement_checkpoint(true);

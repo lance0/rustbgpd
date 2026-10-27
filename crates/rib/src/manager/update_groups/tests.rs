@@ -231,6 +231,7 @@ fn comparison_key() -> GroupKey {
         sendable_ipv6_unicast: false,
         sendable_vpnv4: false,
         sendable_vpnv6: false,
+        owns_evpn: false,
         rtc_negotiated: false,
         per_client_best: false,
         llgr_families: vec![(1, 1)],
@@ -456,6 +457,7 @@ fn comparison_reasons_cover_every_group_key_axis() {
     check!(sendable_ipv6_unicast = true => D::NegotiatedFamilies);
     check!(sendable_vpnv4 = true => D::NegotiatedFamilies);
     check!(sendable_vpnv6 = true => D::NegotiatedFamilies);
+    check!(owns_evpn = true => D::NegotiatedFamilies);
     check!(rtc_negotiated = true => D::NegotiatedFamilies);
     check!(per_client_best = true => D::PerClientBest);
     check!(llgr_families = vec![(2, 1)] => D::LlgrFamilies);
