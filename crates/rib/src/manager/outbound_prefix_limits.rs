@@ -189,17 +189,15 @@ impl OutboundPrefixLimits {
     }
 
     /// Release retained grouped ownership for one family.
-    pub(in crate::manager) fn grouped_clear(&mut self, afi: Afi) {
-        match afi {
-            Afi::Ipv4 => self.grouped_admitted_ipv4.clear(),
-            Afi::Ipv6 => self.grouped_admitted_ipv6.clear(),
-            _ => {}
-        }
-    }
-
-    /// Install a directly collected family-typed materialization.
-    fn replace_grouped(&mut self, admitted: TypedGroupedAdmitted) {
-        self.replace_grouped_with_checkpoint(admitted, &mut || {});
+    pub(in crate::manager) fn grouped_clear_with_checkpoint(
+        &mut self,
+        afi: Afi,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        self.replace_grouped_with_checkpoint(
+            TypedGroupedAdmitted::collect(afi, std::iter::empty()),
+            checkpoint,
+        );
     }
 
     fn replace_grouped_with_checkpoint(
@@ -240,18 +238,34 @@ impl TypedGroupedAdmitted {
         match afi {
             Afi::Ipv4 => {
                 let mut admitted = HashSet::with_capacity(capacity);
+                #[cfg(test)]
+                let reserved = admitted.capacity();
                 admitted.extend(prefixes.into_iter().filter_map(|prefix| match prefix {
                     Prefix::V4(prefix) => Some(prefix),
                     Prefix::V6(_) => None,
                 }));
+                #[cfg(test)]
+                assert_eq!(
+                    admitted.capacity(),
+                    reserved,
+                    "IPv4 inventory grew while filling"
+                );
                 Self::Ipv4(admitted)
             }
             Afi::Ipv6 => {
                 let mut admitted = HashSet::with_capacity(capacity);
+                #[cfg(test)]
+                let reserved = admitted.capacity();
                 admitted.extend(prefixes.into_iter().filter_map(|prefix| match prefix {
                     Prefix::V6(prefix) => Some(prefix),
                     Prefix::V4(_) => None,
                 }));
+                #[cfg(test)]
+                assert_eq!(
+                    admitted.capacity(),
+                    reserved,
+                    "IPv6 inventory grew while filling"
+                );
                 Self::Ipv6(admitted)
             }
             _ => unreachable!("only limited unicast families are materialized"),
@@ -260,8 +274,22 @@ impl TypedGroupedAdmitted {
 
     fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
         match self {
-            Self::Ipv4(prefixes) => super::retire_hash_set(prefixes, checkpoint),
-            Self::Ipv6(prefixes) => super::retire_hash_set(prefixes, checkpoint),
+            Self::Ipv4(prefixes) => {
+                checkpoint();
+                for _ in prefixes.drain() {
+                    checkpoint();
+                }
+                drop(std::mem::take(prefixes));
+                checkpoint();
+            }
+            Self::Ipv6(prefixes) => {
+                checkpoint();
+                for _ in prefixes.drain() {
+                    checkpoint();
+                }
+                drop(std::mem::take(prefixes));
+                checkpoint();
+            }
         }
     }
 
@@ -315,6 +343,11 @@ pub(in crate::manager) struct OutboundLimitControl {
 }
 
 impl OutboundLimitControl {
+    #[cfg(test)]
+    pub(in crate::manager) fn advance_epoch_for_test(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
     /// Drop one departing registration's pending recovery intent. The
     /// resolver tables are configuration and survive the session; a
     /// reconnect resolves them again.
@@ -1185,6 +1218,19 @@ impl RibManager {
         activate: bool,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                manager.apply_outbound_prefix_limits(txn, activate, reply);
+            });
+        });
+    }
+
+    fn apply_outbound_prefix_limits(
+        &mut self,
+        txn: u64,
+        activate: bool,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
         if !activate {
             if self
                 .outbound_limit_control
@@ -1222,7 +1268,7 @@ impl RibManager {
         }
         // The transaction identity is checked before consuming the slot so a
         // stale Apply cannot discard a newer prepared transaction.
-        let prepared = self
+        let mut prepared = self
             .outbound_limit_control
             .prepared
             .take()
@@ -1234,13 +1280,12 @@ impl RibManager {
             return;
         }
         let started = std::time::Instant::now();
-        let live: Vec<_> = prepared
-            .targets
-            .iter()
-            .filter(|(peer, session_id, _)| self.outbound_session_ids.get(peer) == Some(session_id))
-            .copied()
-            .collect();
-        for (peer, _, candidate) in &live {
+        prepared.targets.retain(|(peer, session_id, _)| {
+            self.replacement_checkpoint_at("outbound_limit_install_targets", false);
+            self.outbound_session_ids.get(peer) == Some(session_id)
+        });
+        for (peer, _, candidate) in &prepared.targets {
+            self.replacement_checkpoint_at("outbound_limit_install_targets", false);
             let grouped = self.grouped_member_of(*peer).is_some();
             for afi in LIMITED_FAMILIES {
                 let Some(limit) = candidate.family(afi) else {
@@ -1264,12 +1309,16 @@ impl RibManager {
             }
         }
         self.outbound_limit_control.config = prepared.config;
-        for (peer, _, candidate) in live {
+        for (peer, _, candidate) in prepared.targets.drain(..) {
+            self.replacement_checkpoint_at("outbound_limit_install_targets", false);
             for afi in LIMITED_FAMILIES {
                 self.install_outbound_limit(peer, afi, candidate.family(afi));
             }
             self.refresh_outbound_limit_gauges(peer);
         }
+        super::retire_vec(&mut prepared.targets, &mut || {
+            self.replacement_checkpoint_at("outbound_limit_install_targets", false);
+        });
         self.outbound_limit_control.epoch = self.outbound_limit_control.epoch.wrapping_add(1);
         self.outbound_limit_control.activated = Some(txn);
         self.metrics
@@ -1301,12 +1350,36 @@ impl RibManager {
         // proved its whole advertised projection fits, so materialize it as
         // the bounded set the limiter now maintains.
         let materialized = (grouped && limit.is_some() && previous.is_none()).then(|| {
-            self.grouped_advertised_routes_iter(peer).map_or_else(
+            // Every projected route keeps its staged prefix, including lane
+            // substitutions and Add-Path slots. Exclusions only reduce this
+            // distinct-family-prefix upper bound.
+            let capacity = self
+                .grouped_member_of(peer)
+                .and_then(|gid| self.group_ribs.get(&gid))
+                .map_or(0, |group| group.table.unicast_prefix_count(afi));
+            self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
+            let admitted = self.grouped_advertised_routes_iter(peer).map_or_else(
                 || TypedGroupedAdmitted::collect(afi, std::iter::empty()),
-                |routes| TypedGroupedAdmitted::collect(afi, routes.map(|route| route.prefix)),
-            )
+                |routes| {
+                    TypedGroupedAdmitted::collect_with_capacity(
+                        afi,
+                        routes.map(|route| route.prefix),
+                        capacity,
+                    )
+                },
+            );
+            self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
+            admitted
         });
 
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::replacement_readiness_checkpoint_at(
+                &readiness,
+                "outbound_limit_inventory_retirement",
+                false,
+            );
+        };
         let entry = self.outbound_prefix_limits.entry(peer).or_default();
         let Some(family) = entry.family_mut(afi) else {
             return;
@@ -1316,10 +1389,10 @@ impl RibManager {
             family.blocking = false;
         }
         if let Some(materialized) = materialized {
-            entry.replace_grouped(materialized);
+            entry.replace_grouped_with_checkpoint(materialized, &mut checkpoint);
         }
         if limit.is_none() {
-            entry.grouped_clear(afi);
+            entry.grouped_clear_with_checkpoint(afi, &mut checkpoint);
         }
         // Keep the unlimited fast path exactly as it was: a peer with no
         // remaining limit owns no admission state at all.
