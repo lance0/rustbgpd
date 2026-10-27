@@ -802,6 +802,11 @@ fn deferred_unicast_commit_accepts_local_updates_and_rejects_mixed_sources() {
     let mut local = received.clone();
     local.peer = crate::manager::helpers::LOCAL_PEER;
     local.origin_type = crate::route::RouteOrigin::Local;
+    manager
+        .ribs
+        .entry(local.peer)
+        .or_insert_with(|| crate::adj_rib_in::AdjRibIn::new(local.peer))
+        .insert(local.clone());
     assert_eq!(
         manager.try_send_and_commit_outbound_update(
             target,

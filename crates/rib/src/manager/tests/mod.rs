@@ -1468,6 +1468,7 @@ mod rpki;
 mod rs_control;
 mod rtc;
 mod selection_deferral;
+mod selection_deferral_mutations;
 mod selection_deferral_recording;
 mod session_export_policy;
 mod slice_timing;

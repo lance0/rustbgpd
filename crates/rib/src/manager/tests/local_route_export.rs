@@ -1530,7 +1530,7 @@ fn received_flowspec_selected(
 /// `FlowSpec` rule is still selected and committed to an Established peer at
 /// once. Received rules wait, including one with the injected rule's key
 /// that out-selects it only at release; our `FlowSpec` `EoR` waits for the
-/// release; injected unicast shares the local-route exemption. Red proof:
+/// release; injected RTBH unicast has its own exemption. Red proof:
 /// dropping the injected-rule exemption from `FlowSpec` selection leaves the rule
 /// unselected and its export pending.
 #[test]
@@ -2188,20 +2188,15 @@ fn injected_unicast_is_exported_during_selection_deferral() {
             );
         }
 
-        // Scope is every local unicast route, not only BLACKHOLE hosts.
+        // An ordinary untagged aggregate waits alongside received routes.
         let plain = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24));
         inject(&mut manager, local_route(plain, 71));
-        assert_deferred_unicast_replay(
-            &deferred_unicast_drain(&mut target_rx),
-            mode,
-            &[plain],
-            false,
-        );
-        assert_deferred_unicast_replay(
-            &deferred_unicast_drain(&mut late_rx),
-            mode,
-            &[plain],
-            false,
+        assert!(manager.loc_rib.get(&plain).is_none());
+        assert!(deferred_unicast_drain(&mut target_rx).is_empty());
+        assert!(deferred_unicast_drain(&mut late_rx).is_empty());
+        assert_eq!(
+            row(&query(&mut manager, plain, 71, None, 10).unwrap(), target).reason,
+            "selection_deferred"
         );
 
         let (reply, mut response) = oneshot::channel();
@@ -2260,6 +2255,227 @@ fn injected_unicast_is_exported_during_selection_deferral() {
                 assert_eq!(count, 1, "{mode:?}: exactly one EoR per family");
             }
         }
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one dual-stack transcript pins the RTBH boundary across every export mode"
+)]
+fn unicast_deferral_exempts_only_local_rtbh_candidates() {
+    let defaults = [
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+        Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0)),
+    ];
+    let aggregates = [
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24)),
+        Prefix::V6(Ipv6Prefix::new("2001:db8:10::".parse().unwrap(), 64)),
+    ];
+    for mode in DEFERRED_UNICAST_MODES {
+        let mut manager = deferred_unicast_manager();
+        let target = PeerId::from_addr(v4(2));
+        let mut rx = deferred_unicast_peer(&mut manager, target, mode, false);
+        assert!(deferred_unicast_drain(&mut rx).is_empty());
+        let hosts = deferred_unicast_hosts();
+        for prefix in defaults.into_iter().chain(aggregates) {
+            inject(&mut manager, local_route(prefix, 23));
+            assert!(
+                manager.loc_rib.get(&prefix).is_none(),
+                "{mode:?}: non-RTBH held"
+            );
+            let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+            assert_eq!(
+                row(&page, target).disposition,
+                RouteExportDisposition::Pending
+            );
+            assert_eq!(row(&page, target).reason, "selection_deferred");
+            let explain =
+                deferred_unicast_explain(&mut manager, target, prefix, mode, (LOCAL_PEER, 23));
+            assert_eq!(
+                explain.decision,
+                crate::update::ExplainDecision::NoBestRoute
+            );
+        }
+        assert!(deferred_unicast_drain(&mut rx).is_empty());
+        // Host shape is sufficient without BLACKHOLE; the leased API follows
+        // the same rule as the unleased API and preserves arbitrary path IDs.
+        inject(&mut manager, local_route(hosts[0], 17));
+        deferred_unicast_lease(&mut manager, local_route(hosts[1], 17));
+        for prefix in aggregates {
+            // The same prefix has an untagged local path with a lower path ID.
+            // Eligibility is per candidate, not a prefix-wide exemption.
+            inject(&mut manager, deferred_unicast_local(prefix, 71, 50));
+            assert_eq!(manager.loc_rib.get(&prefix).unwrap().path_id, 71);
+            assert_eq!(
+                row(&query(&mut manager, prefix, 23, None, 10).unwrap(), target).reason,
+                "selection_deferred"
+            );
+        }
+        let immediate: Vec<_> = hosts.into_iter().chain(aggregates).collect();
+        assert_deferred_unicast_replay(&deferred_unicast_drain(&mut rx), mode, &immediate, false);
+        let all: Vec<_> = immediate.iter().copied().chain(defaults).collect();
+        let source = deferred_unicast_received(&mut manager, &all);
+        assert!(deferred_unicast_drain(&mut rx).is_empty());
+        assert_eq!(manager.ribs[&source].len(), 6);
+        assert!(
+            manager.ribs[&source]
+                .iter()
+                .all(|route| !route.is_stale && !route.is_llgr_stale)
+        );
+        for prefix in &immediate {
+            let selected = manager.loc_rib.get(prefix).unwrap();
+            assert_eq!(
+                selected.peer, LOCAL_PEER,
+                "{mode:?}: received candidate held"
+            );
+            let id = if hosts.contains(prefix) { 17 } else { 71 };
+            assert_eq!(selected.path_id, id);
+            assert_eq!(
+                row(&query(&mut manager, *prefix, id, None, 10).unwrap(), target).disposition,
+                RouteExportDisposition::Committed
+            );
+        }
+        let late = PeerId::from_addr(v4(3));
+        let mut late_rx = deferred_unicast_peer(&mut manager, late, mode, false);
+        assert_deferred_unicast_replay(
+            &deferred_unicast_drain(&mut late_rx),
+            mode,
+            &immediate,
+            false,
+        );
+        // A real failed admission makes dirty recovery restage the exact tagged
+        // aggregate, including when its untagged sibling has a better rank.
+        let mut permits = Vec::new();
+        while let Ok(permit) = manager.outbound_peers[&late].clone().try_reserve_owned() {
+            permits.push(permit);
+        }
+        let mut changed = deferred_unicast_local(aggregates[0], 71, 50);
+        AttrSet::edit(&mut changed.attributes, |attrs| {
+            attrs.push(PathAttribute::Med(99));
+        });
+        inject(&mut manager, changed);
+        assert!(manager.dirty_peers.contains(&late));
+        assert!(deferred_unicast_drain(&mut late_rx).is_empty());
+        let _ = deferred_unicast_drain(&mut rx);
+        drop(permits);
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        let recovery = deferred_unicast_drain(&mut late_rx);
+        assert!(
+            recovery
+                .iter()
+                .flat_map(|update| update.announce.iter())
+                .any(|route| route.prefix == aggregates[0] && route.med_attr() == Some(99))
+        );
+        assert!(
+            recovery
+                .iter()
+                .flat_map(|update| update.announce.iter())
+                .all(|route| immediate.contains(&route.prefix) && route.peer == LOCAL_PEER)
+        );
+        for prefix in hosts.into_iter().chain(aggregates) {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::WithdrawInjected {
+                prefix,
+                path_id: if hosts.contains(&prefix) { 17 } else { 71 },
+                allow_missing: false,
+                owner: if prefix == hosts[1] {
+                    "deferral-test"
+                } else {
+                    ""
+                }
+                .to_string(),
+                override_owner: false,
+                reply,
+            });
+            response.try_recv().unwrap().unwrap();
+            assert!(
+                manager.loc_rib.get(&prefix).is_none(),
+                "{mode:?}: fallback still held"
+            );
+        }
+        for outbound in [&mut rx, &mut late_rx] {
+            let updates = deferred_unicast_drain(outbound);
+            assert!(
+                updates
+                    .iter()
+                    .all(|update| update.announce.is_empty() && update.end_of_rib.is_empty())
+            );
+            assert_eq!(
+                updates
+                    .iter()
+                    .map(|update| update.withdraw.len())
+                    .sum::<usize>(),
+                4
+            );
+        }
+        // After release the retained received fallback wins all six prefixes,
+        // including the defaults and aggregates that never bypassed deferral.
+        manager.expire_selection_deferral();
+        for prefix in all {
+            assert_eq!(
+                manager.loc_rib.get(&prefix).unwrap().peer,
+                source,
+                "{mode:?}: received fallback"
+            );
+        }
+    }
+}
+
+#[test]
+fn tagged_aggregate_keeps_deferral_exemption_after_export_policy_removes_blackhole() {
+    for mode in [DeferredUnicastMode::Single, DeferredUnicastMode::AddPath] {
+        let mut manager = deferred_unicast_manager();
+        let target = PeerId::from_addr(v4(2));
+        let mut rx = deferred_unicast_peer(&mut manager, target, mode, false);
+        let mut policy = deny_prefixes_chain(&[v4_prefix()]);
+        let entry = &mut policy.policies[0].policy.entries[0];
+        entry.prefix = None;
+        entry.action = rustbgpd_policy::PolicyAction::Permit;
+        entry.modifications.communities_remove = vec![DEFERRED_BLACKHOLE];
+        let policy = PolicyChain::from_named(policy.policies);
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+            peer: target,
+            export_policy: Some(policy),
+            reply,
+        });
+        response.try_recv().unwrap().unwrap();
+        let _ = deferred_unicast_drain(&mut rx);
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24));
+        inject(&mut manager, deferred_unicast_local(prefix, 71, 50));
+        let updates = deferred_unicast_drain(&mut rx);
+        let announced: Vec<_> = updates
+            .iter()
+            .flat_map(|update| update.announce.iter())
+            .collect();
+        assert_eq!(
+            announced.len(),
+            1,
+            "{mode:?}: source tag determines eligibility"
+        );
+        assert_eq!(announced[0].communities(), [] as [u32; 0]);
+        assert_eq!(
+            row(&query(&mut manager, prefix, 71, None, 10).unwrap(), target).disposition,
+            RouteExportDisposition::Committed
+        );
+        let late = PeerId::from_addr(v4(3));
+        let export_policy = manager.export_chains.for_peer(target).cloned();
+        let mut late_rx = peer_up(
+            &mut manager,
+            late,
+            deferred_unicast_families(),
+            export_policy,
+            0,
+            64,
+        );
+        assert_eq!(
+            deferred_unicast_drain(&mut late_rx)
+                .iter()
+                .map(|update| update.announce.len())
+                .sum::<usize>(),
+            1
+        );
     }
 }
 

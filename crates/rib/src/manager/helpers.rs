@@ -16,6 +16,17 @@ use crate::route::BgpLsFamily;
 /// Sentinel peer for locally-injected routes.
 pub(super) const LOCAL_PEER: crate::PeerId = crate::PeerId::LOCAL;
 
+/// Controller RTBH intent may be selected while received routes are incomplete.
+pub(super) fn unicast_deferral_exempt(route: &crate::route::Route) -> bool {
+    route.peer == LOCAL_PEER
+        && (match route.prefix {
+            Prefix::V4(prefix) => prefix.len == 32,
+            Prefix::V6(prefix) => prefix.len == 128,
+        } || route
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE))
+}
+
 /// How long to wait before retrying distribution to dirty peers.
 pub(super) const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 

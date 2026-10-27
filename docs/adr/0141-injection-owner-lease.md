@@ -298,8 +298,8 @@ Edges:
   withdrawal exactly as it delays an injected add today.
   *Injected FlowSpec rules no longer wait; see
   [Amendment: injected FlowSpec skips selection deferral](#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).
-  Injected unicast routes no longer wait either; see
-  [the subsequent amendment](#amendment-injected-unicast-skips-selection-deferral-2026-10-27).*
+  The unicast exception is now limited to RTBH; see
+  [the latest amendment](#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27).*
 
 ### 5. Failure direction
 
@@ -598,6 +598,10 @@ those tables, so holding it buys little safety and delays a mitigation.
 
 ## Amendment: injected unicast skips selection deferral (2026-10-27)
 
+*This records the initial unicast decision. The
+[later amendment](#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27)
+limits the exception to RTBH.*
+
 Controllers replaying RTBH host routes after a planned restart need those
 routes advertised while a Graceful Restart neighbor remains down. The
 previous unicast boundary delayed that local intent along with received
@@ -644,3 +648,43 @@ option is added.
   The [RFC 7999 BLACKHOLE community](https://www.rfc-editor.org/rfc/rfc7999.html#section-2)
   remains advisory; early local export promises no remote discard or
   forwarding outcome.
+
+## Amendment: limit unicast deferral bypass to RTBH (2026-10-27)
+
+The general unicast exception above was wider than the controller recovery
+problem: an untagged default or aggregate could become a temporary winner
+before received alternatives settled. Selection deferral now bypasses only
+local RTBH candidates.
+
+- **RTBH boundary.** A unicast route injected through the local peer
+  `0.0.0.0` skips deferral when it is an IPv4 `/32`, an IPv6 `/128`, or
+  carries the standard BLACKHOLE community `65535:666` (RFC 7999), of any
+  prefix length. This applies to leased and unleased entries and every
+  injection `path_id`. Other injected unicast, including untagged defaults
+  and aggregates, waits like received routes. There is no new RPC field or
+  configuration option. A host prefix qualifies without a BLACKHOLE
+  community; this classification promises no remote discard action.
+- **Candidate and removal paths.** Only eligible local RTBH candidates
+  compete while unicast selection is deferred, across ordinary best path,
+  Add-Path, ORR, per-client best, initial tables, dirty recovery and
+  explanations. A received candidate remains retained even if it would beat
+  the local one, and becomes eligible when selection resumes. Delete and
+  lease expiry remove local intent immediately without exposing a deferred
+  received fallback. Existing policy, next-hop-self, admission, ownership
+  and generation rules are unchanged.
+- **FlowSpec and completion.** The existing exemption for API-injected
+  FlowSpec rules is unchanged. Family End-of-RIB still follows release
+  selection and all convergence, refresh and replay-grace gates.
+  `gr_eor_grace_time` holds completion independently of selection.
+  `MarkReplayComplete` releases only that replay grace window; it does not
+  satisfy a peer's End-of-RIB wait or another completion gate.
+  `COMMITTED` remains local outbound-channel/Adj-RIB-Out evidence, not remote
+  acceptance or forwarding.
+- **Standards scope.** The RTBH exemption remains a deliberate departure
+  from [RFC 4724 §4.1](https://www.rfc-editor.org/rfc/rfc4724.html#section-4.1),
+  which provides no explicit local-origin exception. UPDATE-before-End-of-RIB
+  ordering does not authorize early selection. A host or BLACKHOLE-tagged
+  route can still temporarily win before received alternatives become
+  eligible; a helper can retain other stale Add-Path advertisements until
+  End-of-RIB or its own stale timer. The narrower boundary reduces the scope
+  of that tradeoff and restores deferral for ordinary injected unicast.

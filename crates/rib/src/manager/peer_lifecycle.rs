@@ -11,7 +11,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
-use super::helpers::{LOCAL_PEER, prefix_family};
+use super::helpers::prefix_family;
 use super::{
     ExactExportKey, LiveSessionRecord, MAX_LIVE_SESSIONS_PER_PEER, PolicyFilteredRouteKey,
     RibManager,
@@ -2067,11 +2067,14 @@ impl RibManager {
         let mut announce = Vec::new();
         let mut next_hop_override = Vec::new();
         let mut only_source = None;
+        let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
         for route in group.table.iter() {
             super::replacement_readiness_checkpoint_at(&self.replacement_readiness, label, false);
             let route_family = prefix_family(&route.prefix);
             if family.is_some_and(|family| family != route_family)
-                || (self.selection_deferred(route_family) && route.peer != LOCAL_PEER)
+                || (self.selection_deferred(route_family)
+                    && !self
+                        .unicast_export_deferral_exempt(route, &mut unicast_deferral_exemptions))
             {
                 continue;
             }
@@ -2157,6 +2160,7 @@ impl RibManager {
         mut checkpoint: impl FnMut(),
     ) -> Vec<super::update_groups::AdvEntry<'a>> {
         let mut replay = Vec::new();
+        let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
         for staged in group.table.iter() {
             checkpoint();
             // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
@@ -2169,7 +2173,8 @@ impl RibManager {
                 continue;
             };
             if self.selection_deferred(prefix_family(&entry.route.prefix))
-                && entry.route.peer != LOCAL_PEER
+                && !self
+                    .unicast_export_deferral_exempt(entry.route, &mut unicast_deferral_exemptions)
             {
                 continue;
             }

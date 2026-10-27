@@ -2285,12 +2285,14 @@ route selection plus initial table/EoR until all eligible current sessions
 send EoR or the remaining marker window expires. `gr_restart_time` therefore
 bounds both the advertised restart window and, via the maximum effective value
 across static peers, the process-start selection deferral. API-injected
-unicast routes and FlowSpec rules are exceptions: only local candidates
-compete while selection is deferred, subject to the existing export policy
-and admission checks. Received candidates remain retained and ineligible
-until selection becomes available. Family EoR still waits for release
-selection and the existing completion gates. See the ADR-0141 amendments for
-[unicast](../adr/0141-injection-owner-lease.md#amendment-injected-unicast-skips-selection-deferral-2026-10-27)
+RTBH unicast routes (`/32`, `/128` or standard BLACKHOLE `65535:666`) and
+FlowSpec rules are exceptions: only those local candidates compete while
+selection is deferred, subject to the existing export policy and admission
+checks. Other injected unicast, including untagged defaults and aggregates,
+waits like received candidates. Received candidates remain retained and
+ineligible until selection becomes available. Family EoR still waits for
+release selection and the existing completion gates. See the ADR-0141 amendments for
+[unicast](../adr/0141-injection-owner-lease.md#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27)
 and [FlowSpec](../adr/0141-injection-owner-lease.md#amendment-injected-flowspec-skips-selection-deferral-2026-10-26).
 
 During a same-address collision, ordinary replacement still re-arms the
@@ -2423,8 +2425,9 @@ restarting peer's routes) and does not bound this window.
 
 This window is independent of RFC 4724 selection deferral (see the
 implementation note under [Graceful Restart](#graceful-restart-rfc-4724)).
-Deferral holds selection of received candidates; API-injected unicast routes
-and FlowSpec rules are exempt. The grace window holds only the End-of-RIB
+Deferral holds selection of received candidates and ordinary injected unicast;
+local RTBH unicast (`/32`, `/128` or standard BLACKHOLE `65535:666`) and
+FlowSpec rules are exempt. The grace window holds only the End-of-RIB
 marker. `MarkReplayComplete` and
 `gr_eor_replay_owners` release the grace window and never shorten selection
 deferral or other convergence and refresh holds. End-of-RIB leaves only when
