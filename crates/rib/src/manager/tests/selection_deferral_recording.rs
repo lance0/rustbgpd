@@ -241,6 +241,7 @@ fn recording_bgpls(index: u32, sibling: bool) -> BgpLsRibRoute {
 }
 
 fn recording_manager(families: Vec<(Afi, Safi)>) -> RibManager {
+    let held_families = families.clone();
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_selection_deferral(SelectionDeferralConfig {
@@ -250,6 +251,7 @@ fn recording_manager(families: Vec<(Afi, Safi)>) -> RibManager {
                 families,
             }],
         });
+    super::arm_selection_waiter(&mut manager, peer_v4(SOURCE), &held_families);
     for (octet, is_stale, is_llgr_stale) in [(253, true, false), (254, false, true)] {
         let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, octet), 32), SOURCE);
         route.is_stale = is_stale;

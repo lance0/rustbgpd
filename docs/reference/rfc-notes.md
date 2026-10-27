@@ -1193,11 +1193,20 @@ shutdown, a marker file is written to `runtime_state_dir`. On startup, if the
 marker is present and not expired, static peers from config are offered R=1 in
 OPEN. The per-family forwarding bits follow the role rules above, independently
 of R. Dynamic gRPC-added peers always get R=0. Before sessions start,
-the RIB freezes the resolved static GR peer/family roster. Per-family Loc-RIB
-selection and outbound initial table/EoR are held until current-session EoRs
-arrive from every eligible waiter or the marker-bounded selection timer
-expires. Peer Restart State and absent GR families exclude that peer/family;
-superseded-session EoRs are rejected. API-injected RTBH unicast (`/32`, `/128` or standard BLACKHOLE `65535:666`)
+the RIB captures the resolved static GR peer/family roster. Only eligible
+peers that have re-established a session since restart hold per-family
+selection for End-of-RIB. The roster is dormant before its first session
+for a family re-establishes and applies no selection-deferral hold. New
+sessions can join an active family wait, but a configured neighbor that
+stays down or never returns does not hold it. Once its current waiters are
+satisfied, excluded or down, the family releases permanently; later peers
+do not re-arm it. A re-established
+eligible session missing EoR still holds selection until completion or the
+marker-bounded selection timer expires. Peer Restart State and absent GR
+families exclude that peer/family; superseded-session EoRs are rejected.
+The [startup selection amendment](../adr/0141-injection-owner-lease.md#amendment-wait-for-re-established-gr-peers-2026-10-27)
+records the waiter and completion behavior.
+API-injected RTBH unicast (`/32`, `/128` or standard BLACKHOLE `65535:666`)
 and FlowSpec rules are exceptions to the selection hold; other injected
 unicast, received candidates and completion markers retain their existing
 gates. See

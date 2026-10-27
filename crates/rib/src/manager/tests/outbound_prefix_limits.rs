@@ -1398,6 +1398,11 @@ fn gated_closed_recovery_is_cleaned_once_without_clearing_protocol_gates() {
                     families: ipv4_sendable(),
                 }],
             });
+            super::arm_selection_waiter(
+                &mut manager,
+                PeerId::from_addr("10.113.1.8".parse().unwrap()),
+                &ipv4_sendable(),
+            );
         } else {
             manager
                 .peer_orf_pending
@@ -1541,6 +1546,7 @@ fn selection_held_recovery_parks_without_protocol_state_or_timer_spin() {
             families: ipv4_sendable(),
         }],
     });
+    super::arm_selection_waiter(&mut manager, waiter, &ipv4_sendable());
     assert!(manager.selection_convergence_held((Afi::Ipv4, Safi::Unicast)));
     assert!(!manager.resync_tick_pending());
     assert_eq!(

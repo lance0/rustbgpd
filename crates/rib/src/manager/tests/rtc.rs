@@ -2101,7 +2101,7 @@ async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release
     let evpn = (Afi::L2Vpn, Safi::Evpn);
     let waiter = peer_v4(Ipv4Addr::new(10, 0, 0, 99));
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_hours(1),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
@@ -2109,6 +2109,7 @@ async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release
                 families: vec![evpn],
             }],
         });
+    super::arm_selection_waiter(&mut manager, waiter, &[evpn]);
     let handle = tokio::spawn(manager.run());
     let sync = async |tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr| {
         let (reply, group) = oneshot::channel();

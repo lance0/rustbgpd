@@ -213,6 +213,9 @@ impl RibManager {
                         out.deltas.push(GroupDelta {
                             prefix: *prefix,
                             path_id: route.path_id,
+                            local_source: per_client_best_result
+                                .local_sources
+                                .remove(&(route.prefix, route.path_id)),
                             new: Some((route, nh)),
                             old_source,
                             prior_source_attrs,
@@ -227,6 +230,7 @@ impl RibManager {
                             prefix: p,
                             path_id,
                             new: None,
+                            local_source: None,
                             old_source,
                             prior_source_attrs: super::payload::capture_prior_source_attrs(
                                 group, p, path_id,
@@ -272,12 +276,13 @@ impl RibManager {
                     let prior = group.runner_up.get(prefix);
                     let (content_unchanged, control_unchanged) = match (prior, &stage.runner_up) {
                         (Some(old), Some(new)) => (
-                            crate::manager::helpers::unicast_routes_equal(
-                                &old.route,
-                                old.nh.as_ref(),
-                                &new.route,
-                                new.nh.as_ref(),
-                            ),
+                            old.local_source == new.local_source
+                                && crate::manager::helpers::unicast_routes_equal(
+                                    &old.route,
+                                    old.nh.as_ref(),
+                                    &new.route,
+                                    new.nh.as_ref(),
+                                ),
                             source_control_input(old.source_attrs.as_ref())
                                 == source_control_input(new.source_attrs.as_ref()),
                         ),
@@ -405,6 +410,7 @@ impl RibManager {
                     out.deltas.push(GroupDelta {
                         prefix: *prefix,
                         path_id: route.path_id,
+                        local_source: result.local_sources.remove(&(route.prefix, route.path_id)),
                         new: Some((route, nh)),
                         old_source,
                         prior_source_attrs,
@@ -419,6 +425,7 @@ impl RibManager {
                         prefix: p,
                         path_id,
                         new: None,
+                        local_source: None,
                         old_source,
                         prior_source_attrs: super::payload::capture_prior_source_attrs(
                             group, p, path_id,

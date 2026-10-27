@@ -521,8 +521,26 @@ impl RibManager {
             self.replacement_checkpoint(true);
             for (prefix, (_, mut path_ids)) in withdrawn.drain() {
                 self.replacement_checkpoint(false);
-                let frees_prefix = if grouped {
+                let frees_prefix = if grouped && self.grouped_member_of(peer).is_some() {
                     is_admitted(&prefix)
+                } else if grouped {
+                    // A keys-only private handoff can still own several
+                    // actual Add-Path ranks for this prefix. The bounded
+                    // proof, rather than its incomplete body, proves the last
+                    // path left; an unavailable proof never frees capacity.
+                    self.initial_group_admitted(peer).is_some_and(|proof| {
+                        let mut found = false;
+                        let mut retained = false;
+                        proof.visit_unicast_prefix_paths(
+                            prefix,
+                            &mut |force| self.replacement_checkpoint(force),
+                            &mut |path_id| {
+                                found = true;
+                                retained |= !path_ids.contains(&path_id);
+                            },
+                        );
+                        found && !retained
+                    })
                 } else {
                     rib_out.is_some_and(|rib| {
                         // Borrow each path so a large Add-Path inventory stays checkpointed.
@@ -810,7 +828,8 @@ impl RibManager {
         afi: Afi,
         grouped: bool,
     ) -> usize {
-        if !grouped {
+        let incomplete = self.private_unicast_admission_incomplete(peer);
+        if !grouped && !incomplete {
             return self
                 .adj_ribs_out
                 .get(&peer)
@@ -822,6 +841,16 @@ impl RibManager {
                 .is_some_and(|family| family.limit.is_some())
         {
             return limits.grouped_len(afi);
+        }
+        if incomplete {
+            // The retained proof owns an incomplete private handoff. Its
+            // unique-prefix cache is seeded once; an unavailable proof is
+            // unknown admission, never spare capacity.
+            return self
+                .initial_group_admitted_counts(peer)
+                .map_or(usize::MAX, |counts| {
+                    counts[4 + usize::from(afi == Afi::Ipv6)]
+                });
         }
         // An unlimited member materializes no admitted set, so its usage is
         // the group's own per-family accounting: shared table minus split
@@ -944,14 +973,35 @@ impl RibManager {
     pub(super) fn install_registration_outbound_limits(&mut self, peer: PeerId) {
         let resolved = self.resolve_outbound_limits(&self.outbound_limit_control.config, peer);
         for afi in LIMITED_FAMILIES {
-            if let Some(limit) = resolved.family(afi) {
+            let limit = resolved.family(afi);
+            if limit.is_some() || self.outbound_prefix_limits.contains_key(&peer) {
                 self.outbound_prefix_limits
                     .entry(peer)
                     .or_default()
                     .family_mut(afi)
                     .expect("LIMITED_FAMILIES are limited families")
-                    .limit = Some(limit);
+                    .limit = limit;
+                if limit.is_none() {
+                    let readiness = self.replacement_readiness.clone();
+                    let entry = self
+                        .outbound_prefix_limits
+                        .get_mut(&peer)
+                        .expect("registration admission entry exists");
+                    entry.family_mut(afi).expect("limited family").blocking = false;
+                    entry.grouped_clear_with_checkpoint(afi, &mut || {
+                        super::replacement_readiness_checkpoint(&readiness, false);
+                    });
+                }
             }
+        }
+        if self.outbound_prefix_limits.get(&peer).is_some_and(|entry| {
+            LIMITED_FAMILIES.into_iter().all(|afi| {
+                entry
+                    .family(afi)
+                    .is_none_or(|family| family.limit.is_none())
+            })
+        }) {
+            self.outbound_prefix_limits.remove(&peer);
         }
         self.refresh_outbound_limit_gauges(peer);
     }
@@ -1338,6 +1388,7 @@ impl RibManager {
         }
         self.advance_export_settings();
         let grouped = self.grouped_member_of(peer).is_some();
+        let incomplete = self.private_unicast_admission_incomplete(peer);
         // A raise or removal is the only edit that opens capacity a blocking
         // episode was withholding; a first install or a lowering can only
         // ever admit fewer prefixes than the peer already has.
@@ -1349,28 +1400,49 @@ impl RibManager {
         // A formerly unlimited grouped member owns no admitted set: preflight
         // proved its whole advertised projection fits, so materialize it as
         // the bounded set the limiter now maintains.
-        let materialized = (grouped && limit.is_some() && previous.is_none()).then(|| {
-            // Every projected route keeps its staged prefix, including lane
-            // substitutions and Add-Path slots. Exclusions only reduce this
-            // distinct-family-prefix upper bound.
-            let capacity = self
-                .grouped_member_of(peer)
-                .and_then(|gid| self.group_ribs.get(&gid))
-                .map_or(0, |group| group.table.unicast_prefix_count(afi));
-            self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
-            let admitted = self.grouped_advertised_routes_iter(peer).map_or_else(
-                || TypedGroupedAdmitted::collect(afi, std::iter::empty()),
-                |routes| {
-                    TypedGroupedAdmitted::collect_with_capacity(
+        let materialized =
+            ((grouped || incomplete) && limit.is_some() && previous.is_none()).then(|| {
+                if incomplete {
+                    let capacity = self
+                        .initial_group_admitted_counts(peer)
+                        .map_or(0, |counts| counts[4 + usize::from(afi == Afi::Ipv6)]);
+                    return TypedGroupedAdmitted::collect_with_capacity(
                         afi,
-                        routes.map(|route| route.prefix),
+                        self.initial_group_admitted(peer)
+                            .into_iter()
+                            .flat_map(|view| {
+                                view.iter_with_checkpoint(|force| {
+                                    self.replacement_checkpoint(force);
+                                })
+                            })
+                            .filter_map(|key| match key {
+                                crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
+                                _ => None,
+                            }),
                         capacity,
-                    )
-                },
-            );
-            self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
-            admitted
-        });
+                    );
+                }
+                // Every projected route keeps its staged prefix, including lane
+                // substitutions and Add-Path slots. Exclusions only reduce this
+                // distinct-family-prefix upper bound.
+                let capacity = self
+                    .grouped_member_of(peer)
+                    .and_then(|gid| self.group_ribs.get(&gid))
+                    .map_or(0, |group| group.table.unicast_prefix_count(afi));
+                self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
+                let admitted = self.grouped_advertised_routes_iter(peer).map_or_else(
+                    || TypedGroupedAdmitted::collect(afi, std::iter::empty()),
+                    |routes| {
+                        TypedGroupedAdmitted::collect_with_capacity(
+                            afi,
+                            routes.map(|route| route.prefix),
+                            capacity,
+                        )
+                    },
+                );
+                self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
+                admitted
+            });
 
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || {

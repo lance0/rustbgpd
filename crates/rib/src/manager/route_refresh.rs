@@ -23,6 +23,9 @@ pub(super) enum FamilyReplayKind {
     PrefixLimitRecovery,
     /// Explicit operator replay; observes gates and adds no protocol refresh markers.
     OperatorReplay,
+    /// Fill missing initial slots after the ordinary selection-release
+    /// pass; preserve its admitted-key proof and add no protocol markers.
+    SelectionRelease,
 }
 
 /// Whether the shared family replay reached the outbound commit boundary.
@@ -981,7 +984,9 @@ impl RibManager {
                     .is_some_and(|families| families.contains(&family));
                 (suppress_eor, deferred_eor)
             }
-            FamilyReplayKind::PrefixLimitRecovery | FamilyReplayKind::OperatorReplay => {
+            FamilyReplayKind::PrefixLimitRecovery
+            | FamilyReplayKind::OperatorReplay
+            | FamilyReplayKind::SelectionRelease => {
                 let orf_pending = self
                     .peer_orf_pending
                     .get(&peer)
@@ -992,6 +997,26 @@ impl RibManager {
                 (true, false)
             }
         };
+        if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
+            if family == (Afi::L2Vpn, Safi::Evpn)
+                && (self.evpn_grouped_member_of(peer).is_some()
+                    || self.has_private_evpn_handoff(peer))
+            {
+                return FamilyReplayOutcome::Deferred;
+            }
+            let grouped = match family.1 {
+                Safi::Unicast => self.grouped_member_of(peer).is_some(),
+                Safi::MplsVpn => self.vpn_grouped_member_of(peer).is_some(),
+                _ => false,
+            };
+            if grouped && !self.pending_group_admitted.contains_key(&peer) {
+                if !self.retain_initial_group_admitted(peer) {
+                    return FamilyReplayOutcome::Committed;
+                }
+                self.mark_outbound_dirty(peer);
+                return FamilyReplayOutcome::Failed;
+            }
+        }
         let orf_filter = self
             .peer_orf_filters
             .get(&peer)
@@ -1900,6 +1925,127 @@ impl RibManager {
             self.replacement_checkpoint(true);
             return FamilyReplayOutcome::Failed;
         }
+        if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
+            let proof = self.pending_group_admitted.get(&peer);
+            let private = self.adj_ribs_out.get(&peer);
+            let announce = std::mem::take(&mut unicast.announce);
+            let next_hop_override = std::mem::take(&mut unicast.next_hop_override);
+            for (route, action) in announce.into_iter().zip(next_hop_override) {
+                self.replacement_checkpoint(false);
+                let admitted = if member_of.is_some() {
+                    // Ordinary release already committed every changed slot;
+                    // only unchanged rows omitted from the held initial dump
+                    // can still be missing from this exact member's proof.
+                    proof.as_ref().is_some_and(|proof| {
+                        proof.contains(&crate::update::ExactExportKey::Unicast(
+                            route.prefix,
+                            route.path_id,
+                        ))
+                    })
+                } else {
+                    private.is_some_and(|rib| {
+                        rib.get(&route.prefix, route.path_id).is_some_and(|old| {
+                            super::helpers::routes_equal(old, &route)
+                                && rib.next_hop_override(&route.prefix, route.path_id)
+                                    == action.as_ref()
+                        })
+                    })
+                };
+                if !admitted {
+                    unicast.announce.push(route);
+                    unicast.next_hop_override.push(action);
+                }
+            }
+            unicast.withdraw.retain(|(prefix, path_id)| {
+                self.replacement_checkpoint(false);
+                if member_of.is_some() {
+                    proof.as_ref().is_some_and(|proof| {
+                        proof.contains(&crate::update::ExactExportKey::Unicast(*prefix, *path_id))
+                    })
+                } else {
+                    private.is_some_and(|rib| rib.get(prefix, *path_id).is_some())
+                }
+            });
+            fs_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_flowspec(&route.selection_key()).is_some_and(|old| {
+                        old.peer == route.peer && old.attributes == route.attributes
+                    })
+                })
+            });
+            fs_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_flowspec(key).is_some())
+            });
+            evpn_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_evpn(&route.key())
+                        .is_some_and(|old| super::helpers::evpn_routes_equal(old, route))
+                })
+            });
+            evpn_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_evpn(key).is_some())
+            });
+            bgpls_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_bgpls(&route.key())
+                        .is_some_and(|old| super::helpers::bgpls_routes_equal(old, route))
+                })
+            });
+            bgpls_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_bgpls(key).is_some())
+            });
+            vpn_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                if vpn_member_of.is_some() {
+                    !proof.as_ref().is_some_and(|proof| {
+                        proof.contains(&crate::update::ExactExportKey::Vpn(route.key()))
+                    })
+                } else {
+                    !private.is_some_and(|rib| {
+                        rib.get_vpn(&route.key())
+                            .is_some_and(|old| super::helpers::vpn_routes_equal(old, route))
+                    })
+                }
+            });
+            vpn_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                if vpn_member_of.is_some() {
+                    proof.as_ref().is_some_and(|proof| {
+                        proof.contains(&crate::update::ExactExportKey::Vpn(key.clone()))
+                    })
+                } else {
+                    private.is_some_and(|rib| rib.get_vpn(key).is_some())
+                }
+            });
+            labeled_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_labeled(&route.key())
+                        .is_some_and(|old| super::helpers::labeled_routes_equal(old, route))
+                })
+            });
+            labeled_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_labeled(key).is_some())
+            });
+            rtc_announce.retain(|route| {
+                self.replacement_checkpoint(false);
+                !private.is_some_and(|rib| {
+                    rib.get_rtc(&route.key())
+                        .is_some_and(|old| super::helpers::rtc_routes_equal(old, route))
+                })
+            });
+            rtc_withdraw.retain(|key| {
+                self.replacement_checkpoint(false);
+                private.is_some_and(|rib| rib.get_rtc(key).is_some())
+            });
+        }
         // Only this shape preserves the current advertised view until the
         // exact probe: withdrawals can retire rejection-overlay entries,
         // per-client-best can add OTC withdrawals, and prefix-limit recovery
@@ -1912,6 +2058,7 @@ impl RibManager {
                 .is_some_and(|group| !group.per_client_best);
         let mut group_prior = crate::fast_hash::FastSet::default();
         if !defer_grouped_refresh_prior
+            && !matches!(replay_kind, FamilyReplayKind::SelectionRelease)
             && member_of.is_some()
             && let Some(routes) = self.grouped_advertised_routes(peer)
         {
@@ -1920,7 +2067,8 @@ impl RibManager {
                 crate::update::ExactExportKey::Unicast(route.prefix, route.path_id)
             }));
         }
-        if let Some(gid) = vpn_member_of
+        if !matches!(replay_kind, FamilyReplayKind::SelectionRelease)
+            && let Some(gid) = vpn_member_of
             && let Some(group) = self.group_ribs.get(&gid)
         {
             let filter = self.member_rt_filter(peer);
@@ -1970,9 +2118,9 @@ impl RibManager {
                     ]
                 },
             ),
-            FamilyReplayKind::PrefixLimitRecovery | FamilyReplayKind::OperatorReplay => {
-                (vec![], vec![])
-            }
+            FamilyReplayKind::PrefixLimitRecovery
+            | FamilyReplayKind::OperatorReplay
+            | FamilyReplayKind::SelectionRelease => (vec![], vec![]),
         };
         if let Some(seal) = evpn_complete_feed.as_mut() {
             // Full data admission establishes coverage before the ordered
@@ -2011,11 +2159,33 @@ impl RibManager {
                 probe_cache: &mut shared.probe_cache,
                 lazy_group_prior: None,
             });
-        if let Err(failure) = self
-            .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
+        let selection_noop = matches!(replay_kind, FamilyReplayKind::SelectionRelease)
+            && announce.is_empty()
+            && unicast.withdraw.is_empty()
+            && fs_announce.is_empty()
+            && fs_withdraw.is_empty()
+            && evpn_announce.is_empty()
+            && evpn_withdraw.is_empty()
+            && bgpls_announce.is_empty()
+            && bgpls_withdraw.is_empty()
+            && vpn_announce.is_empty()
+            && vpn_withdraw.is_empty()
+            && labeled_announce.is_empty()
+            && labeled_withdraw.is_empty()
+            && rtc_announce.is_empty()
+            && rtc_withdraw.is_empty();
+        let admission = if selection_noop {
+            super::retire_hash_set(&mut group_prior, &mut || self.replacement_checkpoint(false));
+            Ok(())
+        } else {
+            self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
                 OutboundCommitBatch {
-                    force_unicast_replay: true,
+                    local_sources: unicast.local_sources,
+                    force_unicast_replay: !matches!(
+                        replay_kind,
+                        FamilyReplayKind::SelectionRelease
+                    ),
                     defer_grouped_refresh_prior,
                     unicast_otc_prechecked,
                     announce_source_exclusion,
@@ -2044,7 +2214,8 @@ impl RibManager {
                 None,
                 None,
             )
-        {
+        };
+        if let Err(failure) = admission {
             if let Some(blocking) = prior_blocking {
                 self.set_outbound_blocking(peer, afi, blocking);
             }
@@ -2057,7 +2228,7 @@ impl RibManager {
                 FamilyReplayKind::PrefixLimitRecovery => {
                     warn!(%peer, ?family, reason = failure.as_str(), "prefix-limit recovery replay not sent");
                 }
-                FamilyReplayKind::OperatorReplay => {
+                FamilyReplayKind::OperatorReplay | FamilyReplayKind::SelectionRelease => {
                     warn!(%peer, ?family, reason = failure.as_str(), "explicit outbound replay not sent");
                 }
             }
@@ -2090,15 +2261,11 @@ impl RibManager {
                     }
                 }
                 self.pending_eor.entry(peer).or_default().insert(family);
-                // The gated flood was just enqueued above; flushing now keeps
-                // the EoR behind it on the channel. A dirty peer defers to the
-                // resync paths instead — they flush pending EoR only AFTER a
-                // successful resync, and flushing here would emit any OTHER
-                // deferred families' EoR ahead of the resync that replays
-                // their table.
-                if !self.dirty_peers.contains(&peer) {
-                    self.flush_pending_eor(peer);
-                }
+            }
+            // The flood above completes an initial marker owed through either
+            // selection deferral or the GR-specific ORF hold.
+            if (initial_eor_owed || deferred_eor) && !self.dirty_peers.contains(&peer) {
+                self.flush_pending_eor(peer);
             }
         }
         super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
@@ -2111,6 +2278,10 @@ impl RibManager {
             &self.replacement_readiness,
         );
         self.replacement_checkpoint(true);
+        if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
+            self.complete_initial_selection_replay(peer);
+            self.retire_completed_initial_group_admitted(peer);
+        }
         FamilyReplayOutcome::Committed
     }
 
@@ -2160,9 +2331,13 @@ impl RibManager {
             if !marker_only {
                 self.mark_outbound_dirty(peer);
             }
-        } else if evpn_marker {
-            let bits = Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
-            self.evpn_feed_markers_admitted(peer, &tx, bits);
+        } else {
+            if evpn_marker {
+                let bits = Self::evpn_admitted_marker_bits(&[(Afi::L2Vpn, Safi::Evpn)], &[]);
+                self.evpn_feed_markers_admitted(peer, &tx, bits);
+            }
+            self.complete_initial_selection_replay(peer);
+            self.retire_completed_initial_group_admitted(peer);
         }
     }
 

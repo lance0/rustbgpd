@@ -22,6 +22,28 @@ use crate::route::{
 use crate::slab::RouteSlab;
 use crate::update::{RouteQueryKey, route_query_key};
 
+/// Original local intent behind an exported unicast key. Export policy and
+/// Add-Path rank rewriting cannot reconstruct this from the stored route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalExportSource {
+    pub(crate) path_id: u32,
+    pub(crate) deferral_exempt: bool,
+}
+
+impl LocalExportSource {
+    pub(crate) fn from_route(route: &Route) -> Option<Self> {
+        (route.peer == PeerId::LOCAL).then(|| Self {
+            path_id: route.path_id,
+            deferral_exempt: match route.prefix {
+                Prefix::V4(prefix) => prefix.len == 32,
+                Prefix::V6(prefix) => prefix.len == 128,
+            } || route
+                .communities()
+                .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE),
+        })
+    }
+}
+
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
 /// Routes are keyed by `(Prefix, path_id)` for Add-Path (RFC 7911).
@@ -34,6 +56,8 @@ pub struct AdjRibOut {
     /// also backs the group RIB-Out table (`GroupRibOut`), whose route map
     /// was the largest heap component in docs/perf/rebaseline-2026-07.md.
     routes: RouteSlab<Route>,
+    /// Only local rows need pre-policy identity; received route bodies grow no field.
+    local_export_sources: ShardedMap<(Prefix, u32), LocalExportSource>,
     /// Explicit `Specific` unicast actions admitted alongside route bodies.
     /// None uses the immutable session profile's default and needs no entry;
     /// `Self_` lives in `self_next_hop`. A hashed entry is 44 B plus one
@@ -244,6 +268,7 @@ impl AdjRibOut {
         Self {
             peer,
             routes: RouteSlab::with_capacity(capacity),
+            local_export_sources: ShardedMap::default(),
             next_hop_overrides: ShardedMap::default(),
             self_next_hop: Vec::new(),
             self_next_hop_count: 0,
@@ -330,7 +355,10 @@ impl AdjRibOut {
     /// Insert or replace an advertised route with checkpoints around index
     /// walks and possible allocation edges.
     pub(crate) fn insert_with(&mut self, route: Route, checkpoint: &mut impl FnMut()) {
+        let key = (route.prefix, route.path_id);
+        let source = LocalExportSource::from_route(&route);
         self.insert_with_next_hop(route, None, checkpoint);
+        self.set_local_export_source(key, source);
     }
 
     pub(crate) fn insert_with_next_hop(
@@ -382,6 +410,39 @@ impl AdjRibOut {
             checkpoint();
             self.next_hop_overrides.insert(key, action);
             checkpoint();
+        }
+    }
+
+    pub(crate) fn take_local_export_sources(
+        &mut self,
+    ) -> ShardedMap<(Prefix, u32), LocalExportSource> {
+        std::mem::take(&mut self.local_export_sources)
+    }
+
+    pub(crate) fn adopt_local_export_sources(
+        &mut self,
+        sources: ShardedMap<(Prefix, u32), LocalExportSource>,
+    ) {
+        self.local_export_sources = sources;
+    }
+
+    pub(crate) fn local_export_source(
+        &self,
+        prefix: &Prefix,
+        path_id: u32,
+    ) -> Option<LocalExportSource> {
+        self.local_export_sources.get(&(*prefix, path_id)).copied()
+    }
+
+    pub(crate) fn set_local_export_source(
+        &mut self,
+        key: (Prefix, u32),
+        source: Option<LocalExportSource>,
+    ) {
+        if let Some(source) = source {
+            self.local_export_sources.insert(key, source);
+        } else {
+            self.local_export_sources.remove(&key);
         }
     }
 
@@ -468,6 +529,7 @@ impl AdjRibOut {
         }
         checkpoint();
         self.next_hop_overrides.remove(&(*prefix, path_id));
+        self.local_export_sources.remove(&(*prefix, path_id));
         self.set_self_next_hop(handle, false);
         let retired = self.routes.remove(handle);
         let removed = retired.is_some();
@@ -570,6 +632,7 @@ impl AdjRibOut {
         self.second_family.unicast = 0;
         self.routes.clear();
         self.next_hop_overrides.clear();
+        self.local_export_sources.clear();
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
@@ -588,13 +651,14 @@ impl AdjRibOut {
         self.second_family.unicast = 0;
         self.routes = RouteSlab::default();
         self.next_hop_overrides = ShardedMap::default();
+        self.local_export_sources = ShardedMap::default();
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids = FamilyPrefixMap::default();
     }
 
-    /// Retire and release unicast state with checkpoints around every route,
-    /// index entry, and final backing allocation.
+    /// Retire and release unicast bodies for group transfer. Local admission
+    /// provenance stays with this receiver across the ownership change.
     pub(crate) fn release_unicast_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.second_family.unicast = 0;
         self.routes.release_with(checkpoint);
@@ -682,6 +746,7 @@ impl AdjRibOut {
         self.second_family = SecondFamilyCounts::default();
         self.routes.clear();
         self.next_hop_overrides.clear();
+        self.local_export_sources.clear();
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
@@ -701,6 +766,7 @@ impl AdjRibOut {
         self.second_family = SecondFamilyCounts::default();
         self.routes.retire_with(checkpoint);
         retire_sharded_map(&mut self.next_hop_overrides, checkpoint);
+        retire_sharded_map(&mut self.local_export_sources, checkpoint);
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);

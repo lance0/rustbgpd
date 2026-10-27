@@ -510,6 +510,7 @@ fn lazy_clean_group_prior_defers_only_for_a_resolved_eligible_stage() {
     let staged = HashMap::from([(
         7,
         vec![crate::manager::update_groups::GroupDelta {
+            local_source: None,
             prefix: route.prefix,
             path_id: route.path_id,
             new: Some((route.clone(), None)),
@@ -1290,6 +1291,7 @@ fn clean_group_all_success_preserves_shared_payload_and_target_snapshot_fence() 
         Ipv4Addr::new(198, 51, 100, 42),
     );
     let deltas = [crate::manager::update_groups::GroupDelta {
+        local_source: None,
         prefix: route.prefix,
         path_id: route.path_id,
         new: Some((route.clone(), None)),
@@ -1534,6 +1536,7 @@ fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
         HashSet::from([route_key.clone(), unrelated_key.clone()]),
     );
     let deltas = [crate::manager::update_groups::GroupDelta {
+        local_source: None,
         prefix: route.prefix,
         path_id: route.path_id,
         new: Some((route.clone(), None)),

@@ -2280,10 +2280,18 @@ daemon may advertise `R=1` after a planned restart, but configured kernel
 installers still advertise `forwarding_preserved = false`. The daemon never
 restores route state from the optional shutdown checkpoint. During that
 marker-backed startup it
-freezes the effective static GR peer/family roster and defers each family's
-route selection plus initial table/EoR until all eligible current sessions
-send EoR or the remaining marker window expires. `gr_restart_time` therefore
-bounds both the advertised restart window and, via the maximum effective value
+captures the effective static GR peer/family roster, but waits for EoR only
+from sessions that have re-established since the restart. Each family's
+selection-deferral roster starts dormant and applies no hold until a roster
+peer re-establishes a session for it. A configured neighbor that stays down or never returns does
+not hold selection. New current sessions can join an active family wait;
+once all current waiters are satisfied, excluded or down, that family
+releases permanently and a later peer does not re-arm it. An eligible
+re-established session missing EoR still holds selection until completion or
+the remaining marker window expires. See the
+[startup selection amendment](../adr/0141-injection-owner-lease.md#amendment-wait-for-re-established-gr-peers-2026-10-27).
+`gr_restart_time` therefore bounds both the advertised restart window and,
+via the maximum effective value
 across static peers, the process-start selection deferral. API-injected
 RTBH unicast routes (`/32`, `/128` or standard BLACKHOLE `65535:666`) and
 FlowSpec rules are exceptions: only those local candidates compete while
@@ -2308,10 +2316,10 @@ the waiter and only the matching peer EoRR releases it. An ordinary EoR, stray
 EoRR, or local refresh timeout cannot declare convergence. The original
 marker-bounded timer remains the overall fallback.
 
-`rbgp neighbor <address>` shows `Selection Deferral` rows while active and
-retains their `all_eor`, `collision_refresh`, `all_excluded` (the gate
-completed with every waiter excluded or deleted — zero completion markers
-consumed), or `timer` release reason afterward. Metrics are
+`rbgp neighbor <address>` shows per-family `Selection Deferral` rows.
+A dormant roster has `active = false`, zero remaining time and no release
+reason. Released rows retain their `all_eor`, `collision_refresh`, `all_excluded` (the gate
+completed without a current waiter delivering a completion marker), or `timer` release reason afterward. Metrics are
 `bgp_selection_deferral_active`, `bgp_selection_deferral_waiters`,
 `bgp_selection_deferral_releases_total`, and
 `bgp_selection_deferral_timeouts_total`. The process-wide deferred-identity

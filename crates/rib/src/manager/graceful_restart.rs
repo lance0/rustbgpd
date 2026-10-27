@@ -291,6 +291,7 @@ impl RibManager {
             SessionTeardownDisposition::DiscardStale => return false,
             SessionTeardownDisposition::FailOver => {
                 self.fail_over_registration(peer, session_id, "PeerGracefulRestart");
+                self.settle_selection_sessions();
                 return true;
             }
             SessionTeardownDisposition::NoRegistration
@@ -589,6 +590,7 @@ impl RibManager {
 
         self.metrics.set_gr_active(&peer.label(), true);
         self.publish_gr_stale_routes(peer);
+        self.settle_selection_sessions();
         true
     }
 

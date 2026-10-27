@@ -17,7 +17,7 @@
 //! before the export chain in every unicast export body.
 
 use crate::{PeerEndpoint, PeerId};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -309,6 +309,8 @@ pub(super) struct ConditionalAdvertisementTracker {
     /// Condition entries by base prefix, for the per-change cover walk.
     by_prefix: FamilyPrefixMap<Vec<(Arc<str>, PrefixSetEntry)>>,
     installed: bool,
+    /// Selection progress is independent of compensated configuration state.
+    selection_arms: HashMap<(Afi, Safi), u64>,
     /// Condition candidates visited, for the no-table-walk proof.
     #[cfg(test)]
     candidate_visits: std::sync::atomic::AtomicUsize,
@@ -324,6 +326,7 @@ pub struct ConditionalAdvertisementCapture {
     definitions: BTreeMap<Arc<str>, DefinitionState>,
     attachments: BTreeMap<PeerEndpoint, Vec<Arc<str>>>,
     installed: bool,
+    selection_arms: HashMap<(Afi, Safi), u64>,
 }
 
 enum CandidateVerdict {
@@ -492,12 +495,13 @@ impl RibManager {
             definitions: self.conditional_advertisements.definitions.clone(),
             attachments: self.conditional_advertisements.attachments.clone(),
             installed: self.conditional_advertisements.installed,
+            selection_arms: self.conditional_advertisements.selection_arms.clone(),
         }
     }
 
     /// Reinstate the state captured by [`Self::install_conditional_advertisements_holding`]
-    /// (ADR-0137 Decision 6). The restored applied states and settle deadlines
-    /// stand; only an observation the RIB has since changed restarts the
+    /// (ADR-0137 Decision 6). Restored applied states stand; a current selection
+    /// hold cancels captured deadlines, and a changed observation restarts the
     /// debounce from now. Returns the names whose applied state differs from
     /// the replaced set.
     pub(super) fn restore_conditional_advertisements(
@@ -505,6 +509,7 @@ impl RibManager {
         capture: ConditionalAdvertisementCapture,
     ) -> Vec<Arc<str>> {
         let now = Instant::now();
+        let captured_selection_arms = capture.selection_arms;
         let replaced = std::mem::replace(
             &mut self.conditional_advertisements.definitions,
             capture.definitions,
@@ -550,18 +555,27 @@ impl RibManager {
             .collect();
         let mut transitions = Vec::new();
         for name in &names {
+            self.replacement_checkpoint_at("conditional_restore_definition", false);
             self.reobserve_definition(name, now, &mut transitions);
             let Some(mut state) = self.conditional_advertisements.definitions.remove(name) else {
                 continue;
             };
-            // A state captured during selection deferral has no deadline;
-            // if deferral was released while the failed generation was
-            // installed, that release armed the replaced state, not this
-            // one. Arm a fresh interval so it cannot stay unsettled forever.
-            if state.deadline.is_none()
+            let deferred = self.condition_deferred(&state.definition);
+            let held_since_capture = state.definition.condition_prefixes.iter().any(|entry| {
+                self.replacement_checkpoint_at("conditional_restore_condition", false);
+                let family = prefix_family(&entry.prefix);
+                captured_selection_arms.get(&family)
+                    != self.conditional_advertisements.selection_arms.get(&family)
+            });
+            if deferred || held_since_capture {
+                state.deadline = None;
+            }
+            if !deferred
+                && state.deadline.is_none()
                 && Self::target(&state).is_some_and(|target| target != state.applied)
-                && !self.condition_deferred(&state.definition)
             {
+                // Release during the failed generation armed its state, so
+                // a captured pending state needs a fresh interval as well.
                 state.observed_since = now;
                 self.arm_or_apply(&mut state, now, &mut transitions);
             }
@@ -637,6 +651,36 @@ impl RibManager {
         }
         self.mark_conditional_advertisement_peers_dirty(&transitions);
         transitions
+    }
+
+    /// A newly deferred family freezes applied state and cancels settling;
+    /// release starts a full interval against the completed table.
+    pub(super) fn suspend_conditional_advertisement_families(
+        &mut self,
+        families: &HashSet<(Afi, Safi)>,
+    ) {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = |stage| {
+            super::replacement_readiness_checkpoint_at(&readiness, stage, false);
+        };
+        for &family in families {
+            checkpoint("conditional_suspend_family");
+            let arms = self
+                .conditional_advertisements
+                .selection_arms
+                .entry(family)
+                .or_default();
+            *arms = arms.saturating_add(1);
+        }
+        for state in self.conditional_advertisements.definitions.values_mut() {
+            checkpoint("conditional_suspend_definition");
+            if state.definition.condition_prefixes.iter().any(|entry| {
+                checkpoint("conditional_suspend_condition");
+                families.contains(&prefix_family(&entry.prefix))
+            }) {
+                state.deadline = None;
+            }
+        }
     }
 
     /// A released RFC 4724 family re-observes its definitions and arms a
@@ -802,24 +846,36 @@ impl RibManager {
     /// attached peers of each applied transition dirty. Returns the names
     /// whose applied state changed.
     pub(super) fn fire_conditional_advertisement_timers(&mut self) -> Vec<Arc<str>> {
-        let now = Instant::now();
-        let due: Vec<_> = self
-            .conditional_advertisements
-            .definitions
-            .iter()
-            .filter(|(_, state)| state.deadline.is_some_and(|deadline| deadline <= now))
-            .map(|(name, _)| Arc::clone(name))
-            .collect();
-        let mut transitions = Vec::new();
-        for name in due {
-            let Some(state) = self.conditional_advertisements.definitions.get_mut(&name) else {
-                continue;
-            };
-            state.deadline = None;
-            Self::apply_observation(&self.metrics, state, &mut transitions);
-        }
-        self.mark_conditional_advertisement_peers_dirty(&transitions);
-        transitions
+        self.with_replacement_readiness(|manager| {
+            let now = Instant::now();
+            let due: Vec<_> = manager
+                .conditional_advertisements
+                .definitions
+                .iter()
+                .inspect(|_| {
+                    manager.replacement_checkpoint_at("conditional_timer_definition", false);
+                })
+                .filter(|(_, state)| state.deadline.is_some_and(|deadline| deadline <= now))
+                .map(|(name, _)| Arc::clone(name))
+                .collect();
+            let mut transitions = Vec::new();
+            for name in due {
+                let Some(mut state) = manager.conditional_advertisements.definitions.remove(&name)
+                else {
+                    continue;
+                };
+                state.deadline = None;
+                if !manager.condition_deferred(&state.definition) {
+                    Self::apply_observation(&manager.metrics, &mut state, &mut transitions);
+                }
+                manager
+                    .conditional_advertisements
+                    .definitions
+                    .insert(name, state);
+            }
+            manager.mark_conditional_advertisement_peers_dirty(&transitions);
+            transitions
+        })
     }
 
     /// Re-observe under the debounce. A held definition is skipped: its
@@ -950,10 +1006,10 @@ impl RibManager {
     }
 
     fn condition_deferred(&self, definition: &ConditionalAdvertisement) -> bool {
-        definition
-            .condition_prefixes
-            .iter()
-            .any(|entry| self.selection_deferred(prefix_family(&entry.prefix)))
+        definition.condition_prefixes.iter().any(|entry| {
+            self.replacement_checkpoint_at("conditional_condition_family", false);
+            self.selection_deferred(prefix_family(&entry.prefix))
+        })
     }
 
     fn rebuild_conditional_index(&mut self) {
@@ -1129,20 +1185,22 @@ impl RibManager {
         capture
     }
 
-    /// Reinstate a captured install: applied state and settle deadlines
-    /// stand; peers whose attachments or gate inputs change are resynced.
+    /// Reinstate a captured install, respecting current selection holds;
+    /// peers whose attachments or gate inputs change are resynced.
     pub(super) fn handle_restore_conditional_advertisements(
         &mut self,
         capture: ConditionalAdvertisementCapture,
     ) {
-        let prior_attachments = self.conditional_advertisements.attachments.clone();
-        let prior_definitions = self.conditional_definition_contents();
-        let transitions = self.restore_conditional_advertisements(capture);
-        self.settle_conditional_advertisement_change(
-            &prior_attachments,
-            &prior_definitions,
-            &transitions,
-        );
+        self.with_replacement_readiness(|manager| {
+            let prior_attachments = manager.conditional_advertisements.attachments.clone();
+            let prior_definitions = manager.conditional_definition_contents();
+            let transitions = manager.restore_conditional_advertisements(capture);
+            manager.settle_conditional_advertisement_change(
+                &prior_attachments,
+                &prior_definitions,
+                &transitions,
+            );
+        });
     }
 
     /// Re-observe the definitions whose `condition_policy` references a

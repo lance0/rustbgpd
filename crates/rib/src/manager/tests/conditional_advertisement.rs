@@ -505,6 +505,7 @@ async fn selection_deferral_holds_pending_until_release() {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
         }],
     });
+    super::arm_selection_waiter(&mut manager, waiter, &[(Afi::Ipv4, Safi::Unicast)]);
     let _ = manager.install_conditional_advertisements(vec![absent_if(SETTLE)]);
     assert_eq!(
         state(&manager),
@@ -811,6 +812,7 @@ async fn rollback_after_deferral_release_arms_the_restored_definition() {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
         }],
     });
+    super::arm_selection_waiter(&mut manager, waiter, &[(Afi::Ipv4, Safi::Unicast)]);
     let _ = manager.install_conditional_advertisements(vec![absent_if(SETTLE)]);
     let (capture, _) = manager.install_conditional_advertisements(vec![absent_if(SETTLE * 2)]);
     assert_eq!(

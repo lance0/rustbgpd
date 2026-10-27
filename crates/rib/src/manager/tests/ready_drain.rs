@@ -16,6 +16,7 @@ fn timer_manager(rx: mpsc::Receiver<RibUpdate>, query_rx: mpsc::Receiver<RibUpda
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });
+    arm_selection_waiter(&mut manager, source, &[(Afi::Ipv6, Safi::Unicast)]);
     manager.ribs.insert(source, AdjRibIn::new(source));
     manager
 }
@@ -349,6 +350,11 @@ async fn assert_injected_unicast_readiness_during_deferral(leased: bool) {
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             }],
         });
+    arm_selection_waiter(
+        &mut manager,
+        peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+        &[(Afi::Ipv4, Safi::Unicast)],
+    );
     manager.flush_poll_budget = Duration::ZERO;
     let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();

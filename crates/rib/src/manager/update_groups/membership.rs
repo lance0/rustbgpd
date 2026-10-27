@@ -185,6 +185,7 @@ impl RibManager {
             self.metrics.record_update_group_regroup();
         }
         if prev_gid != new_gid {
+            self.set_selection_partial_caught_up(peer, false);
             // Whether the peer's VPN advertised state is group-owned
             // whenever it is grouped. Sendable families are fixed per
             // session, so this answers for source AND destination.
@@ -354,7 +355,9 @@ impl RibManager {
                 // Leaving for the per-peer path: the private Adj-RIB-Out is
                 // re-seeded below and becomes authoritative again, so the
                 // bounded member set is released rather than double-counted.
-                self.carry_outbound_admitted_across_regroup(peer, false);
+                if !self.retain_initial_group_admitted(peer) {
+                    self.carry_outbound_admitted_across_regroup(peer, false);
+                }
             }
             if let Some(gid) = new_gid {
                 self.join_group(gid, peer);
@@ -510,7 +513,10 @@ impl RibManager {
         // The regroup carry (a dirty leaver's tombstones riding into
         // its extra withdraws) mutates residue on this path too.
         self.refresh_group_residue_gauge();
-        if new_gid.is_none() && !self.dirty_peers.contains(&peer) {
+        if new_gid.is_none()
+            && !self.dirty_peers.contains(&peer)
+            && !self.retain_initial_group_admitted(peer)
+        {
             self.release_group_admitted_keys(peer);
         }
         if deferred_evpn_destination {

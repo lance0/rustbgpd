@@ -1103,6 +1103,7 @@ impl GroupRibOut {
             let observation = table_growth_observation(&self.table);
             self.table
                 .insert_with_next_hop(route.clone(), nh.clone(), &mut || {});
+            self.table.set_local_export_source(key, delta.local_source);
             #[cfg(feature = "bench-internals")]
             observe_table_growth(&self.table, "commit", observation);
         } else {
@@ -1331,6 +1332,7 @@ impl GroupRibOut {
             let key = (*prefix, path_id);
             return Some(AdvEntry {
                 route: staged,
+                local_source: self.table.local_export_source(prefix, path_id),
                 nh: self.table.next_hop_override(prefix, path_id),
                 source_attrs: if self.source_control_passthrough {
                     None
@@ -1346,6 +1348,7 @@ impl GroupRibOut {
         let entry = self.runner_up.get(prefix)?;
         Some(AdvEntry {
             route: &entry.route,
+            local_source: entry.local_source,
             nh: entry.nh.as_ref(),
             source_attrs: entry.source_attrs.as_ref(),
             policy_label: entry.policy_label.as_ref(),
@@ -2172,6 +2175,450 @@ impl RibManager {
         }
     }
 
+    /// Keep actual admission across omitted initial rows or a frozen old view.
+    /// Complete family recovery retires this proof independently of marker grace.
+    pub(super) fn retain_initial_group_admitted(&self, peer: PeerId) -> bool {
+        self.outbound_session_ids
+            .get(&peer)
+            .is_some_and(|session_id| {
+                self.live_sessions.get(&peer).is_some_and(|records| {
+                    records.iter().any(|record| {
+                        record.session_id == *session_id
+                            && (record.selection_initial_pending
+                                || record
+                                    .selection_partial_pending
+                                    .into_iter()
+                                    .any(|held| held))
+                            && self
+                                .outbound_peers
+                                .get(&peer)
+                                .is_some_and(|outbound| record.outbound_tx.same_channel(outbound))
+                    })
+                })
+            })
+    }
+
+    /// A clean initial join may omit desired group rows without becoming
+    /// dirty. Only its exact current-session proof describes admission then.
+    pub(super) fn initial_group_admitted(
+        &self,
+        peer: PeerId,
+    ) -> Option<admitted_recovery::AdmittedKeyView<'_>> {
+        self.retain_initial_group_admitted(peer)
+            .then(|| self.pending_group_admitted.get(&peer))
+            .flatten()
+    }
+
+    pub(super) fn initial_group_admitted_counts(&self, peer: PeerId) -> Option<[usize; 6]> {
+        if !self.retain_initial_group_admitted(peer) {
+            return None;
+        }
+        let session = self.outbound_session_ids.get(&peer)?;
+        self.live_sessions
+            .get(&peer)?
+            .iter()
+            .find(|record| record.session_id == *session)
+            .and_then(|record| {
+                record
+                    .selection_initial_admitted_valid
+                    .then_some(record.selection_initial_admitted)
+            })
+    }
+
+    /// Seed once at the exceptional initial replay, including a same-channel
+    /// replay's old admission. Ordinary sends never walk the proof universe.
+    pub(super) fn seed_initial_group_admitted_counts(&mut self, peer: PeerId) {
+        if self.initial_group_admitted(peer).is_none() {
+            return;
+        }
+        let mut counts = [0; 6];
+        let mut previous_prefix = None;
+        if let Some(admitted) = self.initial_group_admitted(peer) {
+            for key in admitted.iter_with_checkpoint(|force| self.replacement_checkpoint(force)) {
+                let slot = match key {
+                    ExactExportKey::Unicast(prefix, _) => {
+                        let slot = usize::from(matches!(prefix, Prefix::V6(_)));
+                        if previous_prefix != Some(prefix) {
+                            counts[4 + slot] += 1;
+                            previous_prefix = Some(prefix);
+                        }
+                        slot
+                    }
+                    ExactExportKey::Vpn(key) => 2 + usize::from(key.afi_safi().0 == Afi::Ipv6),
+                    _ => continue,
+                };
+                counts[slot] += 1;
+            }
+        }
+        self.set_initial_group_admitted_counts(peer, counts);
+    }
+
+    pub(super) fn set_initial_group_admitted_counts(&mut self, peer: PeerId, counts: [usize; 6]) {
+        if let Some(session) = self.outbound_session_ids.get(&peer).copied()
+            && let Some(record) = self.newest_live_session_mut(peer, session)
+        {
+            record.selection_initial_admitted = counts;
+            record.selection_initial_admitted_valid = true;
+        }
+    }
+
+    /// Unique final ANN/WD identities, with ANN winning same-key overlap.
+    /// Withdrawals are sorted by the existing proof-commit preparation.
+    pub(super) fn planned_initial_group_admitted_counts(
+        &self,
+        peer: PeerId,
+        announce: &[Route],
+        withdraw: &[(Prefix, u32)],
+        source_exclusion: Option<PeerId>,
+        vpn_announce: &[VpnRibRoute],
+        vpn_withdraw: &[VpnRibRouteKey],
+    ) -> Option<[usize; 6]> {
+        let mut counts = self.initial_group_admitted_counts(peer)?;
+        let admitted = self.initial_group_admitted(peer)?;
+        let mut prefixes: crate::fast_hash::FastMap<Prefix, (usize, usize)> =
+            crate::fast_hash::FastMap::default();
+        for &(prefix, path_id) in withdraw {
+            self.replacement_checkpoint(false);
+            if admitted.contains(&ExactExportKey::Unicast(prefix, path_id)) {
+                let slot = usize::from(matches!(prefix, Prefix::V6(_)));
+                counts[slot] = counts[slot].checked_sub(1)?;
+                let entry = prefixes.entry(prefix).or_insert_with(|| {
+                    let old = admitted
+                        .unicast_prefix_paths(prefix, &mut |_| self.replacement_checkpoint(false));
+                    (old, old)
+                });
+                entry.1 = entry.1.checked_sub(1)?;
+            }
+        }
+        for key in vpn_withdraw {
+            self.replacement_checkpoint(false);
+            if admitted.contains(&ExactExportKey::Vpn(key.clone())) {
+                let slot = 2 + usize::from(key.afi_safi().0 == Afi::Ipv6);
+                counts[slot] = counts[slot].checked_sub(1)?;
+            }
+        }
+        for route in announce {
+            self.replacement_checkpoint(false);
+            if source_exclusion == Some(route.peer) {
+                continue;
+            }
+            let key = (route.prefix, route.path_id);
+            if !admitted.contains(&ExactExportKey::Unicast(key.0, key.1))
+                || withdraw.binary_search(&key).is_ok()
+            {
+                let slot = usize::from(matches!(route.prefix, Prefix::V6(_)));
+                counts[slot] = counts[slot].checked_add(1)?;
+                let entry = prefixes.entry(route.prefix).or_insert_with(|| {
+                    let old = admitted.unicast_prefix_paths(route.prefix, &mut |_| {
+                        self.replacement_checkpoint(false);
+                    });
+                    (old, old)
+                });
+                entry.1 = entry.1.checked_add(1)?;
+            }
+        }
+        for route in vpn_announce {
+            self.replacement_checkpoint(false);
+            let key = route.key();
+            if !admitted.contains(&ExactExportKey::Vpn(key.clone()))
+                || vpn_withdraw
+                    .binary_search_by_key(&(key.nlri_key, key.path_id), |key| {
+                        (key.nlri_key, key.path_id)
+                    })
+                    .is_ok()
+            {
+                let slot = 2 + usize::from(key.afi_safi().0 == Afi::Ipv6);
+                counts[slot] = counts[slot].checked_add(1)?;
+            }
+        }
+        for (prefix, (old, new)) in prefixes {
+            self.replacement_checkpoint(false);
+            let slot = 4 + usize::from(matches!(prefix, Prefix::V6(_)));
+            if old == 0 && new != 0 {
+                counts[slot] = counts[slot].checked_add(1)?;
+            }
+            if old != 0 && new == 0 {
+                counts[slot] = counts[slot].checked_sub(1)?;
+            }
+        }
+        Some(counts)
+    }
+
+    /// A frozen local source that disappears or loses RTBH eligibility needs
+    /// actual-key replay even if another globally selected source is unchanged.
+    pub(super) fn selection_local_source_changed(
+        &self,
+        peer: PeerId,
+        prefixes: &HashSet<Prefix>,
+    ) -> bool {
+        let Some(out) = self.adj_ribs_out.get(&peer) else {
+            return false;
+        };
+        let changed = |prefix, output_id| {
+            out.local_export_source(&prefix, output_id)
+                .is_some_and(|source| {
+                    self.ribs
+                        .get(&crate::manager::helpers::LOCAL_PEER)
+                        .and_then(|rib| rib.get(&prefix, source.path_id))
+                        .and_then(crate::adj_rib_out::LocalExportSource::from_route)
+                        != Some(source)
+                })
+        };
+        for &prefix in prefixes {
+            self.replacement_checkpoint(false);
+            if let Some(proof) = self.initial_group_admitted(peer) {
+                let mut any = false;
+                proof.visit_unicast_prefix_paths(
+                    prefix,
+                    &mut |force| self.replacement_checkpoint(force),
+                    &mut |path_id| any |= changed(prefix, path_id),
+                );
+                if any {
+                    return true;
+                }
+            } else if out.iter_prefix(&prefix).any(|route| {
+                self.replacement_checkpoint(false);
+                changed(prefix, route.path_id)
+            }) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(super) fn selection_partial_caught_up(&self, peer: PeerId) -> bool {
+        self.selection_resync_held(peer)
+            && self
+                .outbound_session_ids
+                .get(&peer)
+                .and_then(|session| {
+                    self.live_sessions
+                        .get(&peer)?
+                        .iter()
+                        .find(|record| record.session_id == *session)
+                })
+                .is_some_and(|record| record.selection_partial_caught_up)
+    }
+
+    pub(super) fn set_selection_partial_caught_up(&mut self, peer: PeerId, caught_up: bool) {
+        if let Some(session) = self.outbound_session_ids.get(&peer).copied()
+            && let Some(record) = self.newest_live_session_mut(peer, session)
+        {
+            record.selection_partial_caught_up = caught_up;
+        }
+    }
+
+    pub(super) fn selection_resync_held(&self, peer: PeerId) -> bool {
+        let Some(session) = self.outbound_session_ids.get(&peer) else {
+            return false;
+        };
+        let Some(record) = self.live_sessions.get(&peer).and_then(|records| {
+            records.iter().find(|record| {
+                record.session_id == *session
+                    && self
+                        .outbound_peers
+                        .get(&peer)
+                        .is_some_and(|outbound| record.outbound_tx.same_channel(outbound))
+            })
+        }) else {
+            return false;
+        };
+        record
+            .selection_partial_pending
+            .into_iter()
+            .zip([
+                (Afi::Ipv4, Safi::Unicast),
+                (Afi::Ipv6, Safi::Unicast),
+                (Afi::Ipv4, Safi::MplsVpn),
+                (Afi::Ipv6, Safi::MplsVpn),
+            ])
+            .any(|(pending, family)| pending && self.selection_deferred(family))
+    }
+
+    pub(super) fn selection_receiver_held_families(&self, peer: PeerId) -> [bool; 4] {
+        [
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv6, Safi::MplsVpn),
+        ]
+        .map(|family| {
+            self.selection_deferred(family)
+                && self
+                    .peer_sendable_families
+                    .get(&peer)
+                    .is_some_and(|families| families.contains(&family))
+        })
+    }
+
+    pub(super) fn private_unicast_admission_incomplete(&self, peer: PeerId) -> bool {
+        self.grouped_member_of(peer).is_none()
+            && self.retain_initial_group_admitted(peer)
+            && self.initial_group_admitted_counts(peer).map_or_else(
+                || self.dirty_peers.contains(&peer) && self.group_recovery_fallback(peer).is_some(),
+                |counts| {
+                    counts[0] + counts[1] != self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)
+                },
+            )
+    }
+
+    pub(super) fn private_vpn_admission_incomplete(&self, peer: PeerId) -> bool {
+        self.vpn_grouped_member_of(peer).is_none()
+            && self.retain_initial_group_admitted(peer)
+            && self.initial_group_admitted_counts(peer).map_or_else(
+                || self.dirty_peers.contains(&peer) && self.group_recovery_fallback(peer).is_some(),
+                |counts| {
+                    counts[2] + counts[3]
+                        != self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::vpn_len)
+                },
+            )
+    }
+
+    pub(super) fn private_common_admission_incomplete(&self, peer: PeerId) -> bool {
+        self.private_unicast_admission_incomplete(peer)
+            || self.private_vpn_admission_incomplete(peer)
+    }
+
+    pub(super) fn actual_unicast_advertised_count(&self, peer: PeerId) -> usize {
+        self.initial_group_admitted_counts(peer)
+            .map(|counts| counts[0] + counts[1])
+            .or_else(|| self.grouped_advertised_count(peer))
+            .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len))
+    }
+
+    /// Capture OLD once before dormant-to-active staging changes a group table.
+    pub(super) fn retain_selection_group_admission(&mut self) {
+        let peers: Vec<_> = self
+            .outbound_peers
+            .keys()
+            .inspect(|_| self.replacement_checkpoint(false))
+            .copied()
+            .filter(|peer| {
+                self.grouped_member_of(*peer).is_some()
+                    && self
+                        .selection_receiver_held_families(*peer)
+                        .into_iter()
+                        .any(|held| held)
+            })
+            .collect();
+        for peer in peers {
+            self.replacement_checkpoint(false);
+            // Freeze known clean counts before a bounded capture can refuse;
+            // desired group state may advance after this activation hook.
+            let previous = self.initial_group_admitted_counts(peer).or_else(|| {
+                (!self.dirty_peers.contains(&peer)
+                    && !self.pending_regroup_baseline.contains_key(&peer))
+                .then(|| {
+                    let uc = self.grouped_advertised_unicast_lens(peer)?;
+                    let vpn = self.grouped_vpn_advertised_lens(peer).unwrap_or([0; 2]);
+                    Some([uc[0], uc[1], vpn[0], vpn[1], uc[0], uc[1]])
+                })
+                .flatten()
+            });
+            self.capture_group_admitted_keys(peer);
+            let families = self.selection_receiver_held_families(peer);
+            if let Some(session) = self.outbound_session_ids.get(&peer).copied()
+                && let Some(record) = self.newest_live_session_mut(peer, session)
+            {
+                for (pending, held) in record.selection_partial_pending.iter_mut().zip(families) {
+                    *pending |= held;
+                }
+            }
+            if self.initial_group_admitted(peer).is_some() {
+                self.seed_initial_group_admitted_counts(peer);
+            } else if let Some(previous) = previous {
+                self.set_initial_group_admitted_counts(peer, previous);
+            }
+        }
+    }
+
+    pub(super) fn complete_initial_selection_replay(&mut self, peer: PeerId) {
+        let still_held = self.pending_eor.get(&peer).is_some_and(|families| {
+            families.iter().any(|family| {
+                matches!(
+                    family,
+                    (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast | Safi::MplsVpn)
+                ) && self.selection_convergence_held(*family)
+            })
+        });
+        if !still_held
+            && !self.selection_resync_held(peer)
+            && let Some(session_id) = self.outbound_session_ids.get(&peer).copied()
+            && let Some(record) = self.newest_live_session_mut(peer, session_id)
+        {
+            record.selection_initial_pending = false;
+            record.selection_partial_pending = [false; 4];
+            record.selection_partial_caught_up = false;
+            record.selection_initial_admitted = [0; 6];
+            record.selection_initial_admitted_valid = false;
+        }
+    }
+
+    /// A released family can owe omitted initial rows even when another
+    /// family still keeps the receiver's partial recovery parked.
+    pub(super) fn wake_selection_partial_recovery(&mut self, family: (Afi, Safi)) {
+        let slot = match family {
+            (Afi::Ipv4, Safi::Unicast) => 0,
+            (Afi::Ipv6, Safi::Unicast) => 1,
+            (Afi::Ipv4, Safi::MplsVpn) => 2,
+            (Afi::Ipv6, Safi::MplsVpn) => 3,
+            _ => return,
+        };
+        let peers: Vec<_> = self
+            .dirty_peers
+            .iter()
+            .inspect(|_| self.replacement_checkpoint(false))
+            .copied()
+            .filter(|peer| {
+                self.outbound_session_ids
+                    .get(peer)
+                    .and_then(|session| {
+                        self.live_sessions
+                            .get(peer)?
+                            .iter()
+                            .find(|record| record.session_id == *session)
+                    })
+                    .is_some_and(|record| record.selection_partial_pending[slot])
+            })
+            .collect();
+        for peer in peers {
+            self.replacement_checkpoint(false);
+            self.set_selection_partial_caught_up(peer, false);
+        }
+    }
+
+    /// Clean receivers may have no delta at release (for example source-
+    /// suppressed rows). Their completed hold still retires its own proof.
+    pub(super) fn retire_settled_selection_admission(&mut self) {
+        let peers: Vec<_> = self
+            .outbound_peers
+            .keys()
+            .inspect(|_| self.replacement_checkpoint(false))
+            .copied()
+            .filter(|peer| {
+                self.retain_initial_group_admitted(*peer)
+                    && !self.dirty_peers.contains(peer)
+                    && !self.force_outbound_peers.contains(peer)
+                    && !self.selection_resync_held(*peer)
+            })
+            .collect();
+        for peer in peers {
+            self.replacement_checkpoint(false);
+            self.complete_initial_selection_replay(peer);
+            self.retire_completed_initial_group_admitted(peer);
+        }
+    }
+
+    pub(super) fn retire_completed_initial_group_admitted(&mut self, peer: PeerId) {
+        if !self.retain_initial_group_admitted(peer)
+            && !self.dirty_peers.contains(&peer)
+            && !self.pending_regroup_baseline.contains_key(&peer)
+            && self.finish_evpn_recovery(peer)
+        {
+            self.release_group_admitted_keys(peer);
+        }
+    }
+
     pub(in crate::manager) fn release_group_admitted_keys(&mut self, peer: PeerId) {
         let readiness = self.replacement_readiness.clone();
         self.pending_group_admitted
@@ -2192,6 +2639,7 @@ impl RibManager {
         for &peer in peers {
             if !self.dirty_peers.contains(&peer)
                 && !self.pending_regroup_baseline.contains_key(&peer)
+                && !self.retain_initial_group_admitted(peer)
             {
                 self.release_group_admitted_keys(peer);
             }
@@ -2764,6 +3212,7 @@ impl RibManager {
         peer: PeerId,
         capture: bool,
     ) -> bool {
+        self.set_selection_partial_caught_up(peer, false);
         if self.outbound_channel_gone(peer) {
             debug!(%peer, "outbound channel closed — dropping dirty state instead of re-marking");
             self.drop_gone_dirty_peer(peer);
@@ -2821,7 +3270,14 @@ impl RibManager {
         if !self.finish_evpn_recovery(peer) {
             return;
         }
-        self.release_group_admitted_keys(peer);
+        let held_counts = self.initial_group_admitted_counts(peer).is_some();
+        self.complete_initial_selection_replay(peer);
+        if self.grouped_member_of(peer).is_none() {
+            self.carry_outbound_admitted_across_regroup(peer, false);
+        }
+        if !self.retain_initial_group_admitted(peer) {
+            self.release_group_admitted_keys(peer);
+        }
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "retirement", false);
@@ -2848,6 +3304,33 @@ impl RibManager {
             }
         }
         self.refresh_group_residue_gauge();
+        if held_counts && !self.retain_initial_group_admitted(peer) {
+            let private = self.adj_ribs_out.get(&peer).map(AdjRibOut::family_lens);
+            let unicast = self
+                .grouped_advertised_unicast_lens(peer)
+                .unwrap_or_else(|| private.map_or([0; 2], |lens| lens.unicast));
+            let vpn = self
+                .grouped_vpn_advertised_lens(peer)
+                .unwrap_or_else(|| private.map_or([0; 2], |lens| lens.vpn));
+            let label = peer.label();
+            super::helpers::set_adj_rib_out_prefixes(
+                &self.metrics,
+                &label,
+                super::helpers::UNICAST_FAMILIES,
+                unicast,
+            );
+            super::helpers::set_adj_rib_out_prefixes(
+                &self.metrics,
+                &label,
+                super::helpers::L3VPN_FAMILIES,
+                vpn,
+            );
+            if self.outbound_prefix_limits.contains_key(&peer) {
+                self.refresh_outbound_limit_gauges(peer);
+            } else {
+                self.refresh_outbound_usage_gauges(peer);
+            }
+        }
     }
 
     /// Whether `peer` is a grouped member whose VPN advertised state is

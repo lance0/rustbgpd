@@ -271,6 +271,11 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
                 families: ipv4_sendable(),
             }],
         });
+        super::arm_selection_waiter(
+            &mut manager,
+            PeerId::from_addr("192.0.2.51".parse().unwrap()),
+            &ipv4_sendable(),
+        );
         manager.flush_poll_budget = std::time::Duration::ZERO;
     }
     let (general_reply, mut general_response) = oneshot::channel();
@@ -11534,6 +11539,7 @@ async fn vpn_group_stage_retirement_services_readiness() {
             families: vec![family],
         }],
     });
+    super::arm_selection_waiter(&mut manager, peer_v4(source), &[family]);
     manager.flush_poll_budget = Duration::ZERO;
     let (sender, mut output) = mpsc::channel(8);
     let mut registration = super::update_groups_recovery::peer_up(peer, sender, None);

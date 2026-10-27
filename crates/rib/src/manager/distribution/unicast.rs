@@ -2182,6 +2182,8 @@ impl RibManager {
             // `force` mode bypasses the equality check — see
             // `distribute_single_best_prefix` for the GShut rationale.
             let changed = force
+                || rib_out.local_export_source(prefix, modified.path_id)
+                    != crate::adj_rib_out::LocalExportSource::from_route(candidate)
                 || rib_out
                     .get(prefix, modified.path_id)
                     .is_none_or(|existing| {
@@ -2194,6 +2196,7 @@ impl RibManager {
                     });
             if changed {
                 checkpoint();
+                out.record_local_source(candidate, modified.path_id);
                 out.next_hop_override.push(nh_action);
                 out.announce.push(modified);
             }
@@ -2403,6 +2406,7 @@ impl RibManager {
                     source_attrs: capture_source_attrs(candidate),
                     policy_label: label,
                     winner_source: winner,
+                    local_source: crate::adj_rib_out::LocalExportSource::from_route(candidate),
                 });
                 break;
             }
@@ -2423,16 +2427,19 @@ impl RibManager {
                 checkpoint();
                 otc_blocked.push(modified.clone());
             }
-            let changed = rib_out.get(prefix, 0).is_none_or(|existing| {
-                !unicast_routes_equal(
-                    existing,
-                    rib_out.next_hop_override(prefix, modified.path_id),
-                    &modified,
-                    nh_action.as_ref(),
-                )
-            });
+            let changed = rib_out.local_export_source(prefix, 0)
+                != crate::adj_rib_out::LocalExportSource::from_route(candidate)
+                || rib_out.get(prefix, 0).is_none_or(|existing| {
+                    !unicast_routes_equal(
+                        existing,
+                        rib_out.next_hop_override(prefix, modified.path_id),
+                        &modified,
+                        nh_action.as_ref(),
+                    )
+                });
             if changed {
                 checkpoint();
+                out.record_local_source(candidate, modified.path_id);
                 out.next_hop_override.push(nh_action);
                 out.announce.push(modified);
             }
@@ -2899,6 +2906,8 @@ impl RibManager {
         // every route that already lives in AdjRibOut, defeating the
         // whole point of `RefreshPeerOutbound`.
         let changed = force
+            || rib_out.local_export_source(prefix, 0)
+                != crate::adj_rib_out::LocalExportSource::from_route(best)
             || rib_out.get(prefix, 0).is_none_or(|existing| {
                 !crate::manager::helpers::unicast_routes_equal_for_profile(
                     existing,
@@ -2940,6 +2949,7 @@ impl RibManager {
         }
         if changed {
             checkpoint();
+            result.record_local_source(best, modified.path_id);
             result.next_hop_override.push(nh_action);
             result.announce.push(modified);
         }
@@ -3193,6 +3203,8 @@ impl RibManager {
 
         // `force` semantics as in `distribute_single_best_prefix`.
         let changed = force
+            || rib_out.local_export_source(prefix, 0)
+                != crate::adj_rib_out::LocalExportSource::from_route(best)
             || rib_out.get(prefix, 0).is_none_or(|existing| {
                 !unicast_routes_equal(
                     existing,
@@ -3203,6 +3215,7 @@ impl RibManager {
             });
         if changed {
             checkpoint();
+            result.record_local_source(best, modified.path_id);
             result.next_hop_override.push(nh_action);
             result.announce.push(modified);
         }

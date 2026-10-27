@@ -1101,13 +1101,15 @@ enum UpdateGroupComparisonDifference {
 message SelectionDeferralFamilyState {
   uint32 afi = 1;
   uint32 safi = 2;
+  // False for a dormant startup roster as well as a released family.
   bool active = 3;
   string waiter_state = 4;
   // Process-local session stamp; explicitly unstable.
   optional uint64 waiter_session_id = 5;
   uint64 blocking_waiters = 6;
   uint64 remaining_millis = 7;
-  // Empty while active; "all_eor" or "timer" after release.
+  // Empty while dormant or active; all_eor, timer, collision_refresh or
+  // all_excluded after release.
   string release_reason = 8;
   // Canonical family label for afi/safi, for example "ipv4_unicast", using
   // the configuration spelling. Empty from an older daemon.

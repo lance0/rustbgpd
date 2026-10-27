@@ -22,7 +22,7 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     let feed_peer = peer_v4(feed);
     let family = (Afi::BgpLs, Safi::BgpLs);
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_selection_deferral(SelectionDeferralConfig {
             timeout: Duration::from_mins(1),
             waiters: vec![SelectionDeferralWaiterConfig {
@@ -30,6 +30,7 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
                 families: vec![family],
             }],
         });
+    super::arm_selection_waiter(&mut manager, feed_peer, &[family]);
     let handle = tokio::spawn(manager.run());
 
     feed_square_topology(&tx, feed).await;

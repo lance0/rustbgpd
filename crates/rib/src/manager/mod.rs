@@ -1870,6 +1870,18 @@ pub(super) struct LiveSessionRecord {
     /// Actual group-owned EVPN admission, including clean deltas without keys.
     evpn_admitted_count: usize,
     group_recovery_fallback: Option<update_groups::RecoveryFallbackCause>,
+    /// Initial unicast replay omitted rows behind process-start selection.
+    /// Own its admitted-key proof independently of End-of-RIB replay grace.
+    selection_initial_pending: bool,
+    /// A process-start hold retains this receiver's admitted projection.
+    selection_partial_pending: [bool; 4],
+    /// Every currently exportable change is admitted; only held work remains.
+    selection_partial_caught_up: bool,
+    /// Actual admitted UC-v4/v6 and VPN-v4/v6 path counts, then UC-v4/v6
+    /// prefix counts. Final batch deltas keep frozen-view gauges O(batch).
+    selection_initial_admitted: [usize; 6],
+    /// Counts remain truthful if a later bounded proof reservation refuses.
+    selection_initial_admitted_valid: bool,
     /// The neighbor's export-policy totals, installed with the registration.
     export_policy_counters: crate::update::ExportPolicyCounters,
 }
@@ -3620,8 +3632,10 @@ impl RibManager {
     /// message makes it runnable and the next event loop turn arms this timer
     /// again.
     fn resync_tick_pending(&self) -> bool {
-        !self.dirty_peers.is_empty()
-            || !self.pending_inbound_refresh.is_empty()
+        self.dirty_peers.iter().any(|&peer| {
+            self.replacement_checkpoint(false);
+            !self.selection_partial_caught_up(peer)
+        }) || !self.pending_inbound_refresh.is_empty()
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {
                     self.replacement_checkpoint(false);
@@ -3707,7 +3721,9 @@ impl RibManager {
                 });
                 after
                     .chain(wrapped)
-                    .filter(|peer| !attempted.contains(*peer))
+                    .filter(|peer| {
+                        !attempted.contains(*peer) && !self.selection_partial_caught_up(**peer)
+                    })
                     .take(1)
                     .copied()
                     .collect()
@@ -3743,7 +3759,7 @@ impl RibManager {
             let unattempted_remain = self
                 .dirty_peers
                 .iter()
-                .any(|peer| !attempted.contains(peer));
+                .any(|peer| !attempted.contains(peer) && !self.selection_partial_caught_up(*peer));
             if !unattempted_remain {
                 return recovered;
             }
@@ -5893,20 +5909,10 @@ impl RibManager {
             // remain grouped, so this VPN delta walk does not cover EVPN:
             // restage its private view under the new Φ. Future grouped RTC
             // needs OLD Φ capture before publication and separate qualification.
-            // A dirty peer's pending resync already does. While EVPN
-            // selection is deferred nothing EVPN has been selected or
-            // advertised (the startup gate is one-shot and the only Loc-RIB
-            // EVPN writer returns early), and release distributes every key
-            // as new under the then-current Φ, so skipping loses nothing.
+            // A dirty peer's pending resync already does. A dormant startup
+            // can have advertised rows before the first waiter arms; release
+            // restages that frozen private inventory under the current Φ.
             let evpn_deferred = self.selection_deferred((Afi::L2Vpn, Safi::Evpn));
-            debug_assert!(
-                !evpn_deferred
-                    || self
-                        .adj_ribs_out
-                        .get(&peer)
-                        .is_none_or(|rib_out| rib_out.evpn_len() == 0),
-                "EVPN advertised while EVPN selection is still deferred"
-            );
             if !self.dirty_peers.contains(&peer) && !evpn_deferred {
                 let readiness = self.replacement_readiness.clone();
                 let mut checkpoint = || {
