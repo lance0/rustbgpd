@@ -145,7 +145,10 @@ v0.73.0 tag failed the doctor and management-correctness gates on one
 v0.74.0 tag on its on-host verdict, every gate passing; the
 [2026-10-06 run](../soaks/soak-rs-flagship-24h-2026-10-06.md) qualified the
 v0.75.0 tag and the [2026-10-11 run](../soaks/soak-rs-flagship-24h-2026-10-11.md) the
-v0.76.0 tag the same way. Use the
+v0.76.0 tag the same way. The
+[2026-10-26 run](../soaks/soak-rs-flagship-24h-2026-10-26.md) on the v0.80.1
+tag failed the doctor and management-correctness gates on one `rbgp doctor`
+health check and is recorded as a pass with that one accepted exception. Use the
 [runner procedure](../../tests/soak/README.md) and its
 [precommitted gates](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 
