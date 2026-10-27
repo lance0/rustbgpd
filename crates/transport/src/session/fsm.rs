@@ -606,6 +606,9 @@ impl PeerSession {
                         .or(self.fsm.negotiated())
                         .is_some_and(|negotiated| negotiated.peer_notification_gr);
             let actions = self.fsm.handle_event(event.clone());
+            // The FSM changes state only here.
+            self.established
+                .publish(self.fsm.state() == SessionState::Established);
             let mut actions = self.hold_keepalive_for_collision_verdict(actions);
             if let Some(replacement) = notification.take()
                 && let Some(Action::SendNotification(original)) = actions

@@ -1188,14 +1188,18 @@ impl PeerManager {
     /// the yield it waits until the actor next returns `Pending`, which a
     /// queue of ready commands can defer for Tokio's whole cooperative budget.
     ///
-    /// A `ListPeers` (the `GetHealth` snapshot) is detached when possible: its
-    /// session fan-out can take its whole `PEER_QUERY_TIMEOUT` while sessions
-    /// drain a reload's exports, and answered in place it held this lane, so a
-    /// `/readyz` ping queued behind it missed its own deadline.
+    /// `ActivePeers` (the `GetHealth` count) reads each session's published
+    /// state and never waits on a session. A `ListPeers` is detached when
+    /// possible: its session fan-out can take its whole `PEER_QUERY_TIMEOUT`
+    /// while sessions drain a reload's exports, and answered in place it held
+    /// this lane, so a `/readyz` ping queued behind it missed its deadline.
     async fn handle_readiness_query(&mut self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::Ping { reply } => {
                 let _ = reply.send(());
+            }
+            PeerManagerReadinessQuery::ActivePeers { reply } => {
+                let _ = reply.send(self.active_peer_count());
             }
             PeerManagerReadinessQuery::ListPeers { reply } => {
                 if let Err(reply) = self.detach_list_peers(reply) {
@@ -1887,6 +1891,9 @@ impl PeerManager {
             }
             PeerManagerCommand::Ping { reply } => {
                 let _ = reply.send(());
+            }
+            PeerManagerCommand::ActivePeers { reply } => {
+                let _ = reply.send(self.active_peer_count());
             }
             PeerManagerCommand::AddPeer {
                 config,

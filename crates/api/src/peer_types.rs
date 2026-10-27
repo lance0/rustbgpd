@@ -854,6 +854,12 @@ pub enum PeerManagerCommand {
         /// Reply channel acknowledging actor responsiveness.
         reply: oneshot::Sender<()>,
     },
+    /// Count configured peers whose session is Established, from the state
+    /// each session publishes, without querying any session.
+    ActivePeers {
+        /// Reply channel returning the Established-peer count.
+        reply: oneshot::Sender<usize>,
+    },
     /// Add a new peer with the given configuration.
     AddPeer {
         /// Neighbor configuration.
@@ -1855,6 +1861,13 @@ pub enum PeerManagerReadinessQuery {
     Ping {
         /// Reply channel acknowledging actor responsiveness.
         reply: oneshot::Sender<()>,
+    },
+    /// Count configured peers whose session is Established (the `GetHealth`
+    /// active-peer count), from the state each session publishes, without
+    /// querying any session.
+    ActivePeers {
+        /// Reply channel returning the Established-peer count.
+        reply: oneshot::Sender<usize>,
     },
     /// Return a live snapshot of all configured peers.
     ListPeers {
@@ -2884,9 +2897,9 @@ pub struct PeerInfo {
     /// True when the per-peer session-state query did not complete in time
     /// (e.g. the session task is parked on TCP write back-pressure). The
     /// `state` field falls back to `Idle` in that case, so consumers that
-    /// care about liveness — `GetHealth`'s active-peer count, `ListNeighbors`
-    /// observability — should treat `stale = true` as "state unknown" rather
-    /// than as an authoritative Idle reading.
+    /// care about liveness, such as `ListNeighbors` observability, should
+    /// treat `stale = true` as "state unknown" rather than as an
+    /// authoritative Idle reading.
     pub stale: bool,
     /// Slow-peer flag (LAN-470): the session is alive but its outbound
     /// queue has stayed above the configured backlog threshold for the

@@ -662,6 +662,10 @@ fn spawn_real_primary(
 /// Complete the OPEN/KEEPALIVE exchange and wait until the session task
 /// itself reports Established.
 async fn establish_real_session(mgr: &PeerManager, stream: &mut TcpStream) {
+    establish_real_session_for(mgr, IpAddr::V4(Ipv4Addr::LOCALHOST), stream).await;
+}
+
+async fn establish_real_session_for(mgr: &PeerManager, peer: IpAddr, stream: &mut TcpStream) {
     use super::collision::{mock_open, read_bgp_message, send_bgp_message};
 
     let mut buf = BytesMut::new();
@@ -679,7 +683,10 @@ async fn establish_real_session(mgr: &PeerManager, stream: &mut TcpStream) {
         Message::Keepalive
     ));
     send_bgp_message(stream, &Message::Keepalive).await;
-    session_state_where(mgr, |state| state.fsm_state == SessionState::Established).await;
+    session_state_of(mgr, peer, |state| {
+        state.fsm_state == SessionState::Established
+    })
+    .await;
 }
 
 /// Poll the session task until `done` holds. Each answer comes from the
@@ -689,7 +696,15 @@ async fn session_state_where(
     mgr: &PeerManager,
     done: impl Fn(&PeerSessionState) -> bool,
 ) -> PeerSessionState {
-    let handle = mgr.peers[&key(IpAddr::V4(Ipv4Addr::LOCALHOST))].handle();
+    session_state_of(mgr, IpAddr::V4(Ipv4Addr::LOCALHOST), done).await
+}
+
+async fn session_state_of(
+    mgr: &PeerManager,
+    peer: IpAddr,
+    done: impl Fn(&PeerSessionState) -> bool,
+) -> PeerSessionState {
+    let handle = mgr.peers[&key(peer)].handle();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(state) = handle.query_state_timeout(Duration::from_secs(1)).await
@@ -818,4 +833,87 @@ async fn lost_row_reports_clean_close_after_notification_flap() {
     );
     let managed = mgr.peers.remove(&key(remote.ip())).unwrap();
     managed.into_parts().0.shutdown().await.unwrap().unwrap();
+}
+
+/// `GetHealth`'s active-peer count reads the state each session publishes.
+/// It must equal the count of sessions that answer `QueryState` as
+/// Established (what `GetHealth` used to fan out for) after every lifecycle
+/// transition: add, up, remote down, reconnect, operator reset, a session
+/// that ends while its peer stays configured (the TCP-AO rotation abort), and
+/// delete. Each step changes exactly one of two real sessions, so a
+/// transition the published state misses leaves the counts unequal.
+#[tokio::test]
+async fn active_peer_count_matches_session_state_across_lifecycle() {
+    async fn assert_counts(mgr: &PeerManager, expected: usize, step: &str) {
+        let session_derived = mgr
+            .list_peers()
+            .await
+            .iter()
+            .filter(|peer| !peer.stale && peer.state == SessionState::Established)
+            .count();
+        assert_eq!(
+            session_derived, expected,
+            "{step}: sessions answering Established"
+        );
+        assert_eq!(
+            mgr.active_peer_count(),
+            expected,
+            "{step}: GetHealth active peers"
+        );
+    }
+    async fn not_established(mgr: &PeerManager, peer: IpAddr) {
+        session_state_of(mgr, peer, |state| {
+            state.fsm_state != SessionState::Established
+        })
+        .await;
+    }
+
+    let mut mgr = test_peer_manager();
+    let listener_a = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_b = TcpListener::bind((Ipv4Addr::new(127, 0, 0, 2), 0))
+        .await
+        .unwrap();
+    let a = listener_a.local_addr().unwrap();
+    let b = listener_b.local_addr().unwrap();
+    let _rib_a = spawn_real_primary(&mut mgr, a);
+    let _rib_b = spawn_real_primary(&mut mgr, b);
+    assert_counts(&mgr, 0, "added, Idle").await;
+
+    mgr.peers[&key(a.ip())].handle().start().await.unwrap();
+    let (mut stream_a, _) = listener_a.accept().await.unwrap();
+    establish_real_session_for(&mgr, a.ip(), &mut stream_a).await;
+    assert_counts(&mgr, 1, "a up").await;
+    mgr.peers[&key(b.ip())].handle().start().await.unwrap();
+    let (mut stream_b, _) = listener_b.accept().await.unwrap();
+    establish_real_session_for(&mgr, b.ip(), &mut stream_b).await;
+    assert_counts(&mgr, 2, "b up").await;
+
+    send_shutdown_and_wait_for_close(&mut stream_a).await;
+    drop(stream_a);
+    not_established(&mgr, a.ip()).await;
+    assert_counts(&mgr, 1, "a down by remote NOTIFICATION").await;
+    let (mut stream_a, _) = listener_a.accept().await.unwrap();
+    establish_real_session_for(&mgr, a.ip(), &mut stream_a).await;
+    assert_counts(&mgr, 2, "a reconnected").await;
+
+    mgr.reset_peer(key(b.ip()), None).await.unwrap();
+    not_established(&mgr, b.ip()).await;
+    assert_counts(&mgr, 1, "b operator reset").await;
+    drop(stream_b);
+    let (mut stream_b, _) = listener_b.accept().await.unwrap();
+    establish_real_session_for(&mgr, b.ip(), &mut stream_b).await;
+    assert_counts(&mgr, 2, "b reconnected").await;
+
+    // TCP-AO rotation aborts a session in place: the peer stays configured
+    // with a session that ended while Established.
+    let handle = mgr.peers[&key(a.ip())].handle();
+    handle.abort_for_transport_safety();
+    while !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    assert_counts(&mgr, 1, "a session aborted in place").await;
+
+    mgr.delete_peer(key(b.ip()), false).await.unwrap();
+    assert_counts(&mgr, 0, "b deleted").await;
+    drop((stream_a, stream_b));
 }

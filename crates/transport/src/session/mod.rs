@@ -616,6 +616,8 @@ pub(crate) struct PeerSession {
     /// so a confirmed interface-down that arrives after the TCP loss can
     /// still purge them.
     pub(crate) gr_retained_connection: crate::handle::RetainedConnectionState,
+    /// Whether the FSM is Established, for [`crate::PeerHandle::is_established`].
+    pub(crate) established: crate::handle::EstablishedPublisher,
     /// The FSM reached `OpenConfirm` or `Established`: judge the connection once
     /// against the current link state at the top of the next run-loop turn.
     link_check_due: bool,
@@ -2344,6 +2346,7 @@ impl PeerSession {
             suppress_gr_retention: false,
             connection,
             gr_retained_connection: crate::handle::RetainedConnectionState::default(),
+            established: crate::handle::EstablishedPublisher::default(),
             link_check_due: false,
             import_explain_enabled: explain_enabled,
             import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(

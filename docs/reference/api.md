@@ -4220,10 +4220,12 @@ actor busy for example in the short tail of a configuration reload, or
 persistent, a wedged actor; a caller may retry once and should treat a
 repeated miss as a failure. A closed actor channel, a dropped reply, or a
 stalled export-policy transition or selection release returns `INTERNAL`.
-`active_peers` counts only non-stale peers observed `Established`; unavailable observations are excluded even if their last known
-state was `Established`. The count can therefore omit live sessions. Use
-`ListNeighbors` and its `stale` flag to distinguish unavailable state from an
-observed session state.
+`active_peers` counts configured peers whose session reports `Established`.
+Each session publishes its state on every FSM transition and clears it when it
+ends, and the peer manager counts from that published state without querying
+any session, so a session busy writing a large export burst is still counted.
+`ListNeighbors` queries each session and marks a session that does not answer
+in time `stale`.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

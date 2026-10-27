@@ -389,9 +389,9 @@ async fn normal_operator_neighbor_snapshot_does_not_delay_import_stats() {
     use rustbgpd_api::peer_types::PeerManagerOperatorQuery;
 
     let mut outcomes = Vec::new();
-    // The readiness lane's `ListPeers` (`GetHealth`) is detached rather than
+    // The readiness lane's `ListPeers` is detached rather than
     // answered in place, so it fences neither mutations nor later reads; see
-    // `queries::readyz_is_not_held_behind_a_health_snapshot_in_the_run_loop`.
+    // `queries::health_probes_are_not_held_behind_a_peer_snapshot_in_the_run_loop`.
     for (lane, cancel_snapshot) in [
         "operator_list",
         "ordinary_list",
