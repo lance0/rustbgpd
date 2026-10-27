@@ -952,3 +952,130 @@ fn validation_policy_posture_resolves_prospective_ranges_and_caps_before_resolut
     );
     assert_eq!(capped.rpki_invalid.reason, "incomplete");
 }
+
+/// A manager with both read lanes (the operator lane sets the detached-read
+/// limit) and two sessions that accept `QueryState` but never answer it, so
+/// a peer snapshot's fan-out runs to its whole `PEER_QUERY_TIMEOUT`, as it
+/// can while sessions drain a reload's exports.
+fn manager_with_held_session_state() -> (
+    PeerManager,
+    mpsc::Sender<PeerManagerCommand>,
+    mpsc::Sender<PeerManagerReadinessQuery>,
+    mpsc::Sender<EnqueuedOperatorQuery>,
+) {
+    let (tx, rx) = mpsc::channel(4);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let mut manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx)
+    .with_operator_queries(operator_rx);
+    for host in 1..=2 {
+        insert_test_managed_peer(
+            &mut manager,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, host)),
+            stalled_policy_query_handle(),
+            false,
+        );
+    }
+    (manager, tx, readiness_tx, operator_tx)
+}
+
+/// Core probes over a stub RIB that answers every Loc-RIB count at once.
+fn core_probe(
+    command_tx: &mpsc::Sender<PeerManagerCommand>,
+    readiness_tx: &mpsc::Sender<PeerManagerReadinessQuery>,
+) -> rustbgpd_api::health_probe::CoreReadinessProbe {
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::QueryLocRibCount { reply } = update {
+                let _ = reply.send(0);
+            }
+        }
+    });
+    rustbgpd_api::health_probe::CoreReadinessProbe::new(command_tx.clone(), rib_tx)
+        .with_peer_manager_readiness(readiness_tx.clone())
+}
+
+/// Issue `GetHealth` first, then `/readyz`, and require `/readyz` to answer
+/// before the health snapshot's held session fan-out can end. Answered in
+/// place, the snapshot held the readiness lane for the whole fan-out, so the
+/// ping queued behind it missed its own 200 ms deadline; the soak saw this
+/// as `peer manager probe timed out` right after a reload commit.
+async fn readyz_overtakes_a_held_health_snapshot(
+    probe: &rustbgpd_api::health_probe::CoreReadinessProbe,
+) {
+    let started = tokio::time::Instant::now();
+    let health = probe.snapshot();
+    tokio::pin!(health);
+    // One poll enqueues the health snapshot on the readiness lane first.
+    tokio::select! {
+        biased;
+        _ = &mut health => panic!("held sessions cannot answer yet"),
+        () = std::future::ready(()) => {}
+    }
+    probe
+        .check()
+        .await
+        .expect("readiness inside its deadline while GetHealth waits on sessions");
+    assert!(
+        started.elapsed() < PEER_QUERY_TIMEOUT,
+        "the ping waited {:?} behind the health snapshot's session fan-out",
+        started.elapsed()
+    );
+    let snapshot = health
+        .await
+        .expect("GetHealth inside its deadline with stale sessions");
+    assert!(snapshot.peers.iter().all(|peer| peer.stale));
+    assert!(started.elapsed() < rustbgpd_api::health_probe::CORE_READINESS_DEADLINE);
+}
+
+#[tokio::test(start_paused = true)]
+async fn readyz_is_not_held_behind_a_health_snapshot_in_the_run_loop() {
+    let (manager, command_tx, readiness_tx, _operator_tx) = manager_with_held_session_state();
+    let actor = tokio::spawn(manager.run());
+    let probe = core_probe(&command_tx, &readiness_tx);
+
+    readyz_overtakes_a_held_health_snapshot(&probe).await;
+
+    command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+}
+
+/// The same overlap while a reload's destination prestage reply is withheld:
+/// the owner waits in `await_with_readiness_budget`, which serves both probes.
+#[tokio::test(start_paused = true)]
+async fn readyz_is_not_held_behind_a_health_snapshot_while_prestage_is_withheld() {
+    let (mut manager, command_tx, readiness_tx, _operator_tx) = manager_with_held_session_state();
+    let probe = core_probe(&command_tx, &readiness_tx);
+    let (prestage_reply, prestage_wait) = oneshot::channel::<()>();
+
+    let (prestaged, ()) = tokio::join!(
+        manager.await_with_readiness_budget(
+            prestage_wait,
+            RIB_REPLY_TIMEOUT,
+            OperatorReadAdmission::Served,
+        ),
+        async {
+            readyz_overtakes_a_held_health_snapshot(&probe).await;
+            prestage_reply.send(()).unwrap();
+        }
+    );
+    assert!(
+        matches!(prestaged, Some(Ok(()))),
+        "the owner resumes once the prestage reply arrives"
+    );
+    for (_, managed) in manager.peers.drain() {
+        let _ = managed.into_parts().0.shutdown().await;
+    }
+}

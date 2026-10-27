@@ -899,10 +899,11 @@ impl PeerManager {
         }
     }
 
-    /// Serve a `ListPeers` admitted at a transaction wait without holding the
-    /// owner (ADR-0132, 2026-10-10 amendment). Capture the manager half of
-    /// every row and enqueue one `QueryState` per session before returning;
-    /// a task in [`PeerManager::detached_list_peers`] joins the replies.
+    /// Serve a `ListPeers` admitted at a transaction wait, or a readiness
+    /// `ListPeers` anywhere, without holding the owner (ADR-0132, 2026-10-10
+    /// amendment). Capture the manager half of every row and enqueue one
+    /// `QueryState` per session before returning; a task in
+    /// [`PeerManager::detached_list_peers`] joins the replies.
     /// Session command channels are FIFO, so each session answers before it
     /// executes any command the owner sends after this point.
     ///
