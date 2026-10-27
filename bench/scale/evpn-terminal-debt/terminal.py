@@ -368,7 +368,6 @@ def run_cell(output, manifest, q, r, wire, arm, index, correctness):
                     break
                 except OSError:
                     time.sleep(.1)
-            (leg / "wire").mkdir()
             driver = q.COMMON.own_child(subprocess.Popen([
                 "taskset", "-c", manifest["harness_cpus"], str(harness), "--daemon", "127.0.0.1:17986", "--clients", "3",
                 "--type2", "8000", "--type5", "2000", "--shift2", "1", "--shift5", "1", "--epochs", "0", "--epoch-secs", "1",
@@ -418,6 +417,7 @@ def run_cell(output, manifest, q, r, wire, arm, index, correctness):
     except Exception as error:
         record["status"] = "FAIL" if isinstance(error, q.AcceptanceFailure) else "INVALID"
         record["error"] = str(error)
+        record["driver_exit_before_cleanup"] = driver.poll() if driver is not None else None
     finally:
         try:
             q.cleanup_cell(record, leg, fixture, driver, daemon, controller)

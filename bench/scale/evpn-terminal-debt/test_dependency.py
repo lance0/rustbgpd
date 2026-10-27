@@ -7,10 +7,12 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tarfile
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 import patches
 import source
@@ -54,6 +56,52 @@ class DependencyChecks(unittest.TestCase):
     def test_anchor_drift_refuses_derivation(self):
         with self.assertRaisesRegex(ValueError, "anchor drift"):
             patches.once("anchor anchor", "anchor", "replacement")
+
+    def test_actual_run_cell_leaves_capture_directory_creation_to_the_driver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            daemon = SimpleNamespace(pid=42, poll=lambda: None)
+            driver = SimpleNamespace(pid=43, poll=lambda: 17)
+            seen = []
+
+            def spawn(command, **kwargs):
+                if command[0] == "systemd-run":
+                    return daemon
+                position = command.index("--qualification-control-dir") + 1
+                capture = Path(command[position])
+                seen.append(capture.exists())
+                self.assertEqual(kwargs["env"]["RUSTBGPD_TERMINAL_RAW_DIR"], str(capture))
+                # The pinned real driver exclusively creates this directory
+                # before connecting. Mirror that boundary, without a socket.
+                capture.mkdir()
+                return driver
+
+            def scenario(fixture, *_):
+                (fixture / "config.toml").touch()
+
+            def cleanup(_record, _leg, fixture, *_):
+                shutil.rmtree(fixture)
+
+            def early_exit(*_):
+                raise ValueError("simulated early driver exit")
+
+            controller = SimpleNamespace(ack=early_exit)
+            manifest = {"head": "a" * 40, "qualification_head": source.PINNED,
+                        "daemon_cpus": source.DAEMON_CPUS, "harness_cpus": source.HARNESS_CPUS}
+            identities = {"rustbgpd-private": "private", "evpn-rr-soak": "driver"}
+            with mock.patch.object(self.q, "cell_gate"), mock.patch.object(self.r, "scenario", side_effect=scenario), \
+                 mock.patch.object(source, "verify_build", return_value=identities), \
+                 mock.patch.object(self.q, "digest", side_effect=lambda path: identities[path.name]), \
+                 mock.patch.object(self.q, "fetch", return_value=(200, "metrics")), \
+                 mock.patch.object(self.q.COMMON, "own_child", side_effect=lambda process: process), \
+                 mock.patch.object(self.q.COMMON, "daemon_pid", return_value=42), \
+                 mock.patch.object(self.q.COMMON, "process_identity", return_value={"pid": 42}), \
+                 mock.patch.object(terminal.subprocess, "run"), mock.patch.object(terminal.subprocess, "Popen", side_effect=spawn), \
+                 mock.patch.object(terminal, "controller_type", return_value=lambda *_: controller), \
+                 mock.patch.object(self.q, "cleanup_cell", side_effect=cleanup):
+                record = terminal.run_cell(output, manifest, self.q, self.r, self.wire, "private", 0, True)
+            self.assertEqual(seen, [False], "runner precreated the driver's exclusive capture directory")
+            self.assertEqual(record["driver_exit_before_cleanup"], 17)
 
     def test_full_export_verification_rejects_missing_extra_modified_and_symlink_inputs(self):
         with tempfile.TemporaryDirectory() as directory:
