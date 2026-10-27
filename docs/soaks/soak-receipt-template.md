@@ -69,6 +69,10 @@ alongside the actual sample interval and both limits. Isolated breaches may
 coexist with a PASS under the
 [precommitted policy](soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 Keep their diagnostic detail; do not reinterpret a passing run as zero breaches.
+Report management correctness (`management_failures`, `management_doctor`)
+and management availability (`management_availability`) as separate rows.
+List every availability miss with its timestamp, operation, result and the
+reload it overlapped, whether the gate tolerated it or not.
 Identify any separately retained timing-series evidence and its measurement
 limits. A revised analyzer's result is reanalysis, not a replacement original
 receipt or qualification of a different candidate.

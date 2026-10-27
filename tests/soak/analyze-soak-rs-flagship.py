@@ -21,10 +21,36 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
     200 within 250 ms; counts and first 20 breaches reported either way;
     missing observations fail closed
   - management-plane load brackets the measured window, retains every
-    operation, completes >= 90% of scheduled probes, and records zero
-    non-ok results or invalid ok results; a non-ok CLI record's bounded
-    stderr excerpt, when present, is carried into the reported failures,
-    as are a nonzero doctor exit's saved report file and red check names
+    operation, completes >= 90% of scheduled probes, and splits non-ok
+    results into two classes:
+      * correctness (`management_failures`, `management_doctor`): zero
+        tolerance. Any wrong, inconsistent or invalid answer, any doctor
+        check red for a reason other than a transient availability error,
+        and every invalid ok result. A non-ok CLI record's bounded stderr
+        excerpt, when present, is carried into the reported failures, as
+        are a nonzero doctor exit's saved report file and red check names.
+      * availability (`management_availability`): a probe timeout, a CLI
+        that exits with gRPC UNAVAILABLE or DEADLINE_EXCEEDED
+        (`Error: temporarily unavailable` / `Error: deadline exceeded`), or
+        a doctor report whose only red non-peer check is `daemon.healthy`
+        failing its health RPC with UNAVAILABLE or DEADLINE_EXCEEDED.
+        Judged like readyz; the bars, fixed before any replay:
+          - 2 consecutive misses of one operation fail (doctor runs, each
+            5 s CLI query and /metrics alike);
+          - a miss whose [start, completion] does not overlap a reload
+            window fails; so does a miss that cannot be placed on the wall
+            clock. A reload window runs from `reload N issued` in
+            cycles.log to the later of `reload N complete` and the
+            daemon's SIGHUP settlement (`runtime config settlement
+            settled`, kind sighup, in rustbgpd.log, before the next reload
+            is issued), plus a 10 s margin;
+          - more than 3 misses of one operation per run fail (the
+            scenario is a 24 h run: at most 3 per 24 h per operation).
+        Every miss is listed with timestamp, operation, result and the
+        reload it overlapped, whether tolerated or not. `/readyz` and the
+        doctor health RPC share the peer-manager probe, so each readyz
+        breach also names the reload window (same definition) it fell in;
+        the readyz pass rule above is unchanged.
   - management cadence: every missed probe slot falls inside a reload
     window [issued - 2 s, complete + 2 s] from cycles.log and no window
     holds more than 2 missed slots per operation; a miss outside every
@@ -52,9 +78,11 @@ import math
 import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from flagship_daemon_log import analyze_daemon_log
+from management_plane_load import doctor_failed_checks
 
 REQUIRED = {
     "timestamp", "elapsed_sec", "rss_mb", "intern_size", "established",
@@ -103,6 +131,22 @@ DOCTOR_CHECK_NAME_CHARS = 64
 # reload commit.
 RELOAD_WINDOW_GRACE_SEC = 2.0
 RELOAD_WINDOW_MISS_LIMIT = 2
+# Availability misses (see the module docstring): readyz-style tolerance for
+# transient UNAVAILABLE / deadline errors, never for wrong answers.
+AVAILABILITY_CONSECUTIVE_LIMIT = 2
+AVAILABILITY_RELOAD_MARGIN_SEC = 10.0
+AVAILABILITY_BUDGET_PER_OPERATION = 3
+AVAILABILITY_LISTED_MAX = 50
+# rbgp's stderr for a gRPC UNAVAILABLE or DEADLINE_EXCEEDED status
+# (crates/cli/src/error.rs), and doctor's daemon.healthy detail when its
+# health RPC fails with either (tonic's Status Display).
+CLI_AVAILABILITY_RE = re.compile(
+    r"^Error: (?:temporarily unavailable|deadline exceeded)\b"
+)
+DOCTOR_HEALTH_AVAILABILITY_RE = re.compile(
+    r"^health RPC failed: code: '(?:The service is currently unavailable"
+    r"|Deadline expired before operation could complete)'"
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 CYCLE_RE = re.compile(
@@ -172,17 +216,86 @@ def route_prefix_identity(meta: dict) -> tuple[dict, list[str]]:
     return {"route_prefix": expected_prefix}, errors
 
 
+def doctor_availability_detail(run_dir: Optional[str], record: dict) -> Optional[str]:
+    """The `daemon.healthy` detail when the saved report's only red non-peer
+    check is a health RPC that failed UNAVAILABLE or DEADLINE_EXCEEDED.
+
+    Anything else, including an unreadable report, stays a correctness
+    failure."""
+    if run_dir is None or record.get("failed_checks") != ["daemon.healthy"]:
+        return None
+    try:
+        report = json.loads((Path(run_dir) / record["doctor_output"]).read_bytes())
+    except (OSError, ValueError):
+        return None
+    if doctor_failed_checks(report) != ["daemon.healthy"]:
+        return None
+    detail = next(
+        check.get("detail") for check in report["checks"]
+        if check["name"] == "daemon.healthy" and check["status"] == "fail"
+    )
+    if isinstance(detail, str) and DOCTOR_HEALTH_AVAILABILITY_RE.match(detail):
+        return detail
+    return None
+
+
+def availability_miss(record: dict, run_dir: Optional[str]) -> Optional[dict]:
+    """Extra listing fields for a transient availability miss, or None for a
+    correctness failure."""
+    result = record["result"]
+    if result == "timeout":
+        return {}
+    if result == "cli_exit" and CLI_AVAILABILITY_RE.match(
+        record.get("stderr_excerpt", "")
+    ):
+        return {}
+    if result == "doctor_check_failed":
+        detail = doctor_availability_detail(run_dir, record)
+        if detail is not None:
+            return {"detail": detail[:256]}
+    return None
+
+
+def availability_reload_windows(cycles: dict, margin: float) -> dict[int, tuple[float, float]]:
+    """Availability reload windows (wall clock): `reload N issued` to the
+    later of `reload N complete` and any daemon SIGHUP settlement before the
+    next reload is issued, plus `margin`. Shared by the readyz annotation
+    and the management availability gate."""
+    issued = sorted(cycles["reload_issued"].items(), key=lambda item: item[1])
+    settled = cycles.get("sighup_settled", [])
+    windows = {}
+    for position, (n, start) in enumerate(issued):
+        if n not in cycles["reload_complete"]:
+            continue
+        following = (issued[position + 1][1] if position + 1 < len(issued)
+                     else math.inf)
+        end = max([cycles["reload_complete"][n],
+                   *(t for t in settled if start <= t < following)])
+        windows[n] = (start, end + margin)
+    return dict(sorted(windows.items()))
+
+
+def utc_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+
+
 def analyze_management_load(
     raw: bytes, meta: dict, first_shutdown: object, cycles: dict,
     operations_set: tuple[str, ...] = MANAGEMENT_OPERATIONS,
     identity_check=route_prefix_identity,
+    run_dir: Optional[str] = None,
 ) -> dict:
     """Validate bounded JSONL evidence without trusting its terminal summary.
 
     `operations_set` and `identity_check` let another soak (the EVPN RR soak)
-    reuse these gates with its own operation set and identity fields."""
+    reuse these gates with its own operation set and identity fields.
+    `run_dir` locates saved doctor reports; without it every red doctor
+    report is a correctness failure."""
     schema_errors: list[str] = []
     failures: list[dict] = []
+    misses: list[dict] = []
     starts: list[dict] = []
     summaries: list[dict] = []
     operations: dict[str, list[dict]] = {
@@ -274,7 +387,16 @@ def analyze_management_load(
                 for field in ("stderr_excerpt", "doctor_output", "failed_checks"):
                     if field in record:
                         failure[field] = record[field]
-                failures.append(failure)
+                transient = availability_miss(record, run_dir)
+                if transient is None:
+                    failures.append(failure)
+                else:
+                    misses.append({
+                        **failure, **transient,
+                        "index": len(operations[operation]) - 1,
+                        "started_monotonic": started,
+                        "completed_monotonic": completed,
+                    })
             elif operation == "metrics" and record.get("exit") != 200:
                 failures.append({
                     "operation": operation,
@@ -527,6 +649,58 @@ def analyze_management_load(
             "outside_windows": outside[:20],
         }
 
+    # Availability misses: placed on the wall clock like missed slots, each
+    # judged against reload windows, adjacency and the per-operation budget.
+    availability_windows = availability_reload_windows(cycles, AVAILABILITY_RELOAD_MARGIN_SEC)
+    availability_violations: list[str] = []
+    listed_misses: list[dict] = []
+    misses_per_operation = {operation: 0 for operation in operations_set}
+    streaks: dict[str, tuple[int, int]] = {}
+    for miss in misses:
+        operation = miss["operation"]
+        misses_per_operation[operation] += 1
+        entry = {
+            key: value for key, value in miss.items()
+            if key not in ("index", "started_monotonic", "completed_monotonic")
+        }
+        reload = None
+        if clock_offset is None:
+            entry["timestamp"] = None
+            availability_violations.append(
+                f"{operation}: miss cannot be placed on the wall clock "
+                "(summary lacks completed_unix)"
+            )
+        else:
+            lo = miss["started_monotonic"] + clock_offset
+            hi = miss["completed_monotonic"] + clock_offset
+            entry["timestamp"] = utc_iso(lo)
+            reload = next(
+                (n for n, (start, end) in availability_windows.items()
+                 if lo <= end and hi >= start),
+                None,
+            )
+            if reload is None:
+                availability_violations.append(
+                    f"{operation}: miss at {entry['timestamp']} outside every "
+                    "reload window"
+                )
+        entry["reload"] = reload
+        previous_index, length = streaks.get(operation, (-2, 0))
+        length = length + 1 if miss["index"] == previous_index + 1 else 1
+        streaks[operation] = (miss["index"], length)
+        if length == AVAILABILITY_CONSECUTIVE_LIMIT:
+            availability_violations.append(
+                f"{operation}: {AVAILABILITY_CONSECUTIVE_LIMIT} consecutive "
+                f"misses ending at {entry['timestamp']}"
+            )
+        listed_misses.append(entry)
+    for operation, count in misses_per_operation.items():
+        if count > AVAILABILITY_BUDGET_PER_OPERATION:
+            availability_violations.append(
+                f"{operation}: {count} misses exceed the budget of "
+                f"{AVAILABILITY_BUDGET_PER_OPERATION}"
+            )
+
     measured_start = finite_number(meta.get("measured_start_monotonic"))
     measured_end = finite_number(meta.get("measured_end_monotonic"))
     finish_release = finite_number(meta.get("engine_finish_release_monotonic"))
@@ -580,9 +754,23 @@ def analyze_management_load(
             "limit": RELOAD_WINDOW_MISS_LIMIT,
             "pass": not cadence_defects,
         },
+        # Correctness: zero tolerance.
         "management_failures": {
             "value": {"count": len(failures), "first": failures[:20]},
             "pass": not failures,
+        },
+        # Availability: isolated in-reload misses are tolerated and listed.
+        "management_availability": {
+            "value": {
+                "count": len(misses),
+                "per_operation": misses_per_operation,
+                "misses": listed_misses[:AVAILABILITY_LISTED_MAX],
+                "violations": availability_violations[:20],
+                "limit_consecutive": AVAILABILITY_CONSECUTIVE_LIMIT,
+                "limit_per_operation": AVAILABILITY_BUDGET_PER_OPERATION,
+                "reload_margin_sec": AVAILABILITY_RELOAD_MARGIN_SEC,
+            },
+            "pass": not availability_violations,
         },
         # `rbgp doctor` is the only in-band assertion that the daemon's own
         # run context stayed sane for the whole window. A red check reaches
@@ -594,7 +782,9 @@ def analyze_management_load(
         # the red configuration checks. Per-peer session checks are
         # excluded there — the scenario trips the designated member on
         # purpose, and the session/flap/trip gates above measure peer health
-        # exactly. This gate is the configuration verdict.
+        # exactly. This gate is the configuration verdict; a lone
+        # `daemon.healthy` UNAVAILABLE/deadline miss is judged by
+        # `management_availability` instead and only counted here.
         "management_doctor": {
             "value": {
                 "attempts": len(operations["doctor"]),
@@ -602,6 +792,7 @@ def analyze_management_load(
                     failure for failure in failures
                     if failure["operation"] == "doctor"
                 ][:20],
+                "availability_misses": misses_per_operation.get("doctor", 0),
             },
             "pass": bool(operations["doctor"]) and not any(
                 failure["operation"] == "doctor" for failure in failures
@@ -794,6 +985,7 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
         1 for a, b in zip(msgs, msgs[1:]) if b < a
     )
     readyz_bad = []
+    readyz_windows = availability_reload_windows(cycles, AVAILABILITY_RELOAD_MARGIN_SEC)
     # The sampler drops the entire row after a failed metrics scrape. Such
     # probes are unknown, never healthy. A two-period gap also catches a
     # missing row without treating ordinary one-second scheduling drift as
@@ -820,6 +1012,11 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
             # Status includes the sampler's 000 sentinel for curl failure;
             # latency means an HTTP 200 response exceeded the limit.
             "kind": "status" if code != 200 else "latency",
+            "reload": next(
+                (n for n, (lo, hi) in readyz_windows.items()
+                 if lo <= stamps[index] <= hi),
+                None,
+            ),
         })
 
     peak_rss = max(rss) if rss else float("nan")
@@ -883,6 +1080,8 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
                     1 for s in readyz_bad if s["kind"] == "latency"),
                 "longest_consecutive": readyz_longest_run,
                 "first": readyz_bad[:20],
+                "in_reload_window": sum(
+                    1 for s in readyz_bad if s["reload"] is not None),
                 "limit_ms": READYZ_MS_LIMIT,
                 "limit_consecutive": READYZ_CONSECUTIVE_LIMIT,
                 "sample_scrape_failures": cycles["sample_scrape_failures"],
@@ -1022,12 +1221,14 @@ def main() -> int:
         return 2
 
     cycles = parse_cycles(cycle_lines)
+    daemon_log = analyze_daemon_log(args.run_dir)
+    cycles["sighup_settled"] = daemon_log["value"]["sighup_settlements_unix"]
     result = analyze(rows, cycles, meta, args.min_slope_seconds)
-    result["gates"]["daemon_log"] = analyze_daemon_log(args.run_dir)
+    result["gates"]["daemon_log"] = daemon_log
     result["gates"].update(analyze_management_load(
         management_raw, meta,
         result["gates"]["daemon_log"]["value"]["first_administrative_shutdown_unix"],
-        cycles,
+        cycles, run_dir=args.run_dir,
     ))
     result["verdict"] = (
         "pass" if all(gate["pass"] for gate in result["gates"].values())
