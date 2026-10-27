@@ -1374,10 +1374,16 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
             self.UNAVAILABLE_HEALTH, "daemon.rlimit.nofile.7"
         )
         unread, _ = self.doctor_miss(self.UNAVAILABLE_HEALTH)
+        # A substituted report: same red check and an availability detail, so
+        # its content alone would be tolerated, but not the stdout the record
+        # fingerprints.
+        recorded, _ = self.doctor_miss(self.UNAVAILABLE_HEALTH)
+        _, substituted_files = self.doctor_miss(self.UNAVAILABLE_HEALTH + " (substituted)")
         for name, fields, files in (
             ("unhealthy", unhealthy, unhealthy_files),
             ("second_red_check", extra, extra_files),
             ("report_missing", unread, {}),
+            ("report_substituted", recorded, substituted_files),
         ):
             with self.subTest(name=name):
                 meta = smoke_meta()

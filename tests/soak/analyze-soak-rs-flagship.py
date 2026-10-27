@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -136,7 +137,6 @@ RELOAD_WINDOW_MISS_LIMIT = 2
 AVAILABILITY_CONSECUTIVE_LIMIT = 2
 AVAILABILITY_RELOAD_MARGIN_SEC = 10.0
 AVAILABILITY_BUDGET_PER_OPERATION = 3
-AVAILABILITY_LISTED_MAX = 50
 # rbgp's stderr for a gRPC UNAVAILABLE or DEADLINE_EXCEEDED status
 # (crates/cli/src/error.rs), and doctor's daemon.healthy detail when its
 # health RPC fails with either (tonic's Status Display).
@@ -220,12 +220,19 @@ def doctor_availability_detail(run_dir: Optional[str], record: dict) -> Optional
     """The `daemon.healthy` detail when the saved report's only red non-peer
     check is a health RPC that failed UNAVAILABLE or DEADLINE_EXCEEDED.
 
-    Anything else, including an unreadable report, stays a correctness
-    failure."""
+    Anything else, including an unreadable report or one whose length or
+    SHA-256 differs from the operation record, stays a correctness failure."""
     if run_dir is None or record.get("failed_checks") != ["daemon.healthy"]:
         return None
+    # The record's bytes/sha256 fingerprint the doctor's whole stdout, which
+    # the driver saves verbatim below its 4 MiB cap: only that exact report
+    # may excuse the failure.
     try:
-        report = json.loads((Path(run_dir) / record["doctor_output"]).read_bytes())
+        raw = (Path(run_dir) / record["doctor_output"]).read_bytes()
+        if (len(raw) != record["bytes"]
+                or hashlib.sha256(raw).hexdigest() != record["sha256"]):
+            return None
+        report = json.loads(raw)
     except (OSError, ValueError):
         return None
     if doctor_failed_checks(report) != ["daemon.healthy"]:
@@ -764,7 +771,7 @@ def analyze_management_load(
             "value": {
                 "count": len(misses),
                 "per_operation": misses_per_operation,
-                "misses": listed_misses[:AVAILABILITY_LISTED_MAX],
+                "misses": listed_misses,
                 "violations": availability_violations[:20],
                 "limit_consecutive": AVAILABILITY_CONSECUTIVE_LIMIT,
                 "limit_per_operation": AVAILABILITY_BUDGET_PER_OPERATION,
