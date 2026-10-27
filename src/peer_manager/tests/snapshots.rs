@@ -794,3 +794,47 @@ async fn export_policy_totals_follow_the_interface_bound_neighbor() {
         record_exports(&mgr, deleted, 7, 4);
     }
 }
+
+/// The session fan-out behind `ListPeers` (and so behind `GetHealth`) is
+/// bounded by one deadline measured from the start of the snapshot. Its
+/// query tasks first run only when the runtime reaches them, which a
+/// reload's export burst can delay; a timeout started at each task's first
+/// poll let the snapshot outlast `PEER_QUERY_TIMEOUT` by that delay, and the
+/// 200 ms health deadline built on it.
+#[tokio::test(start_paused = true)]
+async fn session_fan_out_bound_is_absolute_from_snapshot_start() {
+    let mut mgr = test_peer_manager();
+    for host in 1..=2 {
+        insert_test_managed_peer(
+            &mut mgr,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, host)),
+            stalled_policy_query_handle(),
+            false,
+        );
+    }
+    let started = tokio::time::Instant::now();
+    let rows = {
+        let snapshot = mgr.list_peers();
+        tokio::pin!(snapshot);
+        // One poll spawns the per-session query tasks; none of them has run yet.
+        tokio::select! {
+            biased;
+            _ = &mut snapshot => panic!("held sessions cannot answer"),
+            () = std::future::ready(()) => {}
+        }
+        // A runtime busy with other work reaches the spawned tasks 60 ms later.
+        tokio::time::advance(Duration::from_millis(60)).await;
+        snapshot.await
+    };
+
+    assert!(rows.iter().all(|row| row.stale), "held sessions are stale");
+    assert!(
+        started.elapsed() <= PEER_QUERY_TIMEOUT + Duration::from_millis(1),
+        "the fan-out must end {PEER_QUERY_TIMEOUT:?} after it started, not after its tasks \
+         first ran: took {:?}",
+        started.elapsed()
+    );
+    for (_, managed) in mgr.peers.drain() {
+        let _ = managed.into_parts().0.shutdown().await;
+    }
+}

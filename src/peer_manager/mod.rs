@@ -1187,13 +1187,20 @@ impl PeerManager {
     /// into this worker's LIFO slot, which other workers cannot steal; without
     /// the yield it waits until the actor next returns `Pending`, which a
     /// queue of ready commands can defer for Tokio's whole cooperative budget.
-    async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
+    ///
+    /// A `ListPeers` (the `GetHealth` snapshot) is detached when possible: its
+    /// session fan-out can take its whole `PEER_QUERY_TIMEOUT` while sessions
+    /// drain a reload's exports, and answered in place it held this lane, so a
+    /// `/readyz` ping queued behind it missed its own deadline.
+    async fn handle_readiness_query(&mut self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::Ping { reply } => {
                 let _ = reply.send(());
             }
             PeerManagerReadinessQuery::ListPeers { reply } => {
-                self.answer_list_peers(reply).await;
+                if let Err(reply) = self.detach_list_peers(reply) {
+                    self.answer_list_peers(reply).await;
+                }
             }
         }
         tokio::task::yield_now().await;
@@ -2961,7 +2968,12 @@ impl PeerManager {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
                         Some(PeerManagerReadinessQuery::ListPeers { reply }) => {
-                            self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply }).await;
+                            // Detached as in `handle_readiness_query`; in place
+                            // only when the detached-read limit is reached or a
+                            // session channel is full.
+                            if let Err(reply) = self.detach_list_peers(reply) {
+                                self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply }).await;
+                            }
                             // Same LIFO-slot hand-off as `handle_readiness_query`.
                             tokio::task::yield_now().await;
                         }

@@ -383,16 +383,18 @@ fn held_neighbor_query_handle(
 #[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
-    reason = "one actor scenario checks five read routes, both caller outcomes, and mutation ordering"
+    reason = "one actor scenario checks four read routes, both caller outcomes, and mutation ordering"
 )]
 async fn normal_operator_neighbor_snapshot_does_not_delay_import_stats() {
-    use rustbgpd_api::peer_types::{PeerManagerOperatorQuery, PeerManagerReadinessQuery};
+    use rustbgpd_api::peer_types::PeerManagerOperatorQuery;
 
     let mut outcomes = Vec::new();
+    // The readiness lane's `ListPeers` (`GetHealth`) is detached rather than
+    // answered in place, so it fences neither mutations nor later reads; see
+    // `queries::readyz_is_not_held_behind_a_health_snapshot_in_the_run_loop`.
     for (lane, cancel_snapshot) in [
         "operator_list",
         "ordinary_list",
-        "readiness_list",
         "operator_get",
         "ordinary_get",
     ]
@@ -401,7 +403,7 @@ async fn normal_operator_neighbor_snapshot_does_not_delay_import_stats() {
     {
         let (command_tx, command_rx) = mpsc::channel(4);
         let (operator_tx, operator_rx) = mpsc::channel(4);
-        let (readiness_tx, readiness_rx) = mpsc::channel(4);
+        let (_readiness_tx, readiness_rx) = mpsc::channel(4);
         let mut manager = test_peer_manager()
             .with_operator_queries(operator_rx)
             .with_readiness_queries(readiness_rx);
@@ -426,10 +428,6 @@ async fn normal_operator_neighbor_snapshot_does_not_delay_import_stats() {
                 .unwrap(),
             "ordinary_list" => command_tx
                 .send(PeerManagerCommand::ListPeers { reply })
-                .await
-                .unwrap(),
-            "readiness_list" => readiness_tx
-                .send(PeerManagerReadinessQuery::ListPeers { reply })
                 .await
                 .unwrap(),
             "operator_get" => operator_tx

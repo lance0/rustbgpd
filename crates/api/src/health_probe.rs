@@ -162,6 +162,10 @@ impl CoreReadinessProbe {
 
     /// Probe `PeerManager` responsiveness and RIB readiness.
     ///
+    /// Both actors are queried concurrently under one shared deadline, so a
+    /// slow but healthy answer from one does not spend the other's budget.
+    /// When both fail, the peer-manager error is reported.
+    ///
     /// A daemon with zero configured peers or zero routes can still be ready.
     /// During an actor-owned export-policy transition, the dedicated RIB lane
     /// remains responsive but reports a stalled owner once its age reaches 30
@@ -177,12 +181,21 @@ impl CoreReadinessProbe {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
         }
         let deadline = Instant::now() + CORE_READINESS_DEADLINE;
-        self.ping_peer_manager(deadline).await?;
-        self.query_rib(deadline).await?;
+        tokio::try_join!(
+            biased;
+            self.ping_peer_manager(deadline),
+            self.query_rib(deadline)
+        )?;
         Ok(())
     }
 
     /// Return the same core actor snapshot used by `GetHealth`.
+    ///
+    /// As in [`Self::check`], the peer-manager snapshot and the RIB count are
+    /// queried concurrently under one shared deadline. The peer-manager half
+    /// is a session fan-out that can take up to its own per-session bound
+    /// while sessions drain a post-reload export burst; queried in sequence,
+    /// that legitimate wait was charged to the RIB half as well.
     ///
     /// # Errors
     ///
@@ -194,8 +207,11 @@ impl CoreReadinessProbe {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
         }
         let deadline = Instant::now() + CORE_READINESS_DEADLINE;
-        let peers = self.query_peer_manager(deadline).await?;
-        let total_routes = self.query_rib(deadline).await?;
+        let (peers, total_routes) = tokio::try_join!(
+            biased;
+            self.query_peer_manager(deadline),
+            self.query_rib(deadline)
+        )?;
         Ok(CoreHealthSnapshot {
             peers,
             total_routes,
@@ -535,6 +551,102 @@ mod tests {
         );
     }
 
+    /// After a reload commit the peer manager's half of `GetHealth` is a
+    /// session fan-out that can take most of its own 100 ms bound while every
+    /// session drains the new exports, and the RIB is busy with the same
+    /// burst. Each half fits the 200 ms deadline; run in sequence they did
+    /// not. The RIB query must be issued while the peer-manager reply is still
+    /// withheld, and the probe must succeed once both answers arrive.
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_queries_rib_while_peer_manager_reply_is_withheld() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_tx).with_peer_manager_readiness(readiness_tx);
+        let started = Instant::now();
+        let health = tokio::spawn(async move { probe.snapshot().await });
+
+        let PeerManagerReadinessQuery::ListPeers { reply: peers_reply } = readiness_rx
+            .recv()
+            .await
+            .expect("peer-manager readiness query")
+        else {
+            panic!("GetHealth must ask the peer manager for its peer snapshot");
+        };
+        let rib_query = tokio::time::timeout(CORE_READINESS_DEADLINE, rib_rx.recv())
+            .await
+            .expect("the RIB query must not wait for the peer-manager reply")
+            .expect("RIB query");
+        let RibUpdate::QueryLocRibCount { reply: rib_reply } = rib_query else {
+            panic!("expected QueryLocRibCount command");
+        };
+
+        // Both halves take 150 ms of the shared 200 ms deadline.
+        tokio::time::advance(Duration::from_millis(150)).await;
+        rib_reply.send(23).unwrap();
+        peers_reply.send(Vec::new()).unwrap();
+
+        let snapshot = health
+            .await
+            .unwrap()
+            .expect("two halves inside the deadline make a healthy snapshot");
+        assert_eq!(snapshot.total_routes, 23);
+        assert!(started.elapsed() < CORE_READINESS_DEADLINE);
+    }
+
+    /// `/readyz` composes the peer-manager ping and the RIB count the same
+    /// way, so the same overlap holds for [`CoreReadinessProbe::check`].
+    #[tokio::test(start_paused = true)]
+    async fn check_queries_rib_while_peer_manager_ping_is_withheld() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_tx).with_peer_manager_readiness(readiness_tx);
+        let ready = tokio::spawn(async move { probe.check().await });
+
+        let PeerManagerReadinessQuery::Ping { reply: ping_reply } = readiness_rx
+            .recv()
+            .await
+            .expect("peer-manager readiness ping")
+        else {
+            panic!("readiness must ping the peer manager");
+        };
+        let rib_query = tokio::time::timeout(CORE_READINESS_DEADLINE, rib_rx.recv())
+            .await
+            .expect("the RIB query must not wait for the peer-manager ping")
+            .expect("RIB query");
+        let RibUpdate::QueryLocRibCount { reply: rib_reply } = rib_query else {
+            panic!("expected QueryLocRibCount command");
+        };
+        tokio::time::advance(Duration::from_millis(150)).await;
+        rib_reply.send(0).unwrap();
+        ping_reply.send(()).unwrap();
+
+        ready
+            .await
+            .unwrap()
+            .expect("two halves inside the deadline keep readiness green");
+    }
+
+    /// When both halves fail, the peer-manager error still wins, as it did
+    /// when the halves ran in sequence.
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_halves_report_the_peer_manager_miss_first() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
+        assert_eq!(
+            probe.snapshot().await.unwrap_err(),
+            CoreReadinessError::PeerManagerTimedOut
+        );
+        assert_eq!(
+            probe.check().await.unwrap_err(),
+            CoreReadinessError::PeerManagerTimedOut
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_uses_dedicated_rib_readiness_lane_when_installed() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
@@ -723,11 +835,11 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_fails_when_rib_sender_is_closed() {
-        let (probe, mut peer_rx) = probe_with_closed_rib();
+        let (probe, _peer_rx) = probe_with_closed_rib();
 
-        let (result, ()) = tokio::join!(probe.snapshot(), async {
-            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
-        });
+        // The halves run concurrently: a closed RIB fails the probe without
+        // waiting for the peer-manager answer.
+        let result = probe.snapshot().await;
 
         assert_eq!(
             result.expect_err("closed RIB channel should fail"),

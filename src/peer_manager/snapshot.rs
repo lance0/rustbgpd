@@ -572,19 +572,31 @@ fn effective_remote_asn(
 
 /// Run a bounded state query against every peer concurrently.
 ///
-/// Each query is bounded by [`PEER_QUERY_TIMEOUT`]; a peer whose session
-/// task is parked on TCP write (or whose command channel is full) lands as
-/// [`StateQueryOutcome::TimedOut`], while a closed session task lands as
+/// Every query shares one absolute deadline, [`PEER_QUERY_TIMEOUT`] from the
+/// start of the fan-out. A per-task timeout would start at each spawned
+/// task's first poll, which a runtime busy with a post-reload export burst
+/// can delay by tens of milliseconds per task, so the whole fan-out could
+/// outlast its bound and the 200 ms health deadline built on it.
+///
+/// A peer whose session task is parked on TCP write (or whose command
+/// channel is full) lands as [`StateQueryOutcome::TimedOut`], while a closed
+/// session task lands as
 /// [`StateQueryOutcome::SessionGone`]. A peer whose query task fails to join
 /// is absent from the map. Every non-state outcome is treated as `stale =
 /// true` by [`build_peer_info`].
 async fn collect_session_states(peers: &PeerTable) -> HashMap<PeerKey, StateQueryOutcome> {
+    let deadline = tokio::time::Instant::now() + PEER_QUERY_TIMEOUT;
     let mut tasks = Vec::with_capacity(peers.len());
     for (peer, managed) in peers {
         let peer = peer.clone();
         let commands = managed.handle().commands_sender();
         tasks.push(AbortOnDropHandle::new(tokio::spawn(async move {
-            let outcome = PeerHandle::query_state_outcome_with(commands, PEER_QUERY_TIMEOUT).await;
+            let outcome = tokio::time::timeout_at(
+                deadline,
+                PeerHandle::query_state_outcome_with(commands, PEER_QUERY_TIMEOUT),
+            )
+            .await
+            .unwrap_or(StateQueryOutcome::TimedOut);
             (peer, outcome)
         })));
     }
@@ -887,10 +899,11 @@ impl PeerManager {
         }
     }
 
-    /// Serve a `ListPeers` admitted at a transaction wait without holding the
-    /// owner (ADR-0132, 2026-10-10 amendment). Capture the manager half of
-    /// every row and enqueue one `QueryState` per session before returning;
-    /// a task in [`PeerManager::detached_list_peers`] joins the replies.
+    /// Serve a `ListPeers` admitted at a transaction wait, or a readiness
+    /// `ListPeers` anywhere, without holding the owner (ADR-0132, 2026-10-10
+    /// amendment). Capture the manager half of every row and enqueue one
+    /// `QueryState` per session before returning; a task in
+    /// [`PeerManager::detached_list_peers`] joins the replies.
     /// Session command channels are FIFO, so each session answers before it
     /// executes any command the owner sends after this point.
     ///
