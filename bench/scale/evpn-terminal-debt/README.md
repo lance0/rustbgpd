@@ -130,3 +130,12 @@ To analyze an existing campaign without launching a daemon:
 ```sh
 python3 -B "$CAMPAIGN/sources/candidate/bench/scale/evpn-terminal-debt/terminal.py" analyze "$CAMPAIGN"
 ```
+
+The [2026-10-27 correctness receipt](results/2026-10-27.json), measured on source
+`7fab2c4` with the explicit `a5da4df` input, is **FAIL**. The private arm passed.
+The candidate established genuine admitted debt spanning applied churn under
+kernel backpressure and passed receiver wire, settlement, readiness, headroom and
+reset checks, but visited 899,970 inventory rows across four actual root calls
+against the predeclared zero-work bar. Marker-admission refusals were zero: this
+is timer-deferred debt under kernel backpressure. No N=3 timing campaign followed
+the miss, and production ownership remains disabled.
