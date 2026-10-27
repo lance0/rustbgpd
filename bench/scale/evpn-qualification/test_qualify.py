@@ -2,6 +2,7 @@
 """Seeded false-green controls for the actual-daemon EVPN memory consumer."""
 
 import argparse
+import copy
 import importlib.util
 import io
 import json
@@ -37,6 +38,14 @@ def witness(arm, clients=3, routes=10):
             "peers": [[Q.COMMON.peer(index), 1 if candidate else None, False,
                        64 if candidate else 0, 128 if candidate else 0, 0, False, False, False, False]
                       for index in range(clients)]}
+
+
+def set_provenance_peak(row, target, peak):
+    if target == "daemon":
+        row["peak"] = peak
+    else:
+        row["peers"][0][4] = peak
+        row["peak"] = max(row["peak"], peak + row["retained"])
 
 
 def driver_text(clients, routes):
@@ -174,15 +183,35 @@ class TestQualification(unittest.TestCase):
     def test_aggregate_claim_cannot_hide_private_or_missing_peer(self):
         for mutate in (lambda row: row["peers"][0].__setitem__(1, None),
                        lambda row: row["peers"].__setitem__(1, row["peers"][0]),
+                       lambda row: row["peers"][0].__setitem__(0, "127.254.0.1"),
                        lambda row: row.__setitem__("private_routes", 1),
                        lambda row: row["peers"][0].__setitem__(5, 1),
                        lambda row: row["peers"][0].__setitem__(6, True),
                        lambda row: row.__setitem__("retained", -1),
+                       lambda row: row.__setitem__("retained", row["peak"] + 1),
+                       lambda row: row["peers"][0].__setitem__(3, row["peers"][0][4] + 1),
+                       lambda row: row.__setitem__("peer_budget", row["peer_budget"] + 1),
                        lambda row: row.__setitem__("peak", row["daemon_budget"] + 1)):
             row = witness("candidate")
+            set_provenance_peak(row, "daemon", int(row["daemon_budget"] * .9))
             mutate(row)
-            with self.assertRaises(ValueError):
+            with self.assertRaises(ValueError) as caught:
                 Q.ownership(row, "candidate", 3, 10)
+            self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+
+    def test_memory_provenance_headroom_is_an_acceptance_bar_in_both_arms(self):
+        for arm in ("candidate", "private"):
+            for target in ("peer", "daemon"):
+                budget = witness(arm)[f"{target}_budget"]
+                for peak in (int(budget * .8), int(budget * .8) + 1, int(budget * .9)):
+                    with self.subTest(arm=arm, target=target, peak=peak):
+                        row = witness(arm)
+                        set_provenance_peak(row, target, peak)
+                        if peak <= int(budget * .8):
+                            self.assertIs(Q.ownership(row, arm, 3, 10), row)
+                        else:
+                            with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
+                                Q.ownership(row, arm, 3, 10)
 
     def test_exact_receiver_count_is_not_enough(self):
         text = driver_text(3, 10)
@@ -257,6 +286,68 @@ class TestQualification(unittest.TestCase):
                 for row in summary["slopes"]:
                     self.assertEqual(row["bytes_per_delivery"]["jemalloc_allocated_bytes"],
                                      slope if row["arm"] == "candidate" else 300)
+
+    def test_raw_memory_consumer_enforces_peer_and_daemon_headroom(self):
+        for arm in ("candidate", "private"):
+            for target in ("peer", "daemon"):
+                budget = witness(arm)[f"{target}_budget"]
+                for peak in (int(budget * .8), int(budget * .8) + 1, int(budget * .9)):
+                    with self.subTest(arm=arm, target=target, peak=peak), tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        args = self.make_campaign(root)
+                        path = next(root.glob(f"memory-*-{arm}-*/result.json"))
+                        row = json.loads(path.read_text())
+                        set_provenance_peak(row["ownership"], target, peak)
+                        Q.write_json(path, row)
+                        (path.parent / "observer.log").write_text(
+                            "evpn_qualification " + json.dumps(row["ownership"]) + "\n")
+                        if peak <= int(budget * .8):
+                            Q.analyze(args)
+                        else:
+                            with self.assertRaisesRegex(Q.AcceptanceFailure, "headroom"):
+                                Q.analyze(args)
+                        summary = json.loads((root / "summary.json").read_text())
+                        self.assertEqual(summary["status"], "PASS" if peak <= int(budget * .8) else "FAIL")
+
+    def test_memory_raw_middle_cannot_hide_peak_or_malformed_provenance(self):
+        for arm in ("candidate", "private"):
+            for defect in ("peer", "daemon", "budget", "negative", "roster"):
+                with self.subTest(arm=arm, defect=defect), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    args = self.make_campaign(root)
+                    path = next(root.glob(f"memory-*-{arm}-*/result.json"))
+                    low = json.loads(path.read_text())["ownership"]
+                    middle = copy.deepcopy(low)
+                    if defect in ("peer", "daemon"):
+                        set_provenance_peak(middle, defect, int(middle[f"{defect}_budget"] * .9))
+                    elif defect == "budget":
+                        middle["peer_budget"] += 1
+                    elif defect == "negative":
+                        middle["retained"] = -1
+                    else:
+                        middle["peers"][0][0] = "127.254.0.1"
+                    (path.parent / "observer.log").write_text(
+                        "".join("evpn_qualification " + json.dumps(row) + "\n" for row in (low, middle, low)))
+                    expected = Q.AcceptanceFailure if defect in ("peer", "daemon") else ValueError
+                    with self.assertRaises(expected) as caught:
+                        Q.analyze(args)
+                    if expected is ValueError:
+                        self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+                    summary = json.loads((root / "summary.json").read_text())
+                    self.assertEqual(summary["status"], "FAIL" if expected is Q.AcceptanceFailure else "INVALID")
+
+    def test_memory_raw_provenance_allows_partial_dirty_rosters(self):
+        for arm in ("candidate", "private"):
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                args = self.make_campaign(root)
+                path = next(root.glob(f"memory-*-{arm}-*/observer.log"))
+                partial = witness(arm, 1, 10)
+                partial["dirty"] = 1
+                partial["peers"][0][2] = True
+                path.write_text("evpn_qualification " + json.dumps(partial) + "\n" + path.read_text())
+                Q.analyze(args)
+                self.assertEqual(json.loads((root / "summary.json").read_text())["status"], "PASS")
 
     def test_missing_sample_cannot_change_the_median_roster(self):
         with tempfile.TemporaryDirectory() as temporary:

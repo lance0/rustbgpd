@@ -54,7 +54,9 @@ reported separately; neither substitutes for live heap. The summary also
 reports bytes per additional receiver, while each cell retains actual owned
 and private route counts, per-peer retained/peak provenance, metadata residue,
 budgets and all five executed-reset counters. The historical memory result is
-not an input to the verdict.
+not an input to the verdict. Peer and daemon provenance peaks must remain at
+most 80% of their existing budgets in both memory and recovery cells. A valid
+peak above that bar is FAIL; malformed charges or budgets remain INVALID.
 
 ```sh
 bash bench/scale/evpn-qualification/run.sh /tmp/evpn-memory-measured

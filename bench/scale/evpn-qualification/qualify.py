@@ -305,28 +305,48 @@ def receipt(text, clients, routes):
     return {"exact_receiver_keys": True, "initial_convergence_ms": int(convergence[0])}
 
 
-def ownership(row, arm, clients, routes):
-    counts = ("members", "owned_groups", "owned_members", "owned_routes", "private_routes", "dirty",
-              "retained", "peak", "peer_budget", "daemon_budget", "pending_resets", "completion_receipts", "marker_debt", "retained_recovery",
-              "refresh_pending", "eor_pending", "protocol_obligations")
-    require(all(type(row[name]) is int and row[name] >= 0 for name in counts), "invalid ownership count")
+def validate_provenance(row, clients):
+    """Validate charges and peer identity, including partial or dirty rosters."""
+    counts = ("members", "retained", "peak", "peer_budget", "daemon_budget")
+    require(all(type(row[name]) is int and row[name] >= 0 for name in counts), "invalid provenance count")
     require(row["peer_budget"] == 16 * 1024 ** 2 and row["daemon_budget"] == 256 * 1024 ** 2,
             "EVPN provenance budgets changed")
     require(row["retained"] <= row["peak"] <= row["daemon_budget"], "invalid daemon provenance charge")
+    require(type(row["peers"]) is list and len(row["peers"]) == row["members"] <= clients,
+            "invalid provenance peer roster")
+    expected_peers = {COMMON.peer(index) for index in range(clients)}
+    seen = set()
+    for peer in row["peers"]:
+        require(type(peer) is list and len(peer) == 10, "invalid provenance peer shape")
+        require(type(peer[0]) is str and peer[0] in expected_peers and peer[0] not in seen,
+                "unknown or duplicate provenance peer")
+        seen.add(peer[0])
+        require(peer[1] is None or (type(peer[1]) is int and peer[1] >= 0), "invalid provenance group")
+        require(all(type(peer[index]) is bool for index in (2, 6, 7, 8, 9))
+                and all(type(peer[index]) is int and peer[index] >= 0 for index in (3, 4, 5))
+                and peer[3] <= peer[4] <= row["peer_budget"], "invalid peer provenance charge")
+
+
+def accept_provenance_headroom(row):
+    fraction = RECOVERY_BARS["max_budget_fraction"]
+    accept(row["peak"] <= row["daemon_budget"] * fraction, "daemon provenance headroom breached")
+    accept(all(peer[4] <= row["peer_budget"] * fraction for peer in row["peers"]),
+           "peer provenance headroom breached")
+
+
+def ownership(row, arm, clients, routes):
+    validate_provenance(row, clients)
+    counts = ("owned_groups", "owned_members", "owned_routes", "private_routes", "dirty",
+              "pending_resets", "completion_receipts", "marker_debt", "retained_recovery",
+              "refresh_pending", "eor_pending", "protocol_obligations")
+    require(all(type(row[name]) is int and row[name] >= 0 for name in counts), "invalid ownership count")
     require(row["members"] == clients and row["dirty"] == row["pending_resets"] == row["marker_debt"] == row["retained_recovery"] == 0,
             "ownership witness is incomplete or unsettled")
     require(row["refresh_pending"] == row["eor_pending"] == row["protocol_obligations"] == 0,
             "ownership witness retains a refresh/EoR obligation")
-    require(len(row["peers"]) == clients and len({peer[0] for peer in row["peers"]}) == clients,
-            "ownership witness has missing/duplicate peers")
-    expected_peers = {COMMON.peer(index) for index in range(clients)}
-    require({peer[0] for peer in row["peers"]} == expected_peers, "ownership witness peer roster differs")
     for peer in row["peers"]:
-        require(len(peer) == 10 and type(peer[2]) is bool and type(peer[6]) is bool
-                and peer[7] is False and peer[8] is False and peer[9] is False
-                and all(type(peer[index]) is int and peer[index] >= 0 for index in (3, 4, 5))
-                and peer[3] <= peer[4] <= row["peer_budget"] and peer[2] is False
-                and peer[5] == 0 and peer[6] is False, "invalid or unsettled peer provenance")
+        require(all(peer[index] is False for index in (2, 6, 7, 8, 9)) and peer[5] == 0,
+                "unsettled peer provenance")
     if arm == "candidate":
         require(row["owned_members"] == clients and row["owned_groups"] == 1
                 and row["owned_routes"] == clients * routes and row["private_routes"] == 0,
@@ -338,6 +358,7 @@ def ownership(row, arm, clients, routes):
                 and row["private_routes"] == clients * (clients - 1) * routes,
                 "control is not the actual private EVPN path")
         require(all(peer[1] is None for peer in row["peers"]), "private peer owns EVPN")
+    accept_provenance_headroom(row)
     return row
 
 
@@ -521,6 +542,10 @@ def analyze_results(args):
                     for line in (leg / "observer.log").read_text().splitlines()
                     if line.startswith("evpn_qualification ")]
         require(row["ownership"] in observed, "retained ownership witness absent from daemon log")
+        for observation in observed:
+            validate_provenance(observation, row["clients"])
+        for observation in observed:
+            accept_provenance_headroom(observation)
         heap = metrics((leg / "metrics.txt").read_text())
         require(row["executed_resets"] == heap["executed_resets"], "reset receipt differs from raw metrics")
         ownership(row["ownership"], row["arm"], row["clients"], row["routes_per_client"])
