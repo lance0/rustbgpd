@@ -21,6 +21,7 @@ use tower::service_fn;
 
 use crate::error::CliError;
 use crate::proto::config_service_client::ConfigServiceClient;
+use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 
@@ -154,9 +155,9 @@ pub(crate) async fn rpc_with_timeout<T>(
     })?
 }
 
-/// Decode ceiling for full unary listing responses, replacing tonic's
+/// Decode ceiling for full unary listing and metrics responses, replacing tonic's
 /// 4 MiB client default on the clients built by
-/// [`Connection::rib_listing_client`].
+/// [`Connection::rib_listing_client`] and [`Connection::metrics_client`].
 ///
 /// Budget rationale: representative encoded listing rows are roughly
 /// 52-101 bytes (the widest current fixture, a VPN route entry, encodes
@@ -347,7 +348,7 @@ impl Connection {
     /// A `RibService` client for the full unary listing RPCs (BGP-LS,
     /// VPN, labeled, RTC, FlowSpec, EVPN, blackhole discards, unpaged
     /// FIB, topology nodes/links, ORR status), with the decode ceiling
-    /// raised to [`LISTING_MAX_DECODE_BYTES`]. Every other client keeps
+    /// raised to [`LISTING_MAX_DECODE_BYTES`]. Other RIB clients keep
     /// tonic's 4 MiB default.
     pub(crate) fn rib_listing_client(
         &self,
@@ -373,6 +374,23 @@ impl Connection {
         &self,
     ) -> ConfigServiceClient<InterceptedService<Channel, AuthInterceptor>> {
         self.config_client_with_decode_limit(EFFECTIVE_CONFIG_MAX_DECODE_BYTES)
+    }
+
+    /// Full Prometheus snapshots can exceed 4 MiB at 1000 peers. Reuse the
+    /// finite bulk-response ceiling for `GetMetrics`; other control RPCs
+    /// keep the generated client's default limit.
+    pub(crate) fn metrics_client(
+        &self,
+    ) -> ControlServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        self.metrics_client_with_decode_limit(LISTING_MAX_DECODE_BYTES)
+    }
+
+    fn metrics_client_with_decode_limit(
+        &self,
+        limit: usize,
+    ) -> ControlServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        ControlServiceClient::with_interceptor(self.channel(), self.interceptor())
+            .max_decoding_message_size(limit)
     }
 
     /// Shared constructor core; tests drive it with a small cap to prove
@@ -1020,6 +1038,71 @@ mod tests {
     use prost::Message;
     use rustbgpd_api::proto as server_proto;
 
+    #[tokio::test]
+    async fn metrics_client_decodes_thousand_peer_snapshot_over_default_ceiling() {
+        let handle = crate::test_support::spawn_mock_server(None).await;
+        let response = server_proto::MetricsResponse {
+            prometheus_text: crate::test_support::thousand_peer_metrics().await,
+        };
+        let encoded_len = response.encoded_len();
+        assert!(
+            encoded_len > 4 * 1024 * 1024,
+            "1000-peer fixture: {encoded_len} bytes"
+        );
+        assert!(encoded_len < LISTING_MAX_DECODE_BYTES);
+        eprintln!("1000-peer production metrics fixture: {encoded_len} encoded bytes");
+        *handle.state.metrics_text.lock().await = Some(response.prometheus_text.clone());
+        let connection = connect(&handle.addr, None).await.unwrap();
+
+        let error =
+            ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor())
+                .get_metrics(crate::proto::MetricsRequest {})
+                .await
+                .expect_err("default 4 MiB client must reject the 1000-peer snapshot");
+        assert_eq!(error.code(), tonic::Code::OutOfRange, "{error}");
+        eprintln!("default-client control: {error}");
+
+        let got = connection
+            .metrics_client()
+            .get_metrics(crate::proto::MetricsRequest {})
+            .await
+            .expect("bounded metrics client must decode the full snapshot")
+            .into_inner();
+        assert_eq!(got.prometheus_text, response.prometheus_text);
+    }
+
+    #[tokio::test]
+    async fn metrics_client_enforces_decode_ceiling_and_bearer_authentication() {
+        let handle = crate::test_support::spawn_mock_server(Some("metrics-secret")).await;
+        *handle.state.metrics_text.lock().await = Some("# metrics\n".repeat(256));
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("token.txt");
+        fs::write(&token_path, "metrics-secret\n").unwrap();
+        let connection = connect(&handle.addr, Some(token_path.to_str().unwrap()))
+            .await
+            .unwrap();
+        connection
+            .metrics_client()
+            .get_metrics(crate::proto::MetricsRequest {})
+            .await
+            .unwrap();
+        let error = connection
+            .metrics_client_with_decode_limit(1024)
+            .get_metrics(crate::proto::MetricsRequest {})
+            .await
+            .expect_err("the supplied finite cap must be enforced");
+        assert_eq!(error.code(), tonic::Code::OutOfRange, "{error}");
+
+        let error = connect(&handle.addr, None)
+            .await
+            .unwrap()
+            .metrics_client()
+            .get_metrics(crate::proto::MetricsRequest {})
+            .await
+            .expect_err("metrics client must retain the auth interceptor");
+        assert_eq!(error.code(), tonic::Code::Unauthenticated, "{error}");
+    }
+
     /// A valid BGP-LS listing response whose encoded size is driven by
     /// `route_count` x `payload_len` — the loopback fixture for the
     /// decode-ceiling tests.
@@ -1075,8 +1158,7 @@ mod tests {
 
     // The raw generated constructor keeps tonic's 4 MiB default: the same
     // >4 MiB listing must fail with OutOfRange. This pins both the defect
-    // and that non-listing clients (which all use this constructor) stay
-    // at the default.
+    // and that ordinary RIB clients stay at the default.
     #[tokio::test]
     #[expect(
         deprecated,
@@ -1456,8 +1538,8 @@ mod tests {
             assert_eq!(ctors, expect_ctors, "{name}: bounded constructor sites");
             assert_eq!(rpcs, expect_rpcs, "{name}: listing RPC invocations");
             // The ceiling lives only in connection.rs — no per-command
-            // decode-limit overrides, so non-listing clients keep the
-            // tonic default.
+            // decode-limit overrides; other RIB and policy clients keep
+            // the tonic default.
             assert_eq!(
                 code.matches("max_decoding_message_size").count(),
                 0,

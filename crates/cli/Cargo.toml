@@ -65,6 +65,7 @@ tokio-stream = { workspace = true, features = ["net"] }
 nix = { workspace = true, features = ["signal", "socket", "term"] }
 rustbgpd-api.workspace = true
 rustbgpd-evpn.workspace = true
+rustbgpd-telemetry.workspace = true
 # Fixture builder for the from-bmp adapter tests: captures are framed by
 # the daemon's own RFC-pinned BMP encoder.
 rustbgpd-bmp.workspace = true
