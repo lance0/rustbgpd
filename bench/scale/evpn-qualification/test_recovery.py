@@ -20,7 +20,129 @@ def two_groups(generation="a"):
     return row
 
 
+def last_reload(started, finished, outcome="complete"):
+    return {"record": {"started_unix_millis": started, "finished_unix_millis": finished,
+                       "outcome": outcome, "route": "generation", "reason_code": None,
+                       "failure_bucket": None, "failure_target": None, "applied_count": 2,
+                       "applied": [], "applied_omitted": 0, "unapplied_count": 0,
+                       "unapplied": [], "unapplied_omitted": 0}, "convergence": None}
+
+
+def reload_controls(leg, row, events):
+    controls = []
+    previous = {"record": None, "convergence": None}
+    for generation, start in (("b", 1), ("a", 4)):
+        response = last_reload(start * 1000, start * 1000 + 100)
+        for step, requested, completed, body in (("before", start - .5, start - .4, previous),
+                                                  ("after", start + .01, start + .2, response)):
+            controls.append({"generation": generation, "step": step, "pid": row["daemon_owner"]["pid"],
+                             "requested_at": requested, "at": completed, "wall_us": int(completed * 1_000_000),
+                             "timeout_seconds": 30, "returncode": 0, "stdout": json.dumps(body), "stderr": ""})
+        events.extend([{"event": "reload_signal", "generation": generation, "at": start + .001,
+                        "pid": row["daemon_owner"]["pid"], "signal_floor_ms": start * 1000},
+                       {"event": "reload_settled", "generation": generation, "at": start + .21}])
+        row[f"reload-{generation}"] = response
+        previous = response
+    (leg / "reload-control.jsonl").write_text("".join(json.dumps(item) + "\n" for item in controls))
+
+
 class RecoveryTests(unittest.TestCase):
+    def test_build_pins_same_source_cli_without_using_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def build(command, **kwargs):
+                binary = command[command.index("--bin") + 1]
+                target = Path(kwargs["env"]["CARGO_TARGET_DIR"])
+                (target / "release").mkdir(parents=True, exist_ok=True)
+                (target / "release" / binary).write_text(binary + str(target))
+                return Mock(returncode=0)
+            with patch.object(Q, "manifest_for"), patch.object(Q, "verify_export"), \
+                 patch.object(Q.subprocess, "check_output", return_value="fixture version"), \
+                 patch.object(Q.subprocess, "run", side_effect=build) as runs:
+                Q.build(Mock(output=str(root)))
+            identities = json.loads((root / "binaries.json").read_text())
+            self.assertEqual(set(identities), {"rustbgpd-candidate", "rustbgpd-private", "evpn-rr-soak", "rbgp"})
+            self.assertEqual(identities["rbgp"], Q.digest(root / "bin/rbgp"))
+            cli = runs.call_args_list[-1]
+            self.assertIn("rustbgpctl", cli.args[0])
+            self.assertEqual(cli.kwargs["cwd"], root / "sources/candidate")
+            self.assertEqual(cli.kwargs["env"]["CARGO_TARGET_DIR"], str(root / "target-candidate"))
+
+    def test_reload_record_requires_new_correlated_settlement_not_convergence(self):
+        old = last_reload(999, 1000)
+        changed_convergence = copy.deepcopy(old)
+        changed_convergence["convergence"] = {"state": "converged"}
+        self.assertFalse(R.reload_complete(changed_convergence, old["record"], 1000, 1_100_000))
+        self.assertFalse(R.reload_complete(last_reload(999, 1001), old["record"], 1000, 1_100_000))
+        # Millisecond equality is valid; the signal may arrive later within the same millisecond.
+        self.assertTrue(R.reload_complete(last_reload(1000, 1000), old["record"], 1000, 1_100_000))
+        for outcome in ("ignored_in_flight", "known_partial", "rejected_no_effect", "task_failed"):
+            with self.subTest(outcome=outcome), self.assertRaises(Q.AcceptanceFailure):
+                R.reload_complete(last_reload(1000, 1001, outcome), old["record"], 1000, 1_100_000)
+        for response in ({}, last_reload(True, 1000), last_reload(1001, 1000), last_reload(1000, 2000)):
+            with self.subTest(response=response), self.assertRaises(ValueError) as caught:
+                R.reload_complete(response, old["record"], 1000, 1_100_000)
+            self.assertNotIsInstance(caught.exception, Q.AcceptanceFailure)
+
+    def test_controller_waits_for_owner_before_next_signal_with_one_deadline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = R.Controller.__new__(R.Controller)
+            controller.leg = Path(temporary)
+            controller.daemon = Mock(pid=123)
+            state = {"clock": 1., "record": None, "active": False, "polls": 0}
+            signaled_while_active = []
+            def kill(pid, sig):
+                self.assertEqual((pid, sig), (123, R.signal.SIGHUP))
+                signaled_while_active.append(state["active"])
+                state.update(active=True, polls=0, started=int(state["clock"] * 1000))
+            def poll():
+                state["clock"] += .01
+                state["polls"] += 1
+                if state["active"] and state["polls"] == 2:
+                    state["record"] = last_reload(state["started"], int(state["clock"] * 1000))["record"]
+                    state["active"] = False
+            def rpc(command, **kwargs):
+                self.assertEqual(command[:3], ["/frozen/bin/rbgp", "--addr", "unix:///fixture/grpc.sock"])
+                self.assertLessEqual(kwargs["timeout"], 30)
+                return Mock(returncode=0, stdout=json.dumps({"record": state["record"], "convergence": None}), stderr="")
+            controller.poll = Mock(side_effect=poll)
+            responses = []
+            with patch.object(R.time, "monotonic", side_effect=lambda: state["clock"]), \
+                 patch.object(R.time, "time_ns", side_effect=lambda: int(state["clock"] * 1_000_000_000)), \
+                 patch.object(R.os, "kill", side_effect=kill), \
+                 patch.object(R.subprocess, "run", side_effect=rpc):
+                for generation in ("b", "a"):
+                    started, deadline, response = controller.reload(generation, Path("/frozen/bin/rbgp"),
+                                                                    "unix:///fixture/grpc.sock", 60)
+                    self.assertEqual(deadline, started + 60)
+                    responses.append(response)
+            self.assertEqual(signaled_while_active, [False, False])
+            self.assertEqual([response["record"]["outcome"] for response in responses], ["complete", "complete"])
+            controls = [json.loads(line) for line in (controller.leg / "reload-control.jsonl").read_text().splitlines()]
+            self.assertEqual([item["step"] for item in controls], ["before", "after", "after"] * 2)
+            self.assertIsNone(json.loads(controls[1]["stdout"])["record"])
+
+    def test_remaining_deadline_bounds_rpc_group_and_wire_waits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            controller = R.Controller.__new__(R.Controller)
+            controller.leg, controller.daemon = Path(temporary), Mock(pid=123)
+            with patch.object(R.time, "monotonic", return_value=59.75), \
+                 patch.object(R.subprocess, "run", return_value=Mock(returncode=0, stdout='{"record":null}', stderr="")) as rpc:
+                controller.reload_status("b", "after", Path("/frozen/rbgp"), "unix:///fixture/grpc.sock", 60)
+            self.assertEqual(rpc.call_args.kwargs["timeout"], .25)
+            with patch.object(R.time, "monotonic", return_value=60), \
+                 patch.object(R.subprocess, "run") as rpc, self.assertRaises(Q.AcceptanceFailure):
+                controller.reload_status("b", "after", Path("/frozen/rbgp"), "unix:///fixture/grpc.sock", 60)
+            rpc.assert_not_called()
+            controller.observations, controller.messages = [], []
+            controller.poll = Mock()
+            with patch.object(R.time, "monotonic", return_value=60):
+                with self.assertRaises(R.MissingWitness):
+                    controller.witness(lambda row: True, deadline=60)
+                with self.assertRaises(Q.AcceptanceFailure):
+                    controller.ack("policy b", deadline=60)
+            controller.poll.assert_not_called()
+
     def test_readiness_probe_retains_http_error_code(self):
         sampler = R.Readiness.__new__(R.Readiness)
         sampler.correctness = True
@@ -220,7 +342,7 @@ class RecoveryTests(unittest.TestCase):
         for quiet_status in (0, 1):
             with self.subTest(quiet_status=quiet_status), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                identities = {"rustbgpd-candidate": "candidate", "evpn-rr-soak": "driver"}
+                identities = {"rustbgpd-candidate": "candidate", "evpn-rr-soak": "driver", "rbgp": "client"}
                 Q.write_json(root / "binaries.json", identities)
                 manifest = {"recovery": Q.RECOVERY_BARS, "daemon_cpus": "0", "harness_cpus": "1",
                             "timing_window": Q.timing_window("2030-01-02T03:30:00Z", "2030-01-02T07:30:00Z")}
@@ -242,6 +364,10 @@ class RecoveryTests(unittest.TestCase):
             "source_sha256": Q.digest(root / "source.tar"), "shapes": Q.SHAPES, "schedule": Q.SCHEDULE,
             "settle_seconds": 45, "daemon_bytes": Q.DAEMON_BYTES,
             "max_slope_bytes_per_delivery": Q.MAX_SLOPE_BYTES, "recovery": Q.RECOVERY_BARS})
+        (root / "bin").mkdir()
+        (root / "bin/rbgp").write_text("same-source client fixture")
+        client_hash = Q.digest(root / "bin/rbgp")
+        Q.write_json(root / "binaries.json", {"rbgp": client_hash})
         wire_report = {phase: [{"peer": peer, "state": phase, "ordered": phase if phase in R.PHASES[:3] else None}
                                for peer in range(3)] for phase in R.PHASES}
         for index, arm in enumerate(("candidate", "private")):
@@ -249,7 +375,8 @@ class RecoveryTests(unittest.TestCase):
             leg.mkdir()
             row = {"status": "PASS", "arm": arm, "clients": 3, "routes": 10_000,
                    "correctness_only": True, "wire": wire_report, "driver_exit": 0,
-                   "executed_resets": dict.fromkeys(Q.CAUSES, 0)}
+                   "executed_resets": dict.fromkeys(Q.CAUSES, 0), "daemon_owner": {"pid": 1000 + index},
+                   "reload_client_sha256": client_hash}
             snapshots = []
             names = ("initial_groups", "baseline", "regroup-b", "regroup-a", "mass_dirty_previous", "mass_dirty",
                      "protocol_obligation_before_churn", "protocol_obligation_during_churn", "protocol_obligation_after_churn", "settled")
@@ -279,10 +406,10 @@ class RecoveryTests(unittest.TestCase):
             (leg / "observer.log").write_text("".join("evpn_qualification " + json.dumps(item) + "\n" for item in snapshots)
                 + "".join("evpn_input_barrier " + json.dumps(item) + "\n" for item in barriers))
             (leg / "daemon.log").write_text('evpn_input_barrier {interleaved stdout fragment}\n')
-            events = [{"event": "reload", "generation": "a", "at": 1},
-                      {"event": "complete", "command": "policy a", "at": 3},
-                      {"event": "reload", "generation": "b", "at": 4},
-                      {"event": "complete", "command": "policy b", "at": 6},
+            events = [{"event": "reload", "generation": "b", "at": 1, "wall_us": 1_000_000},
+                      {"event": "complete", "command": "policy b", "at": 3},
+                      {"event": "reload", "generation": "a", "at": 4, "wall_us": 4_000_000},
+                      {"event": "complete", "command": "policy a", "at": 6},
                       *[{"event": "complete", "command": "churn", "at": 7 + n} for n in range(32)],
                       {"event": "command", "command": "churn-overlap", "at": 40, "wall_us": 2000},
                       {"event": "complete", "command": "churn-overlap", "at": 41, "wall_us": 4000},
@@ -291,6 +418,8 @@ class RecoveryTests(unittest.TestCase):
                       {"event": "command", "command": "resume", "at": 51},
                       {"event": "complete", "command": "resume", "at": 52},
                       {"event": "complete", "command": "settle", "at": 56}]
+            reload_controls(leg, row, events)
+            events.sort(key=lambda event: event["at"])
             (leg / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
             (leg / "driver.log").write_text('evpn_control ' + json.dumps({"command": "churn-overlap",
                 "result": {"write_started_us": 2100, "writers_drained_us": 3900}}) + "\n")
@@ -302,6 +431,50 @@ class RecoveryTests(unittest.TestCase):
             Q.write_json(leg / "cgroup.json", row["cgroup"])
             Q.write_json(leg / "result.json", row)
         return wire_report
+
+    def test_analyzer_rechecks_raw_reload_owner_receipts_in_both_arms(self):
+        defects = ("stale", "ignored_in_flight", "known_partial", "task_failed", "prepublished",
+                   "late", "pid", "copied", "client", "missing", "future-finish", "unapplied")
+        for arm in ("candidate", "private"):
+            for defect in defects:
+                with self.subTest(arm=arm, defect=defect), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    report = self.analysis_fixture(root)
+                    leg = next(root.glob(f"recovery-*-{arm}"))
+                    row = json.loads((leg / "result.json").read_text())
+                    controls = [json.loads(line) for line in (leg / "reload-control.jsonl").read_text().splitlines()]
+                    response = json.loads(controls[-1]["stdout"])
+                    if defect == "stale":
+                        response = json.loads(controls[-2]["stdout"])
+                    elif defect in ("ignored_in_flight", "known_partial", "task_failed"):
+                        response["record"]["outcome"] = defect
+                    elif defect == "future-finish":
+                        response["record"]["finished_unix_millis"] = 10_000
+                    elif defect == "unapplied":
+                        response["record"]["unapplied_count"] = 1
+                    elif defect == "prepublished":
+                        controls[-1].update(requested_at=3.8, at=3.9)
+                    elif defect == "late":
+                        controls[-1].update(requested_at=63.9, at=64.01, timeout_seconds=.1)
+                    elif defect == "pid":
+                        controls[-1]["pid"] += 1
+                    elif defect == "client":
+                        row["reload_client_sha256"] = "0" * 64
+                    controls[-1]["stdout"] = json.dumps(response)
+                    row["reload-a"] = response
+                    Q.write_json(leg / "result.json", row)
+                    path = leg / "reload-control.jsonl"
+                    path.write_text("".join(json.dumps(item) + "\n" for item in controls))
+                    if defect == "missing":
+                        path.unlink()
+                    elif defect == "copied":
+                        other = next(path for path in root.glob("recovery-*") if path != leg)
+                        path.write_bytes((other / "reload-control.jsonl").read_bytes())
+                    with patch.object(R, "check_wire", return_value=report), self.assertRaises(Exception) as caught:
+                        R.analyze(root)
+                    expected = "FAIL" if defect in ("ignored_in_flight", "known_partial", "task_failed") else "INVALID"
+                    self.assertEqual(json.loads((root / "recovery-summary.json").read_text())["status"], expected)
+                    self.assertEqual(isinstance(caught.exception, Q.AcceptanceFailure), expected == "FAIL")
 
     def test_analyze_rejects_dirty_cadence_misses_in_either_arm(self):
         for arm in ("candidate", "private"):

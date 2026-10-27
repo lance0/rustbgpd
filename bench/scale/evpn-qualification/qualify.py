@@ -254,14 +254,16 @@ def build(args):
         shutil.copy2(target / "release/rustbgpd", binaries / f"rustbgpd-{arm}")
     target = output / "target-candidate"
     env["CARGO_TARGET_DIR"] = str(target)
-    command = ["taskset", "-c", BUILD_CPUS, "cargo", "build", "--locked", "--release",
-               "-p", "rustbgpd-evpn-load", "--bin", "evpn-rr-soak", "-j", "6"]
-    with (output / "build-harness.log").open("x") as log:
-        result = subprocess.run(command, cwd=output / "sources/candidate", env=env,
-                                stdout=log, stderr=subprocess.STDOUT)
-    (output / "build-harness.exit").write_text(f"{result.returncode}\n")
-    require(result.returncode == 0, "harness build failed; retained its first log")
-    shutil.copy2(target / "release/evpn-rr-soak", binaries / "evpn-rr-soak")
+    for package, binary, label in (("rustbgpd-evpn-load", "evpn-rr-soak", "harness"),
+                                   ("rustbgpctl", "rbgp", "client")):
+        command = ["taskset", "-c", BUILD_CPUS, "cargo", "build", "--locked", "--release",
+                   "-p", package, "--bin", binary, "-j", "6"]
+        with (output / f"build-{label}.log").open("x") as log:
+            result = subprocess.run(command, cwd=output / "sources/candidate", env=env,
+                                    stdout=log, stderr=subprocess.STDOUT)
+        (output / f"build-{label}.exit").write_text(f"{result.returncode}\n")
+        require(result.returncode == 0, f"{label} build failed; retained its first log")
+        shutil.copy2(target / "release" / binary, binaries / binary)
     identities = {path.name: digest(path) for path in binaries.iterdir()}
     require(identities["rustbgpd-candidate"] != identities["rustbgpd-private"], "identical control/candidate binaries")
     write_json(output / "binaries.json", identities)

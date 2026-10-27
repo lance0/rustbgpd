@@ -12,7 +12,10 @@ checkout. Preparation accepts only a clean source commit; builds verify every
 exported source file against that commit's archive plus the reviewed constructor
 and observer patches. Candidate and control use independent Cargo targets.
 Builds inherit the launcher's CPU affinity; use `taskset` on the build command
-to restrict its cores.
+to restrict its cores. The build step also pins the load driver and `rbgp`
+client from that same candidate export. Recovery invokes only the copied
+client, checks its digest, and keeps it outside the daemon cgroup; it never
+falls back to a client from `PATH`.
 
 ```sh
 python3 bench/scale/evpn-qualification/qualify.py prepare /tmp/evpn-memory
@@ -93,6 +96,29 @@ functional exercise uses three clients and 30,000 routes and reports no timing
 verdict. Its route count must fill the real 4,096-message transport writer queue
 within the same fixed churn sequence; smaller inventories can remain fully queued.
 Neither shape exercises a missing destination group or moves every peer.
+
+Each regroup snapshots the previous `rbgp config last-reload` record through
+the fixture's owner-only Unix socket before signaling the exact owned daemon.
+It then requires a new `complete` record whose start timestamp is at least the
+signal's floored Unix millisecond. Equality is allowed because the signal and
+daemon admission can share a millisecond. A changed convergence field alone is
+not a new record. This receipt is published after the reload owner has settled
+and SIGHUP admission has reopened; a stable group or the earlier config-publication
+log does not establish that boundary. Ignored, partial, rejected and failed
+reload outcomes fail the cell.
+
+The same original SIGHUP-start plus 60-second deadline covers status RPCs,
+actual group membership and receiver wire convergence. The controller adds no
+sleep or new allowance before the next reload. Raw CLI responses and signal,
+settlement and completion events are retained and checked again by the final
+consumer, including exact daemon identity, stale/copied receipts and deadline
+coverage.
+
+Campaigns without these control receipts retain their original frozen consumer
+and verdict; the new consumer does not retrospectively qualify them. Checker
+fixtures and seeded sequencing controls establish the fence itself. They do not
+establish a new-source memory or 150-peer recovery result; that requires a new
+frozen-source campaign in an explicitly recorded timing window.
 
 The controller pauses actual socket readers with acknowledged generation fences,
 then issues 32 fixed full-window churn rounds. Both arms must show all members

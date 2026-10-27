@@ -105,6 +105,93 @@ def settled(row):
                                         "completion_receipts", "refresh_pending", "eor_pending", "protocol_obligations"))
 
 
+def reload_record(response):
+    Q.require(type(response) is dict and "record" in response, "malformed last-reload response")
+    record = response["record"]
+    if record is None:
+        return None
+    Q.require(type(record) is dict
+              and all(type(record.get(key)) is int and record[key] >= 0 for key in
+                      ("started_unix_millis", "finished_unix_millis", "applied_count", "unapplied_count"))
+              and record["finished_unix_millis"] >= record["started_unix_millis"]
+              and record.get("outcome") in Q.COMMON.RELOAD_OUTCOMES
+              and all(key in record and (record[key] is None or type(record[key]) is str)
+                      for key in ("failure_bucket", "failure_target", "reason_code")),
+              "malformed last-reload record")
+    return record
+
+
+def reload_complete(response, previous, signal_floor_ms, observed_wall_us):
+    record = reload_record(response)
+    if record is None:
+        return False
+    Q.require(record["finished_unix_millis"] <= observed_wall_us // 1000,
+              "last-reload completion precedes its reported finish")
+    if record == previous or record["started_unix_millis"] < signal_floor_ms:
+        return False
+    Q.accept(record["outcome"] == "complete", f"SIGHUP reload outcome {record['outcome']}")
+    Q.require(record["unapplied_count"] == 0
+              and not any(record.get(key) for key in ("failure_bucket", "failure_target", "reason_code")),
+              "complete last-reload record retains a failure")
+    return True
+
+
+def check_reload_receipts(leg, row, events, seconds):
+    controls = [json.loads(line) for line in (leg / "reload-control.jsonl").read_text().splitlines()]
+    Q.require([item["generation"] for item in controls]
+              == ["b"] * sum(item["generation"] == "b" for item in controls)
+              + ["a"] * sum(item["generation"] == "a" for item in controls),
+              "missing/reordered reload control generations")
+    Q.require([event["generation"] for event in events if event["event"] == "reload"] == ["b", "a"],
+              "missing/reordered reload triggers")
+    previous = None
+    previous_end = 0
+    for generation in ("b", "a"):
+        def event(kind, generation=generation):
+            found = [item for item in events if item["event"] == kind and item.get("generation") == generation]
+            Q.require(len(found) == 1, f"missing/duplicate {kind} for {generation}")
+            return found[0]
+        trigger, signal_row, done = (event(kind) for kind in ("reload", "reload_signal", "reload_settled"))
+        selected = [item for item in controls if item["generation"] == generation]
+        Q.require(len(selected) >= 2 and selected[0]["step"] == "before"
+                  and all(item["step"] == "after" for item in selected[1:]),
+                  "missing/reordered last-reload control receipts")
+        Q.require(all(type(item["pid"]) is int and item["pid"] > 0
+                      and type(item["wall_us"]) is int and item["wall_us"] >= 0
+                      and all(type(item[key]) in (int, float) and item[key] >= 0
+                              for key in ("requested_at", "at", "timeout_seconds"))
+                      for item in selected), "malformed last-reload RPC timing or owner")
+        before, after = selected[0], selected[1:]
+        Q.require(previous_end <= before["requested_at"] <= before["at"] <= trigger["at"]
+                  and trigger["at"] <= signal_row["at"] <= after[0]["requested_at"]
+                  and type(signal_row["signal_floor_ms"]) is int
+                  and signal_row["signal_floor_ms"] >= trigger["wall_us"] // 1000,
+                  "last-reload receipt precedes its signal or previous phase")
+        for item in selected:
+            Q.require(item["pid"] == signal_row["pid"] == row["daemon_owner"]["pid"]
+                      and item["returncode"] == 0 and not item.get("error")
+                      and 0 < item["timeout_seconds"] <= 30 and item["at"] >= item["requested_at"],
+                      "invalid last-reload RPC receipt")
+        baseline = reload_record(json.loads(before["stdout"]))
+        Q.require(baseline == previous, "last-reload baseline differs from the previous owned reload")
+        for index, item in enumerate(after):
+            Q.require(item["requested_at"] + item["timeout_seconds"] <= trigger["at"] + seconds
+                      and item["at"] <= trigger["at"] + seconds,
+                      "last-reload RPC exceeded the original regroup deadline")
+            response = json.loads(item["stdout"])
+            complete = reload_complete(response, baseline, signal_row["signal_floor_ms"], item["wall_us"])
+            Q.require(not complete or index == len(after) - 1, "RPC continued after reload settlement")
+        Q.require(complete and response == row[f"reload-{generation}"]
+                  and after[-1]["at"] <= done["at"], "stale or copied last-reload completion receipt")
+        wire_done = [item for item in events if item["event"] == "complete"
+                     and item.get("command") == f"policy {generation}"]
+        Q.require(len(wire_done) == 1 and done["at"] <= wire_done[0]["at"] <= trigger["at"] + seconds,
+                  "wire completion or reload settlement exceeded the original regroup deadline")
+        previous, previous_end = reload_record(response), wire_done[0]["at"]
+    Q.require(len(controls) == sum(item["generation"] in ("b", "a") for item in controls),
+              "unknown reload control generation")
+
+
 def dirty_pair(observed, clients):
     return next(((left, right) for left, right in zip(observed, observed[1:])
                  if left["dirty"] == right["dirty"] == clients
@@ -260,18 +347,18 @@ class Controller:
                     roster(row, self.arm, self.clients)
             self.observations.extend(observed)
 
-    def command(self, command, timeout=180):
+    def command(self, command, timeout=180, *, deadline=None):
         self.event("command", command=command)
         self.last_command_start = self.last_event.copy()
         self.driver.stdin.write((command + "\n").encode())
         self.driver.stdin.flush()
-        result = self.ack(command, timeout)
+        result = self.ack(command, timeout, deadline=deadline)
         self.last_completion = self.event("complete", command=command)
         self.last_command_complete = self.last_event.copy()
         return result
 
-    def ack(self, command, timeout=180):
-        end = time.monotonic() + timeout
+    def ack(self, command, timeout=180, *, deadline=None):
+        end = min(time.monotonic() + timeout, deadline) if deadline is not None else time.monotonic() + timeout
         while time.monotonic() < end:
             for index, row in enumerate(self.messages):
                 if row["command"] == command:
@@ -279,15 +366,56 @@ class Controller:
             self.poll()
         raise Q.AcceptanceFailure(f"command deadline: {command}")
 
-    def witness(self, predicate, timeout=60, after=None):
+    def witness(self, predicate, timeout=60, after=None, *, deadline=None):
         start = len(self.observations) if after is None else after
-        end = time.monotonic() + timeout
+        end = min(time.monotonic() + timeout, deadline) if deadline is not None else time.monotonic() + timeout
         while time.monotonic() < end:
             self.poll()
             for row in self.observations[start:]:
                 if row["members"] == self.clients and predicate(row):
                     return row
         raise MissingWitness("required actual daemon witness did not occur")
+
+    def reload_status(self, generation, step, client, address, deadline=None):
+        requested = time.monotonic()
+        timeout = 30 if deadline is None else min(30, deadline - requested)
+        Q.accept(timeout > 0, "reload settlement exceeded the original regroup deadline")
+        receipt = {"generation": generation, "step": step, "pid": self.daemon.pid,
+                   "requested_at": requested, "timeout_seconds": timeout}
+        try:
+            result = subprocess.run([str(client), "--addr", address, "--json", "config", "last-reload"],
+                                    text=True, capture_output=True, timeout=timeout, check=False)
+            receipt.update(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
+        except subprocess.TimeoutExpired as error:
+            receipt.update(returncode=None, error="TimeoutExpired", stdout=str(error.stdout), stderr=str(error.stderr))
+            raise Q.AcceptanceFailure("last-reload RPC timed out") from error
+        finally:
+            receipt.update(at=time.monotonic(), wall_us=time.time_ns() // 1000)
+            with (self.leg / "reload-control.jsonl").open("a") as stream:
+                stream.write(json.dumps(receipt) + "\n")
+        Q.accept(deadline is None or receipt["at"] <= deadline,
+                 "last-reload RPC exceeded the original regroup deadline")
+        Q.accept(result.returncode == 0, f"last-reload RPC failed: {result.stderr}")
+        response = json.loads(result.stdout)
+        reload_record(response)
+        return response, receipt
+
+    def reload(self, generation, client, address, seconds):
+        previous_response, _ = self.reload_status(generation, "before", client, address)
+        previous = reload_record(previous_response)
+        started = self.event("reload", generation=generation)
+        deadline = started + seconds
+        signal_floor_ms = time.time_ns() // 1_000_000
+        # Only this exact owned child may receive the signal.
+        os.kill(self.daemon.pid, signal.SIGHUP)
+        self.event("reload_signal", generation=generation, pid=self.daemon.pid, signal_floor_ms=signal_floor_ms)
+        while time.monotonic() < deadline:
+            self.poll()
+            response, receipt = self.reload_status(generation, "after", client, address, deadline)
+            if reload_complete(response, previous, signal_floor_ms, receipt["wall_us"]):
+                self.event("reload_settled", generation=generation)
+                return started, deadline, response
+        raise MissingWitness("owned SIGHUP reload did not settle before the original regroup deadline")
 
     def source_barrier(self):
         result = self.command("source-barrier")
@@ -377,8 +505,10 @@ def run_cell(output, manifest, arm, index, correctness):
         scenario(fixture, output / "sources/candidate", clients)
         identities = json.loads((output / "binaries.json").read_text())
         binary, harness = output / "bin" / f"rustbgpd-{arm}", output / "bin/evpn-rr-soak"
-        for path in (binary, harness):
+        client = output / "bin/rbgp"
+        for path in (binary, harness, client):
             Q.require(Q.digest(path) == identities[path.name], "binary changed after build")
+        record["reload_client_sha256"] = identities[client.name]
         with (leg / "daemon.log").open("x") as log, (leg / "observer.log").open("x") as observer:
             subprocess.run(["taskset", "-c", manifest["daemon_cpus"], str(binary), "--check", "--strict",
                             str(fixture / "config.toml")], stdout=log, stderr=subprocess.STDOUT, check=True)
@@ -419,12 +549,13 @@ def run_cell(output, manifest, arm, index, correctness):
             record["baseline"] = baseline
             for generation in ("b", "a"):
                 shutil.copyfile(fixture / f"config-{generation}.toml", fixture / "config.toml")
-                # Exact child only; never discover/kill a host daemon by name.
-                started = controller.event("reload", generation=generation)
-                os.kill(pid, signal.SIGHUP)
+                started, deadline, response = controller.reload(
+                    generation, client, "unix://" + str(fixture / "grpc.sock"), bars["convergence_seconds"])
+                record[f"reload-{generation}"] = response
                 record[f"regroup-{generation}"] = controller.witness(
-                    lambda row, generation=generation: group_members(row, arm, clients, generation) and settled(row))
-                controller.command(f"policy {generation}", bars["convergence_seconds"])
+                    lambda row, generation=generation: group_members(row, arm, clients, generation) and settled(row),
+                    deadline=deadline)
+                controller.command(f"policy {generation}", deadline=deadline)
                 elapsed = controller.last_completion - started
                 Q.accept(elapsed <= bars["convergence_seconds"], "regroup wire convergence exceeded bar")
                 record[f"regroup-{generation}-seconds"] = None if correctness else elapsed
@@ -529,6 +660,11 @@ def analyze_results(output):
         Q.accept(False, "recorded cell acceptance failures; see failed_cells")
     for path, row in zip(paths, rows, strict=True):
         leg, clients = path.parent, row["clients"]
+        identities = json.loads((output / "binaries.json").read_text())
+        Q.require(row["reload_client_sha256"] == identities["rbgp"] == Q.digest(output / "bin/rbgp"),
+                  "reload client binary differs from its pinned build")
+        events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
+        check_reload_receipts(leg, row, events, manifest["recovery"]["convergence_seconds"])
         Q.require(row["driver_exit"] == 0, "driver did not finish successfully")
         Q.require((clients, row["routes"]) == ((3, 10_000) if correctness else (150, 250)),
                   "recovery cell shape differs from fixed campaign")
@@ -564,7 +700,6 @@ def analyze_results(output):
         ordered_samples = sorted(samples, key=lambda sample: sample["scheduled"])
         Q.require(all(abs(right["scheduled"] - left["scheduled"] - .05) < .000001
                       for left, right in zip(ordered_samples, ordered_samples[1:])), "missing 20 Hz probe")
-        events = [json.loads(line) for line in (leg / "events.jsonl").read_text().splitlines()]
         controls = [json.loads(line.removeprefix("evpn_control ")) for line in
                     (leg / "driver.log").read_text().splitlines() if line.startswith("evpn_control ")]
         protocol_overlap(row, events, controls)
