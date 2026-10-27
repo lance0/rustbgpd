@@ -6,6 +6,7 @@
 //! it must be excluded.  `EoR` completion is bound to that classified session.
 
 use crate::PeerId;
+use crate::fast_hash::ShardedMap;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::mem::size_of;
@@ -143,13 +144,13 @@ impl DeferredSelectionKeyCharge for crate::route::RtcRibRouteKey {
 
 #[derive(Debug, Default)]
 pub(super) struct DeferredSelectionKeys {
-    unicast: HashSet<rustbgpd_wire::Prefix>,
-    flowspec: HashSet<crate::route::FlowSpecKey>,
-    evpn: HashSet<rustbgpd_wire::EvpnRouteKey>,
-    vpn: HashSet<crate::route::VpnRibRouteKey>,
-    labeled: HashSet<crate::route::LabeledRibRouteKey>,
-    bgpls: HashSet<crate::route::BgpLsRouteKey>,
-    rtc: HashSet<crate::route::RtcRibRouteKey>,
+    unicast: ShardedMap<rustbgpd_wire::Prefix, ()>,
+    flowspec: ShardedMap<crate::route::FlowSpecKey, ()>,
+    evpn: ShardedMap<rustbgpd_wire::EvpnRouteKey, ()>,
+    vpn: ShardedMap<crate::route::VpnRibRouteKey, ()>,
+    labeled: ShardedMap<crate::route::LabeledRibRouteKey, ()>,
+    bgpls: ShardedMap<crate::route::BgpLsRouteKey, ()>,
+    rtc: ShardedMap<crate::route::RtcRibRouteKey, ()>,
     /// Families for which at least one distinct identity could not be retained.
     /// Release enumerates that family's Loc-RIB keys as the fail-safe source
     /// for withdrawals already absent from Adj-RIB-In.
@@ -173,11 +174,19 @@ impl DeferredSelectionKeys {
             + self.rtc.len()
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(super) fn is_cleared(&self) -> bool {
+        self.len() == 0
+            && self.overflowed_families.is_empty()
+            && self.retained_key_bytes_by_family.is_empty()
+            && self.retained_key_bytes == 0
+    }
+
     /// Insert distinct typed identities until the process-wide ledger limit is
     /// reached.  Returns each family that entered overflow fallback during
     /// this call; an already-overflowed family stops retaining further keys.
     fn extend_bounded<'a, T>(
-        set: &mut HashSet<T>,
+        set: &mut ShardedMap<T, ()>,
         overflowed_families: &mut HashSet<(Afi, Safi)>,
         retained_key_bytes_by_family: &mut HashMap<(Afi, Safi), usize>,
         retained_key_bytes: &mut usize,
@@ -194,7 +203,7 @@ impl DeferredSelectionKeys {
             // Once a family is sticky-overflowed, skip even the borrowed hash
             // lookup. Otherwise duplicate delivery never consumes identity or
             // byte budget and never clones the key.
-            if overflowed_families.contains(&family) || set.contains(identity) {
+            if overflowed_families.contains(&family) || set.contains_key(identity) {
                 continue;
             }
             let charge = identity.logical_retained_bytes();
@@ -215,7 +224,7 @@ impl DeferredSelectionKeys {
             }
             // Admission is proven before cloning potentially nested FlowSpec
             // or BGP-LS data into the ledger.
-            if set.insert(identity.clone()) {
+            if set.insert(identity.clone(), ()).is_none() {
                 remaining -= 1;
                 *retained_key_bytes = retained_key_bytes.saturating_add(charge);
                 let family_bytes = retained_key_bytes_by_family.entry(family).or_default();
@@ -850,6 +859,13 @@ impl RibManager {
             .is_some_and(SelectionDeferral::has_deferred_selection)
     }
 
+    fn with_deferred_selection_recording(&mut self, work: impl FnOnce(&mut Self)) {
+        if !self.deferred_selection_recording_active() {
+            return;
+        }
+        super::with_executor_handoff(|| self.with_replacement_readiness(work));
+    }
+
     fn record_selection_ledger_overflows(
         &self,
         families: Vec<((Afi, Safi), DeferredSelectionOverflowReason)>,
@@ -869,7 +885,10 @@ impl RibManager {
     }
 
     pub(super) fn record_deferred_unicast(&mut self, affected: &HashSet<rustbgpd_wire::Prefix>) {
-        self.record_deferred_unicast_bounded(affected, self.deferred_selection_keys.limits);
+        self.with_deferred_selection_recording(|manager| {
+            manager
+                .record_deferred_unicast_bounded(affected, manager.deferred_selection_keys.limits);
+        });
     }
 
     fn record_deferred_unicast_bounded(
@@ -887,7 +906,13 @@ impl RibManager {
         let readiness = self.replacement_readiness.clone();
         let deferred = affected
             .iter()
-            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
+            .inspect(|_| {
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "selection_record_unicast",
+                    false,
+                );
+            })
             .filter_map(|prefix| {
                 let family = super::helpers::prefix_family(prefix);
                 selection
@@ -911,180 +936,230 @@ impl RibManager {
         &mut self,
         affected: &HashSet<crate::route::FlowSpecKey>,
     ) {
-        let Some(selection) = self
-            .selection_deferral
-            .as_ref()
-            .filter(|selection| selection.has_deferred_selection())
-        else {
-            return;
-        };
-        let readiness = self.replacement_readiness.clone();
-        let deferred = affected
-            .iter()
-            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
-            .filter_map(|key| {
-                let family = (key.afi, Safi::FlowSpec);
-                selection
-                    .selection_deferred(family)
-                    .then_some((family, key))
-            });
-        let current_len = self.deferred_selection_keys.len();
-        let limits = self.deferred_selection_keys.limits;
-        let newly_overflowed = DeferredSelectionKeys::extend_bounded(
-            &mut self.deferred_selection_keys.flowspec,
-            &mut self.deferred_selection_keys.overflowed_families,
-            &mut self.deferred_selection_keys.retained_key_bytes_by_family,
-            &mut self.deferred_selection_keys.retained_key_bytes,
-            deferred,
-            current_len,
-            limits,
-        );
-        self.record_selection_ledger_overflows(newly_overflowed);
-    }
-
-    pub(super) fn record_deferred_evpn(&mut self, affected: &HashSet<rustbgpd_wire::EvpnRouteKey>) {
-        if !self.deferred_selection_recording_active() {
-            return;
-        }
-        if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
-            let deferred = affected.iter().map(|key| ((Afi::L2Vpn, Safi::Evpn), key));
-            let current_len = self.deferred_selection_keys.len();
-            let limits = self.deferred_selection_keys.limits;
+        self.with_deferred_selection_recording(|manager| {
+            let Some(selection) = manager
+                .selection_deferral
+                .as_ref()
+                .filter(|selection| selection.has_deferred_selection())
+            else {
+                return;
+            };
+            let readiness = manager.replacement_readiness.clone();
+            let deferred = affected
+                .iter()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "selection_record_flowspec",
+                        false,
+                    );
+                })
+                .filter_map(|key| {
+                    let family = (key.afi, Safi::FlowSpec);
+                    selection
+                        .selection_deferred(family)
+                        .then_some((family, key))
+                });
+            let current_len = manager.deferred_selection_keys.len();
+            let limits = manager.deferred_selection_keys.limits;
             let newly_overflowed = DeferredSelectionKeys::extend_bounded(
-                &mut self.deferred_selection_keys.evpn,
-                &mut self.deferred_selection_keys.overflowed_families,
-                &mut self.deferred_selection_keys.retained_key_bytes_by_family,
-                &mut self.deferred_selection_keys.retained_key_bytes,
+                &mut manager.deferred_selection_keys.flowspec,
+                &mut manager.deferred_selection_keys.overflowed_families,
+                &mut manager.deferred_selection_keys.retained_key_bytes_by_family,
+                &mut manager.deferred_selection_keys.retained_key_bytes,
                 deferred,
                 current_len,
                 limits,
             );
-            self.record_selection_ledger_overflows(newly_overflowed);
-        }
+            manager.record_selection_ledger_overflows(newly_overflowed);
+        });
+    }
+
+    pub(super) fn record_deferred_evpn(&mut self, affected: &HashSet<rustbgpd_wire::EvpnRouteKey>) {
+        self.with_deferred_selection_recording(|manager| {
+            if manager.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
+                let readiness = manager.replacement_readiness.clone();
+                let deferred = affected
+                    .iter()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint_at(
+                            &readiness,
+                            "selection_record_evpn",
+                            false,
+                        );
+                    })
+                    .map(|key| ((Afi::L2Vpn, Safi::Evpn), key));
+                let current_len = manager.deferred_selection_keys.len();
+                let limits = manager.deferred_selection_keys.limits;
+                let newly_overflowed = DeferredSelectionKeys::extend_bounded(
+                    &mut manager.deferred_selection_keys.evpn,
+                    &mut manager.deferred_selection_keys.overflowed_families,
+                    &mut manager.deferred_selection_keys.retained_key_bytes_by_family,
+                    &mut manager.deferred_selection_keys.retained_key_bytes,
+                    deferred,
+                    current_len,
+                    limits,
+                );
+                manager.record_selection_ledger_overflows(newly_overflowed);
+            }
+        });
     }
 
     pub(super) fn record_deferred_vpn(&mut self, affected: &HashSet<crate::route::VpnRibRouteKey>) {
-        let Some(selection) = self
-            .selection_deferral
-            .as_ref()
-            .filter(|selection| selection.has_deferred_selection())
-        else {
-            return;
-        };
-        let readiness = self.replacement_readiness.clone();
-        let deferred = affected
-            .iter()
-            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
-            .filter_map(|key| {
-                let family = key.afi_safi();
-                selection
-                    .selection_deferred(family)
-                    .then_some((family, key))
-            });
-        let current_len = self.deferred_selection_keys.len();
-        let limits = self.deferred_selection_keys.limits;
-        let newly_overflowed = DeferredSelectionKeys::extend_bounded(
-            &mut self.deferred_selection_keys.vpn,
-            &mut self.deferred_selection_keys.overflowed_families,
-            &mut self.deferred_selection_keys.retained_key_bytes_by_family,
-            &mut self.deferred_selection_keys.retained_key_bytes,
-            deferred,
-            current_len,
-            limits,
-        );
-        self.record_selection_ledger_overflows(newly_overflowed);
+        self.with_deferred_selection_recording(|manager| {
+            let Some(selection) = manager
+                .selection_deferral
+                .as_ref()
+                .filter(|selection| selection.has_deferred_selection())
+            else {
+                return;
+            };
+            let readiness = manager.replacement_readiness.clone();
+            let deferred = affected
+                .iter()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "selection_record_vpn",
+                        false,
+                    );
+                })
+                .filter_map(|key| {
+                    let family = key.afi_safi();
+                    selection
+                        .selection_deferred(family)
+                        .then_some((family, key))
+                });
+            let current_len = manager.deferred_selection_keys.len();
+            let limits = manager.deferred_selection_keys.limits;
+            let newly_overflowed = DeferredSelectionKeys::extend_bounded(
+                &mut manager.deferred_selection_keys.vpn,
+                &mut manager.deferred_selection_keys.overflowed_families,
+                &mut manager.deferred_selection_keys.retained_key_bytes_by_family,
+                &mut manager.deferred_selection_keys.retained_key_bytes,
+                deferred,
+                current_len,
+                limits,
+            );
+            manager.record_selection_ledger_overflows(newly_overflowed);
+        });
     }
 
     pub(super) fn record_deferred_labeled(
         &mut self,
         affected: &HashSet<crate::route::LabeledRibRouteKey>,
     ) {
-        let Some(selection) = self
-            .selection_deferral
-            .as_ref()
-            .filter(|selection| selection.has_deferred_selection())
-        else {
-            return;
-        };
-        let readiness = self.replacement_readiness.clone();
-        let deferred = affected
-            .iter()
-            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
-            .filter_map(|key| {
-                let family = key.afi_safi();
-                selection
-                    .selection_deferred(family)
-                    .then_some((family, key))
-            });
-        let current_len = self.deferred_selection_keys.len();
-        let limits = self.deferred_selection_keys.limits;
-        let newly_overflowed = DeferredSelectionKeys::extend_bounded(
-            &mut self.deferred_selection_keys.labeled,
-            &mut self.deferred_selection_keys.overflowed_families,
-            &mut self.deferred_selection_keys.retained_key_bytes_by_family,
-            &mut self.deferred_selection_keys.retained_key_bytes,
-            deferred,
-            current_len,
-            limits,
-        );
-        self.record_selection_ledger_overflows(newly_overflowed);
+        self.with_deferred_selection_recording(|manager| {
+            let Some(selection) = manager
+                .selection_deferral
+                .as_ref()
+                .filter(|selection| selection.has_deferred_selection())
+            else {
+                return;
+            };
+            let readiness = manager.replacement_readiness.clone();
+            let deferred = affected
+                .iter()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "selection_record_labeled",
+                        false,
+                    );
+                })
+                .filter_map(|key| {
+                    let family = key.afi_safi();
+                    selection
+                        .selection_deferred(family)
+                        .then_some((family, key))
+                });
+            let current_len = manager.deferred_selection_keys.len();
+            let limits = manager.deferred_selection_keys.limits;
+            let newly_overflowed = DeferredSelectionKeys::extend_bounded(
+                &mut manager.deferred_selection_keys.labeled,
+                &mut manager.deferred_selection_keys.overflowed_families,
+                &mut manager.deferred_selection_keys.retained_key_bytes_by_family,
+                &mut manager.deferred_selection_keys.retained_key_bytes,
+                deferred,
+                current_len,
+                limits,
+            );
+            manager.record_selection_ledger_overflows(newly_overflowed);
+        });
     }
 
     pub(super) fn record_deferred_bgpls(
         &mut self,
         affected: &HashSet<crate::route::BgpLsRouteKey>,
     ) {
-        let Some(selection) = self
-            .selection_deferral
-            .as_ref()
-            .filter(|selection| selection.has_deferred_selection())
-        else {
-            return;
-        };
-        let readiness = self.replacement_readiness.clone();
-        let deferred = affected
-            .iter()
-            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
-            .filter_map(|key| {
-                let family = key.family.to_afi_safi();
-                selection
-                    .selection_deferred(family)
-                    .then_some((family, key))
-            });
-        let current_len = self.deferred_selection_keys.len();
-        let limits = self.deferred_selection_keys.limits;
-        let newly_overflowed = DeferredSelectionKeys::extend_bounded(
-            &mut self.deferred_selection_keys.bgpls,
-            &mut self.deferred_selection_keys.overflowed_families,
-            &mut self.deferred_selection_keys.retained_key_bytes_by_family,
-            &mut self.deferred_selection_keys.retained_key_bytes,
-            deferred,
-            current_len,
-            limits,
-        );
-        self.record_selection_ledger_overflows(newly_overflowed);
-    }
-
-    pub(super) fn record_deferred_rtc(&mut self, affected: &HashSet<crate::route::RtcRibRouteKey>) {
-        if !self.deferred_selection_recording_active() {
-            return;
-        }
-        if self.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
-            let family = crate::route::RtcRibRouteKey::afi_safi();
-            let deferred = affected.iter().map(|key| (family, key));
-            let current_len = self.deferred_selection_keys.len();
-            let limits = self.deferred_selection_keys.limits;
+        self.with_deferred_selection_recording(|manager| {
+            let Some(selection) = manager
+                .selection_deferral
+                .as_ref()
+                .filter(|selection| selection.has_deferred_selection())
+            else {
+                return;
+            };
+            let readiness = manager.replacement_readiness.clone();
+            let deferred = affected
+                .iter()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint_at(
+                        &readiness,
+                        "selection_record_bgpls",
+                        false,
+                    );
+                })
+                .filter_map(|key| {
+                    let family = key.family.to_afi_safi();
+                    selection
+                        .selection_deferred(family)
+                        .then_some((family, key))
+                });
+            let current_len = manager.deferred_selection_keys.len();
+            let limits = manager.deferred_selection_keys.limits;
             let newly_overflowed = DeferredSelectionKeys::extend_bounded(
-                &mut self.deferred_selection_keys.rtc,
-                &mut self.deferred_selection_keys.overflowed_families,
-                &mut self.deferred_selection_keys.retained_key_bytes_by_family,
-                &mut self.deferred_selection_keys.retained_key_bytes,
+                &mut manager.deferred_selection_keys.bgpls,
+                &mut manager.deferred_selection_keys.overflowed_families,
+                &mut manager.deferred_selection_keys.retained_key_bytes_by_family,
+                &mut manager.deferred_selection_keys.retained_key_bytes,
                 deferred,
                 current_len,
                 limits,
             );
-            self.record_selection_ledger_overflows(newly_overflowed);
-        }
+            manager.record_selection_ledger_overflows(newly_overflowed);
+        });
+    }
+
+    pub(super) fn record_deferred_rtc(&mut self, affected: &HashSet<crate::route::RtcRibRouteKey>) {
+        self.with_deferred_selection_recording(|manager| {
+            if manager.selection_deferred(crate::route::RtcRibRouteKey::afi_safi()) {
+                let family = crate::route::RtcRibRouteKey::afi_safi();
+                let readiness = manager.replacement_readiness.clone();
+                let deferred = affected
+                    .iter()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint_at(
+                            &readiness,
+                            "selection_record_rtc",
+                            false,
+                        );
+                    })
+                    .map(|key| (family, key));
+                let current_len = manager.deferred_selection_keys.len();
+                let limits = manager.deferred_selection_keys.limits;
+                let newly_overflowed = DeferredSelectionKeys::extend_bounded(
+                    &mut manager.deferred_selection_keys.rtc,
+                    &mut manager.deferred_selection_keys.overflowed_families,
+                    &mut manager.deferred_selection_keys.retained_key_bytes_by_family,
+                    &mut manager.deferred_selection_keys.retained_key_bytes,
+                    deferred,
+                    current_len,
+                    limits,
+                );
+                manager.record_selection_ledger_overflows(newly_overflowed);
+            }
+        });
     }
 
     #[cfg(test)]
@@ -1093,13 +1168,15 @@ impl RibManager {
         affected: &HashSet<rustbgpd_wire::Prefix>,
         limit: usize,
     ) {
-        self.record_deferred_unicast_bounded(
-            affected,
-            DeferredSelectionLimits {
-                identities: limit,
-                retained_key_bytes: MAX_DEFERRED_SELECTION_RETAINED_KEY_BYTES,
-            },
-        );
+        self.with_deferred_selection_recording(|manager| {
+            manager.record_deferred_unicast_bounded(
+                affected,
+                DeferredSelectionLimits {
+                    identities: limit,
+                    retained_key_bytes: MAX_DEFERRED_SELECTION_RETAINED_KEY_BYTES,
+                },
+            );
+        });
     }
 
     #[cfg(test)]
@@ -1135,6 +1212,24 @@ impl RibManager {
                 .overflowed_families
                 .contains(&family),
         )
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn deferred_selection_storage_shape_for_test(
+        &self,
+        family: (Afi, Safi),
+    ) -> (usize, usize) {
+        let keys = &self.deferred_selection_keys;
+        match family.1 {
+            Safi::Unicast => (keys.unicast.len(), keys.unicast.capacity()),
+            Safi::FlowSpec => (keys.flowspec.len(), keys.flowspec.capacity()),
+            Safi::Evpn => (keys.evpn.len(), keys.evpn.capacity()),
+            Safi::MplsVpn => (keys.vpn.len(), keys.vpn.capacity()),
+            Safi::LabeledUnicast => (keys.labeled.len(), keys.labeled.capacity()),
+            Safi::BgpLs | Safi::BgpLsVpn => (keys.bgpls.len(), keys.bgpls.capacity()),
+            Safi::RtConstrain => (keys.rtc.len(), keys.rtc.capacity()),
+            _ => unreachable!("test uses a supported ledger family"),
+        }
     }
 
     /// Consume a current-session `EoR` in the startup gate. The caller invokes
@@ -1418,6 +1513,13 @@ impl RibManager {
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
+        let ledger_retirement = || {
+            super::replacement_readiness_checkpoint_at(
+                &readiness,
+                "selection_ledger_retirement",
+                false,
+            );
+        };
         checkpoint();
         let overflowed = self
             .deferred_selection_keys
@@ -1444,12 +1546,12 @@ impl RibManager {
         prefixes.extend(
             self.deferred_selection_keys
                 .unicast
-                .iter()
+                .keys()
                 .inspect(|_| checkpoint())
                 .filter(|prefix| super::helpers::prefix_family(prefix) == family)
                 .copied(),
         );
-        self.deferred_selection_keys.unicast.retain(|prefix| {
+        self.deferred_selection_keys.unicast.retain(|prefix, ()| {
             checkpoint();
             super::helpers::prefix_family(prefix) != family
         });
@@ -1480,12 +1582,12 @@ impl RibManager {
         flowspec.extend(
             self.deferred_selection_keys
                 .flowspec
-                .iter()
+                .keys()
                 .inspect(|_| checkpoint())
                 .filter(|key| (key.afi, Safi::FlowSpec) == family)
                 .cloned(),
         );
-        self.deferred_selection_keys.flowspec.retain(|key| {
+        self.deferred_selection_keys.flowspec.retain(|key, ()| {
             checkpoint();
             (key.afi, Safi::FlowSpec) != family
         });
@@ -1511,12 +1613,19 @@ impl RibManager {
                         .map(crate::route::EvpnRibRoute::key),
                 );
             }
-            evpn.extend(
-                self.deferred_selection_keys
-                    .evpn
-                    .drain()
-                    .inspect(|_| checkpoint()),
-            );
+            let mut retained = std::mem::take(&mut self.deferred_selection_keys.evpn);
+            for shard in retained.shards_mut() {
+                for (key, ()) in shard.drain() {
+                    ledger_retirement();
+                    evpn.insert(key);
+                }
+                ledger_retirement();
+                drop(std::mem::take(shard));
+                ledger_retirement();
+            }
+            ledger_retirement();
+            drop(retained);
+            ledger_retirement();
             if !evpn.is_empty() {
                 self.recompute_and_distribute_evpn(&evpn);
                 super::retire_hash_set(&mut evpn, &mut checkpoint);
@@ -1545,12 +1654,12 @@ impl RibManager {
         vpn.extend(
             self.deferred_selection_keys
                 .vpn
-                .iter()
+                .keys()
                 .inspect(|_| checkpoint())
                 .filter(|key| key.afi_safi() == family)
                 .cloned(),
         );
-        self.deferred_selection_keys.vpn.retain(|key| {
+        self.deferred_selection_keys.vpn.retain(|key, ()| {
             checkpoint();
             key.afi_safi() != family
         });
@@ -1580,12 +1689,12 @@ impl RibManager {
         labeled.extend(
             self.deferred_selection_keys
                 .labeled
-                .iter()
+                .keys()
                 .inspect(|_| checkpoint())
                 .filter(|key| key.afi_safi() == family)
                 .copied(),
         );
-        self.deferred_selection_keys.labeled.retain(|key| {
+        self.deferred_selection_keys.labeled.retain(|key, ()| {
             checkpoint();
             key.afi_safi() != family
         });
@@ -1615,12 +1724,12 @@ impl RibManager {
         bgpls.extend(
             self.deferred_selection_keys
                 .bgpls
-                .iter()
+                .keys()
                 .inspect(|_| checkpoint())
                 .filter(|key| key.family.to_afi_safi() == family)
                 .cloned(),
         );
-        self.deferred_selection_keys.bgpls.retain(|key| {
+        self.deferred_selection_keys.bgpls.retain(|key, ()| {
             checkpoint();
             key.family.to_afi_safi() != family
         });
@@ -1646,12 +1755,19 @@ impl RibManager {
                         .map(crate::route::RtcRibRoute::key),
                 );
             }
-            rtc.extend(
-                self.deferred_selection_keys
-                    .rtc
-                    .drain()
-                    .inspect(|_| checkpoint()),
-            );
+            let mut retained = std::mem::take(&mut self.deferred_selection_keys.rtc);
+            for shard in retained.shards_mut() {
+                for (key, ()) in shard.drain() {
+                    ledger_retirement();
+                    rtc.insert(key);
+                }
+                ledger_retirement();
+                drop(std::mem::take(shard));
+                ledger_retirement();
+            }
+            ledger_retirement();
+            drop(retained);
+            ledger_retirement();
             if !rtc.is_empty() {
                 self.recompute_rtc_keys(&rtc);
                 super::retire_hash_set(&mut rtc, &mut checkpoint);
@@ -1681,6 +1797,34 @@ mod ledger_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn cleared_witness_ignores_empty_shards_and_checks_accounting() {
+        let mut keys = DeferredSelectionKeys {
+            unicast: ShardedMap::with_capacity(crate::fast_hash::SHARD_SPLIT_AT),
+            ..DeferredSelectionKeys::default()
+        };
+        assert!(keys.is_cleared());
+        let family = (Afi::Ipv4, Safi::Unicast);
+        let prefix = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            "192.0.2.0".parse().unwrap(),
+            24,
+        ));
+        keys.unicast.insert(prefix, ());
+        assert!(!keys.is_cleared());
+        keys.unicast.clear();
+        assert!(keys.is_cleared());
+        keys.overflowed_families.insert(family);
+        assert!(!keys.is_cleared());
+        keys.overflowed_families.clear();
+        keys.retained_key_bytes_by_family.insert(family, 0);
+        assert!(!keys.is_cleared());
+        keys.retained_key_bytes_by_family.clear();
+        keys.retained_key_bytes = 1;
+        assert!(!keys.is_cleared());
+        keys.retained_key_bytes = 0;
+        assert!(keys.is_cleared());
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     struct ChargedKey {
@@ -1742,7 +1886,7 @@ mod ledger_tests {
     fn bounded_identity_tracking_marks_each_dropped_family_once() {
         let unicast = (Afi::Ipv4, Safi::Unicast);
         let flowspec = (Afi::Ipv4, Safi::FlowSpec);
-        let mut identities = HashSet::new();
+        let mut identities = ShardedMap::default();
         let mut overflowed = HashSet::new();
         let mut bytes_by_family = HashMap::new();
         let mut retained_bytes = 0;
@@ -1766,7 +1910,7 @@ mod ledger_tests {
             },
         );
         assert_eq!(
-            identities,
+            identities.keys().cloned().collect::<HashSet<_>>(),
             HashSet::from([first[0].clone(), first[2].clone()])
         );
         assert_eq!(
@@ -1800,7 +1944,7 @@ mod ledger_tests {
             },
         );
         assert_eq!(
-            identities,
+            identities.keys().cloned().collect::<HashSet<_>>(),
             HashSet::from([first[0].clone(), first[2].clone()])
         );
         assert_eq!(
@@ -1814,7 +1958,7 @@ mod ledger_tests {
     #[test]
     fn simultaneous_identity_and_byte_exhaustion_records_the_combined_reason() {
         let unicast = (Afi::Ipv4, Safi::Unicast);
-        let mut identities = HashSet::new();
+        let mut identities = ShardedMap::default();
         let mut overflowed = HashSet::new();
         let mut bytes_by_family = HashMap::new();
         let mut retained_bytes = 0;
@@ -1834,7 +1978,10 @@ mod ledger_tests {
             0,
             limits,
         );
-        assert_eq!(identities, HashSet::from([first]));
+        assert_eq!(
+            identities.keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([first])
+        );
         assert_eq!(
             newly_overflowed,
             vec![(
@@ -1849,7 +1996,7 @@ mod ledger_tests {
     fn logical_byte_limit_is_duplicate_free_sticky_and_saturating() {
         let unicast = (Afi::Ipv4, Safi::Unicast);
         let flowspec = (Afi::Ipv4, Safi::FlowSpec);
-        let mut identities = HashSet::new();
+        let mut identities = ShardedMap::default();
         let mut overflowed = HashSet::new();
         let mut bytes_by_family = HashMap::new();
         let mut retained_bytes = 0;
@@ -1907,7 +2054,7 @@ mod ledger_tests {
             vec![(flowspec, DeferredSelectionOverflowReason::LogicalBytes)]
         );
         assert_eq!(retained_bytes, 5, "saturating admission must fail closed");
-        assert!(!identities.contains(&huge));
+        assert!(!identities.contains_key(&huge));
     }
 
     #[test]
@@ -1917,7 +2064,7 @@ mod ledger_tests {
         REJECTED_KEY_CLONES.store(0, Ordering::SeqCst);
         let accepted = CloneCountedKey { id: 1, bytes: 1 };
         let rejected = CloneCountedKey { id: 2, bytes: 1 };
-        let mut identities = HashSet::new();
+        let mut identities = ShardedMap::default();
         let mut overflowed = HashSet::new();
         let mut bytes_by_family = HashMap::new();
         let mut retained_bytes = 0;
@@ -2038,7 +2185,7 @@ mod ledger_tests {
             )]
         );
 
-        assert!(ledger.unicast.remove(&keys[0]));
+        assert!(ledger.unicast.remove(&keys[0]).is_some());
         assert_eq!(
             ledger.retained_key_bytes,
             charge * 2,
@@ -2060,10 +2207,10 @@ mod ledger_tests {
         );
         assert_eq!(overflowed.len(), 0);
         assert!(
-            !ledger.unicast.contains(&keys[2]),
+            !ledger.unicast.contains_key(&keys[2]),
             "overflow remains sticky even after another family releases budget"
         );
-        assert!(ledger.unicast.contains(&keys[3]));
+        assert!(ledger.unicast.contains_key(&keys[3]));
         assert_eq!(ledger.retained_key_bytes, charge * 2);
         assert!(ledger.overflowed_families.contains(&overflowed_family));
     }
