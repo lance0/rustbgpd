@@ -14,7 +14,7 @@ from test_qualify import witness, metrics_text
 
 def two_groups(generation="a"):
     row = witness("candidate", 4, 10)
-    row.update(owned_groups=2, owned_routes=80, elapsed_us=50_000)
+    row.update(owned_groups=2, owned_routes=80, elapsed_us=50_000, sample_slot=1)
     for index, peer in enumerate(row["peers"]):
         peer[1] = 2 if index == 1 or (index >= 2 and generation == "b") else 1
     return row
@@ -152,10 +152,29 @@ class RecoveryTests(unittest.TestCase):
         second = copy.deepcopy(first)
         self.assertIsNone(R.dirty_pair([first, second], 4))
         second["elapsed_us"] += 50_000
+        second["sample_slot"] += 1
         self.assertEqual(R.dirty_pair([first, second], 4), (first, second))
         middle = copy.deepcopy(first)
         middle["dirty"] = 3
         self.assertIsNone(R.dirty_pair([first, middle, second], 4))
+
+    def test_dirty_pair_requires_adjacent_slots_and_actual_twenty_hz_gap(self):
+        first = two_groups()
+        first["dirty"] = 4
+        for gap in (1_000_000, 50_001):
+            with self.subTest(gap=gap):
+                second = copy.deepcopy(first)
+                second["elapsed_us"] += gap
+                second["sample_slot"] = second["elapsed_us"] // 50_000
+                self.assertIsNone(R.dirty_pair([first, second], 4))
+        second = copy.deepcopy(first)
+        second.update(elapsed_us=100_000, sample_slot=2)
+        self.assertEqual(R.dirty_pair([first, second], 4), (first, second))
+        for elapsed, slot in ((50_001, 1), (150_000, 3), (100_000, 3)):
+            with self.subTest(elapsed=elapsed, slot=slot):
+                second = copy.deepcopy(first)
+                second.update(elapsed_us=elapsed, sample_slot=slot)
+                self.assertIsNone(R.dirty_pair([first, second], 4))
 
     def test_timings_use_reload_trigger_and_all_resume_ack(self):
         events = [{"event": "reload", "generation": "a", "at": 1},
@@ -241,7 +260,7 @@ class RecoveryTests(unittest.TestCase):
                     observation["owned_routes"] = 60_000
                     for peer, data in enumerate(observation["peers"]):
                         data[1] = 2 if peer == 1 or (peer >= 2 and name == "regroup-b") else 1
-                observation.update(elapsed_us=sequence * 100, wall_us=sequence * 100)
+                observation.update(elapsed_us=sequence * 50_000, sample_slot=sequence, wall_us=sequence * 100)
                 if name.startswith("mass_dirty"):
                     observation["dirty"] = 3
                     for data in observation["peers"]: data[2] = True
@@ -283,6 +302,38 @@ class RecoveryTests(unittest.TestCase):
             Q.write_json(leg / "cgroup.json", row["cgroup"])
             Q.write_json(leg / "result.json", row)
         return wire_report
+
+    def test_analyze_rejects_dirty_cadence_misses_in_either_arm(self):
+        for arm in ("candidate", "private"):
+            for gap in (1_000_000, 50_001, 100_000, 1):
+                with self.subTest(arm=arm, gap=gap), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    report = self.analysis_fixture(root)
+                    leg = next(root.glob(f"recovery-*-{arm}"))
+                    row = json.loads((leg / "result.json").read_text())
+                    snapshots = [json.loads(line.removeprefix("evpn_qualification "))
+                                 for line in (leg / "observer.log").read_text().splitlines()
+                                 if line.startswith("evpn_qualification ")]
+                    start = snapshots.index(row["mass_dirty"])
+                    shift = gap - 50_000
+                    for snapshot in snapshots[start:]:
+                        snapshot["elapsed_us"] += shift
+                        snapshot["sample_slot"] = snapshot["elapsed_us"] // 50_000
+                    row["mass_dirty"] = snapshots[start]
+                    # Other retained receipts refer to these same raw rows.
+                    for name in ("protocol_obligation_before_churn", "protocol_obligation_during_churn",
+                                 "protocol_obligation_after_churn", "settled"):
+                        match = next(snapshot for snapshot in snapshots if snapshot["wall_us"] == row[name]["wall_us"])
+                        row[name] = match
+                    barriers = [line for line in (leg / "observer.log").read_text().splitlines()
+                                if line.startswith("evpn_input_barrier ")]
+                    (leg / "observer.log").write_text(
+                        "".join("evpn_qualification " + json.dumps(snapshot) + "\n" for snapshot in snapshots)
+                        + "".join(line + "\n" for line in barriers))
+                    Q.write_json(leg / "result.json", row)
+                    with patch.object(R, "check_wire", return_value=report), \
+                         self.assertRaises(Q.AcceptanceFailure):
+                        R.analyze(root)
 
     def test_analyze_consumes_raw_receipts_and_rejects_hidden_middle_peak(self):
         with tempfile.TemporaryDirectory() as temporary:

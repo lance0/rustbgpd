@@ -25,7 +25,8 @@ def metrics_text(allocated=100_000_000):
 
 def witness(arm, clients=3, routes=10):
     candidate = arm == "candidate"
-    return {"members": clients, "owned_groups": int(candidate), "owned_members": clients if candidate else 0,
+    return {"elapsed_us": 0, "sample_slot": 0, "members": clients,
+            "owned_groups": int(candidate), "owned_members": clients if candidate else 0,
             "owned_routes": clients * routes if candidate else 0,
             "private_routes": 0 if candidate else clients * (clients - 1) * routes,
             "dirty": 0, "retained": clients * 64 if candidate else 0,

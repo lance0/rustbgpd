@@ -1,11 +1,16 @@
         // Private exported-source observation, identical in both measured arms.
-        static LAST_SAMPLE: std::sync::Mutex<Option<std::time::Instant>> =
+        static LAST_SLOT: std::sync::Mutex<Option<u128>> =
             std::sync::Mutex::new(None);
-        let mut last = LAST_SAMPLE.lock().expect("qualification observer lock");
+        let mut last = LAST_SLOT.lock().expect("qualification observer lock");
         static START: std::sync::LazyLock<std::time::Instant> =
             std::sync::LazyLock::new(std::time::Instant::now);
-        if last.is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(50)) {
-            *last = Some(std::time::Instant::now());
+        let elapsed_us = START.elapsed().as_micros();
+        let sample_slot = elapsed_us / 50_000;
+        if last.is_none_or(|slot| sample_slot > slot) {
+            *last = Some(sample_slot);
+            let wall_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("qualification clock precedes epoch").as_micros();
             let receipt = self.bench_evpn_group_receipt();
             let (mut refresh_pending, mut eor_pending, mut protocol_obligations) = (0, 0, 0);
             let peers = receipt.peers.iter().map(|peer| {
@@ -31,10 +36,10 @@
                 )
             }).collect::<Vec<_>>().join(",");
             eprintln!(
-                "evpn_qualification {{\"elapsed_us\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"peers\":[{}]}}",
-                START.elapsed().as_micros(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                    .expect("qualification clock precedes epoch").as_micros(),
+                "evpn_qualification {{\"elapsed_us\":{},\"sample_slot\":{},\"wall_us\":{},\"members\":{},\"owned_groups\":{},\"owned_members\":{},\"owned_routes\":{},\"private_routes\":{},\"dirty\":{},\"retained\":{},\"peak\":{},\"peer_budget\":{},\"daemon_budget\":{},\"pending_resets\":{},\"completion_receipts\":{},\"marker_debt\":{},\"retained_recovery\":{},\"refresh_pending\":{},\"eor_pending\":{},\"protocol_obligations\":{},\"peers\":[{}]}}",
+                elapsed_us,
+                sample_slot,
+                wall_us,
                 receipt.peers.len(),
                 receipt.owned_groups,
                 receipt.owned_members,

@@ -26,6 +26,7 @@ SCOPE = ("non-RTC Type 2/5, two pre-existing export groups, all but two peers mo
          "not terminal-only complete-feed marker debt, repeated-producer cost, full-fleet/new-group "
          "activation, RTC, soak or complete section F qualification")
 PHASES = ("loaded", "regroup-b", "regroup-a", "refresh", "recovered")
+SAMPLE_PERIOD_US = 1_000_000 // Q.RECOVERY_BARS["sample_hz"]
 
 
 class MissingWitness(Q.AcceptanceFailure):
@@ -107,7 +108,10 @@ def settled(row):
 def dirty_pair(observed, clients):
     return next(((left, right) for left, right in zip(observed, observed[1:])
                  if left["dirty"] == right["dirty"] == clients
-                 and right["elapsed_us"] > left["elapsed_us"]), None)
+                 and left["sample_slot"] == left["elapsed_us"] // SAMPLE_PERIOD_US
+                 and right["sample_slot"] == right["elapsed_us"] // SAMPLE_PERIOD_US
+                 and right["sample_slot"] == left["sample_slot"] + 1
+                 and 0 < right["elapsed_us"] - left["elapsed_us"] <= SAMPLE_PERIOD_US), None)
 
 
 def timings(events):
@@ -543,13 +547,13 @@ def analyze_results(output):
                     "protocol_obligation_before_churn", "protocol_obligation_during_churn", "protocol_obligation_after_churn", "settled"):
             Q.require(row[key] in observed, f"{key} absent from raw observer")
             roster(row[key], row["arm"], clients)
-        Q.accept(row["mass_dirty"]["dirty"] == row["mass_dirty_previous"]["dirty"] == clients
+        Q.accept(dirty_pair([row["mass_dirty_previous"], row["mass_dirty"]], clients) is not None
                  and row["protocol_obligation_before_churn"]["protocol_obligations"] > 0
                  and row["protocol_obligation_during_churn"]["protocol_obligations"] > 0
-                 and row["protocol_obligation_after_churn"]["protocol_obligations"] > 0, "missing actual overlap witness")
+                 and row["protocol_obligation_after_churn"]["protocol_obligations"] > 0,
+                 "missing actual 20 Hz dirty pair or protocol overlap witness")
         first = observed.index(row["mass_dirty_previous"])
-        Q.require(first + 1 < len(observed) and observed[first + 1] == row["mass_dirty"]
-                  and row["mass_dirty"]["elapsed_us"] > row["mass_dirty_previous"]["elapsed_us"],
+        Q.require(first + 1 < len(observed) and observed[first + 1] == row["mass_dirty"],
                   "mass-dirty snapshots are not consecutive actual observations")
         Q.accept(settled(row["settled"]), "proof duty did not settle")
         samples = [json.loads(line) for line in (leg / "readiness.jsonl").read_text().splitlines()]

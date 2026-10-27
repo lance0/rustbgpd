@@ -96,8 +96,12 @@ The controller pauses actual socket readers with acknowledged generation fences,
 then issues 32 fixed full-window churn rounds. Both arms must show all members
 dirty together in two consecutive actual observations at 20 Hz: 150/150 in each
 measured observation. Two isolated 150/150 observations separated by 149/150 do
-not pass. Queue occupancy and a pause acknowledgement do not establish that
-condition. A real Route Refresh
+not pass. The observer captures timestamps before building each receipt and
+emits at most once per anchored 50,000 µs slot, skipping missed slots without
+catch-up or interpolation. Both online and final checks require adjacent raw
+records in adjacent slots with an actual timestamp gap greater than zero and
+at most 50,000 µs; there is no extra tolerance. Queue occupancy and a pause
+acknowledgement do not establish that condition. A real Route Refresh
 must leave an outstanding refresh/EoR obligation, observed before, during and
 after another paced source-update sequence. The private observer retains three
 origins separately: pending EVPN refresh response, pending EVPN EoR, and
