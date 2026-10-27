@@ -542,6 +542,7 @@ class ScaleSplitContractTests(unittest.TestCase):
 
     def test_scale_commands_cannot_mask_removed_core_commands(self) -> None:
         for subcommand, command in (
+            ("clippy", "cargo clippy --locked -p rustbgpd-rib --all-targets -- -D warnings"),
             ("clippy", "cargo clippy --locked --workspace --all-targets -- -D warnings"),
             ("clippy", "cargo clippy --locked -p rustbgpd-wire --all-targets --features tokio-codec -- -D warnings"),
             ("test", "cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke"),
@@ -558,6 +559,17 @@ class ScaleSplitContractTests(unittest.TestCase):
                         f"{WORKFLOW}:core: root Cargo commands removed: {{{subcommand!r}: 1}}",
                         check(root),
                     )
+
+    def test_standalone_rib_clippy_rejects_unified_features(self) -> None:
+        command = "cargo clippy --locked -p rustbgpd-rib --all-targets -- -D warnings"
+        wrong_mode = command.replace(" -- -D warnings", " --features bench-internals -- -D warnings")
+        for replacement in (
+            wrong_mode,
+            "cargo clippy --locked --workspace --all-targets -- -D warnings",
+            f"{wrong_mode}\n      # {command}",
+        ):
+            with self.subTest(replacement=replacement):
+                self.mutate(command, replacement)
 
     def test_extra_manifest_commands_are_rejected(self) -> None:
         for workflow in (WORKFLOW, ".github/workflows/release.yml", ".github/workflows/new.yml"):

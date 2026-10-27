@@ -541,12 +541,9 @@ impl RibManager {
     /// join-time build pass (one shared staging walk, deltas discarded:
     /// correct only while the group is memberless). `peer` is the
     /// exemplar whose group-uniform staging inputs seed the profile.
-    #[cfg_attr(
-        feature = "bench-internals",
-        expect(
-            clippy::too_many_lines,
-            reason = "the benchmark-only ownership assertions extend the existing coupled group-table installation"
-        )
+    #[expect(
+        clippy::too_many_lines,
+        reason = "group-table allocation and shared staging form one installation step"
     )]
     pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: PeerId) {
         #[cfg(feature = "bench-internals")]

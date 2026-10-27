@@ -46,7 +46,7 @@ WORKFLOWS = tuple(
 # Floors, not a census: new root Cargo commands need `--locked`. CI floors
 # are job-scoped so scale commands cannot mask removed core checks.
 MIN_ROOT_COMMANDS = {
-    (WORKFLOWS[0], "core"): Counter(check=6, clippy=2, test=4),
+    (WORKFLOWS[0], "core"): Counter(check=6, clippy=3, test=4),
     (WORKFLOWS[0], "core_tests"): Counter(doc=2, test=2),
     (WORKFLOWS[0], "msrv"): Counter(check=1),
     (WORKFLOWS[1], None): Counter(test=1),
@@ -405,6 +405,11 @@ def check(root: Path) -> list[str]:
     for command in SCALE_COMMANDS:
         if scale_commands[command] != 1:
             errors.append(f"scale receipt Cargo command missing or duplicated: {command}")
+
+    core_commands = Counter(command for _, command in _cargo_commands(jobs.get("core", "")))
+    rib_clippy = "cargo clippy --locked -p rustbgpd-rib --all-targets -- -D warnings"
+    if core_commands[rib_clippy] != 1:
+        errors.append("core must run standalone RIB Clippy exactly once without feature flags")
 
     core_tests = jobs.get("core_tests", "")
     for command in (
