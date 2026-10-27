@@ -2735,7 +2735,7 @@ impl RibManager {
     /// same reverse-index collector used by Add-Path selection.
     #[must_use]
     pub fn bench_unicast_candidate_count(&self, prefix: Prefix) -> usize {
-        Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &prefix).count()
+        Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &prefix, false).count()
     }
 
     /// Reset the production-path counters immediately before one measured

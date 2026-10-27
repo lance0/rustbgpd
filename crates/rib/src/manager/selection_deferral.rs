@@ -1454,8 +1454,9 @@ impl RibManager {
             super::helpers::prefix_family(prefix) != family
         });
         if !prefixes.is_empty() {
-            let changed = self.recompute_best(&prefixes);
-            self.distribute_changes(&changed, &prefixes);
+            self.recompute_best(&prefixes);
+            // A joining peer may not have received an unchanged frozen best.
+            self.distribute_changes(&prefixes, &prefixes);
             super::retire_hash_set(&mut prefixes, &mut checkpoint);
         }
 

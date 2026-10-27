@@ -46,6 +46,7 @@ pub(super) fn export_deny_attribution(
 impl RibManager {
     #[expect(
         clippy::too_many_arguments,
+        clippy::fn_params_excessive_bools,
         reason = "group per-client-best export keeps group, policy, and table diff state together"
     )]
     pub(in crate::manager) fn distribute_group_per_client_best_prefix(
@@ -54,6 +55,7 @@ impl RibManager {
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
+        local_only: bool,
         group_is_ebgp: bool,
         interpret_rfc1997: bool,
         group_is_rr_client: bool,
@@ -73,6 +75,7 @@ impl RibManager {
             rib_out,
             peer_is_rr_client,
             prefix,
+            local_only,
             group_is_ebgp,
             interpret_rfc1997,
             group_is_rr_client,
@@ -99,6 +102,7 @@ impl RibManager {
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
+        local_only: bool,
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
         interpret_rfc1997: bool,
@@ -119,6 +123,7 @@ impl RibManager {
             rib_out,
             peer_is_rr_client,
             prefix,
+            local_only,
             target,
             target_is_ebgp,
             interpret_rfc1997,
@@ -176,12 +181,13 @@ fn orr_candidates<'a>(
     prefix_peers: &'a UnicastPrefixPeers,
     peer_is_rr_client: &'a HashMap<PeerId, bool>,
     prefix: &'a Prefix,
+    local_only: bool,
     target_peer: Option<PeerId>,
     target_is_ebgp: bool,
     target_is_rr_client: bool,
     cluster_id: Option<Ipv4Addr>,
 ) -> impl Iterator<Item = &'a crate::route::Route> {
-    RibManager::unicast_candidates(ribs, prefix_peers, prefix).filter(move |route| {
+    RibManager::unicast_candidates(ribs, prefix_peers, prefix, local_only).filter(move |route| {
         // Split horizon: exclude routes from the target peer
         if Some(route.peer) == target_peer {
             return false;
@@ -205,6 +211,7 @@ fn orr_candidates<'a>(
 /// explain walks exactly the candidate set live staging walks.
 #[expect(
     clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools,
     reason = "candidate collection mirrors the per-target reflection filter inputs"
 )]
 fn multipath_candidates<'a>(
@@ -212,6 +219,7 @@ fn multipath_candidates<'a>(
     prefix_peers: &'a UnicastPrefixPeers,
     peer_is_rr_client: &'a HashMap<PeerId, bool>,
     prefix: &'a Prefix,
+    local_only: bool,
     target_peer: Option<PeerId>,
     target_is_ebgp: bool,
     interpret_rfc1997: bool,
@@ -226,6 +234,7 @@ fn multipath_candidates<'a>(
         prefix_peers,
         peer_is_rr_client,
         prefix,
+        local_only,
         target_peer,
         target_is_ebgp,
         target_is_rr_client,
@@ -288,6 +297,7 @@ fn orr_candidates_with_checkpoint<'a>(
     prefix_peers: &'a UnicastPrefixPeers,
     peer_is_rr_client: &'a HashMap<PeerId, bool>,
     prefix: &'a Prefix,
+    local_only: bool,
     target_peer: Option<PeerId>,
     target_is_ebgp: bool,
     target_is_rr_client: bool,
@@ -295,7 +305,7 @@ fn orr_candidates_with_checkpoint<'a>(
     checkpoint: &mut impl FnMut(),
 ) -> Vec<&'a crate::route::Route> {
     let mut candidates = Vec::new();
-    for route in RibManager::unicast_candidates(ribs, prefix_peers, prefix) {
+    for route in RibManager::unicast_candidates(ribs, prefix_peers, prefix, local_only) {
         checkpoint();
         if Some(route.peer) == target_peer
             || should_suppress_ibgp_inner(
@@ -317,6 +327,7 @@ fn orr_candidates_with_checkpoint<'a>(
 /// Checkpointed live counterpart to [`multipath_candidates`].
 #[expect(
     clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools,
     reason = "candidate collection mirrors the per-target reflection filter inputs"
 )]
 fn multipath_candidates_with_checkpoint<'a>(
@@ -324,6 +335,7 @@ fn multipath_candidates_with_checkpoint<'a>(
     prefix_peers: &'a UnicastPrefixPeers,
     peer_is_rr_client: &'a HashMap<PeerId, bool>,
     prefix: &'a Prefix,
+    local_only: bool,
     target_peer: Option<PeerId>,
     target_is_ebgp: bool,
     interpret_rfc1997: bool,
@@ -340,6 +352,7 @@ fn multipath_candidates_with_checkpoint<'a>(
         prefix_peers,
         peer_is_rr_client,
         prefix,
+        local_only,
         target_peer,
         target_is_ebgp,
         target_is_rr_client,
@@ -413,6 +426,7 @@ impl RibManager {
         peer_is_rr_client: &HashMap<PeerId, bool>,
         rib_out: Option<&AdjRibOut>,
         prefix: Prefix,
+        local_only: bool,
         target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
@@ -546,6 +560,22 @@ impl RibManager {
         // `orr_candidates`, same comparator). A plain peer explains the
         // Loc-RIB best, unchanged.
         let best = if let Some(source) = source {
+            if local_only && source.peer != LOCAL_PEER {
+                let message =
+                    "received source awaits graceful-restart selection deferral".to_string();
+                gate(
+                    &mut explain.gates,
+                    "best_route",
+                    "no_best_route",
+                    Stop,
+                    message.clone(),
+                );
+                explain.reasons.push(ExplainReason {
+                    code: "no_best_route",
+                    message,
+                });
+                return explain;
+            }
             if let Some((_, _, vantage)) = orr {
                 explain.orr_vantage = Some(vantage);
             }
@@ -599,6 +629,7 @@ impl RibManager {
                 prefix_peers,
                 peer_is_rr_client,
                 &prefix,
+                local_only,
                 Some(target_peer),
                 target_is_ebgp,
                 target_is_rr_client,
@@ -690,6 +721,7 @@ impl RibManager {
                 prefix_peers,
                 peer_is_rr_client,
                 &prefix,
+                local_only,
                 Some(target_peer),
                 target_is_ebgp,
                 interpret_rfc1997,
@@ -1249,6 +1281,7 @@ impl RibManager {
                 prefix_peers,
                 peer_is_rr_client,
                 &prefix,
+                local_only,
                 Some(target_peer),
                 target_is_ebgp,
                 interpret_rfc1997,
@@ -1940,6 +1973,7 @@ impl RibManager {
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
+        local_only: bool,
         target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
@@ -2000,6 +2034,7 @@ impl RibManager {
             prefix_peers,
             peer_is_rr_client,
             prefix,
+            local_only,
             Some(target_peer),
             target_is_ebgp,
             interpret_rfc1997,
@@ -2226,6 +2261,7 @@ impl RibManager {
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
+        clippy::fn_params_excessive_bools,
         reason = "group per-client-best export keeps group, policy, and table diff state together"
     )]
     pub(in crate::manager) fn distribute_group_per_client_best_prefix_with_checkpoint(
@@ -2234,6 +2270,7 @@ impl RibManager {
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
+        local_only: bool,
         group_is_ebgp: bool,
         interpret_rfc1997: bool,
         group_is_rr_client: bool,
@@ -2269,6 +2306,7 @@ impl RibManager {
             prefix_peers,
             peer_is_rr_client,
             prefix,
+            local_only,
             // Split horizon lifted out — applied per member at emit.
             None,
             group_is_ebgp,
@@ -2423,6 +2461,7 @@ impl RibManager {
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<PeerId, bool>,
         prefix: &Prefix,
+        local_only: bool,
         target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
         interpret_rfc1997: bool,
@@ -2444,7 +2483,10 @@ impl RibManager {
         let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
 
         checkpoint();
-        let Some(best) = loc_rib.get(prefix) else {
+        let Some(best) = loc_rib
+            .get(prefix)
+            .filter(|best| !local_only || best.peer == LOCAL_PEER)
+        else {
             target.gate("best_route", "no_best_route", Stop, || {
                 "no best route exists for this prefix".to_string()
             });
@@ -2936,6 +2978,7 @@ impl RibManager {
         orr_topology: &crate::orr::OrrTopology,
         orr_spf: &crate::orr::SpfResult,
         prefix: &Prefix,
+        local_only: bool,
         target_peer: PeerId,
         target_peer_asn: Option<u32>,
         target_peer_group: Option<&str>,
@@ -2990,6 +3033,7 @@ impl RibManager {
             prefix_peers,
             peer_is_rr_client,
             prefix,
+            local_only,
             Some(target_peer),
             target_is_ebgp,
             target_is_rr_client,

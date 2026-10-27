@@ -785,6 +785,84 @@ fn deferred_selection_rejects_route_commit_until_release() {
 }
 
 #[test]
+fn deferred_unicast_commit_accepts_local_updates_and_rejects_mixed_sources() {
+    let source = peer(1);
+    let target = peer(2);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+    manager.outbound_peers.insert(target, outbound_tx);
+    manager.peer_export_encoders.insert(
+        target,
+        crate::manager::permissive_test_exact_export_encoder(),
+    );
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 42), 32);
+    let received = make_route_with_lp(prefix, Ipv4Addr::new(10, 0, 0, 1), 200);
+    let mut local = received.clone();
+    local.peer = crate::manager::helpers::LOCAL_PEER;
+    local.origin_type = crate::route::RouteOrigin::Local;
+    assert_eq!(
+        manager.try_send_and_commit_outbound_update(
+            target,
+            OutboundCommitBatch::with_unicast(
+                vec![local.clone(), received].into(),
+                vec![None, None].into(),
+            ),
+        ),
+        Err(OutboundCommitFailure::Refused(
+            OutboundCommitRefusal::SelectionGate
+        ))
+    );
+    assert!(outbound_rx.try_recv().is_err());
+    assert!(
+        manager
+            .adj_ribs_out
+            .get(&target)
+            .and_then(|rib| rib.get(&local.prefix, 0))
+            .is_none()
+    );
+
+    manager
+        .try_send_and_commit_outbound_update(
+            target,
+            OutboundCommitBatch::with_unicast(vec![local.clone()].into(), vec![None].into()),
+        )
+        .unwrap();
+    let update = outbound_rx.try_recv().unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(
+        (
+            update.announce[0].prefix,
+            update.announce[0].peer,
+            update.announce[0].path_id
+        ),
+        (local.prefix, local.peer, local.path_id)
+    );
+    assert_eq!(update.announce[0].attributes, local.attributes);
+    assert_eq!(update.end_of_rib, Vec::new());
+
+    let mut withdrawal = OutboundCommitBatch::with_unicast(Vec::new().into(), Vec::new().into());
+    withdrawal.withdraw.push((local.prefix, 0));
+    manager
+        .try_send_and_commit_outbound_update(target, withdrawal)
+        .unwrap();
+    let update = outbound_rx.try_recv().unwrap();
+    assert_eq!(update.withdraw, vec![(local.prefix, 0)]);
+    assert!(update.announce.is_empty());
+
+    let mut marker = OutboundCommitBatch::with_unicast(Vec::new().into(), Vec::new().into());
+    marker.end_of_rib.push(FAMILY);
+    assert_eq!(
+        manager.try_send_and_commit_outbound_update(target, marker),
+        Err(OutboundCommitFailure::Refused(
+            OutboundCommitRefusal::SelectionGate
+        ))
+    );
+    assert!(outbound_rx.try_recv().is_err());
+}
+
+#[test]
 fn staged_selection_classifies_refresh_response_as_convergence_deferred() {
     let source = peer(1);
     let target = peer(2);

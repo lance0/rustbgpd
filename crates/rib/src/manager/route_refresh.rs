@@ -1603,6 +1603,10 @@ impl RibManager {
                         &refresh_view,
                         &self.peer_is_rr_client,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         peer,
                         target_peer_asn,
                         target_peer_group,
@@ -1645,6 +1649,10 @@ impl RibManager {
                         &refresh_view,
                         &self.peer_is_rr_client,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         peer,
                         target_peer_asn,
                         target_peer_group,
@@ -1684,6 +1692,10 @@ impl RibManager {
                         orr_topology,
                         orr_spf,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         peer,
                         target_peer_asn,
                         target_peer_group,
@@ -1723,6 +1735,10 @@ impl RibManager {
                         &refresh_view,
                         &self.peer_is_rr_client,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         &mut target,
                         target_is_ebgp,
                         interpret_rfc1997,

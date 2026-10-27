@@ -81,7 +81,7 @@ use payload::{
     emit_vpn_group_deltas_for_member,
 };
 
-use super::helpers::{LOCAL_PEER, prefix_family, routes_equal, vpn_routes_equal};
+use super::helpers::{LOCAL_PEER, routes_equal, vpn_routes_equal};
 use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{EvpnRibRoute, Route, VpnRibRoute, VpnRibRouteKey};
@@ -2701,10 +2701,6 @@ impl RibManager {
                 }
             }
             self.record_deferred_unicast(&prefixes);
-            prefixes.retain(|prefix| {
-                checkpoint();
-                !self.selection_deferred(prefix_family(prefix))
-            });
             self.record_deferred_vpn(&vpn_keys);
             vpn_keys.retain(|key| {
                 checkpoint();

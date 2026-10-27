@@ -3746,26 +3746,34 @@ service InjectionService {
   // request is idempotent, and a request with the same key but a different next
   // hop or attributes replaces the local route. The response reports which of
   // these happened. OK confirms that the route was accepted into the local
-  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution normally run
-  // in the same RIB turn, before the reply, but are deferred while Graceful
-  // Restart selection deferral is active for the family: after a planned
-  // restart, for up to the maximum effective gr_restart_time, with export
-  // reason selection_deferred. MarkReplayComplete does not end that deferral.
+  // Adj-RIB-In (peer 0.0.0.0). Selection and outbound distribution run in the
+  // same RIB turn, before the reply, also during Graceful Restart selection
+  // deferral. While selection is deferred for the family, only local
+  // candidates compete in ordinary best path, Add-Path, ORR and per-client
+  // best selection. This covers every path_id and prefix length, with no
+  // BLACKHOLE community requirement. Received candidates remain retained
+  // but ineligible until selection becomes available, including staged
+  // collision failback. Existing export policy, next-hop-self and admission
+  // checks still apply. End-of-RIB and the existing convergence and refresh
+  // holds are unchanged. MarkReplayComplete releases only the separate
+  // End-of-RIB grace window, never selection deferral or those other holds.
   // OK does not mean any peer received or installed the route, and a received
-  // route for the same prefix can out-select it. Injected routes are
-  // process-local and lost on a daemon restart, so a controller reconciles
-  // periodically and after every reconnect by re-adding its desired routes (an
-  // UNCHANGED re-add is cheap). A lower ControlService.GetHealth uptime_seconds
-  // is an extra trigger, not a reliable restart detector. A key held by a lease
-  // owner (ADR-0141) returns FAILED_PRECONDITION with ErrorInfo reason
-  // OWNER_MISMATCH; see AddLeasedPath.
+  // route for the same prefix can out-select it once selection is available.
+  // Injected routes are process-local and lost on a daemon restart, so a
+  // controller reconciles periodically and after every reconnect by
+  // re-adding its desired routes (an UNCHANGED re-add is cheap). A lower
+  // ControlService.GetHealth uptime_seconds is an extra trigger, not a reliable
+  // restart detector. A key held by a lease owner (ADR-0141) returns
+  // FAILED_PRECONDITION with ErrorInfo reason OWNER_MISMATCH; see AddLeasedPath.
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
   // Withdraw a locally injected unicast route by its (prefix, prefix_length,
   // path_id) key. Only routes added through AddPath are affected; routes
   // received from peers are never removed. A key with no local route returns
   // NOT_FOUND unless allow_missing is set. As for AddPath, OK confirms the
   // change to the local Adj-RIB-In; selection and distribution follow in the
-  // same RIB turn unless Graceful Restart selection deferral is active.
+  // same RIB turn, also during Graceful Restart selection deferral. Removing
+  // the last local candidate withdraws it without selecting a received
+  // fallback while selection is deferred.
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
   // Per-peer export disposition of one locally injected unicast route,
   // identified by its exact AddPath key (prefix, prefix_length, path_id).
@@ -3780,7 +3788,9 @@ service InjectionService {
   // means the
   // route sits in that peer's Adj-RIB-Out: committed to its outbound path,
   // not received, accepted or installed by the peer, which BGP does not
-  // report. A key with no local route returns NOT_FOUND. A resumed page
+  // report. Selection deferral does not hold local injection, so it no longer
+  // reports selection_deferred; ordinary policy and admission still apply.
+  // A key with no local route returns NOT_FOUND. A resumed page
   // returns ABORTED when, since the walk's first page, the route's content
   // changed (including its removal), a peer joined or left the Established
   // set, or an Established peer's export policy, a dataset it or an
@@ -3857,11 +3867,14 @@ service InjectionService {
   // lease. Every entry an owner adds shares that owner's one lease; when the
   // lease's deadline passes without a renewal or a further leased add, the
   // daemon withdraws all of the owner's routes and rules in one batch.
-  // Expiry removes local intent only: an equal or better route, or a
-  // received FlowSpec rule with the same key, keeps applying, and the daemon
-  // promises no remote acceptance or enforcement. The lease bounds how long
-  // a stopped controller's state outlives it; it does not cover the daemon
-  // itself stopping.
+  // Selection and distribution follow the same rules during selection
+  // deferral as the unleased RPCs. Expiry withdraws local intent during the
+  // hold without selecting a received fallback.
+  // Expiry removes local intent only: other eligible routes or rules can
+  // keep applying. During selection deferral only local candidates are
+  // eligible. The daemon promises no remote acceptance or enforcement.
+  // The lease bounds how long a stopped controller's state outlives it;
+  // it does not cover the daemon itself stopping.
   //
   // A leased add joins the owner's live lease and extends its deadline to
   // max(current, now + lease_seconds), never shortening it, or starts a new
@@ -3944,11 +3957,14 @@ service InjectionService {
   // (another owner's token is INVALID_ARGUMENT).
   rpc ListLeasedKeys(ListLeasedKeysRequest) returns (ListLeasedKeysResponse);
   // A controller's replay-complete signal for the planned-restart
-  // End-of-RIB grace window (gr_eor_grace_time). The daemon releases the
-  // held End-of-RIB once every owner listed in [global]
+  // End-of-RIB grace window (gr_eor_grace_time). The daemon releases this
+  // grace hold once every owner listed in [global]
   // gr_eor_replay_owners has signalled for the current incarnation, or at
   // the window's deadline, whichever comes first. An empty list keeps the
   // timer-only window.
+  // This signal does not release selection deferral or other convergence
+  // and refresh holds. Local unicast and FlowSpec injection are eligible
+  // during selection deferral without it, subject to policy and admission.
   //
   // Protocol: read incarnation I (CheckLivenessResponse.incarnation or
   // LeaseGeneration.incarnation) before replaying, replay the full desired
@@ -4108,8 +4124,9 @@ message PathExportDispositionEntry {
   // export_policy, outbound_prefix_limit, exact_export_rejected (optionally
   // a colon and the exact-export reason, e.g.
   // exact_export_rejected:missing_ipv6_next_hop), export_rule (any other
-  // export gate; explain_code names it). PENDING: selection_deferred,
-  // outbound_resync, orf_pending, not_yet_committed. NOT_ESTABLISHED:
+  // export gate; explain_code names it). PENDING: outbound_resync,
+  // orf_pending, not_yet_committed; older daemons also use selection_deferred
+  // for local injection. NOT_ESTABLISHED:
   // not_established. New codes may be added.
   string reason = 3;
   // Stop code of the export explain ladder behind the reason, in the

@@ -3359,23 +3359,35 @@ reports `REPLACED`, although nothing changes on the wire. `0.0.0.0` and `::`
 are the same next-hop-self route.
 
 `OK` confirms that the route was accepted into the local Adj-RIB-In (peer
-`0.0.0.0`). Selection and outbound distribution normally run in the same RIB
-turn, before the reply, but are deferred while Graceful Restart selection
-deferral is active for the family. `OK` does not mean that a peer received or
-installed the route.
+`0.0.0.0`). Selection and outbound distribution for a changed route run in the same RIB turn,
+before the reply, including during Graceful Restart selection deferral.
+Existing export policy, next-hop-self and admission checks still apply.
+`OK` does not mean that a peer received or installed the route.
 
-That deferral runs after a planned restart, for up to the maximum effective
-`gr_restart_time`; see
+After a planned restart, while selection is deferred for a unicast family,
+only local candidates participate in ordinary best path, Add-Path, ORR and
+per-client best selection. This covers `AddPath` and `AddLeasedPath`, every
+`path_id`, and both host and non-host prefixes, with or without the BLACKHOLE
+community. Received candidates remain retained but ineligible. When selection
+becomes available, ordinary competition resumes and a received route can
+replace a local one. Collision failback can stage that selection while
+completion markers remain held. See the
+[ADR-0141 amendment](../adr/0141-injection-owner-lease.md#amendment-injected-unicast-skips-selection-deferral-2026-10-27).
+
+`ListPathExportDispositions` reports the actual local export outcome; local
+injection no longer waits with reason `selection_deferred`. Another local
+path can still out-select it, and policy or admission can withhold or delay
+export. The family's End-of-RIB remains held until release selection is sent
+and all existing completion gates allow it. `MarkReplayComplete` releases
+only the separate End-of-RIB grace window. It does not release selection
+deferral; see
 [Controller upgrade and rollback](v1-stable-contract.md#controller-upgrade-and-rollback).
-While it holds the family, an injected unicast route, an RTBH host route
-included, is not selected and `ListPathExportDispositions` reports it
-`PENDING` with reason `selection_deferred`. `NeighborState.selection_deferral`
-shows an active row for the family. `MarkReplayComplete` does not end it.
-Injected FlowSpec rules are exempt; see the
-[FlowSpec injection contract](#flowspec-injection-contract).
 
 `DeletePath` removes only a route added through `AddPath`; it never removes a
-received route. A key with no local route returns `NOT_FOUND` by default. Set
+received route. During selection deferral, delete and lease expiry withdraw
+the local route or select another local path immediately; removing the last
+local path never advertises a received fallback before selection becomes
+available. A key with no local route returns `NOT_FOUND` by default. Set
 `allow_missing: true` to get `OK` with outcome `NOT_PRESENT` instead, so a
 controller's withdraw is idempotent across retries and daemon restarts.
 
@@ -3454,7 +3466,7 @@ a route for the prefix.
 | `outbound_prefix_limit` | Withheld | The peer's outbound prefix limit is reached. |
 | `exact_export_rejected:<reason>` | Withheld | The session's encoder refuses the route's exact wire form, for example `exact_export_rejected:missing_ipv6_next_hop`. A bare `exact_export_rejected` means a fresh probe no longer reproduces the refusal. |
 | `export_rule` | Withheld | Another export gate stops the route, such as split horizon, `NO_ADVERTISE`, LLGR, an ORF filter, OTC or conditional advertisement. |
-| `selection_deferred` | Pending | Graceful Restart selection deferral holds the family. |
+| `selection_deferred` | Pending | Older daemons hold injected unicast during Graceful Restart selection deferral; current daemons exempt local injection. |
 | `outbound_resync` | Pending | Outbound delivery to the peer is resynchronizing. |
 | `orf_pending` | Pending | The peer negotiated ORF and has not sent its first ROUTE-REFRESH. |
 | `not_yet_committed` | Pending | The route is staged but the Adj-RIB-Out does not hold it yet. |
@@ -3619,7 +3631,7 @@ with the attributes export would send now. A received rule with the same key
 never counts: when it is the selected rule, the local rule is `WITHHELD` with
 `not_selected`. `advertised_path_id` is always 0. Graceful Restart selection
 deferral does not hold a local rule, so `selection_deferred` is not reported;
-a daemon without that exemption reports it as for unicast. The reasons are a
+a daemon without that exemption reports the hold as pending. The reasons are a
 subset of the unicast ones:
 
 | `reason` | Disposition | FlowSpec meaning |
@@ -3709,13 +3721,13 @@ pending removal: `RenewLease` refuses that generation with
 `GENERATION_NOT_LIVE`, so a controller that adopts such an entry after its
 own restart re-adds its full desired state instead of renewing.
 
-Expiry removes local intent only. An equal or better route from elsewhere, or
-a received FlowSpec rule with the same key, keeps applying, and the daemon
-makes no promise about remote acceptance or enforcement. The lease bounds how
-long a stopped controller's state outlives it; when the daemon itself stops,
-peers drop the routes as their sessions close or their Graceful Restart timers
-run out. SIGHUP does not touch leases. A daemon that predates these RPCs
-answers `UNIMPLEMENTED` and creates nothing, so never retry a failed leased
+Expiry removes local intent only. Other eligible routes or rules can keep
+applying; during selection deferral only local candidates are eligible.
+The daemon makes no promise about remote acceptance or enforcement. The lease
+bounds how long a stopped controller's state outlives it; when the daemon
+itself stops, peers drop the routes as their sessions close or their Graceful
+Restart timers run out. SIGHUP does not touch leases. A daemon that predates
+these RPCs answers `UNIMPLEMENTED` and creates nothing, so never retry a failed leased
 add through `AddPath` or `AddFlowSpec`.
 
 The lease RPCs, the delete `owner` and `override_owner` fields and the
@@ -3894,11 +3906,16 @@ Release needs every listed controller (AND); the window's deadline still
 releases End-of-RIB if one stays silent. Windows belong to the configured
 neighbors from daemon start, so the release also covers a neighbor whose
 session is not up yet: when it establishes, its initial table ends in
-End-of-RIB at once.
+End-of-RIB once the other convergence gates allow it.
+
+This signal releases only the replay grace window. It does not release
+selection deferral or other convergence and refresh holds. Local unicast and
+FlowSpec injection are eligible during selection deferral without this
+signal; their ordinary policy and admission checks still apply.
 
 | Result | Meaning |
 |--------|---------|
-| OK `RELEASED` | This owner was the last one awaited; the held End-of-RIB was released |
+| OK `RELEASED` | This owner was the last one awaited; the replay grace hold was released. Other convergence gates still apply. |
 | OK `RECORDED` | Recorded; `awaiting` lists the listed owners that have not signalled |
 | OK `NOT_EXPECTED` | The owner is not in `gr_eor_replay_owners`; nothing changed (logged at WARN) |
 | OK `NOT_HOLDING` | No End-of-RIB is held: a cold boot, no window configured, or the window already ended. Nothing is released; the signal is still recorded for this incarnation |

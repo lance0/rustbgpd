@@ -4350,13 +4350,19 @@ impl RibManager {
                     },
                 );
             }
-            RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
+            RibUpdate::InjectRoute { route, reply } => {
+                self.with_selection_readiness(|manager| manager.handle_inject_route(route, reply));
+            }
             RibUpdate::InjectLeasedRoute {
                 route,
                 owner,
                 lease_seconds,
                 reply,
-            } => self.handle_inject_leased_route(route, &owner, lease_seconds, reply),
+            } => {
+                self.with_selection_readiness(|manager| {
+                    manager.handle_inject_leased_route(route, &owner, lease_seconds, reply);
+                });
+            }
             RibUpdate::WithdrawInjected {
                 prefix,
                 path_id,
@@ -4365,15 +4371,18 @@ impl RibManager {
                 override_owner,
                 reply,
             } => {
-                self.handle_withdraw_injected(
-                    prefix,
-                    path_id,
-                    allow_missing,
-                    &owner,
-                    override_owner,
-                    reply,
-                );
-                self.retire_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
+                self.with_selection_readiness(|manager| {
+                    manager.handle_withdraw_injected(
+                        prefix,
+                        path_id,
+                        allow_missing,
+                        &owner,
+                        override_owner,
+                        reply,
+                    );
+                    manager
+                        .retire_exact_export_rejections([ExactExportKey::Unicast(prefix, path_id)]);
+                });
             }
             RibUpdate::ExpireInjectionLeases { leases } => {
                 self.handle_expire_injection_leases(&leases);

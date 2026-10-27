@@ -3114,12 +3114,10 @@ impl RibManager {
                 .announce
                 .iter()
                 .inspect(|_| checkpoint())
-                .any(|route| self.selection_deferred(prefix_family(&route.prefix)))
-                || batch
-                    .withdraw
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .any(|(prefix, _)| self.selection_deferred(prefix_family(prefix)))
+                .any(|route| {
+                    route.peer != LOCAL_PEER
+                        && self.selection_deferred(prefix_family(&route.prefix))
+                })
                 || batch
                     .end_of_rib
                     .iter()
@@ -7011,13 +7009,23 @@ impl RibManager {
     /// instead of every peer's Adj-RIB-In (mostly misses at RR scale). A
     /// stale index entry (peer withdrew / went down and was not yet pruned)
     /// yields no candidates and is skipped — over-counting is benign.
+    /// During selection deferral `local_only` probes only the local RIB;
+    /// received announcers stay indexed for the release sweep.
     pub(in crate::manager) fn unicast_candidates<'a>(
         ribs: &'a HashMap<PeerId, AdjRibIn>,
         prefix_peers: &'a UnicastPrefixPeers,
         prefix: &'a Prefix,
+        local_only: bool,
     ) -> impl Iterator<Item = &'a crate::route::Route> {
-        prefix_peers
-            .peers(prefix)
+        local_only
+            .then_some(LOCAL_PEER)
+            .into_iter()
+            .chain(
+                (!local_only)
+                    .then(|| prefix_peers.peers(prefix))
+                    .into_iter()
+                    .flatten(),
+            )
             .filter_map(move |peer| ribs.get(&peer))
             .flat_map(move |rib| rib.iter_prefix(prefix))
             .filter(|route| crate::srv6::unicast_eligible(route))
@@ -7082,6 +7090,9 @@ impl RibManager {
         let mut needs_full = HashSet::new();
         for prefix in affected {
             if self.selection_deferred(prefix_family(prefix)) {
+                if peer == LOCAL_PEER {
+                    needs_full.insert(*prefix);
+                }
                 continue;
             }
             let verdict = 'fast: {
@@ -7155,7 +7166,6 @@ impl RibManager {
         self.record_deferred_unicast(affected);
         let needs_full: HashSet<Prefix> = affected
             .iter()
-            .filter(|prefix| !self.selection_deferred(prefix_family(prefix)))
             .filter(|prefix| {
                 let Some(best) = self.loc_rib.get(prefix) else {
                     return true; // no best: rescan (cheap; re-checks invariant)
@@ -7181,9 +7191,6 @@ impl RibManager {
         self.record_deferred_unicast(affected);
         let mut changed = HashSet::new();
         for prefix in affected {
-            if self.selection_deferred(prefix_family(prefix)) {
-                continue;
-            }
             let previous_best = self.loc_rib.get(prefix).map(BestSource::of);
             // Inner scope: `candidates` borrows the Adj-RIB-Ins and must be
             // dropped before the `&mut self` event publication below.
@@ -7196,14 +7203,27 @@ impl RibManager {
                 let mut candidates: smallvec::SmallVec<[&crate::route::Route; 8]> =
                     smallvec::SmallVec::new();
                 let ribs = &self.ribs;
-                self.unicast_prefix_peers.prune_to_live(prefix, |peer| {
+                if self.selection_deferred(prefix_family(prefix)) {
                     checkpoint();
-                    let before = candidates.len();
-                    if let Some(rib) = ribs.get(&peer) {
+                    if let Some(rib) = ribs.get(&LOCAL_PEER) {
                         candidates.extend(rib.iter_prefix(prefix).inspect(|_| checkpoint()));
                     }
-                    candidates.len() > before
-                });
+                    // Restored received selections stay frozen until release.
+                    if candidates.is_empty()
+                        && previous_best.is_some_and(|best| best.peer != LOCAL_PEER)
+                    {
+                        continue;
+                    }
+                } else {
+                    self.unicast_prefix_peers.prune_to_live(prefix, |peer| {
+                        checkpoint();
+                        let before = candidates.len();
+                        if let Some(rib) = ribs.get(&peer) {
+                            candidates.extend(rib.iter_prefix(prefix).inspect(|_| checkpoint()));
+                        }
+                        candidates.len() > before
+                    });
+                }
                 // Index membership represents received routes, including
                 // ineligible ones; LocRib::recompute applies eligibility.
                 let did_change = self.loc_rib.recompute(*prefix, candidates.iter().copied());
@@ -7467,13 +7487,19 @@ impl RibManager {
         let best_changed: HashSet<_> = best_changed
             .iter()
             .inspect(|_| checkpoint())
-            .filter(|prefix| !self.selection_deferred(prefix_family(prefix)))
             .copied()
             .collect();
         let all_affected: HashSet<_> = all_affected
             .iter()
             .inspect(|_| checkpoint())
-            .filter(|prefix| !self.selection_deferred(prefix_family(prefix)))
+            .filter(|prefix| {
+                !self.selection_deferred(prefix_family(prefix))
+                    || best_changed.contains(*prefix)
+                    || self
+                        .ribs
+                        .get(&LOCAL_PEER)
+                        .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
+            })
             .copied()
             .collect();
         // FIB install-candidate wake. Route events fire only when the
@@ -7778,10 +7804,6 @@ impl RibManager {
                         if let Some(blocked) = self.peer_otc_blocked.get(&peer) {
                             all.extend(blocked.keys().inspect(|_| checkpoint()).copied());
                         }
-                        all.retain(|prefix| {
-                            checkpoint();
-                            !self.selection_deferred(prefix_family(prefix))
-                        });
                         Cow::Owned(all)
                     } else if let Some(gid) = member_of {
                         // Grouped peers have no ORR / Add-Path extras (both are
@@ -8234,9 +8256,8 @@ impl RibManager {
                                 .get(&peer)
                                 .is_some_and(|admitted| {
                                     admitted.iter_with_checkpoint(|_| checkpoint()).any(|key| {
-                                    matches!(key, crate::update::ExactExportKey::Unicast(prefix, _)
-                                        if !self.selection_deferred(prefix_family(&prefix)))
-                                })
+                                        matches!(key, crate::update::ExactExportKey::Unicast(..))
+                                    })
                                 }))
                         && effective_flowspec_rules.is_empty()
                         && effective_evpn_keys.is_empty()
@@ -8382,10 +8403,7 @@ impl RibManager {
                                             .withdraw
                                             .iter()
                                             .inspect(|_| checkpoint())
-                                            .map(|(prefix, _)| *prefix)
-                                            .filter(|prefix| {
-                                                !self.selection_deferred(prefix_family(prefix))
-                                            }),
+                                            .map(|(prefix, _)| *prefix),
                                     );
                                 }
                                 // VPN portion of the resync, from the group's VPN
@@ -8650,6 +8668,11 @@ impl RibManager {
                                 rib_out,
                                 &self.peer_is_rr_client,
                                 prefix,
+                                self.selection_deferral.as_ref().is_some_and(|deferral| {
+                                    deferral.selection_deferred(
+                                        crate::manager::helpers::prefix_family(prefix),
+                                    )
+                                }),
                                 peer,
                                 target_peer_asn,
                                 target_peer_group,
@@ -8697,6 +8720,11 @@ impl RibManager {
                                 rib_out,
                                 &self.peer_is_rr_client,
                                 prefix,
+                                self.selection_deferral.as_ref().is_some_and(|deferral| {
+                                    deferral.selection_deferred(
+                                        crate::manager::helpers::prefix_family(prefix),
+                                    )
+                                }),
                                 peer,
                                 target_peer_asn,
                                 target_peer_group,
@@ -8734,6 +8762,11 @@ impl RibManager {
                                 orr_topology,
                                 orr_spf,
                                 prefix,
+                                self.selection_deferral.as_ref().is_some_and(|deferral| {
+                                    deferral.selection_deferred(
+                                        crate::manager::helpers::prefix_family(prefix),
+                                    )
+                                }),
                                 peer,
                                 target_peer_asn,
                                 target_peer_group,
@@ -8771,6 +8804,9 @@ impl RibManager {
                                 rib_out,
                                 &self.peer_is_rr_client,
                                 prefix,
+                                self.selection_deferral.as_ref().is_some_and(|deferral| {
+                                    deferral.selection_deferred(prefix_family(prefix))
+                                }),
                                 &mut target,
                                 target_is_ebgp,
                                 interpret_rfc1997,
