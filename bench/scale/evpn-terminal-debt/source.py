@@ -39,6 +39,7 @@ def archive_files(path):
 
 
 def helpers(source):
+    sys.dont_write_bytecode = True
     directory = str(Path(source) / "bench/scale/evpn-qualification")
     require(not any(name in sys.modules and Path(sys.modules[name].__file__).parent != Path(directory)
                     for name in ("qualify", "recovery", "wire")), "mixed qualification inputs")
@@ -150,17 +151,20 @@ def prepare(args, bars):
         "derivation": "pinned qualification derivation, then terminal patches.py from terminal head",
         "production_activation": False, "enhanced_refresh": False, "bars": bars,
         "rustfmt": subprocess.check_output(["rustfmt", "--version"], text=True).strip(),
+        "build_toolchain": {name: subprocess.check_output([name, "--version"], text=True).strip()
+                            for name in ("rustc", "cargo")},
         "daemon_cpus": args.daemon_cpus, "harness_cpus": args.harness_cpus,
         "timing_window": q.timing_window(args.window_start, args.window_end)})
 
 
 def build(args):
     output = Path(args.output).resolve()
-    _, q, _, _ = load(output)
+    manifest_row, q, _, _ = load(output)
     binary = output / "bin"
     binary.mkdir()
-    q.write_json(output / "toolchain.json", {name: subprocess.check_output([name, "--version"], text=True).strip()
-                                            for name in ("rustc", "cargo")})
+    toolchain = {name: subprocess.check_output([name, "--version"], text=True).strip() for name in ("rustc", "cargo")}
+    require(toolchain == manifest_row["build_toolchain"], "toolchain changed since source freeze")
+    q.write_json(output / "toolchain.json", toolchain)
     env = {key: value for key, value in os.environ.items()
            if key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS")}
     for arm, package, target in (("candidate", "rustbgpd", "rustbgpd"),
@@ -186,4 +190,30 @@ def build(args):
                      binary / (f"rustbgpd-{arm}" if target == "rustbgpd" else target))
     identities = {path.name: q.digest(path) for path in binary.iterdir()}
     require(identities["rustbgpd-candidate"] != identities["rustbgpd-private"], "identical arms")
-    q.write_json(output / "binaries.json", identities)
+    q.write_json(output / "binaries.json", {"head": manifest_row["head"], "qualification_head": PINNED,
+                                           "qualification_sha256": manifest_row["qualification_sha256"],
+                                           "terminal_sha256": manifest_row["terminal_sha256"],
+                                           "toolchain": toolchain, "binaries": identities})
+    verify_build(output, manifest_row, q)
+
+
+def verify_build(output, manifest_row, q):
+    receipt = json.loads((output / "binaries.json").read_text())
+    require(all(receipt[name] == manifest_row[name] for name in
+                ("head", "qualification_head", "qualification_sha256", "terminal_sha256")),
+            "build source/archive lineage differs")
+    toolchain = json.loads((output / "toolchain.json").read_text())
+    require(toolchain == receipt["toolchain"] == manifest_row["build_toolchain"]
+            and set(toolchain) == {"rustc", "cargo"}
+            and all(type(toolchain[name]) is str and toolchain[name].startswith(name + " ") for name in toolchain),
+            "build toolchain receipt differs")
+    expected = {"rustbgpd-candidate", "rustbgpd-private", "evpn-rr-soak"}
+    identities = receipt["binaries"]
+    require(set(identities) == expected and {path.name for path in (output / "bin").iterdir()} == expected,
+            "missing/extra built binaries")
+    require(all(type(identities[name]) is str and q.digest(output / "bin" / name) == identities[name] for name in expected)
+            and identities["rustbgpd-candidate"] != identities["rustbgpd-private"], "built binary changed or arms identical")
+    for label in ("candidate", "private", "driver"):
+        require((output / f"build-{label}.exit").read_text().strip() == "0"
+                and (output / f"build-{label}.log").stat().st_size > 0, "missing/failed independent arm build receipt")
+    return identities

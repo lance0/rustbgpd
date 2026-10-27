@@ -11,9 +11,12 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
-import check
-import source
+sys.dont_write_bytecode = True
+
+import check  # noqa: E402 - disable bytecode before importing verified local inputs
+import source  # noqa: E402 - disable bytecode before importing verified local inputs
 
 BARS = {"clients": 3, "routes_per_source": 10000, "type2_fraction": .8,
         "churn_source": 0, "churn_messages": 1, "churn_keys": 4, "churn_rounds": 1,
@@ -335,11 +338,13 @@ def run_cell(output, manifest, q, r, wire, arm, index, correctness):
     daemon = driver = controller = None
     record = {"status": "INVALID", "arm": arm, "correctness_only": correctness,
               "head": manifest["head"], "qualification_head": manifest["qualification_head"],
-              "scope": SCOPE, "production_activation": False}
+              "scope": SCOPE, "production_activation": False,
+              "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+              "cell_started_monotonic_ns": time.monotonic_ns()}
     try:
         q.cell_gate(output, manifest, leg, correctness)
         r.scenario(fixture, output / "sources/candidate", BARS["clients"])
-        identities = json.loads((output / "binaries.json").read_text())
+        identities = source.verify_build(output, manifest, q)
         binary, harness = output / "bin" / f"rustbgpd-{arm}", output / "bin/evpn-rr-soak"
         check.require(all(q.digest(path) == identities[path.name] for path in (binary, harness)), "binary input changed")
         environment = dict(os.environ, RUSTBGPD_BENCH_WRITER_POLLS="1", RUSTBGPD_BENCH_UNSENT_THRESHOLD_BYTES="4096")
@@ -414,7 +419,11 @@ def run_cell(output, manifest, q, r, wire, arm, index, correctness):
         record["status"] = "FAIL" if isinstance(error, q.AcceptanceFailure) else "INVALID"
         record["error"] = str(error)
     finally:
-        q.cleanup_cell(record, leg, fixture, driver, daemon, controller)
+        try:
+            q.cleanup_cell(record, leg, fixture, driver, daemon, controller)
+        finally:
+            record["cell_finished_monotonic_ns"] = time.monotonic_ns()
+            q.write_json(leg / "result.json", record)
     return record
 
 
@@ -442,6 +451,7 @@ def summarize(output, manifest, rows, q, r, wire, correctness):
     q.write_json(output / "summary.json", summary)
     try:
         check.require(manifest["bars"] == BARS, "predeclared campaign bars changed")
+        identities = source.verify_build(output, manifest, q)
         expected = ["private", "candidate"] if correctness else BARS["schedule"]
         check.require(rows and all(row["status"] in ("PASS", "FAIL") and not row.get("cleanup_errors")
                                   and "retained_fixture" not in row for row in rows),
@@ -450,23 +460,58 @@ def summarize(output, manifest, rows, q, r, wire, correctness):
                           and row["qualification_head"] == source.PINNED and row["scope"] == SCOPE
                           and row["production_activation"] is False for row in rows), "mixed cell source/scope/mode")
         check.require([row["arm"] for row in rows] == expected[:len(rows)], "reordered campaign prefix")
-        partial = []
-        for index, (path, row) in enumerate(zip(sorted(output.glob("terminal-*/result.json")), rows, strict=True)):
-            check.require(path.parent.name == f'terminal-{index:02}-{row["arm"]}', "cell path differs from ordered arm")
-            if row["status"] == "PASS":
-                check.require("settled" in row and "evidence" in row and row.get("driver_exit") == 0,
-                              "PASS cell lacks complete raw-evidence/driver receipt")
-            if "settled" in row:
-                raw = evidence(path.parent, row, q, r, wire)
-                check.require(raw == row.get("evidence"), "retained evidence differs from raw consumer")
-                accept_report(raw, row["arm"], q)
-                check.require(row["status"] == "PASS", "stored complete failure is unsupported by its raw bars")
+        paths = sorted(output.glob("terminal-*/result.json"))
+        check.require(len(paths) == len(rows), "missing/extra retained cell records")
+        processes, boots, previous_end, previous_raw_end = set(), set(), 0, 0
+        for path, row in zip(paths, rows, strict=True):
+            owner = row["daemon_owner"]
+            check.require(all(type(owner[name]) is int and owner[name] > 0 for name in ("pid", "starttime"))
+                          and owner["binary_sha256"] == identities[f'rustbgpd-{row["arm"]}'],
+                          "daemon process is not bound to the verified arm binary")
+            boot = str(uuid.UUID(row["boot_id"]))
+            process = boot, owner["pid"], owner["starttime"]
+            check.require(process not in processes, "a physical daemon process was reused as another cell")
+            processes.add(process)
+            boots.add(boot)
+            start, end = row["cell_started_monotonic_ns"], row["cell_finished_monotonic_ns"]
+            check.require(type(start) is int and type(end) is int and 0 < start < end and previous_end <= start,
+                          "physical cell intervals overlap or repeat")
+            previous_end = end
+            event_path = path.parent / "events.jsonl"
+            events = [json.loads(line) for line in event_path.read_text().splitlines()] if event_path.exists() else []
+            if events:
+                clocks = [event["at"] for event in events]
+                check.require(all(type(clock) in (int, float) and start <= clock * 1e9 <= end for clock in clocks)
+                              and clocks == sorted(clocks) and previous_raw_end < clocks[0],
+                              "raw global cell clocks repeat/overlap or escape their physical interval")
+                previous_raw_end = clocks[-1]
             else:
-                check.require(row["status"] == "FAIL" and isinstance(row.get("error"), str) and row["error"],
-                              "unvalidated partial cell is not a recorded acceptance miss")
-                partial.append({"cell": path.parent.name, "error": row["error"]})
-        failures = [row.get("error", "") for row in rows if row["status"] == "FAIL"]
-        if failures:
+                check.require(row["status"] == "FAIL" and "settled" not in row, "complete cell lacks raw global interval")
+        check.require(len(boots) == 1, "campaign combines different host boots")
+        partial, failures, invalids = [], [], []
+        for index, (path, row) in enumerate(zip(paths, rows, strict=True)):
+            check.require(path.parent.name == f'terminal-{index:02}-{row["arm"]}', "cell path differs from ordered arm")
+            try:
+                if row["status"] == "PASS":
+                    check.require("settled" in row and "evidence" in row and row.get("driver_exit") == 0,
+                                  "PASS cell lacks complete raw-evidence/driver receipt")
+                if "settled" in row:
+                    raw = evidence(path.parent, row, q, r, wire)
+                    check.require(raw == row.get("evidence"), "retained evidence differs from raw consumer")
+                    accept_report(raw, row["arm"], q)
+                    check.require(row["status"] == "PASS", "stored complete failure is unsupported by its raw bars")
+                else:
+                    check.require(row["status"] == "FAIL" and isinstance(row.get("error"), str) and row["error"],
+                                  "unvalidated partial cell is not a recorded acceptance miss")
+                    partial.append({"cell": path.parent.name, "error": row["error"]})
+                    failures.append({"cell": path.parent.name, "error": row["error"]})
+            except q.AcceptanceFailure as error:
+                failures.append({"cell": path.parent.name, "error": str(error)})
+            except Exception as error:
+                invalids.append({"cell": path.parent.name, "error": str(error)})
+        if invalids:
+            summary.update(status="INVALID", invalid_cells=invalids, failures=failures)
+        elif failures:
             summary.update(status="FAIL", failures=failures, partial_failures_unvalidated=partial)
         else:
             check.require([row["arm"] for row in rows] == expected, "incomplete/reordered campaign")
@@ -500,6 +545,9 @@ def main():
     run_parser.add_argument("--correctness-only", action="store_true")
     analyze = sub.add_parser("analyze")
     analyze.add_argument("output")
+    verify = sub.add_parser("verify")
+    verify.add_argument("output")
+    verify.add_argument("--built", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
         source.prepare(args, BARS)
@@ -511,6 +559,11 @@ def main():
         return run(args)
     output = Path(args.output).resolve()
     manifest, q, r, wire = source.load(output)
+    if args.command == "verify":
+        if args.built:
+            source.verify_build(output, manifest, q)
+        print(json.dumps({"head": manifest["head"], "qualification_head": manifest["qualification_head"], "verified": True}))
+        return 0
     rows = [json.loads(path.read_text()) for path in sorted(output.glob("terminal-*/result.json"))]
     return summarize(output, manifest, rows, q, r, wire, rows[0]["correctness_only"] if rows else False)
 

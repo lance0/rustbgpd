@@ -14,6 +14,10 @@ commits and archive hashes, and derives two independent source exports. Verifica
 compares every export input with both archives and the reviewed derivations.
 Controller, process ownership, cleanup, cgroup, build conventions and the strict
 Type 2/5 wire checker come from the explicit input. Its recovery sequence is not used.
+Run and final analysis both verify binary hashes, distinct arms, successful
+separate build exits and the frozen toolchain/source lineage. Each cell binds its
+daemon PID/start time and binary hash to that arm; repeated processes or global
+clock intervals cannot supply additional samples.
 
 Run the checker tests before trusting a receipt:
 
@@ -35,6 +39,7 @@ python3 -B bench/scale/evpn-terminal-debt/terminal.py prepare "$CAMPAIGN" \
   --base 110dd43f9be38901fc7826eb74673b7c6d2bc0d6 \
   --daemon-cpus 24-27,56-59 --harness-cpus 28-31,60-63
 taskset -c 24-31,56-63 python3 -B bench/scale/evpn-terminal-debt/terminal.py build "$CAMPAIGN"
+python3 "$CAMPAIGN/sources/candidate/bench/scale/evpn-terminal-debt/terminal.py" verify "$CAMPAIGN" --built
 bench/scale/evpn-terminal-debt/run.sh "$CAMPAIGN" --correctness-only
 ```
 
@@ -116,6 +121,9 @@ timer window closes during churn, the fixture fails without changing its timer,
 buffers, workload or bars. A zero marker-admission-refusal count is allowed: call
 the result **timer-deferred terminal debt under kernel backpressure**. Claim that
 backpressure prevented marker admission only if a real refusal was observed.
+Analysis continues checking later raw cells after a private acceptance miss;
+technical corruption overrides `FAIL` with `INVALID`. A partial private failure
+is retained as unvalidated evidence and never supplies comparative medians.
 
 To analyze an existing campaign without launching a daemon:
 

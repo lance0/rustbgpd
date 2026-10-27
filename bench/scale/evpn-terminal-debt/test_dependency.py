@@ -337,7 +337,11 @@ class DependencyChecks(unittest.TestCase):
                 for index, arm in enumerate(("private", "candidate")):
                     row = {"status": "PASS", "arm": arm, "correctness_only": True, "head": manifest["head"],
                            "qualification_head": source.PINNED, "scope": terminal.SCOPE, "production_activation": False,
-                           "driver_exit": 0, "settled": {}, "evidence": {"debt": {"work": {"inventory_visits": 0}}}}
+                           "driver_exit": 0, "settled": {}, "evidence": {"debt": {"work": {"inventory_visits": 0}}},
+                           "boot_id": "00000000-0000-0000-0000-000000000001",
+                           "daemon_owner": {"pid": 100 + index, "starttime": 1000 + index, "binary_sha256": arm},
+                           "cell_started_monotonic_ns": (index * 10 + 1) * 1000000000,
+                           "cell_finished_monotonic_ns": (index * 10 + 9) * 1000000000}
                     if arm == "candidate" and defect == "positive-work":
                         row["evidence"]["debt"]["work"]["inventory_visits"] = 32
                     if arm == "private" and defect.startswith("private-"):
@@ -350,16 +354,112 @@ class DependencyChecks(unittest.TestCase):
                     leg = output / f"terminal-{index:02}-{arm}"
                     leg.mkdir()
                     self.q.write_json(leg / "result.json", row)
+                    (leg / "events.jsonl").write_text(json.dumps({"at": index * 10 + 2}) + "\n")
                     rows.append(row)
                 # The real raw consumer and its positive work witness are tested
                 # above. Isolate the final disposition from stored PASS flags.
-                with mock.patch.object(terminal, "evidence", side_effect=lambda _leg, row, *_: row["evidence"]):
+                with mock.patch.object(terminal, "evidence", side_effect=lambda _leg, row, *_: row["evidence"]), \
+                     mock.patch.object(source, "verify_build", return_value={"rustbgpd-private": "private", "rustbgpd-candidate": "candidate"}):
                     self.assertEqual(terminal.summarize(output, manifest, rows, self.q, self.r, self.wire, True), 1)
                 summary = json.loads((output / "summary.json").read_text())
                 self.assertEqual(summary["status"], expected)
                 self.assertFalse(summary["medians"])
                 if defect == "private-partial-fail":
                     self.assertEqual(len(summary["partial_failures_unvalidated"]), 1)
+
+    def test_baseline_acceptance_miss_does_not_hide_later_technical_corruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, rows = Path(directory), []
+            manifest = {"head": "a" * 40, "bars": terminal.BARS}
+            for index, arm in enumerate(("private", "candidate")):
+                row = {"status": "FAIL" if arm == "private" else "PASS", "error": "headroom", "arm": arm,
+                       "correctness_only": True, "head": manifest["head"], "qualification_head": source.PINNED,
+                       "scope": terminal.SCOPE, "production_activation": False, "driver_exit": 0, "settled": {}, "evidence": {},
+                       "boot_id": "00000000-0000-0000-0000-000000000001",
+                       "daemon_owner": {"pid": index + 100, "starttime": index + 1000, "binary_sha256": arm},
+                       "cell_started_monotonic_ns": (index * 10 + 1) * 1000000000,
+                       "cell_finished_monotonic_ns": (index * 10 + 9) * 1000000000}
+                leg = output / f"terminal-{index:02}-{arm}"
+                leg.mkdir()
+                self.q.write_json(leg / "result.json", row)
+                (leg / "events.jsonl").write_text(json.dumps({"at": index * 10 + 2}) + "\n")
+                rows.append(row)
+            with mock.patch.object(source, "verify_build", return_value={"rustbgpd-private": "private", "rustbgpd-candidate": "candidate"}), \
+                 mock.patch.object(terminal, "evidence", side_effect=[self.q.AcceptanceFailure("private headroom"), ValueError("candidate truncated wire")]) as consumer:
+                terminal.summarize(output, manifest, rows, self.q, self.r, self.wire, True)
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertEqual(consumer.call_count, 2)
+            self.assertEqual(summary["status"], "INVALID")
+            self.assertEqual(len(summary["failures"]), 1)
+            self.assertIn("truncated wire", summary["invalid_cells"][0]["error"])
+
+    def test_repeated_physical_pair_cannot_supply_three_samples(self):
+        for defect in ("copied-process", "copied-interval", "copied-raw-clocks", "wrong-arm-binary"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                output, rows = Path(directory), []
+                manifest = {"head": "a" * 40, "bars": terminal.BARS}
+                for index, arm in enumerate(terminal.BARS["schedule"]):
+                    row = {"status": "PASS", "arm": arm, "correctness_only": False, "head": manifest["head"],
+                           "qualification_head": source.PINNED, "scope": terminal.SCOPE, "production_activation": False,
+                           "driver_exit": 0, "settled": {}, "evidence": {"debt": {"work": {"inventory_visits": 0}}},
+                           "churn-applied-seconds": 1.0, "convergence-seconds": 1.0,
+                           "boot_id": "00000000-0000-0000-0000-000000000001",
+                           "daemon_owner": {"pid": 100 + index, "starttime": 1000 + index, "binary_sha256": arm},
+                           "cell_started_monotonic_ns": (index * 10 + 1) * 1000000000,
+                           "cell_finished_monotonic_ns": (index * 10 + 9) * 1000000000}
+                    leg = output / f"terminal-{index:02}-{arm}"
+                    leg.mkdir()
+                    (leg / "events.jsonl").write_text(json.dumps({"at": index * 10 + 2}) + "\n")
+                    if index == 2:
+                        if defect == "copied-process":
+                            row["daemon_owner"] = copy.deepcopy(rows[0]["daemon_owner"])
+                        elif defect == "copied-interval":
+                            row["cell_started_monotonic_ns"] = rows[0]["cell_started_monotonic_ns"]
+                            row["cell_finished_monotonic_ns"] = rows[0]["cell_finished_monotonic_ns"]
+                        elif defect == "copied-raw-clocks":
+                            (leg / "events.jsonl").write_text(json.dumps({"at": 2}) + "\n")
+                        else:
+                            row["daemon_owner"]["binary_sha256"] = "candidate"
+                    self.q.write_json(leg / "result.json", row)
+                    rows.append(row)
+                with mock.patch.object(source, "verify_build", return_value={"rustbgpd-private": "private", "rustbgpd-candidate": "candidate"}), \
+                     mock.patch.object(terminal, "evidence", side_effect=lambda _leg, row, *_: row["evidence"]):
+                    terminal.summarize(output, manifest, rows, self.q, self.r, self.wire, False)
+                self.assertEqual(json.loads((output / "summary.json").read_text())["status"], "INVALID")
+
+    def test_build_verifier_rejects_missing_changed_identical_or_unproven_binaries(self):
+        for defect in ("none", "missing-receipt", "changed-binary", "identical-arms", "wrong-toolchain", "failed-build", "wrong-source"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                (output / "bin").mkdir()
+                for name in ("rustbgpd-private", "rustbgpd-candidate", "evpn-rr-soak"):
+                    (output / "bin" / name).write_bytes(name.encode())
+                manifest = {"head": "a" * 40, "qualification_head": source.PINNED, "qualification_sha256": "b" * 64,
+                            "terminal_sha256": "c" * 64, "build_toolchain": {"rustc": "rustc 1.99.1", "cargo": "cargo 1.99.1"}}
+                receipt = {key: manifest[key] for key in ("head", "qualification_head", "qualification_sha256", "terminal_sha256")}
+                receipt.update(toolchain=manifest["build_toolchain"], binaries={path.name: self.q.digest(path) for path in (output / "bin").iterdir()})
+                self.q.write_json(output / "toolchain.json", manifest["build_toolchain"])
+                for label in ("candidate", "private", "driver"):
+                    (output / f"build-{label}.log").write_text("completed canonical separate build\n")
+                    (output / f"build-{label}.exit").write_text("0\n")
+                if defect == "changed-binary":
+                    (output / "bin/rustbgpd-private").write_bytes(b"changed")
+                elif defect == "identical-arms":
+                    (output / "bin/rustbgpd-private").write_bytes((output / "bin/rustbgpd-candidate").read_bytes())
+                    receipt["binaries"]["rustbgpd-private"] = receipt["binaries"]["rustbgpd-candidate"]
+                elif defect == "wrong-toolchain":
+                    self.q.write_json(output / "toolchain.json", {"rustc": "rustc other", "cargo": "cargo other"})
+                elif defect == "failed-build":
+                    (output / "build-private.exit").write_text("1\n")
+                elif defect == "wrong-source":
+                    receipt["head"] = "d" * 40
+                if defect != "missing-receipt":
+                    self.q.write_json(output / "binaries.json", receipt)
+                if defect == "none":
+                    self.assertEqual(source.verify_build(output, manifest, self.q), receipt["binaries"])
+                else:
+                    with self.assertRaises((ValueError, OSError)):
+                        source.verify_build(output, manifest, self.q)
 
 
 if __name__ == "__main__":
