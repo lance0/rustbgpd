@@ -145,8 +145,7 @@ pub async fn health(connection: Connection, json: bool, liveness: bool) -> Resul
 }
 
 pub async fn metrics(connection: Connection) -> Result<(), CliError> {
-    let mut client =
-        ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut client = connection.metrics_client();
     let resp = read_rpc("GetMetrics", client.get_metrics(MetricsRequest {}))
         .await?
         .into_inner();

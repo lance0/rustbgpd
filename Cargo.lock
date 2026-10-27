@@ -3169,6 +3169,7 @@ dependencies = [
  "rustbgpd-bmp",
  "rustbgpd-evpn",
  "rustbgpd-policy",
+ "rustbgpd-telemetry",
  "rustbgpd-wire",
  "serde",
  "serde_json",

@@ -26,6 +26,56 @@ use rustbgpd_api::proto::peer_group_service_server::PeerGroupServiceServer;
 use rustbgpd_api::proto::policy_service_server::PolicyServiceServer;
 use rustbgpd_api::proto::rib_service_server::RibServiceServer;
 
+/// Production metric emitters and renderer, with 1000 dual-stack peers.
+pub(crate) async fn thousand_peer_metrics() -> String {
+    let metrics = rustbgpd_telemetry::BgpMetrics::new();
+    for index in 0_u32..1000 {
+        let peer = std::net::Ipv4Addr::from(0x7f01_0001 + index).to_string();
+        metrics.set_peer_info(&peer, "", 65_000 + index, "", "members");
+        metrics.set_peer_admin_enabled(&peer, "", true);
+        metrics.set_max_prefix_latched(&peer, "", false);
+        metrics.set_peer_session_established(&peer, "", true);
+        metrics.set_peer_session_state(&peer, "", "established");
+        metrics.initialize_update_malformed_series(&peer);
+        metrics.initialize_exact_export_rejection_series(&peer, ["ipv4_unicast", "ipv6_unicast"]);
+        metrics.initialize_export_family_suppressed_series(
+            &peer,
+            "ipv6_unicast",
+            rustbgpd_telemetry::reason_labels::ExactExportReason::MissingIpv6NextHop,
+        );
+        for message in [
+            "open",
+            "keepalive",
+            "update",
+            "notification",
+            "route_refresh",
+        ] {
+            metrics.record_message_sent(&peer, message);
+            metrics.record_message_received(&peer, message);
+        }
+        for family in ["ipv4_unicast", "ipv6_unicast"] {
+            metrics.set_rib_prefixes(&peer, family, 400);
+            metrics.set_adj_rib_out_prefixes(&peer, family, 400);
+            metrics.set_max_prefix_capacity(&peer, family, "accepted", 400, Some(450));
+            metrics.set_max_prefix_capacity(&peer, family, "received", 400, Some(500));
+            metrics.set_route_refresh_in_progress(&peer, family, false);
+            metrics.set_route_refresh_stale_entries(&peer, family, 0);
+        }
+        metrics.set_rfc8212_missing_policy(&peer, false, false);
+        for direction in ["import", "export"] {
+            for action in ["permit", "deny"] {
+                metrics.record_policy_routes(&peer, "members", direction, action);
+            }
+        }
+        metrics.set_peer_update_group(&peer, 1);
+        metrics.set_peer_outbound_queue_depth(&peer, 0);
+        metrics.set_peer_slow(&peer, false);
+    }
+    rustbgpd_api::metrics_render::render_text(&metrics)
+        .await
+        .unwrap()
+}
+
 fn sample_topology_node() -> server_proto::TopologyNodeEntry {
     server_proto::TopologyNodeEntry {
         key: "02aabb".to_string(),
