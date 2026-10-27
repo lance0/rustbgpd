@@ -1393,6 +1393,13 @@ impl RibManager {
             checkpoint();
             if !evpn_coverage_required {
                 self.pending_eor.entry(peer).or_default().insert(family);
+                if self
+                    .peer_orf_pending
+                    .get(&peer)
+                    .is_some_and(|held| held.contains(&family))
+                {
+                    self.gr_deferred_eor.entry(peer).or_default().insert(family);
+                }
             }
             if !self.dirty_peers.contains(&peer) {
                 self.flush_pending_eor(peer);
