@@ -822,6 +822,10 @@ impl RibManager {
         // Clone released before the &mut intern below; chains are small
         // and this runs at config/session-lifecycle frequency only.
         let chain_idx = chain.map(|chain| self.update_groups.intern_chain(chain, receipt));
+        #[cfg(feature = "bench-internals")]
+        let owns_evpn = self.bench_evpn_ownership_candidate(peer);
+        #[cfg(not(feature = "bench-internals"))]
+        let owns_evpn = false;
         let key = GroupKey {
             chain: chain_idx,
             target_is_ebgp: fingerprint.target_is_ebgp,
@@ -832,6 +836,7 @@ impl RibManager {
             sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
             sendable_vpnv4: fingerprint.sendable_vpnv4,
             sendable_vpnv6: fingerprint.sendable_vpnv6,
+            owns_evpn,
             rtc_negotiated: fingerprint.rtc_negotiated,
             per_client_best: fingerprint.per_client_best,
             llgr_families: fingerprint.llgr_families,

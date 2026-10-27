@@ -192,6 +192,9 @@ pub(super) struct GroupKey {
     sendable_vpnv4: bool,
     /// Sendable `VPNv6` (SAFI 128).
     sendable_vpnv6: bool,
+    /// Dormant ownership policy plus EVPN eligibility. Production stays false;
+    /// an enabled cohort must not alias members that cannot send EVPN.
+    owns_evpn: bool,
     /// RT-Constrain negotiated (sendable ∋ `(Ipv4, RtConstrain)`). Stays
     /// in the key (RTC groups must not mix with non-RTC groups: filter
     /// *presence* is group-uniform by construction); the RFC 4684 RT
@@ -227,6 +230,7 @@ impl GroupKey {
         (self.sendable_ipv4_unicast || self.sendable_ipv6_unicast)
             && !self.sendable_vpnv4
             && !self.sendable_vpnv6
+            && !self.owns_evpn
             && !self.rtc_negotiated
     }
 }
@@ -307,6 +311,7 @@ fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComp
         sendable_ipv6_unicast: left_v6,
         sendable_vpnv4: left_vpnv4,
         sendable_vpnv6: left_vpnv6,
+        owns_evpn: left_evpn,
         rtc_negotiated: left_rtc,
         per_client_best: left_pcb,
         llgr_families: left_llgr,
@@ -321,6 +326,7 @@ fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComp
         sendable_ipv6_unicast: right_v6,
         sendable_vpnv4: right_vpnv4,
         sendable_vpnv6: right_vpnv6,
+        owns_evpn: right_evpn,
         rtc_negotiated: right_rtc,
         per_client_best: right_pcb,
         llgr_families: right_llgr,
@@ -345,6 +351,7 @@ fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComp
         || left_v6 != right_v6
         || left_vpnv4 != right_vpnv4
         || left_vpnv6 != right_vpnv6
+        || left_evpn != right_evpn
         || left_rtc != right_rtc
     {
         differences.push(UpdateGroupComparisonDifference::NegotiatedFamilies);

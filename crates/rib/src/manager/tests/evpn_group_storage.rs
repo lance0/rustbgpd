@@ -1425,6 +1425,7 @@ fn shared_evpn_fixture_is_opt_in_and_preserves_ownership_guards() {
         (true, EvpnFixturePeer::Rtc, false),
         (true, EvpnFixturePeer::PerClientBest, false),
         (true, EvpnFixturePeer::AddPath, false),
+        (true, EvpnFixturePeer::WithoutEvpn, false),
     ] {
         let manager = empty_evpn_fixture();
         let mut manager = if enabled {
@@ -1475,20 +1476,44 @@ fn shared_evpn_fixture_rejects_deferred_registration() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
-#[should_panic(expected = "requires every grouped peer to negotiate EVPN")]
-fn shared_evpn_fixture_rejects_non_evpn_join_to_existing_group() {
+fn shared_evpn_fixture_separates_non_evpn_members_from_owned_cohorts() {
     let mut manager = empty_evpn_fixture().with_bench_evpn_group_ownership();
-    let (_peer, _receiver) =
+    let (peer, mut output) =
         register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
-    let _joined = register_evpn_fixture_peer(&mut manager, 31, EvpnFixturePeer::WithoutEvpn);
+    let (other, mut other_output) =
+        register_evpn_fixture_peer(&mut manager, 31, EvpnFixturePeer::WithoutEvpn);
+    assert_ne!(
+        manager.grouped_member_of(peer),
+        manager.grouped_member_of(other)
+    );
+    assert!(manager.evpn_grouped_member_of(peer).is_some());
+    assert!(manager.evpn_grouped_member_of(other).is_none());
+    inject_shared_evpn(&mut manager, vec![received(100)]);
+    assert_eq!(output.try_recv().unwrap().evpn_announce.len(), 1);
+    assert!(other_output.try_recv().is_err());
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer: other,
+        session_id: 7,
+        family: (Afi::L2Vpn, Safi::Evpn),
+        add_path_send_limit: None,
+    });
+    assert_eq!(
+        manager.grouped_member_of(peer),
+        manager.grouped_member_of(other)
+    );
+    let update = other_output.try_recv().unwrap();
+    assert_eq!(update.evpn_announce.len(), 1);
+    assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+    assert_eq!(manager.evpn_admitted_count(other), 1);
 }
 
 #[cfg(feature = "bench-internals")]
 #[test]
-#[should_panic(expected = "stable EVPN fixture cannot regroup")]
-fn shared_evpn_fixture_rejects_absent_destination_before_handoff() {
+fn shared_evpn_fixture_regroups_into_an_absent_owned_destination() {
     let mut manager = empty_evpn_fixture().with_bench_evpn_group_ownership();
-    let (peer, _receiver) = register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    let (peer, mut output) =
+        register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    let old_gid = manager.grouped_member_of(peer).unwrap();
     let route = received(100);
     manager
         .ribs
@@ -1496,9 +1521,237 @@ fn shared_evpn_fixture_rejects_absent_destination_before_handoff() {
         .or_insert_with(|| AdjRibIn::new(route.peer));
     manager.process_evpn_announce_chunk(route.peer, vec![route]);
     assert_eq!(manager.loc_rib.evpn_len(), 1);
+    assert_eq!(output.try_recv().unwrap().evpn_announce.len(), 1);
+    let builds = Arc::new(std::sync::Mutex::new(Vec::new()));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let builds = Arc::clone(&builds);
+        move |site| {
+            if site.starts_with("destination_build_") {
+                builds.lock().unwrap().push(site);
+            }
+        }
+    }));
     manager
         .replace_peer_export_policy_synchronously(peer, Some(strip_rts()))
         .unwrap();
+    let new_gid = manager
+        .evpn_grouped_member_of(peer)
+        .expect("owned destination");
+    assert_ne!(new_gid, old_gid);
+    assert!(!manager.group_ribs.contains_key(&old_gid));
+    assert_eq!(
+        *builds.lock().unwrap(),
+        ["destination_build_without_installed_tables"]
+    );
+    let update = output.try_recv().unwrap();
+    assert_eq!(update.evpn_announce.len(), 1);
+    assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+    assert!(output.try_recv().is_err());
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(
+        manager
+            .evpn_recovery
+            .is_dormant(manager.evpn_recovery_handle(peer).unwrap())
+    );
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn shared_evpn_fixture_recreates_owned_destinations_after_private_handoff() {
+    let mut manager = empty_evpn_fixture().with_bench_evpn_group_ownership();
+    let (peer, mut output) =
+        register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    let old_gid = manager.evpn_grouped_member_of(peer).unwrap();
+    let old_stamp = manager.group_ribs[&old_gid].evpn_table_stamp;
+    let remote = received(100);
+    let mut own = received(200);
+    own.peer = peer;
+    if let EvpnRoute::Imet(route) = &mut own.route {
+        route.ethernet_tag = EthernetTagId(2);
+    }
+    inject_shared_evpn(&mut manager, vec![remote.clone()]);
+    let initial = output.try_recv().unwrap();
+    assert_eq!(initial.evpn_announce.len(), 1);
+    assert_eq!(initial.evpn_announce[0].key(), remote.key());
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    inject_shared_evpn(&mut manager, vec![own]);
+    assert!(output.try_recv().is_err());
+
+    // The actual lifecycle leaves the last owned table, seeds private OLD,
+    // then returns to the same interned gid with a newly allocated table.
+    for slow in [true, false] {
+        manager.handle_update(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 7,
+            slow,
+        });
+        while let Ok(update) = output.try_recv() {
+            assert!(update.evpn_announce.is_empty());
+            assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+        }
+        assert_eq!(manager.evpn_admitted_count(peer), 1);
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert!(!manager.has_evpn_feed_completion(peer));
+        assert!(!manager.evpn_recovery_reset_pending(peer));
+        assert!(
+            manager
+                .evpn_recovery
+                .is_dormant(manager.evpn_recovery_handle(peer).unwrap())
+        );
+        if slow {
+            assert!(manager.evpn_grouped_member_of(peer).is_none());
+            assert!(!manager.group_ribs.contains_key(&old_gid));
+            assert!(
+                manager.adj_ribs_out[&peer]
+                    .get_evpn(&remote.key())
+                    .is_some()
+            );
+        } else {
+            assert_eq!(manager.evpn_grouped_member_of(peer), Some(old_gid));
+            assert_ne!(manager.group_ribs[&old_gid].evpn_table_stamp, old_stamp);
+            assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn shared_evpn_fixture_moves_a_first_private_owner_into_a_new_owned_group() {
+    let mut manager = empty_evpn_fixture().with_bench_evpn_group_ownership();
+    let peer = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, 30).into());
+    manager.slow_isolated_peers.insert(peer);
+    let (_, mut output) = register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    assert!(manager.grouped_member_of(peer).is_none());
+    assert!(manager.evpn_recovery_handle(peer).is_none());
+    inject_shared_evpn(&mut manager, vec![received(100)]);
+    assert_eq!(output.try_recv().unwrap().evpn_announce.len(), 1);
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 1);
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 7,
+        slow: false,
+    });
+    assert!(manager.evpn_grouped_member_of(peer).is_some());
+    while let Ok(update) = output.try_recv() {
+        assert!(update.evpn_announce.is_empty());
+        assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+    }
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert!(
+        manager
+            .evpn_recovery
+            .is_dormant(manager.evpn_recovery_handle(peer).unwrap())
+    );
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(!manager.evpn_recovery_reset_pending(peer));
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn shared_evpn_fixture_rtc_family_enable_moves_into_an_absent_private_group() {
+    let mut manager = empty_evpn_fixture().with_bench_evpn_group_ownership();
+    let (peer, mut output) =
+        register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    let old_gid = manager.evpn_grouped_member_of(peer).unwrap();
+    let remote = received(100);
+    inject_shared_evpn(&mut manager, vec![remote.clone()]);
+    assert_eq!(output.try_recv().unwrap().evpn_announce.len(), 1);
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 7,
+        family: (Afi::Ipv4, Safi::RtConstrain),
+        add_path_send_limit: None,
+    });
+    let new_gid = manager.grouped_member_of(peer).unwrap();
+    assert_ne!(old_gid, new_gid);
+    assert!(!manager.group_ribs.contains_key(&old_gid));
+    assert!(manager.evpn_grouped_member_of(peer).is_none());
+    assert!(!manager.group_ribs[&new_gid].owns_evpn_routes());
+    let mut withdrawn = Vec::new();
+    while let Ok(update) = output.try_recv() {
+        assert!(update.evpn_announce.is_empty());
+        withdrawn.extend(update.evpn_withdraw);
+    }
+    assert_eq!(
+        withdrawn,
+        [remote.key()],
+        "empty negotiated RTC membership removes only actual OLD"
+    );
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert_eq!(manager.evpn_admitted_count(peer), 0);
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.evpn_recovery_reset_pending(peer));
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn shared_evpn_fixture_absent_destination_preserves_refused_old_and_ordered_eor() {
+    let mut manager = empty_evpn_fixture().with_bench_evpn_group_ownership();
+    let (peer, mut output) =
+        register_evpn_fixture_peer(&mut manager, 30, EvpnFixturePeer::Eligible);
+    let remote = received(100);
+    inject_shared_evpn(&mut manager, vec![remote.clone()]);
+    let old = output.try_recv().unwrap().evpn_announce[0].clone();
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    manager
+        .pending_eor
+        .entry(peer)
+        .or_default()
+        .insert((Afi::L2Vpn, Safi::Evpn));
+    manager
+        .replace_peer_export_policy_synchronously(peer, Some(strip_rts()))
+        .unwrap();
+    let handle = manager.evpn_recovery_handle(peer).unwrap();
+    assert_eq!(
+        manager.evpn_recovery.proof_keys(handle).unwrap(),
+        Some(vec![old.key()])
+    );
+    assert!(evpn_routes_equal(
+        manager.adj_ribs_out[&peer].get_evpn(&old.key()).unwrap(),
+        &old
+    ));
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(!manager.evpn_recovery.is_dormant(handle));
+    assert!(!manager.evpn_recovery_reset_pending(peer));
+    assert!(
+        !manager.has_private_evpn_handoff(peer),
+        "the refused feed belongs to the new owned destination"
+    );
+    while output.try_recv().is_ok() {}
+
+    manager.resync_dirty_peers_bounded();
+    let mut announced = 0;
+    let mut ended = false;
+    while let Ok(update) = output.try_recv() {
+        assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+        if !update.evpn_announce.is_empty() {
+            assert!(
+                !ended,
+                "the family marker follows all covered announcements"
+            );
+            assert_eq!(update.evpn_announce[0].key(), old.key());
+            announced += update.evpn_announce.len();
+        }
+        if update.end_of_rib.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+            assert_eq!(announced, 1);
+            ended = true;
+        }
+    }
+    assert_eq!(announced, 1);
+    assert!(ended);
+    assert_eq!(manager.evpn_admitted_count(peer), 1);
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), 0);
+    assert!(manager.evpn_recovery.is_dormant(handle));
+    assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
 }
 
 #[cfg(feature = "bench-internals")]

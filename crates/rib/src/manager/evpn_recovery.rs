@@ -876,6 +876,8 @@ impl RibManager {
         let filter = self.member_rt_filter(peer);
         let rejected = self.peer_unexportable.get(&peer);
         let prior_group = old_group.and_then(|gid| self.group_ribs.get(&gid));
+        let prior_filter =
+            prior_group.and_then(|old| self.rtc_export_filter(peer, Some(&old.sendable)));
         if old_is_clean
             && prior_group
                 .is_some_and(|old| !old.evpn_projection_complete_with_checkpoint(&mut checkpoint))
@@ -890,7 +892,14 @@ impl RibManager {
             if let Some(old) = prior_group {
                 let (route, input) = old.evpn_value_before_deltas(key, old_deltas)?;
                 input
-                    .eligible(route, peer, old, self.cluster_id, filter.as_ref(), rejected)
+                    .eligible(
+                        route,
+                        peer,
+                        old,
+                        self.cluster_id,
+                        prior_filter.as_ref(),
+                        rejected,
+                    )
                     .then_some(route)
             } else {
                 private?.get_evpn(key)
@@ -931,7 +940,7 @@ impl RibManager {
                 old_deltas,
                 peer,
                 self.cluster_id,
-                filter.as_ref(),
+                prior_filter.as_ref(),
                 rejected,
                 &checkpoint,
             ) {
@@ -1024,11 +1033,7 @@ impl RibManager {
     }
 
     fn register_evpn_recovery_for_group(&mut self, peer: PeerId, gid: usize, fresh: bool) -> bool {
-        if !self
-            .group_ribs
-            .get(&gid)
-            .is_some_and(super::update_groups::GroupRibOut::owns_evpn_routes)
-        {
+        if !self.planned_group_owns_evpn(gid) {
             return false;
         }
         if self.evpn_registration_reset(peer).is_some() {
@@ -1183,7 +1188,9 @@ impl RibManager {
                 )
         } else {
             let gid = gid.expect("shared capture has an owned group");
-            let filter = self.member_rt_filter(peer);
+            // A family-enable may have published NEW before OLD is captured.
+            let filter = self
+                .rtc_export_filter(peer, self.group_ribs.get(&gid).map(|group| &group.sendable));
             let group = self
                 .group_ribs
                 .get_mut(&gid)
