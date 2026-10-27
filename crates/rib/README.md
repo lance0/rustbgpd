@@ -74,7 +74,7 @@ The update-group and manager inventory has these boundaries:
 | Group `inventory_log` and its dirty-key union | Logs are sharded and retire between checkpoints. The empty union reserves the union of both logs, counting keys churned in both groups once, before checkpointed insertion. |
 | `ExportMemo.entries` | Sharded; full-table export callers already checkpoint per route or candidate. Distinct source attribute allocations can fill the map. |
 | BoRR `refresh_stale_*` | Still requires readiness ownership and checkpoints across snapshot retain, clearing and construction before bounding set growth. |
-| LLGR `*_llgr_stale_local_tags` | Still requires checkpoint-aware promotion through removal, attribute mutation/interning, selection and cleanup before bounding set growth. |
+| LLGR `*_llgr_stale_local_tags` | Sharded. Promotion and mixed-family purges checkpoint every visited route, removal, mutation/interning and scratch retirement under the changing-count readiness owner. Empty affected sets reserve GR-stale identity counts only for transitioning families before filling; selection, distribution and intern cleanup retain the same owner. |
 | Selection-deferral identity sets | Retained identities have admission limits, but resize work is not bounded. EVPN and RTC recorders also need input checkpoints. |
 | First outbound-limit admitted-set installation | Still requires readiness ownership, per-entry checkpoints and reservation from the known family count. The regroup path already reserves and checkpoints. |
 | `current_policy_filtered_routes` temporaries | Still require bounded set growth and missing candidate-transfer checkpoints. Prefix count alone does not bound multipath rejection identities. |

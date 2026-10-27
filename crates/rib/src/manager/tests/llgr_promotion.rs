@@ -1,0 +1,481 @@
+use super::*;
+use std::sync::Mutex;
+
+const FAMILIES: [(Afi, Safi); 7] = [
+    (Afi::Ipv4, Safi::Unicast),
+    (Afi::Ipv4, Safi::FlowSpec),
+    (Afi::L2Vpn, Safi::Evpn),
+    (Afi::BgpLs, Safi::BgpLs),
+    (Afi::Ipv4, Safi::MplsVpn),
+    (Afi::Ipv4, Safi::LabeledUnicast),
+    (Afi::Ipv4, Safi::RtConstrain),
+];
+
+fn sibling(family: (Afi, Safi)) -> Option<(Afi, Safi)> {
+    match family {
+        (Afi::Ipv4, Safi::Unicast | Safi::FlowSpec | Safi::MplsVpn | Safi::LabeledUnicast) => {
+            Some((Afi::Ipv6, family.1))
+        }
+        (Afi::BgpLs, Safi::BgpLs) => Some((Afi::BgpLs, Safi::BgpLsVpn)),
+        _ => None,
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture sends the same retention cases through all seven real receive paths"
+)]
+fn announce_case(manager: &mut RibManager, family: (Afi, Safi), index: u8, other_family: bool) {
+    let addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = peer_v4(addr);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, index, 0), 24);
+    let v6 = Ipv6Prefix::new(
+        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, u16::from(index), 0),
+        112,
+    );
+    let attrs = match index {
+        1 => vec![PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_LLGR,
+        ])],
+        2 => vec![PathAttribute::CommunitiesPartial(vec![
+            rustbgpd_wire::COMMUNITY_LLGR_STALE,
+        ])],
+        4 => vec![PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_LLGR_STALE,
+        ])],
+        _ => Vec::new(),
+    };
+    let stale = other_family || index < 3;
+    let llgr = !other_family && index == 4;
+    let mut unicast = Vec::new();
+    let mut flowspec = Vec::new();
+    let mut evpn = Vec::new();
+    let update = match family.1 {
+        Safi::Unicast => {
+            let mut route = make_route(prefix, addr);
+            if other_family {
+                route.prefix = Prefix::V6(v6);
+            }
+            route.attributes = AttrSet::new(attrs);
+            route.is_stale = stale;
+            route.is_llgr_stale = llgr;
+            unicast.push(route);
+            None
+        }
+        Safi::FlowSpec => {
+            let mut route = make_flowspec_route(addr);
+            let destination = if other_family {
+                route.afi = Afi::Ipv6;
+                rustbgpd_wire::FlowSpecPrefix::V6(rustbgpd_wire::Ipv6PrefixOffset {
+                    prefix: v6,
+                    offset: 0,
+                })
+            } else {
+                rustbgpd_wire::FlowSpecPrefix::V4(prefix)
+            };
+            route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                destination,
+            )];
+            route.attributes = attrs;
+            route.is_stale = stale;
+            route.is_llgr_stale = llgr;
+            flowspec.push(route);
+            None
+        }
+        Safi::Evpn => {
+            let mut route = make_evpn_imet(addr, u32::from(index));
+            route.attributes = AttrSet::new(attrs);
+            route.is_stale = stale;
+            route.is_llgr_stale = llgr;
+            evpn.push(route);
+            None
+        }
+        Safi::BgpLs => {
+            let mut route = make_bgpls_route(addr, index, 100);
+            if other_family {
+                route.family = BgpLsFamily::LinkStateVpn;
+                route.nlri.route_distinguisher = Some([0, 0, 0xfd, 0xe8, 0, 0, 0, 1]);
+            }
+            route.attributes = AttrSet::new(attrs);
+            route.is_stale = stale;
+            route.is_llgr_stale = llgr;
+            Some(RibUpdate::BgpLsRoutesReceived {
+                session_id: 0,
+                peer,
+                announced: vec![route],
+                withdrawn: Vec::new(),
+            })
+        }
+        Safi::MplsVpn => {
+            let mut route = make_vpn_rib_route(addr, index, 100, 100);
+            if other_family {
+                route.nlri.prefix = VpnPrefix::v6(v6.addr, v6.len).unwrap();
+            }
+            route.attributes = AttrSet::new(attrs);
+            route.is_stale = stale;
+            route.is_llgr_stale = llgr;
+            Some(RibUpdate::VpnRoutesReceived {
+                session_id: 0,
+                peer,
+                announced: vec![route],
+                withdrawn: Vec::new(),
+            })
+        }
+        Safi::LabeledUnicast => {
+            let mut route = make_labeled_rib_route(addr, index, 100, 100);
+            if other_family {
+                route.nlri.prefix = Prefix::V6(v6);
+            }
+            route.attributes = AttrSet::new(attrs);
+            route.is_stale = stale;
+            route.is_llgr_stale = llgr;
+            Some(RibUpdate::LabeledRoutesReceived {
+                session_id: 0,
+                peer,
+                announced: vec![route],
+                withdrawn: Vec::new(),
+            })
+        }
+        Safi::RtConstrain => {
+            let mut route = make_rtc_rib_route(addr, u16::from(index), 100);
+            route.attributes = AttrSet::new(attrs);
+            route.is_stale = stale;
+            route.is_llgr_stale = llgr;
+            Some(RibUpdate::RtcRoutesReceived {
+                session_id: 0,
+                peer,
+                announced: vec![route],
+                withdrawn: Vec::new(),
+            })
+        }
+        _ => unreachable!("fixture family"),
+    };
+    manager.handle_update(update.unwrap_or(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: unicast,
+        withdrawn: Vec::new(),
+        flowspec_announced: flowspec,
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: evpn,
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    }));
+    drain_route_chunks(manager);
+}
+
+fn retention_rows(rib: &AdjRibIn, family: (Afi, Safi)) -> Vec<(bool, bool, bool, bool)> {
+    macro_rules! rows {
+        ($routes:expr) => {
+            $routes
+                .map(|route| {
+                    (
+                        route.is_stale,
+                        route.is_llgr_stale,
+                        route.attributes.iter().any(|attr| {
+                            attr.communities().is_some_and(|values| {
+                                values.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+                            })
+                        }),
+                        route.attributes.iter().any(|attr| {
+                            attr.communities().is_some_and(|values| {
+                                values.contains(&rustbgpd_wire::COMMUNITY_NO_LLGR)
+                            })
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+    }
+    let mut rows = match family.1 {
+        Safi::Unicast => rows!(
+            rib.iter()
+                .filter(|route| super::super::helpers::prefix_family(&route.prefix) == family)
+        ),
+        Safi::FlowSpec => rows!(rib.iter_flowspec().filter(|route| route.afi == family.0)),
+        Safi::Evpn => rows!(rib.iter_evpn()),
+        Safi::BgpLs | Safi::BgpLsVpn => rows!(
+            rib.iter_bgpls()
+                .filter(|route| route.family.to_afi_safi() == family)
+        ),
+        Safi::MplsVpn => rows!(rib.iter_vpn().filter(|route| route.afi_safi() == family)),
+        Safi::LabeledUnicast => rows!(
+            rib.iter_labeled()
+                .filter(|route| route.afi_safi() == family)
+        ),
+        Safi::RtConstrain => rows!(rib.iter_rtc()),
+        _ => unreachable!("fixture family"),
+    };
+    rows.sort_unstable();
+    rows
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actual timer caller proves interior replies, changing counts, fenced lanes and exact family retention together"
+)]
+fn run_timer_case(family: (Afi, Safi), excluded: u8, promote: bool) -> usize {
+    let (tx, rx) = mpsc::channel(1);
+    let (query_tx, query_rx) = mpsc::channel(1);
+    let (summary_tx, summary_rx) = mpsc::channel(1);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx)
+        .with_summary_queries(summary_rx);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    for index in 0..5 + excluded {
+        announce_case(&mut manager, family, index, false);
+    }
+    if sibling(family).is_some() {
+        announce_case(&mut manager, family, 100, true);
+    }
+    let initial_count = manager.loc_rib.len();
+    let removed = if promote { 1 } else { 3 };
+    let final_count = if family.1 == Safi::Unicast {
+        initial_count - removed
+    } else {
+        initial_count
+    };
+    let original_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    manager
+        .llgr_stale_deadlines
+        .insert((peer, family.0, family.1), original_deadline);
+    manager
+        .llgr_peers
+        .insert(peer, [family].into_iter().collect());
+    let configured = if promote {
+        family
+    } else if family == FAMILIES[0] {
+        FAMILIES[1]
+    } else {
+        FAMILIES[0]
+    };
+    manager.llgr_peer_config.insert(
+        peer,
+        super::super::helpers::LlgrPeerConfig {
+            peer_llgr_capable: true,
+            peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+                afi: configured.0,
+                safi: configured.1,
+                forwarding_preserved: false,
+                stale_time: 3600,
+            }],
+            local_llgr_stale_time: 3600,
+            stale_routes_time: 360,
+        },
+    );
+    manager
+        .gr_peers
+        .insert(peer, [family].into_iter().collect());
+    manager
+        .gr_stale_deadlines
+        .insert(peer, tokio::time::Instant::now());
+    let orphans: Vec<_> = (0..32)
+        .map(|med| {
+            let mut attrs = AttrSet::new(vec![PathAttribute::Med(med)]);
+            manager.attr_intern.intern(&mut attrs);
+            Arc::downgrade(&attrs)
+        })
+        .collect();
+    let (reply, general) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    let general = Arc::new(Mutex::new(general));
+    let (reply, mutation) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    let mutation = Arc::new(Mutex::new(mutation));
+    let (reply, summary) = oneshot::channel();
+    summary_tx
+        .try_send(crate::RibSummaryQuery::NeighborRibSnapshots {
+            peers: vec![peer],
+            comparison: None,
+            include_retained: true,
+            reply,
+        })
+        .unwrap();
+    let summary = Arc::new(Mutex::new(summary));
+    let pending = Arc::new(Mutex::new(
+        None::<(
+            &'static str,
+            oneshot::Receiver<Result<usize, crate::RibReadinessError>>,
+        )>,
+    ));
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    manager.flush_poll_budget = Duration::ZERO;
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let pending = Arc::clone(&pending);
+        let observations = Arc::clone(&observations);
+        let general = Arc::clone(&general);
+        let mutation = Arc::clone(&mutation);
+        let summary = Arc::clone(&summary);
+        move |stage| {
+            assert!(matches!(
+                general.lock().unwrap().try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                mutation.lock().unwrap().try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                summary.lock().unwrap().try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            if let Some((previous, mut reply)) = pending.lock().unwrap().take() {
+                observations.lock().unwrap().push((
+                    previous,
+                    reply
+                        .try_recv()
+                        .expect("preceding interior checkpoint must answer readiness")
+                        .unwrap(),
+                ));
+            }
+            let (reply, response) = oneshot::channel();
+            readiness_tx
+                .try_send(crate::RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: Instant::now(),
+                })
+                .unwrap();
+            *pending.lock().unwrap() = Some((stage, response));
+        }
+    }));
+    manager.sweep_gr_stale(peer);
+    manager.replacement_readiness_test_hook = None;
+    let (stage, mut reply) = pending
+        .lock()
+        .unwrap()
+        .take()
+        .expect("actual caller installed an owner");
+    observations
+        .lock()
+        .unwrap()
+        .push((stage, reply.try_recv().unwrap().unwrap()));
+    let observations = observations.lock().unwrap();
+    let walked = if promote {
+        "llgr_promotion"
+    } else {
+        "llgr_purge"
+    };
+    for stage in [walked, "llgr_inventory", "llgr_intern_cleanup"] {
+        assert!(
+            observations
+                .iter()
+                .filter(|(seen, _)| *seen == stage)
+                .count()
+                >= 2,
+            "{family:?}: no interior {stage} service"
+        );
+    }
+    assert!(
+        observations
+            .iter()
+            .all(|(_, count)| (final_count..=initial_count).contains(count))
+    );
+    assert_eq!(observations.last().unwrap().1, final_count);
+    assert_eq!(manager.loc_rib.len(), final_count);
+    if family.1 == Safi::Unicast {
+        let counts: Vec<_> = observations
+            .iter()
+            .filter_map(|(stage, count)| (*stage == "selection_recompute").then_some(*count))
+            .collect();
+        assert_eq!(counts.len(), 3);
+        assert_eq!(counts.last(), Some(&final_count));
+        if !promote {
+            assert_eq!(
+                counts,
+                (1..=removed)
+                    .map(|removed| initial_count - removed)
+                    .collect::<Vec<_>>(),
+                "every completed unicast withdrawal publishes its exact count"
+            );
+        }
+    }
+    let mut expected = vec![(false, false, false, false); 1 + usize::from(excluded)];
+    expected.extend(std::iter::repeat_n(
+        (false, true, true, false),
+        if promote { 3 } else { 1 },
+    ));
+    assert_eq!(retention_rows(&manager.ribs[&peer], family), expected);
+    if let Some(sibling) = sibling(family) {
+        assert_eq!(
+            retention_rows(&manager.ribs[&peer], sibling),
+            [(true, false, false, false)]
+        );
+    }
+    let retained = manager.ribs[&peer]
+        .stale_route_counts()
+        .find(|(seen, _)| *seen == family)
+        .unwrap()
+        .1;
+    assert_eq!(retained.stale, 0);
+    assert_eq!(retained.llgr_stale, if promote { 3 } else { 1 });
+    assert_eq!(
+        manager.llgr_stale_deadlines[&(peer, family.0, family.1)],
+        original_deadline
+    );
+    assert!(!manager.gr_stale_deadlines.contains_key(&peer));
+    assert!(
+        orphans.iter().all(|attrs| attrs.upgrade().is_none()),
+        "{family:?}: unreachable intern entries survived cleanup"
+    );
+    assert_eq!(manager.primary_backlog(), 1);
+    assert!(matches!(
+        summary.lock().unwrap().try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    manager.drain_queries(1);
+    assert_eq!(general.lock().unwrap().try_recv().unwrap(), final_count);
+    assert!(matches!(
+        mutation.lock().unwrap().try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        manager.ribs[&peer].maintained_stale_route_counts(),
+        manager.ribs[&peer].scanned_stale_route_counts()
+    );
+    if promote && excluded == 0 {
+        manager.handle_update(gr_with_llgr(peer, 120, vec![family], vec![family], 3600));
+        manager.sweep_gr_stale(peer);
+        assert_eq!(
+            retention_rows(&manager.ribs[&peer], family),
+            [(false, true, true, false); 4],
+            "another restart preserves the previous LLGR rows and promotes the fresh row"
+        );
+        assert_eq!(
+            manager.llgr_stale_deadlines[&(peer, family.0, family.1)],
+            original_deadline,
+            "another restart must not restart the original LLGR stale timer"
+        );
+    }
+    observations
+        .iter()
+        .filter(|(stage, _)| *stage == walked)
+        .count()
+}
+
+#[test]
+fn llgr_timer_promotion_services_all_family_writers_and_excluded_routes() {
+    for family in FAMILIES {
+        let baseline = run_timer_case(family, 0, true);
+        let excluded = run_timer_case(family, 8, true);
+        assert!(
+            excluded >= baseline + 16,
+            "{family:?}: both promotion scans must checkpoint excluded rows"
+        );
+    }
+}
+
+#[test]
+fn llgr_timer_nonnegotiated_purge_services_all_family_writers() {
+    for family in FAMILIES {
+        let baseline = run_timer_case(family, 0, false);
+        let excluded = run_timer_case(family, 8, false);
+        assert!(
+            excluded >= baseline + 8,
+            "{family:?}: purge must checkpoint excluded rows"
+        );
+    }
+}

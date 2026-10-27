@@ -17,6 +17,27 @@ use super::helpers::{
 use crate::route::{BgpLsFamily, BgpLsRouteKey};
 use crate::update::{GrRetentionFamilyState, GrRetentionPhase};
 
+fn extend_llgr_affected<K: Eq + Hash>(
+    affected: &mut HashSet<K>,
+    keys: Vec<K>,
+    checkpoint: &mut impl FnMut(),
+) {
+    #[cfg(test)]
+    let capacity = affected.capacity();
+    checkpoint();
+    for key in keys {
+        checkpoint();
+        affected.insert(key);
+    }
+    checkpoint();
+    #[cfg(test)]
+    assert_eq!(
+        affected.capacity(),
+        capacity,
+        "LLGR affected-key transfer must not grow"
+    );
+}
+
 /// Deadline registry with a cached minimum. The actor loop probes the
 /// nearest GR / LLGR / refresh deadline on every iteration; with the cache
 /// that probe is O(1) while the registry is untouched, and the only full
@@ -917,17 +938,38 @@ impl RibManager {
     /// the GR-stale routes of every family in the peer's LLGR capability to
     /// LLGR-stale, purge the stale routes of the others, and stamp each
     /// promoted family's Long-Lived Stale Time deadline.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "LLGR promotion has unicast + FlowSpec paths"
-    )]
     fn enter_llgr_phase(
         &mut self,
         peer: PeerId,
         families: &[(Afi, Safi)],
         llgr_config: &LlgrPeerConfig,
     ) {
+        self.with_selection_readiness(|manager| {
+            manager.enter_llgr_phase_with_readiness(peer, families, llgr_config);
+        });
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one LLGR owner covers all family mutations, selection, cleanup and timer publication"
+    )]
+    fn enter_llgr_phase_with_readiness(
+        &mut self,
+        peer: PeerId,
+        families: &[(Afi, Safi)],
+        llgr_config: &LlgrPeerConfig,
+    ) {
         let peer_label = peer.label();
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint =
+            || super::replacement_readiness_checkpoint_at(&readiness, "llgr_inventory", false);
+        let mut promote =
+            || super::replacement_readiness_checkpoint_at(&readiness, "llgr_promotion", false);
+        let mut purge =
+            || super::replacement_readiness_checkpoint_at(&readiness, "llgr_purge", false);
+        let mut cleanup =
+            || super::replacement_readiness_checkpoint_at(&readiness, "llgr_intern_cleanup", false);
+        checkpoint();
         // Only promote families that are in the LLGR capability with a
         // non-zero Long-Lived Stale Time; purge the rest. A zero LLST means
         // no LLGR period for the family (RFC 9494 §4.2), so its routes end
@@ -949,66 +991,139 @@ impl RibManager {
             .filter(|f| !llgr_family_set.contains(f))
             .collect();
 
-        let mut affected = HashSet::new();
-        let mut fs_affected = HashSet::new();
-        let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
-        let mut bgpls_affected: HashSet<BgpLsRouteKey> = HashSet::new();
-        let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
-        let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
-        let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
+        // Only GR-stale identities in this transition can become affected.
+        let capacities = self.ribs.get(&peer).map_or([0; 7], |rib| {
+            let mut capacities = [0; 7];
+            for &family in families {
+                checkpoint();
+                let index = match family.1 {
+                    Safi::Unicast => 0,
+                    Safi::FlowSpec => 1,
+                    Safi::Evpn => 2,
+                    Safi::BgpLs | Safi::BgpLsVpn => 3,
+                    Safi::MplsVpn => 4,
+                    Safi::LabeledUnicast => 5,
+                    Safi::RtConstrain => 6,
+                    _ => continue,
+                };
+                capacities[index] += rib.gr_stale_family_len(family);
+            }
+            capacities
+        });
+        let mut affected = HashSet::with_capacity(capacities[0]);
+        checkpoint();
+        let mut fs_affected = HashSet::with_capacity(capacities[1]);
+        checkpoint();
+        let mut evpn_affected = HashSet::with_capacity(capacities[2]);
+        checkpoint();
+        let mut bgpls_affected = HashSet::with_capacity(capacities[3]);
+        checkpoint();
+        let mut vpn_affected = HashSet::with_capacity(capacities[4]);
+        checkpoint();
+        let mut labeled_affected = HashSet::with_capacity(capacities[5]);
+        checkpoint();
+        let mut rtc_affected = HashSet::with_capacity(capacities[6]);
+        checkpoint();
         let mut rib_len = [0; 2];
         let mut evpn_len = 0;
         if let Some(rib) = self.ribs.get_mut(&peer) {
-            // Promote LLGR-negotiated families to LLGR-stale
             for &family in &llgr_families {
-                let promoted = rib.promote_to_llgr_stale(family, &mut self.attr_intern);
-                for p in promoted {
-                    affected.insert(p);
-                }
-                let fs_promoted = rib.promote_to_llgr_stale_flowspec(family);
-                for r in fs_promoted {
-                    fs_affected.insert(r);
-                }
-                let evpn_promoted = rib.promote_to_llgr_stale_evpn(family, &mut self.attr_intern);
-                for k in evpn_promoted {
-                    evpn_affected.insert(k);
-                }
+                extend_llgr_affected(
+                    &mut affected,
+                    rib.promote_to_llgr_stale_with_checkpoint(
+                        family,
+                        &mut self.attr_intern,
+                        &mut promote,
+                    ),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut fs_affected,
+                    rib.promote_to_llgr_stale_flowspec_with_checkpoint(family, &mut promote),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut evpn_affected,
+                    rib.promote_to_llgr_stale_evpn_with_checkpoint(
+                        family,
+                        &mut self.attr_intern,
+                        &mut promote,
+                    ),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut vpn_affected,
+                    rib.promote_to_llgr_stale_vpn_with_checkpoint(
+                        family,
+                        &mut self.attr_intern,
+                        &mut promote,
+                    ),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut labeled_affected,
+                    rib.promote_to_llgr_stale_labeled_with_checkpoint(
+                        family,
+                        &mut self.attr_intern,
+                        &mut promote,
+                    ),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut bgpls_affected,
+                    rib.promote_to_llgr_stale_bgpls_with_checkpoint(
+                        family,
+                        &mut self.attr_intern,
+                        &mut promote,
+                    ),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut rtc_affected,
+                    rib.promote_to_llgr_stale_rtc_with_checkpoint(
+                        family,
+                        &mut self.attr_intern,
+                        &mut promote,
+                    ),
+                    &mut checkpoint,
+                );
             }
-            // Sweep families NOT in LLGR — these cannot be preserved
             for &family in &non_llgr_families {
-                let swept = rib.sweep_stale_family(family);
-                for p in swept {
-                    affected.insert(p);
-                }
-                let fs_swept = rib.sweep_stale_flowspec_family(family);
-                for r in fs_swept {
-                    fs_affected.insert(r);
-                }
-                let evpn_swept = rib.sweep_stale_family_evpn(family);
-                for k in evpn_swept {
-                    evpn_affected.insert(k);
-                }
-            }
-            // Typed families (VPN, BGP-LS, RTC) follow the same split:
-            // LLGR-negotiated tuples promote to LLGR-stale (routes
-            // carrying NO_LLGR are removed instead and their keys join
-            // the affected sets so the recomputes below withdraw them
-            // downstream); tuples outside the LLGR capability purge.
-            // Each helper is a family-scoped no-op for non-matching
-            // tuples.
-            for &family in &llgr_families {
-                vpn_affected.extend(rib.promote_to_llgr_stale_vpn(family, &mut self.attr_intern));
-                labeled_affected
-                    .extend(rib.promote_to_llgr_stale_labeled(family, &mut self.attr_intern));
-                bgpls_affected
-                    .extend(rib.promote_to_llgr_stale_bgpls(family, &mut self.attr_intern));
-                rtc_affected.extend(rib.promote_to_llgr_stale_rtc(family, &mut self.attr_intern));
-            }
-            for &family in &non_llgr_families {
-                vpn_affected.extend(rib.sweep_stale_family_vpn(family));
-                labeled_affected.extend(rib.sweep_stale_family_labeled(family));
-                bgpls_affected.extend(rib.sweep_stale_family_bgpls(family));
-                rtc_affected.extend(rib.sweep_stale_family_rtc(family));
+                extend_llgr_affected(
+                    &mut affected,
+                    rib.sweep_stale_family_with_checkpoint(family, &mut purge),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut fs_affected,
+                    rib.sweep_stale_flowspec_family_with_checkpoint(family, &mut purge),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut evpn_affected,
+                    rib.sweep_stale_family_evpn_with_checkpoint(family, &mut purge),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut vpn_affected,
+                    rib.sweep_stale_family_vpn_with_checkpoint(family, &mut purge),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut labeled_affected,
+                    rib.sweep_stale_family_labeled_with_checkpoint(family, &mut purge),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut bgpls_affected,
+                    rib.sweep_stale_family_bgpls_with_checkpoint(family, &mut purge),
+                    &mut checkpoint,
+                );
+                extend_llgr_affected(
+                    &mut rtc_affected,
+                    rib.sweep_stale_family_rtc_with_checkpoint(family, &mut purge),
+                    &mut checkpoint,
+                );
             }
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
@@ -1023,7 +1138,7 @@ impl RibManager {
             // sweeps). A second GC below runs after Loc-RIB recompute
             // drops selected-route clones that were still holding old
             // Arcs alive here.
-            self.attr_intern.gc();
+            self.attr_intern.gc_with_checkpoint(&mut cleanup);
             self.metrics
                 .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
         }
@@ -1032,8 +1147,9 @@ impl RibManager {
         }
         if !affected.is_empty() {
             info!(%peer, count = affected.len(), "promoted routes to LLGR stale");
-            let changed = self.recompute_best(&affected);
+            let mut changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
+            super::retire_hash_set(&mut changed, &mut checkpoint);
         }
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
@@ -1062,7 +1178,7 @@ impl RibManager {
             || !labeled_affected.is_empty()
             || rtc_changed
         {
-            self.gc_attr_intern();
+            self.gc_attr_intern_with_checkpoint(&mut cleanup);
         }
         if rtc_changed {
             // A non-LLGR purge (or a NO_LLGR removal during promotion)
@@ -1112,6 +1228,13 @@ impl RibManager {
             .entry(peer)
             .or_default()
             .extend(llgr_families);
+        super::retire_hash_set(&mut affected, &mut checkpoint);
+        super::retire_hash_set(&mut fs_affected, &mut checkpoint);
+        super::retire_hash_set(&mut evpn_affected, &mut checkpoint);
+        super::retire_hash_set(&mut bgpls_affected, &mut checkpoint);
+        super::retire_hash_set(&mut vpn_affected, &mut checkpoint);
+        super::retire_hash_set(&mut labeled_affected, &mut checkpoint);
+        super::retire_hash_set(&mut rtc_affected, &mut checkpoint);
     }
 
     /// Sweep every (peer, AFI, SAFI) whose LLGR stale deadline has expired,
