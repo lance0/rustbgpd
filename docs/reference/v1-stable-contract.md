@@ -108,10 +108,10 @@ The following shared surfaces remain **outside v1**:
 The message-graph digest includes the shared messages as a review tripwire;
 it does not promote the excluded fields or modes. `OK` means local mutation,
 and the advertised view means admission to the destination's outbound channel.
-Selection may be deferred during GR; a full outbound channel leaves prior
-committed rows visible until resynchronization. Neither observation proves
-remote acceptance. Local intent is process-local and must be re-injected by
-the controller after a daemon restart.
+Received selection may be deferred during GR; a full outbound channel leaves
+prior committed rows visible until resynchronization. Neither observation
+proves remote acceptance. Local intent is process-local and must be
+re-injected by the controller after a daemon restart.
 
 The [dated dual-stack qualification](../artifacts/interop/m22-flowspec-controller-20261002/README.md)
 supplies the controller lifecycle evidence: 100 rules, 50 per AFI, against
@@ -140,20 +140,32 @@ intent separately from committed advertisements and remote observations.
 
 A planned restart (SIGTERM with a Graceful Restart marker in
 `runtime_state_dir`) arms RFC 4724 selection deferral when any static
-neighbor has Graceful Restart enabled. Re-injected FlowSpec rules are selected
-and sent to Established peers at once; rules received from peers, and the
-FlowSpec End-of-RIB, wait for the deferral to release
-([api.md](api.md#flowspec-injection-contract)). Re-injected unicast routes,
-RTBH host routes included, wait too: `ListPathExportDispositions` reports them
-`PENDING` with reason `selection_deferred`, and
-`NeighborState.selection_deferral` shows the active family rows. The window
-lasts until every static Graceful Restart neighbor has sent End-of-RIB for the
-family or been excluded (for example, its OPEN lacks Graceful Restart for that
-family), and at most the maximum effective `gr_restart_time`, counted from
-shutdown (120 seconds by default). A neighbor that never comes up holds the
-window for the whole time, including toward peers that are already
-Established. `MarkReplayComplete` does not end it; it releases only the
-separate [End-of-RIB grace window](configuration.md#planned-restart-end-of-rib-grace-window).
+neighbor has Graceful Restart enabled. Re-injected unicast routes and FlowSpec
+rules are eligible for selection and export during that window, subject to
+ordinary policy and admission. For unicast this includes leased and unleased
+routes, every local `path_id`, and host or non-host prefixes, with or without
+the BLACKHOLE community. While selection is deferred, local candidates
+compete only with other local candidates in every selection mode; received
+candidates remain retained and ineligible. `ListPathExportDispositions`
+reports local outbound-channel admission as `COMMITTED`, never remote acceptance
+or enforcement. Other local candidates, policy and admission can still
+withhold or delay an export. See the API contracts for
+[unicast](api.md#unicast-injection-contract) and
+[FlowSpec](api.md#flowspec-injection-contract).
+
+`NeighborState.selection_deferral` shows the active family rows. Ordinary
+competition resumes when selection becomes available, including when
+collision failback stages selection while completion markers remain held.
+The marker-bounded window lasts at most the maximum effective
+`gr_restart_time`, counted from shutdown (120 seconds by default). A neighbor
+that never comes up can hold received selection and family End-of-RIB for
+that whole window. End-of-RIB follows release selection and all existing
+completion gates. `MarkReplayComplete` releases only the separate
+[End-of-RIB grace window](configuration.md#planned-restart-end-of-rib-grace-window);
+it does not end selection deferral or the other convergence and refresh
+holds. Delete and lease expiry withdraw local intent during deferral without
+advertising a received fallback.
+
 To shorten the window, remove placeholder neighbors that will not come up,
 set `graceful_restart = false` on neighbors that are not expected to return,
 or lower `gr_restart_time`.

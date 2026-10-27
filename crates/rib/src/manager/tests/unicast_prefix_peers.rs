@@ -113,7 +113,7 @@ fn assert_prefix_state(
         .collect::<Vec<_>>();
     full.sort_unstable();
     let mut indexed =
-        RibManager::unicast_candidates(&manager.ribs, &manager.unicast_prefix_peers, &p)
+        RibManager::unicast_candidates(&manager.ribs, &manager.unicast_prefix_peers, &p, false)
             .map(route_identity)
             .collect::<Vec<_>>();
     indexed.sort_unstable();

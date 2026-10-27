@@ -172,6 +172,10 @@ impl RibManager {
                         &group.table,
                         &self.peer_is_rr_client,
                         prefix,
+                        self.selection_deferral.as_ref().is_some_and(|deferral| {
+                            deferral
+                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                        }),
                         group.is_ebgp,
                         group.interpret_rfc1997,
                         group.is_rr_client,
@@ -349,6 +353,7 @@ impl RibManager {
                     &group.table,
                     &self.peer_is_rr_client,
                     prefix,
+                    self.selection_deferred(crate::manager::helpers::prefix_family(prefix)),
                     &mut target,
                     group.is_ebgp,
                     group.interpret_rfc1997,

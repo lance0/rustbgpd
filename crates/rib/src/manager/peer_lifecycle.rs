@@ -11,7 +11,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
-use super::helpers::prefix_family;
+use super::helpers::{LOCAL_PEER, prefix_family};
 use super::{
     ExactExportKey, LiveSessionRecord, MAX_LIVE_SESSIONS_PER_PEER, PolicyFilteredRouteKey,
     RibManager,
@@ -2051,7 +2051,7 @@ impl RibManager {
         }
     }
 
-    /// Build one plain-group inventory for a join (all released families) or
+    /// Build one plain-group inventory for a join (including injected unicast) or
     /// a refresh (one already released family). No member state is committed.
     pub(super) fn build_group_replay(
         &self,
@@ -2070,10 +2070,9 @@ impl RibManager {
         for route in group.table.iter() {
             super::replacement_readiness_checkpoint_at(&self.replacement_readiness, label, false);
             let route_family = prefix_family(&route.prefix);
-            if family.map_or_else(
-                || self.selection_deferred(route_family),
-                |family| family != route_family,
-            ) {
+            if family.is_some_and(|family| family != route_family)
+                || (self.selection_deferred(route_family) && route.peer != LOCAL_PEER)
+            {
                 continue;
             }
             if announce.is_empty() {
@@ -2143,7 +2142,8 @@ impl RibManager {
     }
 
     /// Borrowed group entries a joining member replays: the resolved
-    /// `adv(m)` slot of every staged key outside a selection-deferred family
+    /// `adv(m)` slot of every eligible staged key, including local injections
+    /// in a selection-deferred family,
     /// whose source control does not suppress it toward this member. The
     /// vector grows with the retained set; selection deferral or
     /// route-server suppression can leave a small replay from a full table,
@@ -2159,9 +2159,6 @@ impl RibManager {
         let mut replay = Vec::new();
         for staged in group.table.iter() {
             checkpoint();
-            if self.selection_deferred(prefix_family(&staged.prefix)) {
-                continue;
-            }
             // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
             // ADR-0126 Decision 4): the staged winner for a
             // non-source member, the lane runner-up for the
@@ -2171,6 +2168,11 @@ impl RibManager {
             let Some(entry) = group.adv_entry(peer, &staged.prefix, staged.path_id) else {
                 continue;
             };
+            if self.selection_deferred(prefix_family(&entry.route.prefix))
+                && entry.route.peer != LOCAL_PEER
+            {
+                continue;
+            }
             let (source_communities, source_large_communities) =
                 group.source_control_for_route(entry.route, entry.source_attrs);
             if super::distribution::rs_control::rs_control_suppressed(
@@ -2221,9 +2223,12 @@ impl RibManager {
             families
                 .iter()
                 .copied()
-                // A deferred FlowSpec Loc-RIB holds only injected rules,
-                // which are dumped now; its EoR waits for the release.
-                .filter(|family| family.1 == Safi::FlowSpec || !self.selection_deferred(*family))
+                // Deferred unicast and FlowSpec select only injected routes;
+                // their initial UPDATEs pass while End-of-RIB stays held.
+                .filter(|family| {
+                    matches!(family.1, Safi::Unicast | Safi::FlowSpec)
+                        || !self.selection_deferred(*family)
+                })
                 .collect::<Vec<_>>()
         });
         let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
@@ -2327,8 +2332,7 @@ impl RibManager {
             .inspect(|_| checkpoint_at("initial_inventory"))
             .filter(|prefix| {
                 let family = prefix_family(prefix);
-                !self.selection_deferred(family)
-                    && !orf_gated.contains(&family)
+                !orf_gated.contains(&family)
                     && sendable
                         .as_ref()
                         .is_some_and(|families| families.contains(&family))
@@ -2487,6 +2491,9 @@ impl RibManager {
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
+                    self.selection_deferral.as_ref().is_some_and(|deferral| {
+                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                    }),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -2535,6 +2542,9 @@ impl RibManager {
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
+                    self.selection_deferral.as_ref().is_some_and(|deferral| {
+                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                    }),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -2576,6 +2586,9 @@ impl RibManager {
                     orr_topology,
                     orr_spf,
                     prefix,
+                    self.selection_deferral.as_ref().is_some_and(|deferral| {
+                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
+                    }),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -2617,6 +2630,9 @@ impl RibManager {
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
+                    self.selection_deferral
+                        .as_ref()
+                        .is_some_and(|deferral| deferral.selection_deferred(prefix_family(prefix))),
                     &mut target,
                     target_is_ebgp,
                     interpret_rfc1997,
