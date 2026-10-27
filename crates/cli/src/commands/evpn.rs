@@ -2,7 +2,6 @@ use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_add
 use crate::connection::{Connection, MUTATION_RPC_TIMEOUT, mutation_rpc, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
-use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::evpn_service_client::EvpnServiceClient;
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::{
@@ -1881,8 +1880,7 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
     .into_inner()
     .routes;
 
-    let mut control_client =
-        ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut control_client = connection.metrics_client();
     let metrics = read_rpc("GetMetrics", control_client.get_metrics(MetricsRequest {}))
         .await?
         .into_inner()

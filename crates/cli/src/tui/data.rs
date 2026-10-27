@@ -597,8 +597,7 @@ async fn poll_once(connection: &Connection, state: &mut FetcherState) -> DataSna
 
     if now >= state.next_metrics_poll {
         state.next_metrics_poll = now + METRICS_POLL_INTERVAL;
-        let mut client =
-            ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        let mut client = connection.metrics_client();
         match client.get_metrics(MetricsRequest {}).await {
             Ok(response) => {
                 state.rpki_vrp_count = parse_vrp_count(&response.into_inner().prometheus_text);
