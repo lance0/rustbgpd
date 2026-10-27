@@ -57,6 +57,17 @@ fn format_action(a: &FlowSpecAction) -> String {
         Some(crate::proto::flow_spec_action::Action::Redirect(r)) => {
             format!("redirect={}", r.route_target)
         }
+        Some(crate::proto::flow_spec_action::Action::RedirectIp(r)) => {
+            format!(
+                "{}={}",
+                if r.copy {
+                    "copy-to-ip"
+                } else {
+                    "redirect-to-ip"
+                },
+                r.address
+            )
+        }
         Some(crate::proto::flow_spec_action::Action::TrafficRatePackets(r)) => {
             format!("rate-pps={}", r.rate)
         }
@@ -80,6 +91,9 @@ fn route_to_json(route: &crate::proto::FlowSpecRouteEntry) -> serde_json::Value 
         "communities": route.communities.iter().map(|c| output::format_community(*c)).collect::<Vec<_>>(),
         "extended_communities": route.extended_communities,
     });
+    if !route.ipv6_extended_communities.is_empty() {
+        value["ipv6_extended_communities"] = serde_json::json!(route.ipv6_extended_communities);
+    }
     if !route.injection_owner.is_empty() {
         value["lease"] = output::lease_json(
             &route.injection_owner,
@@ -347,6 +361,7 @@ pub async fn add(
             actions: parsed_actions,
             communities: vec![],
             extended_communities: vec![],
+            ipv6_extended_communities: vec![],
         }),
     )
     .await?

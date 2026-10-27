@@ -15,6 +15,7 @@ mod test_support;
 async fn flowspec_json_covers_proto_fields() {
     let server = test_support::spawn_mock_server(None).await;
     let raw = vec![0x800c_fde8_3f80_0000, u64::MAX, 0x800c_fde8_3f80_0000, 0];
+    let raw_ipv6 = vec![vec![0xff; 20], vec![0; 20], vec![0xff; 20]];
     // Keep generated route, component, and action fixtures exhaustive: a new
     // API field must prompt a projection decision and an expected-output update.
     *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {
@@ -88,6 +89,22 @@ async fn flowspec_json_covers_proto_fields() {
                         )),
                     },
                     proto::FlowSpecAction { action: None },
+                    proto::FlowSpecAction {
+                        action: Some(proto::flow_spec_action::Action::RedirectIp(
+                            proto::FlowSpecRedirectIp {
+                                address: "192.0.2.10".into(),
+                                copy: false,
+                            },
+                        )),
+                    },
+                    proto::FlowSpecAction {
+                        action: Some(proto::flow_spec_action::Action::RedirectIp(
+                            proto::FlowSpecRedirectIp {
+                                address: "2001:db8::10".into(),
+                                copy: true,
+                            },
+                        )),
+                    },
                 ],
                 peer_address: "192.0.2.1".into(),
                 afi_safi: proto::AddressFamily::Ipv6Flowspec.into(),
@@ -97,6 +114,7 @@ async fn flowspec_json_covers_proto_fields() {
                 injection_owner: String::new(),
                 lease_generation: None,
                 lease_remaining_ms: None,
+                ipv6_extended_communities: raw_ipv6.clone(),
             },
             proto::FlowSpecRouteEntry::default(),
         ],
@@ -131,12 +149,13 @@ async fn flowspec_json_covers_proto_fields() {
             ],
             // Curated action strings are intentional; raw communities preserve
             // values outside the typed action projection, their order and duplicates.
-            "actions": ["drop", "rate=1024", "sample", "terminal", "mark-dscp=46", "redirect=65000:200", "none"],
+            "actions": ["drop", "rate=1024", "sample", "terminal", "mark-dscp=46", "redirect=65000:200", "none", "redirect-to-ip=192.0.2.10", "copy-to-ip=2001:db8::10"],
             "peer_address": "192.0.2.1",
             "afi_safi": "ipv6_flowspec",
             "as_path": [65001],
             "communities": ["65000:100"],
             "extended_communities": raw,
+            "ipv6_extended_communities": raw_ipv6,
         })
     );
     assert_eq!(
@@ -159,7 +178,7 @@ async fn flowspec_json_covers_proto_fields() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "  match [dest=2001:db8::/32, src=::1234:5678:9a00:0/104, port==443, unknown=opaque] action [drop, rate=1024, sample, terminal, mark-dscp=46, redirect=65000:200, none] from 192.0.2.1 (ipv6_flowspec)\n"
+        "  match [dest=2001:db8::/32, src=::1234:5678:9a00:0/104, port==443, unknown=opaque] action [drop, rate=1024, sample, terminal, mark-dscp=46, redirect=65000:200, none, redirect-to-ip=192.0.2.10, copy-to-ip=2001:db8::10] from 192.0.2.1 (ipv6_flowspec)\n"
     );
     server
         .state
@@ -213,6 +232,7 @@ async fn received_flowspec_json_projection_covers_proto_fields_and_pending_resul
                     injection_owner: String::new(),
                     lease_generation: None,
                     lease_remaining_ms: None,
+                    ipv6_extended_communities: vec![],
                 }),
                 path_id: u32::MAX,
                 selected: *status == proto::FlowSpecValidationStatus::Feasible,

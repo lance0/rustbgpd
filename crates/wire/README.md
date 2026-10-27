@@ -16,6 +16,14 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+The source tree prepares wire 0.27, FSM 0.14 and RPKI 0.9; these versions
+are not yet published. Upgrade the three crates together when exchanging
+public wire types. Attribute 25 now decodes to typed, lossless twenty-octet
+communities, with direct IPv6 target-IP helpers; IPv4 direct targets join
+`FlowSpecAction`. Existing enums are non-exhaustive, but consumers matching
+exact decoded variants must account for the new variants. See the
+[wire changelog](CHANGELOG.md).
+
 ### 0.26.0 compatibility note
 
 `rustbgpd-wire` 0.26.0 is a breaking minor release for UPDATE validation
@@ -447,7 +455,7 @@ Add the published codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.26.1"
+rustbgpd-wire = "0.27.0"
 bytes = "1"
 ```
 

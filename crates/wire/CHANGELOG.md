@@ -3,6 +3,20 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.27.0 - Unreleased
+
+- Add the IPv4 direct target-IP `FlowSpecAction::RedirectToIp` and the
+  lossless `Ipv6ExtendedCommunity` wrapper with IPv6 target-IP helpers,
+  following draft-ietf-idr-flowspec-redirect-ip-16. Redirect and copy are
+  distinct; originated reserved bits are zero and received bits survive raw.
+- Path attribute 25 now decodes as `Ipv6ExtendedCommunities` or its Partial
+  variant instead of `Unknown`. Encoding preserves received Partial and every
+  20-octet value, including unknown types; originated values do not invent
+  Partial. Empty or non-multiple-of-20 payloads remain malformed. These public
+  additions and the decoded-variant change use a new minor compatibility line.
+- Pair this prepared wire line with FSM 0.14 and RPKI 0.9 when sharing public
+  wire types. These crate versions are not published by this change.
+
 ## 0.26.1 - 2026-10-24
 
 - Documentation only: document the `value` and `max` fields of

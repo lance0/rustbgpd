@@ -4135,6 +4135,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let mut as_path = Vec::new();
     let mut communities = Vec::new();
     let mut extended_communities = Vec::new();
+    let mut ipv6_extended_communities = Vec::new();
 
     for attr in &route.attributes {
         if let Some(values) = attr.communities() {
@@ -4143,6 +4144,10 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         }
         if let Some(values) = attr.extended_communities() {
             extended_communities.extend(values.iter().map(|c| c.as_u64()));
+            continue;
+        }
+        if let Some(values) = attr.ipv6_extended_communities() {
+            ipv6_extended_communities.extend(values.iter().map(|value| value.as_bytes().to_vec()));
             continue;
         }
         if let PathAttribute::AsPath(path) = attr {
@@ -4158,7 +4163,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let components = flowspec_components_to_proto(&route.rule);
 
     // Extract FlowSpec actions from extended communities
-    let actions: Vec<proto::FlowSpecAction> = route
+    let mut actions: Vec<proto::FlowSpecAction> = route
         .attributes
         .iter()
         .filter_map(PathAttribute::extended_communities)
@@ -4199,6 +4204,12 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
                     redirect(format!("0.{asn}:{value}"))
                 }
                 FA::Redirect4Octet { asn, value } => redirect(format!("{asn}:{value}")),
+                FA::RedirectToIp { addr, copy } => {
+                    proto::flow_spec_action::Action::RedirectIp(proto::FlowSpecRedirectIp {
+                        address: addr.to_string(),
+                        copy,
+                    })
+                }
                 _ => return None,
             };
             Some(proto::FlowSpecAction {
@@ -4206,6 +4217,24 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
             })
         })
         .collect();
+    actions.extend(
+        route
+            .attributes
+            .iter()
+            .filter_map(PathAttribute::ipv6_extended_communities)
+            .flatten()
+            .filter_map(|community| {
+                let (addr, copy) = community.as_flowspec_redirect_to_ip()?;
+                Some(proto::FlowSpecAction {
+                    action: Some(proto::flow_spec_action::Action::RedirectIp(
+                        proto::FlowSpecRedirectIp {
+                            address: addr.to_string(),
+                            copy,
+                        },
+                    )),
+                })
+            }),
+    );
 
     // FlowSpec routes never carry AFI L2VPN; map any unexpected variant
     // to UNSPECIFIED rather than panicking inside the async gRPC handler
@@ -4230,6 +4259,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         as_path,
         communities,
         extended_communities,
+        ipv6_extended_communities,
         injection_owner: String::new(),
         lease_generation: None,
         lease_remaining_ms: None,
@@ -8853,6 +8883,7 @@ mod tests {
                     injection_owner: String::new(),
                     lease_generation: None,
                     lease_remaining_ms: None,
+                    ipv6_extended_communities: vec![],
                 }),
                 path_id: u32::MAX,
                 selected: false,
@@ -8890,11 +8921,26 @@ mod tests {
                 asn: 65001,
                 value: 400,
             },
+            FA::RedirectToIp {
+                addr: Ipv4Addr::new(192, 0, 2, 10),
+                copy: true,
+            },
         ];
         let ecs: Vec<_> = wire_actions
             .iter()
             .map(rustbgpd_wire::ExtendedCommunity::from_flowspec_action)
             .collect();
+        let mut raw_ipv6 = [0xff; 20];
+        let unknown = rustbgpd_wire::Ipv6ExtendedCommunity::new(raw_ipv6);
+        raw_ipv6 = *rustbgpd_wire::Ipv6ExtendedCommunity::from_flowspec_redirect_to_ip(
+            "2001:db8::10".parse().unwrap(),
+            false,
+        )
+        .as_bytes();
+        // Reserved bits are ignored by the typed projection, retained raw.
+        raw_ipv6[18] = 0xff;
+        raw_ipv6[19] = 0xfe;
+        let target = rustbgpd_wire::Ipv6ExtendedCommunity::new(raw_ipv6);
         let route = FlowSpecRoute {
             rule: rustbgpd_wire::FlowSpecRule {
                 components: vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
@@ -8906,7 +8952,10 @@ mod tests {
             },
             afi: Afi::Ipv4,
             peer: PeerId::from_addr("192.0.2.1".parse().unwrap()),
-            attributes: vec![PathAttribute::ExtendedCommunities(ecs.clone())],
+            attributes: vec![
+                PathAttribute::ExtendedCommunities(ecs.clone()),
+                PathAttribute::Ipv6ExtendedCommunitiesPartial(vec![unknown, target, unknown]),
+            ],
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -8934,11 +8983,31 @@ mod tests {
                 redirect("192.0.2.1:200"),
                 redirect("4200000000:300"),
                 redirect("0.65001:400"),
+                proto::FlowSpecAction {
+                    action: Some(proto::flow_spec_action::Action::RedirectIp(
+                        proto::FlowSpecRedirectIp {
+                            address: "192.0.2.10".into(),
+                            copy: true,
+                        },
+                    )),
+                },
+                proto::FlowSpecAction {
+                    action: Some(proto::flow_spec_action::Action::RedirectIp(
+                        proto::FlowSpecRedirectIp {
+                            address: "2001:db8::10".into(),
+                            copy: false,
+                        },
+                    )),
+                },
             ]
         );
         assert_eq!(
             entry.extended_communities,
             ecs.iter().map(|ec| ec.as_u64()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            entry.ipv6_extended_communities,
+            vec![vec![0xff; 20], raw_ipv6.to_vec(), vec![0xff; 20]]
         );
     }
 

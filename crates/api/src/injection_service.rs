@@ -30,9 +30,9 @@ use rustbgpd_rib::{
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, BitmaskMatch, EthernetSegmentIdentifier, EthernetTagId, EvpnImet,
     EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
-    FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset,
-    LargeCommunity, MacAddress, MplsLabel, NumericMatch, Origin, PathAttribute, Prefix,
-    RouteDistinguisher,
+    FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix, Ipv6ExtendedCommunity, Ipv6Prefix,
+    Ipv6PrefixOffset, LargeCommunity, MacAddress, MplsLabel, NumericMatch, Origin, PathAttribute,
+    Prefix, RouteDistinguisher,
 };
 
 /// gRPC service for injecting and withdrawing locally-originated routes.
@@ -901,13 +901,62 @@ fn build_injected_flowspec(req: proto::AddFlowSpecRequest) -> Result<FlowSpecRou
         .iter()
         .map(|&v| ExtendedCommunity::new(v))
         .collect();
+    let mut ipv6_ecs = req
+        .ipv6_extended_communities
+        .iter()
+        .map(|value| {
+            let octets: [u8; 20] = value.as_slice().try_into().map_err(|_| {
+                Status::invalid_argument(
+                    "each IPv6 extended community must contain exactly 20 octets",
+                )
+            })?;
+            Ok(Ipv6ExtendedCommunity::new(octets))
+        })
+        .collect::<Result<Vec<_>, Status>>()?;
+    let has_typed_redirect = req.actions.iter().any(|action| {
+        matches!(
+            action.action,
+            Some(proto::flow_spec_action::Action::RedirectIp(_))
+        )
+    });
+    if has_typed_redirect
+        && (ecs.iter().any(|ec| {
+            matches!(
+                ec.as_flowspec_action(),
+                Some(rustbgpd_wire::FlowSpecAction::RedirectToIp { .. })
+            )
+        }) || ipv6_ecs
+            .iter()
+            .any(|ec| ec.as_flowspec_redirect_to_ip().is_some()))
+    {
+        return Err(Status::invalid_argument(
+            "redirect_ip must not also be supplied as a raw target-IP action",
+        ));
+    }
     for action in &req.actions {
+        if let Some(proto::flow_spec_action::Action::RedirectIp(target)) = &action.action {
+            match parse_redirect_ip(&target.address)? {
+                IpAddr::V4(addr) => ecs.push(ExtendedCommunity::from_flowspec_action(
+                    &rustbgpd_wire::FlowSpecAction::RedirectToIp {
+                        addr,
+                        copy: target.copy,
+                    },
+                )),
+                IpAddr::V6(addr) => ipv6_ecs.push(
+                    Ipv6ExtendedCommunity::from_flowspec_redirect_to_ip(addr, target.copy),
+                ),
+            }
+            continue;
+        }
         if let Some(ec) = flowspec_action_to_ec(action)? {
             ecs.push(ec);
         }
     }
     if !ecs.is_empty() {
         attributes.push(PathAttribute::ExtendedCommunities(ecs));
+    }
+    if !ipv6_ecs.is_empty() {
+        attributes.push(PathAttribute::Ipv6ExtendedCommunities(ipv6_ecs));
     }
     if !req.communities.is_empty() {
         attributes.push(PathAttribute::Communities(req.communities));
@@ -1892,8 +1941,28 @@ fn flowspec_action_to_ec(
             }
         }
         proto::flow_spec_action::Action::Redirect(r) => return parse_redirect(&r.route_target),
+        proto::flow_spec_action::Action::RedirectIp(_) => {
+            return Err(Status::invalid_argument(
+                "redirect_ip requires family-aware community construction",
+            ));
+        }
     };
     Ok(Some(ExtendedCommunity::from_flowspec_action(&wire_action)))
+}
+
+fn parse_redirect_ip(address: &str) -> Result<IpAddr, Status> {
+    let address: IpAddr = address.parse().map_err(|_| {
+        Status::invalid_argument("redirect_ip.address must be a unicast IP literal")
+    })?;
+    if address.is_unspecified()
+        || address.is_multicast()
+        || matches!(address, IpAddr::V4(ip) if ip.is_broadcast())
+    {
+        return Err(Status::invalid_argument(
+            "redirect_ip.address must be a unicast IP literal",
+        ));
+    }
+    Ok(address)
 }
 
 /// Parse `FlowSpecRedirect.route_target` into one of the RFC 8955 §7.4 /
@@ -3254,6 +3323,7 @@ mod tests {
                 actions: vec![],
                 communities: vec![],
                 extended_communities: vec![],
+                ipv6_extended_communities: vec![],
             }))
             .await
             .unwrap_err();
@@ -3487,6 +3557,7 @@ mod tests {
                 actions: Vec::new(),
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
+                ipv6_extended_communities: vec![],
             }))
             .await
             .unwrap_err();
@@ -4565,6 +4636,7 @@ mod tests {
                 actions: vec![flowspec_rate(rate)],
                 communities: vec![],
                 extended_communities: vec![],
+                ipv6_extended_communities: vec![],
             }))
             .await
             .expect("add accepted")
@@ -4811,6 +4883,7 @@ mod tests {
                 actions: vec![flowspec_rate(0.0)],
                 communities: vec![],
                 extended_communities: vec![],
+                ipv6_extended_communities: vec![],
             }))
             .await
             .expect("add accepted")
@@ -4979,6 +5052,7 @@ mod tests {
             actions: actions.clone(),
             communities: vec![],
             extended_communities: vec![],
+            ipv6_extended_communities: vec![],
         }))
         .await
         .expect("add accepted");
@@ -4995,6 +5069,186 @@ mod tests {
 
         drop((svc, rib, rib_tx));
         manager_task.await.unwrap();
+    }
+
+    fn redirect_ip_request(address: &str, copy: bool) -> proto::AddFlowSpecRequest {
+        proto::AddFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            components: flowspec_rule_components(),
+            actions: vec![proto::FlowSpecAction {
+                action: Some(proto::flow_spec_action::Action::RedirectIp(
+                    proto::FlowSpecRedirectIp {
+                        address: address.into(),
+                        copy,
+                    },
+                )),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_ip_rejects_invalid_targets_and_raw_conflicts_before_mutation() {
+        let (svc, mut rx) = make_service_with_rx();
+        for address in [
+            "",
+            "scrubber.example",
+            "192.0.2.1/32",
+            "fe80::1%eth0",
+            "0.0.0.0",
+            "::",
+            "224.0.0.1",
+            "ff02::1",
+            "255.255.255.255",
+        ] {
+            let error = svc
+                .add_flow_spec(Request::new(redirect_ip_request(address, false)))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{address}");
+            assert!(rx.try_recv().is_err());
+        }
+        for length in [0, 8, 19, 21, 40] {
+            let mut request = redirect_ip_request("2001:db8::10", false);
+            request.ipv6_extended_communities = vec![vec![0; length]];
+            assert_eq!(
+                svc.add_flow_spec(Request::new(request))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument
+            );
+            assert!(rx.try_recv().is_err());
+        }
+        for address in ["192.0.2.10", "2001:db8::10"] {
+            for raw_ipv6 in [false, true] {
+                let mut request = redirect_ip_request(address, false);
+                if raw_ipv6 {
+                    request.ipv6_extended_communities = vec![
+                        Ipv6ExtendedCommunity::from_flowspec_redirect_to_ip(
+                            "2001:db8::99".parse().unwrap(),
+                            true,
+                        )
+                        .as_bytes()
+                        .to_vec(),
+                    ];
+                } else {
+                    request.extended_communities = vec![0x010c_c000_0263_0001];
+                }
+                assert_eq!(
+                    svc.add_flow_spec(Request::new(request))
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    tonic::Code::InvalidArgument
+                );
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
+    fn assert_redirect_ip_raw(route: &proto::FlowSpecRouteEntry, copy: bool) {
+        if route.afi_safi == proto::AddressFamily::Ipv4Flowspec as i32 {
+            assert_eq!(
+                route.extended_communities,
+                vec![0x010c_c000_020a_0000 | u64::from(copy)]
+            );
+            assert!(route.ipv6_extended_communities.is_empty());
+        } else {
+            assert!(route.extended_communities.is_empty());
+            let mut expected = vec![
+                0x00, 0x0c, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0, 0,
+            ];
+            expected[19] = u8::from(copy);
+            assert_eq!(route.ipv6_extended_communities, vec![expected]);
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_ip_round_trips_both_families_through_leased_and_unleased_injection() {
+        for leased in [false, true] {
+            let (rib_tx, rib_rx) = mpsc::channel(64);
+            let manager = rustbgpd_rib::RibManager::new(
+                rib_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                rustbgpd_telemetry::BgpMetrics::new(),
+            );
+            let leases = manager.injection_leases();
+            let manager_task = tokio::spawn(manager.run());
+            let svc =
+                InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+            let rib =
+                crate::rib_service::RibService::new(rib_tx.clone()).with_injection_leases(leases);
+            for (family, target, destination) in [
+                (
+                    proto::AddressFamily::Ipv4Flowspec,
+                    "192.0.2.10",
+                    "203.0.113.10/32",
+                ),
+                (
+                    proto::AddressFamily::Ipv6Flowspec,
+                    "2001:db8::10",
+                    "2001:db8:1::10/128",
+                ),
+            ] {
+                for copy in [false, true] {
+                    let mut request = redirect_ip_request(target, copy);
+                    request.afi_safi = family as i32;
+                    request.components[0].prefix = destination.into();
+                    let actions = request.actions.clone();
+                    for expected in [
+                        if copy {
+                            proto::FlowSpecInjectOutcome::Replaced
+                        } else {
+                            proto::FlowSpecInjectOutcome::Created
+                        },
+                        proto::FlowSpecInjectOutcome::Unchanged,
+                    ] {
+                        let outcome = if leased {
+                            svc.add_leased_flow_spec(Request::new(
+                                proto::AddLeasedFlowSpecRequest {
+                                    rule: Some(request.clone()),
+                                    lease: Some(proto::InjectionLease {
+                                        owner: "redirect-test".into(),
+                                        lease_seconds: 30,
+                                    }),
+                                },
+                            ))
+                            .await
+                            .unwrap()
+                            .into_inner()
+                            .result
+                            .unwrap()
+                            .outcome()
+                        } else {
+                            svc.add_flow_spec(Request::new(request.clone()))
+                                .await
+                                .unwrap()
+                                .into_inner()
+                                .outcome()
+                        };
+                        assert_eq!(outcome, expected);
+                    }
+                    let local = list_local_flowspec(&rib).await;
+                    let route = local
+                        .received_routes
+                        .iter()
+                        .filter_map(|row| row.route.as_ref())
+                        .find(|route| route.afi_safi == family as i32)
+                        .unwrap();
+                    assert_eq!(route.actions, actions);
+                    assert_eq!(
+                        route.injection_owner,
+                        if leased { "redirect-test" } else { "" }
+                    );
+                    assert_redirect_ip_raw(route, copy);
+                }
+            }
+            drop((svc, rib, rib_tx));
+            manager_task.await.unwrap();
+        }
     }
 
     async fn add_unicast(
@@ -5129,6 +5383,7 @@ mod tests {
                 actions: vec![flowspec_rate(0.0)],
                 communities: vec![],
                 extended_communities: vec![],
+                ipv6_extended_communities: vec![],
             }),
             lease: Some(proto::InjectionLease {
                 owner: "ctl".into(),
@@ -5277,6 +5532,7 @@ mod tests {
                     actions: vec![flowspec_rate(0.0)],
                     communities: vec![],
                     extended_communities: vec![],
+                    ipv6_extended_communities: vec![],
                 }),
                 lease: Some(proto::InjectionLease {
                     owner: "ctl".into(),
@@ -5468,6 +5724,7 @@ mod tests {
                         actions: vec![flowspec_rate(0.0)],
                         communities: vec![],
                         extended_communities: vec![],
+                        ipv6_extended_communities: vec![],
                     }),
                     lease: Some(proto::InjectionLease {
                         owner: "ctl".into(),
@@ -5684,6 +5941,7 @@ mod tests {
                 actions: vec![flowspec_rate(0.0)],
                 communities: vec![],
                 extended_communities: vec![],
+                ipv6_extended_communities: vec![],
             }),
             lease: Some(proto::InjectionLease {
                 owner: "ctl".into(),
@@ -5765,6 +6023,7 @@ mod tests {
                 actions: vec![flowspec_rate(0.0)],
                 communities: vec![],
                 extended_communities: vec![],
+                ipv6_extended_communities: vec![],
             }),
             lease: Some(proto::InjectionLease {
                 owner: "ctl".into(),
@@ -6034,6 +6293,7 @@ mod tests {
                 actions: vec![flowspec_rate(0.0)],
                 communities: vec![],
                 extended_communities: vec![],
+                ipv6_extended_communities: vec![],
             }
         };
         let delete_path = |path: proto::AddPathRequest, owner: &str| proto::DeletePathRequest {
@@ -6276,6 +6536,7 @@ mod tests {
                     actions: vec![flowspec_rate(0.0)],
                     communities: vec![],
                     extended_communities: vec![],
+                    ipv6_extended_communities: vec![],
                 }),
                 lease: Some(proto::InjectionLease {
                     owner: "ctl".into(),
