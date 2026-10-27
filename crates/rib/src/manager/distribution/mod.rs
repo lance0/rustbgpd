@@ -9208,7 +9208,7 @@ impl RibManager {
                                         .iter()
                                         .inspect(|_| checkpoint())
                                         .copied()
-                                        .filter(|family| !self.eor_held(peer, *family))
+                                        .filter(|family| !self.pending_eor_held(peer, *family))
                                         .collect()
                                 })
                                 .unwrap_or_default()

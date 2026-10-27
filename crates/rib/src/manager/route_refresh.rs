@@ -973,9 +973,8 @@ impl RibManager {
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
                 self.lift_orf_gate(peer, family);
-                // A GR restarter's EoR may have been withheld at PeerUp while
-                // the ORF gate was active. Only the peer refresh that lifts
-                // that gate may consume and flush this protocol deferral.
+                // GR or selection release may owe the ORF-gated initial
+                // flood. Only the peer refresh may consume this obligation.
                 let deferred_eor = self
                     .gr_deferred_eor
                     .get(&peer)
@@ -2115,6 +2114,15 @@ impl RibManager {
         FamilyReplayOutcome::Committed
     }
 
+    /// Already-pending initial markers also wait for their family's ORF flood.
+    pub(super) fn pending_eor_held(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
+        self.eor_held(peer, family)
+            || self
+                .gr_deferred_eor
+                .get(&peer)
+                .is_some_and(|held| held.contains(&family))
+    }
+
     /// Try to send any deferred `EoR` markers for a peer.
     ///
     /// Called after a successful dirty-peer resync. If the send fails again,
@@ -2124,7 +2132,7 @@ impl RibManager {
             return;
         };
         let (blocked, ready): (HashSet<_>, HashSet<_>) = families.into_iter().partition(|family| {
-            self.eor_held(peer, *family)
+            self.pending_eor_held(peer, *family)
                 || (*family == (Afi::L2Vpn, Safi::Evpn)
                     && (self.evpn_grouped_member_of(peer).is_some()
                         || self.has_private_evpn_handoff(peer))
