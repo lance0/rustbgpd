@@ -1572,11 +1572,13 @@ fn shared_evpn_fixture_recreates_owned_destinations_after_private_handoff() {
     if let EvpnRoute::Imet(route) = &mut own.route {
         route.ethernet_tag = EthernetTagId(2);
     }
-    inject_shared_evpn(&mut manager, vec![remote.clone(), own]);
+    inject_shared_evpn(&mut manager, vec![remote.clone()]);
     let initial = output.try_recv().unwrap();
     assert_eq!(initial.evpn_announce.len(), 1);
     assert_eq!(initial.evpn_announce[0].key(), remote.key());
     assert_eq!(manager.evpn_admitted_count(peer), 1);
+    inject_shared_evpn(&mut manager, vec![own]);
+    assert!(output.try_recv().is_err());
 
     // The actual lifecycle leaves the last owned table, seeds private OLD,
     // then returns to the same interned gid with a newly allocated table.
