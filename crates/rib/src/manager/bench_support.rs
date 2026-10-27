@@ -630,7 +630,7 @@ pub struct EvpnGroupBenchReceipt {
 }
 
 impl RibManager {
-    /// Enable dormant EVPN ownership for a closed, EVPN-capable test cohort.
+    /// Enable dormant EVPN ownership for eligible benchmark peers.
     /// RTC and per-client-best groups remain private, and ordinary group
     /// eligibility (including Add-Path exclusion) is unchanged. This hook is
     /// compiled out of normal builds and has no configuration/RPC/environment
@@ -638,11 +638,7 @@ impl RibManager {
     ///
     /// # Panics
     ///
-    /// Panics if active or deferred peer registrations already exist. Every
-    /// grouped fixture peer must negotiate EVPN. New owned groups must form
-    /// during initial registration before EVPN routes arrive; regrouping into
-    /// an absent destination is unsupported and asserts before handoff planning.
-    /// Existing unit-only regroup controls do not use this hook.
+    /// Panics if active or deferred peer registrations already exist.
     #[must_use]
     pub fn with_bench_evpn_group_ownership(mut self) -> Self {
         assert!(
