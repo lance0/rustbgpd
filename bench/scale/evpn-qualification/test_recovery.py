@@ -21,6 +21,67 @@ def two_groups(generation="a"):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_readiness_probe_retains_http_error_code(self):
+        sampler = R.Readiness.__new__(R.Readiness)
+        sampler.correctness = True
+        error = Q.urllib.error.HTTPError("http://readyz", 503, "busy", {}, None)
+        with patch.object(Q, "fetch", side_effect=error):
+            row = sampler.probe(1.)
+        self.assertEqual(row["status"], 503)
+        self.assertEqual(row["http_error_code"], 503)
+        self.assertEqual(row["scheduled"], 1.)
+        self.assertIsNone(row["seconds"])
+
+    def test_private_bar_misses_do_not_abort_later_recovery_cells(self):
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryFile() as lock:
+            manifest = {"recovery": Q.RECOVERY_BARS}
+            def cell(*args):
+                if args[2] == "private":
+                    raise Q.AcceptanceFailure("baseline bar miss")
+            with patch.object(R.sys, "argv", ["recovery.py", "run", temporary]), \
+                 patch.object(Q, "manifest_for", return_value=manifest), \
+                 patch.object(Q, "verify_export"), \
+                 patch.dict(Q.os.environ, {"RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}), \
+                 patch.object(R, "run_cell", side_effect=cell) as run, \
+                 patch.object(R, "analyze") as analyze:
+                R.main()
+            self.assertEqual([call.args[2] for call in run.call_args_list], list(Q.SCHEDULE))
+            self.assertEqual([call.args[3] for call in run.call_args_list], list(range(6)))
+            analyze.assert_called_once_with(Path(temporary))
+
+    def test_candidate_bar_and_private_invalid_still_abort_recovery_cells(self):
+        for arm, error in (("candidate", Q.AcceptanceFailure("candidate bar miss")),
+                           ("private", ValueError("technical failure"))):
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryFile() as lock:
+                def cell(*args, arm=arm, error=error):
+                    if args[2] == arm:
+                        raise error
+                with patch.object(R.sys, "argv", ["recovery.py", "run", temporary]), \
+                     patch.object(Q, "manifest_for", return_value={"recovery": Q.RECOVERY_BARS}), \
+                     patch.object(Q, "verify_export"), \
+                     patch.dict(Q.os.environ, {"RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}), \
+                     patch.object(R, "run_cell", side_effect=cell) as run, \
+                     patch.object(R, "analyze") as analyze:
+                    with self.assertRaises(type(error)):
+                        R.main()
+                self.assertEqual(run.call_count, 1 if arm == "candidate" else 2)
+                analyze.assert_not_called()
+
+    def test_control_bar_failure_summary_is_fail_not_invalid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.analysis_fixture(root)
+            path = root / "recovery-01-private/result.json"
+            row = json.loads(path.read_text())
+            row.update(status="FAIL", error="readiness HTTP 503")
+            Q.write_json(path, row)
+            with self.assertRaises(Q.AcceptanceFailure):
+                R.analyze(root)
+            summary = json.loads((root / "recovery-summary.json").read_text())
+            self.assertEqual(summary["status"], "FAIL")
+            self.assertFalse(summary["terminal_only_qualified"])
+            self.assertEqual(summary["failed_cells"][0]["arm"], "private")
+
     def test_actual_group_membership_not_policy_names(self):
         a, b = two_groups(), two_groups("b")
         self.assertTrue(R.group_members(a, "candidate", 4, "a"))

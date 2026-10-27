@@ -43,12 +43,10 @@ class Readiness:
 
     def probe(self, scheduled):
         started = time.monotonic()
-        try:
-            status, _ = Q.fetch(19186, "/readyz")
-        except OSError:
-            status = 0
-        return {"status": status, "at": started, "scheduled": scheduled,
-                "seconds": None if self.correctness else time.monotonic() - started}
+        sample = Q.probe_readiness()
+        sample.update(at=started, scheduled=scheduled,
+                      seconds=None if self.correctness else time.monotonic() - started)
+        return sample
 
     def run(self):
         pending, scheduled = [], time.monotonic()
@@ -511,11 +509,20 @@ def analyze_results(output):
     Q.require(manifest.get("recovery") == Q.RECOVERY_BARS, "recovery bars changed")
     paths = sorted(output.glob("recovery-*/result.json"))
     rows = [json.loads(path.read_text()) for path in paths]
-    Q.require(rows and all(row["status"] == "PASS" for row in rows), "missing/failed recovery cell")
+    Q.require(rows, "missing recovery cells")
     correctness = rows[0]["correctness_only"]
     schedule = ["candidate", "private"] if correctness else list(Q.SCHEDULE)
     Q.require([row["arm"] for row in rows] == schedule
               and all(row["correctness_only"] == correctness for row in rows), "incomplete/reordered recovery matrix")
+    Q.require(all(row["status"] in ("PASS", "FAIL") for row in rows), "invalid recovery cell")
+    failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"]}
+                for path, row in zip(paths, rows, strict=True) if row["status"] == "FAIL"]
+    if failures:
+        Q.write_json(output / "recovery-summary.json", {
+            "status": "FAIL", "correctness_only": correctness, "scope": SCOPE,
+            "production_activation_qualified": False, "terminal_only_qualified": False,
+            "cells": len(rows), "medians": {}, "failed_cells": failures})
+        Q.accept(False, "recorded cell acceptance failures; see failed_cells")
     for path, row in zip(paths, rows, strict=True):
         leg, clients = path.parent, row["clients"]
         Q.require(row["driver_exit"] == 0, "driver did not finish successfully")
@@ -605,7 +612,12 @@ def main():
         Q.require(args.correctness_only or manifest.get("source_kind", "committed") == "committed",
                   "measured recovery requires committed source")
         for index, arm in enumerate(["candidate", "private"] if args.correctness_only else Q.SCHEDULE):
-            run_cell(output, manifest, arm, index, args.correctness_only)
+            try:
+                run_cell(output, manifest, arm, index, args.correctness_only)
+            except Q.AcceptanceFailure as error:
+                if arm != "private":
+                    raise
+                print(f"private baseline cell {index} FAIL: {error}", file=sys.stderr)
     analyze(output)
 
 

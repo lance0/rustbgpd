@@ -11,6 +11,8 @@ Commit the reviewed source, then prepare and build a new campaign outside the
 checkout. Preparation accepts only a clean source commit; builds verify every
 exported source file against that commit's archive plus the reviewed constructor
 and observer patches. Candidate and control use independent Cargo targets.
+Builds inherit the launcher's CPU affinity; use `taskset` on the build command
+to restrict its cores.
 
 ```sh
 python3 bench/scale/evpn-qualification/qualify.py prepare /tmp/evpn-memory
@@ -65,6 +67,11 @@ retains the error; build logs and exit codes survive a failed build. The final
 consumer rereads raw metrics, driver output and daemon ownership observations.
 Missing arms, missing repetitions, changed bars, identical binaries, private
 candidate ownership and nonzero reset counters cannot be accepted.
+An acceptance-bar miss in the private control is retained as FAIL baseline
+evidence while later scheduled cells continue. The aggregate remains FAIL and
+lists failed cells; it does not claim a qualified comparison. Candidate misses,
+technical INVALID results and cleanup failures still stop the runner. Readiness
+samples retain `http_error_code` separately from a transport-failure status of 0.
 
 The memory summary covers **initial-load memory only**. The separate recovery
 runner requires a new campaign, using the same preparation and build commands:
@@ -87,8 +94,10 @@ Neither shape exercises a missing destination group or moves every peer.
 
 The controller pauses actual socket readers with acknowledged generation fences,
 then issues 32 fixed full-window churn rounds. Both arms must show all members
-dirty together in two consecutive actual observations. Queue occupancy and a
-pause acknowledgement do not establish that condition. A real Route Refresh
+dirty together in two consecutive actual observations at 20 Hz: 150/150 in each
+measured observation. Two isolated 150/150 observations separated by 149/150 do
+not pass. Queue occupancy and a pause acknowledgement do not establish that
+condition. A real Route Refresh
 must leave an outstanding refresh/EoR obligation, observed before, during and
 after another paced source-update sequence. The private observer retains three
 origins separately: pending EVPN refresh response, pending EVPN EoR, and

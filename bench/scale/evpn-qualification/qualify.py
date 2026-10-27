@@ -43,7 +43,7 @@ RECOVERY_BARS = {"clients": 150, "routes_per_client": 250, "dirty_members": 150,
                  "candidate_median_ratio": 1.03, "max_budget_fraction": .8,
                  "max_churn_rounds": 32, "overlap_source_spacing_ms": 50}
 DAEMON_BYTES = 12 * 1024 ** 3
-BUILD_CPUS = "0-23,32-55"
+BUILD_CPUS = ",".join(str(cpu) for cpu in sorted(os.sched_getaffinity(0)))
 SCOPE = ("initial-load whole-daemon memory and ownership only; not mass-dirty, "
          "fleet regroup, section F wire parity, RTC, soak or production activation")
 
@@ -126,7 +126,7 @@ def cleanup_cell(record, leg, fixture, driver, daemon, controller=None):
         record["cleanup_errors"] = errors
         record.setdefault("error", "owned-resource cleanup failed")
     write_json(leg / "result.json", record)
-    if errors and sys.exc_info()[0] is None:
+    if errors:
         raise ValueError("owned-resource cleanup failed; see retained result")
 
 
@@ -353,6 +353,16 @@ def fetch(port, path):
         return response.status, response.read().decode()
 
 
+def probe_readiness():
+    try:
+        status, _ = fetch(19186, "/readyz")
+        return {"status": status, "http_error_code": None}
+    except urllib.error.HTTPError as error:
+        return {"status": error.code, "http_error_code": error.code}
+    except OSError:
+        return {"status": 0, "http_error_code": None}
+
+
 def run_cell(output, manifest, arm, clients, routes, index, correctness):
     leg = output / f"memory-{index:02}-{arm}-{clients}x{routes}"
     leg.mkdir()
@@ -406,11 +416,9 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
                 require(daemon.poll() is None and driver.poll() is None and time.monotonic() < deadline,
                         "owned process exited or fixed deadline expired")
                 start = time.monotonic()
-                try:
-                    status, _ = fetch(19186, "/readyz")
-                except (OSError, urllib.error.URLError):
-                    status = 0
-                samples.append({"status": status, "elapsed_seconds": None if correctness else time.monotonic() - start})
+                sample = probe_readiness()
+                sample["elapsed_seconds"] = None if correctness else time.monotonic() - start
+                samples.append(sample)
                 if (scenario / "finish/ready").exists():
                     ready_at = ready_at or time.monotonic()
                     if time.monotonic() - ready_at >= (1 if correctness else manifest["settle_seconds"]):
@@ -460,7 +468,12 @@ def run(args):
     index = 0
     for clients, routes in shapes:
         for arm in schedule:
-            run_cell(output, manifest, arm, clients, routes, index, args.correctness_only)
+            try:
+                run_cell(output, manifest, arm, clients, routes, index, args.correctness_only)
+            except AcceptanceFailure as error:
+                if arm != "private":
+                    raise
+                print(f"private baseline cell {index} FAIL: {error}", file=sys.stderr)
             index += 1
     analyze(args)
 
@@ -482,13 +495,22 @@ def analyze_results(args):
     manifest = manifest_for(output)
     paths = sorted(output.glob("memory-*/result.json"))
     rows = [json.loads(path.read_text()) for path in paths]
-    require(rows and all(row["status"] == "PASS" for row in rows), "missing/failed/invalid cell")
+    require(rows, "missing memory cells")
     correct = rows[0]["correctness_only"]
     require(all(row["correctness_only"] == correct for row in rows), "mixed correctness/measured campaign")
     expected = [(arm, clients, routes) for clients, routes in ([(3, 10)] if correct else SHAPES)
                 for arm in (["candidate", "private"] if correct else manifest["schedule"])]
     require([(row["arm"], row["clients"], row["routes_per_client"]) for row in rows] == expected,
             "incomplete, repeated or reordered memory matrix")
+    require(all(row["status"] in ("PASS", "FAIL") for row in rows), "invalid memory cell")
+    failures = [{"cell": path.parent.name, "arm": row["arm"], "error": row["error"]}
+                for path, row in zip(paths, rows, strict=True) if row["status"] == "FAIL"]
+    if failures:
+        write_json(output / "summary.json", {
+            "status": "FAIL", "correctness_only": correct, "scope": SCOPE,
+            "head": manifest["head"], "production_activation_qualified": False,
+            "cells": len(rows), "slopes": [], "failed_cells": failures})
+        accept(False, "recorded cell acceptance failures; see failed_cells")
     for path, row in zip(paths, rows, strict=True):
         leg = path.parent
         receipt((leg / "driver.log").read_text(), row["clients"], row["routes_per_client"])

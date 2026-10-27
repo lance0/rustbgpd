@@ -47,6 +47,84 @@ def driver_text(clients, routes):
 
 
 class TestQualification(unittest.TestCase):
+    def test_readiness_retains_http_error_code_separately(self):
+        error = Q.urllib.error.HTTPError("http://readyz", 503, "busy", {}, None)
+        with patch.object(Q, "fetch", side_effect=error):
+            self.assertEqual(Q.probe_readiness(), {"status": 503, "http_error_code": 503})
+        with patch.object(Q, "fetch", side_effect=TimeoutError("timeout")):
+            self.assertEqual(Q.probe_readiness(), {"status": 0, "http_error_code": None})
+        with patch.object(Q, "fetch", return_value=(200, "ready")):
+            self.assertEqual(Q.probe_readiness(), {"status": 200, "http_error_code": None})
+
+    def test_private_bar_misses_do_not_abort_later_memory_cells(self):
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryFile() as lock:
+            args = argparse.Namespace(output=temporary, correctness_only=False)
+            manifest = {"schedule": Q.SCHEDULE}
+            def cell(*args):
+                if args[2] == "private":
+                    raise Q.AcceptanceFailure("baseline bar miss")
+            with patch.object(Q, "manifest_for", return_value=manifest), \
+                 patch.object(Q, "verify_export"), \
+                 patch.dict(Q.os.environ, {"RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}), \
+                 patch.object(Q, "run_cell", side_effect=cell) as run, \
+                 patch.object(Q, "analyze") as analyze:
+                Q.run(args)
+            self.assertEqual([call.args[2] for call in run.call_args_list], list(Q.SCHEDULE) * len(Q.SHAPES))
+            self.assertEqual([call.args[5] for call in run.call_args_list], list(range(24)))
+            analyze.assert_called_once_with(args)
+
+    def test_candidate_bar_and_private_invalid_still_abort_memory_cells(self):
+        for arm, error in (("candidate", Q.AcceptanceFailure("candidate bar miss")),
+                           ("private", ValueError("technical failure"))):
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryFile() as lock:
+                args = argparse.Namespace(output=temporary, correctness_only=False)
+                def cell(*args, arm=arm, error=error):
+                    if args[2] == arm:
+                        raise error
+                with patch.object(Q, "manifest_for", return_value={"schedule": Q.SCHEDULE}), \
+                     patch.object(Q, "verify_export"), \
+                     patch.dict(Q.os.environ, {"RUSTBGPD_HOST_LOCK_FD": str(lock.fileno())}), \
+                     patch.object(Q, "run_cell", side_effect=cell) as run, \
+                     patch.object(Q, "analyze") as analyze:
+                    with self.assertRaises(type(error)):
+                        Q.run(args)
+                self.assertEqual(run.call_count, 1 if arm == "candidate" else 2)
+                analyze.assert_not_called()
+
+    def test_cleanup_error_during_bar_failure_remains_technical(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture, leg = root / "fixture-input", root / "leg"
+            fixture.mkdir()
+            leg.mkdir()
+            (fixture / "config.toml").write_text("fixture")
+            record = {"status": "FAIL", "error": "baseline bar miss"}
+            with patch.object(Q.COMMON, "stop_owned", side_effect=ValueError("still running")):
+                with self.assertRaisesRegex(ValueError, "owned-resource cleanup") as caught:
+                    try:
+                        raise Q.AcceptanceFailure("baseline bar miss")
+                    finally:
+                        Q.cleanup_cell(record, leg, fixture, "driver", "daemon")
+            self.assertIsInstance(caught.exception.__context__, Q.AcceptanceFailure)
+            retained = json.loads((leg / "result.json").read_text())
+            self.assertEqual(retained["status"], "INVALID")
+            self.assertEqual(retained["error"], "baseline bar miss")
+
+    def test_control_bar_failure_summary_is_fail_not_invalid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = self.make_campaign(root)
+            path = next(root.glob("memory-*-private-*/result.json"))
+            row = json.loads(path.read_text())
+            row.update(status="FAIL", error="readiness HTTP 503")
+            Q.write_json(path, row)
+            with self.assertRaises(Q.AcceptanceFailure):
+                Q.analyze(args)
+            summary = json.loads((root / "summary.json").read_text())
+            self.assertEqual(summary["status"], "FAIL")
+            self.assertEqual(summary["failed_cells"][0]["arm"], "private")
+            self.assertEqual(summary["failed_cells"][0]["error"], "readiness HTTP 503")
+
     def test_cleanup_failure_still_attempts_both_children_and_retains_original_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
