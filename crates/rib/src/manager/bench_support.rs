@@ -1894,21 +1894,7 @@ impl RibManager {
     }
 
     fn bench_selection_deferral_ledger_cleared(&self) -> bool {
-        // `DeferredSelectionKeys` deliberately exposes no production
-        // introspection. Its derived Debug is exhaustive over every retained
-        // set/map/byte counter; compare that state to a fresh ledger while
-        // ignoring the fixture-local limit value.
-        fn without_limits(debug: &str) -> &str {
-            debug
-                .split_once(", limits:")
-                .map_or(debug, |(state, _)| state)
-        }
-        let actual = format!("{:?}", self.deferred_selection_keys);
-        let empty = format!(
-            "{:?}",
-            super::selection_deferral::DeferredSelectionKeys::default()
-        );
-        without_limits(&actual) == without_limits(&empty)
+        self.deferred_selection_keys.is_cleared()
     }
 
     /// Queue one Loc-RIB-count sentinel, time the exact production expiry
