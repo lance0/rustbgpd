@@ -29,6 +29,7 @@ mod peer_lifecycle;
 mod queries;
 mod replacement_summaries;
 use crate::PeerId;
+use crate::fast_hash::ShardedMap;
 use peer_lifecycle::{PeerUpRegistration, SessionTeardownDisposition};
 mod route_refresh;
 mod selection_deferral;
@@ -810,20 +811,20 @@ pub struct RibManager {
     /// Per-peer/per-family deadlines for active enhanced route refresh windows.
     refresh_deadlines: graceful_restart::DeadlineMap<(PeerId, Afi, Safi)>,
     /// Unicast routes still awaiting replacement during an inbound refresh.
-    refresh_stale_routes: HashMap<PeerId, HashSet<(Prefix, u32)>>,
+    refresh_stale_routes: HashMap<PeerId, ShardedMap<(Prefix, u32), ()>>,
     /// `FlowSpec` routes still awaiting replacement during an inbound refresh.
-    refresh_stale_flowspec: HashMap<PeerId, HashSet<crate::route::FlowSpecRouteKey>>,
+    refresh_stale_flowspec: HashMap<PeerId, ShardedMap<crate::route::FlowSpecRouteKey, ()>>,
     /// EVPN routes still awaiting replacement during an inbound refresh.
-    refresh_stale_evpn: HashMap<PeerId, HashSet<rustbgpd_wire::EvpnRouteKey>>,
+    refresh_stale_evpn: HashMap<PeerId, ShardedMap<rustbgpd_wire::EvpnRouteKey, ()>>,
     /// BGP-LS routes still awaiting replacement during an inbound refresh.
-    refresh_stale_bgpls: HashMap<PeerId, HashSet<crate::route::BgpLsRouteKey>>,
+    refresh_stale_bgpls: HashMap<PeerId, ShardedMap<crate::route::BgpLsRouteKey, ()>>,
     /// VPNv4/VPNv6 routes still awaiting replacement during an inbound refresh.
-    refresh_stale_vpn: HashMap<PeerId, HashSet<crate::route::VpnRibRouteKey>>,
+    refresh_stale_vpn: HashMap<PeerId, ShardedMap<crate::route::VpnRibRouteKey, ()>>,
     /// Labeled-unicast route keys marked stale by an in-progress RFC 7313
     /// enhanced route refresh (the SAFI 4 sibling of `refresh_stale_vpn`).
-    refresh_stale_labeled: HashMap<PeerId, HashSet<crate::route::LabeledRibRouteKey>>,
+    refresh_stale_labeled: HashMap<PeerId, ShardedMap<crate::route::LabeledRibRouteKey, ()>>,
     /// RT-Constrain routes still awaiting replacement during an inbound refresh.
-    refresh_stale_rtc: HashMap<PeerId, HashSet<crate::route::RtcRibRouteKey>>,
+    refresh_stale_rtc: HashMap<PeerId, ShardedMap<crate::route::RtcRibRouteKey, ()>>,
     /// O(1) per-peer/per-family stale-entry counts for refresh observability.
     refresh_stale_counts: HashMap<(PeerId, Afi, Safi), usize>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
@@ -5519,7 +5520,7 @@ impl RibManager {
                 }
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5533,7 +5534,7 @@ impl RibManager {
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5578,7 +5579,7 @@ impl RibManager {
                 }
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_vpn.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5592,7 +5593,7 @@ impl RibManager {
                 affected.insert(key.clone());
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_vpn.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5647,7 +5648,7 @@ impl RibManager {
                 }
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_labeled.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5661,7 +5662,7 @@ impl RibManager {
                 affected.insert(key);
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_labeled.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -5715,7 +5716,7 @@ impl RibManager {
                 }
                 if active_refresh
                     && let Some(stale) = self.refresh_stale_rtc.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     removed_stale += 1;
                 }
@@ -5726,7 +5727,7 @@ impl RibManager {
                 needs_intern_gc |= rib.insert_rtc(route);
                 if active_refresh
                     && let Some(stale) = self.refresh_stale_rtc.get_mut(&peer)
-                    && stale.remove(&key)
+                    && stale.remove(&key).is_some()
                 {
                     removed_stale += 1;
                 }

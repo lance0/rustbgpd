@@ -1579,7 +1579,7 @@ impl RibManager {
                 let family = prefix_family(&prefix);
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
-                    && stale.remove(&(prefix, path_id))
+                    && stale.remove(&(prefix, path_id)).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }
@@ -1686,7 +1686,7 @@ impl RibManager {
                 let family = prefix_family(&prefix);
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
-                    && stale.remove(&(prefix, path_id))
+                    && stale.remove(&(prefix, path_id)).is_some()
                 {
                     *removed_stale_counts.entry(family).or_default() += 1;
                 }

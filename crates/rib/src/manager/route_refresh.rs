@@ -679,6 +679,18 @@ impl RibManager {
     }
 
     pub(super) fn handle_begin_route_refresh(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                manager.begin_route_refresh_with_readiness(peer, afi, safi);
+            });
+        });
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "snapshot dispatch keeps all seven family exclusions and retirement checkpoints together"
+    )]
+    fn begin_route_refresh_with_readiness(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "beginning enhanced route refresh");
         self.refresh_in_progress
             .entry(peer)
@@ -705,82 +717,114 @@ impl RibManager {
         //   4. GR/LLGR-stale acquired DURING the window is unreachable — GR
         //      entry is session-down, which drops every refresh window for
         //      the peer (`clear_peer_refresh_state`).
+        let readiness = self.replacement_readiness.clone();
+        let visit =
+            || super::replacement_readiness_checkpoint_at(&readiness, "borr_snapshot", false);
+        let retire =
+            || super::replacement_readiness_checkpoint_at(&readiness, "borr_retirement", false);
         let mut stale_count = 0usize;
         if let Some(rib) = self.ribs.get(&peer) {
             if safi == Safi::FlowSpec {
                 let stale = self.refresh_stale_flowspec.entry(peer).or_default();
-                stale.retain(|key| key.afi != afi);
-                for route in rib
-                    .iter_flowspec()
-                    .filter(|route| route.afi == afi && !route.is_stale && !route.is_llgr_stale)
-                {
-                    if stale.insert(route.key()) {
+                stale.retain(|key, ()| {
+                    retire();
+                    key.afi != afi
+                });
+                for route in rib.iter_flowspec().inspect(|_| visit()) {
+                    if route.afi == afi
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
                 let stale = self.refresh_stale_bgpls.entry(peer).or_default();
-                stale.retain(|key| key.family != bgpls_family);
-                for route in rib.iter_bgpls().filter(|route| {
-                    route.family == bgpls_family && !route.is_stale && !route.is_llgr_stale
-                }) {
-                    if stale.insert(route.key()) {
+                stale.retain(|key, ()| {
+                    retire();
+                    key.family != bgpls_family
+                });
+                for route in rib.iter_bgpls().inspect(|_| visit()) {
+                    if route.family == bgpls_family
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if safi == Safi::MplsVpn {
                 let stale = self.refresh_stale_vpn.entry(peer).or_default();
-                stale.retain(|key| key.afi_safi() != (afi, safi));
-                for route in rib.iter_vpn().filter(|route| {
-                    route.afi_safi() == (afi, safi) && !route.is_stale && !route.is_llgr_stale
-                }) {
-                    if stale.insert(route.key()) {
+                stale.retain(|key, ()| {
+                    retire();
+                    key.afi_safi() != (afi, safi)
+                });
+                for route in rib.iter_vpn().inspect(|_| visit()) {
+                    if route.afi_safi() == (afi, safi)
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if safi == Safi::LabeledUnicast {
                 let stale = self.refresh_stale_labeled.entry(peer).or_default();
-                stale.retain(|key| key.afi_safi() != (afi, safi));
-                for route in rib.iter_labeled().filter(|route| {
-                    route.afi_safi() == (afi, safi) && !route.is_stale && !route.is_llgr_stale
-                }) {
-                    if stale.insert(route.key()) {
+                stale.retain(|key, ()| {
+                    retire();
+                    key.afi_safi() != (afi, safi)
+                });
+                for route in rib.iter_labeled().inspect(|_| visit()) {
+                    if route.afi_safi() == (afi, safi)
+                        && !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
                 let stale = self.refresh_stale_evpn.entry(peer).or_default();
-                stale.clear();
-                for route in rib
-                    .iter_evpn()
-                    .filter(|route| !route.is_stale && !route.is_llgr_stale)
-                {
-                    if stale.insert(route.key()) {
+                stale.retain(|_, ()| {
+                    retire();
+                    false
+                });
+                for route in rib.iter_evpn().inspect(|_| visit()) {
+                    if !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else if safi == Safi::RtConstrain {
-                // RTC is a single family (AFI 1 only), so clearing the whole
-                // per-peer set is safe — the EVPN pattern, not the VPN one.
+                // RTC has only AFI 1, so no other family shares this inventory.
                 let stale = self.refresh_stale_rtc.entry(peer).or_default();
-                stale.clear();
-                for route in rib
-                    .iter_rtc()
-                    .filter(|route| !route.is_stale && !route.is_llgr_stale)
-                {
-                    if stale.insert(route.key()) {
+                stale.retain(|_, ()| {
+                    retire();
+                    false
+                });
+                for route in rib.iter_rtc().inspect(|_| visit()) {
+                    if !route.is_stale
+                        && !route.is_llgr_stale
+                        && stale.insert(route.key(), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
             } else {
                 let stale = self.refresh_stale_routes.entry(peer).or_default();
-                stale.retain(|(prefix, _)| prefix_family(prefix) != (afi, safi));
-                for route in rib.iter().filter(|route| {
-                    prefix_family(&route.prefix) == (afi, safi)
+                stale.retain(|(prefix, _), ()| {
+                    retire();
+                    prefix_family(prefix) != (afi, safi)
+                });
+                for route in rib.iter().inspect(|_| visit()) {
+                    if prefix_family(&route.prefix) == (afi, safi)
                         && !route.is_stale
                         && !route.is_llgr_stale
-                }) {
-                    if stale.insert((route.prefix, route.path_id)) {
+                        && stale.insert((route.prefix, route.path_id), ()).is_none()
+                    {
                         stale_count += 1;
                     }
                 }
@@ -2154,7 +2198,7 @@ impl RibManager {
             .get(&peer)
             .map(|stale| {
                 stale
-                    .iter()
+                    .keys()
                     .copied()
                     .filter(|(prefix, _)| prefix_family(prefix) == family)
                     .collect()
@@ -2165,7 +2209,7 @@ impl RibManager {
             .get(&peer)
             .map(|stale| {
                 stale
-                    .iter()
+                    .keys()
                     .filter(|key| key.afi == afi && safi == Safi::FlowSpec)
                     .cloned()
                     .collect()
@@ -2174,7 +2218,7 @@ impl RibManager {
         let stale_evpn_keys: Vec<EvpnRouteKey> = if family == (Afi::L2Vpn, Safi::Evpn) {
             self.refresh_stale_evpn
                 .get(&peer)
-                .map(|stale| stale.iter().copied().collect())
+                .map(|stale| stale.keys().copied().collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -2185,7 +2229,7 @@ impl RibManager {
                     .get(&peer)
                     .map(|stale| {
                         stale
-                            .iter()
+                            .keys()
                             .filter(|key| key.family == bgpls_family)
                             .cloned()
                             .collect()
@@ -2199,7 +2243,7 @@ impl RibManager {
                 .get(&peer)
                 .map(|stale| {
                     stale
-                        .iter()
+                        .keys()
                         .filter(|key| key.afi_safi() == family)
                         .cloned()
                         .collect()
@@ -2214,7 +2258,7 @@ impl RibManager {
                     .get(&peer)
                     .map(|stale| {
                         stale
-                            .iter()
+                            .keys()
                             .filter(|key| key.afi_safi() == family)
                             .copied()
                             .collect()
@@ -2226,7 +2270,7 @@ impl RibManager {
         let stale_rtc_keys: Vec<crate::route::RtcRibRouteKey> = if safi == Safi::RtConstrain {
             self.refresh_stale_rtc
                 .get(&peer)
-                .map(|stale| stale.iter().cloned().collect())
+                .map(|stale| stale.keys().cloned().collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -2312,7 +2356,7 @@ impl RibManager {
 
         let clear_route_stale_entry = if let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
         {
-            stale.retain(|(prefix, _)| prefix_family(prefix) != family);
+            stale.retain(|(prefix, _), ()| prefix_family(prefix) != family);
             stale.is_empty()
         } else {
             false
@@ -2323,7 +2367,7 @@ impl RibManager {
 
         let clear_flowspec_stale_entry =
             if let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer) {
-                stale.retain(|key| !(key.afi == afi && safi == Safi::FlowSpec));
+                stale.retain(|key, ()| !(key.afi == afi && safi == Safi::FlowSpec));
                 stale.is_empty()
             } else {
                 false
@@ -2341,7 +2385,7 @@ impl RibManager {
         if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
             let clear_bgpls_stale_entry =
                 if let Some(stale) = self.refresh_stale_bgpls.get_mut(&peer) {
-                    stale.retain(|key| key.family != bgpls_family);
+                    stale.retain(|key, ()| key.family != bgpls_family);
                     stale.is_empty()
                 } else {
                     false
@@ -2352,7 +2396,7 @@ impl RibManager {
         }
         if safi == Safi::MplsVpn {
             let clear_vpn_stale_entry = if let Some(stale) = self.refresh_stale_vpn.get_mut(&peer) {
-                stale.retain(|key| key.afi_safi() != family);
+                stale.retain(|key, ()| key.afi_safi() != family);
                 stale.is_empty()
             } else {
                 false
@@ -2364,7 +2408,7 @@ impl RibManager {
         if safi == Safi::LabeledUnicast {
             let clear_labeled_stale_entry =
                 if let Some(stale) = self.refresh_stale_labeled.get_mut(&peer) {
-                    stale.retain(|key| key.afi_safi() != family);
+                    stale.retain(|key, ()| key.afi_safi() != family);
                     stale.is_empty()
                 } else {
                     false
