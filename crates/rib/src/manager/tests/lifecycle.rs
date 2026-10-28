@@ -1924,8 +1924,12 @@ pub(super) fn test_peer_up(
 }
 
 pub(super) fn test_routes_received(peer: PeerId, announced: Vec<Route>) -> RibUpdate {
+    test_session_routes_received(peer, 0, announced)
+}
+
+fn test_session_routes_received(peer: PeerId, session_id: u64, announced: Vec<Route>) -> RibUpdate {
     RibUpdate::RoutesReceived {
-        session_id: 0,
+        session_id,
         peer,
         announced,
         withdrawn: vec![],
@@ -1992,8 +1996,9 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
 
     // The restarter's re-announcements import and distribute to the
     // survivor while the restarter's own dump is still pending.
-    manager.handle_update(test_routes_received(
+    manager.handle_update(test_session_routes_received(
         restarter,
+        2,
         vec![make_route(restarter_prefix, Ipv4Addr::new(10, 0, 0, 2))],
     ));
     drain_route_chunks(&mut manager);
@@ -2718,14 +2723,16 @@ async fn run_loop_advances_deferred_registrations() {
     let (r2_tx, mut r2_rx) = mpsc::channel(64);
     tx.send(test_peer_up(r1, 2, r1_tx)).await.unwrap();
     tx.send(test_peer_up(r2, 3, r2_tx)).await.unwrap();
-    tx.send(test_routes_received(
+    tx.send(test_session_routes_received(
         r1,
+        2,
         vec![make_route(p1, Ipv4Addr::new(10, 0, 0, 2))],
     ))
     .await
     .unwrap();
-    tx.send(test_routes_received(
+    tx.send(test_session_routes_received(
         r2,
+        3,
         vec![make_route(p2, Ipv4Addr::new(10, 0, 0, 3))],
     ))
     .await

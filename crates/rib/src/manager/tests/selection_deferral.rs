@@ -53,7 +53,7 @@ fn deferred_registration_failback_rearms_exact_live_survivor() {
     assert_eq!(manager.live_sessions[&a].len(), 2);
     manager.handle_update(RibUpdate::PeerDown {
         peer: a,
-        session_id: 11,
+        session_id: 22,
     });
     let state = manager
         .selection_deferral
@@ -61,30 +61,30 @@ fn deferred_registration_failback_rearms_exact_live_survivor() {
         .unwrap()
         .peer_snapshot(a);
     assert_eq!(state[0].waiter_state, "awaiting_refresh");
-    assert_eq!(state[0].waiter_session_id, Some(22));
+    assert_eq!(state[0].waiter_session_id, Some(11));
     assert_eq!(manager.next_selection_deferral_deadline(), deadline);
     manager.handle_update(RibUpdate::EndOfRib {
         peer: a,
-        session_id: 11,
+        session_id: 22,
         afi: FAMILY.0,
         safi: FAMILY.1,
     });
     manager.handle_update(RibUpdate::EndRouteRefresh {
         peer: a,
-        session_id: 11,
+        session_id: 22,
         afi: FAMILY.0,
         safi: FAMILY.1,
     });
     assert!(manager.selection_convergence_held(FAMILY));
     manager.handle_update(RibUpdate::BeginRouteRefresh {
         peer: a,
-        session_id: 22,
+        session_id: 11,
         afi: FAMILY.0,
         safi: FAMILY.1,
     });
     manager.handle_update(RibUpdate::EndRouteRefresh {
         peer: a,
-        session_id: 22,
+        session_id: 11,
         afi: FAMILY.0,
         safi: FAMILY.1,
     });

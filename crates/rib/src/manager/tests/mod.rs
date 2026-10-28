@@ -1452,6 +1452,7 @@ mod bmp;
 mod conditional_advertisement;
 mod conditional_advertisement_export;
 mod dataplane_paging;
+mod deferred_session_ingress;
 mod distribution_window;
 mod eor_deferral_accounting;
 mod eor_grace;
