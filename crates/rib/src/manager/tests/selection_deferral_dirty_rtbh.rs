@@ -2960,3 +2960,250 @@ async fn late_waiter_private_capture_services_readiness_before_completion() {
     );
     assert_eq!(wire.len(), 128);
 }
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual limited Add-Path transcript checks retained complete bodies, sibling capacity, repeated replay and the queued headroom recovery"
+)]
+fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent() {
+    let family = (Afi::Ipv6, Safi::Unicast);
+    let mut manager =
+        manager_with_dormant_waiter().with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![family],
+            }],
+        });
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(64);
+    let registration = |outbound_tx| {
+        let mut up = super::lifecycle::test_peer_up(observer, 82, outbound_tx);
+        if let RibUpdate::PeerUp {
+            sendable_families,
+            per_client_best,
+            add_path_send_families,
+            add_path_send_max,
+            ..
+        } = &mut up
+        {
+            *sendable_families = vec![family];
+            *per_client_best = true;
+            *add_path_send_families = vec![family];
+            *add_path_send_max = 2;
+        }
+        up
+    };
+    manager.handle_update(registration(tx.clone()));
+    assert_eq!(rx.try_recv().unwrap().end_of_rib, [family]);
+    super::outbound_prefix_limits::prepare(
+        &mut manager,
+        1,
+        super::outbound_prefix_limits::limit_config(&[(observer, None, Some(2))], &[]),
+    )
+    .unwrap();
+    super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
+    let host = Ipv6Prefix::new("2001:db8:1::1".parse().unwrap(), 128);
+    let ordinary = Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64);
+    let blocked = Ipv6Prefix::new("2001:db8:3::1".parse().unwrap(), 128);
+    let local_route = |prefix, path_id| {
+        let mut route = make_route_with_lp(
+            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32),
+            SOURCE,
+            50,
+        );
+        route.prefix = Prefix::V6(prefix);
+        route.next_hop = "2001:db8::81".parse().unwrap();
+        route.path_id = path_id;
+        set_peer(&mut route, LOCAL_PEER);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        route
+    };
+    let inject = |manager: &mut RibManager, route| {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route, reply });
+        result.try_recv().unwrap().unwrap();
+    };
+    let capacity = |manager: &RibManager| {
+        let row = manager
+            .outbound_prefix_limit_rows(observer)
+            .into_iter()
+            .find(|row| row.family == "ipv6_unicast")
+            .unwrap();
+        assert_ne!(
+            row.usage,
+            u64::MAX,
+            "complete private bodies retain known prefix usage"
+        );
+        (row.usage, row.headroom)
+    };
+    inject(&mut manager, local_route(host, 17));
+    let mut wire = std::collections::HashMap::new();
+    apply_wire(&mut rx, &mut wire);
+    let mut sibling = make_route_with_lp(
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32),
+        SOURCE,
+        10,
+    );
+    sibling.prefix = Prefix::V6(host);
+    sibling.next_hop = "2001:db8::81".parse().unwrap();
+    sibling.path_id = 11;
+    let mut received = sibling.clone();
+    received.prefix = Prefix::V6(ordinary);
+    received.path_id = 0;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: vec![sibling, received],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    apply_wire(&mut rx, &mut wire);
+    assert_eq!(wire.len(), 3);
+    assert_eq!(capacity(&manager), (2, Some(0)));
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+    let waiter = peer_v4(WAITER);
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: waiter,
+        session_id: 83,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![family],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (waiter_tx, _waiter_rx) = mpsc::channel(64);
+    let mut up = super::lifecycle::test_peer_up(waiter, 83, waiter_tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    {
+        *sendable_families = vec![family];
+    }
+    manager.handle_update(up);
+    assert!(manager.pending_group_admitted.get(&observer).is_none());
+    assert!(manager.group_recovery_fallback(observer).is_some());
+    manager.handle_update(registration(tx.clone()));
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
+    assert_eq!(wire.len(), 3);
+    inject(&mut manager, local_route(blocked, 29));
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(updates.iter().all(|update| update.announce.is_empty()
+        && update.withdraw.is_empty()
+        && update.end_of_rib.is_empty()));
+    assert_eq!(wire.len(), 3);
+    assert_eq!(capacity(&manager), (2, Some(0)));
+    let (reply, mut removed) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix: Prefix::V6(host),
+        path_id: 17,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    removed.try_recv().unwrap().unwrap();
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.announce.is_empty() && update.end_of_rib.is_empty())
+    );
+    assert_eq!(wire.len(), 2);
+    assert_eq!(
+        capacity(&manager),
+        (2, Some(0)),
+        "received sibling still owns the host prefix slot"
+    );
+    assert_late_waiter_advertised_truth(
+        &mut manager,
+        observer,
+        2,
+        "limited body after local sibling deletion",
+    );
+    manager.handle_update(registration(tx));
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
+    assert_eq!(wire.len(), 2);
+    assert_eq!(capacity(&manager), (2, Some(0)));
+    assert_late_waiter_advertised_truth(
+        &mut manager,
+        observer,
+        2,
+        "limited body after repeated replay",
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: waiter,
+        session_id: 83,
+        afi: family.0,
+        safi: family.1,
+    });
+    let mut terminals = apply_wire(&mut rx, &mut wire)
+        .iter()
+        .flat_map(|update| &update.end_of_rib)
+        .filter(|marker| **marker == family)
+        .count();
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    terminals += apply_wire(&mut rx, &mut wire)
+        .iter()
+        .flat_map(|update| &update.end_of_rib)
+        .filter(|marker| **marker == family)
+        .count();
+    assert_eq!(terminals, 1);
+    assert_eq!(wire.len(), 2);
+    assert!(!wire.keys().any(|key| key.0 == Prefix::V6(blocked)));
+    assert_eq!(capacity(&manager), (2, Some(0)));
+    assert!(!manager.pending_group_admitted.contains_record(observer));
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V6(host), 11)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.announce.is_empty() && update.end_of_rib.is_empty())
+    );
+    assert_eq!(wire.len(), 1);
+    assert_eq!(capacity(&manager), (1, Some(1)));
+    assert!(
+        manager.drain_outbound_limit_recovery(),
+        "last-prefix withdrawal queues existing capacity recovery"
+    );
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
+    );
+    assert_eq!(wire.len(), 2);
+    assert!(wire.keys().any(|key| key.0 == Prefix::V6(blocked)));
+    assert!(!wire.keys().any(|key| key.0 == Prefix::V6(host)));
+    assert_eq!(capacity(&manager), (2, Some(0)));
+    assert_late_waiter_advertised_truth(
+        &mut manager,
+        observer,
+        2,
+        "limited body after queued intent recovery",
+    );
+    assert!(!manager.dirty_peers.contains(&observer));
+}
