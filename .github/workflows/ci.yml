@@ -221,6 +221,7 @@ jobs:
           bash -n tests/interop/scripts/test-m121-evpn-all-active-frr.sh
           shellcheck -x tests/interop/scripts/test-m121-evpn-all-active-frr.sh
           python3 tests/interop/scripts/test_interop_signal_cleanup.py
+          python3 tests/interop/scripts/test_m27_captured_output.py
           python3 tests/interop/scripts/test_m66_failure_diagnostics.py
           python3 tests/interop/scripts/test_m67_rerun_mode.py
           python3 tests/interop/scripts/test_m69_df_wait_checker.py

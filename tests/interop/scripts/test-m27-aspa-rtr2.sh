@@ -125,7 +125,7 @@ wait_aspa_validation() {
     for i in $(seq 1 30); do
         local routes
         routes=$(grpc_list_received_all)
-        if echo "$routes" | grep -q '"aspaState": "valid"'; then
+        if grep -q '"aspaState": "valid"' <<<"$routes"; then
             ok "ASPA validation states populated (attempt $i)"
             return 0
         fi
@@ -166,17 +166,17 @@ test_rtr_v2_session() {
     local logs
     logs=$(docker exec "$RUSTBGPD" cat /tmp/rustbgpd.log 2>/dev/null || true)
 
-    if echo "$logs" | grep -q '"rtr_version":2'; then
+    if grep -q '"rtr_version":2' <<<"$logs"; then
         ok "RTR v2 connection established (rtr_version=2 in logs)"
-    elif echo "$logs" | grep -q 'rtr_version=2'; then
+    elif grep -q 'rtr_version=2' <<<"$logs"; then
         ok "RTR v2 connection established (rtr_version=2 in logs)"
     else
         fail "RTR v2 connection not found in logs"
-        log "Log snippet: $(echo "$logs" | grep -i 'rtr\|RTR\|rpki\|RPKI\|connect' | head -5)"
+        log "Log snippet: $(grep -im5 'rtr\|RTR\|rpki\|RPKI\|connect' <<<"$logs")"
     fi
 
     # Ensure no fallback to v1
-    if echo "$logs" | grep -q "falling back to v1"; then
+    if grep -q "falling back to v1" <<<"$logs"; then
         fail "RTR fell back to v1 (unexpected)"
     else
         ok "No RTR v1 fallback detected"
@@ -280,11 +280,11 @@ test_aspa_best_path_explain() {
     local explain
     explain=$(grpc_explain "172.16.0.0" 24)
 
-    if echo "$explain" | grep -qi "aspa_preference"; then
+    if grep -qi "aspa_preference" <<<"$explain"; then
         ok "ExplainBestPath shows aspa_preference as decisive reason"
     else
         fail "ExplainBestPath does not mention aspa_preference"
-        log "Explain output: $(echo "$explain" | head -20)"
+        log "Explain output: $(head -20 <<<"$explain")"
     fi
 }
 
