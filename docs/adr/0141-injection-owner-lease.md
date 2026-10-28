@@ -688,3 +688,31 @@ local RTBH candidates.
   eligible; a helper can retain other stale Add-Path advertisements until
   End-of-RIB or its own stale timer. The narrower boundary reduces the scope
   of that tradeoff and restores deferral for ordinary injected unicast.
+
+## Amendment: wait for re-established GR peers (2026-10-27)
+
+After a marker-backed planned restart, the captured static GR peer/family
+roster starts dormant. It applies no selection hold before an eligible
+roster peer re-establishes a session for that family. A configured neighbor
+that stays down or never returns does not hold selection.
+
+Only eligible current sessions owe End-of-RIB. New sessions can join an
+active family wait; when its current waiters are satisfied, excluded or
+down, the family releases permanently. A later peer does not re-arm it.
+A re-established peer missing End-of-RIB still holds selection until it
+completes or the existing marker-derived upper bound expires. The bound
+remains the maximum effective `gr_restart_time` counted from shutdown.
+Session fencing, GR-family and Restart-State exclusions, and collision
+refresh completion still apply.
+
+The [RTBH-only exception](#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27)
+remains unchanged. Activating a hold preserves routes already admitted to
+each current session, while eligible RTBH updates and withdrawals continue.
+Missing ordinary initial-table rows are replayed before their completion
+marker after release. Conditional advertisement settling pauses during a
+hold and resumes with its full interval. The independent replay-complete
+grace window and other completion gates remain in force.
+
+This changes startup selection and completion behavior without adding an
+RPC field or configuration option. It does not qualify remote acceptance,
+forwarding, scale or production EVPN ownership.

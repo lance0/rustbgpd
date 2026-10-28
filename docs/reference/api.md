@@ -568,10 +568,13 @@ gate: its canonical `family` label (for example `ipv4_unicast`; empty from an
 older daemon) alongside the numeric `afi`/`safi`, whether the gate is active,
 this peer's waiter state and stamped session, the process-wide blocking-waiter
 count, and remaining time. `waiter_session_id` is a process-local stamp and is
-explicitly unstable. Released rows are
-retained for the daemon lifetime with reason `all_eor`, `all_excluded`, or
-`timer`, so an operator can distinguish complete convergence from timer-driven
-release.
+explicitly unstable. Dormant rows have `active: false`, no release reason
+and zero remaining time; they are not holding selection. Released rows are
+retained for the daemon lifetime with reason `all_eor`, `collision_refresh`,
+`all_excluded`, or `timer`, so an operator can distinguish complete convergence from timer-driven
+release. Only eligible sessions re-established since restart hold selection;
+a configured neighbor that stays down does not. See the
+[startup selection amendment](../adr/0141-injection-owner-lease.md#amendment-wait-for-re-established-gr-peers-2026-10-27).
 
 `NeighborState.paths_limits` is sorted by numeric AFI then SAFI. Optional
 `effective_send_limit` is presence-aware: presence means active, with zero

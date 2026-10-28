@@ -4832,8 +4832,8 @@ async fn run<T>(
             replay_owners: config.global.gr_eor_replay_owners.clone(),
         });
     }
-    // ADR-0137: seed conditional advertisements before any session can
-    // register, after selection deferral so deferral holds them pending.
+    // ADR-0137: seed before sessions register; an established restart waiter
+    // can then hold selection without making a never-up neighbor a blocker.
     match config.conditional_advertisement_set() {
         Ok(set) => rib_manager = rib_manager.with_conditional_advertisements(set),
         Err(e) => {

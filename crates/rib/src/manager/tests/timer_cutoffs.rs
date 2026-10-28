@@ -225,7 +225,7 @@ async fn refresh_window_timer_fires_under_sustained_ingress() {
 async fn selection_deferral_timer_fires_under_sustained_ingress() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(10),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
@@ -233,6 +233,11 @@ async fn selection_deferral_timer_fires_under_sustained_ingress() {
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             }],
         });
+    super::arm_selection_waiter(
+        &mut manager,
+        peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
+        &[(Afi::Ipv4, Safi::Unicast)],
+    );
     let handle = tokio::spawn(manager.run());
     barrier(&tx).await;
     assert!(selection_deferral_timeouts(&metrics) < 0.5);
@@ -256,7 +261,7 @@ async fn selection_deferral_timer_fires_under_sustained_ingress() {
 async fn coincident_timers_all_fire_under_sustained_ingress() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
         .with_selection_deferral(crate::SelectionDeferralConfig {
             timeout: Duration::from_secs(10),
             waiters: vec![crate::SelectionDeferralWaiterConfig {
@@ -264,6 +269,11 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });
+    super::arm_selection_waiter(
+        &mut manager,
+        peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
+        &[(Afi::Ipv6, Safi::Unicast)],
+    );
     let handle = tokio::spawn(manager.run());
     tx.send(one_route()).await.unwrap();
     tx.send(RibUpdate::BeginRouteRefresh {
@@ -359,6 +369,11 @@ async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
                 families: vec![(Afi::Ipv6, Safi::Unicast)],
             }],
         });
+    super::arm_selection_waiter(
+        &mut manager,
+        peer_v4(Ipv4Addr::new(10, 0, 0, 99)),
+        &[(Afi::Ipv6, Safi::Unicast)],
+    );
     manager.handle_update(one_route());
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,

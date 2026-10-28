@@ -23,6 +23,350 @@ use crate::{
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const READY_FAMILY: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
 
+#[test]
+fn deferred_registration_failback_rearms_exact_live_survivor() {
+    let a = peer(1);
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_mins(1), &[a]));
+    manager.initial_dump_defer_min_routes = 0;
+    let (reply, _queued_query) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    let deadline = manager.next_selection_deferral_deadline();
+    let (old_tx, _old_rx) = mpsc::channel(8);
+    let (current_tx, _current_rx) = mpsc::channel(8);
+    for (session_id, outbound_tx) in [(11, old_tx), (22, current_tx)] {
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: a,
+            session_id,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: vec![FAMILY],
+            peer_enhanced_refresh: true,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        });
+        manager.handle_update(peer_up(a, session_id, outbound_tx));
+        assert!(!manager.outbound_session_ids.contains_key(&a));
+        assert!(manager.pending_initial_registrations.contains(&a));
+    }
+    assert_eq!(manager.live_sessions[&a].len(), 2);
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: a,
+        session_id: 11,
+    });
+    let state = manager
+        .selection_deferral
+        .as_ref()
+        .unwrap()
+        .peer_snapshot(a);
+    assert_eq!(state[0].waiter_state, "awaiting_refresh");
+    assert_eq!(state[0].waiter_session_id, Some(22));
+    assert_eq!(manager.next_selection_deferral_deadline(), deadline);
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: a,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    manager.handle_update(RibUpdate::EndRouteRefresh {
+        peer: a,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    assert!(manager.selection_convergence_held(FAMILY));
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        peer: a,
+        session_id: 22,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    manager.handle_update(RibUpdate::EndRouteRefresh {
+        peer: a,
+        session_id: 22,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    assert!(!manager.selection_convergence_held(FAMILY));
+    assert!(manager.next_selection_deferral_deadline().is_none());
+}
+
+#[tokio::test]
+async fn dormant_observers_plain_refresh_retains_its_completion_marker() {
+    let a = peer(1);
+    let observer = peer(3);
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_mins(1), &[a]));
+    let handle = tokio::spawn(manager.run());
+    let (observer_tx, mut observer_rx) = mpsc::channel(8);
+    stage_gr_context_plain_refresh(&tx, observer, 33).await;
+    tx.send(peer_up(observer, 33, observer_tx)).await.unwrap();
+    let _ = query_state(&tx, observer).await;
+    assert_eq!(observer_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+    let (a_tx, mut a_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, a, 11).await;
+    tx.send(peer_up(a, 11, a_tx)).await.unwrap();
+    tx.send(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
+        peer: observer,
+        session_id: 33,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    assert!(query_state(&tx, a).await.selection_deferral[0].active);
+    assert!(observer_rx.try_recv().is_err());
+    tx.send(RibUpdate::EndOfRib {
+        peer: a,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    assert!(!query_state(&tx, a).await.selection_deferral[0].active);
+    assert_eq!(a_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+    let response = observer_rx.try_recv().unwrap();
+    assert_eq!(
+        response.end_of_rib,
+        vec![FAMILY],
+        "a deferred plain refresh still terminates"
+    );
+    assert!(observer_rx.try_recv().is_err());
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[test]
+fn new_established_waiter_reholds_collision_staged_selection() {
+    for unclassified in [false, true] {
+        let metrics = BgpMetrics::new();
+        let (_tx, rx) = mpsc::channel(8);
+        let a = peer(1);
+        let b = peer(2);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+            .with_selection_deferral(config(Duration::from_mins(1), &[a, b]));
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        let families = HashSet::from([FAMILY]);
+        assert_eq!(
+            selection.classify_session(a, 11, false, &families, &metrics),
+            []
+        );
+        selection.session_down(a, 11, &metrics);
+        assert_eq!(
+            selection.await_collision_failback_refresh(a, 11, false, &families, true, &metrics),
+            Some(vec![SelectionDeferralTransition::Stage { family: FAMILY }])
+        );
+        assert!(!selection.selection_deferred(FAMILY));
+        if unclassified {
+            selection.unclassified_session(b, 22, &metrics);
+        } else {
+            assert_eq!(
+                selection.classify_session(b, 22, false, &families, &metrics),
+                []
+            );
+        }
+        assert!(
+            selection.selection_deferred(FAMILY),
+            "the new session still owes its table"
+        );
+        assert!(selection.end_of_rib(b, 21, FAMILY, &metrics).is_none());
+        assert!(selection.selection_deferred(FAMILY));
+        if unclassified {
+            assert!(selection.end_of_rib(b, 22, FAMILY, &metrics).is_none());
+            assert_eq!(
+                selection.classify_session(b, 22, false, &families, &metrics),
+                []
+            );
+        }
+        assert_eq!(
+            selection.end_of_rib(b, 22, FAMILY, &metrics),
+            Some(SelectionDeferralTransition::Stage { family: FAMILY })
+        );
+        assert!(!selection.selection_deferred(FAMILY));
+        assert!(selection.begin_route_refresh(a, 11, FAMILY).is_none());
+        let release = selection
+            .end_route_refresh(a, 11, FAMILY, &metrics)
+            .unwrap();
+        manager.apply_selection_deferral_transitions([release], "all current sessions completed");
+        assert!(!manager.selection_convergence_held(FAMILY));
+    }
+}
+
+#[tokio::test]
+async fn never_up_neighbor_does_not_hold_established_peers_selection() {
+    let a = peer(1);
+    let never_up = peer(2);
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_mins(1), &[a, never_up]));
+    let handle = tokio::spawn(manager.run());
+    let dormant = query_state(&tx, never_up).await;
+    assert!(!dormant.selection_deferral[0].active);
+    assert_eq!(dormant.selection_deferral[0].blocking_waiters, 0);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, a, 11).await;
+    tx.send(peer_up(a, 11, outbound_tx)).await.unwrap();
+    assert_eq!(
+        query_state(&tx, a).await.selection_deferral[0].blocking_waiters,
+        1
+    );
+    tx.send(RibUpdate::EndOfRib {
+        peer: a,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    let released = query_state(&tx, never_up).await;
+    assert!(!released.selection_deferral[0].active);
+    assert_eq!(released.selection_deferral[0].release_reason, "all_eor");
+    assert_eq!(outbound_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+
+    // A session arriving after this cohort completed does not re-arm it.
+    let (late_tx, _late_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, never_up, 22).await;
+    tx.send(peer_up(never_up, 22, late_tx)).await.unwrap();
+    assert!(!query_state(&tx, never_up).await.selection_deferral[0].active);
+    assert!(outbound_rx.try_recv().is_err());
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn reestablished_missing_eor_holds_until_original_startup_bound() {
+    let a = peer(1);
+    let b = peer(2);
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
+        .with_selection_deferral(config(Duration::from_secs(5), &[a, b]));
+    let handle = tokio::spawn(manager.run());
+    let _ = query_state(&tx, a).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let (a_tx, mut a_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, a, 11).await;
+    tx.send(peer_up(a, 11, a_tx)).await.unwrap();
+    assert!(query_state(&tx, a).await.selection_deferral[0].active);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let (b_tx, mut b_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, b, 22).await;
+    tx.send(peer_up(b, 22, b_tx)).await.unwrap();
+    let held = query_state(&tx, b).await;
+    assert!(held.selection_deferral[0].active);
+    assert_eq!(held.selection_deferral[0].blocking_waiters, 2);
+    assert_eq!(held.selection_deferral[0].remaining_millis, 1000);
+    tx.send(RibUpdate::EndOfRib {
+        peer: a,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        query_state(&tx, b).await.selection_deferral[0].blocking_waiters,
+        1
+    );
+    assert!(a_rx.try_recv().is_err());
+    tokio::time::advance(Duration::from_millis(999)).await;
+    assert!(query_state(&tx, b).await.selection_deferral[0].active);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    let ended = query_state(&tx, b).await;
+    assert!(!ended.selection_deferral[0].active);
+    assert_eq!(ended.selection_deferral[0].release_reason, "timer");
+    for receiver in [&mut a_rx, &mut b_rx] {
+        assert_eq!(receiver.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+        assert!(receiver.try_recv().is_err());
+    }
+    assert_counter_value(&metrics, "bgp_selection_deferral_timeouts_total", 1.0);
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn departing_established_waiter_releases_after_plain_or_gr_teardown() {
+    for graceful in [false, true] {
+        let a = peer(1);
+        let never_up = peer(2);
+        let observer = peer(3);
+        let (tx, rx) = mpsc::channel(32);
+        let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_selection_deferral(config(Duration::from_mins(1), &[a, never_up]));
+        let handle = tokio::spawn(manager.run());
+        let (a_tx, _a_rx) = mpsc::channel(8);
+        stage_gr_context(&tx, a, 11).await;
+        tx.send(peer_up(a, 11, a_tx)).await.unwrap();
+        let (observer_tx, mut observer_rx) = mpsc::channel(8);
+        tx.send(peer_up(observer, 33, observer_tx)).await.unwrap();
+        assert!(query_state(&tx, a).await.selection_deferral[0].active);
+        assert!(observer_rx.try_recv().is_err());
+        let down = if graceful {
+            RibUpdate::PeerGracefulRestart {
+                peer: a,
+                session_id: 11,
+                restart_time: 60,
+                stale_routes_time: 60,
+                gr_families: vec![FAMILY],
+                peer_llgr_capable: false,
+                peer_llgr_families: vec![],
+                llgr_stale_time: 0,
+            }
+        } else {
+            RibUpdate::PeerDown {
+                peer: a,
+                session_id: 11,
+            }
+        };
+        tx.send(down).await.unwrap();
+        let ended = query_state(&tx, never_up).await;
+        assert!(!ended.selection_deferral[0].active, "graceful={graceful}");
+        assert_eq!(observer_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+        assert!(observer_rx.try_recv().is_err());
+        drop(tx);
+        handle.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn dormant_observer_does_not_get_duplicate_eor_after_later_hold() {
+    let a = peer(1);
+    let observer = peer(3);
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_mins(1), &[a]));
+    let handle = tokio::spawn(manager.run());
+    let (observer_tx, mut observer_rx) = mpsc::channel(8);
+    tx.send(peer_up(observer, 33, observer_tx)).await.unwrap();
+    assert!(!query_state(&tx, a).await.selection_deferral[0].active);
+    assert_eq!(observer_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+    let (a_tx, mut a_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, a, 11).await;
+    tx.send(peer_up(a, 11, a_tx)).await.unwrap();
+    assert!(query_state(&tx, a).await.selection_deferral[0].active);
+    tx.send(RibUpdate::EndOfRib {
+        peer: a,
+        session_id: 11,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    })
+    .await
+    .unwrap();
+    assert!(!query_state(&tx, a).await.selection_deferral[0].active);
+    assert_eq!(a_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+    assert!(
+        observer_rx.try_recv().is_err(),
+        "initial EoR was already sent before arming"
+    );
+    drop(tx);
+    handle.await.unwrap();
+}
+
 fn counter_value(metrics: &BgpMetrics, name: &str) -> f64 {
     metrics
         .registry()
@@ -345,7 +689,7 @@ async fn frozen_roster_rearms_satisfied_peer_on_session_replacement() {
     assert_eq!(state.selection_deferral.len(), 1);
     assert!(state.selection_deferral[0].active);
     assert_eq!(state.selection_deferral[0].waiter_state, "awaiting_session");
-    assert_eq!(state.selection_deferral[0].waiter_session_id, None);
+    assert_eq!(state.selection_deferral[0].waiter_session_id, Some(3));
     assert_eq!(state.selection_deferral[0].blocking_waiters, 1);
     assert!(query_best_routes(&tx).await.is_empty());
 
@@ -408,48 +752,23 @@ async fn frozen_roster_rearms_satisfied_peer_on_session_replacement() {
 
 #[tokio::test]
 async fn restart_state_and_non_gr_sessions_are_excluded_without_waiting_for_eor() {
-    let a = peer(1);
-    let b = peer(2);
-    let (tx, rx) = mpsc::channel(32);
-    let manager = RibManager::new(
-        rx,
-        dummy_query_rx(),
-        None,
-        Some(Ipv4Addr::new(10, 0, 0, 254)),
-        BgpMetrics::new(),
-    )
-    .with_selection_deferral(config(Duration::from_mins(1), &[a, b]));
-    let handle = tokio::spawn(manager.run());
-
-    let (a_tx, mut a_rx) = mpsc::channel(8);
-    stage_gr_context_with(&tx, a, 1, true, vec![FAMILY]).await;
-    tx.send(peer_up(a, 1, a_tx)).await.unwrap();
-    let a_state = query_state(&tx, a).await;
-    assert!(a_state.selection_deferral[0].active);
-    assert_eq!(a_state.selection_deferral[0].waiter_state, "excluded");
-    assert_eq!(a_state.selection_deferral[0].blocking_waiters, 1);
-    assert!(a_rx.try_recv().is_err());
-
-    let (b_tx, mut b_rx) = mpsc::channel(8);
-    stage_gr_context_with(&tx, b, 2, false, Vec::new()).await;
-    tx.send(peer_up(b, 2, b_tx)).await.unwrap();
-
-    let a_released = query_state(&tx, a).await;
-    let b_released = query_state(&tx, b).await;
-    assert!(!a_released.selection_deferral[0].active);
-    assert_eq!(a_released.selection_deferral[0].waiter_state, "excluded");
-    assert_eq!(b_released.selection_deferral[0].waiter_state, "excluded");
-    // Zero End-of-RIB markers were consumed: the recorded reason must not
-    // claim `all_eor`.
-    assert_eq!(
-        a_released.selection_deferral[0].release_reason,
-        "all_excluded"
-    );
-    assert_eq!(a_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
-    assert_eq!(b_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
-
-    drop(tx);
-    handle.await.unwrap();
+    for (restart, families) in [(true, vec![FAMILY]), (false, Vec::new())] {
+        let a = peer(1);
+        let (tx, rx) = mpsc::channel(16);
+        let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_selection_deferral(config(Duration::from_mins(1), &[a]));
+        let handle = tokio::spawn(manager.run());
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        stage_gr_context_with(&tx, a, 11, restart, families).await;
+        tx.send(peer_up(a, 11, outbound_tx)).await.unwrap();
+        let state = query_state(&tx, a).await;
+        assert!(!state.selection_deferral[0].active);
+        assert_eq!(state.selection_deferral[0].waiter_state, "excluded");
+        assert_eq!(state.selection_deferral[0].release_reason, "all_excluded");
+        assert_eq!(outbound_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
+        drop(tx);
+        handle.await.unwrap();
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -499,6 +818,10 @@ fn collision_failback_stages_then_waits_for_refresh_completion() {
             .len(),
         0
     );
+    assert_eq!(
+        selection.classify_session(remaining, 21, false, &gr_families, &metrics),
+        []
+    );
     assert!(
         selection
             .end_of_rib(survivor, 11, FAMILY, &metrics)
@@ -530,12 +853,6 @@ fn collision_failback_stages_then_waits_for_refresh_completion() {
         "an unrelated session must not satisfy the refresh waiter"
     );
 
-    assert_eq!(
-        selection
-            .classify_session(remaining, 21, false, &gr_families, &metrics)
-            .len(),
-        0
-    );
     assert_eq!(
         selection.end_of_rib(remaining, 21, FAMILY, &metrics),
         Some(SelectionDeferralTransition::Stage { family: FAMILY })
@@ -586,13 +903,13 @@ fn multiple_failback_survivors_release_only_after_every_waiter_converges() {
     let gr_families = HashSet::from([FAMILY]);
     let selection = manager.selection_deferral.as_mut().unwrap();
 
-    for (peer, session_id) in [(first_survivor, 11), (second_survivor, 21)] {
+    for (peer, session_id) in [(first_survivor, 11), (second_survivor, 21), (ordinary, 31)] {
         assert_eq!(
-            selection
-                .classify_session(peer, session_id, false, &gr_families, &metrics)
-                .len(),
-            0
+            selection.classify_session(peer, session_id, false, &gr_families, &metrics),
+            []
         );
+    }
+    for (peer, session_id) in [(first_survivor, 11), (second_survivor, 21)] {
         assert!(
             selection
                 .end_of_rib(peer, session_id, FAMILY, &metrics)
@@ -734,6 +1051,7 @@ fn deferred_selection_rejects_route_commit_until_release() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
         .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    super::arm_selection_waiter(&mut manager, source, &[FAMILY]);
     assert!(manager.selection_deferred(FAMILY));
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
@@ -769,12 +1087,7 @@ fn deferred_selection_rejects_route_commit_until_release() {
     assert!((selection_gate_refusals - 1.0).abs() < f64::EPSILON);
     assert_counter_value(&metrics, "bgp_outbound_route_drops_total", 0.0);
 
-    let released = manager
-        .selection_deferral
-        .as_mut()
-        .unwrap()
-        .expire(&metrics);
-    assert_eq!(released, vec![FAMILY]);
+    manager.expire_selection_deferral();
     assert!(manager.selection_deferral.is_some());
     assert!(!manager.selection_deferred(FAMILY));
     assert!(
@@ -791,6 +1104,7 @@ fn deferred_unicast_commit_accepts_local_updates_and_rejects_mixed_sources() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
         .with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    super::arm_selection_waiter(&mut manager, source, &[FAMILY]);
     let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
     manager.outbound_peers.insert(target, outbound_tx);
     manager.peer_export_encoders.insert(
@@ -828,11 +1142,14 @@ fn deferred_unicast_commit_accepts_local_updates_and_rejects_mixed_sources() {
             .is_none()
     );
 
+    let mut local_batch =
+        OutboundCommitBatch::with_unicast(vec![local.clone()].into(), vec![None].into());
+    local_batch.local_sources.insert(
+        (local.prefix, local.path_id),
+        crate::adj_rib_out::LocalExportSource::from_route(&local).unwrap(),
+    );
     manager
-        .try_send_and_commit_outbound_update(
-            target,
-            OutboundCommitBatch::with_unicast(vec![local.clone()].into(), vec![None].into()),
-        )
+        .try_send_and_commit_outbound_update(target, local_batch)
         .unwrap();
     let update = outbound_rx.try_recv().unwrap();
     assert_eq!(update.announce.len(), 1);
@@ -1456,6 +1773,9 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
     })
     .await
     .unwrap();
+    let (remaining_tx, _remaining_rx) = mpsc::channel(8);
+    stage_gr_context(&tx, remaining, 21).await;
+    tx.send(peer_up(remaining, 21, remaining_tx)).await.unwrap();
     tx.send(RibUpdate::EndOfRib {
         peer: survivor,
         session_id: 11,
@@ -1479,9 +1799,6 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
     .await
     .unwrap();
 
-    let (remaining_tx, _remaining_rx) = mpsc::channel(8);
-    stage_gr_context(&tx, remaining, 21).await;
-    tx.send(peer_up(remaining, 21, remaining_tx)).await.unwrap();
     tx.send(RibUpdate::RoutesReceived {
         peer: remaining,
         session_id: 21,
@@ -1979,6 +2296,12 @@ fn collision_failback_overflow_receipt(
     // distinguishes whether one identity fit before overflow. Release must use
     // the full frozen Loc-RIB union as the fail-safe identity source.
     manager = manager.with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    super::arm_selection_waiter(&mut manager, source, &[FAMILY]);
+    manager
+        .pending_eor
+        .entry(observer)
+        .or_default()
+        .insert(FAMILY);
     manager.set_deferred_selection_limits_for_test(identity_cap, logical_byte_cap);
     manager.record_deferred_unicast(&HashSet::from([prefix_a, prefix_b]));
     assert_counter_value(
@@ -2391,13 +2714,14 @@ fn zero_byte_limit_overflows_all_real_recorders_once_per_family() {
         timeout: Duration::from_mins(1),
         waiters: vec![SelectionDeferralWaiterConfig {
             peer: peer(1),
-            families,
+            families: families.clone(),
         }],
     };
     let metrics = BgpMetrics::new();
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone())
         .with_selection_deferral(selection_config);
+    super::arm_selection_waiter(&mut manager, peer(1), &families);
     manager.set_deferred_selection_limits_for_test(1_000_000, 0);
 
     let unicast = HashSet::from([make_route_with_lp(
@@ -2459,12 +2783,7 @@ fn inactive_selection_gate_skips_identity_tracking_before_and_after_release() {
     );
 
     manager = manager.with_selection_deferral(config(Duration::from_secs(1), &[peer(1)]));
-    let released = manager
-        .selection_deferral
-        .as_mut()
-        .unwrap()
-        .expire(&metrics);
-    assert_eq!(released, vec![FAMILY]);
+    manager.expire_selection_deferral();
     manager.record_deferred_unicast_with_test_limit(&affected, 0);
     assert_counter_value(
         &metrics,
@@ -2645,7 +2964,7 @@ async fn full_outbound_channel_keeps_eor_pending_until_dirty_resync() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn timer_releases_never_established_waiter_and_records_reason() {
+async fn dormant_roster_expires_without_claiming_a_selection_timeout() {
     let a = peer(1);
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(16);
@@ -2653,9 +2972,13 @@ async fn timer_releases_never_established_waiter_and_records_reason() {
         .with_selection_deferral(config(Duration::from_secs(5), &[a]));
     let handle = tokio::spawn(manager.run());
 
+    let dormant = query_state(&tx, a).await;
+    assert!(!dormant.selection_deferral[0].active);
+    assert_eq!(dormant.selection_deferral[0].blocking_waiters, 0);
     tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
     let state = query_state(&tx, a).await;
-    assert_eq!(state.selection_deferral[0].release_reason, "timer");
+    assert_eq!(state.selection_deferral[0].release_reason, "all_excluded");
     assert!(!state.selection_deferral[0].active);
 
     let families = metrics.registry().gather();
@@ -2663,7 +2986,7 @@ async fn timer_releases_never_established_waiter_and_records_reason() {
         .iter()
         .find(|family| family.name() == "bgp_selection_deferral_timeouts_total")
         .unwrap();
-    assert!((timeout.get_metric()[0].get_counter().get_value() - 1.0).abs() < f64::EPSILON);
+    assert!(timeout.get_metric()[0].get_counter().get_value().abs() < f64::EPSILON);
 
     drop(tx);
     handle.await.unwrap();

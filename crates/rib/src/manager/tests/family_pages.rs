@@ -993,6 +993,7 @@ fn orr_topology_pages_keep_one_source_across_vantage_changes() {
             families: vec![(Afi::BgpLs, Safi::BgpLsVpn)],
         }],
     });
+    super::arm_selection_waiter(&mut manager, waiter, &[(Afi::BgpLs, Safi::BgpLsVpn)]);
     assert!(manager.selection_deferred((Afi::BgpLs, Safi::BgpLsVpn)));
     let mut routes = square_topology(peer);
     for (local, remote) in [(5, 6), (6, 5)] {

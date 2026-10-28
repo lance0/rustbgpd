@@ -211,6 +211,11 @@ fn explicit_replay_rejects_selection_deferral_without_releasing_gate() {
             families: ipv4_sendable(),
         }],
     });
+    super::arm_selection_waiter(
+        &mut manager,
+        PeerId::from_addr("192.0.2.1".parse().unwrap()),
+        &ipv4_sendable(),
+    );
     let mut outbound = register_peer(&mut manager, peer, ipv4_sendable(), false, 16);
     assert!(outbound.try_recv().is_err());
     let (replay, _enrolled) = BmpReplay::new(Duration::from_secs(5));

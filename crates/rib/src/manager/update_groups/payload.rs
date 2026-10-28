@@ -22,6 +22,7 @@ pub(in crate::manager) struct GroupDelta {
     /// Newly staged post-policy route + its next-hop-override flag, or
     /// `None` for a withdrawal.
     pub(in crate::manager) new: Option<(Route, Option<NextHopAction>)>,
+    pub(in crate::manager) local_source: Option<crate::adj_rib_out::LocalExportSource>,
     /// Source peer of the group-table entry this delta replaces, read
     /// BEFORE commit. `None` = the key was not previously staged.
     pub(in crate::manager) old_source: Option<PeerId>,
@@ -57,6 +58,7 @@ pub(in crate::manager) struct GroupDelta {
 #[derive(Debug, Clone)]
 pub(in crate::manager) struct PriorGroupSlots {
     pub(super) route: Route,
+    pub(super) local_source: Option<crate::adj_rib_out::LocalExportSource>,
     pub(super) nh: Option<NextHopAction>,
     pub(super) source_attrs: Option<Arc<AttrSet>>,
     pub(super) lane: Option<RunnerUp>,
@@ -76,6 +78,7 @@ impl PriorGroupSlots {
         checkpoint(true);
         let prior = Box::new(Self {
             route: route.clone(),
+            local_source: group.table.local_export_source(&prefix, path_id),
             nh: group.nh_override((prefix, path_id)),
             source_attrs: if group.source_control_passthrough {
                 capture_source_attrs(route)
@@ -94,6 +97,7 @@ impl PriorGroupSlots {
         if self.route.peer != member {
             return Some(AdvEntry {
                 route: &self.route,
+                local_source: self.local_source,
                 nh: self.nh.as_ref(),
                 source_attrs: self.source_attrs.as_ref(),
                 policy_label: None,
@@ -101,6 +105,7 @@ impl PriorGroupSlots {
         }
         self.lane.as_ref().map(|entry| AdvEntry {
             route: &entry.route,
+            local_source: entry.local_source,
             nh: entry.nh.as_ref(),
             source_attrs: entry.source_attrs.as_ref(),
             policy_label: entry.policy_label.as_ref(),
@@ -141,6 +146,7 @@ pub(in crate::manager) fn capture_source_attrs(source: &Route) -> Option<Arc<Att
 #[derive(Debug, Clone)]
 pub(in crate::manager) struct RunnerUp {
     pub(in crate::manager) route: Route,
+    pub(in crate::manager) local_source: Option<crate::adj_rib_out::LocalExportSource>,
     pub(in crate::manager) nh: Option<NextHopAction>,
     pub(in crate::manager) source_attrs: Option<Arc<AttrSet>>,
     pub(in crate::manager) policy_label: Option<PolicyLabel>,
@@ -161,6 +167,7 @@ pub(in crate::manager) struct RunnerUp {
 #[derive(Clone, Copy)]
 pub(in crate::manager) struct AdvEntry<'a> {
     pub(in crate::manager) route: &'a Route,
+    pub(in crate::manager) local_source: Option<crate::adj_rib_out::LocalExportSource>,
     /// Next-hop-override residue for the slot.
     pub(in crate::manager) nh: Option<&'a NextHopAction>,
     /// Modifying-policy groups and [`RunnerUp`] lane entries may carry captured
@@ -482,6 +489,7 @@ impl GroupStageOutput {
                     (delta.old_source == Some(route.peer) && route.peer != member).then_some(
                         AdvEntry {
                             route,
+                            local_source: delta.local_source,
                             nh: action.as_ref(),
                             source_attrs: delta.prior_source_attrs.as_ref(),
                             policy_label: None,
@@ -500,6 +508,7 @@ impl GroupStageOutput {
                             (delta.prefix, 0),
                             AdvEntry {
                                 route: &entry.route,
+                                local_source: entry.local_source,
                                 nh: entry.nh.as_ref(),
                                 source_attrs: entry.source_attrs.as_ref(),
                                 policy_label: None,
@@ -1228,9 +1237,16 @@ fn emit_pcb_source_flip(
     let old = prior
         .adv_entry(member)
         .and_then(|entry| prepare_pcb_slot(entry, rs_control));
+    let prior_local_source = prior.adv_entry(member).and_then(|entry| entry.local_source);
+    let next_local_source = if route.peer == member {
+        delta.lane.as_ref().and_then(|entry| entry.local_source)
+    } else {
+        delta.local_source
+    };
     let new = if route.peer == member {
         delta.lane.as_ref().map(|entry| AdvEntry {
             route: &entry.route,
+            local_source: entry.local_source,
             nh: entry.nh.as_ref(),
             source_attrs: entry.source_attrs.as_ref(),
             policy_label: entry.policy_label.as_ref(),
@@ -1238,6 +1254,7 @@ fn emit_pcb_source_flip(
     } else {
         Some(AdvEntry {
             route,
+            local_source: delta.local_source,
             nh: nh.as_ref(),
             source_attrs: delta.source_attrs.as_ref(),
             policy_label: delta.policy_label.as_ref(),
@@ -1246,14 +1263,15 @@ fn emit_pcb_source_flip(
     .and_then(|entry| prepare_pcb_slot(entry, rs_control));
     match new {
         Some((new, nh))
-            if old.as_ref().is_none_or(|(old, old_nh)| {
-                !crate::manager::helpers::unicast_routes_equal(
-                    old,
-                    old_nh.as_ref(),
-                    &new,
-                    nh.as_ref(),
-                )
-            }) =>
+            if prior_local_source != next_local_source
+                || old.as_ref().is_none_or(|(old, old_nh)| {
+                    !crate::manager::helpers::unicast_routes_equal(
+                        old,
+                        old_nh.as_ref(),
+                        &new,
+                        nh.as_ref(),
+                    )
+                }) =>
         {
             nh_override_flags.push(nh);
             announce.push(new);

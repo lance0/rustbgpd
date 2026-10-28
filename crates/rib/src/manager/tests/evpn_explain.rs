@@ -296,6 +296,7 @@ fn exact_evpn_explain_source_scope_deferral_dirty_and_encoder_overlay_are_distin
             families: evpn_sendable(),
         }],
     });
+    super::arm_selection_waiter(&mut manager, old.peer, &evpn_sendable());
     manager
         .adj_ribs_out
         .entry(TARGET)

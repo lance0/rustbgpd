@@ -929,6 +929,8 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
                     "active; waiter={}; session={session}; blocking={}; remaining={}ms",
                     row.waiter_state, row.blocking_waiters, row.remaining_millis
                 )
+            } else if row.release_reason.is_empty() {
+                format!("dormant; waiter={}; session={session}", row.waiter_state)
             } else {
                 format!(
                     "released={}; waiter={}; session={session}",
@@ -2523,6 +2525,43 @@ mod tests {
                 ),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn neighbor_detail_distinguishes_dormant_active_and_released_selection() {
+        for (active, release_reason, waiter_state, session, expected) in [
+            (
+                false,
+                "",
+                "awaiting_session",
+                None,
+                "  family-value — dormant; waiter=awaiting_session; session=none",
+            ),
+            (
+                true,
+                "",
+                "awaiting_eor",
+                Some(105),
+                "  family-value — active; waiter=awaiting_eor; session=105; blocking=106; remaining=107ms",
+            ),
+            (
+                false,
+                "release_reason-value",
+                "waiter_state-value",
+                Some(105),
+                "  family-value — released=release_reason-value; waiter=waiter_state-value; session=105",
+            ),
+        ] {
+            let mut state = neighbor_projection_fixture();
+            let row = &mut state.selection_deferral[0];
+            row.active = active;
+            row.release_reason = release_reason.into();
+            row.waiter_state = waiter_state.into();
+            row.waiter_session_id = session;
+            let rendered = render_neighbor_detail_human(&state);
+            let (_, section) = rendered.split_once("Selection Deferral:\n").unwrap();
+            assert_eq!(section.lines().next().unwrap(), expected);
         }
     }
 

@@ -1550,6 +1550,11 @@ fn injected_flowspec_is_exported_during_selection_deferral() {
                 families: vec![FLOWSPEC, UNICAST],
             }],
         });
+    arm_selection_waiter(
+        &mut manager,
+        peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+        &[FLOWSPEC, UNICAST],
+    );
     let target = PeerId::from_addr(v4(2));
     let source_addr = Ipv4Addr::new(10, 0, 0, 9);
     let source = peer_v4(source_addr);
@@ -1656,19 +1661,9 @@ fn injected_flowspec_is_exported_during_selection_deferral() {
     assert_eq!(export.disposition, RouteExportDisposition::Committed);
     assert_eq!(export.reason, "");
 
-    // Release: best path decides the shared key, and each EoR follows its
-    // family's payload. The timer releases both families together; pin the
-    // order in which their completions run so unicast's EoR flush runs
-    // before the FlowSpec release selection.
-    let metrics = manager.metrics.clone();
-    let mut released = manager
-        .selection_deferral
-        .as_mut()
-        .unwrap()
-        .expire(&metrics);
-    released.sort_by_key(|family| *family != UNICAST);
-    assert_eq!(released, vec![UNICAST, FLOWSPEC]);
-    manager.release_selection_families(&released, "Selection_Deferral_Timer expired");
+    // Each family's release must keep the other family's marker held until
+    // that family's own selection has been sent.
+    manager.expire_selection_deferral();
     assert!(!manager.selection_deferred(FLOWSPEC));
     assert_eq!(
         received_flowspec_selected(&mut manager, source),
@@ -1746,6 +1741,10 @@ fn deferred_unicast_hosts() -> [Prefix; 2] {
 }
 
 fn deferred_unicast_manager() -> RibManager {
+    restart_unicast_manager(true)
+}
+
+fn restart_unicast_manager(armed: bool) -> RibManager {
     let (_tx, rx) = mpsc::channel(8);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut manager = RibManager::new(
@@ -1772,6 +1771,13 @@ fn deferred_unicast_manager() -> RibManager {
             .into(),
         replay_owners: vec!["deferral-test".to_string()],
     });
+    if armed {
+        arm_selection_waiter(
+            &mut manager,
+            peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+            &deferred_unicast_families(),
+        );
+    }
     let source = Ipv4Addr::new(198, 51, 100, 250);
     manager.handle_update(RibUpdate::BgpLsRoutesReceived {
         peer: peer_v4(source),
@@ -2215,15 +2221,7 @@ fn injected_unicast_is_exported_during_selection_deferral() {
         assert!(deferred_unicast_drain(&mut target_rx).is_empty());
         assert!(deferred_unicast_drain(&mut late_rx).is_empty());
 
-        let metrics = manager.metrics.clone();
-        let mut families = manager
-            .selection_deferral
-            .as_mut()
-            .unwrap()
-            .expire(&metrics);
-        families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
-        assert_eq!(families, deferred_unicast_families());
-        manager.release_selection_families(&families, "Selection_Deferral_Timer expired");
+        manager.expire_selection_deferral();
         for prefix in hosts {
             assert_eq!(
                 manager.loc_rib.get(&prefix).unwrap().peer,
@@ -2423,6 +2421,337 @@ fn unicast_deferral_exempts_only_local_rtbh_candidates() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one startup transcript checks late joins and completion ordering in every export mode"
+)]
+fn dormant_selection_arming_replays_frozen_routes_to_late_joiners() {
+    fn check_advertised(manager: &mut RibManager, peer: PeerId, expected: &BTreeSet<Prefix>) {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryRoutesPage {
+            scope: crate::update::RouteQueryScope::Advertised { peer },
+            filter: None,
+            after: None,
+            expected_version: None,
+            page_size: 64,
+            reply,
+        });
+        let page = response.try_recv().unwrap().unwrap();
+        assert_eq!(page.total, u64::try_from(expected.len()).unwrap());
+        assert!(!page.has_more);
+        assert_eq!(
+            page.routes
+                .iter()
+                .map(|route| route.prefix)
+                .collect::<BTreeSet<_>>(),
+            *expected
+        );
+        let (reply, mut count) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryAdvertisedCount { peer, reply });
+        assert_eq!(count.try_recv().unwrap(), expected.len());
+    }
+    let defaults = [
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+        Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0)),
+    ];
+    let received = [
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24)),
+        Prefix::V6(Ipv6Prefix::new("2001:db8:10::".parse().unwrap(), 64)),
+    ];
+    let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    for mode in DEFERRED_UNICAST_MODES {
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(
+            rx,
+            dummy_query_rx(),
+            None,
+            Some(Ipv4Addr::new(10, 255, 0, 1)),
+            BgpMetrics::new(),
+        )
+        .with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: Duration::from_mins(2),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: waiter,
+                families: deferred_unicast_families(),
+            }],
+        });
+        let topology_source = Ipv4Addr::new(198, 51, 100, 250);
+        manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+            peer: peer_v4(topology_source),
+            session_id: 0,
+            announced: crate::orr::fixtures::square_topology(topology_source),
+            withdrawn: vec![],
+        });
+        let observer = PeerId::from_addr(v4(4));
+        let mut observer_rx = deferred_unicast_peer(&mut manager, observer, mode, false);
+        let initial = deferred_unicast_drain(&mut observer_rx);
+        assert_eq!(
+            initial
+                .iter()
+                .map(|update| update.end_of_rib.len())
+                .sum::<usize>(),
+            2
+        );
+        for prefix in defaults {
+            inject(&mut manager, local_route(prefix, 17));
+        }
+        let source = deferred_unicast_received(&mut manager, &received);
+        let all: BTreeSet<_> = defaults.into_iter().chain(received).collect();
+        assert_eq!(
+            deferred_unicast_drain(&mut observer_rx)
+                .iter()
+                .flat_map(|update| update.announce.iter().map(|route| route.prefix))
+                .collect::<BTreeSet<_>>(),
+            all
+        );
+        assert!(
+            deferred_unicast_families()
+                .iter()
+                .all(|family| !manager.selection_deferred(*family))
+        );
+
+        // The real stamped PeerUp arms the dormant gate over existing state.
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: waiter,
+            session_id: 77,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: deferred_unicast_families(),
+            peer_enhanced_refresh: false,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        });
+        let (outbound_tx, mut waiter_rx) = mpsc::channel(64);
+        let mut up = super::lifecycle::test_peer_up(waiter, 77, outbound_tx);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = deferred_unicast_families();
+        }
+        manager.handle_update(up);
+        assert!(
+            deferred_unicast_families()
+                .iter()
+                .all(|family| manager.selection_deferred(*family))
+        );
+        assert!(deferred_unicast_drain(&mut waiter_rx).is_empty());
+        let late = PeerId::from_addr(v4(5));
+        let mut late_rx = deferred_unicast_peer(&mut manager, late, mode, false);
+        assert!(deferred_unicast_drain(&mut late_rx).is_empty());
+        check_advertised(&mut manager, late, &BTreeSet::new());
+        // A source-less Add-Path explain previously read the frozen Loc-RIB
+        // row even though its candidate staging correctly exported nothing.
+        for prefix in defaults.into_iter().chain(received) {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+                peer: late,
+                prefix,
+                rd: None,
+                labeled: false,
+                source: None,
+                reply,
+            });
+            let explanation = response.try_recv().unwrap().unwrap();
+            assert_eq!(
+                explanation.decision,
+                crate::update::ExplainDecision::NoBestRoute,
+                "{mode:?}"
+            );
+            assert!(!explanation.already_advertised);
+        }
+        let mut released = HashSet::new();
+        for (afi, safi) in deferred_unicast_families() {
+            manager.handle_update(RibUpdate::EndOfRib {
+                peer: waiter,
+                session_id: 77,
+                afi,
+                safi,
+            });
+            released.insert((afi, safi));
+            let expected = all
+                .iter()
+                .copied()
+                .filter(|prefix| released.contains(&prefix_family(prefix)))
+                .collect();
+            check_advertised(&mut manager, late, &expected);
+        }
+        let replay = deferred_unicast_drain(&mut late_rx);
+        assert_eq!(
+            replay
+                .iter()
+                .map(|update| update.announce.len())
+                .sum::<usize>(),
+            4,
+            "{mode:?}: each missing initial slot is replayed exactly once"
+        );
+        assert!(
+            !manager.pending_group_admitted.contains_record(late),
+            "{mode:?}: completed initial replay retires its admitted proof"
+        );
+        assert_eq!(
+            replay
+                .iter()
+                .flat_map(|update| update.announce.iter().map(|route| route.prefix))
+                .collect::<BTreeSet<_>>(),
+            all,
+            "{mode:?}: unchanged group rows reach the joining member"
+        );
+        for family in deferred_unicast_families() {
+            let mut terminal = false;
+            let mut markers = 0;
+            let mut prefixes = BTreeSet::new();
+            for update in &replay {
+                for route in update
+                    .announce
+                    .iter()
+                    .filter(|route| prefix_family(&route.prefix) == family)
+                {
+                    assert!(!terminal, "{mode:?}: replay data followed the initial EoR");
+                    prefixes.insert(route.prefix);
+                    assert_eq!(
+                        route.peer,
+                        if defaults.contains(&route.prefix) {
+                            LOCAL_PEER
+                        } else {
+                            source
+                        }
+                    );
+                }
+                if update.end_of_rib.contains(&family) {
+                    terminal = true;
+                    markers += 1;
+                }
+            }
+            assert_eq!(
+                prefixes.len(),
+                2,
+                "{mode:?}: both frozen routes precede completion"
+            );
+            assert_eq!(markers, 1, "{mode:?}: exactly one initial EoR");
+        }
+        assert!(
+            deferred_unicast_drain(&mut observer_rx)
+                .iter()
+                .all(|update| update.end_of_rib.is_empty()),
+            "{mode:?}: dormant observer already received its initial EoR"
+        );
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a real startup transition checks local candidate reclassification in every export mode"
+)]
+fn arming_selection_promotes_rtbh_over_a_preselected_ordinary_local_path() {
+    let prefixes = [
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24)),
+        Prefix::V6(Ipv6Prefix::new("2001:db8:10::".parse().unwrap(), 64)),
+    ];
+    for mode in DEFERRED_UNICAST_MODES {
+        let mut manager = restart_unicast_manager(false);
+        let observer = PeerId::from_addr(v4(4));
+        let mut observer_rx = deferred_unicast_peer(&mut manager, observer, mode, false);
+        let _ = deferred_unicast_drain(&mut observer_rx);
+        for prefix in prefixes {
+            inject(&mut manager, deferred_unicast_local(prefix, 71, 50));
+            let mut ordinary = local_route(prefix, 23);
+            AttrSet::edit(&mut ordinary.attributes, |attrs| {
+                attrs.push(PathAttribute::LocalPref(300));
+            });
+            inject(&mut manager, ordinary);
+            assert_eq!(manager.loc_rib.get(&prefix).unwrap().path_id, 23);
+        }
+        let _ = deferred_unicast_drain(&mut observer_rx);
+        let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: waiter,
+            session_id: 77,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: deferred_unicast_families(),
+            peer_enhanced_refresh: false,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        });
+        let (outbound_tx, mut waiter_rx) = mpsc::channel(64);
+        let mut up = super::lifecycle::test_peer_up(waiter, 77, outbound_tx);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = deferred_unicast_families();
+        }
+        manager.handle_update(up);
+        let _ = deferred_unicast_drain(&mut waiter_rx);
+        for prefix in prefixes {
+            assert!(manager.selection_deferred(prefix_family(&prefix)));
+            assert_eq!(
+                manager.loc_rib.get(&prefix).unwrap().path_id,
+                71,
+                "{mode:?}: a newly armed hold must reclassify existing local paths"
+            );
+            assert_eq!(
+                row(
+                    &query(&mut manager, prefix, 23, None, 10).unwrap(),
+                    observer
+                )
+                .reason,
+                "selection_deferred"
+            );
+            assert_eq!(
+                row(
+                    &query(&mut manager, prefix, 71, None, 10).unwrap(),
+                    observer
+                )
+                .disposition,
+                RouteExportDisposition::Committed
+            );
+        }
+        let late = PeerId::from_addr(v4(5));
+        let mut late_rx = deferred_unicast_peer(&mut manager, late, mode, false);
+        assert_deferred_unicast_replay(
+            &deferred_unicast_drain(&mut late_rx),
+            mode,
+            &prefixes,
+            false,
+        );
+        let _ = deferred_unicast_drain(&mut observer_rx);
+        for prefix in prefixes {
+            withdraw(&mut manager, prefix, 71);
+            assert!(
+                manager.loc_rib.get(&prefix).is_none(),
+                "{mode:?}: deleting RTBH must not expose the held local sibling"
+            );
+            assert!(manager.ribs[&LOCAL_PEER].get(&prefix, 23).is_some());
+        }
+        for rx in [&mut observer_rx, &mut late_rx] {
+            assert!(
+                deferred_unicast_drain(rx)
+                    .iter()
+                    .all(|update| update.announce.is_empty())
+            );
+        }
+        for (afi, safi) in deferred_unicast_families() {
+            manager.handle_update(RibUpdate::EndOfRib {
+                peer: waiter,
+                session_id: 77,
+                afi,
+                safi,
+            });
+        }
+        for prefix in prefixes {
+            assert_eq!(
+                manager.loc_rib.get(&prefix).unwrap().path_id,
+                23,
+                "{mode:?}: the ordinary local candidate returns after release"
+            );
+        }
+    }
+}
+
+#[test]
 fn tagged_aggregate_keeps_deferral_exemption_after_export_policy_removes_blackhole() {
     for mode in [DeferredUnicastMode::Single, DeferredUnicastMode::AddPath] {
         let mut manager = deferred_unicast_manager();
@@ -2527,13 +2856,7 @@ fn injected_unicast_replaces_frozen_received_selection_without_fallback() {
             "{mode:?}: last-local removal must not fall back to the frozen source"
         );
 
-        let metrics = manager.metrics.clone();
-        let released = manager
-            .selection_deferral
-            .as_mut()
-            .unwrap()
-            .expire(&metrics);
-        manager.release_selection_families(&released, "Selection_Deferral_Timer expired");
+        manager.expire_selection_deferral();
         for prefix in hosts {
             assert_eq!(manager.loc_rib.get(&prefix).unwrap().peer, source);
         }

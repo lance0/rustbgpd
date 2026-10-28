@@ -3783,12 +3783,12 @@ async fn evpn_sessions_synced_waits_for_selection_deferral_release() {
     };
 
     gr_up(a).await;
+    gr_up(b).await;
     evpn_eor(&tx, a, 1).await;
     assert!(
         !evpn_sessions_synced(&tx).await,
         "deferral still waits for b"
     );
-    gr_up(b).await;
     evpn_eor(&tx, b, 1).await;
     assert!(evpn_sessions_synced(&tx).await);
 

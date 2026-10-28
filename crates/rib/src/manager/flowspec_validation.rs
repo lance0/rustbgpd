@@ -1712,6 +1712,11 @@ mod tests {
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             }],
         });
+        crate::manager::tests::arm_selection_waiter(
+            &mut manager,
+            flow.peer,
+            &[(Afi::Ipv4, Safi::Unicast)],
+        );
         let conflicting = child(&cover, 600, 65002);
         manager
             .ribs
@@ -1742,6 +1747,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one validation transcript covers a held AFI and a runnable AFI sharing discovery"
+    )]
     async fn flowspec_validation_held_family_cannot_hide_runnable_family() {
         use rustbgpd_wire::{FlowSpecComponent, FlowSpecPrefix, Ipv6PrefixOffset, NumericMatch};
 
@@ -1805,6 +1814,11 @@ mod tests {
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
             }],
         });
+        crate::manager::tests::arm_selection_waiter(
+            &mut manager,
+            flow.peer,
+            &[(Afi::Ipv4, Safi::Unicast)],
+        );
         assert!(manager.flowspec_validation.queues[0].len() > VALIDATION_VISITS_PER_TURN);
         manager.process_flowspec_validation_chunk();
         assert!(
@@ -1823,6 +1837,11 @@ mod tests {
                 families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
             }],
         });
+        crate::manager::tests::arm_selection_waiter(
+            &mut manager,
+            flow.peer,
+            &[(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        );
         manager.invalidate_flowspec_dependencies(&HashSet::from([v6_cover.prefix]));
         manager.process_flowspec_validation_chunk();
         assert!(

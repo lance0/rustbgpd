@@ -139,10 +139,15 @@ absent. After restarting the daemon, re-inject desired rules and verify local
 intent separately from committed advertisements and remote observations.
 
 A planned restart (SIGTERM with a Graceful Restart marker in
-`runtime_state_dir`) arms RFC 4724 selection deferral when any static
-neighbor has Graceful Restart enabled. Re-injected RTBH unicast and
-FlowSpec rules are eligible for selection and export during an active
-hold, subject to ordinary policy
+`runtime_state_dir`) retains the static GR peer/family roster. Each family's
+selection-deferral roster starts dormant and applies no hold until a roster
+peer re-establishes a session for it. Only eligible re-established peers wait
+for End-of-RIB; a configured neighbor that stays down or never returns does
+not hold selection. New current sessions can join an active family wait.
+Once its current waiters are satisfied, excluded or down, the family releases
+permanently; a later peer does not re-arm it. See the
+[startup selection amendment](../adr/0141-injection-owner-lease.md#amendment-wait-for-re-established-gr-peers-2026-10-27).
+Re-injected RTBH unicast and FlowSpec rules are eligible for selection and export during an active hold, subject to ordinary policy
 and admission. RTBH eligibility means an IPv4 `/32`, IPv6 `/128`, or any
 prefix carrying standard BLACKHOLE `65535:666`, leased or unleased and with
 any local `path_id`. A host route qualifies without BLACKHOLE; the
@@ -152,17 +157,18 @@ selection is deferred, only eligible local candidates compete in every
 selection mode; received candidates remain retained and ineligible.
 `ListPathExportDispositions` reports local outbound-channel admission as
 `COMMITTED`, never remote acceptance or enforcement. Other eligible local
-candidates, policy and admission can still withhold or delay an export. See the API contracts for
+candidates, policy and admission can still
+withhold or delay an export. See the API contracts for
 [unicast](api.md#unicast-injection-contract) and
 [FlowSpec](api.md#flowspec-injection-contract).
 
-`NeighborState.selection_deferral` shows the active family rows. Ordinary
+`NeighborState.selection_deferral` shows per-family startup state. Ordinary
 competition resumes when selection becomes available, including when
 collision failback stages selection while completion markers remain held.
 The marker-bounded window lasts at most the maximum effective
-`gr_restart_time`, counted from shutdown (120 seconds by default). A neighbor
-that never comes up can hold received selection and family End-of-RIB for
-that whole window. End-of-RIB follows release selection and all existing
+`gr_restart_time`, counted from shutdown (120 seconds by default). An eligible
+re-established peer missing End-of-RIB still holds selection until that
+completion or the bound. End-of-RIB follows release selection and all existing
 completion gates. `MarkReplayComplete` releases only the separate
 [End-of-RIB grace window](configuration.md#planned-restart-end-of-rib-grace-window);
 it does not end selection deferral or the other convergence and refresh
@@ -171,10 +177,9 @@ advertising a received fallback.
 
 The unicast RTBH exemption remains a deliberate exception to RFC 4724 §4.1;
 see the [ADR-0141 amendment](../adr/0141-injection-owner-lease.md#amendment-limit-unicast-deferral-bypass-to-rtbh-2026-10-27).
-
-To shorten the window, remove placeholder neighbors that will not come up,
-set `graceful_restart = false` on neighbors that are not expected to return,
-or lower `gr_restart_time`.
+To shorten the upper bound for re-established peers that have not sent
+End-of-RIB, lower the maximum effective `gr_restart_time` across static peers
+before the next planned restart.
 
 This promotion changes no configuration shape, default or release anchor.
 The existing consecutive-release configuration fixture chain remains the

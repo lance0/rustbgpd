@@ -90,6 +90,7 @@ fn receive(manager: &mut RibManager, prefixes: &[Prefix]) {
 fn setup(
     receive_orf: &[(Afi, Safi)],
     capacity: usize,
+    restarting: bool,
 ) -> (
     RibManager,
     mpsc::Receiver<OutboundRouteUpdate>,
@@ -113,24 +114,26 @@ fn setup(
     assert!(manager.loc_rib.get(&ordinary_v4()).is_none());
     assert!(manager.loc_rib.get(&ordinary_v6(0x100)).is_some());
 
-    let mut previous_rx = connect(&mut manager, target, 31, false, &[], 64);
-    while previous_rx.try_recv().is_ok() {}
-    manager.handle_update(RibUpdate::PeerGracefulRestart {
-        peer: target,
-        session_id: 31,
-        restart_time: 120,
-        stale_routes_time: 360,
-        gr_families: vec![V4, V6],
-        peer_llgr_capable: false,
-        peer_llgr_families: vec![],
-        llgr_stale_time: 0,
-    });
-    assert!(manager.gr_peers.contains_key(&target));
+    if restarting {
+        let mut previous_rx = connect(&mut manager, target, 31, false, &[], 64);
+        while previous_rx.try_recv().is_ok() {}
+        manager.handle_update(RibUpdate::PeerGracefulRestart {
+            peer: target,
+            session_id: 31,
+            restart_time: 120,
+            stale_routes_time: 360,
+            gr_families: vec![V4, V6],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        });
+        assert!(manager.gr_peers.contains_key(&target));
+    }
     let target_rx = connect(
         &mut manager,
         target,
         TARGET_SESSION,
-        true,
+        restarting,
         receive_orf,
         capacity,
     );
@@ -221,7 +224,7 @@ fn assert_completed(manager: &mut RibManager, receiver: &mut mpsc::Receiver<Outb
 
 #[test]
 fn selection_release_does_not_flush_an_orf_held_initial_eor() {
-    let (mut manager, _source_rx, mut target_rx) = setup(&[V4, V6], 64);
+    let (mut manager, _source_rx, mut target_rx) = setup(&[V4, V6], 64, true);
     let target = peer_v4(TARGET_ADDR);
     assert!(!manager.dirty_peers.contains(&target));
     assert!(target_rx.try_recv().is_err());
@@ -253,7 +256,7 @@ fn selection_release_does_not_flush_an_orf_held_initial_eor() {
 
 #[test]
 fn dirty_ipv6_retry_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
-    let (mut manager, _source_rx, mut target_rx) = setup(&[V4], 2);
+    let (mut manager, _source_rx, mut target_rx) = setup(&[V4], 2, true);
     let target = peer_v4(TARGET_ADDR);
     assert_eq!(manager.outbound_peers[&target].capacity(), 0);
     assert!(!manager.dirty_peers.contains(&target));
@@ -347,4 +350,94 @@ fn non_restarting_orf_peer_keeps_backpressured_honest_empty_initial_eor() {
         target_rx.try_recv().is_err(),
         "initial completion is sent once"
     );
+}
+
+#[test]
+fn dirty_ipv6_recovery_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
+    let (mut manager, _source_rx, mut target_rx) = setup(&[V4], 2, true);
+    let target = peer_v4(TARGET_ADDR);
+    assert_eq!(manager.outbound_peers[&target].capacity(), 0);
+    assert!(!manager.dirty_peers.contains(&target));
+    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+
+    // The real initial IPv6 table and its EoR occupy both writer slots.
+    receive(&mut manager, &[ordinary_v6(0x101)]);
+    assert!(
+        manager.dirty_peers.contains(&target),
+        "IPv6 admission really failed"
+    );
+    let mut seen = BTreeSet::new();
+    let mut eors = HashMap::new();
+    assert_eq!(observe(&mut target_rx, false, &mut seen, &mut eors), 2);
+    assert_eq!(eors, HashMap::from([(V6, 1)]));
+    assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
+
+    let commits = manager.dirty_resync_commits;
+    release_v4(&mut manager);
+    // A direct empty distribution pass is the ordinary dirty-timer retry.
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert!(observe(&mut target_rx, false, &mut seen, &mut eors) > 0);
+    assert!(manager.dirty_resync_commits > commits);
+    assert!(
+        seen.contains(&ordinary_v6(0x101)),
+        "the missed IPv6 row recovered"
+    );
+    assert_eq!(eors, HashMap::from([(V6, 1)]));
+    assert!(manager.pending_eor[&target].contains(&V4));
+    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+    assert!(manager.peer_orf_pending[&target].contains(&V4));
+
+    refresh(&mut manager, V4);
+    assert!(observe(&mut target_rx, true, &mut seen, &mut eors) > 0);
+    assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
+    assert_eq!(
+        seen,
+        BTreeSet::from([ordinary_v4(), ordinary_v6(0x100), ordinary_v6(0x101)])
+    );
+    assert_completed(&mut manager, &mut target_rx);
+}
+
+#[test]
+fn non_restarting_dirty_peer_keeps_orf_initial_eor_held_during_selection_release() {
+    let (mut manager, _source_rx, mut target_rx) = setup(&[V4], 2, false);
+    let target = peer_v4(TARGET_ADDR);
+    assert_eq!(manager.outbound_peers[&target].capacity(), 0);
+    assert!(!manager.dirty_peers.contains(&target));
+    assert!(!manager.gr_peers.contains_key(&target));
+
+    // The real initial IPv6 table and its EoR occupy both writer slots.
+    receive(&mut manager, &[ordinary_v6(0x101)]);
+    assert!(
+        manager.dirty_peers.contains(&target),
+        "IPv6 admission really failed"
+    );
+    let mut seen = BTreeSet::new();
+    let mut eors = HashMap::new();
+    assert_eq!(observe(&mut target_rx, false, &mut seen, &mut eors), 2);
+    assert_eq!(eors, HashMap::from([(V6, 1)]));
+    assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
+
+    let commits = manager.dirty_resync_commits;
+    release_v4(&mut manager);
+    // A direct empty distribution pass is the ordinary dirty-timer retry.
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert!(observe(&mut target_rx, false, &mut seen, &mut eors) > 0);
+    assert!(manager.dirty_resync_commits > commits);
+    assert!(
+        seen.contains(&ordinary_v6(0x101)),
+        "the missed IPv6 row recovered"
+    );
+    assert_eq!(eors, HashMap::from([(V6, 1)]));
+    assert!(manager.pending_eor[&target].contains(&V4));
+    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+    assert!(manager.peer_orf_pending[&target].contains(&V4));
+
+    refresh(&mut manager, V4);
+    assert!(observe(&mut target_rx, true, &mut seen, &mut eors) > 0);
+    assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
+    assert_eq!(
+        seen,
+        BTreeSet::from([ordinary_v4(), ordinary_v6(0x100), ordinary_v6(0x101)])
+    );
+    assert_completed(&mut manager, &mut target_rx);
 }

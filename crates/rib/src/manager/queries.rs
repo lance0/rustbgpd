@@ -803,13 +803,17 @@ impl RibManager {
                 return Err(RoutePageError::Invalidated);
             }
             if let RouteQueryScope::Advertised { peer } = scope
-                && let Some(gid) = self.vpn_grouped_member_of(peer)
-                && (self.outbound_channel_gone(peer)
-                    || self.dirty_peers.contains(&peer)
-                    || self
-                        .group_ribs
-                        .get(&gid)
-                        .is_some_and(|group| group.dirty_members.contains(&peer)))
+                && (self.private_vpn_admission_incomplete(peer)
+                    || self.vpn_grouped_member_of(peer).is_some_and(|gid| {
+                        self.outbound_channel_gone(peer)
+                            || self.dirty_peers.contains(&peer)
+                            || (self.retain_initial_group_admitted(peer)
+                                && self.initial_group_admitted(peer).is_none())
+                            || self
+                                .group_ribs
+                                .get(&gid)
+                                .is_some_and(|group| group.dirty_members.contains(&peer))
+                    }))
             {
                 return Err(RoutePageError::ResyncInProgress);
             }
@@ -1957,9 +1961,18 @@ impl RibManager {
                 return;
             }
         }
-        if rd.is_none() && !labeled && self.grouped_unicast_admission_unknown(peer) {
+        if (rd.is_none()
+            && !labeled
+            && self.grouped_unicast_admission_unknown(peer)
+            && !self.selection_rtbh_admission_known(peer, &prefix))
+            || (rd.is_some()
+                && (self.private_vpn_admission_incomplete(peer)
+                    || (self.vpn_grouped_member_of(peer).is_some()
+                        && self.retain_initial_group_admitted(peer)
+                        && self.initial_group_admitted(peer).is_none())))
+        {
             let _ = reply.send(Err(ExplainAdvertisedRouteError::FailedPrecondition(
-                "grouped advertised state is resynchronizing; no admitted baseline is available"
+                "advertised state is resynchronizing; no admitted baseline is available"
                     .to_string(),
             )));
             return;
@@ -2332,7 +2345,9 @@ impl RibManager {
                 "route awaits graceful-restart selection deferral".to_string(),
             );
         }
-        if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
+        if (self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer))
+            || self.outbound_channel_gone(peer)
+        {
             return row(
                 Pending,
                 "outbound_resync",
@@ -2416,7 +2431,9 @@ impl RibManager {
         if let Some((reason, detail)) = self.unexported_family(peer, family) {
             return row(Withheld, &reason, "family_not_sendable", detail);
         }
-        if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
+        if (self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer))
+            || self.outbound_channel_gone(peer)
+        {
             return row(
                 Pending,
                 "outbound_resync",
@@ -2862,9 +2879,13 @@ impl RibManager {
     /// which entries changed after the missed send, so unicast export explain
     /// and the advertised listing both refuse until the resync completes.
     fn grouped_unicast_admission_unknown(&self, peer: PeerId) -> bool {
-        self.grouped_member_of(peer).is_some()
-            && (self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer))
-            && !self.pending_regroup_baseline.contains_key(&peer)
+        self.private_unicast_admission_incomplete(peer)
+            || (self.grouped_member_of(peer).is_some()
+                && (self.dirty_peers.contains(&peer)
+                    || self.outbound_channel_gone(peer)
+                    || (self.retain_initial_group_admitted(peer)
+                        && self.initial_group_admitted(peer).is_none()))
+                && !self.pending_regroup_baseline.contains_key(&peer))
     }
 
     /// The admitted unicast state of an unsettled grouped member that retains
@@ -2892,16 +2913,52 @@ impl RibManager {
     /// ([`Self::grouped_unicast_admission_unknown`]). The advertised listing
     /// applies the same rule, so the two agree. Explain reads only the
     /// explained prefix, so the view holds only that prefix's entries.
+    fn selection_rtbh_admission_known(&self, peer: PeerId, prefix: &Prefix) -> bool {
+        if !self.selection_partial_caught_up(peer) {
+            return false;
+        }
+        let Some(group) = self
+            .grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))
+        else {
+            return false;
+        };
+        let actual = self.adj_ribs_out.get(&peer);
+        group.table.iter_prefix(prefix).any(|route| {
+            group
+                .adv_entry(peer, prefix, route.path_id)
+                .is_some_and(|entry| {
+                    entry
+                        .local_source
+                        .is_some_and(|source| source.deferral_exempt)
+                        && actual
+                            .and_then(|rib| rib.local_export_source(prefix, entry.route.path_id))
+                            == entry.local_source
+                        && self.initial_group_admitted(peer).is_some_and(|proof| {
+                            proof.contains(&ExactExportKey::Unicast(*prefix, entry.route.path_id))
+                        })
+                })
+        })
+    }
+
     fn grouped_unicast_explain_view(&self, peer: PeerId, prefix: &Prefix) -> Option<AdjRibOut> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let mut view = AdjRibOut::new(peer);
-        if self.dirty_peers.contains(&peer) || self.outbound_channel_gone(peer) {
+        if (self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer))
+            || self.outbound_channel_gone(peer)
+        {
             let baseline = self.pending_regroup_baseline.get(&peer)?;
             for (key, route) in baseline.unicast.iter().filter(|(key, _)| key.0 == *prefix) {
                 view.insert_with_next_hop(
                     route.clone(),
                     baseline.next_hop_overrides.get(key).cloned(),
                     &mut || {},
+                );
+                view.set_local_export_source(
+                    *key,
+                    self.adj_ribs_out
+                        .get(&peer)
+                        .and_then(|rib| rib.local_export_source(&key.0, key.1)),
                 );
             }
             return Some(view);
@@ -2910,18 +2967,22 @@ impl RibManager {
         // applied to the staged entries of this one prefix.
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
+        let initial = self.initial_group_admitted(peer);
         for staged in group.table.iter_prefix(prefix) {
             let Some(entry) = group.adv_entry_post_backstop(peer, prefix, staged.path_id) else {
                 continue;
             };
             let route = entry.route;
-            if rejected.is_some_and(|keys| {
+            if initial.is_some_and(|admitted| {
+                !admitted.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+            }) || rejected.is_some_and(|keys| {
                 keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
             }) || limits.is_some_and(|limits| !limits.admits_grouped(&route.prefix))
             {
                 continue;
             }
             view.insert_with_next_hop(route.clone(), entry.nh.cloned(), &mut || {});
+            view.set_local_export_source((route.prefix, route.path_id), entry.local_source);
         }
         Some(view)
     }
@@ -3154,10 +3215,12 @@ impl RibManager {
         let grouped_rib_out;
         let rib_out = if let Some(group) = vpn_grouped.and_then(|gid| self.group_ribs.get(&gid)) {
             let rejected = self.peer_unexportable.get(&peer);
+            let initial = self.initial_group_admitted(peer);
             let mut view = AdjRibOut::new(peer);
             for route in group.table.iter_vpn().filter(|route| {
                 let key = ExactExportKey::Vpn(route.key());
                 route.peer != peer
+                    && initial.is_none_or(|admitted| admitted.contains(&key))
                     && update_groups::rt_passes(rtc_filter.as_ref(), route)
                     && !rejected.is_some_and(|keys| keys.contains(&key))
             }) {
@@ -3881,9 +3944,7 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<usize>,
     ) {
         // Grouped members synthesize: group table len − own-sourced.
-        let count = self
-            .grouped_advertised_count(peer)
-            .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len));
+        let count = self.actual_unicast_advertised_count(peer);
         let _ = reply.send(count);
     }
     /// ADR-0112: routes this peer's Adj-RIB-In still retains as GR or LLGR
@@ -3946,6 +4007,25 @@ impl RibManager {
             }
             counts.entry(peer).or_default().extend(synthesized);
         }
+        for &peer in self.outbound_peers.keys() {
+            if let Some(admitted) = self.initial_group_admitted_counts(peer) {
+                let row = counts.entry(peer).or_default();
+                row.retain(|((_, safi), _)| !matches!(safi, Safi::Unicast | Safi::MplsVpn));
+                for (family, count) in [
+                    (Afi::Ipv4, Safi::Unicast),
+                    (Afi::Ipv6, Safi::Unicast),
+                    (Afi::Ipv4, Safi::MplsVpn),
+                    (Afi::Ipv6, Safi::MplsVpn),
+                ]
+                .into_iter()
+                .zip(admitted)
+                {
+                    if count != 0 {
+                        row.push((family, u64::try_from(count).unwrap_or(u64::MAX)));
+                    }
+                }
+            }
+        }
         let rpki_adj_rib_in_post = self.vrp_table.is_some().then(|| {
             self.ribs
                 .iter()
@@ -3997,9 +4077,7 @@ impl RibManager {
     pub(super) fn neighbor_rib_snapshot(&self, peer: PeerId) -> NeighborRibSnapshot {
         NeighborRibSnapshot {
             peer,
-            advertised_count: self
-                .grouped_advertised_count(peer)
-                .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
+            advertised_count: self.actual_unicast_advertised_count(peer),
             policy_stats: self
                 .export_policy_counters
                 .get(&peer)
@@ -4023,8 +4101,12 @@ impl RibManager {
                 .get(&peer)
                 .filter(|_| pending)
                 .map(|since| since.elapsed().as_secs()),
-            advertised_count_pending: self.grouped_member_of(peer).is_some()
-                && (pending || self.outbound_channel_gone(peer)),
+            advertised_count_pending: self.private_unicast_admission_incomplete(peer)
+                || (self.grouped_member_of(peer).is_some()
+                    && (pending
+                        || self.outbound_channel_gone(peer)
+                        || (self.retain_initial_group_admitted(peer)
+                            && self.initial_group_admitted(peer).is_none()))),
             recovery_fallback: self
                 .group_recovery_fallback(peer)
                 .map(super::update_groups::RecoveryFallbackCause::as_str),

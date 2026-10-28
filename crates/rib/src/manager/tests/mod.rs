@@ -26,6 +26,28 @@ use crate::test_support::{
 };
 use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
+pub(super) fn arm_selection_waiter(
+    manager: &mut RibManager,
+    peer: PeerId,
+    families: &[(Afi, Safi)],
+) {
+    let transitions = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .classify_session(
+            peer,
+            77,
+            false,
+            &families.iter().copied().collect(),
+            &manager.metrics,
+        );
+    assert!(
+        transitions.is_empty(),
+        "the fixture owes a current-session EoR"
+    );
+}
+
 /// Capture the published export rows of a running manager (ADR-0136). A
 /// primary-lane round trip first: every primary message is its own run-loop
 /// turn, so the publication point has run for all earlier work.
@@ -1468,9 +1490,15 @@ mod rpki;
 mod rs_control;
 mod rtc;
 mod selection_deferral;
+mod selection_deferral_backpressure;
+mod selection_deferral_conditional_timer;
+mod selection_deferral_dirty_rtbh;
 mod selection_deferral_mutations;
 mod selection_deferral_orf_edges;
 mod selection_deferral_recording;
+mod selection_deferral_rtc_join;
+mod selection_deferral_startup;
+mod selection_deferral_startup_gate_edges;
 mod session_export_policy;
 mod slice_timing;
 mod timer_cutoffs;
