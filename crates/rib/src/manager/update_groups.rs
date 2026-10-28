@@ -2474,6 +2474,20 @@ impl RibManager {
             )
     }
 
+    /// A current cache can prove that private bodies still cover every actual row.
+    pub(super) fn private_common_admission_complete(&self, peer: PeerId) -> bool {
+        self.grouped_member_of(peer).is_none()
+            && self.vpn_grouped_member_of(peer).is_none()
+            && self
+                .initial_group_admitted_counts(peer)
+                .is_some_and(|counts| {
+                    self.adj_ribs_out.get(&peer).is_some_and(|rib| {
+                        let lens = rib.family_lens();
+                        lens.unicast == [counts[0], counts[1]] && lens.vpn == [counts[2], counts[3]]
+                    })
+                })
+    }
+
     pub(super) fn private_common_admission_incomplete(&self, peer: PeerId) -> bool {
         self.private_unicast_admission_incomplete(peer)
             || self.private_vpn_admission_incomplete(peer)
@@ -2486,7 +2500,7 @@ impl RibManager {
             .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len))
     }
 
-    /// Capture OLD once before dormant-to-active staging changes a group table.
+    /// Capture actual admission before dormant-to-active staging can dirty it.
     pub(super) fn retain_selection_group_admission(&mut self) {
         let peers: Vec<_> = self
             .outbound_peers
@@ -2494,11 +2508,9 @@ impl RibManager {
             .inspect(|_| self.replacement_checkpoint(false))
             .copied()
             .filter(|peer| {
-                self.grouped_member_of(*peer).is_some()
-                    && self
-                        .selection_receiver_held_families(*peer)
-                        .into_iter()
-                        .any(|held| held)
+                self.selection_receiver_held_families(*peer)
+                    .into_iter()
+                    .any(|held| held)
             })
             .collect();
         for peer in peers {
@@ -2509,9 +2521,22 @@ impl RibManager {
                 (!self.dirty_peers.contains(&peer)
                     && !self.pending_regroup_baseline.contains_key(&peer))
                 .then(|| {
-                    let uc = self.grouped_advertised_unicast_lens(peer)?;
-                    let vpn = self.grouped_vpn_advertised_lens(peer).unwrap_or([0; 2]);
-                    Some([uc[0], uc[1], vpn[0], vpn[1], uc[0], uc[1]])
+                    if self.grouped_member_of(peer).is_none() {
+                        let rib = self.adj_ribs_out.get(&peer)?;
+                        let lens = rib.family_lens();
+                        Some([
+                            lens.unicast[0],
+                            lens.unicast[1],
+                            lens.vpn[0],
+                            lens.vpn[1],
+                            rib.unicast_prefix_count(Afi::Ipv4),
+                            rib.unicast_prefix_count(Afi::Ipv6),
+                        ])
+                    } else {
+                        let uc = self.grouped_advertised_unicast_lens(peer)?;
+                        let vpn = self.grouped_vpn_advertised_lens(peer).unwrap_or([0; 2]);
+                        Some([uc[0], uc[1], vpn[0], vpn[1], uc[0], uc[1]])
+                    }
                 })
                 .flatten()
             });

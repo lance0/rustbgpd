@@ -3136,6 +3136,8 @@ impl RibManager {
         let mut unicast_deferral_exemptions = FastMap::default();
         let eligible_was_caught_up =
             !self.dirty_peers.contains(&peer) || self.selection_partial_caught_up(peer);
+        let refresh_private_admitted_counts = self.pending_group_admitted.get(&peer).is_none()
+            && self.private_common_admission_complete(peer);
         self.filter_deferred_unicast_recovery(peer, &mut batch);
         let gated = self
             .selection_deferral
@@ -4735,7 +4737,7 @@ impl RibManager {
         // A held initial join's group may contain rows this receiver has
         // never seen. Plan its actual counts from final batch identities,
         // without walking either the group or the retained proof universe.
-        let initial_admitted_counts = if refused_withdrawals {
+        let mut initial_admitted_counts = if refused_withdrawals {
             refused_withdrawal_counts
         } else {
             self.planned_initial_group_admitted_counts(
@@ -5019,6 +5021,18 @@ impl RibManager {
         #[cfg(feature = "bench-internals")]
         if let Some(started) = bench_commit_started {
             super::bench_support::bench_record_per_client_best_commit(started.elapsed());
+        }
+
+        if refresh_private_admitted_counts && let Some(rib) = self.adj_ribs_out.get(&peer) {
+            let lens = rib.family_lens();
+            initial_admitted_counts = Some([
+                lens.unicast[0],
+                lens.unicast[1],
+                lens.vpn[0],
+                lens.vpn[1],
+                rib.unicast_prefix_count(Afi::Ipv4),
+                rib.unicast_prefix_count(Afi::Ipv6),
+            ]);
         }
 
         if let Some(base) = self.pending_regroup_baseline.get_mut(&peer) {

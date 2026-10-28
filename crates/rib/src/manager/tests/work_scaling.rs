@@ -1560,3 +1560,176 @@ fn incremental_policy_rejection_updates_work_is_linear() {
         incremental_policy_rejection_updates,
     );
 }
+
+fn late_private_up(peer: PeerId, outbound_tx: mpsc::Sender<OutboundRouteUpdate>) -> RibUpdate {
+    let mut up = test_peer_up(peer, 1, outbound_tx);
+    if let RibUpdate::PeerUp {
+        per_client_best,
+        add_path_send_families,
+        add_path_send_max,
+        ..
+    } = &mut up
+    {
+        *per_client_best = true;
+        *add_path_send_families = vec![(Afi::Ipv4, Safi::Unicast)];
+        *add_path_send_max = 2;
+    }
+    up
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual-caller shape measures private capture and replay with exact wire, public-count and release assertions"
+)]
+fn late_private_arm(size: usize) -> Work {
+    let count = size * ROUTES;
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let source = member(4);
+    let waiter = member(5);
+    let (_tx, mut manager) = manager();
+    manager = manager.with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: waiter,
+            families: vec![family],
+        }],
+    });
+    let mut source_rx = join(&mut manager, 4, false, None).0;
+    let mut receivers = Vec::new();
+    let mut senders = Vec::new();
+    for index in 0..4 {
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer: member(index),
+            session_id: 1,
+            encoder: ReusableExactExportEncoder::new(
+                u64::try_from(index).unwrap() + 10,
+                WIRE_PROFILE,
+            ),
+        });
+        let (tx, mut rx) = mpsc::channel(4096);
+        manager.handle_update(late_private_up(member(index), tx.clone()));
+        assert_eq!(rx.try_recv().unwrap().end_of_rib, [family]);
+        senders.push(tx);
+        receivers.push(rx);
+    }
+    let host = prefix(200, 0);
+    let mut local = deferred_local_unicast(host);
+    local.path_id = 17;
+    inject_deferred_unicast(&mut manager, local);
+    let mut received = (0..count)
+        .map(|index| {
+            make_route(
+                prefix(1, index),
+                match source.addr() {
+                    IpAddr::V4(address) => address,
+                    IpAddr::V6(_) => unreachable!(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut sibling = make_route_with_lp(
+        host,
+        match source.addr() {
+            IpAddr::V4(address) => address,
+            IpAddr::V6(_) => unreachable!(),
+        },
+        10,
+    );
+    sibling.path_id = 11;
+    received.push(sibling);
+    let mut update = test_routes_received(source, received);
+    if let RibUpdate::RoutesReceived { session_id, .. } = &mut update {
+        *session_id = 1;
+    }
+    manager.handle_update(update);
+    drain_route_chunks(&mut manager);
+    let mut wires = vec![BTreeMap::new(); 4];
+    let apply = |receivers: &mut Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+                 wires: &mut Vec<BTreeMap<(Prefix, u32), Route>>,
+                 allow_marker: bool| {
+        for (rx, wire) in receivers.iter_mut().zip(wires) {
+            while let Ok(update) = rx.try_recv() {
+                assert!(allow_marker || update.end_of_rib.is_empty());
+                assert!(update.end_of_rib.iter().all(|marker| *marker == family));
+                for key in update.withdraw {
+                    assert!(wire.remove(&key).is_some());
+                }
+                for route in update.announce.iter() {
+                    assert!(!route.is_stale && !route.is_llgr_stale);
+                    wire.insert((route.prefix, route.path_id), route.clone());
+                }
+            }
+        }
+    };
+    apply(&mut receivers, &mut wires, false);
+    assert!(wires.iter().all(|wire| wire.len() == count + 2));
+    while source_rx.try_recv().is_ok() {}
+    let mut waiter_rx = None;
+    let work = checkpoints_in(|| {
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: waiter,
+            session_id: 1,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: vec![family],
+            peer_enhanced_refresh: true,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        });
+        waiter_rx = Some(join(&mut manager, 5, false, None).0);
+        for (index, tx) in senders.iter().enumerate() {
+            manager.handle_update(late_private_up(member(index), tx.clone()));
+        }
+    });
+    assert!(manager.selection_deferred(family));
+    apply(&mut receivers, &mut wires, false);
+    let (reply, mut bmp) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryBmpPeerStats { reply });
+    let bmp = bmp.try_recv().unwrap();
+    for (index, wire) in wires.iter().enumerate() {
+        let peer = member(index);
+        assert_eq!(wire.len(), count + 2);
+        let (reply, mut public) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryAdvertisedCount { peer, reply });
+        assert_eq!(public.try_recv().unwrap(), wire.len());
+        assert_eq!(
+            bmp.adj_rib_out_post[&peer]
+                .iter()
+                .find(|(f, _)| *f == family)
+                .unwrap()
+                .1,
+            u64::try_from(wire.len()).unwrap()
+        );
+        assert!(manager.pending_group_admitted.get(&peer).is_some());
+    }
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: waiter,
+        session_id: 1,
+        afi: family.0,
+        safi: family.1,
+    });
+    apply(&mut receivers, &mut wires, true);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    apply(&mut receivers, &mut wires, true);
+    for (index, wire) in wires.iter().enumerate() {
+        assert_eq!(wire.len(), count + 2);
+        assert!(
+            !manager
+                .pending_group_admitted
+                .contains_record(member(index))
+        );
+        assert!(!manager.dirty_peers.contains(&member(index)));
+    }
+    drop(waiter_rx);
+    eprintln!("private late-GR capture/replay N={count}: {work:?}");
+    work
+}
+
+#[test]
+fn private_late_gr_capture_and_replay_work_is_linear() {
+    assert_linear(
+        "private late-GR capture/replay",
+        &[ALL, ""],
+        late_private_arm,
+    );
+}

@@ -2419,3 +2419,544 @@ fn refused_proof_private_add_path_withdraw_keeps_unknown_sibling() {
 fn refused_proof_private_add_path_withdraw_recovers_capacity_after_release() {
     assert_refused_private_withdrawal_capacity(false);
 }
+
+fn assert_late_waiter_advertised_truth(
+    manager: &mut RibManager,
+    observer: crate::PeerId,
+    expected: usize,
+    stage: &str,
+) {
+    let (reply, mut count) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryAdvertisedCount {
+        peer: observer,
+        reply,
+    });
+    let count = count.try_recv().unwrap();
+    let (reply, mut neighbors) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryNeighborRibSnapshots {
+        peers: vec![observer],
+        comparison: None,
+        include_retained: false,
+        reply,
+    });
+    let neighbors = neighbors.try_recv().unwrap();
+    let neighbor_count = neighbors.snapshots[0].advertised_count;
+    let (reply, mut bmp) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryBmpPeerStats { reply });
+    let bmp = bmp.try_recv().unwrap();
+    let bmp_count: u64 = bmp.adj_rib_out_post[&observer]
+        .iter()
+        .filter(|(family, _)| family.1 == Safi::Unicast)
+        .map(|(_, count)| count)
+        .sum();
+    let (reply, mut listing) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryRoutesPage {
+        scope: crate::update::RouteQueryScope::Advertised { peer: observer },
+        filter: None,
+        after: None,
+        expected_version: None,
+        page_size: 16,
+        reply,
+    });
+    let listing = listing.try_recv().unwrap();
+    eprintln!(
+        "{stage}: wire={expected} advertised={count} neighbor={neighbor_count} bmp={bmp_count} listing={listing:?}"
+    );
+    assert_eq!(
+        (count, neighbor_count, bmp_count),
+        (expected, expected, u64::try_from(expected).unwrap()),
+        "{stage}: public advertised counts must describe actual writer admission"
+    );
+    match listing {
+        Ok(page) => {
+            assert_eq!(
+                page.total,
+                u64::try_from(expected).unwrap(),
+                "{stage}: successful listing total"
+            );
+            assert_eq!(
+                page.routes.len(),
+                expected,
+                "{stage}: successful listing bodies"
+            );
+        }
+        Err(crate::update::RoutePageError::ResyncInProgress) => {}
+        Err(error) => panic!("{stage}: unexpected advertised listing error: {error:?}"),
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one production-driven late-waiter transcript checks wire admission and public counts before and after same-channel replay"
+)]
+fn assert_late_waiter_private_replay(ipv6: bool, refuse_capture: bool, fresh_channel: bool) {
+    let family = (if ipv6 { Afi::Ipv6 } else { Afi::Ipv4 }, Safi::Unicast);
+    let mut manager =
+        manager_with_dormant_waiter().with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![family],
+            }],
+        });
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(64);
+    let registration = |outbound_tx| {
+        let mut up = super::lifecycle::test_peer_up(observer, 82, outbound_tx);
+        if let RibUpdate::PeerUp {
+            sendable_families,
+            per_client_best,
+            add_path_send_families,
+            add_path_send_max,
+            ..
+        } = &mut up
+        {
+            *sendable_families = vec![family];
+            *per_client_best = true;
+            *add_path_send_families = vec![family];
+            *add_path_send_max = 2;
+        }
+        up
+    };
+    manager.handle_update(registration(tx.clone()));
+    let initial = rx.try_recv().unwrap();
+    assert_eq!(initial.end_of_rib, [family]);
+    let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
+    let ordinary = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let mut wire = std::collections::HashMap::new();
+    let route_in_family = |mut route: Route| {
+        if ipv6 {
+            route.prefix = Prefix::V6(if route.prefix == Prefix::V4(host) {
+                Ipv6Prefix::new("2001:db8:1::1".parse().unwrap(), 128)
+            } else {
+                Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64)
+            });
+            route.next_hop = "2001:db8::81".parse().unwrap();
+        }
+        route
+    };
+    let mut local = route_in_family(make_route_with_lp(host, SOURCE, 50));
+    set_peer(&mut local, LOCAL_PEER);
+    local.origin_type = crate::route::RouteOrigin::Local;
+    local.path_id = 17;
+    let local_prefix = local.prefix;
+    let (reply, mut injected) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute {
+        route: local,
+        reply,
+    });
+    injected.try_recv().unwrap().unwrap();
+    apply_wire(&mut rx, &mut wire);
+    let mut sibling = route_in_family(make_route_with_lp(host, SOURCE, 10));
+    sibling.path_id = 11;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: vec![sibling, route_in_family(make_route(ordinary, SOURCE))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    apply_wire(&mut rx, &mut wire);
+    assert_eq!(wire.len(), 3);
+    assert_late_waiter_advertised_truth(&mut manager, observer, wire.len(), "before hold");
+    let before = wire.clone();
+    if refuse_capture {
+        assert!(
+            ipv6,
+            "the source has no IPv6 export and consumes no capture allocation"
+        );
+        manager
+            .pending_group_admitted
+            .fail_next_allocation_for_test();
+    }
+    let waiter = peer_v4(WAITER);
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: waiter,
+        session_id: 83,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![family],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (waiter_tx, _waiter_rx) = mpsc::channel(64);
+    let mut waiter_up = super::lifecycle::test_peer_up(waiter, 83, waiter_tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut waiter_up
+    {
+        *sendable_families = vec![family];
+    }
+    manager.handle_update(waiter_up);
+    if refuse_capture {
+        assert!(manager.pending_group_admitted.get(&observer).is_none());
+        assert!(manager.group_recovery_fallback(observer).is_some());
+    }
+    assert!(manager.selection_deferred(family));
+    assert_eq!(manager.outbound_session_ids[&observer], 82);
+    assert!(manager.outbound_peers[&observer].same_channel(&tx));
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
+    assert_eq!(wire.keys().collect::<HashSet<_>>(), before.keys().collect());
+    assert_late_waiter_advertised_truth(&mut manager, observer, wire.len(), "after hold arms");
+    // The same session and same writer still own every old wire key.
+    // No allocation-failure seam, private-state mutation, or backpressure.
+    manager.handle_update(registration(tx.clone()));
+    assert!(manager.selection_deferred(family));
+    assert_eq!(manager.outbound_session_ids[&observer], 82);
+    assert!(manager.outbound_peers[&observer].same_channel(&tx));
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
+    assert_eq!(wire.keys().collect::<HashSet<_>>(), before.keys().collect());
+    assert_late_waiter_advertised_truth(
+        &mut manager,
+        observer,
+        wire.len(),
+        "after same-channel replay",
+    );
+    if fresh_channel {
+        let (fresh_tx, mut fresh_rx) = mpsc::channel(64);
+        manager.handle_update(registration(fresh_tx));
+        let mut fresh_wire = std::collections::HashMap::new();
+        let updates = apply_wire(&mut fresh_rx, &mut fresh_wire);
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
+        );
+        assert_eq!(fresh_wire.len(), 1);
+        assert_late_waiter_advertised_truth(&mut manager, observer, 1, "fresh channel while held");
+        assert!(rx.try_recv().is_err());
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: peer_v4(WAITER),
+            session_id: 83,
+            afi: family.0,
+            safi: family.1,
+        });
+        let updates = apply_wire(&mut fresh_rx, &mut fresh_wire);
+        assert_eq!(
+            updates
+                .iter()
+                .flat_map(|update| &update.end_of_rib)
+                .filter(|marker| **marker == family)
+                .count(),
+            1
+        );
+        assert_eq!(fresh_wire.len(), 3);
+        assert_late_waiter_advertised_truth(
+            &mut manager,
+            observer,
+            3,
+            "fresh channel after release",
+        );
+        assert!(!manager.pending_group_admitted.contains_record(observer));
+        return;
+    }
+    if refuse_capture {
+        let mut ban = route_in_family(make_route_with_lp(host, SOURCE, 50));
+        ban.prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:3::1".parse().unwrap(), 128));
+        ban.path_id = 29;
+        set_peer(&mut ban, LOCAL_PEER);
+        ban.origin_type = crate::route::RouteOrigin::Local;
+        let ban_prefix = ban.prefix;
+        let (reply, mut injected) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route: ban, reply });
+        injected.try_recv().unwrap().unwrap();
+        let updates = apply_wire(&mut rx, &mut wire);
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
+        );
+        assert_eq!(
+            wire.len(),
+            4,
+            "complete actual bodies permit RTBH without a key ledger"
+        );
+        assert_late_waiter_advertised_truth(
+            &mut manager,
+            observer,
+            4,
+            "retained body after RTBH add",
+        );
+        manager.handle_update(registration(tx.clone()));
+        let updates = apply_wire(&mut rx, &mut wire);
+        assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
+        assert_eq!(wire.len(), 4);
+        assert_late_waiter_advertised_truth(
+            &mut manager,
+            observer,
+            4,
+            "second replay after RTBH add",
+        );
+        let (reply, mut removed) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix: ban_prefix,
+            path_id: 29,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        removed.try_recv().unwrap().unwrap();
+        let updates = apply_wire(&mut rx, &mut wire);
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.announce.is_empty() && update.end_of_rib.is_empty())
+        );
+        assert_eq!(wire.len(), 3);
+        assert_late_waiter_advertised_truth(
+            &mut manager,
+            observer,
+            3,
+            "retained body after RTBH delete",
+        );
+        manager.handle_update(registration(tx.clone()));
+        let updates = apply_wire(&mut rx, &mut wire);
+        assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
+        assert_eq!(wire.len(), 3);
+        assert_late_waiter_advertised_truth(
+            &mut manager,
+            observer,
+            3,
+            "third replay after RTBH delete",
+        );
+    }
+    if !refuse_capture {
+        let (reply, mut removed) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix: local_prefix,
+            path_id: 17,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        removed.try_recv().unwrap().unwrap();
+        let updates = apply_wire(&mut rx, &mut wire);
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.announce.is_empty() && update.end_of_rib.is_empty())
+        );
+        assert_eq!(wire.len(), 2);
+        assert_late_waiter_advertised_truth(
+            &mut manager,
+            observer,
+            wire.len(),
+            "after RTBH delete",
+        );
+    }
+    let removed_prefix = route_in_family(make_route(ordinary, SOURCE)).prefix;
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: vec![],
+        withdrawn: vec![(removed_prefix, 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(updates.iter().all(|update| update.announce.is_empty()
+        && update.withdraw.is_empty()
+        && update.end_of_rib.is_empty()));
+    assert_late_waiter_advertised_truth(
+        &mut manager,
+        observer,
+        wire.len(),
+        "after frozen source withdrawal",
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 83,
+        afi: family.0,
+        safi: family.1,
+    });
+    apply_wire(&mut rx, &mut wire);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    apply_wire(&mut rx, &mut wire);
+    assert_eq!(wire.len(), if refuse_capture { 2 } else { 1 });
+    assert!(!wire.keys().any(|key| key.0 == removed_prefix));
+    assert_late_waiter_advertised_truth(&mut manager, observer, wire.len(), "after release");
+    assert!(!manager.dirty_peers.contains(&observer));
+    assert!(!manager.pending_group_admitted.contains_record(observer));
+    assert!(!manager.pending_extra_withdraws.contains_key(&observer));
+}
+
+#[test]
+fn late_waiter_private_replay_keeps_actual_advertised_counts() {
+    assert_late_waiter_private_replay(false, false, false);
+}
+
+#[test]
+fn late_waiter_private_ipv6_replay_keeps_actual_advertised_counts() {
+    assert_late_waiter_private_replay(true, false, false);
+}
+
+#[test]
+fn late_waiter_private_refused_capture_keeps_actual_advertised_counts() {
+    assert_late_waiter_private_replay(true, true, false);
+}
+
+#[test]
+fn late_waiter_private_fresh_channel_does_not_inherit_actual_admission() {
+    assert_late_waiter_private_replay(true, true, true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the real private capture is paused at two checkpoints to prove readiness service and fence queued queries and mutations"
+)]
+async fn late_waiter_private_capture_services_readiness_before_completion() {
+    let family = (Afi::Ipv6, Safi::Unicast);
+    let (tx, rx) = mpsc::channel(8);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx)
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![family],
+            }],
+        });
+    let _source_rx = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(1024);
+    let mut up = super::lifecycle::test_peer_up(observer, 82, outbound_tx);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        per_client_best,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![family];
+        *per_client_best = true;
+    }
+    manager.handle_update(up);
+    outbound_rx.try_recv().unwrap();
+    let received = (0_u128..128)
+        .map(|index| {
+            let mut route = make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24), SOURCE);
+            route.prefix = Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::from(0x2001_0db8_0000_0000_0000_0000_0000_0000 + index),
+                128,
+            ));
+            route.next_hop = "2001:db8::81".parse().unwrap();
+            route
+        })
+        .collect();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: received,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    let mut wire = std::collections::HashMap::new();
+    apply_wire(&mut outbound_rx, &mut wire);
+    assert_eq!(wire.len(), 128);
+    let waiter = peer_v4(WAITER);
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: waiter,
+        session_id: 83,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![family],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (waiter_tx, _waiter_rx) = mpsc::channel(1024);
+    let mut waiter_up = super::lifecycle::test_peer_up(waiter, 83, waiter_tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut waiter_up
+    {
+        *sendable_families = vec![family];
+    }
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    manager.replacement_readiness_test_hook = Some(Arc::new(move |stage| {
+        if stage == "common_capture" {
+            let call = calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if call < 2 {
+                entered_tx.send(call).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+        }
+    }));
+    let capture = tokio::spawn(async move {
+        let update = manager.rx.recv().await.unwrap();
+        manager.handle_update(update);
+        manager
+    });
+    tx.send(waiter_up).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    let (reply, mut readiness) = oneshot::channel();
+    readiness_tx
+        .try_send(crate::update::RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: std::time::Instant::now(),
+        })
+        .unwrap();
+    let (reply, mut general) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(RibUpdate::PeerDown {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+    })
+    .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let interior_reply = readiness.try_recv();
+    let general_held = matches!(general.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    let mutation_held = tx.capacity() == 7;
+    release_tx.send(()).unwrap();
+    let mut manager = capture.await.unwrap();
+    manager.replacement_readiness_test_hook = None;
+    assert_eq!(interior_reply, Ok(Ok(128)));
+    assert!(general_held && mutation_held);
+    assert_eq!(
+        manager.pending_group_admitted.get(&observer).unwrap().len(),
+        128
+    );
+    assert_eq!(wire.len(), 128);
+}
