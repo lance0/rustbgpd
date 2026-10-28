@@ -861,6 +861,11 @@ impl RibManager {
     )]
     fn clear_outbound_peer_state_inner(&mut self, peer: PeerId, same_connection_replay: bool) {
         let retain_admission = same_connection_replay && self.retain_initial_group_admitted(peer);
+        // A refused capture has no key ledger to replace these actual bodies.
+        // Only the exact channel with a proven-complete private table keeps it.
+        let retain_private_body = retain_admission
+            && self.pending_group_admitted.get(&peer).is_none()
+            && self.private_common_admission_complete(peer);
         self.invalidate_evpn_feed_completion(peer);
         if !same_connection_replay {
             self.retire_evpn_recovery(peer);
@@ -883,7 +888,9 @@ impl RibManager {
         );
         // Any family's removed committed rows end an advertised-view walk.
         if let Some(mut rib) = self.adj_ribs_out.remove(&peer) {
-            let local_sources = same_connection_replay.then(|| rib.take_local_export_sources());
+            let retained_common = retain_private_body.then(|| rib.take_common_routes());
+            let local_sources = (same_connection_replay && retained_common.is_none())
+                .then(|| rib.take_local_export_sources());
             if !rib.is_empty_all_families() {
                 self.advance_advertised_pages();
             }
@@ -925,7 +932,9 @@ impl RibManager {
                     manager.replacement_checkpoint(true);
                 });
             });
-            if let Some(sources) = local_sources {
+            if let Some(retained) = retained_common {
+                self.adj_ribs_out.insert(peer, retained);
+            } else if let Some(sources) = local_sources {
                 let mut retained = AdjRibOut::new(peer);
                 retained.adopt_local_export_sources(sources);
                 self.adj_ribs_out.insert(peer, retained);
