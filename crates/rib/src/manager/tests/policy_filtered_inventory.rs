@@ -12,6 +12,8 @@ const INPUT: &str = "policy_filtered_input";
 const REBUILD: &str = "policy_filtered_rebuild";
 const ALLOCATION: &str = "policy_filtered_allocation";
 const RETIREMENT: &str = "policy_filtered_retirement";
+const HISTORY: &str = "policy_filtered_retained";
+const HISTORY_CLEANUP: &str = "policy_filtered_history_cleanup";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Writer {
@@ -206,7 +208,7 @@ fn assert_candidate_tables(manager: &RibManager) {
 
 fn assert_denials_and_events(manager: &RibManager, peer: PeerId) {
     let expected = expected_denials(peer);
-    assert_eq!(manager.policy_filtered_routes[&peer], expected);
+    assert_eq!(retained_policy_rejection_keys(manager, peer), expected);
     let events = denial_events(manager, peer);
     assert_eq!(events.len(), 16);
     let observed: HashSet<_> = events
@@ -286,7 +288,10 @@ fn observe_inventory(
         let general = Mutex::new(general);
         let summary = Mutex::new(Some(summary));
         move |stage| {
-            if ![INPUT, REBUILD, ALLOCATION, RETIREMENT].contains(&stage) {
+            if !matches!(
+                stage,
+                INPUT | REBUILD | ALLOCATION | RETIREMENT | HISTORY | HISTORY_CLEANUP
+            ) {
                 return;
             }
             for empty in [
@@ -421,10 +426,11 @@ fn inventory_writer_uses_candidate_bounds(writer: Writer) {
         retired,
         "{writer:?}: retire every temporary key and allocation"
     );
+    assert!(visits[HISTORY] > 0, "{writer:?}: history");
     assert_candidate_tables(&manager);
     assert_denials_and_events(&manager, target(0));
     assert!(
-        manager.policy_filtered_routes[&target(0)].len()
+        retained_policy_rejection_keys(&manager, target(0)).len()
             > HashSet::<PolicyFilteredRouteKey>::with_capacity(manager.loc_rib.len()).capacity(),
         "real rejected candidate identities exceed the old prefix-count capacity"
     );
@@ -646,14 +652,17 @@ fn policy_filtered_inventory_retry_preserves_event_edges_and_diagnostics() {
     receive(&mut manager, SOURCES[0], vec![allowed]);
     let mut expected = expected_denials(target(0));
     assert!(expected.remove(&changed));
-    assert_eq!(manager.policy_filtered_routes[&target(0)], expected);
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, target(0)),
+        expected
+    );
     assert_eq!(manager.adj_ribs_out[&target(0)].len(), 17);
     assert_eq!(denial_events(&manager, target(0)).len(), 16);
     while outbound.try_recv().is_ok() {}
     let denied = candidate(SOURCES[0], 0, 1, 200);
     receive(&mut manager, SOURCES[0], vec![denied]);
     assert_eq!(
-        manager.policy_filtered_routes[&target(0)],
+        retained_policy_rejection_keys(&manager, target(0)),
         expected_denials(target(0))
     );
     let events = denial_events(&manager, target(0));
@@ -670,4 +679,82 @@ fn policy_filtered_inventory_retry_preserves_event_edges_and_diagnostics() {
     );
     assert_candidate_tables(&manager);
     assert_pages_and_explain(&mut manager);
+}
+
+#[test]
+fn policy_rejection_history_refresh_preserves_siblings_and_empty_cleanup() {
+    let mut manager = manager();
+    let peer = target(0);
+    let v4 = prefix(0);
+    let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48));
+    let key = |prefix, source_peer, path_id| PolicyFilteredRouteKey {
+        target_peer: peer,
+        source_peer,
+        prefix,
+        path_id,
+    };
+    let first = key(v4, peer_v4(SOURCES[0]), 1);
+    let sibling = key(v4, peer_v4(SOURCES[1]), 7);
+    let other_family = key(v6, peer_v4(SOURCES[0]), 3);
+    let both = HashSet::from([v4, v6]);
+    let all = HashSet::from([first, sibling, other_family]);
+    manager.update_policy_filtered_routes_for_prefixes(peer, &both, &all);
+    manager.update_policy_filtered_routes_for_prefixes(peer, &both, &all);
+    assert_eq!(retained_policy_rejection_keys(&manager, peer), all);
+    assert_eq!(denial_events(&manager, peer).len(), 3);
+    let only_v4 = HashSet::from([v4]);
+    manager.update_policy_filtered_routes_for_prefixes(peer, &only_v4, &HashSet::from([first]));
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, peer),
+        HashSet::from([first, other_family])
+    );
+    assert_eq!(denial_events(&manager, peer).len(), 3);
+    manager.update_policy_filtered_routes_for_prefixes(
+        peer,
+        &only_v4,
+        &HashSet::from([first, sibling]),
+    );
+    assert_eq!(retained_policy_rejection_keys(&manager, peer), all);
+    assert_eq!(denial_events(&manager, peer).len(), 4);
+    manager.update_policy_filtered_routes_for_prefixes(peer, &only_v4, &HashSet::new());
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, peer),
+        HashSet::from([other_family])
+    );
+    assert!(!manager.policy_filtered_routes[&peer].contains_key(&v4));
+    manager.update_policy_filtered_routes_for_prefixes(peer, &HashSet::from([v6]), &HashSet::new());
+    assert!(!manager.policy_filtered_routes.contains_key(&peer));
+    assert_eq!(denial_events(&manager, peer).len(), 4);
+    manager.update_policy_filtered_routes_for_prefixes(peer, &only_v4, &HashSet::from([sibling]));
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, peer),
+        HashSet::from([sibling])
+    );
+    assert_eq!(denial_events(&manager, peer).len(), 5);
+    manager.clear_policy_filtered_routes_for_peer(peer);
+    assert!(!manager.policy_filtered_routes.contains_key(&peer));
+}
+
+#[test]
+fn policy_rejection_history_peer_down_services_interior_readiness() {
+    let mut manager = manager();
+    feed_candidates(&mut manager);
+    let (tx, mut outbound) = mpsc::channel(8);
+    register_target(&mut manager, 0, false, deny_local_pref_at_least(200), tx);
+    while outbound.try_recv().is_ok() {}
+    assert_candidate_tables(&manager);
+    assert_denials_and_events(&manager, target(0));
+    let visits = observe_inventory(&mut manager, false, |manager| {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: target(0),
+            session_id: 0,
+        });
+    });
+    assert!(
+        visits.get(HISTORY_CLEANUP).copied().unwrap_or_default() > 1,
+        "bucket and allocation cleanup must serve readiness under the history owner"
+    );
+    assert!(!manager.policy_filtered_routes.contains_key(&target(0)));
+    assert_candidate_tables(&manager);
+    assert_eq!(denial_events(&manager, target(0)).len(), 16);
 }

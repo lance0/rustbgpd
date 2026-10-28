@@ -26,6 +26,18 @@ use crate::test_support::{
 };
 use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
+pub(super) fn retained_policy_rejection_keys(
+    manager: &RibManager,
+    target: PeerId,
+) -> HashSet<PolicyFilteredRouteKey> {
+    manager
+        .policy_filtered_routes
+        .get(&target)
+        .into_iter()
+        .flat_map(|prefixes| prefixes.values().flat_map(|keys| keys.iter().copied()))
+        .collect()
+}
+
 pub(super) fn arm_selection_waiter(
     manager: &mut RibManager,
     peer: PeerId,

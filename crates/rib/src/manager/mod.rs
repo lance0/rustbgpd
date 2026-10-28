@@ -960,8 +960,9 @@ pub struct RibManager {
     fib_candidate_changes_tx: watch::Sender<u64>,
     /// Currently surfaced unicast export-policy denials. This keeps
     /// route-level policy-filtered events transition-based instead of
-    /// re-emitting on every dirty or forced outbound resync.
-    policy_filtered_routes: HashMap<PeerId, HashSet<PolicyFilteredRouteKey>>,
+    /// re-emitting on every dirty or forced outbound resync. Prefix buckets
+    /// keep incremental refreshes independent of unrelated rejected routes.
+    policy_filtered_routes: HashMap<PeerId, BTreeMap<Prefix, HashSet<PolicyFilteredRouteKey>>>,
     /// The attached session's export-policy totals handle, keyed by target
     /// peer. The handle belongs to the neighbor (`PeerUp` carries it), so the
     /// totals outlive this registration; only the RIB's reference ends with
@@ -5502,40 +5503,85 @@ impl RibManager {
         let _ = self.route_events_tx.send(event);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "prefix-scoped rejection mutation and transition event publication share one commit"
+    )]
     pub(super) fn update_policy_filtered_routes_for_prefixes(
         &mut self,
         target_peer: PeerId,
         prefixes: &HashSet<Prefix>,
         current: &HashSet<PolicyFilteredRouteKey>,
     ) {
+        if current.is_empty() && !self.policy_filtered_routes.contains_key(&target_peer) {
+            return;
+        }
         let readiness = &self.replacement_readiness;
         let checkpoint = || replacement_readiness_checkpoint(readiness, false);
+        let allocation_checkpoint = || replacement_readiness_checkpoint(readiness, true);
+        let retained_checkpoint = || {
+            #[cfg(test)]
+            replacement_readiness_checkpoint_at(readiness, "policy_filtered_retained", false);
+            #[cfg(not(test))]
+            checkpoint();
+        };
         let peer_routes = self.policy_filtered_routes.entry(target_peer).or_default();
-        peer_routes.retain(|key| {
+        for prefix in prefixes {
+            retained_checkpoint();
+            let empty = peer_routes.get_mut(prefix).is_some_and(|keys| {
+                keys.retain(|key| {
+                    retained_checkpoint();
+                    current.contains(key)
+                });
+                keys.is_empty()
+            });
+            if empty {
+                allocation_checkpoint();
+                drop(peer_routes.remove(prefix));
+                allocation_checkpoint();
+            }
+        }
+        allocation_checkpoint();
+        let mut incoming: Vec<_> = current.iter().inspect(|_| checkpoint()).copied().collect();
+        allocation_checkpoint();
+        incoming.sort_unstable_by(|left, right| {
             checkpoint();
-            !prefixes.contains(&key.prefix) || current.contains(key)
+            left.prefix.cmp(&right.prefix)
         });
-        let required = peer_routes.len().saturating_add(current.len());
-        if required > peer_routes.capacity() {
+        allocation_checkpoint();
+        let mut newly_filtered = Vec::with_capacity(incoming.len());
+        allocation_checkpoint();
+        for group in incoming.chunk_by(|left, right| {
             checkpoint();
-            let mut replacement = HashSet::with_capacity(required);
-            for key in peer_routes.drain() {
-                replacement.insert(key);
+            left.prefix == right.prefix
+        }) {
+            retained_checkpoint();
+            let keys = peer_routes.entry(group[0].prefix).or_default();
+            let required = keys.len().saturating_add(group.len());
+            if required > keys.capacity() {
+                allocation_checkpoint();
+                let mut replacement = HashSet::with_capacity(required);
+                allocation_checkpoint();
+                for key in keys.drain() {
+                    checkpoint();
+                    replacement.insert(key);
+                }
+                allocation_checkpoint();
+                drop(std::mem::replace(keys, replacement));
+                allocation_checkpoint();
+            }
+            for key in group.iter().copied() {
                 checkpoint();
-            }
-            drop(std::mem::replace(peer_routes, replacement));
-            checkpoint();
-        }
-        let mut newly_filtered = Vec::with_capacity(current.len());
-        checkpoint();
-        for key in current.iter().copied() {
-            checkpoint();
-            if peer_routes.insert(key) {
-                newly_filtered.push(key);
+                if keys.insert(key) {
+                    newly_filtered.push(key);
+                }
             }
         }
+        retire_vec(&mut incoming, &mut || checkpoint());
         if peer_routes.is_empty() {
+            allocation_checkpoint();
             self.policy_filtered_routes.remove(&target_peer);
+            allocation_checkpoint();
         }
         let mut newly_filtered = newly_filtered.into_iter();
         // Resolved only when an event is published.
@@ -5574,9 +5620,27 @@ impl RibManager {
     }
 
     pub(super) fn clear_policy_filtered_routes_for_peer(&mut self, target_peer: PeerId) {
-        if let Some(mut routes) = self.policy_filtered_routes.remove(&target_peer) {
-            retire_hash_set(&mut routes, &mut || self.replacement_checkpoint(false));
+        if !self.policy_filtered_routes.contains_key(&target_peer) {
+            return;
         }
+        with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                if let Some(mut routes) = manager.policy_filtered_routes.remove(&target_peer) {
+                    while let Some((_, mut keys)) = routes.pop_first() {
+                        manager.replacement_checkpoint_at("policy_filtered_history_cleanup", false);
+                        retire_hash_set(&mut keys, &mut || {
+                            manager.replacement_checkpoint_at(
+                                "policy_filtered_history_cleanup",
+                                false,
+                            );
+                        });
+                    }
+                    manager.replacement_checkpoint_at("policy_filtered_history_cleanup", true);
+                    drop(routes);
+                    manager.replacement_checkpoint_at("policy_filtered_history_cleanup", true);
+                }
+            });
+        });
     }
 
     fn publish_evpn_route_event(&mut self, event: crate::event::EvpnRouteEvent) {

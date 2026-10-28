@@ -2238,7 +2238,7 @@ impl RibManager {
                 self.policy_filtered_routes
                     .get(&peer)
                     .into_iter()
-                    .flat_map(|keys| keys.iter().map(|key| key.prefix)),
+                    .flat_map(|prefixes| prefixes.keys().copied()),
             )
             .inspect(|_| checkpoint())
             .filter(|prefix| in_inventory(prefix))
