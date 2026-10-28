@@ -3375,6 +3375,9 @@ impl RibManager {
         // keeps ordinary rows frozen. Reserve before another family advances
         // its admission; the later reservation only sees a filtered subset.
         let mut held_proof_reserved = false;
+        let mut refused_withdrawal_counts = None;
+        let mut refused_withdrawal_prefixes = Vec::new();
+        let mut refused_withdrawals = false;
         if self.selection_resync_held(peer)
             && (self.grouped_member_of(peer).is_some()
                 || self.private_common_admission_incomplete(peer))
@@ -3417,16 +3420,75 @@ impl RibManager {
                 }
             }
             if !held_proof_reserved {
-                batch.retire_with(
+                self.replacement_checkpoint(true);
+                let mut seen = HashSet::with_capacity(batch.withdraw.len());
+                let mut withdraw = Vec::with_capacity(batch.withdraw.len());
+                self.replacement_checkpoint(true);
+                for &(prefix, path_id) in &batch.withdraw {
+                    checkpoint();
+                    let source = self
+                        .adj_ribs_out
+                        .get(&peer)
+                        .and_then(|rib| rib.local_export_source(&prefix, path_id));
+                    if source.is_some_and(|source| {
+                        source.deferral_exempt
+                            && self
+                                .ribs
+                                .get(&LOCAL_PEER)
+                                .and_then(|rib| rib.get(&prefix, source.path_id))
+                                .is_none_or(|route| !unicast_deferral_exempt(route))
+                    }) && seen.insert((prefix, path_id))
+                    {
+                        withdraw.push((prefix, path_id));
+                    }
+                }
+                super::retire_hash_set(&mut seen, &mut || checkpoint());
+                if withdraw.is_empty() {
+                    super::retire_vec(&mut withdraw, &mut || checkpoint());
+                    batch.retire_with(
+                        &mut || checkpoint(),
+                        #[cfg(test)]
+                        retirement_observer.as_deref(),
+                    );
+                    super::retire_hash_set(&mut group_prior, &mut || checkpoint());
+                    return self.outbound_commit_failed(
+                        peer,
+                        OutboundCommitFailure::Refused(OutboundCommitRefusal::SelectionGate),
+                    );
+                }
+                (refused_withdrawal_counts, refused_withdrawal_prefixes) =
+                    self.removed_rtbh_withdrawal_counts(peer, &withdraw);
+                if self.initial_group_admitted_counts(peer).is_some()
+                    && refused_withdrawal_counts.is_none()
+                {
+                    super::retire_vec(&mut withdraw, &mut || checkpoint());
+                    batch.retire_with(
+                        &mut || checkpoint(),
+                        #[cfg(test)]
+                        retirement_observer.as_deref(),
+                    );
+                    super::retire_hash_set(&mut group_prior, &mut || checkpoint());
+                    return self.outbound_commit_failed(
+                        peer,
+                        OutboundCommitFailure::Refused(OutboundCommitRefusal::SelectionGate),
+                    );
+                }
+                // Actual local provenance proves these removals. The refused
+                // batch's new admission and completion duties remain pending.
+                let mut refused = std::mem::replace(
+                    &mut batch,
+                    OutboundCommitBatch {
+                        withdraw,
+                        ..OutboundCommitBatch::default()
+                    },
+                );
+                refused.retire_with(
                     &mut || checkpoint(),
                     #[cfg(test)]
                     retirement_observer.as_deref(),
                 );
-                super::retire_hash_set(&mut group_prior, &mut || checkpoint());
-                return self.outbound_commit_failed(
-                    peer,
-                    OutboundCommitFailure::Refused(OutboundCommitRefusal::SelectionGate),
-                );
+                shared_unicast_precommit = None;
+                refused_withdrawals = true;
             }
         }
         if !self.reserve_evpn_recovery_admission(
@@ -3440,6 +3502,7 @@ impl RibManager {
                 retirement_observer.as_deref(),
             );
             super::retire_hash_set(&mut group_prior, &mut || checkpoint());
+            super::retire_vec(&mut refused_withdrawal_prefixes, &mut || checkpoint());
             return self.outbound_commit_failed(
                 peer,
                 OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
@@ -4291,6 +4354,7 @@ impl RibManager {
                 if let Some(observer) = &retirement_observer {
                     observer("evpn_count_candidate_retirement_after");
                 }
+                super::retire_vec(&mut refused_withdrawal_prefixes, &mut || checkpoint());
                 return self.outbound_commit_failed(
                     peer,
                     OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
@@ -4349,6 +4413,7 @@ impl RibManager {
             if let Some(observer) = &retirement_observer {
                 observer("evpn_admission_candidate_retirement_after");
             }
+            super::retire_vec(&mut refused_withdrawal_prefixes, &mut || checkpoint());
             return self.outbound_commit_failed(
                 peer,
                 OutboundCommitFailure::Refused(OutboundCommitRefusal::EvpnRecovery),
@@ -4600,14 +4665,32 @@ impl RibManager {
             super::retire_hash_set(&mut vpn_seen, &mut || checkpoint());
         }
         let limited = self.outbound_prefix_limits.contains_key(&peer);
-        let capacity_filtered = self.enforce_outbound_prefix_limits(
-            peer,
-            grouped_unicast_count.is_some() || self.private_unicast_admission_incomplete(peer),
-            announce_source_exclusion,
-            &mut announce,
-            &mut next_hop_override,
-            &withdraw,
-        );
+        let capacity_filtered = if refused_withdrawals {
+            if let Some(limits) = self.outbound_prefix_limits.get_mut(&peer) {
+                for prefix in &refused_withdrawal_prefixes {
+                    checkpoint();
+                    limits.grouped_remove(prefix);
+                }
+                if let Some(counts) = refused_withdrawal_counts {
+                    for (slot, afi) in [Afi::Ipv4, Afi::Ipv6].into_iter().enumerate() {
+                        if counts[slot] == 0 {
+                            limits.grouped_clear_with_checkpoint(afi, &mut || checkpoint());
+                        }
+                    }
+                }
+            }
+            false
+        } else {
+            self.enforce_outbound_prefix_limits(
+                peer,
+                grouped_unicast_count.is_some() || self.private_unicast_admission_incomplete(peer),
+                announce_source_exclusion,
+                &mut announce,
+                &mut next_hop_override,
+                &withdraw,
+            )
+        };
+        super::retire_vec(&mut refused_withdrawal_prefixes, &mut || checkpoint());
         #[cfg(test)]
         if let Some(observer) = &retirement_observer {
             observer("common_candidate_retirement_before");
@@ -4652,14 +4735,18 @@ impl RibManager {
         // A held initial join's group may contain rows this receiver has
         // never seen. Plan its actual counts from final batch identities,
         // without walking either the group or the retained proof universe.
-        let initial_admitted_counts = self.planned_initial_group_admitted_counts(
-            peer,
-            &announce,
-            &withdraw,
-            announce_source_exclusion,
-            &vpn_announce,
-            &vpn_withdraw,
-        );
+        let initial_admitted_counts = if refused_withdrawals {
+            refused_withdrawal_counts
+        } else {
+            self.planned_initial_group_admitted_counts(
+                peer,
+                &announce,
+                &withdraw,
+                announce_source_exclusion,
+                &vpn_announce,
+                &vpn_withdraw,
+            )
+        };
         let grouped_unicast_lens = initial_admitted_counts
             .map(|counts| [counts[0], counts[1]])
             .or(grouped_unicast_lens);
@@ -4964,6 +5051,9 @@ impl RibManager {
         if let Some(counts) = initial_admitted_counts {
             self.set_initial_group_admitted_counts(peer, counts);
         }
+        if refused_withdrawals {
+            self.recover_outbound_limit_headroom(peer);
+        }
 
         // ADR-0113 capacity gauges publish the committed admitted truth, so
         // they refresh here rather than at the enforcement seam above, which
@@ -5092,6 +5182,12 @@ impl RibManager {
         #[cfg(test)]
         if let Some(observer) = &retirement_observer {
             observer("group_prior_retirement_after");
+        }
+        if refused_withdrawals {
+            return self.outbound_commit_failed(
+                peer,
+                OutboundCommitFailure::Refused(OutboundCommitRefusal::SelectionGate),
+            );
         }
         if eligible_was_caught_up && self.selection_resync_held(peer) {
             self.set_selection_partial_caught_up(peer, true);
@@ -7265,6 +7361,73 @@ impl RibManager {
                 .get(&peer)
                 .is_some_and(|proof| proof.contains(&ExactExportKey::Unicast(*prefix, path_id)))
             || self.group_recovery_fallback(peer).is_some()
+    }
+
+    /// Missing common proof does not invalidate known local withdrawals.
+    fn removed_rtbh_withdrawal_counts(
+        &self,
+        peer: PeerId,
+        withdraw: &[(Prefix, u32)],
+    ) -> (Option<[usize; 6]>, Vec<Prefix>) {
+        let Some(mut counts) = self.initial_group_admitted_counts(peer) else {
+            return (None, Vec::new());
+        };
+        let one_path_per_prefix = [counts[0] == counts[4], counts[1] == counts[5]];
+        let private = self.adj_ribs_out.get(&peer);
+        let private_lens = private.map(AdjRibOut::family_lens);
+        let private_complete = [0, 1].map(|slot| {
+            self.grouped_member_of(peer).is_none()
+                && private_lens.is_some_and(|lens| lens.unicast[slot] == counts[slot])
+        });
+        for (slot, afi) in [Afi::Ipv4, Afi::Ipv6].into_iter().enumerate() {
+            if private_complete[slot] {
+                counts[4 + slot] = private.map_or(0, |rib| rib.unicast_prefix_count(afi));
+            }
+        }
+        self.replacement_checkpoint(true);
+        let mut removed = HashMap::<Prefix, usize>::with_capacity(withdraw.len());
+        let mut freed = Vec::with_capacity(withdraw.len());
+        self.replacement_checkpoint(true);
+        let planned = (|| {
+            for &(prefix, _) in withdraw {
+                self.replacement_checkpoint(false);
+                let slot = usize::from(matches!(prefix, Prefix::V6(_)));
+                counts[slot] = counts[slot].checked_sub(1)?;
+                *removed.entry(prefix).or_default() += 1;
+            }
+            for (&prefix, &removed) in &removed {
+                self.replacement_checkpoint(false);
+                let slot = usize::from(matches!(prefix, Prefix::V6(_)));
+                let last_path = one_path_per_prefix[slot]
+                    || (private_complete[slot]
+                        && private.is_some_and(|rib| {
+                            rib.iter_prefix(&prefix)
+                                .inspect(|_| self.replacement_checkpoint(false))
+                                .count()
+                                == removed
+                        }));
+                if last_path {
+                    if counts[4 + slot] != usize::MAX {
+                        counts[4 + slot] = counts[4 + slot].checked_sub(1)?;
+                    }
+                    freed.push(prefix);
+                } else if !private_complete[slot] {
+                    // Unknown received siblings must not become spare capacity.
+                    counts[4 + slot] = usize::MAX;
+                }
+                if counts[slot] == 0 {
+                    counts[4 + slot] = 0;
+                }
+            }
+            Some(counts)
+        })();
+        self.replacement_checkpoint(true);
+        drop(removed);
+        self.replacement_checkpoint(true);
+        if planned.is_none() {
+            super::retire_vec(&mut freed, &mut || self.replacement_checkpoint(false));
+        }
+        (planned, freed)
     }
 
     /// Partial recovery exports local RTBH while ordinary admitted rows stay frozen.

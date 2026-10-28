@@ -3330,6 +3330,7 @@ impl RibManager {
             } else {
                 self.refresh_outbound_usage_gauges(peer);
             }
+            self.recover_outbound_limit_headroom(peer);
         }
     }
 

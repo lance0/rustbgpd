@@ -584,10 +584,11 @@ pub struct JsonEffectiveNeighborPosture {
     pub orr_vantage: Option<String>,
 }
 
-/// One unicast family's outbound prefix capacity. `limit`/`headroom` are
-/// absent while the family is unlimited rather than a synthetic zero, and
-/// `reason` carries the stable `outbound_prefix_limit_reached` only while
-/// the family is blocking.
+/// One unicast family's outbound prefix capacity. `usage = u64::MAX`
+/// means admitted unique-prefix usage is unknown during recovery; JSON
+/// retains that numeric sentinel. `limit` is absent while unlimited;
+/// `headroom` is also absent when usage is unknown. `reason` carries
+/// `outbound_prefix_limit_reached` only while the family is blocking.
 #[derive(Serialize)]
 pub struct JsonOutboundPrefixLimit {
     pub family: String,

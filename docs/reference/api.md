@@ -735,11 +735,22 @@ admitted into this peer's advertised state, post-policy, post-OTC, and
 post-exact-export, agreeing with advertised-route queries and never the
 shared update-group table's count — the optional configured `limit`
 (absence means unlimited, never zero), the saturating `headroom` (absent
-while the family is unlimited), a `blocking` flag for an open blocking
-episode, and the stable `reason` `outbound_prefix_limit_reached` while
+while the family is unlimited or usage is unknown), a `blocking` flag for
+an open blocking episode, and the stable `reason`
+`outbound_prefix_limit_reached` while
 blocking. The list is empty from a daemon that does not expose it and from
 a peer with no outbound registration; a registered peer always reports
 both unicast families.
+
+During incomplete admission recovery, unavailable proof can make the
+admitted unique-prefix usage unknown. `usage = 18446744073709551615`
+(`UINT64_MAX`) is that unknown sentinel, not a prefix count. `headroom` is
+absent until usage is known again; a present `limit` remains the configured
+maximum, and `blocking` still describes the actual blocking episode. The
+CLI preserves the numeric sentinel in JSON and renders `unknown` in text
+and the TUI. Route/path and stale counts remain exact; the unknown sentinel
+applies only to distinct-prefix capacity. Recovery restores ordinary usage
+and headroom reporting.
 
 `NeighborState.effective_posture` is a read-only snapshot of the resolved
 running neighbor posture: NEXT_HOP ownership enforcement, RFC 1997

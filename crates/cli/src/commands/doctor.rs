@@ -1145,6 +1145,11 @@ fn outbound_prefix_limit_checks(
     rows.iter()
         .filter(|row| row.blocking)
         .map(|row| {
+            let usage = if row.usage == u64::MAX {
+                "unknown".to_string()
+            } else {
+                row.usage.to_string()
+            };
             let limit = row
                 .limit
                 .map_or_else(|| "unlimited".to_string(), |limit| limit.to_string());
@@ -1161,7 +1166,7 @@ fn outbound_prefix_limit_checks(
                 status: CheckStatus::Fail,
                 detail: format!(
                     "peer {identity} family {} is intentionally withholding routes: usage {}, limit {limit}, reason {reason}",
-                    row.family, row.usage
+                    row.family, usage
                 ),
             }
         })
@@ -5540,6 +5545,14 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 .contains("reason outbound_prefix_limit_reached")
         );
 
+        let mut unknown_usage = blocking;
+        unknown_usage.usage = u64::MAX;
+        unknown_usage.headroom = None;
+        let unknown = outbound_prefix_limit_checks("fe80::1%eth0", &[unknown_usage.clone()]);
+        assert!(unknown[0].detail.contains("usage unknown, limit 100"));
+        assert!(!unknown[0].detail.contains(&u64::MAX.to_string()));
+        unknown_usage.blocking = false;
+        assert!(outbound_prefix_limit_checks("fe80::1%eth0", &[unknown_usage]).is_empty());
         assert!(outbound_prefix_limit_checks("fe80::1%eth1", &[nonblocking, unlimited]).is_empty());
         assert!(outbound_prefix_limit_checks("fe80::1%eth1", &[]).is_empty());
     }
