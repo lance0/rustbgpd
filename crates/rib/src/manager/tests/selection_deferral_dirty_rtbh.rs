@@ -3162,14 +3162,27 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         .count();
     assert_eq!(terminals, 1);
     assert_eq!(wire.len(), 2);
-    assert!(!wire.keys().any(|key| key.0 == Prefix::V6(blocked)));
+    assert!(wire.keys().any(|key| key.0 == Prefix::V6(ordinary)));
+    // Rank migration withdraws H's last OLD path. ADR-0113 allows H and B
+    // to compete in batch order for that freed slot, without a preference.
+    assert_ne!(
+        wire.keys().any(|key| key.0 == Prefix::V6(host)),
+        wire.keys().any(|key| key.0 == Prefix::V6(blocked)),
+        "exactly one competing prefix fills the remaining slot"
+    );
     assert_eq!(capacity(&manager), (2, Some(0)));
+    assert_late_waiter_advertised_truth(
+        &mut manager,
+        observer,
+        2,
+        "limited body after selection release",
+    );
     assert!(!manager.pending_group_admitted.contains_record(observer));
     manager.handle_update(RibUpdate::RoutesReceived {
         peer: peer_v4(SOURCE),
         session_id: 81,
         announced: vec![],
-        withdrawn: vec![(Prefix::V6(host), 11)],
+        withdrawn: vec![(Prefix::V6(ordinary), 0)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
         evpn_announced: vec![],
@@ -3196,8 +3209,12 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
             .all(|update| update.withdraw.is_empty() && update.end_of_rib.is_empty())
     );
     assert_eq!(wire.len(), 2);
-    assert!(wire.keys().any(|key| key.0 == Prefix::V6(blocked)));
-    assert!(!wire.keys().any(|key| key.0 == Prefix::V6(host)));
+    assert_eq!(
+        wire.keys().map(|key| key.0).collect::<HashSet<_>>(),
+        HashSet::from([Prefix::V6(host), Prefix::V6(blocked)]),
+        "queued recovery fills the freed ordinary slot with remaining intent"
+    );
+    assert!(!wire.keys().any(|key| key.0 == Prefix::V6(ordinary)));
     assert_eq!(capacity(&manager), (2, Some(0)));
     assert_late_waiter_advertised_truth(
         &mut manager,
