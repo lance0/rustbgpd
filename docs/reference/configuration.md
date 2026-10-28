@@ -1074,8 +1074,13 @@ agrees with `rbgp rib advertised <addr>`. Prometheus exposes the
 same truth as `bgp_outbound_prefix_usage`, `bgp_outbound_prefix_limit`,
 `bgp_outbound_prefix_headroom`, and `bgp_outbound_prefix_blocking`, plus the
 `bgp_outbound_prefix_blocked_total` attempt counter — all labeled by peer and
-family only. An episode logs once when it opens and once when a recovery
-resync proves nothing is still withheld, never per prefix.
+family only. If incomplete recovery loses the exact admission proof,
+unique-prefix usage can be unknown while route/path and stale counts remain
+exact. The CLI renders `unknown`; API and CLI JSON retain the documented
+`UINT64_MAX` usage sentinel. Usage and headroom metric series are absent
+until recovery restores a known count; the configured maximum and blocking
+state remain visible. An episode logs once when it opens and once when a
+recovery resync proves nothing is still withheld, never per prefix.
 
 Edits are live and never reset the session, but they are transactional:
 raising or removing a maximum schedules one coalesced resync of just that peer

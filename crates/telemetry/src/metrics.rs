@@ -1593,7 +1593,7 @@ impl BgpMetrics {
         let outbound_prefix_usage = IntGaugeVec::new(
             Opts::new(
                 "bgp_outbound_prefix_usage",
-                "Distinct prefixes admitted into this peer's advertised unicast state.",
+                "Distinct prefixes admitted into this peer's advertised unicast state; absent while recovery leaves usage unknown.",
             ),
             &["peer", "family"],
         )
@@ -1611,7 +1611,7 @@ impl BgpMetrics {
         let outbound_prefix_headroom = IntGaugeVec::new(
             Opts::new(
                 "bgp_outbound_prefix_headroom",
-                "Remaining admissible prefixes before the finite outbound maximum; absent when unlimited.",
+                "Remaining admissible prefixes before the finite outbound maximum; absent when unlimited or recovery leaves usage unknown.",
             ),
             &["peer", "family"],
         )
@@ -5327,11 +5327,15 @@ impl BgpMetrics {
     ) {
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
         let labels = [peer, family];
-        let usage = i64::try_from(usage).unwrap_or(i64::MAX);
-        self.0
-            .outbound_prefix_usage
-            .with_label_values(&labels)
-            .set(usage);
+        if usage == usize::MAX {
+            let _ = self.0.outbound_prefix_usage.remove_label_values(&labels);
+            let _ = self.0.outbound_prefix_headroom.remove_label_values(&labels);
+        } else {
+            self.0
+                .outbound_prefix_usage
+                .with_label_values(&labels)
+                .set(i64::try_from(usage).unwrap_or(i64::MAX));
+        }
         self.0
             .outbound_prefix_blocking
             .with_label_values(&labels)
@@ -5341,12 +5345,14 @@ impl BgpMetrics {
                 .outbound_prefix_limit
                 .with_label_values(&labels)
                 .set(i64::from(limit));
-            self.0
-                .outbound_prefix_headroom
-                .with_label_values(&labels)
-                .set(i64::from(
-                    limit.saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
-                ));
+            if usage != usize::MAX {
+                self.0
+                    .outbound_prefix_headroom
+                    .with_label_values(&labels)
+                    .set(i64::from(
+                        limit.saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
+                    ));
+            }
         } else {
             let _ = self.0.outbound_prefix_limit.remove_label_values(&labels);
             let _ = self.0.outbound_prefix_headroom.remove_label_values(&labels);
@@ -5366,10 +5372,14 @@ impl BgpMetrics {
     ) {
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
         let labels = [peer, family];
-        self.0
-            .outbound_prefix_usage
-            .with_label_values(&labels)
-            .set(i64::try_from(usage).unwrap_or(i64::MAX));
+        if usage == usize::MAX {
+            let _ = self.0.outbound_prefix_usage.remove_label_values(&labels);
+        } else {
+            self.0
+                .outbound_prefix_usage
+                .with_label_values(&labels)
+                .set(i64::try_from(usage).unwrap_or(i64::MAX));
+        }
         self.0
             .outbound_prefix_blocking
             .with_label_values(&labels)
@@ -10716,6 +10726,47 @@ mod tests {
         assert!(text.contains(
             r#"bgp_outbound_prefix_blocked_total{family="ipv4_unicast",peer="10.0.0.1"} 3"#
         ));
+    }
+
+    #[test]
+    fn outbound_prefix_unknown_capacity_omits_numeric_usage_and_recovers() {
+        let m = BgpMetrics::new();
+        let peer = "10.0.0.1";
+        m.set_outbound_prefix_capacity(peer, "ipv4_unicast", 1, Some(2), true);
+        m.set_outbound_prefix_capacity(peer, "ipv4_unicast", usize::MAX, Some(2), true);
+        let text = gather_text(&m);
+        assert!(!text.contains("bgp_outbound_prefix_usage{"));
+        assert!(!text.contains("bgp_outbound_prefix_headroom{"));
+        assert!(
+            text.contains(r#"bgp_outbound_prefix_limit{family="ipv4_unicast",peer="10.0.0.1"} 2"#)
+        );
+        assert!(
+            text.contains(
+                r#"bgp_outbound_prefix_blocking{family="ipv4_unicast",peer="10.0.0.1"} 1"#
+            )
+        );
+        m.set_outbound_prefix_capacity(peer, "ipv4_unicast", 1, Some(2), false);
+        let text = gather_text(&m);
+        assert!(
+            text.contains(r#"bgp_outbound_prefix_usage{family="ipv4_unicast",peer="10.0.0.1"} 1"#)
+        );
+        assert!(
+            text.contains(
+                r#"bgp_outbound_prefix_headroom{family="ipv4_unicast",peer="10.0.0.1"} 1"#
+            )
+        );
+        m.set_outbound_prefix_capacity(peer, "ipv4_unicast", usize::MAX, None, false);
+        let text = gather_text(&m);
+        assert!(!text.contains("bgp_outbound_prefix_usage{"));
+        assert!(!text.contains("bgp_outbound_prefix_limit{"));
+        assert!(!text.contains("bgp_outbound_prefix_headroom{"));
+        m.set_outbound_prefix_usage(peer, "ipv4_unicast", 2, false);
+        assert!(
+            gather_text(&m)
+                .contains(r#"bgp_outbound_prefix_usage{family="ipv4_unicast",peer="10.0.0.1"} 2"#)
+        );
+        m.set_outbound_prefix_usage(peer, "ipv4_unicast", usize::MAX, false);
+        assert!(!gather_text(&m).contains("bgp_outbound_prefix_usage{"));
     }
 
     #[test]

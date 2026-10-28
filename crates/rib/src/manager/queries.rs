@@ -2852,6 +2852,11 @@ impl RibManager {
             return explanation;
         }
 
+        let usage = if usage == usize::MAX {
+            "unknown during recovery".to_string()
+        } else {
+            usage.to_string()
+        };
         let detail = format!(
             "{} outbound prefix limit reached for peer {}: limit {limit}, usage {usage}",
             super::outbound_prefix_limits::family_label(afi),

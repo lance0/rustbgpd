@@ -1802,3 +1802,620 @@ fn refused_private_handoff_withdraws_removed_old_unicast_and_vpn_at_release() {
     assert!(!manager.pending_group_admitted.contains_record(observer));
     assert!(!manager.pending_extra_withdraws.contains_key(&observer));
 }
+
+#[derive(Clone, Copy)]
+enum RefusedRtbhRemoval {
+    Delete,
+    Expire,
+    Demote,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one dual-stack failure transcript verifies local removal, actual wire, refusal duties, counts and release"
+)]
+async fn assert_removed_rtbh_after_proof_refusal(
+    ipv6: bool,
+    removal: RefusedRtbhRemoval,
+    writer_full: bool,
+) {
+    let family = (if ipv6 { Afi::Ipv6 } else { Afi::Ipv4 }, Safi::Unicast);
+    let prefix = |last: u16, host: bool| {
+        if ipv6 {
+            Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::new(0x2001, 0xdb8, last, 0, 0, 0, 0, 1),
+                if host { 128 } else { 64 },
+            ))
+        } else {
+            Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(198, 51, u8::try_from(last).unwrap(), 1),
+                if host { 32 } else { 24 },
+            ))
+        }
+    };
+    let ordinary = prefix(1, false);
+    let first = prefix(2, !matches!(removal, RefusedRtbhRemoval::Demote));
+    let second = prefix(3, true);
+    let route = |prefix| {
+        let mut route = match prefix {
+            Prefix::V4(prefix) => make_route(prefix, SOURCE),
+            Prefix::V6(prefix) => make_v6_route(prefix, "2001:db8::81".parse().unwrap()),
+        };
+        set_peer(&mut route, peer_v4(SOURCE));
+        route
+    };
+    let local = |prefix, tagged| {
+        let mut route = route(prefix);
+        set_peer(&mut route, LOCAL_PEER);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        route.attributes = AttrSet::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            PathAttribute::Communities(if tagged {
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE]
+            } else {
+                vec![]
+            }),
+        ]);
+        route
+    };
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER),
+                families: vec![family],
+            }],
+        });
+    let connect = |manager: &mut RibManager, address: Ipv4Addr, capacity, waiter| {
+        let peer = peer_v4(address);
+        let session_id = u64::from(address.octets()[3]);
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer,
+            session_id,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: if waiter { vec![family] } else { vec![] },
+            peer_enhanced_refresh: true,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        });
+        let (tx, rx) = mpsc::channel(capacity);
+        let mut up = super::lifecycle::test_peer_up(peer, session_id, tx);
+        if let RibUpdate::PeerUp {
+            sendable_families,
+            is_ebgp,
+            ..
+        } = &mut up
+        {
+            *sendable_families = vec![family];
+            *is_ebgp = true;
+        }
+        manager.handle_update(up);
+        rx
+    };
+    let _source = connect(&mut manager, SOURCE, 64, false);
+    let observer = peer_v4(OBSERVER);
+    let mut rx = connect(&mut manager, OBSERVER, 1, false);
+    rx.try_recv().unwrap();
+    let limits = if ipv6 {
+        (None, Some(3))
+    } else {
+        (Some(3), None)
+    };
+    super::outbound_prefix_limits::prepare(
+        &mut manager,
+        1,
+        super::outbound_prefix_limits::limit_config(&[(observer, limits.0, limits.1)], &[]),
+    )
+    .unwrap();
+    super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: vec![route(ordinary)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    let mut wire = std::collections::HashMap::new();
+    apply_wire(&mut rx, &mut wire);
+    let _waiter = connect(&mut manager, WAITER, 64, true);
+    let generation = if matches!(removal, RefusedRtbhRemoval::Expire) {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectLeasedRoute {
+            route: local(first, false),
+            owner: "refusal-expiry".to_string(),
+            lease_seconds: 5,
+            reply,
+        });
+        Some(result.try_recv().unwrap().unwrap().1)
+    } else {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute {
+            route: local(first, matches!(removal, RefusedRtbhRemoval::Demote)),
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        None
+    };
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute {
+        route: local(second, false),
+        reply,
+    });
+    result.try_recv().unwrap().unwrap();
+    apply_wire(&mut rx, &mut wire);
+    assert_eq!(wire.len(), 2);
+    assert!(wire.contains_key(&(first, 0)));
+    assert!(!wire.contains_key(&(second, 0)));
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    assert!(manager.pending_group_admitted.get(&observer).is_none());
+    assert!(manager.group_recovery_fallback(observer).is_some());
+    assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    let occupied = writer_full.then(|| {
+        manager.outbound_peers[&observer]
+            .clone()
+            .try_reserve_owned()
+            .unwrap()
+    });
+    match removal {
+        RefusedRtbhRemoval::Delete => {
+            let (reply, mut result) = oneshot::channel();
+            manager.handle_update(RibUpdate::WithdrawInjected {
+                prefix: first,
+                path_id: 0,
+                allow_missing: false,
+                owner: String::new(),
+                override_owner: false,
+                reply,
+            });
+            assert!(result.try_recv().unwrap().unwrap().removed);
+        }
+        RefusedRtbhRemoval::Expire => {
+            tokio::time::advance(Duration::from_secs(6)).await;
+            let (leases, _) = manager.injection_leases().take_expired();
+            assert_eq!(leases.len(), 1);
+            assert_eq!(Some(leases[0].generation), generation);
+            manager.handle_update(RibUpdate::ExpireInjectionLeases { leases });
+        }
+        RefusedRtbhRemoval::Demote => {
+            let (reply, mut result) = oneshot::channel();
+            manager.handle_update(RibUpdate::InjectRoute {
+                route: local(first, false),
+                reply,
+            });
+            assert_eq!(
+                result.try_recv().unwrap().unwrap(),
+                crate::update::InjectOutcome::Replaced
+            );
+        }
+    }
+    if let Some(occupied) = occupied {
+        assert_eq!(manager.actual_unicast_advertised_count(observer), 2);
+        assert!(
+            manager.adj_ribs_out[&observer]
+                .local_export_source(&first, 0)
+                .is_some()
+        );
+        assert!(apply_wire(&mut rx, &mut wire).is_empty());
+        drop(occupied);
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    }
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(manager.selection_deferred(family));
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.announce.is_empty() && update.end_of_rib.is_empty())
+    );
+    assert_eq!(
+        updates
+            .iter()
+            .flat_map(|update| &update.withdraw)
+            .copied()
+            .collect::<Vec<_>>(),
+        [(first, 0)]
+    );
+    assert!(
+        wire.contains_key(&(ordinary, 0)),
+        "received OLD remains frozen"
+    );
+    assert!(
+        !wire.contains_key(&(first, 0)),
+        "removed RTBH must withdraw despite proof refusal"
+    );
+    assert!(
+        !wire.contains_key(&(second, 0)),
+        "missing proof permits no new admission"
+    );
+    assert_eq!(manager.actual_unicast_advertised_count(observer), 1);
+    assert_eq!(manager.neighbor_rib_snapshot(observer).advertised_count, 1);
+    let rows = manager.outbound_prefix_limit_rows(observer);
+    let row = rows
+        .iter()
+        .find(|row| row.family == if ipv6 { "ipv6_unicast" } else { "ipv4_unicast" })
+        .unwrap();
+    assert_eq!((row.usage, row.headroom), (1, Some(2)));
+    assert!(manager.dirty_peers.contains(&observer));
+    assert!(manager.group_recovery_fallback(observer).is_some());
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert!(
+        apply_wire(&mut rx, &mut wire).is_empty(),
+        "held retry must not debit or withdraw twice"
+    );
+    assert_eq!(manager.actual_unicast_advertised_count(observer), 1);
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 83,
+        afi: family.0,
+        safi: family.1,
+    });
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    while let Ok(update) = rx.try_recv() {
+        assert_eq!(update.end_of_rib, []);
+        for key in update.withdraw {
+            assert!(
+                wire.remove(&key).is_some() || key == (first, 0),
+                "only known obsolete RTBH may receive a conservative repeated withdrawal"
+            );
+        }
+        for route in update.announce.iter() {
+            wire.insert((route.prefix, route.path_id), route.clone());
+        }
+    }
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    apply_wire(&mut rx, &mut wire);
+    let expected = if matches!(removal, RefusedRtbhRemoval::Demote) {
+        3
+    } else {
+        2
+    };
+    assert_eq!(wire.len(), expected);
+    assert!(wire.contains_key(&(ordinary, 0)) && wire.contains_key(&(second, 0)));
+    assert_eq!(manager.actual_unicast_advertised_count(observer), expected);
+    assert!(!manager.dirty_peers.contains(&observer));
+    assert!(!manager.pending_group_admitted.contains_record(observer));
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_deleted_ipv4_rtbh() {
+    assert_removed_rtbh_after_proof_refusal(false, RefusedRtbhRemoval::Delete, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_deleted_ipv6_rtbh() {
+    assert_removed_rtbh_after_proof_refusal(true, RefusedRtbhRemoval::Delete, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_expired_ipv4_rtbh() {
+    assert_removed_rtbh_after_proof_refusal(false, RefusedRtbhRemoval::Expire, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_expired_ipv6_rtbh() {
+    assert_removed_rtbh_after_proof_refusal(true, RefusedRtbhRemoval::Expire, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_demoted_ipv4_rtbh() {
+    assert_removed_rtbh_after_proof_refusal(false, RefusedRtbhRemoval::Demote, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_demoted_ipv6_rtbh() {
+    assert_removed_rtbh_after_proof_refusal(true, RefusedRtbhRemoval::Demote, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_proof_still_withdraws_only_after_writer_admission() {
+    assert_removed_rtbh_after_proof_refusal(false, RefusedRtbhRemoval::Delete, true).await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual Add-Path transcript verifies refused proof, frozen received paths, capacity and release recovery"
+)]
+fn assert_refused_private_withdrawal_capacity(shared_prefix: bool) {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(1);
+    let registration = |tx| {
+        let mut up = super::lifecycle::test_peer_up(observer, 82, tx);
+        if let RibUpdate::PeerUp {
+            per_client_best,
+            add_path_send_families,
+            add_path_send_max,
+            ..
+        } = &mut up
+        {
+            *per_client_best = true;
+            *add_path_send_families = vec![FAMILY];
+            *add_path_send_max = 2;
+        }
+        up
+    };
+    manager.handle_update(registration(tx.clone()));
+    rx.try_recv().unwrap();
+    let limit = 2;
+    super::outbound_prefix_limits::prepare(
+        &mut manager,
+        1,
+        super::outbound_prefix_limits::limit_config(&[(observer, Some(limit), None)], &[]),
+    )
+    .unwrap();
+    super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
+    let first = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
+    let ordinary = if shared_prefix {
+        first
+    } else {
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)
+    };
+    if !shared_prefix {
+        inject_aggregate(&mut manager, first, 17, false);
+    }
+    let mut wire = std::collections::HashMap::new();
+    apply_wire(&mut rx, &mut wire);
+    let mut received: Vec<_> = (0..2)
+        .map(|rank| {
+            let mut route = make_route_with_lp(ordinary, SOURCE, 10 - rank);
+            route.path_id = 11 + rank;
+            route
+        })
+        .collect();
+    if shared_prefix {
+        received.push(make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            SOURCE,
+        ));
+    }
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: received,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    apply_wire(&mut rx, &mut wire);
+    for _ in 0..2 {
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        apply_wire(&mut rx, &mut wire);
+    }
+    assert!(
+        !manager.dirty_peers.contains(&observer),
+        "pre-hold writer backpressure must settle before capturing OLD"
+    );
+    let initial = 3;
+    assert_eq!(wire.len(), initial);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    manager.handle_update(registration(tx));
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
+    assert!(manager.private_unicast_admission_incomplete(observer));
+    assert_eq!(manager.actual_unicast_advertised_count(observer), initial);
+    if shared_prefix {
+        assert_eq!(manager.adj_ribs_out[&observer].len(), 0);
+        inject_aggregate(&mut manager, first, 17, false);
+        let updates = apply_wire(&mut rx, &mut wire);
+        assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
+        assert_eq!(wire.len(), initial);
+        assert_eq!(manager.actual_unicast_advertised_count(observer), initial);
+    }
+    let obsolete = wire
+        .iter()
+        .find_map(|(key, route)| (route.peer == LOCAL_PEER).then_some(*key))
+        .unwrap();
+    let frozen: HashSet<_> = wire
+        .keys()
+        .filter(|key| **key != obsolete)
+        .copied()
+        .collect();
+    assert_eq!(manager.adj_ribs_out[&observer].len(), 1);
+    let pending: Vec<_> = (2..10)
+        .map(|last| Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, last), 32))
+        .collect();
+    let occupied = manager.outbound_peers[&observer]
+        .clone()
+        .try_reserve_owned()
+        .unwrap();
+    for &prefix in &pending {
+        inject_host(&mut manager, prefix);
+        let updates = apply_wire(&mut rx, &mut wire);
+        assert!(updates.iter().all(|update| update.announce.is_empty()
+            && update.withdraw.is_empty()
+            && update.end_of_rib.is_empty()));
+        assert_eq!(wire.len(), initial);
+    }
+    drop(occupied);
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    let second = pending[0];
+    assert!(manager.pending_group_admitted.get(&observer).is_none());
+    assert!(manager.group_recovery_fallback(observer).is_some());
+    assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix: Prefix::V4(first),
+        path_id: 17,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    result.try_recv().unwrap().unwrap();
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.announce.is_empty() && update.end_of_rib.is_empty())
+    );
+    assert_eq!(
+        updates
+            .iter()
+            .flat_map(|update| &update.withdraw)
+            .copied()
+            .collect::<Vec<_>>(),
+        [obsolete]
+    );
+    assert_eq!(wire.keys().copied().collect::<HashSet<_>>(), frozen);
+    assert_eq!(
+        manager.actual_unicast_advertised_count(observer),
+        initial - 1
+    );
+    assert_eq!(
+        manager.neighbor_rib_snapshot(observer).advertised_count,
+        initial - 1
+    );
+    let row = manager
+        .outbound_prefix_limit_rows(observer)
+        .into_iter()
+        .find(|row| row.family == "ipv4_unicast")
+        .unwrap();
+    assert_eq!(
+        (row.usage, row.headroom),
+        (u64::MAX, None),
+        "unknown received siblings never become proven spare capacity"
+    );
+    let violations = super::outbound_prefix_limits::prepare(
+        &mut manager,
+        99,
+        super::outbound_prefix_limits::limit_config(&[(observer, Some(3), None)], &[]),
+    )
+    .unwrap_err();
+    assert_eq!(violations[0].usage, u64::MAX);
+    assert!(
+        violations[0]
+            .to_string()
+            .contains("usage is unknown during recovery")
+    );
+    let (reply, mut explanation) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+        peer: observer,
+        prefix: Prefix::V4(second),
+        rd: None,
+        labeled: false,
+        source: None,
+        reply,
+    });
+    let refusal = explanation.try_recv().unwrap().unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .contains("no admitted baseline is available")
+    );
+    for name in ["bgp_outbound_prefix_usage", "bgp_outbound_prefix_headroom"] {
+        assert!(
+            manager
+                .metrics
+                .registry()
+                .gather()
+                .iter()
+                .filter(|family| family.name() == name)
+                .flat_map(|family| family.get_metric().iter())
+                .all(|metric| {
+                    !metric.get_label().iter().any(|label| {
+                        label.name() == "peer" && label.value() == observer.label().as_str()
+                    }) || !metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "family" && label.value() == "ipv4_unicast")
+                }),
+            "unknown capacity must omit numeric {name}"
+        );
+    }
+    assert!(manager.dirty_peers.contains(&observer));
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    assert_eq!(
+        manager.actual_unicast_advertised_count(observer),
+        initial - 1
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 83,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    for _ in 0..3 {
+        while let Ok(update) = rx.try_recv() {
+            for key in update.withdraw {
+                assert!(wire.remove(&key).is_some() || key == obsolete);
+            }
+            for route in update.announce.iter() {
+                wire.insert((route.prefix, route.path_id), route.clone());
+            }
+        }
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.drain_outbound_limit_recovery();
+    }
+    apply_wire(&mut rx, &mut wire);
+    assert!(!manager.dirty_peers.contains(&observer));
+    assert!(!manager.pending_group_admitted.contains_record(observer));
+    assert!(wire.keys().any(|key| key.0 == Prefix::V4(ordinary)));
+    assert_eq!(
+        manager.actual_unicast_advertised_count(observer),
+        wire.len()
+    );
+    let row = manager
+        .outbound_prefix_limit_rows(observer)
+        .into_iter()
+        .find(|row| row.family == "ipv4_unicast")
+        .unwrap();
+    assert_eq!(row.usage, u64::from(limit));
+    assert_eq!(
+        gauge_metric_value(
+            &manager.metrics,
+            "bgp_outbound_prefix_usage",
+            &[
+                ("peer", observer.label().as_str()),
+                ("family", "ipv4_unicast")
+            ]
+        ),
+        f64::from(limit)
+    );
+    assert_eq!(
+        gauge_metric_value(
+            &manager.metrics,
+            "bgp_outbound_prefix_headroom",
+            &[
+                ("peer", observer.label().as_str()),
+                ("family", "ipv4_unicast")
+            ]
+        ),
+        0.0
+    );
+    if !shared_prefix {
+        assert!(
+            wire.keys()
+                .any(|key| pending.iter().any(|prefix| key.0 == Prefix::V4(*prefix))),
+            "released capacity must recover withheld new-prefix intent"
+        );
+    }
+}
+
+#[test]
+fn refused_proof_private_add_path_withdraw_keeps_unknown_sibling() {
+    assert_refused_private_withdrawal_capacity(true);
+}
+
+#[test]
+fn refused_proof_private_add_path_withdraw_recovers_capacity_after_release() {
+    assert_refused_private_withdrawal_capacity(false);
+}

@@ -835,6 +835,12 @@ impl RibManager {
                 .get(&peer)
                 .map_or(0, |rib| rib.unicast_prefix_count(afi));
         }
+        if self
+            .initial_group_admitted_counts(peer)
+            .is_some_and(|counts| counts[4 + usize::from(afi == Afi::Ipv6)] == usize::MAX)
+        {
+            return usize::MAX;
+        }
         if let Some(limits) = self.outbound_prefix_limits.get(&peer)
             && limits
                 .family(afi)
@@ -919,9 +925,13 @@ impl RibManager {
                 let limit = family.and_then(|family| family.limit).map(NonZeroU32::get);
                 OutboundPrefixLimitFamilyState {
                     family: family_label(afi).to_string(),
-                    usage: u64::try_from(usage).unwrap_or(u64::MAX),
+                    usage: if usage == usize::MAX {
+                        u64::MAX
+                    } else {
+                        u64::try_from(usage).unwrap_or(u64::MAX)
+                    },
                     limit,
-                    headroom: limit.map(|limit| {
+                    headroom: limit.filter(|_| usage != usize::MAX).map(|limit| {
                         limit.saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX))
                     }),
                     blocking: family.is_some_and(|family| family.blocking),
@@ -1068,6 +1078,25 @@ impl RibManager {
             .entry(peer)
             .or_default()
             .insert(afi);
+    }
+
+    /// Recheck blocked intent when committed recovery restores known headroom.
+    pub(in crate::manager) fn recover_outbound_limit_headroom(&mut self, peer: PeerId) {
+        let grouped = self.grouped_member_of(peer).is_some();
+        for afi in LIMITED_FAMILIES {
+            let limit = self
+                .outbound_prefix_limits
+                .get(&peer)
+                .and_then(|limits| limits.family(afi))
+                .filter(|family| family.blocking)
+                .and_then(|family| family.limit);
+            if let Some(limit) = limit
+                && self.outbound_family_usage(peer, afi, grouped)
+                    < usize::try_from(limit.get()).unwrap_or(usize::MAX)
+            {
+                self.schedule_outbound_limit_recovery(peer, afi);
+            }
+        }
     }
 
     /// Select one runnable family after the last attempted peer, then wrap.
@@ -1230,7 +1259,11 @@ impl RibManager {
                     violations.push(OutboundPrefixLimitViolation {
                         peer,
                         family: family_label(afi).to_string(),
-                        usage: u64::try_from(usage).unwrap_or(u64::MAX),
+                        usage: if usage == usize::MAX {
+                            u64::MAX
+                        } else {
+                            u64::try_from(usage).unwrap_or(u64::MAX)
+                        },
                         requested: limit.get(),
                     });
                 }
@@ -1350,7 +1383,11 @@ impl RibManager {
                         OutboundPrefixLimitViolation {
                             peer: *peer,
                             family: family_label(afi).to_string(),
-                            usage: u64::try_from(usage).unwrap_or(u64::MAX),
+                            usage: if usage == usize::MAX {
+                                u64::MAX
+                            } else {
+                                u64::try_from(usage).unwrap_or(u64::MAX)
+                            },
                             requested: limit.get(),
                         }
                     )));
