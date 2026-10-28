@@ -3685,14 +3685,23 @@ impl RibManager {
                 *max = limit;
             }
         }
-        // A GR restarter would sweep its retained routes on an `EoR` sent
-        // ahead of an ORF-gated flood: defer it as `send_initial_table`
-        // does, until the peer's ROUTE-REFRESH lifts the gate.
+        // Preserve an owed initial marker before regrouping can flush it.
+        // Once this family becomes sendable, its ORF-gated table must precede
+        // completion even if selection or replay grace held the marker for
+        // a fresh peer. Keep immediate fresh-peer completion when no marker
+        // remains held.
         let orf_gated = self
             .peer_orf_pending
             .get(&peer)
             .is_some_and(|gated| gated.contains(&family));
-        if orf_gated && self.gr_peers.contains_key(&peer) {
+        if orf_gated
+            && (self.gr_peers.contains_key(&peer)
+                || self.selection_convergence_held(family)
+                || self
+                    .pending_eor
+                    .get(&peer)
+                    .is_some_and(|pending| pending.contains(&family)))
+        {
             self.gr_deferred_eor.entry(peer).or_default().insert(family);
         } else {
             self.pending_eor.entry(peer).or_default().insert(family);

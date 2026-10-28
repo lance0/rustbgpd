@@ -441,3 +441,261 @@ fn non_restarting_dirty_peer_keeps_orf_initial_eor_held_during_selection_release
     );
     assert_completed(&mut manager, &mut target_rx);
 }
+
+fn connect_withheld_v6(
+    manager: &mut RibManager,
+    helper: bool,
+    capacity: usize,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let target = peer_v4(TARGET_ADDR);
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: target,
+        session_id: TARGET_SESSION,
+        peer_restart_state: false,
+        peer_gr_helper: helper,
+        peer_gr_families: vec![],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
+        peer: target,
+        session_id: TARGET_SESSION,
+        families: vec![(V6, crate::update::ExactExportErrorCode::MissingIpv6NextHop)],
+    });
+    let (outbound_tx, target_rx) = mpsc::channel(capacity);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer: target,
+        session_id: TARGET_SESSION,
+        peer_asn: 65001,
+        peer_router_id: TARGET_ADDR,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![V4],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![V6],
+        negotiated_llgr_families: vec![],
+    });
+    target_rx
+}
+
+fn setup_withheld_v6() -> (
+    RibManager,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let source = peer_v4(SOURCE_ADDR);
+    let target = peer_v4(TARGET_ADDR);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: source,
+                families: vec![V6],
+            }],
+        });
+    let source_rx = connect(&mut manager, source, SOURCE_SESSION, false, &[], 64);
+    receive(&mut manager, &[ordinary_v4(), ordinary_v6(0x100)]);
+    assert!(manager.selection_convergence_held(V6));
+    assert!(!manager.selection_convergence_held(V4));
+
+    let target_rx = connect_withheld_v6(&mut manager, false, 2);
+    assert!(!manager.gr_peers.contains_key(&target));
+    assert_eq!(manager.outbound_peers[&target].capacity(), 0);
+    assert!(manager.pending_eor[&target].contains(&V6));
+    (manager, source_rx, target_rx)
+}
+
+#[test]
+fn withheld_family_unlock_keeps_orf_initial_eor_held_during_selection_release() {
+    let (mut manager, _source_rx, mut target_rx) = setup_withheld_v6();
+    let source = peer_v4(SOURCE_ADDR);
+    let target = peer_v4(TARGET_ADDR);
+    manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer: target,
+        session_id: TARGET_SESSION,
+        family: V6,
+        add_path_send_limit: None,
+    });
+    assert!(manager.peer_sendable_families[&target].contains(&V6));
+    assert_eq!(manager.registered_withheld_families(target), []);
+    assert!(manager.peer_orf_pending[&target].contains(&V6));
+    assert!(manager.dirty_peers.contains(&target));
+
+    // The actual IPv4 initial data and EoR filled both writer slots.
+    let initial = target_rx.try_recv().unwrap();
+    assert_eq!(initial.announce.len(), 1);
+    assert_eq!(initial.announce[0].prefix, ordinary_v4());
+    assert_eq!(initial.end_of_rib, [] as [(Afi, Safi); 0]);
+    let completed_v4 = target_rx.try_recv().unwrap();
+    assert_eq!(completed_v4.announce.len(), 0);
+    assert_eq!(completed_v4.end_of_rib, [V4]);
+    let mut seen = BTreeSet::from([ordinary_v4()]);
+    let mut eors = HashMap::from([(V4, 1)]);
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: SOURCE_SESSION,
+        afi: V6.0,
+        safi: V6.1,
+    });
+    assert!(!manager.selection_convergence_held(V6));
+    assert!(manager.loc_rib.get(&ordinary_v6(0x100)).is_some());
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    while let Ok(update) = target_rx.try_recv() {
+        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert!(
+            update
+                .announce
+                .iter()
+                .all(|route| route.prefix != ordinary_v6(0x100)),
+            "IPv6 table must wait for its own ORF refresh after becoming sendable"
+        );
+        assert!(
+            !update.end_of_rib.contains(&V6),
+            "IPv6 initial EoR must wait for its own ORF refresh after becoming sendable"
+        );
+        assert_eq!(update.end_of_rib, [] as [(Afi, Safi); 0]);
+        seen.extend(update.announce.iter().map(|route| route.prefix));
+    }
+    assert_eq!(seen, BTreeSet::from([ordinary_v4()]));
+    assert!(manager.pending_eor[&target].contains(&V6));
+    assert!(manager.peer_orf_pending[&target].contains(&V6));
+
+    refresh(&mut manager, V6);
+    assert!(observe(&mut target_rx, true, &mut seen, &mut eors) > 0);
+    assert_eq!(seen, BTreeSet::from([ordinary_v4(), ordinary_v6(0x100)]));
+    assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
+    assert_completed(&mut manager, &mut target_rx);
+}
+
+#[test]
+fn still_withheld_orf_family_keeps_fresh_empty_completion_on_selection_release() {
+    let (mut manager, _source_rx, mut target_rx) = setup_withheld_v6();
+    let source = peer_v4(SOURCE_ADDR);
+    let target = peer_v4(TARGET_ADDR);
+    let missed = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    // A real runnable-family miss makes recovery necessary; IPv6 stays withheld.
+    receive(&mut manager, &[missed]);
+    assert!(manager.dirty_peers.contains(&target));
+    assert!(!manager.peer_sendable_families[&target].contains(&V6));
+    assert_eq!(
+        manager.registered_withheld_families(target),
+        [(V6, crate::update::ExactExportErrorCode::MissingIpv6NextHop)]
+    );
+    let mut seen = BTreeSet::new();
+    let mut eors = HashMap::new();
+    assert_eq!(observe(&mut target_rx, true, &mut seen, &mut eors), 2);
+    assert_eq!(seen, BTreeSet::from([ordinary_v4()]));
+    assert_eq!(eors, HashMap::from([(V4, 1)]));
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: SOURCE_SESSION,
+        afi: V6.0,
+        safi: V6.1,
+    });
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    while let Ok(update) = target_rx.try_recv() {
+        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        for route in update.announce.iter() {
+            assert_ne!(route.prefix, ordinary_v6(0x100));
+            seen.insert(route.prefix);
+        }
+        for family in update.end_of_rib {
+            *eors.entry(family).or_default() += 1;
+        }
+    }
+    assert_eq!(seen, BTreeSet::from([ordinary_v4(), missed]));
+    assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
+    assert!(manager.peer_orf_pending[&target].contains(&V6));
+    assert!(!manager.pending_eor.contains_key(&target));
+    assert!(!manager.gr_deferred_eor.contains_key(&target));
+    assert!(!manager.dirty_peers.contains(&target));
+    manager.flush_pending_eor(target);
+    assert!(target_rx.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release() {
+    for replay_complete in [false, true] {
+        let source = peer_v4(SOURCE_ADDR);
+        let target = peer_v4(TARGET_ADDR);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_eor_grace(crate::EorGraceConfig {
+                peers: vec![crate::EorGracePeerConfig {
+                    peer: target.into(),
+                    deadline,
+                    families: vec![V4, V6],
+                }],
+                replay_owners: vec!["controller".into()],
+            });
+        let _source_rx = connect(&mut manager, source, SOURCE_SESSION, false, &[], 64);
+        receive(&mut manager, &[ordinary_v4(), ordinary_v6(0x100)]);
+        assert!(!manager.selection_convergence_held(V6));
+        let mut target_rx = connect_withheld_v6(&mut manager, true, 64);
+        assert!(!manager.gr_peers.contains_key(&target));
+        assert!(manager.eor_grace_held(target, V6));
+        assert!(manager.pending_eor[&target].contains(&V6));
+        let mut seen = BTreeSet::new();
+        let mut eors = HashMap::new();
+        assert_eq!(observe(&mut target_rx, true, &mut seen, &mut eors), 1);
+        assert_eq!(seen, BTreeSet::from([ordinary_v4()]));
+        assert_eq!(eors, HashMap::new());
+
+        manager.handle_update(RibUpdate::PeerFamilySendable {
+            peer: target,
+            session_id: TARGET_SESSION,
+            family: V6,
+            add_path_send_limit: None,
+        });
+        assert!(target_rx.try_recv().is_err());
+        if replay_complete {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::MarkReplayComplete {
+                owner: "controller".into(),
+                incarnation: manager.injection_leases.incarnation(),
+                reply,
+            });
+            assert_eq!(
+                response.try_recv().unwrap(),
+                Ok(crate::ReplayComplete::Released)
+            );
+        } else {
+            tokio::time::advance(Duration::from_secs(60)).await;
+            manager.expire_eor_holds(deadline);
+        }
+        assert!(!manager.eor_grace_held(target, V6));
+        observe(&mut target_rx, true, &mut seen, &mut eors);
+        assert_eq!(seen, BTreeSet::from([ordinary_v4()]));
+        assert_eq!(eors, HashMap::from([(V4, 1)]));
+        assert!(manager.pending_eor[&target].contains(&V6));
+        assert!(manager.peer_orf_pending[&target].contains(&V6));
+
+        // A complete refresh for the runnable family cannot discharge IPv6.
+        refresh(&mut manager, V4);
+        let mut refreshed = BTreeSet::new();
+        let mut refresh_eors = HashMap::new();
+        observe(&mut target_rx, true, &mut refreshed, &mut refresh_eors);
+        assert_eq!(refreshed, BTreeSet::from([ordinary_v4()]));
+        assert_eq!(refresh_eors, HashMap::from([(V4, 1)]));
+        assert!(manager.pending_eor[&target].contains(&V6));
+        assert!(manager.gr_deferred_eor[&target].contains(&V6));
+        assert!(manager.peer_orf_pending[&target].contains(&V6));
+
+        refresh(&mut manager, V6);
+        observe(&mut target_rx, true, &mut seen, &mut eors);
+        assert_eq!(seen, BTreeSet::from([ordinary_v4(), ordinary_v6(0x100)]));
+        assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
+        assert_completed(&mut manager, &mut target_rx);
+    }
+}
