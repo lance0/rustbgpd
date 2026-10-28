@@ -2648,6 +2648,145 @@ fn collision_promotion_burst_does_not_nest_one_level_per_peer() {
         .expect("burst thread");
 }
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the actor fixture establishes queued collision ordering and checks real inbound creation on the same worker stack"
+)]
+fn run_loop_accepts_inbound_during_collision_burst_on_reduced_stack() {
+    const PEERS: u8 = 8;
+    std::thread::Builder::new()
+        .stack_size(1_572_864)
+        .spawn(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_writer(std::io::sink)
+                .finish();
+            let _subscriber = tracing::subscriber::set_default(subscriber);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Box::pin(async {
+                    let (commands, command_rx) = mpsc::channel(4);
+                    let (rib_tx, _rib_rx) = mpsc::channel(1024);
+                    let mut mgr = PeerManager::new(
+                        command_rx,
+                        65001,
+                        Ipv4Addr::new(10, 0, 0, 1),
+                        None,
+                        None,
+                        BgpMetrics::new(),
+                        rib_tx,
+                        None,
+                    );
+                    let addrs: Vec<IpAddr> = (1..=PEERS)
+                        .map(|i| IpAddr::V4(Ipv4Addr::new(10, 1, 0, i)))
+                        .collect();
+                    let mut counters = Vec::new();
+                    for (&peer_addr, candidate) in addrs.iter().zip(1001_u64..) {
+                        let observed = Arc::new(FakePeerCounters::default());
+                        insert_test_managed_peer_with_asn(
+                            &mut mgr,
+                            peer_addr,
+                            65002,
+                            fake_peer_handle(
+                                peer_addr,
+                                SessionState::Active,
+                                None,
+                                observed.clone(),
+                            ),
+                            false,
+                        );
+                        attach_test_pending_inbound(
+                            &mut mgr,
+                            peer_addr,
+                            fake_peer_handle(
+                                peer_addr,
+                                SessionState::OpenConfirm,
+                                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                                observed.clone(),
+                            ),
+                            candidate,
+                        );
+                        counters.push(observed);
+                    }
+                    let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
+                    insert_test_managed_peer_with_asn(
+                        &mut mgr,
+                        localhost,
+                        65002,
+                        fake_peer_handle(
+                            localhost,
+                            SessionState::Active,
+                            None,
+                            Arc::new(FakePeerCounters::default()),
+                        ),
+                        false,
+                    );
+                    let notifications = mgr.session_notify_tx.clone();
+                    mgr.test_command_hook = Some(Arc::new(move |command| {
+                        if matches!(command, PeerManagerCommand::AcceptInbound { .. }) {
+                            // Queue after selection so AcceptInbound owns the drain.
+                            for (&peer_addr, candidate) in addrs.iter().zip(1001_u64..) {
+                                notifications
+                                    .send(SessionNotification::OpenReceived {
+                                        session_id: candidate,
+                                        role: rustbgpd_transport::SessionRole::InboundCandidate,
+                                        peer_addr,
+                                        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                                        peer_asn: 65002,
+                                    })
+                                    .unwrap();
+                            }
+                        }
+                    }));
+                    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+                    let mut remote = TcpStream::connect(listener.local_addr().unwrap())
+                        .await
+                        .unwrap();
+                    let (stream, peer_addr) = listener.accept().await.unwrap();
+                    let actor = tokio::spawn(Box::pin(mgr.run()));
+                    commands
+                        .send(PeerManagerCommand::AcceptInbound {
+                            stream,
+                            peer_addr,
+                            tcp_ao_info: None,
+                            tcp_ao_generation: None,
+                        })
+                        .await
+                        .unwrap();
+                    let (reply, response) = oneshot::channel();
+                    commands
+                        .send(PeerManagerCommand::Ping { reply })
+                        .await
+                        .unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), response)
+                        .await
+                        .expect("inbound command settles")
+                        .unwrap();
+                    for observed in &counters {
+                        assert_eq!(
+                            observed.activate_max_prefix_metrics.load(Ordering::SeqCst),
+                            1
+                        );
+                    }
+                    let message = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        read_bgp_message(&mut remote, &mut BytesMut::new()),
+                    )
+                    .await
+                    .expect("real inbound session sends OPEN");
+                    assert!(matches!(message, Message::Open(_)));
+                    commands.send(PeerManagerCommand::Shutdown).await.unwrap();
+                    actor.await.unwrap();
+                }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 /// Link-local neighbors on different interfaces share an address. A fence
 /// for one must not handle the other's notification: the owner is resolved
 /// through the session, not the address.

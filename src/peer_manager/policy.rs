@@ -4253,6 +4253,15 @@ impl PeerManager {
         event: ConfigEvent,
         affected_peers: Option<Vec<PeerKey>>,
     ) -> OwnedCatalogMutationOutcome {
+        // Keep the refresh state out of every command-dispatch poll frame.
+        Box::pin(self.apply_policy_change_owned_inner(event, affected_peers)).await
+    }
+
+    async fn apply_policy_change_owned_inner(
+        &mut self,
+        event: ConfigEvent,
+        affected_peers: Option<Vec<PeerKey>>,
+    ) -> OwnedCatalogMutationOutcome {
         if let ConfigEvent::DeletePolicy { name, .. } = &event {
             let refs = policy_references(&self.current_config, name);
             if !refs.is_empty() {
