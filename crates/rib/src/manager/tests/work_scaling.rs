@@ -1399,3 +1399,164 @@ fn deferred_post_miss_rtbh_replay_work_is_linear() {
         deferred_post_miss_rtbh_replay,
     );
 }
+
+fn receive_policy_rejection(manager: &mut RibManager, index: usize, local_pref: u32) {
+    let source = member(0);
+    let IpAddr::V4(next_hop) = source.addr() else {
+        unreachable!("test source is IPv4")
+    };
+    let mut update = test_routes_received(
+        source,
+        vec![make_route_with_lp(prefix(1, index), next_hop, local_pref)],
+    );
+    if let RibUpdate::RoutesReceived { session_id, .. } = &mut update {
+        *session_id = 1;
+    }
+    manager.handle_update(update);
+    drain_route_chunks(manager);
+}
+
+fn policy_rejection_events(manager: &RibManager, target: PeerId) -> usize {
+    manager
+        .route_event_history
+        .iter()
+        .filter(|event| {
+            event.event_type == RouteEventType::PolicyFiltered
+                && event.target_peer == Some(target.addr())
+        })
+        .count()
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual-caller growth transcript pins retained history, event edges, wire output and withdrawal cleanup"
+)]
+fn incremental_policy_rejection_updates(size: usize) -> Work {
+    let count = size * ROUTES;
+    let source = member(0);
+    let target = member(1);
+    let (_tx, mut manager) = manager();
+    let policy = super::export_explain::deny_local_pref_at_least(200);
+    let mut receivers = vec![
+        join(&mut manager, 0, false, None).0,
+        join(&mut manager, 1, false, Some(policy)).0,
+    ];
+    for rx in &mut receivers {
+        let initial = rx.try_recv().unwrap();
+        assert!(initial.announce.is_empty());
+        assert_eq!(initial.end_of_rib, [(Afi::Ipv4, Safi::Unicast)]);
+        assert!(rx.try_recv().is_err());
+    }
+    let work = checkpoints_in(|| {
+        for index in 0..count {
+            receive_policy_rejection(&mut manager, index, 200);
+            assert_eq!(drain(&mut receivers), (0, 0));
+        }
+    });
+    let expected: HashSet<_> = (0..count)
+        .map(|index| PolicyFilteredRouteKey {
+            target_peer: target,
+            source_peer: source,
+            prefix: Prefix::V4(prefix(1, index)),
+            path_id: 0,
+        })
+        .collect();
+    assert_eq!(retained_policy_rejection_keys(&manager, target), expected);
+    assert_eq!(policy_rejection_events(&manager, target), count);
+    for event in manager.route_event_history.iter().filter(|event| {
+        event.event_type == RouteEventType::PolicyFiltered
+            && event.target_peer == Some(target.addr())
+    }) {
+        assert_eq!(event.peer, Some(source.addr()));
+        assert_eq!(event.path_id, 0);
+        assert_eq!(event.reason, "policy_denied");
+        assert!(expected.iter().any(|key| key.prefix == event.prefix));
+    }
+    assert_eq!(manager.ribs[&source].len(), count);
+    assert_eq!(
+        manager.ribs.values().map(AdjRibIn::len).sum::<usize>(),
+        count
+    );
+    assert_eq!(manager.loc_rib.len(), count);
+    assert_eq!(
+        manager
+            .ribs
+            .values()
+            .map(AdjRibIn::retained_stale_count)
+            .sum::<u64>(),
+        0
+    );
+    assert!(
+        manager
+            .loc_rib
+            .iter()
+            .all(|route| !route.is_stale && !route.is_llgr_stale)
+    );
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryAdvertisedCount {
+        peer: target,
+        reply,
+    });
+    assert_eq!(response.try_recv().unwrap(), 0);
+
+    let last = count - 1;
+    receive_policy_rejection(&mut manager, last, 200);
+    assert_eq!(drain(&mut receivers), (0, 0));
+    assert_eq!(policy_rejection_events(&manager, target), count);
+    assert_eq!(retained_policy_rejection_keys(&manager, target), expected);
+    receive_policy_rejection(&mut manager, last, 100);
+    assert_eq!(drain(&mut receivers), (1, 0));
+    assert_eq!(policy_rejection_events(&manager, target), count);
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, target).len(),
+        count - 1
+    );
+    receive_policy_rejection(&mut manager, last, 200);
+    assert_eq!(drain(&mut receivers), (0, 1));
+    assert_eq!(policy_rejection_events(&manager, target), count + 1);
+    assert_eq!(retained_policy_rejection_keys(&manager, target), expected);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source,
+        session_id: 1,
+        announced: Vec::new(),
+        withdrawn: vec![(Prefix::V4(prefix(1, last)), 0)],
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    assert_eq!(drain(&mut receivers), (0, 0));
+    let mut without_last = expected.clone();
+    without_last.retain(|key| key.prefix != Prefix::V4(prefix(1, last)));
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, target),
+        without_last
+    );
+    assert_eq!(policy_rejection_events(&manager, target), count + 1);
+    receive_policy_rejection(&mut manager, last, 200);
+    assert_eq!(drain(&mut receivers), (0, 0));
+    assert_eq!(retained_policy_rejection_keys(&manager, target), expected);
+    assert_eq!(policy_rejection_events(&manager, target), count + 2);
+    assert_eq!(manager.ribs[&source].len(), count);
+    assert_eq!(manager.loc_rib.len(), count);
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: target,
+        session_id: 1,
+    });
+    assert!(!manager.policy_filtered_routes.contains_key(&target));
+    assert_eq!(manager.ribs[&source].len(), count);
+    assert_eq!(manager.loc_rib.len(), count);
+    eprintln!("incremental policy rejection size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn incremental_policy_rejection_updates_work_is_linear() {
+    assert_linear(
+        "incremental policy rejection retention",
+        &[ALL, "policy_filtered_retained"],
+        incremental_policy_rejection_updates,
+    );
+}

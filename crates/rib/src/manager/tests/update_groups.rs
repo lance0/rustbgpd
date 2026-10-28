@@ -17208,9 +17208,17 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
         path_id: 0,
     };
     let residue = manager.policy_filtered_routes.entry(grouped).or_default();
-    assert!(residue.remove(&key(denied)), "the join recorded the denial");
-    residue.insert(key(permitted));
-    residue.insert(key(absent));
+    let keys = residue.get_mut(&Prefix::V4(denied)).unwrap();
+    assert!(keys.remove(&key(denied)), "recorded denial");
+    if keys.is_empty() {
+        residue.remove(&Prefix::V4(denied));
+    }
+    for prefix in [permitted, absent] {
+        residue
+            .entry(Prefix::V4(prefix))
+            .or_default()
+            .insert(key(prefix));
+    }
     manager
         .peer_otc_blocked
         .entry(grouped)
@@ -17241,7 +17249,7 @@ fn refresh_residue_during_churn(force_ungrouped: bool) -> Vec<RefreshObservation
             .policy_filtered_routes
             .get(&peer)
             .into_iter()
-            .flatten()
+            .flat_map(|prefixes| prefixes.values().flatten())
             .map(|key| format!("{key:?}"))
             .collect();
         let otc_blocked = manager
