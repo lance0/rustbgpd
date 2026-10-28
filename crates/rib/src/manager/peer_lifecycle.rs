@@ -26,11 +26,10 @@ use crate::update::OutboundRouteUpdate;
 /// of `{PeerUp(winner), PeerUp(loser), PeerDown(loser)}` in the RFC 4271
 /// §6.8 collision window.
 pub(super) enum SessionTeardownDisposition {
-    /// No registered session for the peer (never registered, already torn
-    /// down, or in a GR window) — keep the pre-stamping accept-all
-    /// behavior.
+    /// No registered or live session for the peer — keep the pre-stamping
+    /// accept-all behavior.
     NoRegistration,
-    /// The stamped id is not the active registration: a teardown from a
+    /// The stamped id is not the current session: a teardown from a
     /// superseded (or already-dropped) session. Discarded whole; if the
     /// session was still tracked as live it has been pruned.
     DiscardStale,
@@ -172,8 +171,8 @@ impl RibManager {
     /// `live_sessions` (it is down, whatever else happens) and classifies
     /// the event against the active registration. Discards are logged at
     /// INFO + counted in `bgp_rib_stale_peer_down_ignored_total`; a
-    /// teardown for a peer with no registered session keeps the
-    /// pre-stamping accept-all behavior and is never discarded.
+    /// teardown for a peer with neither registration nor a live session
+    /// keeps the pre-stamping accept-all behavior and is never discarded.
     pub(super) fn classify_session_teardown(
         &mut self,
         peer: PeerId,
@@ -195,23 +194,9 @@ impl RibManager {
         self.pending_peer_source_context.remove(&(peer, session_id));
         self.pending_peer_policy_context.remove(&(peer, session_id));
         self.drop_evpn_feed_receipts(peer, Some(session_id));
-        let Some(&registered) = self.outbound_session_ids.get(&peer) else {
-            // No registration. Ordinarily `live_sessions` is empty for the
-            // peer here and the full teardown proceeds; during the LAN-475
-            // deferral window sessions are tracked but not yet registered,
-            // so classify against them: prune the stamped session, and when
-            // another live session remains take the ordinary failover path
-            // (reset + re-register + inbound ROUTE-REFRESH request) — the
-            // survivor's registration may simply defer again.
-            let survivor_remains = self.live_sessions.get_mut(&peer).is_some_and(|sessions| {
-                sessions.retain(|s| s.session_id != session_id);
-                !sessions.is_empty()
-            });
+        let Some(registered) = self.current_session_id(peer) else {
             if let Some(selection) = self.selection_deferral.as_mut() {
                 selection.session_down(peer, session_id, &self.metrics);
-            }
-            if survivor_remains {
-                return SessionTeardownDisposition::FailOver;
             }
             self.live_sessions.remove(&peer);
             return SessionTeardownDisposition::NoRegistration;
@@ -230,7 +215,7 @@ impl RibManager {
                 stale_session_id = session_id,
                 registered_session_id = registered,
                 "discarding stale session teardown from a superseded session — \
-                 the registered session's state is untouched"
+                 the current session's state is untouched"
             );
             self.metrics
                 .record_rib_stale_peer_down_ignored(&peer.label());
@@ -254,12 +239,22 @@ impl RibManager {
         }
     }
 
+    /// Registration is authoritative; a deferred session already owns ingress.
+    fn current_session_id(&self, peer: PeerId) -> Option<u64> {
+        self.outbound_session_ids.get(&peer).copied().or_else(|| {
+            self.live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .map(|record| record.session_id)
+        })
+    }
+
     /// Session-identity gate for the data-plane-affecting messages a
     /// session emits while Established (`RoutesReceived`, `EndOfRib`,
     /// `BeginRouteRefresh`/`EndRouteRefresh`, `RouteRefreshRequest`,
     /// `PeerOrfUpdate`). Returns `true` when the message must be
-    /// discarded: a registration exists for the peer and the stamped id
-    /// is not the active session — a message from a superseded session
+    /// discarded: a registered or deferred live session owns the peer and
+    /// the stamped id is not that session — a message from a superseded session
     /// (RFC 4271 §6.8 collision window) queued behind the replacement's
     /// `PeerUp`. Without the gate, such a message would mutate the
     /// REPLACEMENT session's state: stale routes landing in its
@@ -268,15 +263,10 @@ impl RibManager {
     /// ORF entries installed as its outbound filter. Registration context
     /// uses session-stamped staging instead of this data-message gate.
     ///
-    /// A message for a peer with NO registration keeps the pre-stamping
-    /// accept-all behavior, mirroring the teardown rule in
-    /// [`Self::classify_session_teardown`]. Unlike teardowns there is no
-    /// GR-window case to protect here — per-producer FIFO means a
-    /// session's data messages are always delivered between its own
-    /// `PeerUp` (which registers) and its own down event (after which it
-    /// emits nothing), so an unregistered data message can only come
-    /// from a legacy emitter that never registered, and dropping those
-    /// would change behavior for no safety gain.
+    /// Before outbound registration completes, the newest live record already
+    /// owns inbound state. Only a peer with neither registration nor a live
+    /// session keeps the pre-stamping legacy accept-all behavior. Staged OPEN
+    /// context remains separate from this data-message gate.
     ///
     /// Discards are logged at INFO (same shape as the stale-teardown
     /// discard) and counted in
@@ -291,7 +281,7 @@ impl RibManager {
         event: &'static str,
         kind: StaleSessionMessageKind,
     ) -> bool {
-        let Some(&registered) = self.outbound_session_ids.get(&peer) else {
+        let Some(registered) = self.current_session_id(peer) else {
             return false;
         };
         if registered == session_id {
@@ -303,7 +293,7 @@ impl RibManager {
             stale_session_id = session_id,
             registered_session_id = registered,
             "discarding stale session message from a superseded session — \
-             the registered session's state is untouched"
+             the current session's state is untouched"
         );
         self.metrics
             .record_rib_stale_session_message_ignored(&peer.label(), kind);
