@@ -225,6 +225,31 @@ pub struct InjectionTag {
     pub revision: Option<NonZeroU64>,
 }
 
+/// A lease table admission (ADR-0141 §4, ADR-0144 §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Admission {
+    /// The owner and generation joined or started.
+    pub(crate) tag: InjectionTag,
+    /// Live owners, read under the admission's lock, so the caller need not
+    /// take it again before the RIB insert.
+    pub(crate) live_owners: usize,
+    /// Whether the admission started a new generation. The caller logs it
+    /// with [`log_generation_started`] after the commit, so a slow log write
+    /// never sits between the window check and the RIB insert.
+    pub(crate) started: bool,
+}
+
+/// Log that `tag`'s generation started under a lease of `lease_seconds`.
+pub(crate) fn log_generation_started(tag: &InjectionTag, lease_seconds: u32) {
+    tracing::info!(
+        owner = &*tag.owner,
+        incarnation = tag.generation.incarnation,
+        sequence = tag.generation.sequence,
+        lease_seconds,
+        "injection lease generation started"
+    );
+}
+
 /// Why a lease table admission was refused. The table, the RIB and the wire
 /// are unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,17 +492,19 @@ impl InjectionLeases {
     /// [`LeaseRejection::OwnerCap`] when a new owner would exceed
     /// [`MAX_LIVE_OWNERS`] live leases; nothing changes.
     pub fn admit(&self, owner: &str, lease_seconds: u32) -> Result<InjectionTag, LeaseRejection> {
-        self.admit_at(owner, lease_seconds, None, Instant::now)
-            .map(|(tag, _)| tag)
+        let admission = self.admit_at(owner, lease_seconds, None, Instant::now)?;
+        if admission.started {
+            log_generation_started(&admission.tag, lease_seconds);
+        }
+        Ok(admission.tag)
     }
 
     /// [`admit`](Self::admit), and with `window` a guarded admission
     /// (ADR-0144 §2): `owner` is the stored guarded name, the window must be
     /// live and issued to it at this instant, and the deadline becomes
     /// `max(current, min(now + lease_seconds, window expiry))`: never
-    /// shortened, and never extended past the window. Also returns the live
-    /// owner count, read under the same lock, so the caller need not take it
-    /// again before the insert.
+    /// shortened, and never extended past the window. Logs nothing: the
+    /// caller logs a started generation after its commit.
     ///
     /// # Errors
     ///
@@ -488,7 +515,7 @@ impl InjectionLeases {
         owner: &str,
         lease_seconds: u32,
         window: Option<MutationWindowId>,
-    ) -> Result<(InjectionTag, usize), LeaseRejection> {
+    ) -> Result<Admission, LeaseRejection> {
         self.admit_at(owner, lease_seconds, window, Instant::now)
     }
 
@@ -498,7 +525,7 @@ impl InjectionLeases {
         lease_seconds: u32,
         window: Option<MutationWindowId>,
         clock: impl FnOnce() -> Instant,
-    ) -> Result<(InjectionTag, usize), LeaseRejection> {
+    ) -> Result<Admission, LeaseRejection> {
         let mut state = self.lock();
         let now = clock();
         let cap = match window {
@@ -527,10 +554,14 @@ impl InjectionLeases {
                 lease.deadline = extended;
                 lease.lease_seconds = lease_seconds;
             }
-            let live = state.live_count(now);
+            let live_owners = state.live_count(now);
             drop(state);
             self.changed.notify_one();
-            return Ok((tag, live));
+            return Ok(Admission {
+                tag,
+                live_owners,
+                started: false,
+            });
         }
         // Capacity counts live leases by deadline: unreaped expired records
         // do not hold a slot, and a rejection moves nothing.
@@ -552,24 +583,18 @@ impl InjectionLeases {
                 lease_seconds,
             },
         );
-        let live = state.live_count(now);
+        let live_owners = state.live_count(now);
         drop(state);
         self.changed.notify_one();
-        tracing::info!(
-            owner,
-            incarnation = generation.incarnation,
-            sequence = generation.sequence,
-            lease_seconds,
-            "injection lease generation started"
-        );
-        Ok((
-            InjectionTag {
+        Ok(Admission {
+            tag: InjectionTag {
                 owner: name,
                 generation,
                 revision: None,
             },
-            live,
-        ))
+            live_owners,
+            started: true,
+        })
     }
 
     /// Renew `owner`'s lease if `generation` is live, setting the deadline to
@@ -945,7 +970,7 @@ mod tests {
             let g = table
                 .admit_at("ctl", 5, None, || base)
                 .unwrap()
-                .0
+                .tag
                 .generation;
 
             let guard = table.lock();
@@ -966,7 +991,7 @@ mod tests {
                     if leased_add {
                         table
                             .admit_at("ctl", 5, None, clock)
-                            .map(|(tag, _)| tag.generation)
+                            .map(|admission| admission.tag.generation)
                             .ok()
                     } else {
                         table.renew_at("ctl", g, 5, None, clock).ok().map(|_| g)
@@ -999,7 +1024,7 @@ mod tests {
     ) -> Result<InjectionTag, LeaseRejection> {
         table
             .admit_with(&guarded_owner(owner), lease_seconds, Some(window))
-            .map(|(tag, _)| tag)
+            .map(|admission| admission.tag)
     }
 
     fn remaining(table: &InjectionLeases, owner: &str) -> Duration {
@@ -1066,7 +1091,7 @@ mod tests {
         assert_eq!(
             table
                 .admit_with("ctl", 60, Some(window))
-                .map(|(tag, _)| tag),
+                .map(|admission| admission.tag),
             Err(LeaseRejection::WindowNotLive),
             "the window belongs to the guarded name"
         );

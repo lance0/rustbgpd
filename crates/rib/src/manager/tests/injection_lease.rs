@@ -2180,14 +2180,14 @@ async fn only_a_removing_guarded_delete_retires_export_rejections() {
         }
     }));
     let delete = |manager: &mut RibManager, octet: u8, revision: u64| {
+        // The dispatch installs its own readiness owner, so the retirement
+        // checkpoints reach the observer.
         let (reply, mut rx) = oneshot::channel();
-        manager.with_replacement_readiness(|manager| {
-            manager.handle_update(RibUpdate::WithdrawGuardedFlowSpec {
-                key: rule_key(octet),
-                owner: "ctl".to_string(),
-                revision: NonZeroU64::new(revision).unwrap(),
-                reply,
-            });
+        manager.handle_update(RibUpdate::WithdrawGuardedFlowSpec {
+            key: rule_key(octet),
+            owner: "ctl".to_string(),
+            revision: NonZeroU64::new(revision).unwrap(),
+            reply,
         });
         rx.try_recv().unwrap()
     };
@@ -2210,6 +2210,106 @@ async fn only_a_removing_guarded_delete_retires_export_rejections() {
         HashSet::from([rejected(2)]),
         "the removed key's rejection is retired, the absent key's is not"
     );
+}
+
+/// A guarded delete's retirement over a large rejection overlay runs under a
+/// readiness owner: a readiness query queued while the retirement walks the
+/// overlay is answered at its next checkpoint, not after the turn.
+///
+/// Break-to-red: without the readiness owner around the delete, the
+/// retirement's checkpoints service nothing and never reach the observer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_guarded_delete_retirement_keeps_answering_readiness() {
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Service a queued query at every checkpoint rather than once per budget.
+    manager.flush_poll_budget = Duration::ZERO;
+    let (window, _) = manager.injection_leases().issue_window("ctl", 120).unwrap();
+    let (reply, mut added) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectGuardedFlowSpec {
+        route: guarded_rule(1, 1),
+        owner: "ctl".to_string(),
+        lease_seconds: 60,
+        fence: GuardedFence {
+            window,
+            revision: NonZeroU64::new(1).unwrap(),
+        },
+        reply,
+    });
+    added.try_recv().unwrap().unwrap();
+    // An overlay far larger than the one key the delete retires.
+    manager.peer_unexportable.insert(
+        TARGET,
+        (1..=200)
+            .map(|octet| ExactExportKey::FlowSpec(rule_key(octet)))
+            .collect(),
+    );
+    let before = manager.loc_rib.len();
+
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    manager.readiness_rx = Some(readiness_rx);
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    manager.replacement_readiness_test_hook = Some(Arc::new(move |stage| {
+        if stage != "exact_rejection_retirement" {
+            return;
+        }
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call < 2 {
+            entered_tx.send(call).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }
+    }));
+    let actor = tokio::spawn(async move {
+        let update = manager.rx.recv().await.unwrap();
+        manager.handle_update(update);
+        manager
+    });
+    let (reply, removed) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawGuardedFlowSpec {
+        key: rule_key(1),
+        owner: "ctl".to_string(),
+        revision: NonZeroU64::new(1).unwrap(),
+        reply,
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        next_entry(&mut entered_rx).await,
+        Some(0),
+        "the retirement reached its first checkpoint"
+    );
+    let (reply, mut response) = oneshot::channel();
+    readiness_tx
+        .try_send(crate::update::RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: std::time::Instant::now(),
+        })
+        .unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        next_entry(&mut entered_rx).await,
+        Some(1),
+        "the retirement reached its next checkpoint"
+    );
+    let answered = response.try_recv();
+    release_tx.send(()).unwrap();
+    let manager = actor.await.unwrap();
+
+    assert_eq!(
+        answered,
+        Ok(Ok(before)),
+        "the query is answered inside the retirement, not after it"
+    );
+    assert!(removed.await.unwrap().unwrap().removed);
+    assert_eq!(manager.peer_unexportable[&TARGET].len(), 199);
 }
 
 /// A delete of an older revision delayed behind a delete and a newer add of

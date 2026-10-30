@@ -102,7 +102,8 @@ impl RibManager {
     /// payload; then join or start the owner's lease (checking a guarded
     /// add's window and capping the deadline at its expiry), then tag the
     /// key. A present unowned key is never adopted. Nothing changes on a
-    /// refusal.
+    /// refusal. Returns the tag and whether it started a generation, which
+    /// the caller logs after its insert and distribution.
     pub(super) fn admit_injected_lease(
         &mut self,
         key: &InjectedKey,
@@ -110,7 +111,7 @@ impl RibManager {
         owner: &str,
         lease_seconds: u32,
         guarded: Option<GuardedAdmission>,
-    ) -> Result<InjectionTag, RibCommandError> {
+    ) -> Result<(InjectionTag, bool), RibCommandError> {
         match self.injected_owners.get(key) {
             Some(tag) if &*tag.owner != owner => {
                 return Err(RibCommandError::FailedPrecondition(
@@ -150,7 +151,11 @@ impl RibManager {
                 ));
             }
         }
-        let (mut tag, live_owners) = self
+        let crate::injection_lease::Admission {
+            mut tag,
+            live_owners,
+            started,
+        } = self
             .injection_leases
             .admit_with(
                 owner,
@@ -165,7 +170,7 @@ impl RibManager {
             .insert(key.clone());
         self.injected_owners.insert(key.clone(), tag.clone());
         self.metrics.set_injection_leases(gauge_val(live_owners));
-        Ok(tag)
+        Ok((tag, started))
     }
 
     /// Drop `key`'s ownership tag after the RIB removed it, returning it.

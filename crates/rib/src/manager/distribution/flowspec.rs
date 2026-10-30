@@ -242,18 +242,20 @@ impl RibManager {
             Some(_) => InjectOutcome::Replaced,
         };
         let present = outcome != InjectOutcome::Created;
-        let generation = if let Some((owner, lease_seconds, fence)) = lease {
+        let (generation, started) = if let Some((owner, lease_seconds, fence)) = lease {
             let guarded = fence.map(|fence| GuardedAdmission {
                 fence,
                 same_payload: outcome == InjectOutcome::Unchanged,
             });
-            Some(
-                self.admit_injected_lease(&owned_key, present, owner, lease_seconds, guarded)?
-                    .generation,
+            let (tag, started) =
+                self.admit_injected_lease(&owned_key, present, owner, lease_seconds, guarded)?;
+            (
+                Some(tag.generation),
+                started.then_some((tag, lease_seconds)),
             )
         } else {
             self.check_injected_owner(&owned_key, "")?;
-            None
+            (None, None)
         };
         let rib = self
             .ribs
@@ -270,6 +272,10 @@ impl RibManager {
         let mut fs_affected = HashSet::new();
         fs_affected.insert(key);
         self.recompute_and_distribute_flowspec(&fs_affected);
+        // Logged once the add has committed and distributed.
+        if let Some((tag, lease_seconds)) = &started {
+            crate::injection_lease::log_generation_started(tag, *lease_seconds);
+        }
         Ok((outcome, generation))
     }
 

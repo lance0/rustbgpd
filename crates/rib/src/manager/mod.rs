@@ -5184,12 +5184,23 @@ impl RibManager {
                 reply,
             } => {
                 // Only a removal retires the key's export rejections; a
-                // refused or absent delete changes nothing.
+                // refused or absent delete changes nothing. Both run under
+                // one readiness owner, as the unicast withdrawal does, so the
+                // retirement's checkpoints keep answering readiness.
                 let retired = ExactExportKey::FlowSpec(key.clone());
                 let owner = crate::injection_lease::guarded_owner(&owner);
-                if self.handle_withdraw_flowspec(key, true, &owner, false, Some(revision), reply) {
-                    self.retire_exact_export_rejections([retired]);
-                }
+                self.with_selection_readiness(|manager| {
+                    if manager.handle_withdraw_flowspec(
+                        key,
+                        true,
+                        &owner,
+                        false,
+                        Some(revision),
+                        reply,
+                    ) {
+                        manager.retire_exact_export_rejections([retired]);
+                    }
+                });
             }
             RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
             RibUpdate::WithdrawEvpn { key, reply } => {
