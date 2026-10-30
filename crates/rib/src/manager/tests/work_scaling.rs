@@ -2035,7 +2035,10 @@ fn private_late_gr_capture_work_is_linear() {
 /// Demoting every local RTBH path of one Add-Path prefix in one pass, ranks
 /// unchanged, reclaims each path's own key from the departing pool in
 /// ascending order. Each reclaim must cost a constant number of steps, not
-/// a shift of the pool behind it.
+/// a shift of the pool behind it. The count pins the departing pool's
+/// checkpointed skip loop; a removal-based reclaim shifts the pool with an
+/// unchecked `Vec::remove`, so this test sees that cost only when the shift
+/// is counted (as its red proof did).
 fn add_path_rtbh_demotion(size: usize) -> Work {
     let count = size * ROUTES;
     let (_tx, mut manager) = manager();

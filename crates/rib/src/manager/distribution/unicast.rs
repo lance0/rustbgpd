@@ -3425,7 +3425,8 @@ pub(in crate::manager) struct AddPathKeys {
     next: u32,
     /// Keys this plan assigned, sorted once planning ends.
     assigned: smallvec::SmallVec<[u32; 8]>,
-    /// Keys of the wire's blackholing rows, ascending.
+    /// Keys of the wire's blackholing rows, ascending; debug builds only,
+    /// for the plan's invariant check.
     blackhole_keys: smallvec::SmallVec<[u32; 4]>,
     hold: bool,
 }
@@ -3496,7 +3497,9 @@ impl AddPathKeys {
             let carries_blackhole = route
                 .communities()
                 .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE);
-            if carries_blackhole || source.is_some_and(|source| source.deferral_exempt) {
+            if cfg!(debug_assertions)
+                && (carries_blackhole || source.is_some_and(|source| source.deferral_exempt))
+            {
                 keys.blackhole_keys.push(path_id);
             }
             if let Some(source) = source {
@@ -3701,41 +3704,27 @@ impl AddPathKeys {
         }
         debug_assert!(keys.iter().all(|&key| key != 0));
         self.assigned.sort_unstable();
-        self.keep_a_blackhole_key(staged, &mut keys);
+        self.debug_assert_keeps_a_blackhole_key(staged);
         keys
     }
 
-    /// The withdraw phase goes first, so a plan that withdraws every
-    /// blackholing row on the wire while it still sends one would leave the
-    /// prefix unblackholed until the announcement. Move one blackholing row
-    /// onto the lowest departing blackholing key instead: that key was on
-    /// the wire and is unassigned, so it is replaced in place rather than
-    /// withdrawn, and the moved row's old key leaves in its stead.
-    fn keep_a_blackhole_key(
-        &mut self,
-        staged: &[(&crate::route::Route, bool)],
-        keys: &mut smallvec::SmallVec<[u32; 8]>,
-    ) {
-        if self.blackhole_keys.is_empty() {
-            return;
-        }
-        let kept = self.blackhole_keys.iter().any(|key| {
-            self.assigned.binary_search(key).is_ok() || self.frozen.binary_search(key).is_ok()
-        });
-        let Some(index) = staged.iter().position(|&(_, blackholing)| blackholing) else {
-            return;
-        };
-        if kept {
-            return;
-        }
-        let departing = self.blackhole_keys[0];
-        let old = std::mem::replace(&mut keys[index], departing);
-        if let Ok(at) = self.assigned.binary_search(&old) {
-            self.assigned.remove(at);
-        }
-        if let Err(at) = self.assigned.binary_search(&departing) {
-            self.assigned.insert(at, departing);
-        }
+    /// The withdraw phase goes first, so a plan that withdrew every
+    /// blackholing row on the wire while it still sent one would leave the
+    /// prefix unblackholed until the announcement. The class handoff keeps
+    /// a blackholing key whenever the plan keeps a blackholing row; only a
+    /// local row without export provenance could break that, and staging
+    /// records provenance for every local row it commits.
+    fn debug_assert_keeps_a_blackhole_key(&self, staged: &[(&crate::route::Route, bool)]) {
+        debug_assert!(
+            self.blackhole_keys.is_empty()
+                || !staged.iter().any(|&(_, blackholing)| blackholing)
+                || self.blackhole_keys.iter().any(|key| {
+                    self.assigned.binary_search(key).is_ok()
+                        || self.frozen.binary_search(key).is_ok()
+                }),
+            "the plan withdraws every blackholing key {:?} while it keeps a blackholing row",
+            self.blackhole_keys
+        );
     }
 
     /// A held row's path keeps its key when its class is unchanged. A path
