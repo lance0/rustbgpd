@@ -256,6 +256,7 @@ impl RibService {
                 tag,
                 leases.remaining(tag),
             );
+            entry.admission_revision = tag.revision.map(std::num::NonZeroU64::get);
         }
     }
 
@@ -4267,6 +4268,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         injection_owner: String::new(),
         lease_generation: None,
         lease_remaining_ms: None,
+        admission_revision: None,
     }
 }
 
@@ -8888,6 +8890,7 @@ mod tests {
                     lease_generation: None,
                     lease_remaining_ms: None,
                     ipv6_extended_communities: vec![],
+                    admission_revision: None,
                 }),
                 path_id: u32::MAX,
                 selected: false,

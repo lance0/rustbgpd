@@ -57,7 +57,7 @@ pub const MAX_LIVE_WINDOWS: usize = MAX_LIVE_OWNERS * MAX_LIVE_WINDOWS_PER_OWNER
 /// Prefix of a guarded owner's stored name (ADR-0144 §4). `:` is outside the
 /// owner alphabet [`validate_owner`] accepts, so no legacy add, renewal or
 /// owner-scoped delete can name a guarded owner.
-const GUARDED_OWNER_PREFIX: &str = "guarded:";
+pub const GUARDED_OWNER_PREFIX: &str = "guarded:";
 
 /// The name under which guarded owner `owner` is stored, tagged and labelled.
 #[must_use]

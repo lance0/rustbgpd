@@ -3964,6 +3964,47 @@ service InjectionService {
   // accepted, and a token is valid only for the owner it was issued for
   // (another owner's token is INVALID_ARGUMENT).
   rpc ListLeasedKeys(ListLeasedKeysRequest) returns (ListLeasedKeysResponse);
+  // Guarded FlowSpec mutations (ADR-0144). A guarded owner's rules and lease
+  // live in their own namespace and are reported as `guarded:<owner>`
+  // (ListInjectionLeases, ListLeasedKeys, FlowSpecRouteEntry.injection_owner);
+  // the leased and unleased methods cannot add, renew or delete them, apart
+  // from DeleteFlowSpec's override_owner. Outside the v1 contract.
+  //
+  // IssueMutationWindow issues a window to an owner, living window_seconds
+  // (1..=120). An owner holds at most 64 live windows and the daemon 4,096;
+  // past either cap the call is RESOURCE_EXHAUSTED and changes nothing.
+  // AddGuardedFlowSpec and RenewGuardedLease are checked against the window
+  // when they commit, not when they arrive: an expired window, or one issued
+  // to another owner or by another daemon process, is FAILED_PRECONDITION
+  // with ErrorInfo reason WINDOW_NOT_LIVE and changes nothing. The window
+  // also caps the lease: a guarded add sets the owner's deadline to
+  // max(current, min(now + lease_seconds, window expiry)), and a guarded
+  // renewal to exactly min(now + lease_seconds, window expiry).
+  //
+  // Every guarded add carries a nonzero client-chosen revision, stored with
+  // the rule. A present rule held at another revision, or at the same
+  // revision with a different payload, is FAILED_PRECONDITION with reason
+  // REVISION_MISMATCH. The same revision with the same payload is UNCHANGED.
+  // DeleteGuardedFlowSpec removes the rule only at its revision: an absent
+  // rule is NOT_PRESENT; another revision is REVISION_MISMATCH; another
+  // owner, or no owner, is OWNER_MISMATCH or KEY_UNOWNED. A delete needs no
+  // window.
+  //
+  // Definitive refusals leave the RIB, the lease table and the wire
+  // unchanged by that request: FAILED_PRECONDITION (WINDOW_NOT_LIVE,
+  // REVISION_MISMATCH, OWNER_MISMATCH, KEY_UNOWNED, GENERATION_NOT_LIVE),
+  // RESOURCE_EXHAUSTED, INVALID_ARGUMENT, UNIMPLEMENTED and
+  // PERMISSION_DENIED. Any other outcome, such as DEADLINE_EXCEEDED,
+  // UNAVAILABLE or a dropped connection, is unknown: the add may have
+  // committed. Resolve it by reading the rule's revision back, or by
+  // retrying with the same revision under a live window. A daemon without
+  // these methods answers UNIMPLEMENTED (or PERMISSION_DENIED to a
+  // non-operator credential) and changes nothing; never retry a guarded
+  // mutation through the legacy methods.
+  rpc IssueMutationWindow(IssueMutationWindowRequest) returns (IssueMutationWindowResponse);
+  rpc AddGuardedFlowSpec(AddGuardedFlowSpecRequest) returns (AddGuardedFlowSpecResponse);
+  rpc DeleteGuardedFlowSpec(DeleteGuardedFlowSpecRequest) returns (DeleteGuardedFlowSpecResponse);
+  rpc RenewGuardedLease(RenewGuardedLeaseRequest) returns (RenewGuardedLeaseResponse);
   // A controller's replay-complete signal for the planned-restart
   // End-of-RIB grace window (gr_eor_grace_time). The daemon releases this
   // grace hold once every owner listed in [global]
@@ -4316,6 +4357,9 @@ message FlowSpecRouteEntry {
   // Each value contains exactly twenty octets, preserving reserved bits and
   // unmodelled types independently of extended_communities.
   repeated bytes ipv6_extended_communities = 11;
+  // The admission revision of a rule added with AddGuardedFlowSpec, set
+  // with injection_owner. Outside the v1 contract.
+  optional uint64 admission_revision = 12;
 }
 
 message AddFlowSpecRequest {
@@ -4452,7 +4496,7 @@ message ListInjectionLeasesResponse {
 }
 
 message ListLeasedKeysRequest {
-  // Required lease owner.
+  // Required lease owner; a guarded owner is named `guarded:<owner>`.
   string owner = 1;
   // Keys per page: 0 selects 100, and larger values are capped at 1000.
   uint32 page_size = 2;
@@ -4483,6 +4527,9 @@ message LeasedKey {
   LeaseGeneration generation = 3;
   // Time to the lease deadline; 0 means expired, withdrawal pending.
   uint32 lease_remaining_ms = 4;
+  // The admission revision of a key added with AddGuardedFlowSpec. Outside
+  // the v1 contract.
+  optional uint64 admission_revision = 5;
 }
 
 message ListLeasedKeysResponse {
@@ -4492,6 +4539,75 @@ message ListLeasedKeysResponse {
   // The owner's live generation this walk is bound to; absent when the
   // owner has no live lease.
   LeaseGeneration generation = 3;
+}
+
+// A mutation window (ADR-0144). Both fields must match; a window never
+// survives a daemon restart.
+message MutationWindow {
+  fixed64 incarnation = 1;
+  uint64 sequence = 2;
+}
+
+message IssueMutationWindowRequest {
+  // 1-64 bytes of [A-Za-z0-9._-], without the "guarded:" prefix.
+  string owner = 1;
+  // 1..=120. Out of range is INVALID_ARGUMENT.
+  uint32 window_seconds = 2;
+}
+
+message IssueMutationWindowResponse {
+  MutationWindow window = 1;
+  // The window's lifetime, from the daemon's monotonic clock.
+  uint32 window_remaining_ms = 2;
+}
+
+message AddGuardedFlowSpecRequest {
+  AddFlowSpecRequest rule = 1;
+  // Required. The owner is given without the "guarded:" prefix.
+  InjectionLease lease = 2;
+  // Required: a window issued to this owner.
+  MutationWindow window = 3;
+  // Required, nonzero. Never reuse a revision for a different admission of
+  // the same key.
+  uint64 revision = 4;
+}
+
+message AddGuardedFlowSpecResponse {
+  AddFlowSpecResponse result = 1;
+  // The owner's live generation after this add.
+  LeaseGeneration generation = 2;
+}
+
+message DeleteGuardedFlowSpecRequest {
+  AddressFamily afi_safi = 1;
+  // Same identity and ordering rules as AddFlowSpecRequest.components.
+  repeated FlowSpecComponent components = 2;
+  // Required, without the "guarded:" prefix.
+  string owner = 3;
+  // Required, nonzero: the revision the rule was added with.
+  uint64 revision = 4;
+}
+
+message DeleteGuardedFlowSpecResponse {
+  // DELETED or NOT_PRESENT.
+  FlowSpecDeleteOutcome outcome = 1;
+}
+
+message RenewGuardedLeaseRequest {
+  // Without the "guarded:" prefix.
+  string owner = 1;
+  LeaseGeneration generation = 2;
+  // 5..=3600; the deadline becomes exactly
+  // min(now + lease_seconds, window expiry).
+  uint32 lease_seconds = 3;
+  // Required: a window issued to this owner.
+  MutationWindow window = 4;
+}
+
+message RenewGuardedLeaseResponse {
+  LeaseGeneration generation = 1;
+  // Time to the new deadline, from the daemon's monotonic clock.
+  uint32 lease_remaining_ms = 2;
 }
 
 message MarkReplayCompleteRequest {

@@ -1662,6 +1662,34 @@ impl rustbgpd_api::proto::injection_service_server::InjectionService for MockInj
         Err(Status::unimplemented("not mocked"))
     }
 
+    async fn issue_mutation_window(
+        &self,
+        _request: Request<server_proto::IssueMutationWindowRequest>,
+    ) -> Result<Response<server_proto::IssueMutationWindowResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
+    async fn add_guarded_flow_spec(
+        &self,
+        _request: Request<server_proto::AddGuardedFlowSpecRequest>,
+    ) -> Result<Response<server_proto::AddGuardedFlowSpecResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
+    async fn delete_guarded_flow_spec(
+        &self,
+        _request: Request<server_proto::DeleteGuardedFlowSpecRequest>,
+    ) -> Result<Response<server_proto::DeleteGuardedFlowSpecResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
+    async fn renew_guarded_lease(
+        &self,
+        _request: Request<server_proto::RenewGuardedLeaseRequest>,
+    ) -> Result<Response<server_proto::RenewGuardedLeaseResponse>, Status> {
+        Err(Status::unimplemented("not mocked"))
+    }
+
     async fn list_path_export_dispositions(
         &self,
         _request: Request<server_proto::ListPathExportDispositionsRequest>,

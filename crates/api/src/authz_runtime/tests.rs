@@ -1361,33 +1361,44 @@ fn only_successful_read_audits_are_debug_and_all_are_counted() {
     );
 }
 
-/// ADR-0141 §8 amends ADR-0064 §7 for exactly one method: a successful
-/// `RenewLease` audits at INFO; its failures and every other
-/// `operator_only` result stay at WARN.
+/// ADR-0141 §8 and ADR-0144 §1 amend ADR-0064 §7 for exactly three
+/// methods: a successful `RenewLease`, `RenewGuardedLease` or
+/// `IssueMutationWindow` audits at INFO; their failures and every other
+/// `operator_only` result, including the guarded add and delete, stay at
+/// WARN.
 #[test]
 fn renew_lease_success_audits_at_info_and_nothing_else_moves() {
     use super::decision::audit_level;
     use tracing::Level;
 
-    let renew = "/rustbgpd.v1.InjectionService/RenewLease";
-    assert_eq!(
-        audit_level(AuthTier::OperatorOnly, renew, "handler_ok"),
-        Level::INFO
-    );
-    for result in [
-        "handler_failed_precondition",
-        "role_tier_denied",
-        "authn_failed",
+    for routine in [
+        "/rustbgpd.v1.InjectionService/RenewLease",
+        "/rustbgpd.v1.InjectionService/RenewGuardedLease",
+        "/rustbgpd.v1.InjectionService/IssueMutationWindow",
     ] {
         assert_eq!(
-            audit_level(AuthTier::OperatorOnly, renew, result),
-            Level::WARN,
-            "{result}"
+            audit_level(AuthTier::OperatorOnly, routine, "handler_ok"),
+            Level::INFO,
+            "{routine}"
         );
+        for result in [
+            "handler_failed_precondition",
+            "handler_resource_exhausted",
+            "role_tier_denied",
+            "authn_failed",
+        ] {
+            assert_eq!(
+                audit_level(AuthTier::OperatorOnly, routine, result),
+                Level::WARN,
+                "{routine} {result}"
+            );
+        }
     }
     for path in [
         "/rustbgpd.v1.InjectionService/AddLeasedPath",
         "/rustbgpd.v1.InjectionService/AddPath",
+        "/rustbgpd.v1.InjectionService/AddGuardedFlowSpec",
+        "/rustbgpd.v1.InjectionService/DeleteGuardedFlowSpec",
         "/rustbgpd.v1.ControlService/Shutdown",
     ] {
         assert_eq!(

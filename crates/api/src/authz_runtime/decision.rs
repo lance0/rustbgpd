@@ -184,13 +184,20 @@ pub(super) fn record_audit_decision(
 }
 
 /// The audit line's level (ADR-0064 §7). Every `operator_only` result logs
-/// at WARN except a successful `RenewLease`, which a controller sends every
-/// few seconds and which logs at INFO (ADR-0141 §8); a successful `read`
-/// logs at DEBUG; everything else at INFO.
+/// at WARN except a successful `RenewLease`, `RenewGuardedLease` or
+/// `IssueMutationWindow`, which a controller sends every few seconds and
+/// which log at INFO (ADR-0141 §8, ADR-0144 §1); a successful `read` logs
+/// at DEBUG; everything else at INFO.
 pub(super) fn audit_level(tier: AuthTier, path: &str, result: &str) -> tracing::Level {
-    const RENEW_LEASE: &str = "/rustbgpd.v1.InjectionService/RenewLease";
+    const ROUTINE_OPERATOR_CALLS: [&str; 3] = [
+        "/rustbgpd.v1.InjectionService/RenewLease",
+        "/rustbgpd.v1.InjectionService/RenewGuardedLease",
+        "/rustbgpd.v1.InjectionService/IssueMutationWindow",
+    ];
     match tier {
-        AuthTier::OperatorOnly if path == RENEW_LEASE && result == "handler_ok" => {
+        AuthTier::OperatorOnly
+            if result == "handler_ok" && ROUTINE_OPERATOR_CALLS.contains(&path) =>
+        {
             tracing::Level::INFO
         }
         AuthTier::OperatorOnly => tracing::Level::WARN,

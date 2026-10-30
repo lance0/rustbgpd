@@ -104,6 +104,12 @@ The following shared surfaces remain **outside v1**:
   opt-in and disabled by default. Local injection remains trusted origination.
 - FlowSpec CLI commands and output, GR/LLGR retention guarantees, remote
   acceptance, installation, forwarding and enforcement.
+- The guarded FlowSpec mutation methods of
+  [ADR-0144](../adr/0144-guarded-flowspec-mutations.md)
+  (`IssueMutationWindow`, `AddGuardedFlowSpec`, `DeleteGuardedFlowSpec`,
+  `RenewGuardedLease`), the `admission_revision` read-back on
+  `FlowSpecRouteEntry` and `LeasedKey`, and guarded owner names
+  (`guarded:<owner>`) in lease listings.
 
 The message-graph digest includes the shared messages as a review tripwire;
 it does not promote the excluded fields or modes. `OK` means local mutation,
