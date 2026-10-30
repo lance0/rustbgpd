@@ -489,9 +489,20 @@ impl AdjRibIn {
 
     /// GR-stale identities in one family bound promotion and purge outputs.
     pub(crate) fn gr_stale_family_len(&self, family: (Afi, Safi)) -> usize {
+        self.retained_family_len(family, false)
+    }
+
+    /// GR-stale, or with `llgr` LLGR-stale, identities in one family.
+    pub(crate) fn retained_family_len(&self, family: (Afi, Safi), llgr: bool) -> usize {
         let count = self
             .stale_route_counts()
-            .find_map(|(found, counts)| (found == family).then_some(counts.stale))
+            .find_map(|(found, counts)| {
+                (found == family).then_some(if llgr {
+                    counts.llgr_stale
+                } else {
+                    counts.stale
+                })
+            })
             .unwrap_or(0);
         usize::try_from(count).expect("maintained route count fits addressable storage")
     }
@@ -1041,26 +1052,34 @@ impl AdjRibIn {
     /// Remove stale routes for a specific family, returning their prefixes.
     /// Used when a family was in GR but not in the peer's LLGR capability.
     pub fn sweep_stale_family(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
-        self.sweep_stale_family_with_checkpoint(family, &mut || {})
+        self.sweep_stale_family_with_checkpoint(family, false, &mut || {})
     }
 
+    /// Remove one family's GR-stale routes, or with `llgr` its LLGR-stale
+    /// routes, checkpointing every slot visited (vacancies included),
+    /// removal and scratch retirement.
     pub(crate) fn sweep_stale_family_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        llgr: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Prefix> {
         if family.1 != Safi::Unicast {
             return Vec::new();
         }
         checkpoint();
-        let mut stale: Vec<(Prefix, u32)> = Vec::with_capacity(self.gr_stale_family_len(family));
+        let mut stale: Vec<(Prefix, u32)> =
+            Vec::with_capacity(self.retained_family_len(family, llgr));
         checkpoint();
         stale.extend(
             self.routes
                 .iter_slots()
                 .inspect(|_| checkpoint())
                 .flatten()
-                .filter(|r| r.is_stale && route_matches_family(r, family))
+                .filter(|r| {
+                    (if llgr { r.is_llgr_stale } else { r.is_stale })
+                        && route_matches_family(r, family)
+                })
                 .map(|r| (r.prefix, r.path_id)),
         );
         let mut prefixes = Vec::with_capacity(stale.len());
@@ -1205,19 +1224,7 @@ impl AdjRibIn {
     /// prefixes. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
     pub fn sweep_llgr_stale_family(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
-        let stale: Vec<(Prefix, u32)> = self
-            .routes
-            .iter()
-            .filter(|r| r.is_llgr_stale && route_matches_family(r, family))
-            .map(|r| (r.prefix, r.path_id))
-            .collect();
-        let mut prefixes = Vec::new();
-        for key in &stale {
-            prefixes.push(key.0);
-            self.llgr_stale_local_tags.remove(key);
-            self.remove_route_entry(&key.0, key.1);
-        }
-        prefixes
+        self.sweep_stale_family_with_checkpoint(family, true, &mut || {})
     }
 
     /// Clear the LLGR-stale flag on routes matching the given family.
@@ -1393,31 +1400,34 @@ impl AdjRibIn {
 
     /// Remove all stale EVPN routes, returning their keys.
     pub fn sweep_stale_evpn(&mut self) -> Vec<EvpnRouteKey> {
-        self.sweep_stale_family_evpn_with_checkpoint((Afi::L2Vpn, Safi::Evpn), &mut || {})
+        self.sweep_stale_family_evpn_with_checkpoint((Afi::L2Vpn, Safi::Evpn), false, &mut || {})
     }
 
     /// Remove stale EVPN routes if `family == (L2Vpn, Evpn)`. Used when a
     /// family was in GR but not in the peer's LLGR capability.
     pub fn sweep_stale_family_evpn(&mut self, family: (Afi, Safi)) -> Vec<EvpnRouteKey> {
-        self.sweep_stale_family_evpn_with_checkpoint(family, &mut || {})
+        self.sweep_stale_family_evpn_with_checkpoint(family, false, &mut || {})
     }
 
+    /// GR-stale, or with `llgr` LLGR-stale, EVPN removal with checkpoints.
     pub(crate) fn sweep_stale_family_evpn_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        llgr: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<EvpnRouteKey> {
         if family != (Afi::L2Vpn, Safi::Evpn) {
             return Vec::new();
         }
         checkpoint();
-        let mut stale: Vec<EvpnRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        let mut stale: Vec<EvpnRouteKey> =
+            Vec::with_capacity(self.retained_family_len(family, llgr));
         checkpoint();
         stale.extend(
             self.evpn_routes
                 .iter()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale)
+                .filter(|(_, r)| if llgr { r.is_llgr_stale } else { r.is_stale })
                 .map(|(k, _)| *k),
         );
         for key in &stale {
@@ -1500,17 +1510,7 @@ impl AdjRibIn {
 
     /// Remove all LLGR-stale EVPN routes, returning their keys.
     pub fn sweep_llgr_stale_evpn(&mut self) -> Vec<EvpnRouteKey> {
-        let stale: Vec<EvpnRouteKey> = self
-            .evpn_routes
-            .iter()
-            .filter(|(_, r)| r.is_llgr_stale)
-            .map(|(k, _)| *k)
-            .collect();
-        for key in &stale {
-            self.evpn_llgr_stale_local_tags.remove(key);
-            self.evpn_routes.remove(key);
-        }
-        stale
+        self.sweep_stale_family_evpn_with_checkpoint((Afi::L2Vpn, Safi::Evpn), true, &mut || {})
     }
 
     /// Remove LLGR-stale EVPN routes if `family == (L2Vpn, Evpn)`, returning
@@ -1689,25 +1689,30 @@ impl AdjRibIn {
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
     pub fn sweep_stale_family_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
-        self.sweep_stale_family_bgpls_with_checkpoint(family, &mut || {})
+        self.sweep_stale_family_bgpls_with_checkpoint(family, false, &mut || {})
     }
 
+    /// GR-stale, or with `llgr` LLGR-stale, BGP-LS removal with checkpoints.
     pub(crate) fn sweep_stale_family_bgpls_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        llgr: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<BgpLsRouteKey> {
         let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
             return Vec::new();
         };
         checkpoint();
-        let mut stale: Vec<BgpLsRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        let mut stale: Vec<BgpLsRouteKey> =
+            Vec::with_capacity(self.retained_family_len(family, llgr));
         checkpoint();
         stale.extend(
             self.bgpls_routes
                 .iter()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale && r.family == fam)
+                .filter(|(_, r)| {
+                    (if llgr { r.is_llgr_stale } else { r.is_stale }) && r.family == fam
+                })
                 .map(|(k, _)| k.clone()),
         );
         for key in &stale {
@@ -1812,20 +1817,7 @@ impl AdjRibIn {
     /// their keys. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
     pub fn sweep_llgr_stale_family_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
-        let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
-            return Vec::new();
-        };
-        let stale: Vec<BgpLsRouteKey> = self
-            .bgpls_routes
-            .iter()
-            .filter(|(_, r)| r.is_llgr_stale && r.family == fam)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in &stale {
-            self.bgpls_llgr_stale_local_tags.remove(key);
-            self.bgpls_routes.remove(key);
-        }
-        stale
+        self.sweep_stale_family_bgpls_with_checkpoint(family, true, &mut || {})
     }
 
     /// Clear the LLGR-stale flag on BGP-LS routes of the given family tuple,
@@ -2048,25 +2040,30 @@ impl AdjRibIn {
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
     pub fn sweep_stale_family_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
-        self.sweep_stale_family_vpn_with_checkpoint(family, &mut || {})
+        self.sweep_stale_family_vpn_with_checkpoint(family, false, &mut || {})
     }
 
+    /// GR-stale, or with `llgr` LLGR-stale, VPN removal with checkpoints.
     pub(crate) fn sweep_stale_family_vpn_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        llgr: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<VpnRibRouteKey> {
         if family.1 != Safi::MplsVpn {
             return Vec::new();
         }
         checkpoint();
-        let mut stale: Vec<VpnRibRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        let mut stale: Vec<VpnRibRouteKey> =
+            Vec::with_capacity(self.retained_family_len(family, llgr));
         checkpoint();
         stale.extend(
             self.vpn_routes
                 .iter()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
+                .filter(|(_, r)| {
+                    (if llgr { r.is_llgr_stale } else { r.is_stale }) && r.afi_safi() == family
+                })
                 .map(|(k, _)| k.clone()),
         );
         for key in &stale {
@@ -2169,19 +2166,7 @@ impl AdjRibIn {
     /// their keys. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
     pub fn sweep_llgr_stale_family_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
-        if family.1 != Safi::MplsVpn {
-            return Vec::new();
-        }
-        let stale: Vec<VpnRibRouteKey> = self
-            .vpn_routes
-            .iter()
-            .filter(|(_, r)| r.is_llgr_stale && r.afi_safi() == family)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in &stale {
-            self.remove_vpn_entry(key);
-        }
-        stale
+        self.sweep_stale_family_vpn_with_checkpoint(family, true, &mut || {})
     }
 
     /// Clear the LLGR-stale flag on VPN routes of the given family tuple,
@@ -2379,12 +2364,14 @@ impl AdjRibIn {
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
     pub fn sweep_stale_family_labeled(&mut self, family: (Afi, Safi)) -> Vec<LabeledRibRouteKey> {
-        self.sweep_stale_family_labeled_with_checkpoint(family, &mut || {})
+        self.sweep_stale_family_labeled_with_checkpoint(family, false, &mut || {})
     }
 
+    /// GR-stale, or with `llgr` LLGR-stale, labeled removal with checkpoints.
     pub(crate) fn sweep_stale_family_labeled_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        llgr: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<LabeledRibRouteKey> {
         if family.1 != Safi::LabeledUnicast {
@@ -2392,13 +2379,15 @@ impl AdjRibIn {
         }
         checkpoint();
         let mut stale: Vec<LabeledRibRouteKey> =
-            Vec::with_capacity(self.gr_stale_family_len(family));
+            Vec::with_capacity(self.retained_family_len(family, llgr));
         checkpoint();
         stale.extend(
             self.labeled_routes
                 .iter()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale && r.afi_safi() == family)
+                .filter(|(_, r)| {
+                    (if llgr { r.is_llgr_stale } else { r.is_stale }) && r.afi_safi() == family
+                })
                 .map(|(k, _)| *k),
         );
         for key in &stale {
@@ -2504,19 +2493,7 @@ impl AdjRibIn {
         &mut self,
         family: (Afi, Safi),
     ) -> Vec<LabeledRibRouteKey> {
-        if family.1 != Safi::LabeledUnicast {
-            return Vec::new();
-        }
-        let stale: Vec<LabeledRibRouteKey> = self
-            .labeled_routes
-            .iter()
-            .filter(|(_, r)| r.is_llgr_stale && r.afi_safi() == family)
-            .map(|(k, _)| *k)
-            .collect();
-        for key in &stale {
-            self.remove_labeled_entry(key);
-        }
-        stale
+        self.sweep_stale_family_labeled_with_checkpoint(family, true, &mut || {})
     }
 
     /// Clear the LLGR-stale flag on labeled routes of the given family tuple,
@@ -2667,31 +2644,34 @@ impl AdjRibIn {
     /// (RFC 4724 §4.1: stale routes deleted when the restart timer expires or
     /// `EoR` sweeps).
     pub fn sweep_stale_rtc(&mut self) -> Vec<RtcRibRouteKey> {
-        self.sweep_stale_family_rtc_with_checkpoint(RtcRibRouteKey::afi_safi(), &mut || {})
+        self.sweep_stale_family_rtc_with_checkpoint(RtcRibRouteKey::afi_safi(), false, &mut || {})
     }
 
     /// Remove stale RTC routes if `family == (Ipv4, RtConstrain)`. Used when
     /// a family was in GR but not in the peer's LLGR capability.
     pub fn sweep_stale_family_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
-        self.sweep_stale_family_rtc_with_checkpoint(family, &mut || {})
+        self.sweep_stale_family_rtc_with_checkpoint(family, false, &mut || {})
     }
 
+    /// GR-stale, or with `llgr` LLGR-stale, RTC removal with checkpoints.
     pub(crate) fn sweep_stale_family_rtc_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        llgr: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<RtcRibRouteKey> {
         if family != RtcRibRouteKey::afi_safi() {
             return Vec::new();
         }
         checkpoint();
-        let mut stale: Vec<RtcRibRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        let mut stale: Vec<RtcRibRouteKey> =
+            Vec::with_capacity(self.retained_family_len(family, llgr));
         checkpoint();
         stale.extend(
             self.rtc_routes
                 .iter()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale)
+                .filter(|(_, r)| if llgr { r.is_llgr_stale } else { r.is_stale })
                 .map(|(k, _)| k.clone()),
         );
         for key in &stale {
@@ -2775,17 +2755,7 @@ impl AdjRibIn {
     /// Remove all LLGR-stale RTC routes, returning their keys
     /// (RFC 9494 §4.3: LLGR timer expiry).
     pub fn sweep_llgr_stale_rtc(&mut self) -> Vec<RtcRibRouteKey> {
-        let stale: Vec<RtcRibRouteKey> = self
-            .rtc_routes
-            .iter()
-            .filter(|(_, r)| r.is_llgr_stale)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in &stale {
-            self.rtc_llgr_stale_local_tags.remove(key);
-            self.rtc_routes.remove(key);
-        }
-        stale
+        self.sweep_stale_family_rtc_with_checkpoint(RtcRibRouteKey::afi_safi(), true, &mut || {})
     }
 
     /// Remove LLGR-stale RTC routes if `family == (Ipv4, RtConstrain)`,
@@ -2921,25 +2891,31 @@ impl AdjRibIn {
 
     /// Remove stale `FlowSpec` routes for a specific family, returning their rules.
     pub fn sweep_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
-        self.sweep_stale_flowspec_family_with_checkpoint(family, &mut || {})
+        self.sweep_stale_flowspec_family_with_checkpoint(family, false, &mut || {})
     }
 
+    /// GR-stale, or with `llgr` LLGR-stale, `FlowSpec` removal with
+    /// checkpoints.
     pub(crate) fn sweep_stale_flowspec_family_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        llgr: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<FlowSpecKey> {
         if family.1 != Safi::FlowSpec {
             return Vec::new();
         }
         checkpoint();
-        let mut stale: Vec<FlowSpecRouteKey> = Vec::with_capacity(self.gr_stale_family_len(family));
+        let mut stale: Vec<FlowSpecRouteKey> =
+            Vec::with_capacity(self.retained_family_len(family, llgr));
         checkpoint();
         stale.extend(
             self.flowspec_routes
                 .iter()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale && r.afi == family.0)
+                .filter(|(_, r)| {
+                    (if llgr { r.is_llgr_stale } else { r.is_stale }) && r.afi == family.0
+                })
                 .map(|(k, _)| k.clone()),
         );
         let mut rules = Vec::with_capacity(stale.len());
@@ -3051,25 +3027,7 @@ impl AdjRibIn {
     /// their rules. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
     pub fn sweep_llgr_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
-        if family.1 != Safi::FlowSpec {
-            return Vec::new();
-        }
-        let stale: Vec<FlowSpecRouteKey> = self
-            .flowspec_routes
-            .iter()
-            .filter(|(_, r)| r.is_llgr_stale && r.afi == family.0)
-            .map(|(k, _)| k.clone())
-            .collect();
-        let mut rules = Vec::new();
-        for key in &stale {
-            rules.push(FlowSpecKey {
-                afi: key.afi,
-                rule: key.rule.clone(),
-            });
-            self.flowspec_llgr_stale_local_tags.remove(key);
-            self.flowspec_routes.remove(key);
-        }
-        rules
+        self.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut || {})
     }
 
     /// Clear the LLGR-stale flag on `FlowSpec` routes matching the given family.

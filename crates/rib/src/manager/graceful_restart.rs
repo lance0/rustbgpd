@@ -956,19 +956,28 @@ impl RibManager {
         page_topology: Option<Box<(super::RoutePageVersion, crate::orr::OrrTopology)>>,
     ) {
         self.with_selection_readiness(|manager| {
-            if let Some(page) = page_topology {
-                let readiness = manager.replacement_readiness.clone();
-                let (_, topology) = *page;
-                topology.retire_with(&mut || {
-                    super::replacement_readiness_checkpoint_at(
-                        &readiness,
-                        "llgr_orr_page_retire",
-                        false,
-                    );
-                });
-            }
+            manager.retire_page_topology(page_topology);
             manager.enter_llgr_phase_with_readiness(peer, families, llgr_config);
         });
+    }
+
+    /// Retire a version-fenced paged-read topology a timer took out before
+    /// advancing page versions, under the readiness owner the caller holds.
+    fn retire_page_topology(
+        &self,
+        page_topology: Option<Box<(super::RoutePageVersion, crate::orr::OrrTopology)>>,
+    ) {
+        if let Some(page) = page_topology {
+            let readiness = self.replacement_readiness.clone();
+            let (_, topology) = *page;
+            topology.retire_with(&mut || {
+                super::replacement_readiness_checkpoint_at(
+                    &readiness,
+                    "llgr_orr_page_retire",
+                    false,
+                );
+            });
+        }
     }
 
     #[expect(
@@ -1113,37 +1122,37 @@ impl RibManager {
             for &family in &non_llgr_families {
                 extend_llgr_affected(
                     &mut affected,
-                    rib.sweep_stale_family_with_checkpoint(family, &mut purge),
+                    rib.sweep_stale_family_with_checkpoint(family, false, &mut purge),
                     &mut checkpoint,
                 );
                 extend_llgr_affected(
                     &mut fs_affected,
-                    rib.sweep_stale_flowspec_family_with_checkpoint(family, &mut purge),
+                    rib.sweep_stale_flowspec_family_with_checkpoint(family, false, &mut purge),
                     &mut checkpoint,
                 );
                 extend_llgr_affected(
                     &mut evpn_affected,
-                    rib.sweep_stale_family_evpn_with_checkpoint(family, &mut purge),
+                    rib.sweep_stale_family_evpn_with_checkpoint(family, false, &mut purge),
                     &mut checkpoint,
                 );
                 extend_llgr_affected(
                     &mut vpn_affected,
-                    rib.sweep_stale_family_vpn_with_checkpoint(family, &mut purge),
+                    rib.sweep_stale_family_vpn_with_checkpoint(family, false, &mut purge),
                     &mut checkpoint,
                 );
                 extend_llgr_affected(
                     &mut labeled_affected,
-                    rib.sweep_stale_family_labeled_with_checkpoint(family, &mut purge),
+                    rib.sweep_stale_family_labeled_with_checkpoint(family, false, &mut purge),
                     &mut checkpoint,
                 );
                 extend_llgr_affected(
                     &mut bgpls_affected,
-                    rib.sweep_stale_family_bgpls_with_checkpoint(family, &mut purge),
+                    rib.sweep_stale_family_bgpls_with_checkpoint(family, false, &mut purge),
                     &mut checkpoint,
                 );
                 extend_llgr_affected(
                     &mut rtc_affected,
-                    rib.sweep_stale_family_rtc_with_checkpoint(family, &mut purge),
+                    rib.sweep_stale_family_rtc_with_checkpoint(family, false, &mut purge),
                     &mut checkpoint,
                 );
             }
@@ -1284,45 +1293,127 @@ impl RibManager {
     /// so this can fire for a peer that is back up and awaiting End-of-RIB
     /// (`gr_peers`): the original Long-Lived Stale Time bounds retention
     /// regardless — routes the peer has not re-advertised by then are purged.
+    pub(super) fn sweep_llgr_stale(&mut self, peer: PeerId, families: &[(Afi, Safi)]) {
+        let page_topology = if families.is_empty() {
+            None
+        } else {
+            // Like GR expiry, LLGR expiry is a direct timer mutation seam.
+            // The cached page topology leaves the readable slot first, so
+            // the owner below retires it with checkpoints.
+            let page_topology = self.orr_page_topology.take();
+            self.advance_all_route_pages();
+            page_topology
+        };
+        info!(%peer, ?families, "LLGR timer expired — sweeping LLGR-stale routes");
+        self.with_selection_readiness(|manager| {
+            manager.retire_page_topology(page_topology);
+            manager.sweep_llgr_stale_with_readiness(peer, families);
+        });
+
+        self.prune_exact_export_rejections();
+        self.finish_llgr_expiry(peer);
+    }
+
+    /// Purge, recompute, distribute and clean up after LLGR expiry under
+    /// the changing-count readiness owner the caller holds.
     #[expect(
         clippy::too_many_lines,
         reason = "family-scoped sweeps and recomputes across all seven route tables"
     )]
-    pub(super) fn sweep_llgr_stale(&mut self, peer: PeerId, families: &[(Afi, Safi)]) {
-        if !families.is_empty() {
-            // Like GR expiry, LLGR expiry is a direct timer mutation seam.
-            self.advance_all_route_pages();
-        }
-        info!(%peer, ?families, "LLGR timer expired — sweeping LLGR-stale routes");
+    fn sweep_llgr_stale_with_readiness(&mut self, peer: PeerId, families: &[(Afi, Safi)]) {
         let peer_label = peer.label();
+        let readiness = self.replacement_readiness.clone();
+        let mut inventory = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "llgr_expiry_inventory", false);
+        };
+        let mut purge =
+            || super::replacement_readiness_checkpoint_at(&readiness, "llgr_expiry_purge", false);
+        let mut cleanup =
+            || super::replacement_readiness_checkpoint_at(&readiness, "llgr_intern_cleanup", false);
+        inventory();
 
-        let mut swept = Vec::new();
-        let mut fs_swept = Vec::new();
-        let mut evpn_swept = Vec::new();
-        let mut bgpls_swept = Vec::new();
-        let mut l3vpn_swept = Vec::new();
-        let mut labeled_swept = Vec::new();
-        let mut rtc_swept = Vec::new();
-        let mut rib_len = [0; 2];
-        let mut evpn_len = 0;
         for &(afi, safi) in families {
+            inventory();
             self.llgr_stale_deadlines.remove(&(peer, afi, safi));
             if let Some(awaiting) = self.llgr_peers.get_mut(&peer) {
                 awaiting.remove(&(afi, safi));
             }
         }
+        // Only LLGR-stale identities of the expiring families can be swept.
+        let capacities = self.ribs.get(&peer).map_or([0; 7], |rib| {
+            let mut capacities = [0; 7];
+            for &family in families {
+                inventory();
+                let index = match family.1 {
+                    Safi::Unicast => 0,
+                    Safi::FlowSpec => 1,
+                    Safi::Evpn => 2,
+                    Safi::BgpLs | Safi::BgpLsVpn => 3,
+                    Safi::MplsVpn => 4,
+                    Safi::LabeledUnicast => 5,
+                    Safi::RtConstrain => 6,
+                    _ => continue,
+                };
+                capacities[index] += rib.retained_family_len(family, true);
+            }
+            capacities
+        });
+        let mut affected = HashSet::with_capacity(capacities[0]);
+        inventory();
+        let mut fs_affected = HashSet::with_capacity(capacities[1]);
+        inventory();
+        let mut evpn_affected = HashSet::with_capacity(capacities[2]);
+        inventory();
+        let mut bgpls_affected = HashSet::with_capacity(capacities[3]);
+        inventory();
+        let mut vpn_affected = HashSet::with_capacity(capacities[4]);
+        inventory();
+        let mut labeled_affected = HashSet::with_capacity(capacities[5]);
+        inventory();
+        let mut rtc_affected = HashSet::with_capacity(capacities[6]);
+        inventory();
+        let mut rib_len = [0; 2];
+        let mut evpn_len = 0;
         if let Some(rib) = self.ribs.get_mut(&peer) {
             // Each helper is a family-scoped no-op for non-matching tuples.
             for &family in families {
-                swept.extend(rib.sweep_llgr_stale_family(family));
-                fs_swept.extend(rib.sweep_llgr_stale_flowspec_family(family));
-                evpn_swept.extend(rib.sweep_llgr_stale_family_evpn(family));
-                bgpls_swept.extend(rib.sweep_llgr_stale_family_bgpls(family));
-                l3vpn_swept.extend(rib.sweep_llgr_stale_family_vpn(family));
-                labeled_swept.extend(rib.sweep_llgr_stale_family_labeled(family));
-                rtc_swept.extend(rib.sweep_llgr_stale_family_rtc(family));
+                extend_llgr_affected(
+                    &mut affected,
+                    rib.sweep_stale_family_with_checkpoint(family, true, &mut purge),
+                    &mut inventory,
+                );
+                extend_llgr_affected(
+                    &mut fs_affected,
+                    rib.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut purge),
+                    &mut inventory,
+                );
+                extend_llgr_affected(
+                    &mut evpn_affected,
+                    rib.sweep_stale_family_evpn_with_checkpoint(family, true, &mut purge),
+                    &mut inventory,
+                );
+                extend_llgr_affected(
+                    &mut bgpls_affected,
+                    rib.sweep_stale_family_bgpls_with_checkpoint(family, true, &mut purge),
+                    &mut inventory,
+                );
+                extend_llgr_affected(
+                    &mut vpn_affected,
+                    rib.sweep_stale_family_vpn_with_checkpoint(family, true, &mut purge),
+                    &mut inventory,
+                );
+                extend_llgr_affected(
+                    &mut labeled_affected,
+                    rib.sweep_stale_family_labeled_with_checkpoint(family, true, &mut purge),
+                    &mut inventory,
+                );
+                extend_llgr_affected(
+                    &mut rtc_affected,
+                    rib.sweep_stale_family_rtc_with_checkpoint(family, true, &mut purge),
+                    &mut inventory,
+                );
             }
-            self.attr_intern.gc();
+            self.attr_intern.gc_with_checkpoint(&mut cleanup);
             self.metrics
                 .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
             crate::manager::helpers::set_rib_prefixes(
@@ -1334,67 +1425,52 @@ impl RibManager {
             rib_len = rib.unicast_lens();
             evpn_len = rib.evpn_len();
         }
-        let had_swept = !swept.is_empty();
-        let had_fs_swept = !fs_swept.is_empty();
-        let had_evpn_swept = !evpn_swept.is_empty();
-        let had_bgpls_swept = !bgpls_swept.is_empty();
-        let had_l3vpn_swept = !l3vpn_swept.is_empty();
-        let had_labeled_swept = !labeled_swept.is_empty();
-        let had_rtc_swept = !rtc_swept.is_empty();
-        if had_swept {
-            info!(%peer, count = swept.len(), "swept LLGR-stale routes");
-            let affected: HashSet<Prefix> = swept.into_iter().collect();
+        let had_rtc_swept = !rtc_affected.is_empty();
+        let had_any = !affected.is_empty()
+            || !fs_affected.is_empty()
+            || !evpn_affected.is_empty()
+            || !bgpls_affected.is_empty()
+            || !vpn_affected.is_empty()
+            || !labeled_affected.is_empty()
+            || had_rtc_swept;
+        if !affected.is_empty() {
+            info!(%peer, count = affected.len(), "swept LLGR-stale routes");
             crate::manager::helpers::set_rib_prefixes(
                 &self.metrics,
                 &peer_label,
                 crate::manager::helpers::UNICAST_FAMILIES,
                 rib_len,
             );
-            let changed = self.recompute_best(&affected);
+            let mut changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
+            super::retire_hash_set(&mut changed, &mut inventory);
         }
-        if had_fs_swept {
-            let fs_affected: HashSet<crate::route::FlowSpecKey> = fs_swept.into_iter().collect();
+        if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
         }
-        if had_evpn_swept {
-            let evpn_affected: HashSet<EvpnRouteKey> = evpn_swept.into_iter().collect();
+        if !evpn_affected.is_empty() {
             self.metrics
                 .set_rib_prefixes(&peer_label, "l2vpn_evpn", gauge_val(evpn_len));
             self.recompute_and_distribute_evpn(&evpn_affected);
         }
-        if had_bgpls_swept {
+        if !bgpls_affected.is_empty() {
             // The sweep drops the LLGR-stale entries from the topology feed,
             // so this recompute is also where ORR vantages that survived the
             // whole GR + LLGR retention on the departed peer's links finally
             // unresolve.
-            let bgpls_affected: HashSet<BgpLsRouteKey> = bgpls_swept.into_iter().collect();
             self.recompute_bgpls_keys(&bgpls_affected);
         }
-        if had_l3vpn_swept {
-            let vpn_affected: HashSet<crate::route::VpnRibRouteKey> =
-                l3vpn_swept.into_iter().collect();
+        if !vpn_affected.is_empty() {
             self.recompute_vpn_keys(&vpn_affected);
         }
-        if had_labeled_swept {
-            let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
-                labeled_swept.into_iter().collect();
+        if !labeled_affected.is_empty() {
             self.recompute_labeled_keys(&labeled_affected);
         }
         if had_rtc_swept {
-            let rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
-                rtc_swept.into_iter().collect();
             self.recompute_rtc_keys(&rtc_affected);
         }
-        if had_swept
-            || had_fs_swept
-            || had_evpn_swept
-            || had_bgpls_swept
-            || had_l3vpn_swept
-            || had_labeled_swept
-            || had_rtc_swept
-        {
-            self.gc_attr_intern();
+        if had_any {
+            self.gc_attr_intern_with_checkpoint(&mut cleanup);
         }
         if had_rtc_swept {
             // Same obligation as the GR-expiry sweeps: the down peer's
@@ -1403,8 +1479,19 @@ impl RibManager {
             // re-establish path (which re-derives membership from this RIB).
             self.rebuild_rtc_membership_and_restage_vpn(peer);
         }
+        super::retire_hash_set(&mut affected, &mut inventory);
+        super::retire_hash_set(&mut fs_affected, &mut inventory);
+        super::retire_hash_set(&mut evpn_affected, &mut inventory);
+        super::retire_hash_set(&mut bgpls_affected, &mut inventory);
+        super::retire_hash_set(&mut vpn_affected, &mut inventory);
+        super::retire_hash_set(&mut labeled_affected, &mut inventory);
+        super::retire_hash_set(&mut rtc_affected, &mut inventory);
+    }
 
-        self.prune_exact_export_rejections();
+    /// Publish the retention state left by an LLGR expiry, releasing the
+    /// peer once no retention phase remains.
+    fn finish_llgr_expiry(&mut self, peer: PeerId) {
+        let peer_label = peer.label();
 
         // Terminal only when no family retains an LLGR deadline: other
         // families with longer stale times keep their retention (and the
