@@ -10,6 +10,7 @@ use super::helpers::{afi_safi_label, gauge_val, prefix_family};
 use super::peer_lifecycle::{GroupReplay, MAX_JOIN_COHORT, group_replay_rs_inert};
 use super::{PolicyFilteredRouteKey, RibManager, RibUpdate};
 use crate::ERR_REFRESH_TIMEOUT;
+use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{BgpLsFamily, FlowSpecKey, FlowSpecRoute, FlowSpecRouteKey};
 use crate::update::OutboundRouteUpdate;
@@ -163,205 +164,255 @@ impl RibManager {
     /// GR- or LLGR-stale, clear the stale state of the rest, and complete
     /// GR/LLGR once no family is awaited. Also used at re-establishment for
     /// a family the new OPEN no longer lists.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "End-of-RIB handler covers GR and LLGR branches across the per-family stale lifecycles (unicast, FlowSpec, EVPN, VPN, BGP-LS, RTC)"
-    )]
     pub(super) fn remove_unrefreshed_stale_family(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         let is_gr_peer = self.gr_peers.contains_key(&peer);
         let is_llgr_peer = self.llgr_peers.contains_key(&peer);
         if !is_gr_peer && !is_llgr_peer {
             debug!(%peer, ?afi, ?safi, "End-of-RIB received without active GR/LLGR state, ignoring");
+        } else {
+            self.with_selection_readiness(|manager| {
+                manager.resolve_end_of_rib_with_readiness(peer, (afi, safi), is_gr_peer);
+            });
         }
-        if is_gr_peer {
-            if let Some(awaiting) = self.gr_peers.get_mut(&peer) {
-                awaiting.remove(&(afi, safi));
+        self.prune_exact_export_rejections();
+    }
+
+    /// End-of-RIB stale resolution for one family under the changing-count
+    /// readiness owner the caller holds. With `gr`, the family is resolved
+    /// from the GR phase (GR- and LLGR-stale routes are swept, both flags
+    /// cleared); otherwise from the LLGR phase (LLGR-stale routes swept,
+    /// the LLGR flag cleared). Every walk checkpoints each visited route
+    /// (vacant unicast slots included), removal and transfer; the affected
+    /// sets are reserved from the table sizes they are drawn from.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "End-of-RIB handler covers GR and LLGR branches across the per-family stale lifecycles (unicast, FlowSpec, EVPN, VPN, BGP-LS, RTC)"
+    )]
+    fn resolve_end_of_rib_with_readiness(&mut self, peer: PeerId, family: (Afi, Safi), gr: bool) {
+        let (afi, safi) = family;
+        let readiness = self.replacement_readiness.clone();
+        let mut sweep =
+            || super::replacement_readiness_checkpoint_at(&readiness, "eor_sweep", false);
+        let mut inventory =
+            || super::replacement_readiness_checkpoint_at(&readiness, "eor_inventory", false);
+        let mut cleanup =
+            || super::replacement_readiness_checkpoint_at(&readiness, "eor_intern_cleanup", false);
+        inventory();
+        let awaiting = if gr {
+            self.gr_peers.get_mut(&peer)
+        } else {
+            self.llgr_peers.get_mut(&peer)
+        };
+        if let Some(awaiting) = awaiting {
+            awaiting.remove(&family);
+        }
+
+        // Collect the affected keys BEFORE the sweep below removes the
+        // non-readvertised ones, so the recompute both withdraws swept keys
+        // downstream and re-promotes the retained ones.
+        let rib = self.ribs.get(&peer);
+        let bound = |len: fn(&AdjRibIn) -> usize, applies: bool| {
+            if applies { rib.map_or(0, len) } else { 0 }
+        };
+        let mut fs_affected: HashSet<FlowSpecKey> =
+            HashSet::with_capacity(bound(AdjRibIn::flowspec_len, true));
+        inventory();
+        let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::with_capacity(bound(
+            AdjRibIn::evpn_len,
+            family == (Afi::L2Vpn, Safi::Evpn),
+        ));
+        inventory();
+        let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> =
+            HashSet::with_capacity(bound(AdjRibIn::vpn_len, safi == Safi::MplsVpn));
+        inventory();
+        let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
+            HashSet::with_capacity(bound(AdjRibIn::labeled_len, safi == Safi::LabeledUnicast));
+        inventory();
+        let bgpls_family = BgpLsFamily::from_afi_safi(afi, safi);
+        let mut bgpls_affected: HashSet<crate::route::BgpLsRouteKey> =
+            HashSet::with_capacity(bound(AdjRibIn::bgpls_len, bgpls_family.is_some()));
+        inventory();
+        let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> =
+            HashSet::with_capacity(bound(AdjRibIn::rtc_len, safi == Safi::RtConstrain));
+        inventory();
+        if let Some(rib) = rib {
+            // FlowSpec selection keys are AFI-scoped: every rule of this AFI
+            // is re-selected whatever the End-of-RIB's SAFI.
+            for route in rib.iter_flowspec().inspect(|_| inventory()) {
+                if route.afi == afi {
+                    fs_affected.insert(route.selection_key());
+                }
             }
+            if family == (Afi::L2Vpn, Safi::Evpn) {
+                for route in rib.iter_evpn().inspect(|_| inventory()) {
+                    evpn_affected.insert(route.key());
+                }
+            }
+            if safi == Safi::MplsVpn {
+                for route in rib.iter_vpn().inspect(|_| inventory()) {
+                    if route.afi_safi() == family {
+                        vpn_affected.insert(route.key());
+                    }
+                }
+            }
+            if safi == Safi::LabeledUnicast {
+                for route in rib.iter_labeled().inspect(|_| inventory()) {
+                    if route.afi_safi() == family {
+                        labeled_affected.insert(route.key());
+                    }
+                }
+            }
+            if let Some(bgpls_family) = bgpls_family {
+                for route in rib.iter_bgpls().inspect(|_| inventory()) {
+                    if route.family == bgpls_family {
+                        bgpls_affected.insert(route.key());
+                    }
+                }
+            }
+            if safi == Safi::RtConstrain {
+                for route in rib.iter_rtc().inspect(|_| inventory()) {
+                    rtc_affected.insert(route.key());
+                }
+            }
+        }
 
-            let fs_affected: HashSet<FlowSpecKey> = self
-                .ribs
-                .get(&peer)
-                .map(|rib| {
-                    rib.iter_flowspec()
-                        .filter(|route| route.afi == afi)
-                        .map(FlowSpecRoute::selection_key)
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let evpn_affected: HashSet<EvpnRouteKey> = if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
-                self.ribs
-                    .get(&peer)
-                    .map(|rib| {
-                        rib.iter_evpn()
-                            .map(crate::route::EvpnRibRoute::key)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                HashSet::new()
-            };
-
-            // Collect the typed-family keys BEFORE the sweep below removes
-            // the non-readvertised ones, so the recompute both withdraws
-            // swept keys downstream and re-promotes the retained ones.
-            let vpn_affected: HashSet<crate::route::VpnRibRouteKey> = if safi == Safi::MplsVpn {
-                self.ribs
-                    .get(&peer)
-                    .map(|rib| {
-                        rib.iter_vpn()
-                            .filter(|route| route.afi_safi() == (afi, safi))
-                            .map(crate::route::VpnRibRoute::key)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                HashSet::new()
-            };
-            let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
-                if safi == Safi::LabeledUnicast {
-                    self.ribs
-                        .get(&peer)
-                        .map(|rib| {
-                            rib.iter_labeled()
-                                .filter(|route| route.afi_safi() == (afi, safi))
-                                .map(crate::route::LabeledRibRoute::key)
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    HashSet::new()
-                };
-            let bgpls_affected: HashSet<crate::route::BgpLsRouteKey> =
-                if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
-                    self.ribs
-                        .get(&peer)
-                        .map(|rib| {
-                            rib.iter_bgpls()
-                                .filter(|route| route.family == bgpls_family)
-                                .map(crate::route::BgpLsRibRoute::key)
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    HashSet::new()
-                };
-            let rtc_affected: HashSet<crate::route::RtcRibRouteKey> = if safi == Safi::RtConstrain {
-                self.ribs
-                    .get(&peer)
-                    .map(|rib| rib.iter_rtc().map(crate::route::RtcRibRoute::key).collect())
-                    .unwrap_or_default()
-            } else {
-                HashSet::new()
-            };
-
-            let mut rtc_swept = false;
-            let mut unicast_changed: Vec<Prefix> = Vec::new();
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                // RFC 4724 §4.1 End-of-RIB removal for every family: a
-                // route still marked stale here was not re-advertised
-                // during the restart window and is deleted (re-advertised
-                // routes had their flag cleared on insert). Routes still
-                // LLGR-stale are swept too: a peer that re-established
-                // DURING the LLGR phase moved back to `gr_peers`
-                // (`handle_peer_up`) while its unrefreshed routes kept
-                // their LLGR-stale flag — they were equally not
-                // re-advertised (RFC 9494 §4.2). Unicast removal and
-                // retained local LLGR-community cleanup share one scan.
-                // Each helper is a family-scoped no-op for non-matching
-                // tuples.
+        let mut rtc_swept = false;
+        let mut unicast_changed: Vec<Prefix> = Vec::new();
+        if let Some(rib) = self.ribs.get_mut(&peer) {
+            // RFC 4724 §4.1 End-of-RIB removal for every family: a route
+            // still marked stale here was not re-advertised during the
+            // restart window and is deleted (re-advertised routes had their
+            // flag cleared on insert). From the GR phase, routes still
+            // LLGR-stale are swept too: a peer that re-established DURING
+            // the LLGR phase moved back to `gr_peers` (`handle_peer_up`)
+            // while its unrefreshed routes kept their LLGR-stale flag — they
+            // were equally not re-advertised (RFC 9494 §4.2). From the LLGR
+            // phase only LLGR-stale routes remain to sweep, and the trailing
+            // clear is flag/LLGR-community hygiene for the retained routes.
+            // Each helper is a family-scoped no-op for non-matching tuples.
+            if gr {
                 #[cfg(feature = "bench-internals")]
                 let stale_resolution_started = Instant::now();
-                unicast_changed = rib.finish_gr_family((afi, safi));
+                unicast_changed = rib.finish_gr_family_with_checkpoint(family, &mut sweep);
                 #[cfg(feature = "bench-internals")]
                 {
                     self.adj_rib_out_commit_stats.eor_stale_resolution_ns =
                         u64::try_from(stale_resolution_started.elapsed().as_nanos())
                             .unwrap_or(u64::MAX);
                 }
-                rib.sweep_stale_flowspec_family((afi, safi));
-                rib.sweep_llgr_stale_flowspec_family((afi, safi));
-                rib.clear_stale_flowspec((afi, safi));
-                crate::manager::helpers::set_rib_prefixes(
-                    &self.metrics,
-                    &peer.label(),
-                    crate::manager::helpers::FLOWSPEC_FAMILIES,
-                    rib.flowspec_lens(),
-                );
-                rib.sweep_stale_family_evpn((afi, safi));
-                rib.sweep_llgr_stale_family_evpn((afi, safi));
-                rib.clear_stale_evpn((afi, safi));
-                rib.sweep_stale_family_vpn((afi, safi));
-                rib.sweep_llgr_stale_family_vpn((afi, safi));
-                rib.clear_stale_vpn((afi, safi));
-                rib.sweep_stale_family_labeled((afi, safi));
-                rib.sweep_llgr_stale_family_labeled((afi, safi));
-                rib.clear_stale_labeled((afi, safi));
-                rib.sweep_stale_family_bgpls((afi, safi));
-                rib.sweep_llgr_stale_family_bgpls((afi, safi));
-                rib.clear_stale_bgpls((afi, safi));
-                rtc_swept = !rib.sweep_stale_family_rtc((afi, safi)).is_empty();
-                rtc_swept |= !rib.sweep_llgr_stale_family_rtc((afi, safi)).is_empty();
-                rib.clear_stale_rtc((afi, safi));
+                for llgr in [false, true] {
+                    let mut swept =
+                        rib.sweep_stale_flowspec_family_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut swept, &mut sweep);
+                }
+                rib.clear_stale_flowspec_with_checkpoint(family, &mut sweep);
+            } else {
+                unicast_changed = rib.sweep_stale_family_with_checkpoint(family, true, &mut sweep);
+                unicast_changed.extend(rib.clear_stale_with_checkpoint(family, true, &mut sweep));
+                let mut swept =
+                    rib.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut sweep);
+                super::retire_vec(&mut swept, &mut sweep);
+                rib.clear_llgr_stale_flowspec_with_checkpoint(family, &mut sweep);
             }
-            // End-of-RIB resolves this family's LLGR retention (routes were
-            // either re-advertised or swept just above), so its surviving
-            // original-LLST deadline — kept across the re-establishment —
-            // is retired here.
-            self.llgr_stale_deadlines.remove(&(peer, afi, safi));
+            crate::manager::helpers::set_rib_prefixes(
+                &self.metrics,
+                &peer.label(),
+                crate::manager::helpers::FLOWSPEC_FAMILIES,
+                rib.flowspec_lens_with_checkpoint(&mut sweep),
+            );
+            for llgr in [false, true] {
+                // From the LLGR phase only the LLGR-stale sweep applies.
+                if llgr || gr {
+                    // The swept keys only feed the recomputes through the
+                    // sets collected above; release them between checkpoints.
+                    let mut evpn =
+                        rib.sweep_stale_family_evpn_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut evpn, &mut sweep);
+                    let mut vpn =
+                        rib.sweep_stale_family_vpn_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut vpn, &mut sweep);
+                    let mut labeled =
+                        rib.sweep_stale_family_labeled_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut labeled, &mut sweep);
+                    let mut bgpls =
+                        rib.sweep_stale_family_bgpls_with_checkpoint(family, llgr, &mut sweep);
+                    super::retire_vec(&mut bgpls, &mut sweep);
+                    let mut rtc =
+                        rib.sweep_stale_family_rtc_with_checkpoint(family, llgr, &mut sweep);
+                    rtc_swept |= !rtc.is_empty();
+                    super::retire_vec(&mut rtc, &mut sweep);
+                }
+            }
+            let llgr_only = !gr;
+            rib.clear_stale_evpn_with_checkpoint(family, llgr_only, &mut sweep);
+            rib.clear_stale_vpn_with_checkpoint(family, llgr_only, &mut sweep);
+            rib.clear_stale_labeled_with_checkpoint(family, llgr_only, &mut sweep);
+            rib.clear_stale_bgpls_with_checkpoint(family, llgr_only, &mut sweep);
+            rib.clear_stale_rtc_with_checkpoint(family, llgr_only, &mut sweep);
+        }
+        // End-of-RIB resolves this family's LLGR retention (routes were
+        // either re-advertised or swept just above), so its surviving
+        // original-LLST deadline — kept across the re-establishment — is
+        // retired here.
+        self.llgr_stale_deadlines.remove(&(peer, afi, safi));
 
-            // FlowSpec/EVPN affected keys were collected BEFORE the sweep,
-            // so removed keys are already in their sets. The unicast
-            // selection inputs this EoR changes are exactly the routes the
-            // family-scoped sweeps removed and the clear mutated: every
-            // other retained route was recomputed when it was re-advertised
-            // (which cleared its stale flag), and the peer's other families
-            // are untouched.
-            let affected: HashSet<Prefix> = unicast_changed.into_iter().collect();
-            self.recompute_and_distribute_end_of_rib_unicast(&affected);
-            if !fs_affected.is_empty() {
-                self.recompute_and_distribute_flowspec(&fs_affected);
-            }
-            if !evpn_affected.is_empty() {
-                self.recompute_and_distribute_evpn(&evpn_affected);
-            }
-            if !vpn_affected.is_empty() {
-                self.recompute_vpn_keys(&vpn_affected);
-            }
-            if !labeled_affected.is_empty() {
-                self.recompute_labeled_keys(&labeled_affected);
-            }
-            if !bgpls_affected.is_empty() {
-                self.recompute_bgpls_keys(&bgpls_affected);
-            }
-            if !rtc_affected.is_empty() {
-                self.recompute_rtc_keys(&rtc_affected);
-            }
-            #[cfg(feature = "bench-internals")]
-            let gc_started = Instant::now();
-            self.gc_attr_intern();
-            #[cfg(feature = "bench-internals")]
-            {
-                self.adj_rib_out_commit_stats.eor_attr_gc_ns =
-                    u64::try_from(gc_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            }
-            if rtc_swept {
-                // The EoR sweep removed RT interest the peer did not
-                // re-advertise: shrink its membership so no-longer-covered
-                // VPN routes are withdrawn from its Adj-RIB-Out.
-                self.rebuild_rtc_membership_and_restage_vpn(peer);
-            }
+        // FlowSpec/EVPN affected keys were collected BEFORE the sweep, so
+        // removed keys are already in their sets. The unicast selection
+        // inputs this EoR changes are exactly the routes the family-scoped
+        // sweeps removed and the clear mutated: every other retained route
+        // was recomputed when it was re-advertised (which cleared its stale
+        // flag), and the peer's other families are untouched.
+        let mut affected: HashSet<Prefix> = HashSet::with_capacity(unicast_changed.len());
+        inventory();
+        for prefix in unicast_changed {
+            inventory();
+            affected.insert(prefix);
+        }
+        self.recompute_and_distribute_end_of_rib_unicast(&affected);
+        if !fs_affected.is_empty() {
+            self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+        if !evpn_affected.is_empty() {
+            self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+        if !vpn_affected.is_empty() {
+            self.recompute_vpn_keys(&vpn_affected);
+        }
+        if !labeled_affected.is_empty() {
+            self.recompute_labeled_keys(&labeled_affected);
+        }
+        if !bgpls_affected.is_empty() {
+            self.recompute_bgpls_keys(&bgpls_affected);
+        }
+        if !rtc_affected.is_empty() {
+            self.recompute_rtc_keys(&rtc_affected);
+        }
+        #[cfg(feature = "bench-internals")]
+        let gc_started = Instant::now();
+        self.gc_attr_intern_with_checkpoint(&mut cleanup);
+        #[cfg(feature = "bench-internals")]
+        {
+            self.adj_rib_out_commit_stats.eor_attr_gc_ns =
+                u64::try_from(gc_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        }
+        if rtc_swept {
+            // The EoR sweep removed RT interest the peer did not
+            // re-advertise: shrink its membership so no-longer-covered VPN
+            // routes are withdrawn from its Adj-RIB-Out.
+            self.rebuild_rtc_membership_and_restage_vpn(peer);
+        }
 
-            let peer_label = peer.label();
-            #[cfg(feature = "bench-internals")]
-            let stale_count_started = Instant::now();
-            self.publish_gr_stale_routes(peer);
-            #[cfg(feature = "bench-internals")]
-            {
-                self.adj_rib_out_commit_stats.eor_stale_count_ns =
-                    u64::try_from(stale_count_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            }
+        let peer_label = peer.label();
+        #[cfg(feature = "bench-internals")]
+        let stale_count_started = Instant::now();
+        self.publish_gr_stale_routes(peer);
+        #[cfg(feature = "bench-internals")]
+        {
+            self.adj_rib_out_commit_stats.eor_stale_count_ns =
+                u64::try_from(stale_count_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        }
 
+        if gr {
             let all_done = self.gr_peers.get(&peer).is_some_and(HashSet::is_empty);
             if all_done {
                 info!(%peer, "graceful restart complete — all End-of-RIB received");
@@ -372,171 +423,7 @@ impl RibManager {
                 self.metrics.set_gr_active(&peer_label, false);
                 self.metrics.set_gr_stale_routes(&peer_label, 0);
             }
-        } else if is_llgr_peer {
-            if let Some(awaiting) = self.llgr_peers.get_mut(&peer) {
-                awaiting.remove(&(afi, safi));
-            }
-
-            let fs_affected: HashSet<FlowSpecKey> = self
-                .ribs
-                .get(&peer)
-                .map(|rib| {
-                    rib.iter_flowspec()
-                        .filter(|route| route.afi == afi)
-                        .map(FlowSpecRoute::selection_key)
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let evpn_affected: HashSet<EvpnRouteKey> = if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
-                self.ribs
-                    .get(&peer)
-                    .map(|rib| {
-                        rib.iter_evpn()
-                            .map(crate::route::EvpnRibRoute::key)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                HashSet::new()
-            };
-
-            // Collect the typed-family keys BEFORE the sweep below removes
-            // the non-readvertised ones, so the recompute both withdraws
-            // swept keys downstream and re-promotes the retained ones —
-            // the same shape as the GR arm above.
-            let vpn_affected: HashSet<crate::route::VpnRibRouteKey> = if safi == Safi::MplsVpn {
-                self.ribs
-                    .get(&peer)
-                    .map(|rib| {
-                        rib.iter_vpn()
-                            .filter(|route| route.afi_safi() == (afi, safi))
-                            .map(crate::route::VpnRibRoute::key)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                HashSet::new()
-            };
-            let labeled_affected: HashSet<crate::route::LabeledRibRouteKey> =
-                if safi == Safi::LabeledUnicast {
-                    self.ribs
-                        .get(&peer)
-                        .map(|rib| {
-                            rib.iter_labeled()
-                                .filter(|route| route.afi_safi() == (afi, safi))
-                                .map(crate::route::LabeledRibRoute::key)
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    HashSet::new()
-                };
-            let bgpls_affected: HashSet<crate::route::BgpLsRouteKey> =
-                if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
-                    self.ribs
-                        .get(&peer)
-                        .map(|rib| {
-                            rib.iter_bgpls()
-                                .filter(|route| route.family == bgpls_family)
-                                .map(crate::route::BgpLsRibRoute::key)
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    HashSet::new()
-                };
-            let rtc_affected: HashSet<crate::route::RtcRibRouteKey> = if safi == Safi::RtConstrain {
-                self.ribs
-                    .get(&peer)
-                    .map(|rib| rib.iter_rtc().map(crate::route::RtcRibRoute::key).collect())
-                    .unwrap_or_default()
-            } else {
-                HashSet::new()
-            };
-
-            let mut rtc_swept = false;
-            let mut unicast_changed: Vec<Prefix> = Vec::new();
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                // RFC-strict End-of-RIB removal for every family, matching
-                // the GR arm: a route still LLGR-stale here was not
-                // re-advertised during the LLGR window and is deleted
-                // (RFC 4724 §4.1 via RFC 9494 §4.2). The trailing clear is
-                // flag/LLGR-community hygiene for the retained routes.
-                // Each helper is a family-scoped no-op for non-matching
-                // tuples.
-                unicast_changed = rib.sweep_llgr_stale_family((afi, safi));
-                unicast_changed.extend(rib.clear_llgr_stale((afi, safi)));
-                rib.sweep_llgr_stale_flowspec_family((afi, safi));
-                rib.clear_llgr_stale_flowspec((afi, safi));
-                crate::manager::helpers::set_rib_prefixes(
-                    &self.metrics,
-                    &peer.label(),
-                    crate::manager::helpers::FLOWSPEC_FAMILIES,
-                    rib.flowspec_lens(),
-                );
-                rib.sweep_llgr_stale_family_evpn((afi, safi));
-                rib.clear_llgr_stale_evpn((afi, safi));
-                rib.sweep_llgr_stale_family_vpn((afi, safi));
-                rib.clear_llgr_stale_vpn((afi, safi));
-                rib.sweep_llgr_stale_family_labeled((afi, safi));
-                rib.clear_llgr_stale_labeled((afi, safi));
-                rib.sweep_llgr_stale_family_bgpls((afi, safi));
-                rib.clear_llgr_stale_bgpls((afi, safi));
-                rtc_swept = !rib.sweep_llgr_stale_family_rtc((afi, safi)).is_empty();
-                rib.clear_llgr_stale_rtc((afi, safi));
-            }
-            // This family's LLGR retention is resolved — retire its deadline.
-            self.llgr_stale_deadlines.remove(&(peer, afi, safi));
-
-            // Same shape as the GR arm: FlowSpec/EVPN affected keys already
-            // include the swept ones (collected pre-sweep), and the unicast
-            // set is exactly the swept and clear-mutated routes.
-            let affected: HashSet<Prefix> = unicast_changed.into_iter().collect();
-            self.recompute_and_distribute_end_of_rib_unicast(&affected);
-            if !fs_affected.is_empty() {
-                self.recompute_and_distribute_flowspec(&fs_affected);
-            }
-            if !evpn_affected.is_empty() {
-                self.recompute_and_distribute_evpn(&evpn_affected);
-            }
-            if !vpn_affected.is_empty() {
-                self.recompute_vpn_keys(&vpn_affected);
-            }
-            if !labeled_affected.is_empty() {
-                self.recompute_labeled_keys(&labeled_affected);
-            }
-            if !bgpls_affected.is_empty() {
-                self.recompute_bgpls_keys(&bgpls_affected);
-            }
-            if !rtc_affected.is_empty() {
-                self.recompute_rtc_keys(&rtc_affected);
-            }
-            #[cfg(feature = "bench-internals")]
-            let gc_started = Instant::now();
-            self.gc_attr_intern();
-            #[cfg(feature = "bench-internals")]
-            {
-                self.adj_rib_out_commit_stats.eor_attr_gc_ns =
-                    u64::try_from(gc_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            }
-            if rtc_swept {
-                // The EoR sweep removed LLGR-stale RT interest the peer did
-                // not re-advertise: shrink its membership so no-longer-
-                // covered VPN routes are withdrawn from its Adj-RIB-Out.
-                self.rebuild_rtc_membership_and_restage_vpn(peer);
-            }
-
-            let peer_label = peer.label();
-            #[cfg(feature = "bench-internals")]
-            let stale_count_started = Instant::now();
-            self.publish_gr_stale_routes(peer);
-            #[cfg(feature = "bench-internals")]
-            {
-                self.adj_rib_out_commit_stats.eor_stale_count_ns =
-                    u64::try_from(stale_count_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            }
-
+        } else {
             let all_done = self.llgr_peers.get(&peer).is_some_and(HashSet::is_empty);
             if all_done {
                 info!(%peer, "LLGR complete — all End-of-RIB received");
@@ -548,7 +435,13 @@ impl RibManager {
                 self.metrics.set_gr_stale_routes(&peer_label, 0);
             }
         }
-        self.prune_exact_export_rejections();
+        super::retire_hash_set(&mut affected, &mut inventory);
+        super::retire_hash_set(&mut fs_affected, &mut inventory);
+        super::retire_hash_set(&mut evpn_affected, &mut inventory);
+        super::retire_hash_set(&mut vpn_affected, &mut inventory);
+        super::retire_hash_set(&mut labeled_affected, &mut inventory);
+        super::retire_hash_set(&mut bgpls_affected, &mut inventory);
+        super::retire_hash_set(&mut rtc_affected, &mut inventory);
     }
 
     /// Lift the RFC 5291 §6 initial-advertisement gate for one family and

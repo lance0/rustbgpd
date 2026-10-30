@@ -1304,6 +1304,280 @@ fn llgr_expiry_unicast_selection_changed_set_never_grows() {
     );
 }
 
+/// GR-cycle walks reached through their actual callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GrWalk {
+    /// `PeerGracefulRestart` marking every retained route stale.
+    Entry,
+    /// End-of-RIB while the family is GR-stale.
+    EorGr,
+    /// End-of-RIB while the family is LLGR-stale.
+    EorLlgr,
+    /// GR timer expiry without LLGR: the whole-table purge.
+    ExpiryNoLlgr,
+}
+
+const GR_WALKS: [GrWalk; 4] = [
+    GrWalk::Entry,
+    GrWalk::EorGr,
+    GrWalk::EorLlgr,
+    GrWalk::ExpiryNoLlgr,
+];
+
+impl GrWalk {
+    /// The walk's route-visiting unit and its affected-inventory unit.
+    fn units(self) -> [&'static str; 2] {
+        match self {
+            Self::Entry => ["gr_mark", "gr_inventory"],
+            Self::EorGr | Self::EorLlgr => ["eor_sweep", "eor_inventory"],
+            Self::ExpiryNoLlgr => ["gr_expiry_purge", "gr_expiry_inventory"],
+        }
+    }
+}
+
+/// Run `walk` through its actual caller over `routes` retained routes of
+/// `family` under the readiness probe, after announcing `vacated` more
+/// unicast routes and withdrawing them so the slab keeps vacant slots. No
+/// route is re-advertised, so every walk but GR entry removes them all.
+/// Every answered readiness count must lie between the settled and the
+/// initial Loc-RIB count, end on the settled count, and step down by one
+/// per completed unicast withdrawal.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actual-caller fixture drives all four GR walks and pins every readiness count"
+)]
+fn run_gr_walk_case(
+    family: (Afi, Safi),
+    walk: GrWalk,
+    routes: u8,
+    vacated: u8,
+) -> BTreeMap<&'static str, usize> {
+    let (mut manager, readiness_tx) = readiness_manager();
+    let addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = peer_v4(addr);
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    for index in 5..5 + vacated + routes {
+        announce_case(&mut manager, family, index, false);
+    }
+    if vacated > 0 {
+        assert_eq!(
+            family,
+            (Afi::Ipv4, Safi::Unicast),
+            "slab vacancies are unicast"
+        );
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced: Vec::new(),
+            withdrawn: (5..5 + vacated)
+                .map(|index| {
+                    (
+                        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, index, 0), 24)),
+                        0,
+                    )
+                })
+                .collect(),
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+    }
+    let gr = if walk == GrWalk::EorLlgr {
+        gr_with_llgr(peer, 120, vec![family], vec![family], 3600)
+    } else {
+        gr_with_llgr(peer, 120, vec![family], Vec::new(), 0)
+    };
+    let eor = RibUpdate::EndOfRib {
+        session_id: 0,
+        peer,
+        afi: family.0,
+        safi: family.1,
+    };
+    let work: Box<dyn FnOnce(&mut RibManager)> = match walk {
+        GrWalk::Entry => Box::new(move |manager| manager.handle_update(gr)),
+        GrWalk::EorGr => {
+            manager.handle_update(gr);
+            Box::new(move |manager| manager.handle_update(eor))
+        }
+        GrWalk::EorLlgr => {
+            manager.handle_update(gr);
+            manager.sweep_gr_stale(peer);
+            Box::new(move |manager| manager.handle_update(eor))
+        }
+        GrWalk::ExpiryNoLlgr => {
+            manager.handle_update(gr);
+            // A surviving deadline on another tuple keeps the expiry
+            // non-terminal: departed-peer teardown has its own owner.
+            manager.llgr_stale_deadlines.insert(
+                (peer, Afi::Ipv6, Safi::Unicast),
+                tokio::time::Instant::now() + Duration::from_secs(3600),
+            );
+            Box::new(move |manager| manager.sweep_gr_stale(peer))
+        }
+    };
+    let initial = manager.loc_rib.len();
+    crate::orr::rebuild_growth::take();
+    let (answered, observations) =
+        run_with_readiness_observations(&mut manager, readiness_tx, work);
+    let removed = if family.1 == Safi::Unicast && walk != GrWalk::Entry {
+        usize::from(routes)
+    } else {
+        0
+    };
+    let settled = initial - removed;
+    assert_eq!(manager.loc_rib.len(), settled, "{walk:?} {family:?}");
+    let selections: Vec<_> = observations
+        .iter()
+        .filter_map(|&(stage, count)| (stage == "selection_recompute").then_some(count))
+        .filter(|&count| count != initial)
+        .collect();
+    assert_eq!(
+        selections,
+        (1..=removed).map(|step| initial - step).collect::<Vec<_>>(),
+        "{walk:?} {family:?}: every completed withdrawal publishes its exact count"
+    );
+    assert!(
+        observations
+            .iter()
+            .all(|&(_, count)| (settled..=initial).contains(&count)),
+        "{walk:?} {family:?}: counts outside [{settled}, {initial}]: {observations:?}"
+    );
+    assert_eq!(
+        observations.last().map(|&(_, count)| count),
+        Some(settled),
+        "{walk:?} {family:?}: the final answer is the settled count"
+    );
+    let retained = manager.ribs[&peer].retained_stale_count();
+    let expected = if walk == GrWalk::Entry {
+        u64::from(routes)
+    } else {
+        0
+    };
+    assert_eq!(
+        retained, expected,
+        "{walk:?} {family:?}: retention after the walk"
+    );
+    assert_eq!(
+        manager.ribs[&peer].maintained_stale_route_counts(),
+        manager.ribs[&peer].scanned_stale_route_counts()
+    );
+    answered
+}
+
+/// GR entry, End-of-RIB from the GR and the LLGR phase, and GR expiry
+/// without LLGR each run under the readiness owner for every family: a
+/// query queued before the walk and one queued at each checkpoint of the
+/// route walk and the affected inventory are answered inside the walk.
+#[test]
+fn gr_walks_answer_readiness_inside_every_family_walk() {
+    let mut failures = Vec::new();
+    for walk in GR_WALKS {
+        for family in FAMILIES {
+            let answered = run_gr_walk_case(family, walk, 32, 0);
+            for stage in std::iter::once(PRE_QUEUED).chain(walk.units()) {
+                let count = answered.get(stage).copied().unwrap_or(0);
+                if count < usize::from(stage != PRE_QUEUED) + 1 {
+                    failures.push((walk, family, stage, count));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "(walk, family, unit, answered) without interior readiness service: {failures:?}"
+    );
+}
+
+/// Per-unit work-count control: from 8 to 40 retained routes, every walk's
+/// route unit answers at least twice per added route and its inventory
+/// unit at least once, for every family; 240 vacant unicast slab slots add
+/// a route-unit answer per vacancy; and GR entry's affected sets never
+/// grow past their reservation.
+#[test]
+fn gr_walk_work_counts_grow_per_unit() {
+    let count = |answered: &BTreeMap<&str, usize>, stage| answered.get(stage).copied().unwrap_or(0);
+    let unicast = (Afi::Ipv4, Safi::Unicast);
+    let mut failures = Vec::new();
+    for walk in GR_WALKS {
+        let [route_unit, inventory_unit] = walk.units();
+        for family in FAMILIES {
+            let small = run_gr_walk_case(family, walk, 8, 0);
+            let large = run_gr_walk_case(family, walk, 40, 0);
+            for (unit, per_route) in [(route_unit, 2), (inventory_unit, 1)] {
+                let (small, large) = (count(&small, unit), count(&large, unit));
+                if large < small + per_route * 32 {
+                    failures.push((walk, family, unit, small, large));
+                }
+            }
+        }
+        let dense = run_gr_walk_case(unicast, walk, 8, 0);
+        let sparse = run_gr_walk_case(unicast, walk, 8, 240);
+        // GR entry also re-collects the retained unicast routes slot by slot.
+        let units: &[&str] = if walk == GrWalk::Entry {
+            &[route_unit, inventory_unit]
+        } else {
+            &[route_unit]
+        };
+        for &unit in units {
+            let (dense, sparse) = (count(&dense, unit), count(&sparse, unit));
+            if sparse < dense + 240 {
+                failures.push((walk, unicast, unit, dense, sparse));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "(walk, family, unit, small, large) answered counts do not grow with the work: {failures:?}"
+    );
+    for family in FAMILIES {
+        run_gr_walk_case(family, GrWalk::Entry, 64, 0);
+        let growth = crate::orr::rebuild_growth::take();
+        let grown: Vec<_> = growth
+            .iter()
+            .filter(|(name, (_, largest))| name.starts_with("gr_entry_") && *largest != 0)
+            .collect();
+        assert!(
+            grown.is_empty() && growth.keys().any(|name| name.starts_with("gr_entry_")),
+            "{family:?}: GR-entry affected sets must fill without growth: {growth:?}"
+        );
+    }
+}
+
+/// A consecutive restart deletes every `FlowSpec` rule still GR-stale from the
+/// previous one. Each deleted rule is visited, removed between two
+/// checkpoints and its owned key released between checkpoints too, so GR
+/// entry's route unit answers at least four queries per deleted rule.
+#[test]
+fn gr_entry_consecutive_restart_releases_deleted_flowspec_rules() {
+    let run = |rules: u8| {
+        let flowspec = (Afi::Ipv4, Safi::FlowSpec);
+        let (mut manager, readiness_tx) = readiness_manager();
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+        manager.ribs.insert(peer, AdjRibIn::new(peer));
+        for index in 5..5 + rules {
+            announce_case(&mut manager, flowspec, index, false);
+        }
+        manager.handle_update(gr_with_llgr(peer, 120, vec![flowspec], Vec::new(), 0));
+        let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
+            manager.handle_update(gr_with_llgr(peer, 120, vec![flowspec], Vec::new(), 0));
+        });
+        assert_eq!(
+            manager.ribs[&peer].flowspec_len(),
+            0,
+            "every stale rule is deleted"
+        );
+        answered.get("gr_mark").copied().unwrap_or(0)
+    };
+    let (small, large) = (run(8), run(40));
+    assert!(
+        large >= small + 4 * 32,
+        "gr_mark answered {small} for 8 deleted rules and {large} for 40"
+    );
+}
+
 /// Announce `paths` Add-Path routes of an indexed family (unicast, VPN or
 /// labeled) from one peer, all on one NLRI or one per NLRI, retain them
 /// LLGR-stale through the actual GR timer, expire them through the actual
@@ -1555,5 +1829,119 @@ fn llgr_expiry_rtc_restage_matching_answers_readiness() {
     assert!(
         failures.is_empty(),
         "(unit, floor, growth, answered with 8 fresh RTs, with 136) must cover the restage: {failures:?}"
+    );
+}
+
+/// GR-phase End-of-RIB removes every unrefreshed Add-Path path of an NLRI;
+/// each removal scans that NLRI's path list, so the sweep must answer
+/// readiness inside the scans: one prefix with 64 paths answers at least
+/// `64 * 63 / 8` more queries than 64 single-path prefixes.
+#[test]
+fn eor_add_path_removal_scans_answer_readiness() {
+    let run = |one_prefix: bool| {
+        let unicast = (Afi::Ipv4, Safi::Unicast);
+        let (mut manager, readiness_tx) = readiness_manager();
+        let addr = Ipv4Addr::new(10, 0, 0, 1);
+        let peer = peer_v4(addr);
+        manager.ribs.insert(peer, AdjRibIn::new(peer));
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced: (0..64u8)
+                .map(|path| {
+                    let octet = if one_prefix { 1 } else { path + 1 };
+                    let mut route =
+                        make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, octet, 0), 24), addr);
+                    route.path_id = if one_prefix { u32::from(path) + 1 } else { 0 };
+                    route
+                })
+                .collect(),
+            withdrawn: Vec::new(),
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+        manager.handle_update(gr_with_llgr(peer, 120, vec![unicast], Vec::new(), 0));
+        let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
+            manager.handle_update(RibUpdate::EndOfRib {
+                session_id: 0,
+                peer,
+                afi: unicast.0,
+                safi: unicast.1,
+            });
+        });
+        assert_eq!(
+            manager.ribs[&peer].len(),
+            0,
+            "every unrefreshed path is removed"
+        );
+        answered.get("eor_sweep").copied().unwrap_or(0)
+    };
+    let (spread, one) = (run(false), run(true));
+    assert!(
+        one >= spread + 64 * 63 / 8,
+        "eor_sweep answered {spread} for 64 prefixes and {one} for one prefix with 64 paths"
+    );
+}
+
+/// Announce `flowspec` IPv4 `FlowSpec` rules and `unicast` IPv4 routes, enter
+/// GR for both families, then resolve the `FlowSpec` family's End-of-RIB
+/// with nothing re-advertised. Returns the `eor_sweep` answers.
+fn run_flowspec_eor_case(flowspec: u8, unicast: u8) -> usize {
+    let families = [(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv4, Safi::Unicast)];
+    let (mut manager, readiness_tx) = readiness_manager();
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    for (family, count) in families.into_iter().zip([flowspec, unicast]) {
+        for index in 5..5 + count {
+            announce_case(&mut manager, family, index, false);
+        }
+    }
+    manager.handle_update(gr_with_llgr(peer, 120, families.to_vec(), Vec::new(), 0));
+    let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
+        manager.handle_update(RibUpdate::EndOfRib {
+            session_id: 0,
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::FlowSpec,
+        });
+    });
+    assert_eq!(
+        manager.ribs[&peer].flowspec_len(),
+        0,
+        "unrefreshed rules are swept"
+    );
+    assert_eq!(
+        manager.ribs[&peer].len(),
+        usize::from(unicast),
+        "unicast is untouched"
+    );
+    answered.get("eor_sweep").copied().unwrap_or(0)
+}
+
+/// End-of-RIB sweeps a large stale `FlowSpec` set: every swept rule is
+/// visited, removed between two checkpoints, its route key released and the
+/// returned rule released between checkpoints too, so the sweep answers at
+/// least five queries per swept rule.
+#[test]
+fn eor_flowspec_sweep_releases_swept_rules_under_readiness() {
+    let (small, large) = (run_flowspec_eor_case(8, 0), run_flowspec_eor_case(72, 0));
+    assert!(
+        large >= small + 5 * 64,
+        "eor_sweep answered {small} for 8 swept rules and {large} for 72"
+    );
+}
+
+/// A `FlowSpec` End-of-RIB never walks the unicast slab: its sweep answers
+/// the same number of queries however many unicast routes the peer holds.
+#[test]
+fn eor_flowspec_sweep_skips_the_unicast_slab() {
+    let (small, large) = (run_flowspec_eor_case(8, 8), run_flowspec_eor_case(8, 200));
+    assert_eq!(
+        small, large,
+        "eor_sweep answered {small} with 8 unicast routes and {large} with 200"
     );
 }
