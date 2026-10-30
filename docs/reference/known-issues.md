@@ -11,14 +11,31 @@ resolved.
 
 ## Open issues
 
-- **Reloads can produce transient readiness failures.** The current core probe
-  can return `/readyz` 503 during a policy reload, and observed HTTP latency can
-  exceed its shared 200 ms actor deadline. The peer manager now answers
-  readiness probes while it waits on the RIB during reload settlement,
-  graceful-restart bursts and full RIB mailboxes, and the probe listener runs
-  on its own thread. `/readyz` still asks the peer manager and the RIB on the
-  daemon runtime, so saturated runtime workers or a RIB busy with a large
-  reload can still return 503 within the deadline.
+- **Reloads can produce transient readiness failures.** `/readyz` and
+  `GetHealth` share one 200 ms core-actor deadline, and either can fail during
+  a policy reload; observed `/readyz` HTTP latency can also exceed that
+  deadline. Each probe queries the peer manager and the RIB concurrently, so a
+  slow answer from one does not spend the other's budget. On the peer-manager
+  side, `/readyz` sends a ping and `GetHealth` counts Established peers from
+  the state each session publishes; neither queries a session, so neither
+  waits on sessions writing a reload's new exports. The peer manager answers
+  both on its dedicated readiness lane, including while it waits on the RIB
+  during reload settlement, graceful-restart bursts and full RIB mailboxes.
+  The RIB serves its readiness lane at checkpoints inside long operations,
+  including each receiver boundary of private EVPN distribution. The probe
+  listener runs on its own thread.
+  Both actors still run on the daemon runtime, so saturated runtime workers,
+  or actor work that runs past the deadline between readiness checkpoints,
+  can still fail a probe. The 200 ms deadline is unchanged, and these changes
+  do not remove the underlying scheduling delay.
+  On the [v0.80.1 route-server flagship soak](../soaks/soak-rs-flagship-24h-2026-10-26.md),
+  1 of 147 `rbgp doctor` runs failed `daemon.healthy` when the peer-manager
+  probe missed its deadline just after a reload commit. The
+  [2026-10-28 run](../soaks/soak-rs-flagship-24h-2026-10-28.md) of the same
+  shape on untagged main, which has the concurrent probe halves but predates
+  the session-free Established count, had 147 of 147 `doctor` runs `ok` and no
+  bad `/readyz` samples. One clean run is consistent with the fix, not proof
+  of it, and no soak yet covers the current probe path.
   `bgp_readiness_probe_failures_total{reason}` names the failing component.
   Timing instrumentation supports investigation but does not establish that
   the underlying delay is fixed.
