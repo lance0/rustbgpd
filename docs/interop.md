@@ -176,7 +176,10 @@ M100 for its current-daemon receiver — is gated on
 its `run_labs` output. Workflow path filters exclude documentation-only pull
 requests and pushes before any job starts. For a triggered pull request, a
 complete three-dot diff that is standalone-fuzz-only or
-release/packaging-only skips the entire lab roster. The classifier defaults to
+release/packaging-only skips the entire lab roster. The classifier job checks
+out a single commit; for a pull request it fetches the base and head deeper
+until their merge base is complete, and fails the check if that takes more
+than 1024 commits. The classifier defaults to
 every lane on an empty diff, a malformed path, or any mixed diff, and only
 `pull_request` events can take its skip path. Every non-documentation push to
 `main` admitted by the workflow trigger runs the labs; both workflows also

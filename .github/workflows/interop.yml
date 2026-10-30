@@ -175,9 +175,9 @@ jobs:
     outputs:
       run_labs: ${{ steps.classify.outputs.run_labs }}
     steps:
+      # Shallow on purpose: full history alone can outlast the one-minute cap.
+      # The classifier fetches a pull request's base...head merge base itself.
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - name: Classify complete pull-request diff
         id: classify
         env:

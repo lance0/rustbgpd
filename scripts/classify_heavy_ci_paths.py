@@ -53,6 +53,10 @@ PACKAGE_FILES = frozenset(
     }
 )
 SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+# The classifier job checks out one commit. A pull request fetches its base and
+# head at each depth in turn until their merge base is complete; past the last
+# depth it fails closed instead of diffing against a truncated history.
+FETCH_DEPTHS = (64, 256, 1024)
 
 
 class ClassificationError(RuntimeError):
@@ -96,10 +100,58 @@ def classify_paths(paths: Sequence[str]) -> tuple[bool, str]:
     return True, "mixed or lab-relevant paths"
 
 
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, check=False)
+
+
+def _shallow_commits(repo: Path) -> frozenset[str]:
+    path = _git(repo, "rev-parse", "--git-path", "shallow").stdout.decode().strip()
+    shallow = repo / path
+    return frozenset(shallow.read_text().split()) if shallow.is_file() else frozenset()
+
+
+def _merge_base_complete(repo: Path, base: str, head: str) -> bool:
+    """Whether every commit between base/head and each merge base is present.
+
+    A shallow commit on either side could hide a newer merge base, and Git
+    would then diff against an older common ancestor without complaint. Each
+    candidate is checked on its own: a boundary at or below one candidate can
+    hide that another candidate is its ancestor, not a second merge base.
+    """
+    bases = _git(repo, "merge-base", "--all", base, head)
+    if bases.returncode != 0 or not bases.stdout.split():
+        return False
+    shallow = _shallow_commits(repo)
+    for candidate in bases.stdout.decode().split():
+        sides = _git(repo, "rev-list", base, head, "--not", candidate)
+        if sides.returncode != 0 or shallow & set(sides.stdout.decode().split()):
+            return False
+    return True
+
+
+def ensure_merge_base(repo: Path, base: str, head: str) -> None:
+    """Deepen a shallow checkout until the base...head merge base is complete."""
+    if not _shallow_commits(repo):
+        return
+    for depth in FETCH_DEPTHS:
+        fetch = _git(
+            repo, "fetch", "--quiet", "--no-tags", f"--depth={depth}", "origin", base, head
+        )
+        if fetch.returncode != 0:
+            detail = fetch.stderr.decode("utf-8", errors="replace").strip()
+            raise ClassificationError(detail or f"git fetch exited {fetch.returncode}")
+        if _merge_base_complete(repo, base, head):
+            return
+    raise ClassificationError(
+        f"no complete merge base within {FETCH_DEPTHS[-1]} commits of base and head"
+    )
+
+
 def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
     """Read the complete three-dot PR diff without API file-count limits."""
     if not SHA.fullmatch(base) or not SHA.fullmatch(head):
         raise ClassificationError("pull request base/head must be full commit IDs")
+    ensure_merge_base(repo, base, head)
     result = subprocess.run(
         [
             "git",
