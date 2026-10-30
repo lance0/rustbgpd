@@ -56,6 +56,12 @@ bounded from below by the issue request's send time:
 | `loss-4` | +0.052 | +0.047 | +0.105 | +0.172 | 8.3 |
 | `stall-3` | +0.052 | +7.069 | +15.077 | +0.285 | 23.2 |
 
+Method note: local absence is dated from the daemon's log record of the
+withdrawal turn, with the first absent poll kept as an upper bound. This method
+was adopted after `stall-1` and `stall-2`. Both runs remain FAIL under the poll
+method (+15.07 s against a 13 s bar): the poll that saw the rule gone was
+answered only after a second stalled ingest turn.
+
 The lease deadline is an upper bound taken from the lease listing after a
 late 60 s guarded renewal. Uncapped, that renewal would land about 54 s past
 `t_w`.
