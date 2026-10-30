@@ -3739,10 +3739,10 @@ impl RibManager {
 
                 let needs_as_path_string =
                     export_pol.is_some_and(PolicyChain::requires_as_path_string);
-                let mut next_rank: u32 = 1;
+                let mut permitted: Vec<&crate::route::Route> = Vec::new();
                 let mut export_memo = distribution::ExportMemo::default();
                 for cand in &filtered {
-                    if (next_rank as usize) > limit {
+                    if permitted.len() >= limit {
                         break;
                     }
                     let aspath_str = if needs_as_path_string {
@@ -3796,18 +3796,34 @@ impl RibManager {
                     if distribution::no_advertise_export_suppressed(modified.communities()) {
                         continue;
                     }
-                    let outbound_rank = next_rank;
-                    next_rank += 1;
+                    permitted.push(cand);
+                }
+                // Rank picks the paths. During a hold, live staging keeps
+                // the keys already on the wire; mirror it.
+                let keys = match self.adj_ribs_out.get(&peer_addr) {
+                    Some(rib_out) if self.selection_deferred(family) => {
+                        distribution::HoldAddPathKeys::new(
+                            &self.ribs,
+                            rib_out,
+                            &prefix,
+                            &filtered,
+                            &mut || {},
+                        )
+                        .assign_all(&permitted, limit, &mut || {})
+                    }
+                    _ => (1..=u32::try_from(permitted.len()).unwrap_or(u32::MAX)).collect(),
+                };
+                for (cand, key) in permitted.into_iter().zip(keys) {
                     if self
                         .peer_unexportable
                         .get(&peer_addr)
                         .is_some_and(|rejected| {
-                            rejected.contains(&ExactExportKey::Unicast(prefix, outbound_rank))
+                            rejected.contains(&ExactExportKey::Unicast(prefix, key))
                         })
                     {
                         continue;
                     }
-                    advertised.push((cand.peer, cand.path_id, outbound_rank));
+                    advertised.push((cand.peer, cand.path_id, key));
                 }
             }
         }

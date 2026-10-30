@@ -4162,3 +4162,60 @@ fn hold_start_keeps_add_path_keys_of_frozen_and_exempt_rows() {
         );
     }
 }
+
+/// Peer-scoped `ExplainBestPath` during a hold reports the keys live staging
+/// keeps: a frozen ordinary row at `#1` and RTBH rows at `#2` and `#3` stay
+/// put, so the runner-up RTBH path is advertised at `#3`, not at rank 2.
+#[test]
+fn hold_explain_best_path_reports_kept_add_path_keys() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let mut manager = restart_unicast_manager(false);
+    let observer = PeerId::from_addr(v4(4));
+    let mut rx = deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::AddPath, false);
+    let _ = deferred_unicast_drain(&mut rx);
+    let mut ordinary = local_route(prefix, 23);
+    AttrSet::edit(&mut ordinary.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(300));
+    });
+    inject(&mut manager, ordinary);
+    inject(&mut manager, deferred_unicast_local(prefix, 17, 50));
+    inject(&mut manager, deferred_unicast_local(prefix, 19, 40));
+    let mut wire = BTreeMap::new();
+    for update in deferred_unicast_drain(&mut rx) {
+        for key in &update.withdraw {
+            wire.remove(key);
+        }
+        for route in update.announce.iter() {
+            wire.insert((route.prefix, route.path_id), route.local_pref());
+        }
+    }
+    let before = BTreeMap::from([((prefix, 1), 300), ((prefix, 2), 50), ((prefix, 3), 40)]);
+    assert_eq!(wire, before, "before the hold");
+
+    let _waiter_rx = connect_restart_waiter(&mut manager);
+    assert!(manager.selection_deferred(prefix_family(&prefix)));
+    for update in deferred_unicast_drain(&mut rx) {
+        for key in &update.withdraw {
+            wire.remove(key);
+        }
+        for route in update.announce.iter() {
+            wire.insert((route.prefix, route.path_id), route.local_pref());
+        }
+    }
+    assert_eq!(wire, before, "the hold keeps every admitted row at its key");
+
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainBestPath {
+        prefix,
+        peer: Some(observer),
+        reply,
+    });
+    let explanation = result.try_recv().unwrap().expect("known prefix");
+    assert_eq!(explanation.best.as_ref().map(|best| best.path_id), Some(17));
+    let advertised: BTreeMap<u32, u32> = explanation
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.route.path_id, candidate.advertised_path_id))
+        .collect();
+    assert_eq!(advertised, BTreeMap::from([(19, 3)]), "{explanation:?}");
+}
