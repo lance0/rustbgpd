@@ -4,7 +4,9 @@
 //! of a selection hold, exempt local RTBH and host routes, Add-Path ranks,
 //! backpressure, refused recovery proof, an Address Prefix ORF and the
 //! receiver's session flaps (a new channel and session id, with RFC 4724
-//! stale retention at a GR-capable peer). A tiny reference model
+//! stale retention at a GR-capable peer), and a grouped receiver's moves
+//! to the per-peer path through slow-peer isolation, a peer-context export
+//! policy or a conditional-advertisement attachment. A tiny reference model
 //! keeps the local and received intent; the receiver's wire is rebuilt from
 //! the updates it actually got. Every route carries a unique identity
 //! community, so a wire row names the exact injection it came from.
@@ -145,6 +147,62 @@ enum Op {
         gr_families: bool,
         writer_full: bool,
     },
+    /// Move a grouped receiver onto the per-peer path (`on`) or back,
+    /// through a production trigger. Exports are unchanged.
+    Regroup {
+        kind: RegroupKind,
+        on: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RegroupKind {
+    /// The transport's slow-peer isolation flag (`PeerSlowState`).
+    Slow,
+    /// An export policy with peer context (`ReplacePeerExportPolicy`).
+    PeerPolicy,
+    /// A conditional advertisement attached to the receiver, controlling
+    /// only a prefix outside the model.
+    Conditional,
+}
+
+/// A conditional advertisement that controls and observes only prefixes
+/// outside the model, attached to `attached` when given.
+fn unrelated_conditional(attached: Option<PeerId>) -> crate::ConditionalAdvertisementSet {
+    let policy = rustbgpd_policy::rpol::RpolFile::parse(
+        "policy unrelated { term t { if route.prefix == 192.0.2.250/32 { accept } } \
+         term rest { reject } }",
+    )
+    .expect("clean rpol")
+    .compile_policy(
+        "unrelated",
+        &[],
+        &mut rustbgpd_policy::sets::SetStore::new(),
+    )
+    .expect("policy exists");
+    let name: std::sync::Arc<str> = std::sync::Arc::from("unrelated");
+    crate::ConditionalAdvertisementSet {
+        definitions: vec![crate::ConditionalAdvertisement {
+            name: name.clone(),
+            advertise_policy: rustbgpd_policy::PolicyChain::from_named(vec![
+                rustbgpd_policy::NamedPolicy::from_rpol(
+                    "unrelated".to_string(),
+                    std::sync::Arc::new(policy),
+                ),
+            ]),
+            advertise_if: crate::ConditionalAdvertiseIf::Present,
+            condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(Prefix::V4(
+                Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 251), 32),
+            ))],
+            condition_policy: None,
+            settle_time: Duration::ZERO,
+            retiring: false,
+        }],
+        attachments: attached
+            .into_iter()
+            .map(|peer| (peer.addr().into(), vec![name.clone()]))
+            .collect(),
+    }
 }
 
 fn config_strategy() -> impl Strategy<Value = Config> {
@@ -193,6 +251,15 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
         2 => any::<bool>().prop_map(Op::Backpressure),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
+        2 => (
+            prop_oneof![
+                Just(RegroupKind::Slow),
+                Just(RegroupKind::PeerPolicy),
+                Just(RegroupKind::Conditional),
+            ],
+            any::<bool>()
+        )
+            .prop_map(|(kind, on)| Op::Regroup { kind, on }),
         2 => (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
             |(notification, helper, gr_families, writer_full)| Op::Reconnect {
                 notification,
@@ -240,10 +307,6 @@ struct Harness {
     reannounced: Option<BTreeSet<usize>>,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
-    /// Wire keys whose current row a dirty retry announced while its proof
-    /// was refused, and the keys the in-flight `RefuseProof` announced.
-    refused_retry_rows: HashSet<(Prefix, u32)>,
-    refusing: Option<HashSet<(Prefix, u32)>>,
     /// The receiver's current transport session.
     session: u64,
     /// Keys a GR helper retains as stale from a previous session until our
@@ -256,6 +319,9 @@ struct Harness {
     gr_families: bool,
     /// The receiver has an established session.
     registered: bool,
+    /// The receiver's configured export policy has peer context; a new
+    /// session registers with it.
+    peer_policy: bool,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -294,13 +360,12 @@ impl Harness {
             hold_starting: false,
             reannounced: None,
             blackholed: BTreeMap::new(),
-            refused_retry_rows: HashSet::new(),
-            refusing: None,
             session: OBSERVER_SESSION,
             stale: HashSet::new(),
             helper: true,
             gr_families: true,
             registered: false,
+            peer_policy: false,
         };
         if !config.late {
             harness.establish();
@@ -459,7 +524,7 @@ impl Harness {
         {
             *sendable_families = vec![FAMILY];
             *per_client_best = self.config.per_client_best;
-            if !self.config.grouped {
+            if !self.config.grouped || self.peer_policy {
                 *export_policy = Some(private_policy(None));
             }
             if self.config.add_path {
@@ -652,14 +717,50 @@ impl Harness {
                     &HashSet::new(),
                     &HashSet::from([peer_v4(OBSERVER)]),
                 );
-                // Record what this retry admits once its updates arrive.
-                self.refusing = Some(HashSet::new());
                 self.manager
                     .pending_group_admitted
                     .disarm_allocation_failure_for_test();
             }
             Op::Drain => {}
             Op::Reconnect { .. } => self.reconnect(op),
+            Op::Regroup { kind, on } => self.regroup(kind, on),
+        }
+    }
+
+    /// Only a grouped receiver has a group to leave; a private one already
+    /// takes the per-peer path.
+    fn regroup(&mut self, kind: RegroupKind, on: bool) {
+        if !self.config.grouped || !self.registered {
+            return;
+        }
+        let observer = peer_v4(OBSERVER);
+        match kind {
+            RegroupKind::Slow => self.manager.handle_update(RibUpdate::PeerSlowState {
+                peer: observer,
+                session_id: self.session,
+                slow: on,
+            }),
+            RegroupKind::PeerPolicy => {
+                self.peer_policy = on;
+                let (reply, mut response) = oneshot::channel();
+                self.manager
+                    .handle_update(RibUpdate::ReplacePeerExportPolicy {
+                        peer: observer,
+                        export_policy: on.then(|| private_policy(None)),
+                        reply,
+                    });
+                response.try_recv().unwrap().unwrap();
+            }
+            RegroupKind::Conditional => {
+                let (reply, mut capture) = oneshot::channel();
+                self.manager
+                    .handle_update(RibUpdate::InstallConditionalAdvertisements {
+                        set: unrelated_conditional(on.then_some(observer)),
+                        swapping_datasets: vec![],
+                        reply,
+                    });
+                capture.try_recv().unwrap();
+            }
         }
     }
 
@@ -736,7 +837,6 @@ impl Harness {
             for key in &update.withdraw {
                 self.wire.remove(key);
                 self.stale.remove(key);
-                self.refused_retry_rows.remove(key);
             }
             // The transport sends an envelope's withdrawals as their own
             // UPDATEs before its announcements, and splits announcements with
@@ -786,10 +886,6 @@ impl Harness {
             let key = (route.prefix, route.path_id);
             self.wire.insert(key, injection);
             self.stale.remove(&key);
-            self.refused_retry_rows.remove(&key);
-            if let Some(refusing) = self.refusing.as_mut() {
-                refusing.insert(key);
-            }
             if self.held {
                 self.check_blackholed()?;
             }
@@ -926,17 +1022,6 @@ impl Harness {
             });
         if self.stale.contains(&key) && candidate {
             return allowed("LAN-2727");
-        }
-        // LAN-2701: under refused proof, a private receiver keeps a deleted
-        // RTBH until release when the refused retry itself announced its
-        // current row: a new RTBH, or a path the retry moved onto the
-        // Add-Path key an unadmitted exempt path would take.
-        let refused = self
-            .manager
-            .group_recovery_fallback(peer_v4(OBSERVER))
-            .is_some();
-        if !self.config.grouped && refused && self.refused_retry_rows.contains(&key) {
-            return allowed("LAN-2701");
         }
         None
     }
@@ -1090,19 +1175,6 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
         }
         harness.apply(op);
         harness.observe()?;
-        // The retry's rows count as refused only while its proof is refused.
-        let refusing = harness.refusing.take();
-        if harness
-            .manager
-            .group_recovery_fallback(peer_v4(OBSERVER))
-            .is_some()
-        {
-            harness
-                .refused_retry_rows
-                .extend(refusing.unwrap_or_default());
-        } else {
-            harness.refused_retry_rows.clear();
-        }
         let drained = matches!(op, Op::Drain);
         if drained {
             harness.drain()?;
@@ -1783,6 +1855,151 @@ fn waiting_stale_rtbh_leaves_once_its_prefix_has_no_route() {
     let failed: Vec<_> = cases
         .into_iter()
         .filter_map(|(config, hold)| failure(config, &[], &hold))
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// Each `Regroup` trigger really moves a grouped receiver onto the per-peer
+/// path and back, so the op cannot pass vacuously.
+#[test]
+fn regroup_triggers_move_a_grouped_receiver() {
+    let config = Config {
+        grouped: true,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    for kind in [
+        RegroupKind::Slow,
+        RegroupKind::PeerPolicy,
+        RegroupKind::Conditional,
+    ] {
+        let mut harness = Harness::new(config);
+        let observer = peer_v4(OBSERVER);
+        assert!(harness.manager.grouped_member_of(observer).is_some());
+        harness.apply(&Op::Regroup { kind, on: true });
+        assert!(
+            harness.manager.grouped_member_of(observer).is_none(),
+            "{kind:?} on leaves the group"
+        );
+        harness.apply(&Op::Regroup { kind, on: false });
+        assert!(
+            harness.manager.grouped_member_of(observer).is_some(),
+            "{kind:?} off rejoins a group"
+        );
+    }
+}
+
+/// A grouped receiver that leaves its group while dirty still owes the
+/// withdrawal of a row deleted behind its full writer. Red proof: dropping
+/// the leaver's owed withdrawals in `recompute_update_group` fails every
+/// trigger here.
+#[test]
+fn regroup_leaver_keeps_its_owed_withdrawals() {
+    let setup = vec![
+        Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+    ];
+    let mut failed = Vec::new();
+    for per_client_best in [false, true] {
+        let config = Config {
+            grouped: true,
+            add_path: false,
+            per_client_best,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        for kind in [
+            RegroupKind::Slow,
+            RegroupKind::PeerPolicy,
+            RegroupKind::Conditional,
+        ] {
+            for prefix in [0, 2] {
+                let hold = [
+                    Op::Backpressure(true),
+                    Op::Delete { prefix, path: 0 },
+                    Op::Regroup { kind, on: true },
+                    Op::Backpressure(false),
+                    Op::Drain,
+                ];
+                if let Some(reason) = failure(config, &setup, &hold) {
+                    failed.push(format!(
+                        "pcb={per_client_best} {kind:?} prefix {prefix}: {reason}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// I5 under refused proof: an RTBH the refused retry itself admitted, then
+/// deleted in the hold, leaves the wire inside the hold. Single-best (a),
+/// and Add-Path (b) where the deleted path holds the key an unadmitted
+/// exempt path would take while another exempt row covers the prefix.
+#[test]
+fn refused_retry_admitted_rtbh_leaves_the_wire_inside_the_hold() {
+    let single = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let host = |path, preference| Op::Inject {
+        prefix: 1,
+        path,
+        preference,
+        blackhole: false,
+    };
+    let cases = [
+        (
+            "a: single-best",
+            single,
+            vec![
+                Op::Backpressure(true),
+                host(2, 0),
+                Op::RefuseProof,
+                Op::Delete { prefix: 1, path: 2 },
+                Op::Drain,
+            ],
+        ),
+        (
+            "b: Add-Path with a covering exempt row",
+            Config {
+                add_path: true,
+                ..single
+            },
+            vec![
+                host(0, 0),
+                Op::Backpressure(true),
+                host(2, 0),
+                Op::RefuseProof,
+                host(1, 0),
+                Op::Delete { prefix: 1, path: 0 },
+                Op::Drain,
+            ],
+        ),
+    ];
+    let failed: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(name, config, hold)| {
+            failure(config, &[], &hold).map(|reason| format!("{name}: {reason}"))
+        })
         .collect();
     assert!(failed.is_empty(), "{failed:#?}");
 }

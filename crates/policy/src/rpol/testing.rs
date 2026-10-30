@@ -22,7 +22,7 @@ use crate::engine::{
     NamedPolicy, NextHopAction, PolicyAction, PolicyChain, RouteContext, RouteFamily,
     RouteModifications, RouteType, ext_community_identity,
 };
-use crate::ir::CompiledChain;
+use crate::ir::{CompiledChain, is_well_known_community};
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, SetStore};
 
 use super::ast::{
@@ -690,9 +690,9 @@ fn discard_asserted(assertion: &WithAssertion, fixture: &Fixture, mods: &mut Rou
             .large_communities_remove
             .retain(|lc| lc.global_admin != *global || !fixture.large_communities.contains(lc)),
         WithAssertion::RemovesAll(kind) => match kind {
-            CommunityKind::Standard => mods
-                .communities_remove
-                .retain(|value| !fixture.communities.contains(value)),
+            CommunityKind::Standard => mods.communities_remove.retain(|value| {
+                is_well_known_community(*value) || !fixture.communities.contains(value)
+            }),
             CommunityKind::Ext => {
                 let fixture: std::collections::HashSet<_> = fixture
                     .extended_communities
@@ -787,7 +787,9 @@ fn community_listed(
     }
 }
 
-/// `removes <kind> *`: every fixture value of the kind is removed.
+/// `removes <kind> *`: every fixture value the scrub targets is removed —
+/// every value of the kind, except well-known standard communities, which
+/// `remove community *` keeps.
 fn check_removes_all(
     kind: CommunityKind,
     mods: &RouteModifications,
@@ -798,7 +800,12 @@ fn check_removes_all(
     // identity for extended communities.
     let missing = match kind {
         CommunityKind::Standard => unremoved(
-            &fixture.communities,
+            &fixture
+                .communities
+                .iter()
+                .copied()
+                .filter(|value| !is_well_known_community(*value))
+                .collect::<Vec<_>>(),
             &mods.communities_remove,
             |value| *value,
             |value| format!("{}:{}", value >> 16, value & 0xffff),

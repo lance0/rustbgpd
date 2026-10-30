@@ -2784,11 +2784,14 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
 }
 
 /// Refused proof while a deleted RTBH path's key is re-announced for its
-/// surviving sibling. With Add-Path (a private receiver) the sibling only
-/// moves rank: withdraw the deleted path's key and keep the sibling's old
-/// key. With one path per prefix (a grouped receiver) the replacement has no
-/// other key, so the deleted path stays: the prefix must never lose its
-/// blackhole. `held_counts` also checks the advertised count inside the hold.
+/// surviving sibling. A private Add-Path receiver's table still matches its
+/// admitted counts after the refused retry, so it is the wire: the delete
+/// re-ranks as outside the hold, moving the sibling to rank 1 and
+/// withdrawing rank 2, and the prefix stays blackholed throughout. With one
+/// path per prefix (a grouped receiver) the refused admission keeps the
+/// deleted path: the replacement has no other key, and the prefix must never
+/// lose its blackhole. `held_counts` also checks the advertised count inside
+/// the hold.
 #[expect(
     clippy::too_many_lines,
     reason = "one transcript covers pre-hold admission, refused proof, the replacement and release"
@@ -2907,22 +2910,22 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     assert!(result.try_recv().unwrap().unwrap().removed);
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(manager.selection_deferred(FAMILY));
-    assert!(
-        updates.iter().all(|update| update.announce.is_empty()),
-        "re-announcing path 23 needs the refused admission"
-    );
     let withdrawn: Vec<_> = updates
         .iter()
         .flat_map(|update| &update.withdraw)
         .copied()
         .collect();
     if add_path {
-        assert_eq!(withdrawn, [(prefix, 1)], "the deleted rank-1 path leaves");
+        // Each UPDATE withdraws before it announces: rank 1 keeps the
+        // deleted path until path 23 replaces it, so no gap unblackholes
+        // the prefix.
+        assert_eq!(withdrawn, [(prefix, 2)], "rank 2 empties");
         assert_eq!(
-            wire.get(&(prefix, 2)).map(Route::local_pref),
+            wire.get(&(prefix, 1)).map(Route::local_pref),
             Some(100),
-            "the surviving RTBH path keeps its old rank"
+            "the surviving RTBH path moves to rank 1"
         );
+        assert!(!wire.contains_key(&(prefix, 2)));
         if held_counts {
             assert_eq!(
                 manager.actual_unicast_advertised_count(observer),
@@ -2930,6 +2933,10 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
             );
         }
     } else {
+        assert!(
+            updates.iter().all(|update| update.announce.is_empty()),
+            "re-announcing path 23 needs the refused admission"
+        );
         assert_eq!(withdrawn, [], "the replacement has no other key");
         assert_eq!(
             wire.get(&(prefix, 0)).map(Route::local_pref),
@@ -2970,7 +2977,6 @@ fn refused_proof_withdraws_a_deleted_add_path_rtbh_and_keeps_its_moved_sibling()
 }
 
 #[test]
-#[ignore = "LAN-2702: the held count omits the RTBH admitted under refused proof"]
 fn refused_proof_add_path_rtbh_admission_keeps_held_advertised_count() {
     assert_refused_proof_rtbh_replacement(true, true);
 }
@@ -2980,114 +2986,77 @@ fn refused_proof_keeps_a_single_best_prefix_blackholed_across_rtbh_replacement()
     assert_refused_proof_rtbh_replacement(false, true);
 }
 
-/// The refused-proof replacement salvage is linear in the batch: deleting
-/// rank 1 of `siblings` Add-Path RTBH paths re-ranks every other path, and
-/// each re-announcement must not rescan the prefix's siblings.
-fn refused_replacement_salvage_visits(siblings: u32) -> usize {
+/// The refused-proof replacement salvage is linear in the batch. A grouped
+/// receiver dirty in the hold regroups onto a peer-context export policy,
+/// leaving its private admission incomplete. One refused retry then
+/// re-announces the backup of every deleted RTBH, and each re-announcement
+/// must not rescan the receiver's other export sources.
+fn refused_replacement_salvage_visits(prefixes: u8) -> usize {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
-    let (tx, mut rx) = mpsc::channel(256);
-    let registration = |tx| {
-        let mut up = super::lifecycle::test_peer_up(observer, 82, tx);
-        if let RibUpdate::PeerUp {
-            per_client_best,
-            add_path_send_families,
-            add_path_send_max,
-            sendable_families,
-            ..
-        } = &mut up
-        {
-            *per_client_best = true;
-            *sendable_families = vec![FAMILY];
-            *add_path_send_families = vec![FAMILY];
-            *add_path_send_max = siblings;
+    let mut rx = connect(&mut manager, OBSERVER, 256, false, false);
+    assert!(manager.grouped_member_of(observer).is_some());
+    let host = |n| Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, n), 32);
+    for n in 1..=prefixes {
+        for (path_id, preference) in [(100, 200), (101, 100)] {
+            let mut route = make_route_with_lp(host(n), SOURCE, preference);
+            set_peer(&mut route, crate::PeerId::LOCAL);
+            route.origin_type = crate::route::RouteOrigin::Local;
+            route.path_id = path_id;
+            let (reply, mut result) = oneshot::channel();
+            manager.handle_update(RibUpdate::InjectRoute { route, reply });
+            result.try_recv().unwrap().unwrap();
         }
-        up
-    };
-    manager.handle_update(registration(tx.clone()));
+    }
+    drain_route_chunks(&mut manager);
     let mut wire = std::collections::HashMap::new();
     apply_wire(&mut rx, &mut wire);
-    super::outbound_prefix_limits::prepare(
-        &mut manager,
-        1,
-        super::outbound_prefix_limits::limit_config(&[(observer, Some(8), None)], &[]),
-    )
-    .unwrap();
-    super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
-    let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
-    let prefix = Prefix::V4(host);
-    for rank in 0..siblings {
-        let mut route = make_route_with_lp(host, SOURCE, 1000 - rank);
-        set_peer(&mut route, crate::PeerId::LOCAL);
-        route.origin_type = crate::route::RouteOrigin::Local;
-        route.path_id = 100 + rank;
-        let (reply, mut result) = oneshot::channel();
-        manager.handle_update(RibUpdate::InjectRoute { route, reply });
-        result.try_recv().unwrap().unwrap();
-    }
-    manager.handle_update(RibUpdate::RoutesReceived {
-        peer: peer_v4(SOURCE),
-        session_id: 81,
-        announced: vec![make_route(
-            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
-            SOURCE,
-        )],
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
-        evpn_withdrawn: vec![],
-        validated_with: None,
-    });
-    drain_route_chunks(&mut manager);
-    apply_wire(&mut rx, &mut wire);
-    assert_eq!(
-        wire.keys().filter(|key| key.0 == prefix).count(),
-        siblings as usize
-    );
+    assert_eq!(wire.len(), usize::from(prefixes));
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
     let writer = manager.outbound_peers[&observer].clone();
     let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
-    inject_host(
-        &mut manager,
-        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
-    );
+    inject_host(&mut manager, host(prefixes + 1));
+    assert!(manager.dirty_peers.contains(&observer));
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: observer,
+        export_policy: Some(private_policy(None)),
+        reply,
+    });
+    result.try_recv().unwrap().unwrap();
+    assert!(manager.grouped_member_of(observer).is_none());
+    assert!(manager.private_common_admission_incomplete(observer));
+    for n in 1..=prefixes {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix: Prefix::V4(host(n)),
+            path_id: 100,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(result.try_recv().unwrap().unwrap().removed);
+    }
     drop(occupied);
+    manager.refused_replacement_salvage_visits = 0;
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
     manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
     assert!(manager.group_recovery_fallback(observer).is_some());
-    // Complete private bodies still admit the new RTBH host.
-    apply_wire(&mut rx, &mut wire);
-    manager.refused_replacement_salvage_visits = 0;
-    let (reply, mut result) = oneshot::channel();
-    manager.handle_update(RibUpdate::WithdrawInjected {
-        prefix,
-        path_id: 100,
-        allow_missing: false,
-        owner: String::new(),
-        override_owner: false,
-        reply,
-    });
-    assert!(result.try_recv().unwrap().unwrap().removed);
-    let withdrawn: Vec<_> = apply_wire(&mut rx, &mut wire)
-        .iter()
-        .flat_map(|update| update.withdraw.clone())
-        .collect();
-    assert_eq!(withdrawn, [(prefix, 1)], "the deleted rank-1 path leaves");
     manager.refused_replacement_salvage_visits
 }
 
 #[test]
-fn refused_replacement_salvage_work_is_linear_in_add_path_siblings() {
-    for siblings in [4, 16, 64] {
-        let visits = refused_replacement_salvage_visits(siblings);
-        let bound = 3 * siblings as usize + 8;
+fn refused_replacement_salvage_work_is_linear_in_departing_rtbh_prefixes() {
+    for prefixes in [4, 16, 64] {
+        let visits = refused_replacement_salvage_visits(prefixes);
+        let bound = 3 * usize::from(prefixes) + 8;
         assert!(
-            visits > siblings as usize && visits <= bound,
-            "{siblings} siblings cost {visits} salvage visits; bound {bound}"
+            visits > usize::from(prefixes) && visits <= bound,
+            "{prefixes} departing prefixes cost {visits} salvage visits; bound {bound}"
         );
     }
 }

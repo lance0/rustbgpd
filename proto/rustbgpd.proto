@@ -3968,7 +3968,7 @@ service InjectionService {
   // live in their own namespace and are reported as `guarded:<owner>`
   // (ListInjectionLeases, ListLeasedKeys, FlowSpecRouteEntry.injection_owner);
   // the leased and unleased methods cannot add, renew or delete them, apart
-  // from DeleteFlowSpec's override_owner. Outside the v1 contract.
+  // from DeleteFlowSpec's override_owner. Inventoried in v1 (API shape only).
   //
   // IssueMutationWindow issues a window to an owner, living window_seconds
   // (1..=120). An owner holds at most 64 live windows and the daemon 4,096;
@@ -4362,7 +4362,7 @@ message FlowSpecRouteEntry {
   // unmodelled types independently of extended_communities.
   repeated bytes ipv6_extended_communities = 11;
   // The admission revision of a rule added with AddGuardedFlowSpec, set
-  // with injection_owner. Outside the v1 contract.
+  // with injection_owner.
   optional uint64 admission_revision = 12;
 }
 
@@ -4531,8 +4531,7 @@ message LeasedKey {
   LeaseGeneration generation = 3;
   // Time to the lease deadline; 0 means expired, withdrawal pending.
   uint32 lease_remaining_ms = 4;
-  // The admission revision of a key added with AddGuardedFlowSpec. Outside
-  // the v1 contract.
+  // The admission revision of a key added with AddGuardedFlowSpec.
   optional uint64 admission_revision = 5;
 }
 

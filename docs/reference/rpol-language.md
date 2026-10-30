@@ -812,7 +812,9 @@ against an `asn-set`, or against a `community-set`'s standard members
 (`c in scrub` above; large/ext members of the set never match a u32)
 — and the binding-valued community actions `add community <var>` /
 `remove community <var>` (standard kind only), which stage the
-element's value per execution: the scrub-loop idiom. Shadowing follows
+element's value per execution: the scrub-loop idiom. A loop removal is
+explicit, so it removes well-known values such as `NO_EXPORT` too, unlike
+`remove community *`. Shadowing follows
 the `let` rules — the loop variable shadows outer bindings, a body
 `let` may shadow it.
 
@@ -1097,7 +1099,7 @@ Two consequences worth internalizing:
 | `add community 65001:999` / `remove community ...` | standard communities |
 | `add large-community 65000:1:2` / `remove ...` | large communities |
 | `remove large-community 65000:*:*` | every arrived large community with global administrator 65000 |
-| `remove community *` / `remove large-community *:*:*` / `remove ext-community *` | every arrived community of that kind |
+| `remove community *` / `remove large-community *:*:*` / `remove ext-community *` | every arrived community of that kind, except that `remove community *` keeps well-known communities (see below) |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
 | `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (ASN: 1–4294967295; count: literal 1–255) |
 | `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
@@ -1136,6 +1138,32 @@ a value added earlier and absent from the arrived route is kept. On a route
 without the attribute they do nothing. Each fails the route closed above its
 wire-derived bound (16,383 standard, 8,191 extended, 5,461 large communities),
 and the compiler pre-pays that scan.
+
+**`remove community *` keeps well-known communities.** Standard communities
+in the range RFC 1997 reserves for well-known values, `65535:0` through
+`65535:65535` (`NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`, `NOPEER`,
+`BLACKHOLE`, `GRACEFUL_SHUTDOWN`, `ACCEPT_OWN`, `LLGR_STALE`, `NO_LLGR` and
+the unassigned rest), stay on the route, as IOS-XR RPL `delete community
+all` and `set community` without `additive` keep well-known communities. The
+replace idiom therefore keeps a route's scoping:
+
+```rpol
+policy retag {
+    term t {
+        remove community *          # NO_EXPORT on the arrived route stays
+        add community 65000:100
+        accept
+    }
+}
+```
+
+Remove a well-known value by naming it: `remove community NO_EXPORT`, or
+`remove community 65535:65284` for one without a name. To empty the attribute
+entirely, including values with no name, remove each arrived value with a
+loop, `for c in route.communities { remove community c }`, which is subject
+to the loop's 4,096-element bound. Large and extended communities have no
+well-known range: `remove large-community *:*:*` and `remove ext-community *`
+remove every value.
 
 ### Routes that carry too many communities
 
@@ -1184,7 +1212,9 @@ policy strip-many-communities {
 ```
 
 A route server passes communities through by default, so this is opt-in
-ingress hygiene. Pin the threshold with fixtures on both sides of it and
+ingress hygiene. Unlike BIRD's `.empty`, `remove community *` keeps
+well-known values such as `NO_EXPORT`; use the loop form above if the scrub
+must remove those too. Pin the threshold with fixtures on both sides of it and
 `removes community *` (below).
 
 ### Computed prepend operands
@@ -1290,7 +1320,7 @@ has none). An empty string is a route without an AS path.
 | `community LIT` | `LIT` is in the add list (`large-community` / `ext-community` likewise) |
 | `removes community LIT` | `LIT` is in the remove list (any community kind keyword) |
 | `removes large-community GA:*:*` | every matching fixture value is in the remove list; the fixture must contain at least one match |
-| `removes community *` / `removes large-community *:*:*` / `removes ext-community *` | every fixture value of that kind is in the remove list; the fixture must carry at least one |
+| `removes community *` / `removes large-community *:*:*` / `removes ext-community *` | every fixture value the matching strip-all form removes is in the remove list (for `community`, every value outside the well-known range); the fixture must carry at least one such value |
 | `not removed community LIT` | `LIT` is present in the fixture and absent from the remove list (any community kind keyword) |
 | `without community LIT` | `LIT` is **not** in the add list (any community kind keyword) |
 | `without local-pref\|med\|next-hop\|prepend` | the policy leaves that attribute unchanged |
