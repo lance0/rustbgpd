@@ -119,6 +119,15 @@ impl OutboundPrefixLimits {
         }
     }
 
+    #[cfg(test)]
+    pub(in crate::manager) fn grouped_capacity(&self, afi: Afi) -> usize {
+        match afi {
+            Afi::Ipv4 => self.grouped_admitted_ipv4.capacity(),
+            Afi::Ipv6 => self.grouped_admitted_ipv6.capacity(),
+            _ => 0,
+        }
+    }
+
     /// Remove one withdrawn prefix from its exact typed family set.
     pub(in crate::manager) fn grouped_remove(&mut self, prefix: &Prefix) {
         match prefix {
@@ -1461,11 +1470,14 @@ impl RibManager {
                 }
                 // Every projected route keeps its staged prefix, including lane
                 // substitutions and Add-Path slots. Exclusions only reduce this
-                // distinct-family-prefix upper bound.
+                // distinct-family-prefix upper bound. Preflight proved the
+                // projection fits the limit, and later admissions cannot pass
+                // it, so the limit bounds this retained set for its lifetime.
                 let capacity = self
                     .grouped_member_of(peer)
                     .and_then(|gid| self.group_ribs.get(&gid))
-                    .map_or(0, |group| group.table.unicast_prefix_count(afi));
+                    .map_or(0, |group| group.table.unicast_prefix_count(afi))
+                    .min(limit.map_or(usize::MAX, |limit| limit.get() as usize));
                 self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
                 let admitted = self.grouped_advertised_routes_iter(peer).map_or_else(
                     || TypedGroupedAdmitted::collect(afi, std::iter::empty()),
