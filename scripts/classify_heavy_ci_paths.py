@@ -111,18 +111,22 @@ def _shallow_commits(repo: Path) -> frozenset[str]:
 
 
 def _merge_base_complete(repo: Path, base: str, head: str) -> bool:
-    """Whether every commit between base/head and their merge bases is present.
+    """Whether every commit between base/head and each merge base is present.
 
     A shallow commit on either side could hide a newer merge base, and Git
-    would then diff against an older common ancestor without complaint.
+    would then diff against an older common ancestor without complaint. Each
+    candidate is checked on its own: a boundary at or below one candidate can
+    hide that another candidate is its ancestor, not a second merge base.
     """
     bases = _git(repo, "merge-base", "--all", base, head)
     if bases.returncode != 0 or not bases.stdout.split():
         return False
-    sides = _git(repo, "rev-list", base, head, "--not", *bases.stdout.decode().split())
-    return sides.returncode == 0 and not (
-        _shallow_commits(repo) & set(sides.stdout.decode().split())
-    )
+    shallow = _shallow_commits(repo)
+    for candidate in bases.stdout.decode().split():
+        sides = _git(repo, "rev-list", base, head, "--not", candidate)
+        if sides.returncode != 0 or shallow & set(sides.stdout.decode().split()):
+            return False
+    return True
 
 
 def ensure_merge_base(repo: Path, base: str, head: str) -> None:

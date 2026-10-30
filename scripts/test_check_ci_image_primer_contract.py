@@ -1097,6 +1097,50 @@ class HeavyLabPathClassifierTests(unittest.TestCase):
             with self.assertRaises(heavy.ClassificationError):
                 heavy.changed_paths(clone, base, head)
 
+    def test_shallow_merge_base_candidate_cannot_hide_an_older_one(self):
+        """Base and head both merge an older main commit back in. At depth 3
+        the true merge base is a shallow boundary, so the older commit looks
+        like a second, independent merge-base candidate. Dated last, it is the
+        one Git diffs against, and the PR's revert of src/lib.rs disappears:
+        a fuzz-only diff would skip the labs."""
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            upstream = temporary / "upstream"
+            upstream.mkdir()
+            self.git(upstream, "init", "-q", "-b", "main")
+            self.git(upstream, "config", "uploadpack.allowAnySHA1InWant", "true")
+            self.commit_file(upstream, "README", "root")
+            with mock.patch.dict(os.environ, {"GIT_COMMITTER_DATE": "2030-01-01T00:00:00Z"}):
+                older = self.commit_file(upstream, "src/lib.rs", "v1")
+            for number in range(2, 12):
+                merge_base = self.commit_file(upstream, "src/lib.rs", f"v{number}")
+
+            def merge_older(files: dict[str, str]) -> str:
+                for relative, content in files.items():
+                    (upstream / relative).parent.mkdir(parents=True, exist_ok=True)
+                    (upstream / relative).write_text(content)
+                self.git(upstream, "add", "--", *files)
+                self.git(upstream, "commit", "-qm", "tip")
+                tree = self.git(upstream, "rev-parse", "HEAD^{tree}")
+                return self.git(
+                    upstream, "commit-tree", tree, "-p", "HEAD", "-p", older, "-m", "merge older"
+                )
+
+            head = merge_older({"src/lib.rs": "v1", "crates/wire/fuzz/seeds/pr": "seed"})
+            self.git(upstream, "branch", "pr", head)
+            self.git(upstream, "reset", "-q", "--hard", merge_base)
+            base = merge_older({"src/base_only.rs": "base"})
+            self.git(upstream, "reset", "-q", "--hard", base)
+            expected = heavy.changed_paths(upstream, base, head)
+            self.assertEqual(expected, ("crates/wire/fuzz/seeds/pr", "src/lib.rs"))
+            self.assertTrue(heavy.classify_paths(expected)[0])
+            self.git(temporary, "clone", "-q", "--depth=1", upstream.as_uri(), "clone")
+            clone = temporary / "clone"
+            with mock.patch.object(heavy, "FETCH_DEPTHS", (3,)):
+                with self.assertRaisesRegex(heavy.ClassificationError, "no complete merge base"):
+                    heavy.changed_paths(clone, base, head)
+            self.assertEqual(heavy.changed_paths(clone, base, head), expected)
+
     def test_allowed_fuzz_roots_are_standalone_workspaces(self):
         main = json.loads(
             subprocess.check_output(
