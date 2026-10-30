@@ -72,3 +72,7 @@ required-features = ["bench-internals"]
 name = "explain_snapshot"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "shared_payload_drop"
+harness = false

@@ -43,6 +43,9 @@ pub(super) struct PendingOutbound {
     evpn_announce: std::vec::IntoIter<EvpnRibRoute>,
     vpn_announce: std::vec::IntoIter<VpnRibRoute>,
     labeled_announce: std::vec::IntoIter<LabeledRibRoute>,
+    /// Unicast announcements, filled only once the envelope completes (see
+    /// [`Self::begin_retirement`]); until then they stay in `update`.
+    announce: std::vec::IntoIter<Route>,
     /// Spans every announce slice, so the envelope reports dropped IPv6
     /// next hops once, when its announce phase completes.
     dropped_ipv6_next_hops: DroppedIpv6NextHops,
@@ -128,6 +131,45 @@ fn take_private_announcements<T>(
 }
 
 impl PendingOutbound {
+    /// Once every frame is admitted, no fallback can read the announcements
+    /// again. Where this session holds the last reference to a shared (or
+    /// private unicast) inventory it takes ownership, so the inventory is
+    /// released a bounded batch per advance, like moved private payloads,
+    /// instead of in one synchronous drop. Returns whether any remains after
+    /// the first batch.
+    fn begin_retirement(&mut self) -> bool {
+        self.announce = take_private_announcements(&mut self.update.announce, false);
+        self.vpn_announce = take_private_announcements(&mut self.update.vpn_announce, false);
+        self.evpn_announce = take_private_announcements(&mut self.update.evpn_announce, false);
+        self.capacity_blocked = false;
+        self.phase = OUTBOUND_PHASES.len();
+        self.retire_step()
+    }
+
+    /// Release one slice-sized batch of a completed envelope's inventory,
+    /// sized by the same slice-cost feedback as encode slices.
+    fn retire_step(&mut self) -> bool {
+        let started = Instant::now();
+        let budget = self.slice_routes;
+        let released = self.announce.by_ref().take(budget).count()
+            + self.vpn_announce.by_ref().take(budget).count()
+            + self.evpn_announce.by_ref().take(budget).count();
+        let cost = started.elapsed();
+        #[cfg(test)]
+        let cost = self.test_slice_cost.unwrap_or(cost);
+        if released > 0 {
+            self.charge_slice(cost);
+        }
+        self.retiring()
+    }
+
+    /// Only a completed envelope retires: before that, the moved private
+    /// iterators still hold routes to send.
+    fn retiring(&self) -> bool {
+        self.phase == OUTBOUND_PHASES.len()
+            && self.announce.len() + self.vpn_announce.len() + self.evpn_announce.len() > 0
+    }
+
     fn shared_announce_phase(&self) -> usize {
         if !self.update.evpn_announce.is_empty() {
             EVPN_ANNOUNCE_PHASE
@@ -366,6 +408,7 @@ impl PeerSession {
             evpn_announce,
             vpn_announce,
             labeled_announce: std::mem::take(&mut update.labeled_announce).into_iter(),
+            announce: Vec::new().into_iter(),
             update,
             shared,
             requests,
@@ -490,6 +533,13 @@ impl PeerSession {
         let Some(mut pending) = self.pending_outbound.take() else {
             return;
         };
+        if pending.retiring() {
+            // Every frame is already admitted; only the release remains.
+            if pending.retire_step() {
+                self.pending_outbound = Some(pending);
+            }
+            return;
+        }
         let Some(writer) = &self.writer_bulk_tx else {
             self.outbound_admission_timer = None;
             return;
@@ -630,6 +680,9 @@ impl PeerSession {
             }
         } else {
             self.outbound_admission_timer = None;
+            if finished && pending.update.replay.is_none() && pending.begin_retirement() {
+                self.pending_outbound = Some(pending);
+            }
         }
         self.sample_outbound_queue_depth();
     }

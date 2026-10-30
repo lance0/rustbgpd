@@ -3102,3 +3102,103 @@ async fn shared_encode_cell_refuses_a_mismatched_payload() {
         );
     }
 }
+
+/// The member that holds the last reference to a completed shared inventory
+/// releases it one bounded batch per advance after its final frame, not in
+/// the one turn that admits that frame. Unicast and VPN alike.
+#[tokio::test]
+async fn shared_group_last_owner_retires_inventory_in_bounded_steps() {
+    const SLICE: usize = super::shared_group::PROGRESSIVE_SLICE_ROUTES;
+    let total = 4 * SLICE + 1;
+    let source = Ipv4Addr::new(10, 46, 0, 1);
+    for vpn in [false, true] {
+        let unicast_template = make_sourced_route(
+            source,
+            Ipv4Prefix::new(Ipv4Addr::new(20, 0, 0, 0), 24),
+            64_601,
+        );
+        let vpn_template = make_vpn_rib_route(101);
+        let held = Arc::clone(if vpn {
+            &vpn_template.attributes
+        } else {
+            &unicast_template.attributes
+        });
+        let base = Arc::strong_count(&held);
+        let live = || Arc::strong_count(&held) - base;
+        let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+        let mut members = Vec::new();
+        let mut updates = Vec::new();
+        let unicast: Arc<Vec<Route>> = Arc::new(if vpn {
+            Vec::new()
+        } else {
+            (0..u32::try_from(total).unwrap())
+                .map(|i| Route {
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x1400_0000 | (i << 8)), 24)),
+                    ..unicast_template.clone()
+                })
+                .collect()
+        });
+        let vpn_routes: Arc<Vec<_>> = Arc::new(if vpn {
+            (0..u32::try_from(total).unwrap())
+                .map(|i| {
+                    let mut route = vpn_template.clone();
+                    route.nlri.prefix = VpnPrefix::v4(Ipv4Addr::from(0x0a00_0000 | i), 32).unwrap();
+                    route
+                })
+                .collect()
+        } else {
+            Vec::new()
+        });
+        for _ in 0..2 {
+            let (mut session, rib_rx) = make_test_session_with_rib(65001, 65002);
+            let mut negotiated = negotiated_session(65002, false);
+            if vpn {
+                negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+            }
+            session.negotiated = Some(Arc::new(negotiated));
+            session.config.route_server_client = true;
+            let (bulk, frames) = mpsc::channel(100_000);
+            session.writer_bulk_tx = Some(bulk);
+            let update = if vpn {
+                OutboundRouteUpdate {
+                    exact_export_snapshot: Some(session.publish_export_profile()),
+                    vpn_announce: Arc::clone(&vpn_routes),
+                    shared_group_encode: Some(Arc::clone(&shared)),
+                    ..OutboundRouteUpdate::default()
+                }
+            } else {
+                shared_group_envelope(&session, &shared, Ipv4Addr::new(10, 46, 0, 254), &unicast)
+            };
+            updates.push(update);
+            members.push((session, rib_rx, frames));
+        }
+        drop((unicast, vpn_routes));
+        assert_eq!(live(), total);
+
+        // The first member completes while the second still holds the inventory.
+        let (first, _, _) = &mut members[0];
+        first.test_drain_outbound(updates.remove(0)).await;
+        assert_eq!(
+            live(),
+            total,
+            "vpn={vpn}: a non-last member releases nothing"
+        );
+
+        let (last, _, frames) = &mut members[1];
+        let mut before = live();
+        last.handle_outbound_route_update(updates.remove(0)).await;
+        let mut released = vec![before - live()];
+        while let Some(pending) = last.pending_outbound.as_ref() {
+            pending.ready(last.writer_bulk_tx.as_ref()).await;
+            before = live();
+            last.advance_pending_outbound();
+            released.push(before - live());
+            while frames.try_recv().is_ok() {}
+        }
+        assert_eq!(live(), 0, "vpn={vpn}: the last owner releases every route");
+        assert!(
+            released.iter().all(|&batch| batch <= SLICE),
+            "vpn={vpn}: one advance released more than a slice: {released:?}"
+        );
+    }
+}
