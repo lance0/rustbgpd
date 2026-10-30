@@ -112,6 +112,7 @@ check-contracts:
     python3 -m unittest -v scripts/test_check_embedding_crate_map.py
     python3 scripts/check_embedding_crate_map.py
     python3 -m unittest -v scripts/test_check_release_preflight.py
+    python3 -m unittest -v scripts/test_check_release_build_features.py
     python3 -m unittest -v scripts/test_source_id.py
     just check-changelog-fragments
 

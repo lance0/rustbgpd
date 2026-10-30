@@ -44,7 +44,10 @@ PACKAGE_FILES = frozenset(
     {
         ".github/workflows/release.yml",
         ".github/workflows/release-install-contract.yml",
+        ".github/workflows/release-build-features.yml",
         "scripts/build-packages.sh",
+        "scripts/check_release_build_features.py",
+        "scripts/test_check_release_build_features.py",
         "scripts/check_release_install_contract.py",
         "scripts/test_check_release_install_contract.py",
     }
