@@ -212,6 +212,10 @@ struct Harness {
     orf_gated: bool,
     held: bool,
     replayed: bool,
+    /// The receiver is taking the hold's first distribution.
+    hold_starting: bool,
+    /// Exempt injections the envelope between its phases re-announces.
+    reannounced: Option<BTreeSet<usize>>,
     /// A replay in the hold found the receiver in an update group.
     grouped_replayed: bool,
     refused: bool,
@@ -253,6 +257,8 @@ impl Harness {
             orf_gated: config.orf,
             held: false,
             replayed: false,
+            hold_starting: false,
+            reannounced: None,
             grouped_replayed: false,
             refused: false,
             blackholed: BTreeMap::new(),
@@ -543,6 +549,22 @@ impl Harness {
             for key in &update.withdraw {
                 self.wire.remove(key);
             }
+            // The transport sends an envelope's withdrawals as their own
+            // UPDATEs before its announcements, so the peer also sees the
+            // state between the two phases.
+            if self.held {
+                self.reannounced = Some(
+                    update
+                        .announce
+                        .iter()
+                        .map(Self::identity)
+                        .filter(|&injection| self.injections[injection].exempt)
+                        .collect(),
+                );
+                let between_phases = self.check_blackholed();
+                self.reannounced = None;
+                between_phases?;
+            }
             for route in update.announce.iter() {
                 let injection = Self::identity(route);
                 let resurrected =
@@ -554,7 +576,7 @@ impl Harness {
                 );
                 self.wire.insert((route.prefix, route.path_id), injection);
             }
-            // A withdraw and re-announce in separate UPDATEs leaves the
+            // A withdraw and re-announce in separate envelopes leaves the
             // peer unblackholed in between, so check each one.
             if self.held {
                 self.check_blackholed()?;
@@ -635,6 +657,17 @@ impl Harness {
             .all(|&injection| !self.injections[injection].live);
         if self.config.add_path && fallback && removed {
             return allowed("LAN-2692");
+        }
+        // LAN-2698: at the hold's start an Add-Path receiver re-ranks an
+        // exempt path above a frozen ordinary one, withdrawing its old key
+        // in the envelope's withdraw phase before announcing the new one.
+        let restored = self.reannounced.as_ref().is_some_and(|reannounced| {
+            self.blackholed[&index]
+                .iter()
+                .all(|injection| reannounced.contains(injection))
+        });
+        if self.config.add_path && self.hold_starting && restored {
+            return allowed("LAN-2698");
         }
         None
     }
@@ -835,7 +868,9 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     harness.waiter = Some(connect(&mut harness.manager, WAITER, 64, true, false));
     harness.held = true;
     prop_assert!(harness.manager.selection_deferred(FAMILY));
+    harness.hold_starting = true;
     harness.observe()?;
+    harness.hold_starting = false;
     for op in hold {
         if std::env::var("ORACLE_TRACE").is_ok() {
             eprintln!(
@@ -1024,5 +1059,66 @@ fn i1_catches_a_transient_unblackhole_between_updates() {
     assert!(
         transient(false).is_ok(),
         "a check after the whole channel cannot see it"
+    );
+}
+
+/// One envelope that withdraws the live RTBH key and announces its
+/// exempt replacement reaches the peer as two UPDATEs, withdrawals first:
+/// I1 must see the gap between the phases.
+#[test]
+fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+    };
+    let replaced = |held: bool, between_phases: bool| {
+        let mut harness = Harness::new(config);
+        harness.apply(&Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        });
+        harness.apply(&Op::Inject {
+            prefix: 0,
+            path: 1,
+            preference: 1,
+            blackhole: false,
+        });
+        harness.drain().unwrap();
+        let host = prefix(0);
+        assert_eq!(harness.wire.get(&(host, 0)), Some(&1));
+        harness.blackholed = harness.exempt_rows();
+        let Prefix::V4(v4) = host else { unreachable!() };
+        let mut route = make_route_with_lp(v4, SOURCE, 100);
+        route.path_id = 7;
+        route.attributes = AttrSet::new(vec![PathAttribute::Communities(vec![IDENTITY_ASN << 16])]);
+        // A seeded envelope: drop the live row's key, announce injection
+        // 0 (still live and exempt) under another key.
+        harness
+            .tx
+            .try_send(OutboundRouteUpdate {
+                withdraw: vec![(host, 0)],
+                announce: Arc::new(vec![route]),
+                ..OutboundRouteUpdate::default()
+            })
+            .unwrap();
+        harness.held = held && between_phases;
+        let observed = harness.observe().map(|_| ());
+        harness.held = held;
+        observed.and_then(|()| harness.check_blackholed())
+    };
+    let error = replaced(true, true).expect_err("the phase gap unblackholes the peer");
+    assert!(
+        error
+            .to_string()
+            .contains("I1: 198.51.100.1/32 lost its exempt row")
+    );
+    assert!(
+        replaced(true, false).is_ok(),
+        "a check after the whole envelope cannot see it"
     );
 }
