@@ -1021,7 +1021,7 @@ impl AdjRibIn {
             checkpoint();
             deleted.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.remove_route_entry(&key.0, key.1);
+            self.remove_route_entry_with_checkpoint(&key.0, key.1, checkpoint);
             checkpoint();
         }
         retire_llgr_keys(already_stale, checkpoint);
@@ -1126,7 +1126,7 @@ impl AdjRibIn {
             checkpoint();
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.remove_route_entry(&key.0, key.1);
+            self.remove_route_entry_with_checkpoint(&key.0, key.1, checkpoint);
             checkpoint();
         }
         retire_llgr_keys(to_remove, checkpoint);
@@ -1235,7 +1235,7 @@ impl AdjRibIn {
             checkpoint();
             changed.push(key.0);
             self.llgr_stale_local_tags.remove(key);
-            self.remove_route_entry(&key.0, key.1);
+            self.remove_route_entry_with_checkpoint(&key.0, key.1, checkpoint);
             checkpoint();
         }
         retire_llgr_keys(stale, checkpoint);
@@ -2165,7 +2165,7 @@ impl AdjRibIn {
         );
         for key in &already_stale {
             checkpoint();
-            self.remove_vpn_entry(key);
+            self.remove_vpn_entry_with_checkpoint(key, checkpoint);
         }
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
@@ -2523,7 +2523,7 @@ impl AdjRibIn {
         );
         for key in &already_stale {
             checkpoint();
-            self.remove_labeled_entry(key);
+            self.remove_labeled_entry_with_checkpoint(key, checkpoint);
         }
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).

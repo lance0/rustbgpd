@@ -1831,3 +1831,58 @@ fn llgr_expiry_rtc_restage_matching_answers_readiness() {
         "(unit, floor, growth, answered with 8 fresh RTs, with 136) must cover the restage: {failures:?}"
     );
 }
+
+/// GR-phase End-of-RIB removes every unrefreshed Add-Path path of an NLRI;
+/// each removal scans that NLRI's path list, so the sweep must answer
+/// readiness inside the scans: one prefix with 64 paths answers at least
+/// `64 * 63 / 8` more queries than 64 single-path prefixes.
+#[test]
+fn eor_add_path_removal_scans_answer_readiness() {
+    let run = |one_prefix: bool| {
+        let unicast = (Afi::Ipv4, Safi::Unicast);
+        let (mut manager, readiness_tx) = readiness_manager();
+        let addr = Ipv4Addr::new(10, 0, 0, 1);
+        let peer = peer_v4(addr);
+        manager.ribs.insert(peer, AdjRibIn::new(peer));
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer,
+            announced: (0..64u8)
+                .map(|path| {
+                    let octet = if one_prefix { 1 } else { path + 1 };
+                    let mut route =
+                        make_route(Ipv4Prefix::new(Ipv4Addr::new(203, 0, octet, 0), 24), addr);
+                    route.path_id = if one_prefix { u32::from(path) + 1 } else { 0 };
+                    route
+                })
+                .collect(),
+            withdrawn: Vec::new(),
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+        manager.handle_update(gr_with_llgr(peer, 120, vec![unicast], Vec::new(), 0));
+        let answered = run_with_readiness_probe(&mut manager, readiness_tx, |manager| {
+            manager.handle_update(RibUpdate::EndOfRib {
+                session_id: 0,
+                peer,
+                afi: unicast.0,
+                safi: unicast.1,
+            });
+        });
+        assert_eq!(
+            manager.ribs[&peer].len(),
+            0,
+            "every unrefreshed path is removed"
+        );
+        answered.get("eor_sweep").copied().unwrap_or(0)
+    };
+    let (spread, one) = (run(false), run(true));
+    assert!(
+        one >= spread + 64 * 63 / 8,
+        "eor_sweep answered {spread} for 64 prefixes and {one} for one prefix with 64 paths"
+    );
+}
