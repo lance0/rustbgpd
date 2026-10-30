@@ -49,9 +49,28 @@ methods stay as they are rather than being replaced:
 Existing methods gain no optional fields. Proto3 servers drop unknown fields,
 so an older daemon would commit the mutation without the fence. An older
 daemon answers an unknown method with `UNIMPLEMENTED` and changes nothing; a
-credential without the operator role gets `PERMISSION_DENIED` instead. A
-controller therefore treats any non-`OK` reply as a refusal, and must not
-retry a refused guarded mutation through the legacy methods.
+credential without the operator role gets `PERMISSION_DENIED` instead. Against
+a daemon that lacks the methods, any non-`OK` reply is therefore a refusal,
+and the rollback qualification asserts that no state changed rather than
+relying on a particular status.
+
+Against a daemon that implements them, a controller separates definitive
+refusals from unknown outcomes:
+
+- **Definitive refusals** leave the RIB, the lease table and the wire
+  unchanged by that request: `FAILED_PRECONDITION` with reason
+  `WINDOW_NOT_LIVE`, `REVISION_MISMATCH` or `OWNER_MISMATCH` (and the other
+  ADR-0141 ownership reasons), `RESOURCE_EXHAUSTED`, `INVALID_ARGUMENT`,
+  `UNIMPLEMENTED` and `PERMISSION_DENIED`.
+- **Unknown outcomes** are everything else, such as `DEADLINE_EXCEEDED`,
+  `UNAVAILABLE` or a dropped connection. A guarded add can commit while its
+  window is live and its reply still be lost. The controller resolves the
+  outcome by reading back the key and its revision, or by retrying with the
+  same revision under a live window, which is `UNCHANGED` for an identical
+  payload.
+
+In neither case does a controller retry a guarded mutation through the legacy
+methods.
 
 All four methods are `operator_only`, the tier of every injection mutation
 (ADR-0141 §8). Successful `RenewGuardedLease` and `IssueMutationWindow` calls
