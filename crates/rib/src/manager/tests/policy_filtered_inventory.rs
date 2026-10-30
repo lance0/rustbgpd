@@ -758,3 +758,56 @@ fn policy_rejection_history_peer_down_services_interior_readiness() {
     assert_candidate_tables(&manager);
     assert_eq!(denial_events(&manager, target(0)).len(), 16);
 }
+
+/// A clean pass whose per-client-best group stages denied candidates owns
+/// that shared staging inside an executor handoff.
+#[test]
+fn per_client_best_rejection_staging_is_owned_and_handed_off() {
+    let mut manager = manager();
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    register_target(
+        &mut manager,
+        0,
+        true,
+        deny_local_pref_at_least(200),
+        outbound_tx,
+    );
+    while outbound_rx.try_recv().is_ok() {}
+    let group = manager
+        .grouped_member_of(target(0))
+        .expect("grouped target");
+    assert!(manager.group_ribs[&group].per_client_best);
+    let observed = owned_checkpoints(&mut manager, feed_candidates);
+    assert_owned_inside_handoff("per-client-best staging", &observed, "staging_shared_emit");
+    assert_candidate_tables(&manager);
+    assert_denials_and_events(&manager, target(0));
+}
+
+/// A clean Add-Path pass whose export policy memoizes more distinct
+/// candidate attribute sets than it stages prefixes releases that memo under
+/// an owner inside an executor handoff.
+#[test]
+fn add_path_export_memo_retirement_is_owned_and_handed_off() {
+    let mut manager = manager();
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    register_target(
+        &mut manager,
+        0,
+        false,
+        community_chain(0xFDE8_0001),
+        outbound_tx,
+    );
+    while outbound_rx.try_recv().is_ok() {}
+    assert!(manager.grouped_member_of(target(0)).is_none());
+    // Eight distinct attribute sets across two prefixes.
+    let routes = (0..2)
+        .flat_map(|prefix_index| {
+            (1..=8).map(move |path_id| candidate(SOURCES[0], prefix_index, path_id, 100 + path_id))
+        })
+        .collect();
+    let observed = owned_checkpoints(&mut manager, |manager| {
+        receive(manager, SOURCES[0], routes);
+    });
+    assert_owned_inside_handoff("Add-Path memo retirement", &observed, "retirement");
+    assert_eq!(manager.adj_ribs_out[&target(0)].len(), 16);
+}

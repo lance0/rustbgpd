@@ -26,6 +26,42 @@ use crate::test_support::{
 };
 use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
+/// Every owned readiness checkpoint `work` passes, with whether it ran
+/// inside an executor handoff.
+pub(super) fn owned_checkpoints(
+    manager: &mut RibManager,
+    work: impl FnOnce(&mut RibManager),
+) -> Vec<(&'static str, bool)> {
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let previous = manager.replacement_readiness_test_hook.replace(Arc::new({
+        let observed = Arc::clone(&observed);
+        move |stage| {
+            let open = super::executor_handoffs().1;
+            observed.lock().unwrap().push((stage, open > 0));
+        }
+    }));
+    work(manager);
+    manager.replacement_readiness_test_hook = previous;
+    std::mem::take(&mut *observed.lock().unwrap())
+}
+
+/// `stage` ran under a readiness owner, and every owned checkpoint ran
+/// inside an executor handoff.
+pub(super) fn assert_owned_inside_handoff(
+    pass: &str,
+    observed: &[(&'static str, bool)],
+    stage: &str,
+) {
+    assert!(
+        observed.iter().any(|(observed, _)| *observed == stage),
+        "{pass}: no owned {stage} checkpoint: {observed:?}"
+    );
+    assert!(
+        observed.iter().all(|(_, handed_off)| *handed_off),
+        "{pass}: owned checkpoint outside an executor handoff: {observed:?}"
+    );
+}
+
 pub(super) fn retained_policy_rejection_keys(
     manager: &RibManager,
     target: PeerId,

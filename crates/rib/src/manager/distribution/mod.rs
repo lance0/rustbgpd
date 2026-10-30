@@ -8056,7 +8056,7 @@ impl RibManager {
         evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
     ) {
-        let pass = |manager: &mut Self, replay: bool| {
+        let pass = |manager: &mut Self, owned: bool| {
             manager.distribute_changes_with_readiness(
                 best_changed,
                 all_affected,
@@ -8064,17 +8064,42 @@ impl RibManager {
                 advertised_generation_already_advanced,
                 evpn_feeds,
                 targets,
-                replay,
+                owned,
             );
         };
-        // A replay pass owns its shared preparation and retirement; keep
-        // executor opportunities across the whole pass. Clean incremental
-        // fanout keeps its synchronous fast path.
-        if self.dirty_peers.is_empty() && self.force_outbound_peers.is_empty() {
+        // A replay pass, or one whose shared staging refreshes a group's
+        // rejection inventory, owns its shared preparation and retirement;
+        // keep executor opportunities across the whole pass. Clean
+        // incremental fanout keeps its synchronous fast path.
+        if self.dirty_peers.is_empty()
+            && self.force_outbound_peers.is_empty()
+            && !self.shared_rejection_work(best_changed, all_affected, targets)
+        {
             pass(self, false);
         } else {
             super::with_executor_handoff(|| pass(self, true));
         }
+    }
+
+    /// Whether shared staging refreshes a per-client-best group's denial
+    /// inventory: such a group walks every candidate of each staged prefix
+    /// through its export chain and records each denied identity.
+    fn shared_rejection_work(
+        &self,
+        best_changed: &HashSet<Prefix>,
+        all_affected: &HashSet<Prefix>,
+        targets: Option<&HashSet<PeerId>>,
+    ) -> bool {
+        (!best_changed.is_empty() || !all_affected.is_empty())
+            && self.group_ribs.values().any(|group| {
+                group.per_client_best
+                    && targets.is_none_or(|targets| {
+                        group.members.iter().any(|member| targets.contains(member))
+                    })
+                    && (group.export_chain.is_some()
+                        || group.has_policy_filtered_in(best_changed)
+                        || group.has_policy_filtered_in(all_affected))
+            })
     }
 
     #[expect(
@@ -8083,7 +8108,7 @@ impl RibManager {
     )]
     #[expect(
         clippy::too_many_arguments,
-        reason = "the replay flag records the executor handoff decided by the caller"
+        reason = "the owned flag records the executor handoff decided by the caller"
     )]
     fn distribute_changes_with_readiness(
         &mut self,
@@ -8093,12 +8118,12 @@ impl RibManager {
         advertised_generation_already_advanced: bool,
         mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
-        replay: bool,
+        owned: bool,
     ) {
         // Clean incremental fanout owns no readiness episode: its work is
-        // bounded by the pass. Shared preparation and cleanup of a replay
-        // pass own one each, so their ages never bleed into a member's.
-        let prep_installed = replay && self.begin_replacement_readiness();
+        // bounded by the pass. Owned shared preparation and cleanup take one
+        // each, so their ages never bleed into a member's.
+        let prep_installed = owned && self.begin_replacement_readiness();
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
@@ -10168,37 +10193,56 @@ impl RibManager {
         } else {
             distribute_peers();
         }
-        let retirement_installed = replay && self.begin_replacement_readiness();
-        let readiness = self.replacement_readiness.clone();
-        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
-        // One line per pass that mixes unicast withdrawals and announcements
-        // in a group (a failover), so a daemon-level benchmark can count the
-        // members on each path without per-pass churn noise.
-        #[cfg(feature = "bench-internals")]
-        if group_stage
-            .values()
-            .any(|stage| !stage.shared_withdraw.is_empty() && !stage.shared_announce.is_empty())
-        {
-            info!(
-                shared_members = bench_grouped_paths.0,
-                per_member_walks = bench_grouped_paths.1,
-                "bench: grouped mixed pass fanout paths"
-            );
+        // Shared cleanup is owned when it releases inventory: an owned pass,
+        // more memoized source attribute sets than staged prefixes (several
+        // candidates per prefix, as Add-Path or per-client-best export
+        // memoizes), captured admitted keys, or a peer made dirty during the
+        // pass (conditional advertisement or a failed send). One memo entry
+        // per changed prefix is ordinary pass-sized work.
+        let retirement_owned = owned
+            || replay_handoff
+            || export_memo.len() > best_changed.len().saturating_add(all_affected.len())
+            || !speculative_group_admitted.is_empty()
+            || !self.dirty_peers.is_empty()
+            || !self.force_outbound_peers.is_empty();
+        let mut retire = || {
+            let retirement_installed = retirement_owned && self.begin_replacement_readiness();
+            let readiness = self.replacement_readiness.clone();
+            let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+            // One line per pass that mixes unicast withdrawals and announcements
+            // in a group (a failover), so a daemon-level benchmark can count the
+            // members on each path without per-pass churn noise.
+            #[cfg(feature = "bench-internals")]
+            if group_stage
+                .values()
+                .any(|stage| !stage.shared_withdraw.is_empty() && !stage.shared_announce.is_empty())
+            {
+                info!(
+                    shared_members = bench_grouped_paths.0,
+                    per_member_walks = bench_grouped_paths.1,
+                    "bench: grouped mixed pass fanout paths"
+                );
+            }
+            shared_unicast_probe_cache
+                .retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
+            for (_, mut stage) in group_stage.drain() {
+                stage.retire_with(&mut |force| self.replacement_checkpoint_at("retirement", force));
+            }
+            crate::adj_rib_out::release_hash_map(&mut group_stage, &mut || checkpoint());
+            #[cfg(feature = "bench-internals")]
+            export_memo.record_replacement_capacities(self);
+            export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
+            crate::adj_rib_out::release_hash_map(&mut shared_group_encodes, &mut || checkpoint());
+            crate::adj_rib_out::release_hash_map(&mut rs_tagged_pass, &mut || checkpoint());
+            self.release_speculative_group_admitted_keys(&speculative_group_admitted);
+            self.replacement_checkpoint(true);
+            drop(readiness);
+            self.finish_readiness_owner(retirement_installed);
+        };
+        if retirement_owned {
+            super::with_executor_handoff(retire);
+        } else {
+            retire();
         }
-        shared_unicast_probe_cache
-            .retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
-        for (_, mut stage) in group_stage.drain() {
-            stage.retire_with(&mut |force| self.replacement_checkpoint_at("retirement", force));
-        }
-        crate::adj_rib_out::release_hash_map(&mut group_stage, &mut || checkpoint());
-        #[cfg(feature = "bench-internals")]
-        export_memo.record_replacement_capacities(self);
-        export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
-        crate::adj_rib_out::release_hash_map(&mut shared_group_encodes, &mut || checkpoint());
-        crate::adj_rib_out::release_hash_map(&mut rs_tagged_pass, &mut || checkpoint());
-        self.release_speculative_group_admitted_keys(&speculative_group_admitted);
-        self.replacement_checkpoint(true);
-        drop(readiness);
-        self.finish_readiness_owner(retirement_installed);
     }
 }
