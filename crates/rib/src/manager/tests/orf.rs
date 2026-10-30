@@ -1525,20 +1525,26 @@ fn orf_installed_classifier_input(manager: &RibManager, peer: PeerId) -> bool {
         .orf_installed
 }
 
-/// Same invariant through the ORF-message path: an Address-Prefix ORF push
-/// is itself a ROUTE-REFRESH (RFC 5291 §6) and lifts the family's gate.
+/// Same invariant through the ORF-message path: an IMMEDIATE Address-Prefix
+/// ORF push is itself a ROUTE-REFRESH (RFC 5291 §6) and lifts the family's
+/// gate; a DEFER push does not.
 #[test]
 fn orf_pending_entry_drops_after_last_orf_message_lift() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
-    for afi in [Afi::Ipv4, Afi::Ipv6] {
+    for (afi, when) in [
+        (Afi::Ipv4, WhenToRefresh::Defer),
+        (Afi::Ipv6, WhenToRefresh::Defer),
+        (Afi::Ipv4, WhenToRefresh::Immediate),
+        (Afi::Ipv6, WhenToRefresh::Immediate),
+    ] {
         let (reply, mut response) = oneshot::channel();
         manager.handle_update(RibUpdate::PeerOrfUpdate {
             peer,
             session_id: 7,
             afi,
             safi: Safi::Unicast,
-            when: WhenToRefresh::Defer,
+            when,
             entries: vec![],
             reply,
         });
@@ -1546,6 +1552,12 @@ fn orf_pending_entry_drops_after_last_orf_message_lift() {
             .try_recv()
             .expect("synchronous ORF reply")
             .expect("ORF update accepted");
+        if when == WhenToRefresh::Defer {
+            assert!(
+                manager.peer_orf_pending[&peer].contains(&(afi, Safi::Unicast)),
+                "DEFER must not lift the {afi:?} gate"
+            );
+        }
     }
     assert!(
         !manager.peer_orf_pending.contains_key(&peer),
@@ -1623,7 +1635,7 @@ fn orf_filter_entry_tracks_installed_filters() {
             session_id: 7,
             afi,
             safi: Safi::Unicast,
-            when: WhenToRefresh::Defer,
+            when: WhenToRefresh::Immediate,
             entries,
             reply,
         });
