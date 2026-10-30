@@ -202,6 +202,8 @@ struct Injection {
     preference: u32,
     exempt: bool,
     live: bool,
+    /// The operator deleted it (a replacement only retires it).
+    deleted: bool,
 }
 
 struct Harness {
@@ -487,6 +489,7 @@ impl Harness {
             preference,
             exempt,
             live: true,
+            deleted: false,
         });
         self.injections.len() - 1
     }
@@ -549,6 +552,9 @@ impl Harness {
                 });
                 result.try_recv().unwrap().unwrap();
                 let old = self.local.remove(&(index, path));
+                if let Some(old) = old {
+                    self.injections[old].deleted = true;
+                }
                 self.retire(old);
             }
             Op::Receive { prefix: index } => {
@@ -818,8 +824,50 @@ impl Harness {
         Ok(())
     }
 
-    /// I1's liveness half after a clean drain in the hold.
+    /// A known open defect that explains a deleted exempt row still on the
+    /// wire after a drain in the hold, or `None`.
+    fn known_stale_blackhole(&self) -> Option<&'static str> {
+        // LAN-2701: under refused proof, a private receiver keeps a deleted
+        // RTBH until release when the refused retry itself admitted it, or
+        // when it holds the Add-Path key an unadmitted exempt path would take.
+        if !self.config.grouped && self.refused {
+            return allowed("LAN-2701");
+        }
+        None
+    }
+
+    /// I5 after a drain with a free writer in the hold: an exempt row the
+    /// operator deleted has left the wire, unless it is the prefix's last
+    /// exempt row while an exempt export is still intended (never
+    /// unblackhole: LAN-2674 and LAN-2692 keep it until its replacement is
+    /// admitted).
+    fn check_deleted_blackholes(&self) -> Checked {
+        let wanted = self.wanted_blackholes();
+        for (&(prefix_key, path_id), &injection) in &self.wire {
+            let row = &self.injections[injection];
+            if !row.exempt || !row.deleted {
+                continue;
+            }
+            let replaced = self.wire.values().any(|&other| {
+                let other = &self.injections[other];
+                other.prefix == row.prefix && other.exempt && other.live
+            });
+            let last_blackhole = wanted.contains(&row.prefix) && !replaced;
+            prop_assert!(
+                last_blackhole || self.known_stale_blackhole().is_some(),
+                "I5: deleted exempt injection {injection} still on the wire at {prefix_key}#{path_id} \
+                 after a drain in the hold; wire {}",
+                show(&self.wire)
+            );
+        }
+        Ok(())
+    }
+
+    /// I1's liveness half after a clean drain in the hold, and I5.
     fn check_hold(&mut self, drained: bool) -> Checked {
+        if drained && self.occupied.is_empty() {
+            self.check_deleted_blackholes()?;
+        }
         let wanted = self.wanted_blackholes();
         let settled = drained
             && self.occupied.is_empty()
@@ -1236,4 +1284,70 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
         swapped(false).is_ok(),
         "a check after all announcements cannot see it"
     );
+}
+
+/// I5: an RTBH the operator deletes during the hold leaves the wire inside
+/// the hold, for private and grouped receivers, before and after the
+/// receiver's session flaps onto a new channel.
+#[test]
+fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
+    let config = |grouped| Config {
+        grouped,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let setup = vec![
+        Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Receive { prefix: 3 },
+    ];
+    let delete = Op::Delete { prefix: 0, path: 0 };
+    let plain = vec![
+        Op::Backpressure(true),
+        delete.clone(),
+        Op::Backpressure(false),
+        Op::Drain,
+    ];
+    let reconnected = |helper| {
+        vec![
+            Op::Reconnect {
+                graceful: true,
+                helper,
+                writer_full: false,
+            },
+            Op::Drain,
+            delete.clone(),
+            Op::Drain,
+        ]
+    };
+    let cases = [
+        ("private", config(false), plain.clone()),
+        ("grouped", config(true), plain),
+        ("private, reconnected", config(false), reconnected(false)),
+        ("grouped, reconnected", config(true), reconnected(false)),
+        (
+            "private, reconnected to a GR helper",
+            config(false),
+            reconnected(true),
+        ),
+        (
+            "grouped, reconnected to a GR helper",
+            config(true),
+            reconnected(true),
+        ),
+    ];
+    let failed: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(name, config, hold)| {
+            failure(config, &setup, &hold).map(|reason| format!("{name}: {reason}"))
+        })
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
 }
