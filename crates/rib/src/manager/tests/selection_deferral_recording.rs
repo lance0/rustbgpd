@@ -691,3 +691,116 @@ fn actual_evpn_release_retires_selection_ledger_with_interior_readiness() {
 fn actual_rtc_release_retires_selection_ledger_with_interior_readiness() {
     actual_release_retires_ledger_with_readiness(Recorder::Rtc);
 }
+
+const RECORDERS: [Recorder; 7] = [
+    Recorder::Unicast,
+    Recorder::FlowSpec,
+    Recorder::Evpn,
+    Recorder::Vpn,
+    Recorder::Labeled,
+    Recorder::BgpLs,
+    Recorder::Rtc,
+];
+
+/// Withdrawn-during-deferral identities stay in the ledger but not in
+/// Adj-RIB-In, so release grows its destinations from empty. Each insert is
+/// bracketed by checkpoints, so its capacity growth is one slice's rehash
+/// work; no slice may rehash more than one shard's share.
+fn release_destination_growth_is_bounded(recorder: Recorder) {
+    use crate::manager::selection_deferral::release_growth;
+    let count = crate::fast_hash::SHARD_SPLIT_AT * 2;
+    let mut manager = recording_manager(vec![recorder.family()]);
+    for index in 0..u32::try_from(count).unwrap() {
+        recorder.record(&mut manager, index);
+    }
+    assert_eq!(
+        manager
+            .deferred_selection_storage_shape_for_test(recorder.family())
+            .0,
+        count
+    );
+    release_growth::take();
+    release_recorded_family(&mut manager, recorder.family());
+    let growth = release_growth::take();
+    let bound = crate::fast_hash::SHARD_SPLIT_AT.max(count / crate::fast_hash::SHARDS);
+    let destinations: Vec<_> = growth.keys().map(|&(_, destination)| destination).collect();
+    assert_eq!(
+        destinations,
+        ["set", "staged"],
+        "{recorder:?}: both release destinations must be observed: {growth:?}"
+    );
+    for (&(key, destination), &(inserts, largest)) in &growth {
+        assert!(
+            inserts >= count,
+            "{recorder:?} {key} {destination}: only {inserts} inserts observed"
+        );
+        assert!(
+            largest <= bound,
+            "{recorder:?} {key} {destination}: one checkpoint slice grew capacity by {largest} (bound {bound})"
+        );
+    }
+    assert_eq!(
+        manager
+            .deferred_selection_storage_shape_for_test(recorder.family())
+            .0,
+        0
+    );
+    assert!(!manager.selection_deferred(recorder.family()));
+}
+
+#[test]
+fn unicast_release_destination_growth_is_bounded() {
+    release_destination_growth_is_bounded(Recorder::Unicast);
+}
+
+#[test]
+fn flowspec_release_destination_growth_is_bounded() {
+    release_destination_growth_is_bounded(Recorder::FlowSpec);
+}
+
+#[test]
+fn evpn_release_destination_growth_is_bounded() {
+    release_destination_growth_is_bounded(Recorder::Evpn);
+}
+
+#[test]
+fn vpn_release_destination_growth_is_bounded() {
+    release_destination_growth_is_bounded(Recorder::Vpn);
+}
+
+#[test]
+fn labeled_release_destination_growth_is_bounded() {
+    release_destination_growth_is_bounded(Recorder::Labeled);
+}
+
+#[test]
+fn bgpls_release_destination_growth_is_bounded() {
+    release_destination_growth_is_bounded(Recorder::BgpLs);
+}
+
+#[test]
+fn rtc_release_destination_growth_is_bounded() {
+    release_destination_growth_is_bounded(Recorder::Rtc);
+}
+
+#[test]
+fn empty_selection_recording_opens_no_readiness_owner() {
+    let mut manager = recording_manager(RECORDERS.iter().map(|r| r.family()).collect());
+    let before = manager.replacement_readiness_receipts.len();
+    manager.record_deferred_unicast(&HashSet::new());
+    manager.record_deferred_flowspec(&HashSet::new());
+    manager.record_deferred_evpn(&HashSet::new());
+    manager.record_deferred_vpn(&HashSet::new());
+    manager.record_deferred_labeled(&HashSet::new());
+    manager.record_deferred_bgpls(&HashSet::new());
+    manager.record_deferred_rtc(&HashSet::new());
+    assert_eq!(manager.replacement_readiness_receipts.len(), before);
+    // The same deferred manager opens one owner per non-empty call.
+    for recorder in RECORDERS {
+        recorder.record(&mut manager, 0);
+    }
+    assert_eq!(
+        manager.replacement_readiness_receipts.len(),
+        before + RECORDERS.len()
+    );
+}

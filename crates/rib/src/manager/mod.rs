@@ -909,10 +909,11 @@ pub struct RibManager {
     /// immediate `EoR` would tell the restarter our initial update is
     /// complete and trigger its stale-route sweep BEFORE the gated flood
     /// arrives — a self-inflicted blackhole window. The `EoR` is emitted
-    /// after the gate lifts and the gated flood is sent. Selection release
-    /// records the same obligation for an ORF-gated initial table. Other
-    /// non-GR ORF peers keep the immediate `EoR`, including a pending marker
-    /// whose initial honest-empty send encountered backpressure.
+    /// after the gate lifts and the gated flood is sent. A marker held by
+    /// selection deferral or replay grace records the same obligation at
+    /// `PeerUp` or family unlock. Other non-GR ORF peers keep the immediate
+    /// `EoR`, including a pending marker whose initial honest-empty send
+    /// encountered backpressure, and a family withheld at selection release.
     gr_deferred_eor: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Peers whose RT-Constrain-filtered families (VPN, EVPN) keep their
     /// initial-table `EoR` in `pending_eor` until the peer's RT-Constrain

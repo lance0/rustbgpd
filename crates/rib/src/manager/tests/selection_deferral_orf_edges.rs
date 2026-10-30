@@ -699,3 +699,195 @@ async fn withheld_family_unlock_keeps_orf_initial_eor_held_after_grace_release()
         assert_completed(&mut manager, &mut target_rx);
     }
 }
+
+#[test]
+fn still_withheld_orf_family_completes_on_clean_selection_release() {
+    let (mut manager, _source_rx, mut target_rx) = setup_withheld_v6();
+    let source = peer_v4(SOURCE_ADDR);
+    let target = peer_v4(TARGET_ADDR);
+    // Drain the real IPv4 table and EoR: the peer is clean and owes only the
+    // selection-held marker of its withheld IPv6 family.
+    let mut seen = BTreeSet::new();
+    let mut eors = HashMap::new();
+    assert_eq!(observe(&mut target_rx, true, &mut seen, &mut eors), 2);
+    assert_eq!(seen, BTreeSet::from([ordinary_v4()]));
+    assert_eq!(eors, HashMap::from([(V4, 1)]));
+    assert!(!manager.dirty_peers.contains(&target));
+    assert!(!manager.peer_sendable_families[&target].contains(&V6));
+    assert!(manager.peer_orf_pending[&target].contains(&V6));
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: SOURCE_SESSION,
+        afi: V6.0,
+        safi: V6.1,
+    });
+    assert!(!manager.selection_convergence_held(V6));
+    let mut released = Vec::new();
+    while let Ok(update) = target_rx.try_recv() {
+        assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+        assert_eq!(update.announce.len(), 0, "a withheld family sends no table");
+        released.extend(update.end_of_rib.iter().copied());
+    }
+    assert_eq!(
+        released,
+        [V6],
+        "a withheld family's empty EoR must not wait for the peer's refresh"
+    );
+    assert!(manager.peer_orf_pending[&target].contains(&V6));
+    assert!(!manager.pending_eor.contains_key(&target));
+    assert!(!manager.gr_deferred_eor.contains_key(&target));
+    assert!(!manager.dirty_peers.contains(&target));
+}
+
+/// Drain the writer, then run the dirty-resync retry until the target settles.
+fn pump(
+    manager: &mut RibManager,
+    receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    announced: &mut Vec<Prefix>,
+    eors: &mut Vec<(Afi, Safi)>,
+) {
+    for _ in 0..16 {
+        while let Ok(update) = receiver.try_recv() {
+            assert_eq!(update.withdraw, [] as [(Prefix, u32); 0]);
+            announced.extend(update.announce.iter().map(|route| route.prefix));
+            eors.extend(update.end_of_rib.iter().copied());
+        }
+        if !manager.dirty_peers.contains(&peer_v4(TARGET_ADDR)) {
+            return;
+        }
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    }
+    panic!("target never settled");
+}
+
+#[test]
+fn withheld_orf_family_unlock_completion_ignores_writer_capacity() {
+    for capacity in [1, 64] {
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let _source_rx = connect(
+            &mut manager,
+            peer_v4(SOURCE_ADDR),
+            SOURCE_SESSION,
+            false,
+            &[],
+            64,
+        );
+        receive(&mut manager, &[ordinary_v4(), ordinary_v6(0x100)]);
+        let target = peer_v4(TARGET_ADDR);
+        let mut target_rx = connect_withheld_v6(&mut manager, false, capacity);
+        assert!(!manager.gr_peers.contains_key(&target));
+        assert!(!manager.eor_held(target, V6));
+        assert_eq!(
+            manager.pending_eor.contains_key(&target),
+            capacity == 1,
+            "capacity {capacity}: only the one-slot writer defers the PeerUp markers"
+        );
+
+        // Unlock IPv6 while any backpressured PeerUp marker is still queued.
+        let mut announced = Vec::new();
+        let mut eors = Vec::new();
+        while let Ok(update) = target_rx.try_recv() {
+            announced.extend(update.announce.iter().map(|route| route.prefix));
+            eors.extend(update.end_of_rib.iter().copied());
+        }
+        manager.handle_update(RibUpdate::PeerFamilySendable {
+            peer: target,
+            session_id: TARGET_SESSION,
+            family: V6,
+            add_path_send_limit: None,
+        });
+        pump(&mut manager, &mut target_rx, &mut announced, &mut eors);
+        eors.sort_unstable_by_key(|&(afi, safi)| (afi as u16, safi as u8));
+        assert_eq!(announced, [ordinary_v4()], "capacity {capacity}");
+        assert_eq!(
+            eors,
+            [V4, V6],
+            "capacity {capacity}: one honest-empty IPv6 EoR, not held for the refresh"
+        );
+        assert!(manager.peer_orf_pending[&target].contains(&V6));
+        assert!(!manager.pending_eor.contains_key(&target));
+        assert!(!manager.gr_deferred_eor.contains_key(&target));
+
+        // The peer's own refresh brings the table with its ordinary response
+        // marker; no initial marker is left over for it.
+        refresh(&mut manager, V6);
+        let mut refreshed = Vec::new();
+        let mut refresh_eors = Vec::new();
+        pump(
+            &mut manager,
+            &mut target_rx,
+            &mut refreshed,
+            &mut refresh_eors,
+        );
+        assert_eq!(refreshed, [ordinary_v6(0x100)], "capacity {capacity}");
+        assert_eq!(refresh_eors, [V6], "capacity {capacity}");
+        assert!(!manager.peer_orf_pending.contains_key(&target));
+        assert!(!manager.pending_eor.contains_key(&target));
+        assert!(!manager.gr_deferred_eor.contains_key(&target));
+    }
+}
+
+fn push_v4_orf(manager: &mut RibManager, when: WhenToRefresh) {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::PeerOrfUpdate {
+        peer: peer_v4(TARGET_ADDR),
+        session_id: TARGET_SESSION,
+        afi: V4.0,
+        safi: V4.1,
+        when,
+        entries: vec![AddressPrefixOrf {
+            action: OrfAction::Add,
+            match_: OrfMatch::Permit,
+            sequence: 1,
+            min_len: 0,
+            max_len: 32,
+            prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
+        }],
+        reply,
+    });
+    response
+        .try_recv()
+        .expect("synchronous ORF reply")
+        .expect("ORF update accepted");
+}
+
+#[test]
+fn deferred_orf_update_keeps_the_initial_gate_through_selection_release() {
+    let (mut manager, _source_rx, mut target_rx) = setup(&[V4], 64, true);
+    let target = peer_v4(TARGET_ADDR);
+    let mut seen = BTreeSet::new();
+    let mut eors = HashMap::new();
+    observe(&mut target_rx, false, &mut seen, &mut eors);
+    assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
+    assert_eq!(eors, HashMap::from([(V6, 1)]));
+    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+
+    // RFC 5291 §6: DEFER installs the entries but is not the refresh that
+    // opens the family.
+    push_v4_orf(&mut manager, WhenToRefresh::Defer);
+    assert!(
+        manager
+            .peer_orf_pending
+            .get(&target)
+            .is_some_and(|gated| gated.contains(&V4)),
+        "a DEFER ORF must not lift the initial-advertisement gate"
+    );
+    assert!(manager.peer_orf_filters[&target].contains_key(&V4));
+    assert_eq!(observe(&mut target_rx, false, &mut seen, &mut eors), 0);
+
+    // Release must not send the IPv4 table or EoR the peer has not asked for.
+    release_v4(&mut manager);
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    observe(&mut target_rx, false, &mut seen, &mut eors);
+    assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
+    assert!(manager.gr_deferred_eor[&target].contains(&V4));
+    assert!(manager.peer_orf_pending[&target].contains(&V4));
+
+    push_v4_orf(&mut manager, WhenToRefresh::Immediate);
+    assert!(observe(&mut target_rx, true, &mut seen, &mut eors) > 0);
+    assert_eq!(seen, BTreeSet::from([ordinary_v4(), ordinary_v6(0x100)]));
+    assert_eq!(eors, HashMap::from([(V4, 1), (V6, 1)]));
+    assert_completed(&mut manager, &mut target_rx);
+}
