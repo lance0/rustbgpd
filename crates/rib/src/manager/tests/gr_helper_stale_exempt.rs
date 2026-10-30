@@ -898,7 +898,10 @@ fn assert_timer_withdraws(
         manager.resync_dirty_peers_bounded();
         apply(rx, rib, keep);
     }
-    assert!(manager.selection_deferred(FAMILY), "still inside the hold");
+    assert!(
+        manager.selection_convergence_held(FAMILY),
+        "our End-of-RIB is still held"
+    );
     assert!(
         !rib.contains_key(&(Prefix::V4(rtbh), 0)),
         "the deleted RTBH leaves the helper inside the hold; peer {rib:?}"
@@ -1058,4 +1061,155 @@ fn orf_opened_behind_a_full_writer_keeps_the_timer_armed() {
     permit_all_orf(&mut manager, 182);
     drop(occupied);
     assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, v4, None);
+}
+
+/// The transport closes a grouped receiver's channel before the RIB learns
+/// its session ended, so the group's RTBH withdrawal fails on the closed
+/// writer and only the group's hold ledger names it. A new export policy
+/// then moves the receiver to another group before the session end
+/// arrives, and the new group's table never held the row. Red proof:
+/// without handing the departing group's ledger to the peer, the deleted
+/// RTBH stays until release.
+#[test]
+fn group_ledger_follows_a_receiver_into_another_group() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, true, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let first = manager.grouped_member_of(observer);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: observer,
+        export_policy: Some(super::update_groups::community_chain(0xFC00_0001)),
+        reply,
+    });
+    response.try_recv().unwrap().unwrap();
+    let second = manager.grouped_member_of(observer);
+    assert!(
+        second.is_some() && second != first,
+        "moved to another group"
+    );
+    clean_end(&mut manager, 82);
+    assert!(rib.contains_key(&(Prefix::V4(rtbh), 0)));
+    let (_new_tx, mut new_rx, _) = register_peer(&mut manager, OBSERVER, 182, true, false, false);
+    assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
+}
+
+/// Collecting the carry visits every local provenance entry of the ended
+/// session's table, ordinary ones included, under a readiness checkpoint.
+/// Red proof: checkpointing only the exempt entries counts none here.
+#[test]
+fn carry_collection_checkpoints_every_provenance_entry() {
+    const AGGREGATES: usize = 48;
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    // Ordinary aggregates admitted before the hold sit in the Adj-RIB-Out
+    // with local provenance; none is exempt.
+    for index in 0..AGGREGATES {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 9, u8::try_from(index).unwrap(), 0), 24);
+        let mut route = make_route(prefix, SOURCE);
+        set_peer(&mut route, crate::PeerId::LOCAL);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route, reply });
+        result.try_recv().unwrap().unwrap();
+        apply(&mut old_rx, &mut rib, None);
+    }
+    assert_eq!(rib.len(), AGGREGATES);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    let work = super::work_scaling::checkpoints_in(|| clean_end(&mut manager, 82));
+    assert!(
+        work.get("helper_stale_carry").copied().unwrap_or(0) >= AGGREGATES,
+        "every provenance entry is checkpointed: {work:?}"
+    );
+}
+
+/// A full set takes no more keys, but a key it already holds never costs a
+/// new one its place. Red proof: counting incoming keys against the room
+/// left drops the new key behind a duplicate.
+#[test]
+fn bounded_insert_skips_duplicates_before_the_limit() {
+    let key = |index: usize| {
+        let [a, b, c, d] = u32::try_from(index).unwrap().to_be_bytes();
+        (
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(a, b, c, d), 32)),
+            0,
+        )
+    };
+    let limit = super::HELPER_STALE_EXEMPT_LIMIT;
+    let mut set: std::collections::BTreeSet<_> = (0..limit - 1).map(key).collect();
+    super::peer_lifecycle::insert_bounded(&mut set, [key(0), key(limit)], &mut || {});
+    assert!(set.contains(&key(limit)), "the new key is kept");
+    assert_eq!(set.len(), limit);
+    super::peer_lifecycle::insert_bounded(&mut set, [key(limit + 1)], &mut || {});
+    assert_eq!(set.len(), limit, "a full set takes no more");
+}
+
+/// Collision failback stages selection while the gate deferring our
+/// End-of-RIB still waits for the surviving session's route refresh. A
+/// reconnected helper whose writer frees then must still withdraw the
+/// carried deleted RTBH. Red proof: retiring keys once selection stops
+/// being deferred drops it.
+#[test]
+fn staged_selection_still_withdraws_a_carried_rtbh() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    let (_new_tx, mut new_rx, occupied) = register(&mut manager, 182, false, true);
+    let metrics = BgpMetrics::new();
+    let waiter = peer_v4(WAITER);
+    let session = u64::from(WAITER.octets()[3]);
+    let transitions = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        selection.session_down(waiter, session, &metrics);
+        selection
+            .await_collision_failback_refresh(
+                waiter,
+                session,
+                false,
+                &std::collections::HashSet::from([FAMILY]),
+                true,
+                &metrics,
+            )
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions(transitions, "test collision failback stage");
+    assert!(
+        !manager.selection_deferred(FAMILY) && manager.selection_convergence_held(FAMILY),
+        "selection staged, End-of-RIB still held"
+    );
+    drop(occupied);
+    assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, rtbh, Some(kept));
 }

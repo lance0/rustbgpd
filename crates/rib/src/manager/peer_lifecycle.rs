@@ -133,6 +133,22 @@ pub(super) fn group_replay_rs_inert(
     })
 }
 
+/// Insert `keys` until `set` holds [`super::HELPER_STALE_EXEMPT_LIMIT`]
+/// keys; a key already present costs nothing.
+pub(super) fn insert_bounded(
+    set: &mut std::collections::BTreeSet<(Prefix, u32)>,
+    keys: impl IntoIterator<Item = (Prefix, u32)>,
+    checkpoint: &mut impl FnMut(),
+) {
+    for key in keys {
+        checkpoint();
+        if set.len() >= super::HELPER_STALE_EXEMPT_LIMIT {
+            break;
+        }
+        set.insert(key);
+    }
+}
+
 /// The carried keys whose prefix is in `changed`, walking the smaller side.
 fn changed_keys(
     keys: &std::collections::BTreeSet<(Prefix, u32)>,
@@ -872,6 +888,12 @@ impl RibManager {
     /// session may hold, so the next session can withdraw deleted ones
     /// while a selection hold defers that End-of-RIB.
     fn carry_helper_stale_exempt(&mut self, peer: PeerId, session_id: u64) {
+        self.with_peer_teardown_readiness(|manager| {
+            manager.carry_helper_stale_exempt_owned(peer, session_id);
+        });
+    }
+
+    fn carry_helper_stale_exempt_owned(&mut self, peer: PeerId, session_id: u64) {
         let queued = self
             .hold_exempt_withdrawn
             .remove(&super::HoldWithdrawOwner::Peer(peer));
@@ -895,6 +917,10 @@ impl RibManager {
         if !helper {
             return;
         }
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "helper_stale_carry", false);
+        };
         // The exempt rows the session holds or may still hold: its table's,
         // and those withdrawn outright in the hold, which may not have
         // reached the peer. The flush withdraws none whose key still has a
@@ -906,20 +932,20 @@ impl RibManager {
             self.hold_exempt_withdrawn
                 .get(&super::HoldWithdrawOwner::Group(gid))
         }) {
-            keys.extend(group.iter().copied());
+            insert_bounded(&mut keys, group.iter().copied(), &mut checkpoint);
         }
         let table = match gid {
             Some(gid) => self.group_ribs.get(&gid).map(|group| &group.table),
             None => self.adj_ribs_out.get(&peer),
         };
         if let Some(table) = table {
-            keys.extend(
-                table
-                    .local_export_sources()
-                    .filter(|(_, source)| source.deferral_exempt)
-                    .map(|(key, _)| *key)
-                    .take(super::HELPER_STALE_EXEMPT_LIMIT.saturating_sub(keys.len())),
-            );
+            // Every provenance entry is visited, ordinary ones included.
+            let exempt = table
+                .local_export_sources()
+                .inspect(|_| checkpoint())
+                .filter(|(_, source)| source.deferral_exempt)
+                .map(|(key, _)| *key);
+            insert_bounded(&mut keys, exempt, &mut || {});
         }
         let Some(ended) = self.outbound_peers.get(&peer).map(mpsc::Sender::downgrade) else {
             return;
@@ -937,8 +963,7 @@ impl RibManager {
             carried.ended = ended;
             carried.settled = false;
             carried.orf_blocked.clear();
-            let room = super::HELPER_STALE_EXEMPT_LIMIT.saturating_sub(carried.keys.len());
-            carried.keys.extend(keys.into_iter().take(room));
+            insert_bounded(&mut carried.keys, keys, &mut checkpoint);
         }
     }
 
@@ -948,9 +973,11 @@ impl RibManager {
         owner: super::HoldWithdrawOwner,
         keys: impl IntoIterator<Item = (Prefix, u32)>,
     ) {
+        let readiness = self.replacement_readiness.clone();
         let ledger = self.hold_exempt_withdrawn.entry(owner).or_default();
-        let room = super::HELPER_STALE_EXEMPT_LIMIT.saturating_sub(ledger.len());
-        ledger.extend(keys.into_iter().take(room));
+        insert_bounded(ledger, keys, &mut || {
+            super::replacement_readiness_checkpoint_at(&readiness, "helper_stale_carry", false);
+        });
         if ledger.is_empty() {
             self.hold_exempt_withdrawn.remove(&owner);
         }
@@ -1025,26 +1052,7 @@ impl RibManager {
             self.helper_stale_exempt.clear();
             return;
         }
-        // A settled set relies on each flush seeing its changed prefixes. A
-        // set this flush cannot run (its session is not caught up, or has no
-        // encoder yet) loses those changes, so it is re-walked once it runs.
-        let mut ready = Vec::new();
-        let mut skipped_touched = Vec::new();
-        for (&peer, carried) in &self.helper_stale_exempt {
-            if self.helper_stale_exempt_runnable(peer)
-                && self.peer_export_encoders.contains_key(&peer)
-            {
-                ready.push(peer);
-            } else if carried.settled && !changed_keys(&carried.keys, changed).is_empty() {
-                skipped_touched.push(peer);
-            }
-        }
-        for peer in skipped_touched {
-            if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
-                carried.settled = false;
-            }
-        }
-        for peer in ready {
+        for peer in self.helper_stale_exempt_ready(changed) {
             // A route-bearing envelope carries the current session's export
             // snapshot, or the transport resets the session.
             let Some(encoder) = self.peer_export_encoders.get(&peer) else {
@@ -1082,7 +1090,9 @@ impl RibManager {
                 let family = prefix_family(&prefix);
                 let keyed = add_path.is_some_and(|families| families.contains(&family));
                 let path_id = if keyed { path_id } else { 0 };
-                if !self.selection_deferred(family)
+                // Retire a key only once the gate deferring our End-of-RIB
+                // opens; selection can be staged while it still holds.
+                if !self.selection_convergence_held(family)
                     || self.advertises_unicast_key(peer, prefix, path_id)
                 {
                     done.push(key);
@@ -1117,7 +1127,9 @@ impl RibManager {
             // Queued, or the channel already closed: either way the session
             // may end before the peer reads it, so the hold's ledger keeps
             // the keys for the next carry.
-            self.record_hold_exempt_withdrawn(super::HoldWithdrawOwner::Peer(peer), withdrawn);
+            if !withdrawn.is_empty() {
+                self.record_hold_exempt_withdrawn(super::HoldWithdrawOwner::Peer(peer), withdrawn);
+            }
             let Some(carried) = self.helper_stale_exempt.get_mut(&peer) else {
                 continue;
             };
@@ -1131,6 +1143,30 @@ impl RibManager {
                 carried.orf_blocked = orf_blocked;
             }
         }
+    }
+
+    /// The carried sets this flush can run. A settled set relies on each
+    /// flush seeing its changed prefixes, so one it cannot run (its session
+    /// is not caught up, or has no encoder yet) whose prefixes changed is
+    /// re-walked once it runs.
+    fn helper_stale_exempt_ready(&mut self, changed: &HashSet<Prefix>) -> Vec<PeerId> {
+        let mut ready = Vec::new();
+        let mut skipped_touched = Vec::new();
+        for (&peer, carried) in &self.helper_stale_exempt {
+            if self.helper_stale_exempt_runnable(peer)
+                && self.peer_export_encoders.contains_key(&peer)
+            {
+                ready.push(peer);
+            } else if carried.settled && !changed_keys(&carried.keys, changed).is_empty() {
+                skipped_touched.push(peer);
+            }
+        }
+        for peer in skipped_touched {
+            if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
+                carried.settled = false;
+            }
+        }
+        ready
     }
 
     /// A settled set must be walked again: an ORF gate one of its keys
@@ -1377,10 +1413,12 @@ impl RibManager {
             });
         }
         self.pending_extra_withdraws.remove(&peer);
-        self.hold_exempt_withdrawn
-            .remove(&super::HoldWithdrawOwner::Peer(peer));
         self.release_group_admitted_keys(peer);
         self.remove_update_group_member(peer);
+        // After leaving the group, which hands the group's hold ledger to
+        // the peer's.
+        self.hold_exempt_withdrawn
+            .remove(&super::HoldWithdrawOwner::Peer(peer));
         // The extra-withdraw drop above mutates residue even for a peer
         // whose membership removal doesn't touch a group.
         self.refresh_group_residue_gauge();

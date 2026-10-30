@@ -1193,7 +1193,7 @@ pub struct RibManager {
     /// withdrawal reaches the peer leaves that row stale at a GR helper,
     /// and the group table or Adj-RIB-Out no longer names it. Bounded per
     /// owner by [`HELPER_STALE_EXEMPT_LIMIT`]; cleared when the hold ends.
-    hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, HashSet<(Prefix, u32)>>,
+    hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, BTreeSet<(Prefix, u32)>>,
     /// Exempt unicast keys an ended session of a GR-capable peer may still
     /// hold as stale (RFC 4724 §4.2). The peer drops stale routes only at
     /// our End-of-RIB, which a selection hold defers until release, so the

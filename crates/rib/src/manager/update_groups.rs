@@ -3595,6 +3595,16 @@ impl RibManager {
     fn leave_group_without_gauge_refresh(&mut self, gid: usize, peer: PeerId) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        // A withdrawal the group queued to this member may not have
+        // reached it; the member's own hold ledger keeps it for a flap after
+        // the move.
+        if let Some(group_ledger) = self
+            .hold_exempt_withdrawn
+            .get(&super::HoldWithdrawOwner::Group(gid))
+        {
+            let keys: Vec<_> = group_ledger.iter().copied().collect();
+            self.record_hold_exempt_withdrawn(super::HoldWithdrawOwner::Peer(peer), keys);
+        }
         let Some(group) = self.group_ribs.get_mut(&gid) else {
             return;
         };
@@ -3611,6 +3621,8 @@ impl RibManager {
     }
 
     fn remove_group_with_readiness(&mut self, gid: usize) {
+        self.hold_exempt_withdrawn
+            .remove(&super::HoldWithdrawOwner::Group(gid));
         if let Some(mut group) = self.group_ribs.remove(&gid) {
             group.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
             self.replacement_checkpoint_at("retirement", true);
