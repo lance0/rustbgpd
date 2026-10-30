@@ -229,7 +229,7 @@ shape itself does not raise the tier.
 | `ListPolicyEvents` | `sensitive_read` | Bounded policy mutation history. |
 | `ListEvpnEvents` | `sensitive_read` | Bounded EVPN route add / withdraw / best-change history. |
 
-### InjectionService (15 RPCs)
+### InjectionService (19 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -243,6 +243,10 @@ shape itself does not raise the tier.
 | `AddLeasedPath` | `operator_only` | `AddPath` under an owner's lease (ADR-0141); same risk class as `AddPath`. |
 | `AddLeasedFlowSpec` | `operator_only` | `AddFlowSpec` under an owner's lease (ADR-0141); same risk class as `AddFlowSpec`. |
 | `RenewLease` | `operator_only` | Keeps an owner's injected routes and rules alive. Delaying a dead controller's withdrawal has the blast radius of the injection itself, so it shares the adds' tier; a successful renewal is audited at INFO instead of WARN (ADR-0141). |
+| `IssueMutationWindow` | `operator_only` | Issues the mutation window a guarded FlowSpec add or renewal must commit within (ADR-0144). A window authorizes diversion and lease extension, so it shares the adds' tier; a successful issue is audited at INFO instead of WARN. |
+| `AddGuardedFlowSpec` | `operator_only` | `AddFlowSpec` under a guarded owner's lease, fenced by a mutation window and an admission revision (ADR-0144); same risk class as `AddFlowSpec`. |
+| `DeleteGuardedFlowSpec` | `operator_only` | Removes a guarded owner's FlowSpec rule at one admission revision (ADR-0144); same risk class as `DeleteFlowSpec`. |
+| `RenewGuardedLease` | `operator_only` | `RenewLease` for a guarded owner, capped by a mutation window (ADR-0144); same tier and the same INFO audit for a successful renewal. |
 | `ListInjectionLeases` | `sensitive_read` | Lease owners, generations and remaining time; discloses controller identities. |
 | `ListLeasedKeys` | `sensitive_read` | The injected keys one owner holds, with each key's generation and remaining lease, paged. Same disclosure as `ListInjectionLeases` plus the owner's route and rule keys. |
 | `MarkReplayComplete` | `operator_only` | A controller's replay-complete signal after a planned restart. The last listed controller's signal releases the held End-of-RIB, and helpers then remove every stale route the controllers did not re-add, so an early or forged signal has the blast radius of deleting those routes. Rare; audited at WARN like the adds. |
@@ -289,10 +293,10 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.7% |
-| `sensitive_read` | 83 | 61.9% |
-| `mutating` | 22 | 16.4% |
-| `operator_only` | 28 | 20.9% |
-| **Total** | **134** | **100%** |
+| `sensitive_read` | 83 | 60.1% |
+| `mutating` | 22 | 15.9% |
+| `operator_only` | 32 | 23.2% |
+| **Total** | **138** | **100%** |
 
 (Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
 includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`
@@ -320,12 +324,12 @@ specific method if the model warrants it.
    (including `SetFibTable` / `DeleteFibTable`). The 4-tier scheme allows
    richer enforcement (e.g., per-method capability tokens) but the
    per-service split is the cheapest first step.
-2. **`operator_only` is small enough to gate by principal role.** 27
+2. **`operator_only` is small enough to gate by principal role.** 32
    methods total; carving these out into a separate listener or
    requiring a distinct principal role (`operator` vs. `automation`) has
    low operational cost and high blast-radius reduction.
 3. **InjectionService is `operator_only` apart from its five reads.**
-   Nine of the twenty-seven `operator_only` methods live here. The simplest model is
+   Fourteen of the thirty-two `operator_only` methods live here. The simplest model is
    to make the whole service gated behind an `inject` capability or a
    dedicated listener — operators rarely use it for automation, and
    when they do it should be a deliberate channel.

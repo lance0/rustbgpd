@@ -96,7 +96,7 @@ and RPCs in it stay alpha; the
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | Bounded point validation and configured RTR-cache accepted-epoch inventory, plus the outside-v1 ASPA diagnostics: a bounded merged-provider lookup for one customer ASN and a literal AS_PATH verification with an explicit local role and neighbor ASN |
 | `EventService` | `WatchEvents`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
-| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases and a controller replay-complete signal |
+| `InjectionService` | `AddPath`, `DeletePath`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `ListInjectionLeases`, `ListLeasedKeys`, `IssueMutationWindow`, `AddGuardedFlowSpec`, `DeleteGuardedFlowSpec`, `RenewGuardedLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection, with optional owner leases, guarded FlowSpec mutations and a controller replay-complete signal |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
@@ -271,7 +271,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `BfdService` | `GetBfdSessions` | None |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches`, `LookupAspa`, `VerifyAsPath` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
-| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
+| `InjectionService` | `ListInjectionLeases`, `ListLeasedKeys`, `ListPathExportDispositions`, `BatchListPathExportDispositions`, `ListFlowSpecExportDispositions` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddLeasedPath`, `AddLeasedFlowSpec`, `RenewLease`, `IssueMutationWindow`, `AddGuardedFlowSpec`, `DeleteGuardedFlowSpec`, `RenewGuardedLease`, `MarkReplayComplete`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
@@ -3255,6 +3255,7 @@ export policy).
 | `RenewLease` | Renew an owner's lease generation |
 | `ListInjectionLeases` | List the injection lease table |
 | `ListLeasedKeys` | List the keys one lease owner holds; see [reconcile an owner's keys](#reconcile-an-owners-keys) |
+| `IssueMutationWindow` / `AddGuardedFlowSpec` / `DeleteGuardedFlowSpec` / `RenewGuardedLease` | Window- and revision-fenced FlowSpec mutations; see [guarded FlowSpec mutations](#guarded-flowspec-mutations) |
 | `MarkReplayComplete` | Signal that a controller finished replaying after a planned restart; see [replay-complete signal](#replay-complete-signal) |
 | `AddEvpnRoute` | Inject an EVPN Type 2 (MAC/IP), Type 3 (IMET), or Type 5 (IP Prefix) route; Type 5 may be interface-less or carry an overlay-index gateway |
 | `DeleteEvpnRoute` | Withdraw a previously injected EVPN route by its EVPN route key |
@@ -3940,6 +3941,77 @@ context.AddMetadata("authorization", "Bearer " + token);
 
 Do not expose the listener beyond loopback to reach a remote controller;
 see [security](security.md) for the remote mTLS posture.
+
+#### Guarded FlowSpec mutations
+
+A leased mutation can commit long after the controller sent it: it can wait
+before its handler runs, for RIB queue admission and behind RIB work, and a
+client timeout cancels none of these. The guarded methods
+([ADR-0144](../adr/0144-guarded-flowspec-mutations.md)) fence a FlowSpec rule
+against that. They are outside the v1 contract.
+
+| RPC | Behaviour |
+|---|---|
+| `IssueMutationWindow(owner, window_seconds)` | Issues a window living `window_seconds` (1..=120). An owner holds at most 64 live windows and the daemon 4,096; past either cap the call is `RESOURCE_EXHAUSTED` |
+| `AddGuardedFlowSpec(rule, lease, window, revision)` | A leased FlowSpec add, checked against the window when it commits. The owner's deadline becomes `max(current, min(now + lease_seconds, window expiry))`: the add caps any extension at its window but keeps a later deadline set earlier, which the new rule then shares. `revision` is a nonzero client-chosen value stored with the rule |
+| `DeleteGuardedFlowSpec(rule key, owner, revision)` | Removes the rule only at its revision: `DELETED`, or `NOT_PRESENT` for an absent rule. Needs no window |
+| `RenewGuardedLease(owner, generation, lease_seconds, window)` | Sets the deadline to exactly `min(now + lease_seconds, window expiry)`, which may shorten it |
+
+A window's expiry is therefore not the rule's withdrawal deadline. The
+owner's lease never outlives the latest-expiring window it used, and no
+window lives more than 120 s after it was issued. Read the lease deadline back
+(`ListInjectionLeases`, or `lease_remaining_ms` on the rule) rather than
+inferring it from a window.
+
+Owners are named without a prefix in requests. The daemon keeps a guarded
+owner's rules and lease in a separate namespace and reports it as
+`guarded:<owner>`: in `FlowSpecRouteEntry.injection_owner`, in
+`ListInjectionLeases`, and as the owner `ListLeasedKeys` takes. The leased
+and unleased methods cannot add, renew or delete a guarded owner's state;
+`DeleteFlowSpec` with `override_owner` remains the operator's break-glass.
+Read-back reports each guarded rule's revision in
+`FlowSpecRouteEntry.admission_revision` and `LeasedKey.admission_revision`.
+
+| Refusal | Status |
+|---|---|
+| Malformed owner, `window_seconds` outside 1..=120, revision 0, missing window, rule, lease or generation, `lease_seconds` outside 5..=3600 | `INVALID_ARGUMENT` |
+| Window expired, unknown, another owner's or another process's | `FAILED_PRECONDITION`, `WINDOW_NOT_LIVE` |
+| Present rule at another revision, or at the same revision with another payload; delete of another revision | `FAILED_PRECONDITION`, `REVISION_MISMATCH` |
+| Rule held by another owner, guarded or not, or by no owner | `FAILED_PRECONDITION`, `OWNER_MISMATCH` or `KEY_UNOWNED` |
+| Renewal of a generation that is not live | `FAILED_PRECONDITION`, `GENERATION_NOT_LIVE` |
+| Window cap reached | `RESOURCE_EXHAUSTED` |
+
+These refusals, and `UNIMPLEMENTED` or `PERMISSION_DENIED`, are definitive:
+the request changed nothing. Any other outcome, such as `DEADLINE_EXCEEDED`,
+`UNAVAILABLE` or a dropped connection, is unknown, because the add may have
+committed while its window was live. Resolve it by reading the rule's
+revision back, or by retrying with the same revision under a live window,
+which is `UNCHANGED` for an identical payload. To change a guarded rule,
+delete it at its revision and add it with a new one; never reuse a revision
+for a different admission of the same key. A daemon without these methods
+answers `UNIMPLEMENTED`, or `PERMISSION_DENIED` to a credential without the
+operator role, and changes nothing; never retry a guarded mutation through
+the leased or unleased methods.
+
+All four methods are `operator_only`. A successful `IssueMutationWindow` or
+`RenewGuardedLease` is audited at INFO rather than WARN.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"owner": "scrubber", "window_seconds": 60}' \
+  localhost:50051 rustbgpd.v1.InjectionService/IssueMutationWindow
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "rule": {"afi_safi": "IPV4_FLOWSPEC",
+             "components": [{"type": 1, "prefix": "203.0.113.7/32"}],
+             "actions": [{"traffic_rate": {"rate": 0}}]},
+    "lease": {"owner": "scrubber", "lease_seconds": 30},
+    "window": {"incarnation": "<from the window>", "sequence": "<from the window>"},
+    "revision": "1"
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddGuardedFlowSpec
+```
 
 ### Replay-complete signal
 

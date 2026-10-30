@@ -15,8 +15,10 @@ use crate::route_distinguisher::parse_rd;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::injection_lease::{
-    InjectedKey, InjectedKeyCursor, InjectionLeases, LeaseConflict, LeaseGeneration, LeasedKeyRow,
-    LeasedKeysPage, LeasedKeysResume, validate_lease, validate_owner,
+    GUARDED_OWNER_PREFIX, GuardedFence, InjectedKey, InjectedKeyCursor, InjectionLeases,
+    LeaseConflict, LeaseGeneration, LeaseRejection, LeasedKeyRow, LeasedKeysPage, LeasedKeysResume,
+    MAX_LIVE_OWNERS, MAX_LIVE_WINDOWS, MAX_LIVE_WINDOWS_PER_OWNER, MutationWindowId, guarded_owner,
+    validate_lease, validate_owner, validate_window,
 };
 use rustbgpd_rib::manager::{LOCAL_ROUTE_EXPORT_MAX_KEYS, ROUTE_QUERY_MAX_PAGE_SIZE};
 use rustbgpd_rib::update::{
@@ -34,6 +36,7 @@ use rustbgpd_wire::{
     Ipv6PrefixOffset, LargeCommunity, MacAddress, MplsLabel, NumericMatch, Origin, PathAttribute,
     Prefix, RouteDistinguisher,
 };
+use std::num::NonZeroU64;
 
 /// gRPC service for injecting and withdrawing locally-originated routes.
 pub struct InjectionService {
@@ -191,6 +194,77 @@ fn parse_delete_owner(owner: &str) -> Result<(), Status> {
     validate_owner(owner).map_err(Status::invalid_argument)
 }
 
+/// Validate an owner a read names: a lease owner, or a guarded owner as
+/// read-back reports it, `guarded:<owner>` (ADR-0144 §4). Only reads accept
+/// the guarded form; no legacy mutation can name it.
+fn validate_listed_owner(owner: &str) -> Result<(), Status> {
+    validate_owner(owner.strip_prefix(GUARDED_OWNER_PREFIX).unwrap_or(owner))
+        .map_err(Status::invalid_argument)
+}
+
+/// A required mutation window (ADR-0144 §2).
+fn parse_window(window: Option<proto::MutationWindow>) -> Result<MutationWindowId, Status> {
+    window
+        .map(|window| MutationWindowId {
+            incarnation: window.incarnation,
+            sequence: window.sequence,
+        })
+        .ok_or_else(|| Status::invalid_argument("window is required"))
+}
+
+/// A required, nonzero admission revision (ADR-0144 §3).
+fn parse_revision(revision: u64) -> Result<NonZeroU64, Status> {
+    NonZeroU64::new(revision).ok_or_else(|| Status::invalid_argument("revision must be nonzero"))
+}
+
+/// The status of a refused lease-table operation.
+fn lease_rejection_status(rejection: LeaseRejection) -> Status {
+    match rejection {
+        LeaseRejection::WindowCap => Status::resource_exhausted(format!(
+            "at most {MAX_LIVE_WINDOWS_PER_OWNER} live mutation windows per owner, \
+             {MAX_LIVE_WINDOWS} in total"
+        )),
+        LeaseRejection::OwnerCap => Status::resource_exhausted(format!(
+            "at most {MAX_LIVE_OWNERS} owners can hold a live injection lease"
+        )),
+        LeaseRejection::WindowNotLive => lease_conflict_status(
+            LeaseConflict::WindowNotLive,
+            "the mutation window is not live for this owner".to_string(),
+        ),
+    }
+}
+
+/// Audit summary of a guarded call: the stored guarded owner, plus the
+/// window, revision and generation it names.
+fn guarded_summary(
+    owner: &str,
+    window: Option<MutationWindowId>,
+    revision: Option<NonZeroU64>,
+    generation: Option<LeaseGeneration>,
+) -> GrpcRequestSummary {
+    let mut summary = lease_summary(&guarded_owner(owner), generation, false)
+        .as_str()
+        .to_string();
+    if let Some(window) = window {
+        let _ = write!(
+            summary,
+            " window={}:{}",
+            window.incarnation, window.sequence
+        );
+    }
+    if let Some(revision) = revision {
+        let _ = write!(summary, " revision={revision}");
+    }
+    GrpcRequestSummary::new(summary)
+}
+
+fn window_to_proto(window: MutationWindowId) -> proto::MutationWindow {
+    proto::MutationWindow {
+        incarnation: window.incarnation,
+        sequence: window.sequence,
+    }
+}
+
 fn generation_to_proto(generation: LeaseGeneration) -> proto::LeaseGeneration {
     proto::LeaseGeneration {
         incarnation: generation.incarnation,
@@ -212,7 +286,8 @@ fn leased_keys_token(owner: &str, page: &LeasedKeysPage, cursor: &InjectedKeyCur
         || format!("w{}", page.watermark),
         |generation| generation.sequence.to_string(),
     );
-    // Owners are `[A-Za-z0-9._-]`, so the owner field holds no separator.
+    // A guarded owner (`guarded:<owner>`) holds one separator; parsing
+    // matches the whole expected owner, so that is unambiguous.
     let mut token = format!("t1:{owner}:{}:{sequence}:", page.incarnation);
     match cursor {
         InjectedKeyCursor::Unicast(prefix, path_id) => {
@@ -236,14 +311,18 @@ fn leased_keys_token(owner: &str, page: &LeasedKeysPage, cursor: &InjectedKeyCur
 fn parse_leased_keys_token(token: &str, owner: &str) -> Result<LeasedKeysResume, Status> {
     let invalid = || Status::invalid_argument("invalid page_token");
     let rest = token.strip_prefix("t1:").ok_or_else(invalid)?;
-    let (token_owner, rest) = rest.split_once(':').ok_or_else(invalid)?;
     // Two owners without a live lease share the same binding, so a token is
-    // only valid for the owner whose walk produced it.
-    if token_owner != owner {
+    // only valid for the owner whose walk produced it. A guarded owner's
+    // name holds one ':', so match the whole expected owner rather than
+    // splitting at the first separator.
+    let Some(rest) = rest
+        .strip_prefix(owner)
+        .and_then(|rest| rest.strip_prefix(':'))
+    else {
         return Err(Status::invalid_argument(
             "page_token belongs to a different owner",
         ));
-    }
+    };
     let (incarnation, rest) = rest.split_once(':').ok_or_else(invalid)?;
     let (sequence, key) = rest.split_once(':').ok_or_else(invalid)?;
     let incarnation: u64 = incarnation.parse().map_err(|_| invalid())?;
@@ -322,6 +401,7 @@ fn leased_key_to_proto(row: &LeasedKeyRow) -> proto::LeasedKey {
         key: Some(key),
         generation: Some(generation_to_proto(row.generation)),
         lease_remaining_ms: millis(row.remaining),
+        admission_revision: row.revision.map(NonZeroU64::get),
     }
 }
 
@@ -1275,6 +1355,186 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         }))
     }
 
+    async fn issue_mutation_window(
+        &self,
+        request: Request<proto::IssueMutationWindowRequest>,
+    ) -> Result<Response<proto::IssueMutationWindowResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.get_ref();
+        validate_window(&req.owner, req.window_seconds).map_err(Status::invalid_argument)?;
+        set_request_summary(&request, guarded_summary(&req.owner, None, None, None));
+        let (window, lifetime) = self
+            .leases
+            .issue_window(&req.owner, req.window_seconds)
+            .map_err(lease_rejection_status)?;
+        if let Some(audit) = request.extensions().get::<GrpcAuditHandle>() {
+            audit.set_summary(guarded_summary(&req.owner, Some(window), None, None));
+        }
+        Ok(Response::new(proto::IssueMutationWindowResponse {
+            window: Some(window_to_proto(window)),
+            window_remaining_ms: millis(lifetime),
+        }))
+    }
+
+    async fn add_guarded_flow_spec(
+        &self,
+        request: Request<proto::AddGuardedFlowSpecRequest>,
+    ) -> Result<Response<proto::AddGuardedFlowSpecResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.get_ref();
+        let (owner, lease_seconds) = parse_lease(req.lease.clone())?;
+        let fence = GuardedFence {
+            window: parse_window(req.window)?,
+            revision: parse_revision(req.revision)?,
+        };
+        set_request_summary(
+            &request,
+            guarded_summary(&owner, Some(fence.window), Some(fence.revision), None),
+        );
+        let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
+        let rule = request
+            .into_inner()
+            .rule
+            .ok_or_else(|| Status::invalid_argument("rule is required"))?;
+        let route = build_injected_flowspec(rule)?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::InjectGuardedFlowSpec {
+                route,
+                owner: owner.clone(),
+                lease_seconds,
+                fence,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
+        let (outcome, generation) = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|error| map_rib_command_error("guarded FlowSpec inject failed", error))?;
+        if let Some(audit) = audit {
+            audit.set_summary(guarded_summary(
+                &owner,
+                Some(fence.window),
+                Some(fence.revision),
+                Some(generation),
+            ));
+        }
+        let outcome = match outcome {
+            InjectOutcome::Created => proto::FlowSpecInjectOutcome::Created,
+            InjectOutcome::Replaced => proto::FlowSpecInjectOutcome::Replaced,
+            InjectOutcome::Unchanged => proto::FlowSpecInjectOutcome::Unchanged,
+        };
+        Ok(Response::new(proto::AddGuardedFlowSpecResponse {
+            result: Some(proto::AddFlowSpecResponse {
+                outcome: outcome as i32,
+            }),
+            generation: Some(generation_to_proto(generation)),
+        }))
+    }
+
+    async fn delete_guarded_flow_spec(
+        &self,
+        request: Request<proto::DeleteGuardedFlowSpecRequest>,
+    ) -> Result<Response<proto::DeleteGuardedFlowSpecResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.get_ref();
+        validate_owner(&req.owner).map_err(Status::invalid_argument)?;
+        let revision = parse_revision(req.revision)?;
+        set_request_summary(
+            &request,
+            guarded_summary(&req.owner, None, Some(revision), None),
+        );
+        let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
+        let req = request.into_inner();
+        let afi = parse_flowspec_afi(req.afi_safi)?;
+        let rule = FlowSpecRule {
+            components: parse_flowspec_components(&req.components, afi)?,
+        };
+        rule.validate()
+            .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
+        validate_flowspec_rule_encoded_len(&rule, afi)?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::WithdrawGuardedFlowSpec {
+                key: rustbgpd_rib::FlowSpecKey { afi, rule },
+                owner: req.owner.clone(),
+                revision,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
+        let removal = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|error| map_rib_command_error("guarded FlowSpec withdraw failed", error))?;
+        if let (Some(audit), Some(tag)) = (audit, removal.tag.as_ref()) {
+            audit.set_summary(guarded_summary(
+                &req.owner,
+                None,
+                Some(revision),
+                Some(tag.generation),
+            ));
+        }
+        let outcome = if removal.removed {
+            proto::FlowSpecDeleteOutcome::Deleted
+        } else {
+            proto::FlowSpecDeleteOutcome::NotPresent
+        };
+        Ok(Response::new(proto::DeleteGuardedFlowSpecResponse {
+            outcome: outcome as i32,
+        }))
+    }
+
+    async fn renew_guarded_lease(
+        &self,
+        request: Request<proto::RenewGuardedLeaseRequest>,
+    ) -> Result<Response<proto::RenewGuardedLeaseResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.get_ref();
+        validate_lease(&req.owner, req.lease_seconds).map_err(Status::invalid_argument)?;
+        let generation = req
+            .generation
+            .as_ref()
+            .map(|generation| LeaseGeneration {
+                incarnation: generation.incarnation,
+                sequence: generation.sequence,
+            })
+            .ok_or_else(|| Status::invalid_argument("generation is required"))?;
+        let window = parse_window(req.window)?;
+        set_request_summary(
+            &request,
+            guarded_summary(&req.owner, Some(window), None, Some(generation)),
+        );
+        let remaining = self
+            .leases
+            .renew_guarded(&req.owner, generation, req.lease_seconds, window)
+            .map_err(|conflict| {
+                tracing::debug!(owner = %req.owner, reason = conflict.reason(), "guarded lease renewal rejected");
+                let message = match conflict {
+                    LeaseConflict::WindowNotLive => {
+                        "the mutation window is not live for this owner"
+                    }
+                    _ => "lease generation is not live; re-add the owner's desired state",
+                };
+                lease_conflict_status(conflict, message.to_string())
+            })?;
+        Ok(Response::new(proto::RenewGuardedLeaseResponse {
+            generation: Some(generation_to_proto(generation)),
+            lease_remaining_ms: millis(remaining),
+        }))
+    }
+
     async fn list_path_export_dispositions(
         &self,
         request: Request<proto::ListPathExportDispositionsRequest>,
@@ -1426,7 +1686,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         request: Request<proto::ListLeasedKeysRequest>,
     ) -> Result<Response<proto::ListLeasedKeysResponse>, Status> {
         let req = request.into_inner();
-        validate_owner(&req.owner).map_err(Status::invalid_argument)?;
+        validate_listed_owner(&req.owner)?;
         let resume = if req.page_token.is_empty() {
             None
         } else {
@@ -6601,5 +6861,761 @@ mod tests {
 
         drop((svc, rib, rib_tx));
         manager_task.await.unwrap();
+    }
+
+    /// A real RIB, its lease table and an injection service over it.
+    struct GuardedRig {
+        svc: InjectionService,
+        rib: crate::rib_service::RibService,
+        leases: Arc<InjectionLeases>,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        manager_task: tokio::task::JoinHandle<()>,
+    }
+
+    impl GuardedRig {
+        fn start() -> Self {
+            let (rib_tx, rib_rx) = mpsc::channel(64);
+            let manager = rustbgpd_rib::RibManager::new(
+                rib_rx,
+                mpsc::channel(1).1,
+                None,
+                None,
+                rustbgpd_telemetry::BgpMetrics::new(),
+            );
+            let leases = manager.injection_leases();
+            let manager_task = tokio::spawn(manager.run());
+            let svc =
+                InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite, Arc::clone(&leases));
+            let rib = crate::rib_service::RibService::new(rib_tx.clone())
+                .with_injection_leases(Arc::clone(&leases));
+            Self {
+                svc,
+                rib,
+                leases,
+                rib_tx,
+                manager_task,
+            }
+        }
+
+        async fn stop(self) {
+            drop((self.svc, self.rib, self.rib_tx));
+            self.manager_task.await.unwrap();
+        }
+
+        async fn window(&self, owner: &str) -> proto::MutationWindow {
+            self.svc
+                .issue_mutation_window(Request::new(proto::IssueMutationWindowRequest {
+                    owner: owner.into(),
+                    window_seconds: 120,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .window
+                .unwrap()
+        }
+
+        async fn add(
+            &self,
+            port: &str,
+            rate: f32,
+            owner: &str,
+            window: Option<proto::MutationWindow>,
+            revision: u64,
+        ) -> Result<proto::AddGuardedFlowSpecResponse, Status> {
+            self.svc
+                .add_guarded_flow_spec(Request::new(proto::AddGuardedFlowSpecRequest {
+                    rule: Some(guarded_rule(port, rate)),
+                    lease: Some(proto::InjectionLease {
+                        owner: owner.into(),
+                        lease_seconds: 60,
+                    }),
+                    window,
+                    revision,
+                }))
+                .await
+                .map(Response::into_inner)
+        }
+
+        async fn delete(
+            &self,
+            port: &str,
+            owner: &str,
+            revision: u64,
+        ) -> Result<proto::DeleteGuardedFlowSpecResponse, Status> {
+            self.svc
+                .delete_guarded_flow_spec(Request::new(proto::DeleteGuardedFlowSpecRequest {
+                    afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                    components: guarded_rule(port, 0.0).components,
+                    owner: owner.into(),
+                    revision,
+                }))
+                .await
+                .map(Response::into_inner)
+        }
+
+        /// The local rules, by destination port, with owner, revision and
+        /// payload rate.
+        async fn local_rules(
+            &self,
+        ) -> Vec<(String, String, Option<u64>, Vec<proto::FlowSpecAction>)> {
+            use proto::rib_service_server::RibService as _;
+            let mut rules: Vec<_> = self
+                .rib
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+                    afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                    received_peer_address: "0.0.0.0".into(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .received_routes
+                .into_iter()
+                .filter_map(|row| row.route)
+                .map(|route| {
+                    (
+                        route.components[1].value.clone(),
+                        route.injection_owner,
+                        route.admission_revision,
+                        route.actions,
+                    )
+                })
+                .collect();
+            rules.sort_by(|a, b| a.0.cmp(&b.0));
+            rules
+        }
+    }
+
+    fn guarded_rule(port: &str, rate: f32) -> proto::AddFlowSpecRequest {
+        let mut components = flowspec_rule_components();
+        components[1].value = port.into();
+        proto::AddFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            components,
+            actions: vec![flowspec_rate(rate)],
+            communities: vec![],
+            extended_communities: vec![],
+            ipv6_extended_communities: vec![],
+        }
+    }
+
+    /// Every ADR-0144 §1 definitive refusal of the four guarded RPCs, at the
+    /// API boundary, against a real RIB: `INVALID_ARGUMENT` for malformed
+    /// input, `FAILED_PRECONDITION` with `WINDOW_NOT_LIVE`,
+    /// `REVISION_MISMATCH`, `OWNER_MISMATCH`, `KEY_UNOWNED` or
+    /// `GENERATION_NOT_LIVE`, and `RESOURCE_EXHAUSTED` for the window cap.
+    /// None changes the guarded rule, its revision or the lease.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of every status across the four guarded RPCs"
+    )]
+    async fn guarded_rpcs_map_every_definitive_refusal() {
+        let rig = GuardedRig::start();
+        let window = rig.window("ctl").await;
+        let added = rig.add("=80", 0.0, "ctl", Some(window), 1).await.unwrap();
+        assert_eq!(
+            added.result.unwrap().outcome(),
+            proto::FlowSpecInjectOutcome::Created
+        );
+        let generation = added.generation.unwrap();
+        // A legacy owner holds =443; =8080 is unowned.
+        rig.svc
+            .add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                rule: Some(guarded_rule("=443", 0.0)),
+                lease: Some(proto::InjectionLease {
+                    owner: "ctl".into(),
+                    lease_seconds: 30,
+                }),
+            }))
+            .await
+            .unwrap();
+        rig.svc
+            .add_flow_spec(Request::new(guarded_rule("=8080", 0.0)))
+            .await
+            .unwrap();
+        let foreign = rig.window("other").await;
+        let elsewhere = proto::MutationWindow {
+            incarnation: window.incarnation ^ 1,
+            ..window
+        };
+        let before = rig.local_rules().await;
+        let lease_before = rig.leases.list(Some("guarded:ctl"));
+
+        let issue = |owner: &str, window_seconds| {
+            rig.svc
+                .issue_mutation_window(Request::new(proto::IssueMutationWindowRequest {
+                    owner: owner.into(),
+                    window_seconds,
+                }))
+        };
+        let renew = |window, generation, lease_seconds| {
+            rig.svc
+                .renew_guarded_lease(Request::new(proto::RenewGuardedLeaseRequest {
+                    owner: "ctl".into(),
+                    generation,
+                    lease_seconds,
+                    window,
+                }))
+        };
+        let invalid = [
+            (
+                "issue: malformed owner",
+                issue("bad owner", 30).await.unwrap_err(),
+            ),
+            (
+                "issue: guarded-form owner",
+                issue("guarded:ctl", 30).await.unwrap_err(),
+            ),
+            ("issue: zero window", issue("ctl", 0).await.unwrap_err()),
+            (
+                "issue: oversized window",
+                issue("ctl", 121).await.unwrap_err(),
+            ),
+            (
+                "add: revision 0",
+                rig.add("=80", 0.0, "ctl", Some(window), 0)
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "add: no window",
+                rig.add("=80", 0.0, "ctl", None, 1).await.unwrap_err(),
+            ),
+            (
+                "add: malformed owner",
+                rig.add("=80", 0.0, "a:b", Some(window), 1)
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "delete: revision 0",
+                rig.delete("=80", "ctl", 0).await.unwrap_err(),
+            ),
+            (
+                "delete: malformed owner",
+                rig.delete("=80", "guarded:ctl", 1).await.unwrap_err(),
+            ),
+            (
+                "renew: no window",
+                renew(None, Some(generation), 60).await.unwrap_err(),
+            ),
+            (
+                "renew: no generation",
+                renew(Some(window), None, 60).await.unwrap_err(),
+            ),
+            (
+                "renew: lease below 5 s",
+                renew(Some(window), Some(generation), 4).await.unwrap_err(),
+            ),
+        ];
+        for (case, status) in &invalid {
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{case}");
+        }
+        let missing_rule = rig
+            .svc
+            .add_guarded_flow_spec(Request::new(proto::AddGuardedFlowSpecRequest {
+                rule: None,
+                lease: Some(proto::InjectionLease {
+                    owner: "ctl".into(),
+                    lease_seconds: 60,
+                }),
+                window: Some(window),
+                revision: 1,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(missing_rule.code(), tonic::Code::InvalidArgument);
+
+        let conflicts = [
+            (
+                "add: another owner's window",
+                rig.add("=80", 0.0, "ctl", Some(foreign), 1)
+                    .await
+                    .unwrap_err(),
+                "WINDOW_NOT_LIVE",
+            ),
+            (
+                "add: another process's window",
+                rig.add("=80", 0.0, "ctl", Some(elsewhere), 1)
+                    .await
+                    .unwrap_err(),
+                "WINDOW_NOT_LIVE",
+            ),
+            (
+                "add: same revision, another payload",
+                rig.add("=80", 1.0, "ctl", Some(window), 1)
+                    .await
+                    .unwrap_err(),
+                "REVISION_MISMATCH",
+            ),
+            (
+                "add: another revision",
+                rig.add("=80", 0.0, "ctl", Some(window), 2)
+                    .await
+                    .unwrap_err(),
+                "REVISION_MISMATCH",
+            ),
+            (
+                "add: a legacy owner's key",
+                rig.add("=443", 0.0, "ctl", Some(window), 1)
+                    .await
+                    .unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "add: an unowned key",
+                rig.add("=8080", 0.0, "ctl", Some(window), 1)
+                    .await
+                    .unwrap_err(),
+                "KEY_UNOWNED",
+            ),
+            (
+                "delete: another revision",
+                rig.delete("=80", "ctl", 2).await.unwrap_err(),
+                "REVISION_MISMATCH",
+            ),
+            (
+                "delete: another guarded owner",
+                rig.delete("=80", "other", 1).await.unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "delete: a legacy owner's key",
+                rig.delete("=443", "ctl", 1).await.unwrap_err(),
+                "OWNER_MISMATCH",
+            ),
+            (
+                "delete: an unowned key",
+                rig.delete("=8080", "ctl", 1).await.unwrap_err(),
+                "KEY_UNOWNED",
+            ),
+            (
+                "renew: another owner's window",
+                renew(Some(foreign), Some(generation), 60)
+                    .await
+                    .unwrap_err(),
+                "WINDOW_NOT_LIVE",
+            ),
+            (
+                "renew: a generation that is not live",
+                renew(
+                    Some(window),
+                    Some(proto::LeaseGeneration {
+                        sequence: generation.sequence + 7,
+                        ..generation
+                    }),
+                    60,
+                )
+                .await
+                .unwrap_err(),
+                "GENERATION_NOT_LIVE",
+            ),
+        ];
+        for (case, status, reason) in &conflicts {
+            assert_eq!(lease_conflict_reason(status), *reason, "{case}");
+        }
+        assert_eq!(rig.local_rules().await, before, "no refusal changed a rule");
+        assert_eq!(rig.leases.list(Some("guarded:ctl")).len(), 1);
+        assert_eq!(
+            rig.leases.list(Some("guarded:ctl"))[0].generation,
+            lease_before[0].generation
+        );
+
+        // "ctl" holds one live window; 63 more fill its allowance.
+        for _ in 1..MAX_LIVE_WINDOWS_PER_OWNER {
+            issue("ctl", 30).await.unwrap();
+        }
+        let exhausted = issue("ctl", 30).await.unwrap_err();
+        assert_eq!(exhausted.code(), tonic::Code::ResourceExhausted);
+
+        // An absent rule is NOT_PRESENT; the guarded rule deletes at its
+        // revision.
+        assert_eq!(
+            rig.delete("=81", "ctl", 1).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::NotPresent
+        );
+        assert_eq!(
+            rig.delete("=80", "ctl", 1).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::Deleted
+        );
+        rig.stop().await;
+    }
+
+    /// A window that expired while the add was in flight is refused at
+    /// commit with `WINDOW_NOT_LIVE`, as is a renewal through it; nothing
+    /// starts. A renewal through a live window is capped at its expiry.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_window_is_refused_and_a_live_one_caps_renewal() {
+        let rig = GuardedRig::start();
+        let short = rig
+            .svc
+            .issue_mutation_window(Request::new(proto::IssueMutationWindowRequest {
+                owner: "ctl".into(),
+                window_seconds: 5,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(short.window_remaining_ms, 5_000);
+        let long = rig.window("ctl").await;
+        let generation = rig
+            .add("=80", 0.0, "ctl", Some(long), 1)
+            .await
+            .unwrap()
+            .generation;
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        let late = rig
+            .add("=81", 0.0, "ctl", short.window, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(lease_conflict_reason(&late), "WINDOW_NOT_LIVE");
+        let renewal = rig
+            .svc
+            .renew_guarded_lease(Request::new(proto::RenewGuardedLeaseRequest {
+                owner: "ctl".into(),
+                generation,
+                lease_seconds: 60,
+                window: short.window,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(lease_conflict_reason(&renewal), "WINDOW_NOT_LIVE");
+        assert_eq!(rig.local_rules().await.len(), 1);
+        let renewed = rig
+            .svc
+            .renew_guarded_lease(Request::new(proto::RenewGuardedLeaseRequest {
+                owner: "ctl".into(),
+                generation,
+                lease_seconds: 3600,
+                window: Some(long),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(renewed.generation, generation);
+        assert!(renewed.lease_remaining_ms <= 115_000, "{renewed:?}");
+        rig.stop().await;
+    }
+
+    /// The guarded read-back: the local `FlowSpec` view and the guarded
+    /// owner's key listing report the owner as `guarded:<owner>` with the
+    /// admission revision, and the lease listing filters on that name. A
+    /// legacy leased rule reports no revision.
+    #[tokio::test]
+    async fn guarded_read_back_reports_owner_and_revision() {
+        let rig = GuardedRig::start();
+        let window = rig.window("ctl").await;
+        let generation = rig
+            .add("=80", 0.0, "ctl", Some(window), 7)
+            .await
+            .unwrap()
+            .generation;
+        rig.add("=81", 0.0, "ctl", Some(window), 8).await.unwrap();
+        rig.svc
+            .add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                rule: Some(guarded_rule("=443", 0.0)),
+                lease: Some(proto::InjectionLease {
+                    owner: "ctl".into(),
+                    lease_seconds: 30,
+                }),
+            }))
+            .await
+            .unwrap();
+        let rules = rig.local_rules().await;
+        assert_eq!(
+            rules
+                .iter()
+                .map(|(port, owner, revision, _)| (port.as_str(), owner.as_str(), *revision))
+                .collect::<Vec<_>>(),
+            [
+                ("==443", "ctl", None),
+                ("==80", "guarded:ctl", Some(7)),
+                ("==81", "guarded:ctl", Some(8))
+            ]
+        );
+        // A one-key page walk of the guarded owner resumes by its token,
+        // whose owner field holds the guarded name's ':'.
+        let mut revisions = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let page = rig
+                .svc
+                .list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                    owner: "guarded:ctl".into(),
+                    page_size: 1,
+                    page_token,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(page.generation, generation);
+            revisions.extend(page.keys.iter().map(|key| key.admission_revision));
+            if page.next_page_token.is_empty() {
+                break;
+            }
+            page_token = page.next_page_token;
+        }
+        assert_eq!(revisions, [Some(7), Some(8)]);
+        let leases = rig
+            .svc
+            .list_injection_leases(Request::new(proto::ListInjectionLeasesRequest {
+                owner: "guarded:ctl".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .leases;
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases[0].generation, generation);
+        // A guarded name is a read-only form: malformed after the prefix is
+        // still refused.
+        let malformed = rig
+            .svc
+            .list_leased_keys(Request::new(proto::ListLeasedKeysRequest {
+                owner: "guarded:bad owner".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+        rig.stop().await;
+    }
+
+    /// The legacy leased add, `RenewLease` and owner-scoped `DeleteFlowSpec`
+    /// cannot reach a guarded owner's rule or lease: each is refused, and the
+    /// rule keeps its owner and revision.
+    ///
+    /// Break-to-red: without the guarded owner namespace, all three succeed.
+    #[tokio::test]
+    async fn legacy_rpcs_cannot_reach_a_guarded_owner() {
+        let rig = GuardedRig::start();
+        let window = rig.window("ctl").await;
+        let generation = rig
+            .add("=80", 0.0, "ctl", Some(window), 1)
+            .await
+            .unwrap()
+            .generation;
+        let add = rig
+            .svc
+            .add_leased_flow_spec(Request::new(proto::AddLeasedFlowSpecRequest {
+                rule: Some(guarded_rule("=80", 0.0)),
+                lease: Some(proto::InjectionLease {
+                    owner: "ctl".into(),
+                    lease_seconds: 3600,
+                }),
+            }))
+            .await;
+        let renew = rig
+            .svc
+            .renew_lease(Request::new(proto::RenewLeaseRequest {
+                owner: "ctl".into(),
+                generation,
+                lease_seconds: 3600,
+            }))
+            .await;
+        let delete = rig
+            .svc
+            .delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: guarded_rule("=80", 0.0).components,
+                allow_missing: false,
+                owner: "ctl".into(),
+                override_owner: false,
+            }))
+            .await;
+        assert_eq!(
+            [
+                add.as_ref().map(|_| ()).map_err(Status::code),
+                renew.as_ref().map(|_| ()).map_err(Status::code),
+                delete.as_ref().map(|_| ()).map_err(Status::code),
+            ],
+            [Err(tonic::Code::FailedPrecondition); 3],
+            "legacy add, renew and delete must all be refused"
+        );
+        assert_eq!(lease_conflict_reason(&add.unwrap_err()), "OWNER_MISMATCH");
+        assert_eq!(
+            lease_conflict_reason(&renew.unwrap_err()),
+            "GENERATION_NOT_LIVE"
+        );
+        assert_eq!(
+            lease_conflict_reason(&delete.unwrap_err()),
+            "OWNER_MISMATCH"
+        );
+        let rules = rig.local_rules().await;
+        assert_eq!(rules.len(), 1);
+        assert_eq!((rules[0].1.as_str(), rules[0].2), ("guarded:ctl", Some(1)));
+        rig.stop().await;
+    }
+
+    /// A delete of revision 1 delivered again after the rule was deleted and
+    /// re-added at revision 2 is refused with `REVISION_MISMATCH`: the newer
+    /// admission stays, at revision 2 and with its own payload.
+    ///
+    /// Break-to-red: without the revision check, the late delete removes the
+    /// newer admission.
+    #[tokio::test]
+    async fn a_delayed_guarded_delete_spares_a_newer_admission() {
+        let rig = GuardedRig::start();
+        let window = rig.window("ctl").await;
+        rig.add("=80", 0.0, "ctl", Some(window), 1).await.unwrap();
+        assert_eq!(
+            rig.delete("=80", "ctl", 1).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            rig.add("=80", 2.0, "ctl", Some(window), 2)
+                .await
+                .unwrap()
+                .result
+                .unwrap()
+                .outcome(),
+            proto::FlowSpecInjectOutcome::Created
+        );
+        let late = rig.delete("=80", "ctl", 1).await;
+        assert_eq!(
+            late.as_ref()
+                .map_err(lease_conflict_reason)
+                .err()
+                .as_deref(),
+            Some("REVISION_MISMATCH"),
+            "{late:?}"
+        );
+        let rules = rig.local_rules().await;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].2, Some(2));
+        assert_eq!(rules[0].3, vec![flowspec_rate(2.0)]);
+        rig.stop().await;
+    }
+
+    /// A daemon built before the guarded methods refuses each of them
+    /// without changing anything. Its generated router has no entry for
+    /// them, so it dispatches each as an unknown method. This in-process
+    /// server emulates that router by renaming the four paths to ones this
+    /// build lacks, in front of the real service, RIB and lease table; a
+    /// real older binary is qualified separately. The client, built from the
+    /// current schema, gets `UNIMPLEMENTED` on every path, and no rule,
+    /// lease or window exists afterwards.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one older-daemon session: server, client, four refused paths and the state checks"
+    )]
+    async fn an_older_daemon_refuses_every_guarded_method_and_changes_nothing() {
+        use hyper_util::rt::TokioIo;
+        use proto::injection_service_client::InjectionServiceClient;
+        use proto::injection_service_server::InjectionServiceServer;
+        use tonic::codegen::http;
+        use tonic::transport::{Endpoint, Server, Uri};
+
+        const GUARDED: [&str; 4] = [
+            "/rustbgpd.v1.InjectionService/IssueMutationWindow",
+            "/rustbgpd.v1.InjectionService/AddGuardedFlowSpec",
+            "/rustbgpd.v1.InjectionService/DeleteGuardedFlowSpec",
+            "/rustbgpd.v1.InjectionService/RenewGuardedLease",
+        ];
+        let rig = GuardedRig::start();
+        let older_router =
+            tower::util::MapRequestLayer::new(|mut request: http::Request<tonic::body::Body>| {
+                if GUARDED.contains(&request.uri().path()) {
+                    let removed = format!("{}Removed", request.uri().path());
+                    *request.uri_mut() = removed.parse().unwrap();
+                }
+                request
+            });
+        let svc = InjectionService::new(
+            rig.rib_tx.clone(),
+            AccessMode::ReadWrite,
+            Arc::clone(&rig.leases),
+        );
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(
+            Server::builder()
+                .layer(older_router)
+                .add_service(InjectionServiceServer::new(svc))
+                .serve_with_incoming(tokio_stream::once(Ok::<_, std::io::Error>(server_io))),
+        );
+        let mut client_io = Some(client_io);
+        let channel = Endpoint::from_static("http://older-daemon.test")
+            .connect_with_connector(tower::service_fn(move |_: Uri| {
+                let io = client_io.take();
+                async move {
+                    io.map(TokioIo::new)
+                        .ok_or_else(|| std::io::Error::other("reused"))
+                }
+            }))
+            .await
+            .unwrap();
+        let mut client = InjectionServiceClient::new(channel);
+        let window = proto::MutationWindow {
+            incarnation: rig.leases.incarnation(),
+            sequence: 1,
+        };
+        let codes = [
+            client
+                .issue_mutation_window(proto::IssueMutationWindowRequest {
+                    owner: "ctl".into(),
+                    window_seconds: 120,
+                })
+                .await
+                .map(|_| ())
+                .map_err(|status| status.code()),
+            client
+                .add_guarded_flow_spec(proto::AddGuardedFlowSpecRequest {
+                    rule: Some(guarded_rule("=80", 0.0)),
+                    lease: Some(proto::InjectionLease {
+                        owner: "ctl".into(),
+                        lease_seconds: 60,
+                    }),
+                    window: Some(window),
+                    revision: 1,
+                })
+                .await
+                .map(|_| ())
+                .map_err(|status| status.code()),
+            client
+                .delete_guarded_flow_spec(proto::DeleteGuardedFlowSpecRequest {
+                    afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                    components: guarded_rule("=80", 0.0).components,
+                    owner: "ctl".into(),
+                    revision: 1,
+                })
+                .await
+                .map(|_| ())
+                .map_err(|status| status.code()),
+            client
+                .renew_guarded_lease(proto::RenewGuardedLeaseRequest {
+                    owner: "ctl".into(),
+                    generation: Some(proto::LeaseGeneration {
+                        incarnation: rig.leases.incarnation(),
+                        sequence: 1,
+                    }),
+                    lease_seconds: 60,
+                    window: Some(window),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|status| status.code()),
+        ];
+        assert_eq!(codes, [Err(tonic::Code::Unimplemented); 4]);
+        // The legacy methods on the same server still work, so the router
+        // was serving.
+        assert!(
+            client
+                .list_injection_leases(proto::ListInjectionLeasesRequest::default())
+                .await
+                .unwrap()
+                .into_inner()
+                .leases
+                .is_empty(),
+            "no lease started"
+        );
+        assert_eq!(rig.local_rules().await, Vec::new(), "no rule added");
+        // The first window this table issues is still sequence 1: none was
+        // issued through the older router.
+        assert_eq!(rig.window("ctl").await, window);
+        drop(client);
+        rig.stop().await;
     }
 }

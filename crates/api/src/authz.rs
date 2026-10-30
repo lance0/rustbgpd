@@ -799,6 +799,30 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.InjectionService",
+        "IssueMutationWindow",
+        "/rustbgpd.v1.InjectionService/IssueMutationWindow",
+        AuthTier::OperatorOnly,
+    ),
+    method(
+        "rustbgpd.v1.InjectionService",
+        "AddGuardedFlowSpec",
+        "/rustbgpd.v1.InjectionService/AddGuardedFlowSpec",
+        AuthTier::OperatorOnly,
+    ),
+    method(
+        "rustbgpd.v1.InjectionService",
+        "DeleteGuardedFlowSpec",
+        "/rustbgpd.v1.InjectionService/DeleteGuardedFlowSpec",
+        AuthTier::OperatorOnly,
+    ),
+    method(
+        "rustbgpd.v1.InjectionService",
+        "RenewGuardedLease",
+        "/rustbgpd.v1.InjectionService/RenewGuardedLease",
+        AuthTier::OperatorOnly,
+    ),
+    method(
+        "rustbgpd.v1.InjectionService",
         "ListInjectionLeases",
         "/rustbgpd.v1.InjectionService/ListInjectionLeases",
         AuthTier::SensitiveRead,
@@ -957,7 +981,7 @@ mod tests {
     const INVENTORY_JSON: &str = include_str!("../../../docs/reference/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/reference/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 1 | 0.7% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 83 | 61.9% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 83 | 60.1% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1197,7 +1221,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 134);
+        assert_eq!(METHODS.len(), 138);
     }
 
     #[test]
@@ -1240,7 +1264,7 @@ mod tests {
         assert_eq!(method_count_by_tier(AuthTier::Read), 1);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 83);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 22);
-        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 28);
+        assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 32);
     }
 
     /// ADR-0141 §8: renewal shares the adds' tier, so an `automation`
@@ -1248,7 +1272,15 @@ mod tests {
     /// the listing is a sensitive read.
     #[test]
     fn injection_lease_methods_keep_the_injection_tier() {
-        for method in ["AddLeasedPath", "AddLeasedFlowSpec", "RenewLease"] {
+        for method in [
+            "AddLeasedPath",
+            "AddLeasedFlowSpec",
+            "RenewLease",
+            "IssueMutationWindow",
+            "AddGuardedFlowSpec",
+            "DeleteGuardedFlowSpec",
+            "RenewGuardedLease",
+        ] {
             assert_eq!(
                 method_authz(&format!("/rustbgpd.v1.InjectionService/{method}"))
                     .map(|method| method.tier),
