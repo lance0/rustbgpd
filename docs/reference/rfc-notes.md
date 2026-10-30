@@ -1499,8 +1499,13 @@ separate from control-plane-only families advertising F=1.
 - ORF filters use prefix-list semantics: sequence order, first match wins,
   implicit deny on a non-empty list, permit-all when empty.
 - The initial advertisement for an ORF-negotiated family is gated until the
-  peer's first ROUTE-REFRESH; `DEFER` installs state and waits for a later
-  immediate or plain refresh to sweep advertisements and withdrawals.
+  peer's first plain ROUTE-REFRESH or `IMMEDIATE` ORF for that family. `DEFER`
+  installs state without lifting the gate and waits for a later immediate or
+  plain refresh to sweep advertisements and withdrawals.
+- A non-GR peer gets an empty End-of-RIB for a gated family at once, and a
+  withheld family's empty End-of-RIB is never held for the peer's refresh. A
+  marker held by GR, selection deferral or replay grace waits for the gated
+  table instead.
 - Unknown `When-to-refresh` values are invalid control input: rustbgpd resets
   the negotiated Address-Prefix ORF list for that family/type and forces a safe
   resync instead of treating the value as defer-like state.

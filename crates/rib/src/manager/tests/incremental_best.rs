@@ -403,6 +403,7 @@ enum Op {
     OrfPush {
         peer: u8,
         kind: u8,
+        immediate: bool,
     },
     FullChannel {
         peer: u8,
@@ -423,7 +424,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         1 => (0..PEERS).prop_map(|peer| Op::EorClear { peer }),
         2 => (0..PEERS, any::<bool>()).prop_map(|(peer, orf)| Op::PeerUp { peer, orf }),
         2 => (0..PEERS).prop_map(|peer| Op::PlainRefresh { peer }),
-        2 => (0..PEERS, 0u8..3).prop_map(|(peer, kind)| Op::OrfPush { peer, kind }),
+        2 => (0..PEERS, 0u8..3, any::<bool>())
+            .prop_map(|(peer, kind, immediate)| Op::OrfPush { peer, kind, immediate }),
         1 => (0..PEERS, any::<bool>()).prop_map(|(peer, full)| Op::FullChannel { peer, full }),
     ]
 }
@@ -610,7 +612,11 @@ fn apply(manager: &mut RibManager, channels: &mut Channels, op: &Op, received_at
                 });
             }
         }
-        Op::OrfPush { peer, kind } => {
+        Op::OrfPush {
+            peer,
+            kind,
+            immediate,
+        } => {
             let address = peer_addr(*peer);
             if channels.orf[usize::from(*peer)] {
                 let entries = match kind {
@@ -638,7 +644,11 @@ fn apply(manager: &mut RibManager, channels: &mut Channels, op: &Op, received_at
                     session_id: 0,
                     afi: FAMILY.0,
                     safi: FAMILY.1,
-                    when: WhenToRefresh::Defer,
+                    when: if *immediate {
+                        WhenToRefresh::Immediate
+                    } else {
+                        WhenToRefresh::Defer
+                    },
                     entries,
                     reply,
                 });
@@ -840,7 +850,11 @@ fn refresh_orf_and_full_channel_leave_no_peer_map_residue() {
         Op::PlainRefresh { peer: 0 },
         Op::SessionDown { peer: 0 },
         Op::PeerUp { peer: 1, orf: true },
-        Op::OrfPush { peer: 1, kind: 2 },
+        Op::OrfPush {
+            peer: 1,
+            kind: 2,
+            immediate: true,
+        },
         Op::FullChannel {
             peer: 1,
             full: true,

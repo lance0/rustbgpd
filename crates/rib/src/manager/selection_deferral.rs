@@ -1512,14 +1512,11 @@ impl RibManager {
                 // a partial resync while another family stays held.
                 continue;
             }
-            if !evpn_coverage_required
-                && self
-                    .peer_orf_pending
-                    .get(&peer)
-                    .is_some_and(|held| held.contains(&family))
-            {
-                self.gr_deferred_eor.entry(peer).or_default().insert(family);
-            }
+            // An ORF gate defers the replay. A sendable family held by this
+            // gate already recorded its table obligation at registration or
+            // unlock, and the flush keeps that marker for the peer's refresh.
+            // Any other pending marker (a withheld family, or one the writer
+            // deferred) is an honest-empty completion and leaves now.
             if !self.dirty_peers.contains(&peer) {
                 // A late group member may have skipped a frozen row already in
                 // the shared table; unchanged group selection cannot replay it.
@@ -1530,10 +1527,8 @@ impl RibManager {
                         family.1,
                         super::route_refresh::FamilyReplayKind::SelectionRelease,
                     );
-                    if outcome != super::route_refresh::FamilyReplayOutcome::Committed {
-                        if outcome == super::route_refresh::FamilyReplayOutcome::Failed {
-                            self.mark_outbound_dirty(peer);
-                        }
+                    if outcome == super::route_refresh::FamilyReplayOutcome::Failed {
+                        self.mark_outbound_dirty(peer);
                         continue;
                     }
                 }
