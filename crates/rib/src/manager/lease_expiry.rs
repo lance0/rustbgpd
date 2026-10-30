@@ -3,6 +3,7 @@
 //! state is shared, behind the lease table's lock.
 
 use std::collections::HashSet;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use tracing::warn;
@@ -10,14 +11,22 @@ use tracing::warn;
 use super::helpers::{LOCAL_PEER, gauge_val};
 use super::{AdjRibIn, ExactExportKey, RibManager};
 use crate::injection_lease::{
-    ExpiredLease, InjectedKey, InjectedKeyCursor, InjectionTag, LeaseConflict, LeasedKeyRow,
-    LeasedKeysPage, LeasedKeysResume, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
+    ExpiredLease, GuardedFence, InjectedKey, InjectedKeyCursor, InjectionTag, LeaseConflict,
+    LeasedKeyRow, LeasedKeysPage, LeasedKeysResume, MAX_KEYS_PER_OWNER, MAX_LIVE_OWNERS,
 };
 use crate::route::FlowSpecRouteKey;
 use crate::update::RibCommandError;
 
 /// Owner label used once [`MAX_LIVE_OWNERS`] distinct owners have been seen.
 const OTHER_OWNER_LABEL: &str = "_other";
+
+/// A guarded add's fence, and whether its payload equals the present local
+/// entry's (ADR-0144 §3).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct GuardedAdmission {
+    pub(super) fence: GuardedFence,
+    pub(super) same_payload: bool,
+}
 
 impl RibManager {
     /// The owner and generation `key` is tagged with, if owned.
@@ -71,17 +80,38 @@ impl RibManager {
         }
     }
 
+    /// Refuse a guarded change to `key` at `revision` unless the key is
+    /// tagged with exactly that admission revision (ADR-0144 §3).
+    pub(super) fn check_injected_revision(
+        &self,
+        key: &InjectedKey,
+        revision: NonZeroU64,
+    ) -> Result<(), RibCommandError> {
+        match self.injected_owners.get(key).and_then(|tag| tag.revision) {
+            Some(held) if held == revision => Ok(()),
+            held => Err(RibCommandError::FailedPrecondition(
+                LeaseConflict::RevisionMismatch,
+                format!("key is held at revision {held:?}, not {revision}"),
+            )),
+        }
+    }
+
     /// Admit a leased add of `key` in the turn that commits it: refuse an
-    /// ownership mismatch or a new key past [`MAX_KEYS_PER_OWNER`], then join
-    /// or start the owner's lease, then tag the key. A present unowned key is
-    /// never adopted. Nothing changes on a refusal.
+    /// ownership mismatch or a new key past [`MAX_KEYS_PER_OWNER`], then, for
+    /// a guarded add, a present key at another revision or with another
+    /// payload; then join or start the owner's lease (checking a guarded
+    /// add's window and capping the deadline at its expiry), then tag the
+    /// key. A present unowned key is never adopted. Nothing changes on a
+    /// refusal. Returns the tag and whether it started a generation, which
+    /// the caller logs after its insert and distribution.
     pub(super) fn admit_injected_lease(
         &mut self,
         key: &InjectedKey,
         present: bool,
         owner: &str,
         lease_seconds: u32,
-    ) -> Result<InjectionTag, RibCommandError> {
+        guarded: Option<GuardedAdmission>,
+    ) -> Result<(InjectionTag, bool), RibCommandError> {
         match self.injected_owners.get(key) {
             Some(tag) if &*tag.owner != owner => {
                 return Err(RibCommandError::FailedPrecondition(
@@ -107,18 +137,40 @@ impl RibManager {
             }
             _ => {}
         }
-        let tag = self
+        if let Some(guarded) = guarded
+            && present
+        {
+            self.check_injected_revision(key, guarded.fence.revision)?;
+            if !guarded.same_payload {
+                return Err(RibCommandError::FailedPrecondition(
+                    LeaseConflict::RevisionMismatch,
+                    format!(
+                        "revision {} is already admitted with a different payload",
+                        guarded.fence.revision
+                    ),
+                ));
+            }
+        }
+        let crate::injection_lease::Admission {
+            mut tag,
+            live_owners,
+            started,
+        } = self
             .injection_leases
-            .admit(owner, lease_seconds)
+            .admit_with(
+                owner,
+                lease_seconds,
+                guarded.map(|guarded| guarded.fence.window),
+            )
             .map_err(super::distribution::lease_rejection)?;
+        tag.revision = guarded.map(|guarded| guarded.fence.revision);
         self.owner_keys
             .entry(Arc::clone(&tag.owner))
             .or_default()
             .insert(key.clone());
         self.injected_owners.insert(key.clone(), tag.clone());
-        self.metrics
-            .set_injection_leases(gauge_val(self.injection_leases.live_owner_count()));
-        Ok(tag)
+        self.metrics.set_injection_leases(gauge_val(live_owners));
+        Ok((tag, started))
     }
 
     /// Drop `key`'s ownership tag after the RIB removed it, returning it.
@@ -187,6 +239,7 @@ impl RibManager {
                     key: key.clone(),
                     cursor,
                     generation: tag.generation,
+                    revision: tag.revision,
                     remaining: self.injection_leases.remaining(tag),
                 })
                 .collect(),
