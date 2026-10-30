@@ -5,9 +5,12 @@
   `InjectionService` gains `IssueMutationWindow`, `AddGuardedFlowSpec`,
   `DeleteGuardedFlowSpec` and `RenewGuardedLease`. A guarded add or renewal
   commits only inside a server-issued mutation window (at most 120 s; 64
-  live windows per owner) and never extends the owner's lease past it, so a
-  request delayed before its handler, in the RIB queue or behind RIB work
-  cannot revive a diversion after the window ends. Each guarded add carries
+  live windows per owner) and caps any lease extension at that window,
+  while keeping a later deadline set under another window. The owner's lease
+  never outlives the latest-expiring window it used, so a request delayed
+  before its handler, in the RIB queue or behind RIB work cannot revive a
+  diversion after the owner's windows end; a controller reads the deadline
+  back rather than inferring it from one window. Each guarded add carries
   a nonzero revision, and a guarded delete removes the rule only at its
   revision, so a late delete cannot remove a newer admission of the same
   key. Guarded owners live in their own namespace, reported as

@@ -3953,9 +3953,15 @@ against that. They are outside the v1 contract.
 | RPC | Behaviour |
 |---|---|
 | `IssueMutationWindow(owner, window_seconds)` | Issues a window living `window_seconds` (1..=120). An owner holds at most 64 live windows and the daemon 4,096; past either cap the call is `RESOURCE_EXHAUSTED` |
-| `AddGuardedFlowSpec(rule, lease, window, revision)` | A leased FlowSpec add, checked against the window when it commits. The owner's deadline becomes `max(current, min(now + lease_seconds, window expiry))`: never shortened, never past the window. `revision` is a nonzero client-chosen value stored with the rule |
+| `AddGuardedFlowSpec(rule, lease, window, revision)` | A leased FlowSpec add, checked against the window when it commits. The owner's deadline becomes `max(current, min(now + lease_seconds, window expiry))`: the add caps any extension at its window but keeps a later deadline set earlier, which the new rule then shares. `revision` is a nonzero client-chosen value stored with the rule |
 | `DeleteGuardedFlowSpec(rule key, owner, revision)` | Removes the rule only at its revision: `DELETED`, or `NOT_PRESENT` for an absent rule. Needs no window |
 | `RenewGuardedLease(owner, generation, lease_seconds, window)` | Sets the deadline to exactly `min(now + lease_seconds, window expiry)`, which may shorten it |
+
+A window's expiry is therefore not the rule's withdrawal deadline. The
+owner's lease never outlives the latest-expiring window it used, and no
+window lives more than 120 s after it was issued. Read the lease deadline back
+(`ListInjectionLeases`, or `lease_remaining_ms` on the rule) rather than
+inferring it from a window.
 
 Owners are named without a prefix in requests. The daemon keeps a guarded
 owner's rules and lease in a separate namespace and reports it as

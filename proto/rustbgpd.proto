@@ -3976,10 +3976,14 @@ service InjectionService {
   // AddGuardedFlowSpec and RenewGuardedLease are checked against the window
   // when they commit, not when they arrive: an expired window, or one issued
   // to another owner or by another daemon process, is FAILED_PRECONDITION
-  // with ErrorInfo reason WINDOW_NOT_LIVE and changes nothing. The window
-  // also caps the lease: a guarded add sets the owner's deadline to
-  // max(current, min(now + lease_seconds, window expiry)), and a guarded
-  // renewal to exactly min(now + lease_seconds, window expiry).
+  // with ErrorInfo reason WINDOW_NOT_LIVE and changes nothing. A guarded add
+  // sets the owner's deadline to max(current, min(now + lease_seconds,
+  // window expiry)): it caps any extension at its window but keeps a later
+  // deadline set under another window, which the new rule then shares. A
+  // guarded renewal sets exactly min(now + lease_seconds, window expiry).
+  // The lease never outlives the latest-expiring window the owner used, but
+  // one window's expiry is not a rule's withdrawal deadline: read the
+  // deadline back instead of inferring it.
   //
   // Every guarded add carries a nonzero client-chosen revision, stored with
   // the rule. A present rule held at another revision, or at the same
