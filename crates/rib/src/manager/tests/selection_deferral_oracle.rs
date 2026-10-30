@@ -283,9 +283,15 @@ struct Harness {
     /// I1 per UPDATE; the checker's own tests clear it for a control that
     /// checks only after the channel.
     per_update_i1: bool,
-    /// The check runs right after our End-of-RIB purged a GR helper's
-    /// stale rows.
-    eor_purge: bool,
+    /// The check runs right after the current session's first End-of-RIB
+    /// purged a GR helper's stale rows before the session announced any
+    /// unicast route.
+    early_eor_purge: bool,
+    /// The current session kept our rows stale across a flap and has not
+    /// sent its first End-of-RIB yet.
+    awaiting_first_eor: bool,
+    /// The current session has announced a unicast route.
+    session_announced: bool,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -328,7 +334,9 @@ impl Harness {
             gr_families: true,
             registered: false,
             per_update_i1: true,
-            eor_purge: false,
+            early_eor_purge: false,
+            awaiting_first_eor: false,
+            session_announced: false,
         };
         if !config.late {
             harness.establish();
@@ -451,13 +459,16 @@ impl Harness {
             }
             self.stale = self.wire.keys().copied().collect();
             self.blackholed = self.exempt_rows();
+            self.awaiting_first_eor = true;
         } else {
             // A NOTIFICATION, or a peer without GR, drops our routes: no
             // blackhole survives the reset.
             self.wire.clear();
             self.stale.clear();
             self.blackholed.clear();
+            self.awaiting_first_eor = false;
         }
+        self.session_announced = false;
         self.helper = helper;
         self.gr_families = gr_families;
         let (tx, rx) = mpsc::channel(4);
@@ -758,14 +769,16 @@ impl Harness {
             self.apply_announcements(&update)?;
             // Our End-of-RIB ends a GR helper's retention: it purges every
             // stale row this session did not re-announce.
+            let first_eor =
+                update.end_of_rib.contains(&FAMILY) && std::mem::take(&mut self.awaiting_first_eor);
             if update.end_of_rib.contains(&FAMILY) && !self.stale.is_empty() {
                 for key in std::mem::take(&mut self.stale) {
                     self.wire.remove(&key);
                 }
                 if self.per_update_i1 {
-                    self.eor_purge = true;
+                    self.early_eor_purge = first_eor && !self.session_announced;
                     let checked = self.check_blackholed();
-                    self.eor_purge = false;
+                    self.early_eor_purge = false;
                     checked?;
                 }
             }
@@ -790,6 +803,7 @@ impl Harness {
         if self.per_update_i1 {
             self.check_blackholed()?;
         }
+        self.session_announced |= !update.announce.is_empty();
         let (lead, rest) = update
             .announce
             .split_at(update.exempt_announce.min(update.announce.len()));
@@ -900,17 +914,31 @@ impl Harness {
         if self.config.add_path && fallback && removed {
             return allowed("LAN-2692");
         }
-        // LAN-2724: outside the hold, an ORF-gated session sends its initial
-        // End-of-RIB ahead of the gated table, so a GR helper purges the
-        // stale rows it kept across the flap before they are re-sent.
-        if self.config.orf && self.eor_purge && !self.held {
+        // LAN-2724: outside the hold, an ORF-gated session sends its first
+        // End-of-RIB ahead of the gated table, before announcing anything,
+        // so a GR helper purges the stale rows it kept across the flap
+        // before they are re-sent.
+        if self.config.orf && self.early_eor_purge && !self.held {
             return allowed("LAN-2724");
         }
         None
     }
 
-    /// Prefixes whose fresh export carries an exempt path.
+    /// Prefixes whose export carries an exempt path: during the hold, which
+    /// exports exempt local paths alone, every prefix with a live one
+    /// however received paths rank; otherwise a fresh dump's.
     fn wanted_blackholes(&self) -> BTreeSet<usize> {
+        if self.held {
+            return self
+                .local
+                .iter()
+                .filter(|&(&(index, _), &injection)| {
+                    self.injections[injection].exempt
+                        && !(self.config.orf && self.deny & (1 << index) != 0)
+                })
+                .map(|(&(index, _), _)| index)
+                .collect();
+        }
         self.expected()
             .values()
             .map(|&injection| &self.injections[injection])

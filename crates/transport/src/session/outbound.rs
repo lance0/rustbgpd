@@ -349,7 +349,7 @@ impl PendingOutbound {
                     // Blackholing rows lead the envelope and go out in slices
                     // of their own, so no slice mixes them with ordinary rows
                     // that its attribute groups could send first.
-                    let exempt = self.update.exempt_announce;
+                    let exempt = self.update.exempt_announce.min(self.update.announce.len());
                     let end = if self.offset < exempt {
                         (self.offset + budget).min(exempt)
                     } else {

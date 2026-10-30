@@ -2550,8 +2550,9 @@ distributes multiple candidate paths per prefix to this peer, sorted by
 best-path preference. Rank picks which `send_max` paths are sent; a path
 keeps its path ID while it is sent, and a new path takes the lowest free ID,
 so path ID 1 is not necessarily the best path. Received paths keep their
-source peer's IDs, so when one peer contributes several paths and one
-leaves, a survivor may move to that peer's lowest ID. Split horizon, iBGP
+source peer's IDs, lowest first in rank order, so when one peer contributes
+several paths, one leaving can move a survivor to that peer's lowest ID and
+two of its paths swapping rank swap their IDs. Split horizon, iBGP
 suppression, and per-candidate export policy are evaluated for each path.
 
 Both IPv4 and IPv6 unicast are supported. See [ADR-0033](../adr/0033-add-path.md).

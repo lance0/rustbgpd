@@ -1203,32 +1203,33 @@ fn exempt_first(
     if flags.iter().skip(count).all(|&flag| !flag) {
         return count;
     }
-    let routes = std::mem::take(Arc::make_mut(announce));
-    let overrides = std::mem::take(Arc::make_mut(next_hop_override));
-    let aligned = overrides.len() == routes.len();
-    debug_assert!(
-        aligned || overrides.is_empty(),
-        "next-hop overrides are index-aligned with the announcements"
-    );
-    let mut overrides = overrides.into_iter();
-    let (mut first, mut rest) = (Vec::with_capacity(routes.len()), Vec::new());
-    let (mut first_nh, mut rest_nh) = (Vec::new(), Vec::new());
-    for (route, flag) in routes.into_iter().zip(flags) {
-        checkpoint();
-        let action = if aligned { overrides.next() } else { None };
-        if flag {
-            first.push(route);
-            first_nh.extend(action);
-        } else {
-            rest.push(route);
-            rest_nh.extend(action);
-        }
+    let aligned = next_hop_override.len() == announce.len();
+    if !aligned && !next_hop_override.is_empty() {
+        // Overrides are index-aligned with the routes or absent; never
+        // reorder routes away from their overrides.
+        return 0;
     }
-    first.append(&mut rest);
-    first_nh.append(&mut rest_nh);
-    *Arc::make_mut(announce) = first;
-    *Arc::make_mut(next_hop_override) = first_nh;
+    // In place: lift the blackholing rows out, in order, and splice them
+    // back at the front, so the extra memory is theirs alone.
+    move_to_front(Arc::make_mut(announce), &flags, checkpoint);
+    if aligned {
+        move_to_front(Arc::make_mut(next_hop_override), &flags, checkpoint);
+    }
     count
+}
+
+/// Move the items `flags` marks to the front, keeping both groups' order.
+fn move_to_front<T>(items: &mut Vec<T>, flags: &[bool], checkpoint: &mut impl FnMut()) {
+    let mut at = 0;
+    let lead: Vec<T> = items
+        .extract_if(.., |_| {
+            checkpoint();
+            let flag = flags[at];
+            at += 1;
+            flag
+        })
+        .collect();
+    items.splice(0..0, lead);
 }
 
 #[inline(never)]
@@ -1264,6 +1265,7 @@ mod exempt_first_tests {
             )))
         };
         let mut overrides = Arc::new((1..=5).map(action).collect::<Vec<_>>());
+        let buffer = announce.as_ptr();
         let count = exempt_first(
             &mut announce,
             &mut overrides,
@@ -1271,6 +1273,7 @@ mod exempt_first_tests {
             &mut || {},
         );
         assert_eq!(count, 2);
+        assert_eq!(announce.as_ptr(), buffer, "reordered in place");
         let order: Vec<u32> = announce.iter().map(|route| route.path_id).collect();
         assert_eq!(order, [2, 4, 1, 3, 5]);
         let moved: Vec<_> = order
@@ -1278,6 +1281,33 @@ mod exempt_first_tests {
             .map(|&path_id| action(u8::try_from(path_id).unwrap()))
             .collect();
         assert_eq!(*overrides, moved);
+    }
+
+    /// Overrides that do not line up with the routes leave both untouched.
+    #[test]
+    fn misaligned_overrides_keep_the_envelope_order() {
+        let prefix = |n| {
+            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                Ipv4Addr::new(198, 51, 100, n),
+                32,
+            ))
+        };
+        let mut announce = Arc::new(
+            (1..=3)
+                .map(|n| crate::test_support::make_route_with_path_id(prefix(n), u32::from(n)))
+                .collect::<Vec<_>>(),
+        );
+        let mut overrides = Arc::new(vec![None]);
+        let count = exempt_first(
+            &mut announce,
+            &mut overrides,
+            |route| route.path_id == 3,
+            &mut || {},
+        );
+        assert_eq!(count, 0);
+        let order: Vec<u32> = announce.iter().map(|route| route.path_id).collect();
+        assert_eq!(order, [1, 2, 3]);
+        assert_eq!(overrides.len(), 1);
     }
 }
 

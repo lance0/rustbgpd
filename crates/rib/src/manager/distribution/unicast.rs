@@ -1544,7 +1544,7 @@ impl RibManager {
                     "adj_rib_out",
                     "already_advertised",
                     Pass,
-                    "identical source path already occupies this outbound rank — Adj-RIB-Out in \
+                    "identical source path already occupies this outbound path ID — Adj-RIB-Out in \
                      sync; remote acceptance is not observable"
                         .to_string(),
                 );
@@ -1575,7 +1575,7 @@ impl RibManager {
                     "adj_rib_out",
                     "staged_announce",
                     Pass,
-                    "selected source differs from the route at this outbound rank — would re-announce"
+                    "selected source differs from the route at this outbound path ID — would re-announce"
                         .to_string(),
                 );
             } else {
@@ -1584,7 +1584,7 @@ impl RibManager {
                     "adj_rib_out",
                     "staged_announce",
                     Pass,
-                    "selected source is not present at this outbound rank — would announce"
+                    "selected source is not present at this outbound path ID — would announce"
                         .to_string(),
                 );
             }

@@ -1636,10 +1636,10 @@ carries inactive (absent), unlimited (zero), or finite.
 - Adj-RIB-In/Out keyed by `(Prefix, u32)` for multi-path storage.
 - Multi-path send: rank picks the `send_max` paths. A unicast path keeps its
   path ID while it is sent and a new path takes the lowest free ID, so a
-  rank change re-announces nothing and a local RTBH path is never
-  renumbered. Received paths are matched to their IDs by source peer: when
-  one peer contributes several paths and one leaves, a survivor may move to
-  that peer's lowest ID. Each Add-Path update sends its blackholing rows
+  local path is never renumbered when ranks shift. Received paths are
+  matched to their IDs by source peer, lowest ID first in rank order: when
+  one peer contributes several paths, one leaving can move a survivor to
+  that peer's lowest ID, and two of its paths swapping rank swap their IDs. Each Add-Path update sends its blackholing rows
   (deferral-exempt or carrying BLACKHOLE) before any ordinary row. VPN and
   labeled-unicast send still number paths by rank (best=1, ...).
 - `send_max` caps paths per prefix per peer.
