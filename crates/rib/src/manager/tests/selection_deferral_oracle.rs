@@ -22,6 +22,9 @@
 //! - I5, prompt removal: after a drain with a free writer in the hold, an
 //!   exempt row the operator deleted has left the wire, unless it is the
 //!   prefix's last exempt row while an exempt export is still intended.
+//! - I6, send limit: after every UPDATE, no prefix carries more paths from
+//!   the current session than the receiver's Add-Path `send_max`, or more
+//!   than one without Add-Path.
 //!
 //! Each case fixes one receiver configuration (private or grouped,
 //! single-best or Add-Path, per-client-best, ORF, prefix limit, and whether
@@ -718,6 +721,7 @@ impl Harness {
     /// I4 for every announcement; I1 after the withdrawals and after each
     /// announcement while the hold lasts.
     fn apply_announcements(&mut self, update: &OutboundRouteUpdate) -> Checked {
+        self.check_send_limit()?;
         if self.held {
             self.check_blackholed()?;
         }
@@ -732,9 +736,33 @@ impl Harness {
             let key = (route.prefix, route.path_id);
             self.wire.insert(key, injection);
             self.stale.remove(&key);
+            self.check_send_limit()?;
             if self.held {
                 self.check_blackholed()?;
             }
+        }
+        Ok(())
+    }
+
+    /// I6: no prefix carries more of this session's paths than the
+    /// receiver may be sent. A GR helper's stale rows from an earlier
+    /// session are not this session's.
+    fn check_send_limit(&self) -> Checked {
+        let limit = if self.config.add_path {
+            ADD_PATH_MAX
+        } else {
+            1
+        };
+        let mut paths = BTreeMap::<Prefix, usize>::new();
+        for key in self.wire.keys().filter(|key| !self.stale.contains(*key)) {
+            *paths.entry(key.0).or_default() += 1;
+        }
+        for (prefix, count) in paths {
+            prop_assert!(
+                count <= limit,
+                "I6: {prefix} carries {count} paths, over the send limit {limit}; wire {}",
+                show(&self.wire)
+            );
         }
         Ok(())
     }
@@ -1570,4 +1598,61 @@ fn hold_start_keeps_add_path_rtbh_key_between_phases() {
     if let Some(reason) = failure(config, &[inject(2, 0, 0, false)], &hold) {
         panic!("rtbh swap: {reason}");
     }
+}
+
+/// I6 shapes: a hold never puts more than `send_max` paths on a prefix.
+/// 1. In one pass, an ordinary source at `#1` is promoted to RTBH and takes
+///    over the deleted RTBH row's `#2`; the freeze backstop keeps its old
+///    `#1`, which must count against the limit when a new RTBH path arrives.
+/// 2. In one pass, a frozen row holds `#1`, an ordinary source at `#2` is
+///    promoted and a higher-ranked RTBH path arrives: the promoted source's
+///    own `#2` is reserved before a new key is allocated.
+#[test]
+fn hold_keeps_add_path_rows_within_send_max() {
+    let config = Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let inject = |path, preference, blackhole| Op::Inject {
+        prefix: 2,
+        path,
+        preference,
+        blackhole,
+    };
+    let cases = [
+        (
+            "retained own row",
+            vec![inject(0, 2, false), inject(1, 1, true)],
+            vec![
+                Op::Backpressure(true),
+                inject(0, 2, true),
+                Op::Delete { prefix: 2, path: 1 },
+                Op::Backpressure(false),
+                Op::Drain,
+                inject(2, 0, true),
+            ],
+        ),
+        (
+            "reserved own key",
+            vec![inject(0, 2, false), inject(1, 1, false)],
+            vec![
+                Op::Backpressure(true),
+                inject(1, 1, true),
+                inject(2, 3, true),
+                Op::Backpressure(false),
+                Op::Drain,
+            ],
+        ),
+    ];
+    let failures: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(name, setup, hold)| {
+            failure(config, &setup, &hold).map(|reason| format!("{name}: {reason}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{failures:#?}");
 }

@@ -3379,10 +3379,13 @@ pub(in crate::manager) fn lease_rejection(
 ///   the lowest unused key while the wire stays within the send limit;
 ///   and at the limit it replaces a frozen row in place;
 /// - a frozen row (received, or an ordinary injection still present) keeps
-///   its key otherwise.
+///   its key otherwise, including a promoted source's own ordinary row when
+///   the source moved to another key: the freeze backstop keeps that row on
+///   the wire, so it counts against the send limit.
 ///
 /// Only rows that carry no blackhole, or whose blackhole intent left, are
-/// ever withdrawn.
+/// ever withdrawn. A new key is allocated only while every row that stays
+/// (assigned, frozen, or a later candidate's own row) fits the send limit.
 ///
 /// Why frozen rows keep their keys: the hold preserves what each session
 /// already admitted, and an RTBH path on its own key is already effective,
@@ -3400,7 +3403,7 @@ pub(in crate::manager) struct HoldAddPathKeys {
     departing_exempt: std::collections::BTreeSet<u32>,
     /// Keys of rows that carry no blackhole and are leaving.
     free: std::collections::BTreeSet<u32>,
-    frozen: HashSet<u32>,
+    frozen: std::collections::BTreeSet<u32>,
     occupied: HashSet<u32>,
     assigned: HashSet<u32>,
     next: u32,
@@ -3425,7 +3428,7 @@ impl HoldAddPathKeys {
             held_ordinary: HashMap::new(),
             departing_exempt: std::collections::BTreeSet::new(),
             free: std::collections::BTreeSet::new(),
-            frozen: HashSet::new(),
+            frozen: std::collections::BTreeSet::new(),
             occupied: HashSet::new(),
             assigned: HashSet::new(),
             next: 1,
@@ -3484,24 +3487,41 @@ impl HoldAddPathKeys {
         // An exempt row whose source is not staged this pass is leaving too.
         self.departing_exempt
             .extend(self.held_exempt.drain().map(|(_, key)| key));
+        // An ordinary row stays frozen unless its source is a changing
+        // candidate, which may still claim it; until then it is reserved.
+        let claimable: HashSet<u32> = changing
+            .iter()
+            .map(|&index| staged[index])
+            .filter(|route| route.peer == LOCAL_PEER)
+            .map(|route| route.path_id)
+            .collect();
+        let frozen = &mut self.frozen;
+        self.held_ordinary.retain(|source, key| {
+            claimable.contains(source) || {
+                frozen.insert(*key);
+                false
+            }
+        });
+        let mut reserved = self.held_ordinary.len();
         for index in changing {
             checkpoint();
             let route = staged[index];
             let own = (route.peer == LOCAL_PEER)
                 .then(|| self.held_ordinary.remove(&route.path_id))
                 .flatten();
+            reserved -= usize::from(own.is_some());
             let key = if let Some(key) = self.departing_exempt.pop_first() {
-                // The source's own ordinary row, if any, leaves instead.
-                self.free.extend(own);
+                // The source's own ordinary row stays frozen: the hold keeps
+                // it on the wire until a blackhole replaces it in place.
+                self.frozen.extend(own);
                 key
             } else if let Some(key) = own {
                 key
             } else if let Some(key) = self.free.pop_first() {
                 key
-            } else if self.assigned.len() + self.frozen.len() >= limit
-                && let Some(key) = self.frozen.iter().max().copied()
+            } else if self.assigned.len() + self.frozen.len() + reserved >= limit
+                && let Some(key) = self.frozen.pop_last()
             {
-                self.frozen.remove(&key);
                 key
             } else {
                 while self.occupied.contains(&self.next) {
