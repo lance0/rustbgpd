@@ -3136,8 +3136,11 @@ impl RibManager {
         let mut unicast_deferral_exemptions = FastMap::default();
         let eligible_was_caught_up =
             !self.dirty_peers.contains(&peer) || self.selection_partial_caught_up(peer);
-        let refresh_private_admitted_counts = self.pending_group_admitted.get(&peer).is_none()
-            && self.private_common_admission_complete(peer);
+        // A private table that matches the admitted counts records the
+        // actual wire. Read the proof's absence after the commit: a proof
+        // refused inside it leaves the table as the only record, and counts
+        // left stale would refuse a later removed-RTBH withdrawal.
+        let private_admission_complete = self.private_common_admission_complete(peer);
         self.filter_deferred_unicast_recovery(peer, &mut batch);
         let gated = self
             .selection_deferral
@@ -5096,7 +5099,10 @@ impl RibManager {
             super::bench_support::bench_record_per_client_best_commit(started.elapsed());
         }
 
-        if refresh_private_admitted_counts && let Some(rib) = self.adj_ribs_out.get(&peer) {
+        if private_admission_complete
+            && self.pending_group_admitted.get(&peer).is_none()
+            && let Some(rib) = self.adj_ribs_out.get(&peer)
+        {
             let lens = rib.family_lens();
             initial_admitted_counts = Some([
                 lens.unicast[0],

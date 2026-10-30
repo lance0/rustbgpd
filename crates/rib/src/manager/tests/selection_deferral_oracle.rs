@@ -307,10 +307,6 @@ struct Harness {
     reannounced: Option<BTreeSet<usize>>,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
-    /// Wire keys whose current row a dirty retry announced while its proof
-    /// was refused, and the keys the in-flight `RefuseProof` announced.
-    refused_retry_rows: HashSet<(Prefix, u32)>,
-    refusing: Option<HashSet<(Prefix, u32)>>,
     /// The receiver's current transport session.
     session: u64,
     /// Keys a GR helper retains as stale from a previous session until our
@@ -364,8 +360,6 @@ impl Harness {
             hold_starting: false,
             reannounced: None,
             blackholed: BTreeMap::new(),
-            refused_retry_rows: HashSet::new(),
-            refusing: None,
             session: OBSERVER_SESSION,
             stale: HashSet::new(),
             helper: true,
@@ -723,8 +717,6 @@ impl Harness {
                     &HashSet::new(),
                     &HashSet::from([peer_v4(OBSERVER)]),
                 );
-                // Record what this retry admits once its updates arrive.
-                self.refusing = Some(HashSet::new());
                 self.manager
                     .pending_group_admitted
                     .disarm_allocation_failure_for_test();
@@ -816,7 +808,6 @@ impl Harness {
             for key in &update.withdraw {
                 self.wire.remove(key);
                 self.stale.remove(key);
-                self.refused_retry_rows.remove(key);
             }
             // The transport sends an envelope's withdrawals as their own
             // UPDATEs before its announcements, and splits announcements with
@@ -866,10 +857,6 @@ impl Harness {
             let key = (route.prefix, route.path_id);
             self.wire.insert(key, injection);
             self.stale.remove(&key);
-            self.refused_retry_rows.remove(&key);
-            if let Some(refusing) = self.refusing.as_mut() {
-                refusing.insert(key);
-            }
             if self.held {
                 self.check_blackholed()?;
             }
@@ -996,17 +983,6 @@ impl Harness {
         // row deleted before the new session re-sent it is never withdrawn.
         if self.stale.contains(&key) {
             return allowed("LAN-2703");
-        }
-        // LAN-2701: under refused proof, a private receiver keeps a deleted
-        // RTBH until release when the refused retry itself announced its
-        // current row: a new RTBH, or a path the retry moved onto the
-        // Add-Path key an unadmitted exempt path would take.
-        let refused = self
-            .manager
-            .group_recovery_fallback(peer_v4(OBSERVER))
-            .is_some();
-        if !self.config.grouped && refused && self.refused_retry_rows.contains(&key) {
-            return allowed("LAN-2701");
         }
         None
     }
@@ -1160,19 +1136,6 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
         }
         harness.apply(op);
         harness.observe()?;
-        // The retry's rows count as refused only while its proof is refused.
-        let refusing = harness.refusing.take();
-        if harness
-            .manager
-            .group_recovery_fallback(peer_v4(OBSERVER))
-            .is_some()
-        {
-            harness
-                .refused_retry_rows
-                .extend(refusing.unwrap_or_default());
-        } else {
-            harness.refused_retry_rows.clear();
-        }
         let drained = matches!(op, Op::Drain);
         if drained {
             harness.drain()?;
@@ -1709,5 +1672,63 @@ fn regroup_leaver_keeps_its_owed_withdrawals() {
             }
         }
     }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// I5 under refused proof: an RTBH the refused retry itself admitted, then
+/// deleted in the hold, leaves the wire inside the hold. Single-best (a),
+/// and Add-Path (b) where the deleted path holds the key an unadmitted
+/// exempt path would take while another exempt row covers the prefix.
+#[test]
+fn refused_retry_admitted_rtbh_leaves_the_wire_inside_the_hold() {
+    let single = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    let host = |path, preference| Op::Inject {
+        prefix: 1,
+        path,
+        preference,
+        blackhole: false,
+    };
+    let cases = [
+        (
+            "a: single-best",
+            single,
+            vec![
+                Op::Backpressure(true),
+                host(2, 0),
+                Op::RefuseProof,
+                Op::Delete { prefix: 1, path: 2 },
+                Op::Drain,
+            ],
+        ),
+        (
+            "b: Add-Path with a covering exempt row",
+            Config {
+                add_path: true,
+                ..single
+            },
+            vec![
+                host(0, 0),
+                Op::Backpressure(true),
+                host(2, 0),
+                Op::RefuseProof,
+                host(1, 0),
+                Op::Delete { prefix: 1, path: 0 },
+                Op::Drain,
+            ],
+        ),
+    ];
+    let failed: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(name, config, hold)| {
+            failure(config, &[], &hold).map(|reason| format!("{name}: {reason}"))
+        })
+        .collect();
     assert!(failed.is_empty(), "{failed:#?}");
 }
