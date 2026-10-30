@@ -133,6 +133,25 @@ pub(super) fn group_replay_rs_inert(
     })
 }
 
+/// The carried keys whose prefix is in `changed`, walking the smaller side.
+fn changed_keys(
+    keys: &std::collections::BTreeSet<(Prefix, u32)>,
+    changed: &HashSet<Prefix>,
+) -> Vec<(Prefix, u32)> {
+    if changed.len() < keys.len() {
+        changed
+            .iter()
+            .flat_map(|&prefix| keys.range((prefix, 0)..=(prefix, u32::MAX)))
+            .copied()
+            .collect()
+    } else {
+        keys.iter()
+            .filter(|(prefix, _)| changed.contains(prefix))
+            .copied()
+            .collect()
+    }
+}
+
 impl RibManager {
     /// Session-down teardown, dispatched on session identity (see
     /// [`SessionTeardownDisposition`]): a stale teardown from a
@@ -1006,12 +1025,25 @@ impl RibManager {
             self.helper_stale_exempt.clear();
             return;
         }
-        let ready: Vec<PeerId> = self
-            .helper_stale_exempt
-            .keys()
-            .copied()
-            .filter(|&peer| self.helper_stale_exempt_runnable(peer))
-            .collect();
+        // A settled set relies on each flush seeing its changed prefixes. A
+        // set this flush cannot run (its session is not caught up, or has no
+        // encoder yet) loses those changes, so it is re-walked once it runs.
+        let mut ready = Vec::new();
+        let mut skipped_touched = Vec::new();
+        for (&peer, carried) in &self.helper_stale_exempt {
+            if self.helper_stale_exempt_runnable(peer)
+                && self.peer_export_encoders.contains_key(&peer)
+            {
+                ready.push(peer);
+            } else if carried.settled && !changed_keys(&carried.keys, changed).is_empty() {
+                skipped_touched.push(peer);
+            }
+        }
+        for peer in skipped_touched {
+            if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
+                carried.settled = false;
+            }
+        }
         for peer in ready {
             // A route-bearing envelope carries the current session's export
             // snapshot, or the transport resets the session.
@@ -1022,28 +1054,11 @@ impl RibManager {
             // A settled set re-checks only the keys a change can release:
             // all of them once an ORF gate it waited on opens, else those
             // whose prefix this pass changed.
-            let rescan = !carried.settled
-                || carried.orf_blocked.iter().any(|family| {
-                    !self
-                        .peer_orf_pending
-                        .get(&peer)
-                        .is_some_and(|gated| gated.contains(family))
-                });
-            let candidates: Vec<(Prefix, u32)> = if rescan {
+            let rescan = self.helper_stale_needs_rescan(peer, carried);
+            let candidates = if rescan {
                 carried.keys.iter().copied().collect()
-            } else if changed.len() < carried.keys.len() {
-                changed
-                    .iter()
-                    .flat_map(|&prefix| carried.keys.range((prefix, 0)..=(prefix, u32::MAX)))
-                    .copied()
-                    .collect()
             } else {
-                carried
-                    .keys
-                    .iter()
-                    .filter(|(prefix, _)| changed.contains(prefix))
-                    .copied()
-                    .collect()
+                changed_keys(&carried.keys, changed)
             };
             if candidates.is_empty() {
                 continue;
@@ -1059,6 +1074,7 @@ impl RibManager {
             // the session advertises is its own now. One whose prefix still
             // has a route, or whose family an ORF gate holds, waits.
             let mut withdraw = std::collections::BTreeSet::new();
+            let mut withdrawn = Vec::new();
             let mut done = Vec::new();
             for key in candidates {
                 self.replacement_checkpoint_at("helper_stale_exempt", false);
@@ -1076,6 +1092,7 @@ impl RibManager {
                     }
                 } else if !self.desires_unicast_prefix(peer, prefix) {
                     withdraw.insert((prefix, path_id));
+                    withdrawn.push(key);
                     done.push(key);
                 }
             }
@@ -1084,27 +1101,52 @@ impl RibManager {
                 withdraw: withdraw.into_iter().collect(),
                 ..OutboundRouteUpdate::default()
             };
-            // A full writer keeps the set for the next tick.
-            if update.withdraw.is_empty()
-                || !matches!(
+            // A full writer keeps the whole set for the next tick, which
+            // re-walks it.
+            if !update.withdraw.is_empty()
+                && matches!(
                     self.outbound_peers[&peer].try_send(update),
                     Err(TrySendError::Full(_))
                 )
             {
-                let Some(carried) = self.helper_stale_exempt.get_mut(&peer) else {
-                    continue;
-                };
-                for key in &done {
-                    carried.keys.remove(key);
+                if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
+                    carried.settled = false;
                 }
-                if carried.keys.is_empty() {
-                    self.helper_stale_exempt.remove(&peer);
-                } else {
-                    carried.settled = true;
-                    carried.orf_blocked = orf_blocked;
-                }
+                continue;
+            }
+            // Queued, or the channel already closed: either way the session
+            // may end before the peer reads it, so the hold's ledger keeps
+            // the keys for the next carry.
+            self.record_hold_exempt_withdrawn(super::HoldWithdrawOwner::Peer(peer), withdrawn);
+            let Some(carried) = self.helper_stale_exempt.get_mut(&peer) else {
+                continue;
+            };
+            for key in &done {
+                carried.keys.remove(key);
+            }
+            if carried.keys.is_empty() {
+                self.helper_stale_exempt.remove(&peer);
+            } else {
+                carried.settled = true;
+                carried.orf_blocked = orf_blocked;
             }
         }
+    }
+
+    /// A settled set must be walked again: an ORF gate one of its keys
+    /// waited on has opened.
+    pub(super) fn helper_stale_needs_rescan(
+        &self,
+        peer: PeerId,
+        carried: &super::HelperStaleExempt,
+    ) -> bool {
+        !carried.settled
+            || carried.orf_blocked.iter().any(|family| {
+                !self
+                    .peer_orf_pending
+                    .get(&peer)
+                    .is_some_and(|gated| gated.contains(family))
+            })
     }
 
     /// A later session is registered and has sent every row the hold lets

@@ -630,15 +630,25 @@ fn replacement_session_carries_the_superseded_sessions_stale_rtbh() {
     assert_withdrawn_inside_hold(&mut manager, &mut new_rx, &mut rib, rtbh, kept);
 }
 
-/// An ORF gate holds only its own family's initial table: the other
-/// family's carried keys are withdrawn, and the gated family's wait in the
-/// carried set until the peer's ORF lifts the gate.
-#[test]
+type TwoFamilyFlap = (
+    RibManager,
+    PeerRib,
+    mpsc::Sender<OutboundRouteUpdate>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    Ipv4Prefix,
+    (Prefix, u32),
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+);
+
+/// A private receiver with IPv4 and IPv6 whose IPv4 initial table an ORF
+/// gate holds: a host RTBH in each family, a clean flap toward a GR helper,
+/// the IPv6 RTBH deleted (and the IPv4 one when `delete_v4`), then the new
+/// session session 182 driven by the resync timer.
 #[expect(
     clippy::too_many_lines,
-    reason = "one two-family transcript arms the hold, flaps the session and checks each family"
+    reason = "one two-family transcript arms the hold and flaps the session"
 )]
-fn orf_gate_holds_back_only_its_own_family() {
+fn two_family_orf_flap(delete_v4: bool) -> TwoFamilyFlap {
     const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
     let (_tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
@@ -649,7 +659,7 @@ fn orf_gate_holds_back_only_its_own_family() {
                 families: vec![FAMILY, V6],
             }],
         });
-    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
     let register_both = |manager: &mut RibManager, session_id: u64| {
         manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
@@ -693,7 +703,7 @@ fn orf_gate_holds_back_only_its_own_family() {
         peer_llgr_families: vec![],
         local_llgr_stale_time: 0,
     });
-    let (waiter_tx, _waiter_rx) = mpsc::channel(64);
+    let (waiter_tx, waiter_rx) = mpsc::channel(64);
     let mut waiter_up = super::lifecycle::test_peer_up(peer_v4(WAITER), 83, waiter_tx);
     if let RibUpdate::PeerUp {
         sendable_families, ..
@@ -731,11 +741,33 @@ fn orf_gate_holds_back_only_its_own_family() {
         reply,
     });
     assert!(result.try_recv().unwrap().unwrap().removed);
-    let (_new_tx, mut new_rx) = register_both(&mut manager, 182);
+    if delete_v4 {
+        delete(&mut manager, v4);
+    }
+    let keep = (!delete_v4).then_some((Prefix::V4(v4), 0));
+    let (new_tx, mut new_rx) = register_both(&mut manager, 182);
     for _ in 0..4 {
         manager.resync_dirty_peers_bounded();
-        apply(&mut new_rx, &mut rib, Some((Prefix::V4(v4), 0)));
+        apply(&mut new_rx, &mut rib, keep);
     }
+    (
+        manager,
+        rib,
+        new_tx,
+        new_rx,
+        v4,
+        v6_key,
+        vec![source, waiter_rx],
+    )
+}
+
+/// An ORF gate holds only its own family's initial table: the other
+/// family's carried keys are withdrawn, and the gated family's wait in the
+/// carried set until the peer's ORF lifts the gate.
+#[test]
+fn orf_gate_holds_back_only_its_own_family() {
+    let (manager, rib, _new_tx, _new_rx, v4, v6_key, _peers) = two_family_orf_flap(false);
+    let observer = peer_v4(OBSERVER);
     assert!(
         !rib.contains_key(&v6_key),
         "the ungated family's deleted RTBH leaves inside the hold; peer {rib:?}"
@@ -825,4 +857,205 @@ fn settled_helper_flush_work_is_linear() {
         &["helper_stale_exempt"],
         settled_helper_flush,
     );
+}
+
+/// Fill a session's writer; dropping the permits frees it.
+fn occupy(tx: &mpsc::Sender<OutboundRouteUpdate>) -> Vec<mpsc::OwnedPermit<OutboundRouteUpdate>> {
+    std::iter::from_fn(|| tx.clone().try_reserve_owned().ok()).collect()
+}
+
+fn withdraw_received(manager: &mut RibManager, prefix: Ipv4Prefix) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: u64::from(SOURCE.octets()[3]),
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(prefix), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(manager);
+}
+
+/// The resync timer as the actor runs it: one tick per arm, re-armed only
+/// while it reports pending work. The stale RTBH `rtbh` must then be gone
+/// inside the hold, with `kept` never absent.
+fn assert_timer_withdraws(
+    manager: &mut RibManager,
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    rib: &mut PeerRib,
+    rtbh: Ipv4Prefix,
+    kept: Option<Ipv4Prefix>,
+) {
+    let keep = kept.map(|kept| (Prefix::V4(kept), 0));
+    apply(rx, rib, keep);
+    for _ in 0..8 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        apply(rx, rib, keep);
+    }
+    assert!(manager.selection_deferred(FAMILY), "still inside the hold");
+    assert!(
+        !rib.contains_key(&(Prefix::V4(rtbh), 0)),
+        "the deleted RTBH leaves the helper inside the hold; peer {rib:?}"
+    );
+    if let Some(keep) = keep {
+        assert_eq!(rib.get(&keep), Some(&false), "the live RTBH is re-sent");
+    }
+}
+
+/// A private receiver whose carried RTBH key waits because a received
+/// ordinary route the hold defers still covers its prefix; the set is
+/// settled. Returns the live RTBH kept on the wire.
+fn settled_waiting_key() -> (
+    RibManager,
+    PeerRib,
+    Session,
+    Ipv4Prefix,
+    Ipv4Prefix,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let mut manager = manager_with_dormant_waiter();
+    let source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    announce(&mut manager, [rtbh]);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    let mut session = register(&mut manager, 182, false, false);
+    assert_timer_withdraws_nothing(&mut manager, &mut session.1, &mut rib, kept);
+    let key = (Prefix::V4(rtbh), 0);
+    assert!(
+        manager
+            .helper_stale_exempt
+            .get(&peer_v4(OBSERVER))
+            .is_some_and(|carried| carried.settled && carried.keys.contains(&key)),
+        "the key waits in a settled set"
+    );
+    assert_eq!(
+        rib.get(&key),
+        Some(&true),
+        "the helper still holds it stale"
+    );
+    (manager, rib, session, rtbh, kept, vec![source, waiter])
+}
+
+fn assert_timer_withdraws_nothing(
+    manager: &mut RibManager,
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    rib: &mut PeerRib,
+    kept: Ipv4Prefix,
+) {
+    let keep = Some((Prefix::V4(kept), 0));
+    apply(rx, rib, keep);
+    for _ in 0..8 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        apply(rx, rib, keep);
+    }
+}
+
+/// A settled key becomes withdrawable while the writer is full. Red proof:
+/// leaving the set settled on a full send strands the key until release.
+#[test]
+fn full_writer_unsettles_a_withdrawable_carried_key() {
+    let (mut manager, mut rib, (tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
+    let occupied = occupy(&tx);
+    withdraw_received(&mut manager, rtbh);
+    drop(occupied);
+    assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
+}
+
+/// A settled key's last covering route goes while its receiver is dirty
+/// and not caught up, so the flush skips it. Red proof: without unsettling
+/// the skipped set, the recovered session never re-checks the key.
+#[test]
+fn skipped_dirty_receiver_rechecks_its_settled_key() {
+    let (mut manager, mut rib, (tx, mut rx, _), rtbh, kept, _peers) = settled_waiting_key();
+    let occupied = occupy(&tx);
+    // A new live RTBH queues behind the full writer and leaves the
+    // receiver dirty.
+    let fresh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 4), 32);
+    inject_rtbh(&mut manager, fresh);
+    assert!(manager.dirty_peers.contains(&peer_v4(OBSERVER)));
+    withdraw_received(&mut manager, rtbh);
+    drop(occupied);
+    assert_timer_withdraws(&mut manager, &mut rx, &mut rib, rtbh, Some(kept));
+    assert_eq!(rib.get(&(Prefix::V4(fresh), 0)), Some(&false));
+}
+
+/// A reconnected session queues the helper withdrawal and ends again before
+/// the peer reads it; its Adj-RIB-Out never held the row. Red proof:
+/// without recording the flush's withdrawal in the hold ledger the third
+/// session never withdraws it.
+#[test]
+fn helper_withdrawal_dropped_by_a_second_flap_is_resent() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
+    let mut rib = PeerRib::new();
+    apply(&mut old_rx, &mut rib, None);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32);
+    inject_rtbh(&mut manager, rtbh);
+    inject_rtbh(&mut manager, kept);
+    apply(&mut old_rx, &mut rib, None);
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+    delete(&mut manager, rtbh);
+    let (_second_tx, second_rx, _) = register(&mut manager, 182, false, false);
+    manager.resync_dirty_peers_bounded();
+    assert!(
+        !manager.helper_stale_exempt.contains_key(&peer_v4(OBSERVER)),
+        "the second session queued the withdrawal"
+    );
+    // The peer never reads the second session's queue.
+    clean_end(&mut manager, 182);
+    drop(second_rx);
+    assert!(rib.contains_key(&(Prefix::V4(rtbh), 0)));
+    let (_third_tx, mut third_rx, _) = register(&mut manager, 283, false, false);
+    assert_timer_withdraws(&mut manager, &mut third_rx, &mut rib, rtbh, Some(kept));
+}
+
+/// The ORF gate the last waiting key held on opens while the writer is
+/// full; the resync timer catches the receiver up and must still flush.
+/// Red proof: without the released ORF wait in the timer's pending check
+/// the timer stops and the deleted RTBH stays until release.
+#[test]
+fn orf_opened_behind_a_full_writer_keeps_the_timer_armed() {
+    let (mut manager, mut rib, new_tx, mut new_rx, v4, v6_key, _peers) = two_family_orf_flap(true);
+    assert!(!rib.contains_key(&v6_key));
+    assert!(
+        manager
+            .helper_stale_exempt
+            .get(&peer_v4(OBSERVER))
+            .is_some_and(|carried| carried.settled && !carried.orf_blocked.is_empty()),
+        "the gated key waits in a settled set"
+    );
+    let occupied = occupy(&new_tx);
+    permit_all_orf(&mut manager, 182);
+    drop(occupied);
+    assert_timer_withdraws(&mut manager, &mut new_rx, &mut rib, v4, None);
 }

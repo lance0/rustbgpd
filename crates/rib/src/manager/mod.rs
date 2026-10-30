@@ -1963,7 +1963,9 @@ struct HelperStaleExempt {
     /// The last flush withdrew everything it could: each remaining key waits
     /// for a route change on its prefix or for an ORF gate in `orf_blocked`,
     /// and a later flush re-checks only those, so neither the resync timer
-    /// nor an unrelated distribution pass walks the set again.
+    /// nor an unrelated distribution pass walks the set again. Cleared when
+    /// a flush cannot finish: a full writer, or a skipped set whose prefixes
+    /// changed. The resync timer then runs until a flush settles it.
     settled: bool,
     /// Families whose waiting keys an ORF gate held at the last flush.
     orf_blocked: Vec<(Afi, Safi)>,
@@ -3820,7 +3822,8 @@ impl RibManager {
         }) || !self.pending_inbound_refresh.is_empty()
             || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
-                !carried.settled && self.helper_stale_exempt_runnable(peer)
+                self.helper_stale_needs_rescan(peer, carried)
+                    && self.helper_stale_exempt_runnable(peer)
             })
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {
