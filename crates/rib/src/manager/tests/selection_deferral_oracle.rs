@@ -1,0 +1,942 @@
+//! Model-checked GR selection hold.
+//!
+//! Random operation sequences drive a real `RibManager` through the matrix
+//! of a selection hold, exempt local RTBH and host routes, Add-Path ranks,
+//! backpressured same-channel replays (keys-only private Adj-RIB-Out),
+//! refused recovery proof and an Address Prefix ORF. A tiny reference model
+//! keeps the local and received intent; the receiver's wire is rebuilt from
+//! the updates it actually got. Every route carries a unique identity
+//! community, so a wire row names the exact injection it came from.
+//!
+//! Invariants:
+//! - I1, never unblackhole: during the hold, a prefix whose fresh export
+//!   carries an exempt path and that had an exempt row on the wire keeps
+//!   one; after a drain with a free writer, admitted proof and no ORF gate,
+//!   every such prefix carries a live exempt row.
+//! - I2, exact convergence: after release and drain, the wire equals a fresh
+//!   session's full dump, computed from the final intent alone.
+//! - I3: `actual_unicast_advertised_count` equals the wire key count.
+//! - I4, no resurrection: a deleted or replaced exempt path is never
+//!   announced again.
+//!
+//! Each case fixes one receiver configuration (private or grouped,
+//! single-best or Add-Path, per-client-best, ORF, prefix limit), builds a
+//! pre-hold table, starts the hold, runs the operations, then releases and
+//! drains. Received routes stay on their own prefixes, so the model never
+//! ranks a received path against a local one. Not modelled: IPv6, LLGR,
+//! leases, export policy edits, a second hold, more than one receiver.
+//!
+//! Known open defects are allowed only by their exact signature, each
+//! naming its ticket (`allowed`). `ORACLE_STRICT=1` disables every
+//! allowance and `ORACLE_STRICT=LAN-2680,...` only the listed ones, which
+//! reproduces them. `PROPTEST_CASES` scales the case count for a deep run;
+//! `ORACLE_TRACE` prints each operation and wire update. A failure prints a
+//! sequence minimized by one-op deletion.
+
+use std::collections::HashMap;
+
+use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
+
+use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter, private_policy};
+use super::*;
+use crate::update::OutboundRouteUpdate;
+
+const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+const SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 81);
+const OBSERVER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 82);
+const WAITER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 83);
+const OBSERVER_SESSION: u64 = 82;
+const SOURCE_SESSION: u64 = 81;
+const WAITER_SESSION: u64 = 83;
+/// Two host routes and one aggregate carry local intent; two aggregates
+/// carry received routes.
+const PREFIXES: usize = 5;
+const LOCAL_PREFIXES: usize = 3;
+const PATH_IDS: [u32; 3] = [17, 23, 29];
+const ADD_PATH_MAX: usize = 2;
+/// `65000:n` names injection `n`.
+const IDENTITY_ASN: u32 = 65000;
+const DRAIN_ROUNDS: usize = 16;
+
+fn prefix(index: usize) -> Prefix {
+    let (octets, len) = [
+        ([198, 51, 100, 1], 32),
+        ([198, 51, 100, 2], 32),
+        ([203, 0, 113, 0], 24),
+        ([100, 64, 1, 0], 24),
+        ([100, 64, 2, 0], 24),
+    ][index];
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(octets), len))
+}
+
+fn prefix_index(wire: Prefix) -> usize {
+    (0..PREFIXES)
+        .find(|&index| prefix(index) == wire)
+        .expect("only modelled prefixes reach the wire")
+}
+
+/// `prefix#path_id=injection`, sorted.
+fn show<'a>(wire: impl IntoIterator<Item = (&'a (Prefix, u32), &'a usize)>) -> String {
+    let mut rows: Vec<_> = wire
+        .into_iter()
+        .map(|((prefix, path_id), injection)| format!("{prefix}#{path_id}={injection}"))
+        .collect();
+    rows.sort();
+    format!("[{}]", rows.join(", "))
+}
+
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one independent axis of the receiver matrix"
+)]
+#[derive(Clone, Copy, Debug)]
+struct Config {
+    /// Grouped receivers share an update group; Add-Path is always private.
+    grouped: bool,
+    add_path: bool,
+    per_client_best: bool,
+    /// The receiver negotiates Address Prefix ORF receive.
+    orf: bool,
+    /// A configured prefix limit makes recovery depend on exact proof.
+    limit: bool,
+}
+
+#[derive(Clone, Debug)]
+enum Op {
+    /// Inject or replace a local path; preference picks its rank.
+    Inject {
+        prefix: usize,
+        path: usize,
+        preference: u32,
+        blackhole: bool,
+    },
+    Delete {
+        prefix: usize,
+        path: usize,
+    },
+    Receive {
+        prefix: usize,
+    },
+    ReceiveWithdraw {
+        prefix: usize,
+    },
+    /// Replace the receiver's ORF with one denying the masked prefixes.
+    Orf {
+        deny: u8,
+    },
+    Backpressure(bool),
+    /// Same actor/channel re-registration; `refuse_capture` fails its
+    /// admitted-key capture.
+    Replay {
+        refuse_capture: bool,
+    },
+    /// Free the writer; the receiver's dirty retry then fails its
+    /// admission-proof allocation.
+    RefuseProof,
+    Drain,
+}
+
+fn config_strategy() -> impl Strategy<Value = Config> {
+    (
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+    )
+        .prop_map(|(grouped, add_path, per_client_best, orf, limit)| Config {
+            grouped: grouped && !add_path,
+            add_path,
+            per_client_best,
+            orf,
+            limit,
+        })
+}
+
+fn intent_strategy() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        4 => (0..LOCAL_PREFIXES, 0..PATH_IDS.len(), 0u32..3, any::<bool>()).prop_map(
+            |(prefix, path, preference, blackhole)| Op::Inject {
+                prefix,
+                path,
+                preference,
+                blackhole,
+            }
+        ),
+        2 => (0..LOCAL_PREFIXES, 0..PATH_IDS.len())
+            .prop_map(|(prefix, path)| Op::Delete { prefix, path }),
+        1 => (LOCAL_PREFIXES..PREFIXES).prop_map(|prefix| Op::Receive { prefix }),
+        1 => (LOCAL_PREFIXES..PREFIXES).prop_map(|prefix| Op::ReceiveWithdraw { prefix }),
+        1 => (0u8..1 << PREFIXES).prop_map(|deny| Op::Orf { deny }),
+    ]
+}
+
+fn hold_strategy() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        8 => intent_strategy(),
+        2 => any::<bool>().prop_map(Op::Backpressure),
+        1 => any::<bool>().prop_map(|refuse_capture| Op::Replay { refuse_capture }),
+        2 => Just(Op::RefuseProof),
+        2 => Just(Op::Drain),
+    ]
+}
+
+struct Injection {
+    prefix: usize,
+    preference: u32,
+    exempt: bool,
+    live: bool,
+}
+
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the model tracks independent per-case history and gate flags"
+)]
+struct Harness {
+    config: Config,
+    manager: RibManager,
+    tx: mpsc::Sender<OutboundRouteUpdate>,
+    rx: mpsc::Receiver<OutboundRouteUpdate>,
+    source: mpsc::Receiver<OutboundRouteUpdate>,
+    waiter: Option<mpsc::Receiver<OutboundRouteUpdate>>,
+    occupied: Vec<mpsc::OwnedPermit<OutboundRouteUpdate>>,
+    /// Receiver wire: key to the injection it carries.
+    wire: HashMap<(Prefix, u32), usize>,
+    injections: Vec<Injection>,
+    local: BTreeMap<(usize, usize), usize>,
+    received: BTreeMap<usize, usize>,
+    deny: u8,
+    orf_gated: bool,
+    held: bool,
+    replayed: bool,
+    refused: bool,
+    /// Prefix to the exempt injections on its wire rows at the last check.
+    blackholed: BTreeMap<usize, BTreeSet<usize>>,
+}
+
+type Checked = Result<(), TestCaseError>;
+
+impl Harness {
+    fn new(config: Config) -> Self {
+        let mut manager = manager_with_dormant_waiter();
+        let source = connect(&mut manager, SOURCE, 64, false, false);
+        let observer = peer_v4(OBSERVER);
+        manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+            peer: observer,
+            session_id: OBSERVER_SESSION,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: vec![],
+            peer_enhanced_refresh: true,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        });
+        let (tx, rx) = mpsc::channel(4);
+        let mut harness = Self {
+            config,
+            manager,
+            tx,
+            rx,
+            source,
+            waiter: None,
+            occupied: Vec::new(),
+            wire: HashMap::new(),
+            injections: Vec::new(),
+            local: BTreeMap::new(),
+            received: BTreeMap::new(),
+            deny: 0,
+            orf_gated: config.orf,
+            held: false,
+            replayed: false,
+            refused: false,
+            blackholed: BTreeMap::new(),
+        };
+        harness.register();
+        if config.limit {
+            super::outbound_prefix_limits::prepare(
+                &mut harness.manager,
+                1,
+                super::outbound_prefix_limits::limit_config(&[(observer, Some(64), None)], &[]),
+            )
+            .unwrap();
+            super::outbound_prefix_limits::apply(&mut harness.manager, 1, true).unwrap();
+        }
+        if config.orf {
+            harness.push_orf(0);
+        }
+        harness
+    }
+
+    fn register(&mut self) {
+        let mut up =
+            super::lifecycle::test_peer_up(peer_v4(OBSERVER), OBSERVER_SESSION, self.tx.clone());
+        if let RibUpdate::PeerUp {
+            export_policy,
+            per_client_best,
+            add_path_send_families,
+            add_path_send_max,
+            sendable_families,
+            negotiated_orf_recv,
+            ..
+        } = &mut up
+        {
+            *sendable_families = vec![FAMILY];
+            *per_client_best = self.config.per_client_best;
+            if !self.config.grouped {
+                *export_policy = Some(private_policy(None));
+            }
+            if self.config.add_path {
+                *add_path_send_families = vec![FAMILY];
+                *add_path_send_max = u32::try_from(ADD_PATH_MAX).unwrap();
+            }
+            if self.config.orf {
+                *negotiated_orf_recv = vec![FAMILY];
+            }
+        }
+        self.manager.handle_update(up);
+        if self.config.orf {
+            // Re-registration clears the session's filter and re-arms the
+            // initial-advertisement gate until the peer refreshes.
+            self.deny = 0;
+            self.orf_gated = true;
+        }
+    }
+
+    fn push_orf(&mut self, deny: u8) {
+        let mut entries = vec![AddressPrefixOrf {
+            action: OrfAction::RemoveAll,
+            match_: OrfMatch::Permit,
+            sequence: 0,
+            min_len: 0,
+            max_len: 0,
+            prefix: None,
+        }];
+        for index in (0..PREFIXES).filter(|index| deny & (1 << index) != 0) {
+            entries.push(AddressPrefixOrf {
+                action: OrfAction::Add,
+                match_: OrfMatch::Deny,
+                sequence: u32::try_from(index).unwrap() + 1,
+                min_len: 0,
+                max_len: 0,
+                prefix: Some(prefix(index)),
+            });
+        }
+        entries.push(AddressPrefixOrf {
+            action: OrfAction::Add,
+            match_: OrfMatch::Permit,
+            sequence: 100,
+            min_len: 0,
+            max_len: 32,
+            prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
+        });
+        let (reply, mut response) = oneshot::channel();
+        self.manager.handle_update(RibUpdate::PeerOrfUpdate {
+            peer: peer_v4(OBSERVER),
+            session_id: OBSERVER_SESSION,
+            afi: FAMILY.0,
+            safi: FAMILY.1,
+            when: WhenToRefresh::Immediate,
+            entries,
+            reply,
+        });
+        response.try_recv().unwrap().unwrap();
+        self.deny = deny;
+        self.orf_gated = false;
+    }
+
+    fn identity(route: &Route) -> usize {
+        route
+            .communities()
+            .iter()
+            .find(|community| *community >> 16 == IDENTITY_ASN)
+            .map(|community| (community & 0xffff) as usize)
+            .expect("every modelled route carries its identity")
+    }
+
+    fn new_injection(&mut self, prefix: usize, preference: u32, exempt: bool) -> usize {
+        self.injections.push(Injection {
+            prefix,
+            preference,
+            exempt,
+            live: true,
+        });
+        self.injections.len() - 1
+    }
+
+    fn retire(&mut self, injection: Option<usize>) {
+        if let Some(injection) = injection {
+            self.injections[injection].live = false;
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match keeps every operation's daemon call beside its model update"
+    )]
+    fn apply(&mut self, op: &Op) {
+        match *op {
+            Op::Inject {
+                prefix: index,
+                path,
+                preference,
+                blackhole,
+            } => {
+                // Unique per path and variant, so ranks never tie.
+                let preference = 100 + u32::try_from(path).unwrap() + 3 * preference;
+                let exempt = index < 2 || blackhole;
+                let injection = self.new_injection(index, preference, exempt);
+                let Prefix::V4(v4) = prefix(index) else {
+                    unreachable!()
+                };
+                let mut route = make_route_with_lp(v4, SOURCE, preference);
+                set_peer(&mut route, crate::PeerId::LOCAL);
+                route.origin_type = crate::route::RouteOrigin::Local;
+                route.path_id = PATH_IDS[path];
+                let mut communities =
+                    vec![(IDENTITY_ASN << 16) | u32::try_from(injection).unwrap()];
+                if blackhole {
+                    communities.push(rustbgpd_wire::COMMUNITY_BLACKHOLE);
+                }
+                route.attributes = AttrSet::new(vec![
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::AsPath(AsPath { segments: vec![] }),
+                    PathAttribute::LocalPref(preference),
+                    PathAttribute::Communities(communities),
+                ]);
+                let (reply, mut result) = oneshot::channel();
+                self.manager
+                    .handle_update(RibUpdate::InjectRoute { route, reply });
+                result.try_recv().unwrap().unwrap();
+                let old = self.local.insert((index, path), injection);
+                self.retire(old);
+            }
+            Op::Delete {
+                prefix: index,
+                path,
+            } => {
+                let (reply, mut result) = oneshot::channel();
+                self.manager.handle_update(RibUpdate::WithdrawInjected {
+                    prefix: prefix(index),
+                    path_id: PATH_IDS[path],
+                    allow_missing: true,
+                    owner: String::new(),
+                    override_owner: false,
+                    reply,
+                });
+                result.try_recv().unwrap().unwrap();
+                let old = self.local.remove(&(index, path));
+                self.retire(old);
+            }
+            Op::Receive { prefix: index } => {
+                let injection = self.new_injection(index, 100, false);
+                let Prefix::V4(v4) = prefix(index) else {
+                    unreachable!()
+                };
+                let mut route = make_route_with_lp(v4, SOURCE, 100);
+                AttrSet::edit(&mut route.attributes, |attributes| {
+                    attributes.push(PathAttribute::Communities(vec![
+                        (IDENTITY_ASN << 16) | u32::try_from(injection).unwrap(),
+                    ]));
+                });
+                self.receive(vec![route], vec![]);
+                let old = self.received.insert(index, injection);
+                self.retire(old);
+            }
+            Op::ReceiveWithdraw { prefix: index } => {
+                self.receive(vec![], vec![(prefix(index), 0)]);
+                let old = self.received.remove(&index);
+                self.retire(old);
+            }
+            Op::Orf { deny } => {
+                if self.config.orf {
+                    self.push_orf(deny);
+                }
+            }
+            Op::Backpressure(true) => {
+                if self.occupied.is_empty() {
+                    let writer = self.tx.clone();
+                    self.occupied =
+                        std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+                }
+            }
+            Op::Backpressure(false) => self.occupied.clear(),
+            Op::Replay { refuse_capture } => {
+                self.replayed |= self.held;
+                if refuse_capture {
+                    self.manager
+                        .pending_group_admitted
+                        .fail_next_allocation_for_test();
+                }
+                self.register();
+                // An unconsumed fault must not land on another peer later.
+                self.manager
+                    .pending_group_admitted
+                    .disarm_allocation_failure_for_test();
+            }
+            Op::RefuseProof => {
+                // Freeing the writer starts the dirty retry that is refused.
+                self.occupied.clear();
+                self.manager
+                    .pending_group_admitted
+                    .fail_next_allocation_for_test();
+                self.manager.distribute_changes_to_targets(
+                    &HashSet::new(),
+                    &HashSet::from([peer_v4(OBSERVER)]),
+                );
+                self.manager
+                    .pending_group_admitted
+                    .disarm_allocation_failure_for_test();
+            }
+            Op::Drain => {}
+        }
+    }
+
+    fn receive(&mut self, announced: Vec<Route>, withdrawn: Vec<(Prefix, u32)>) {
+        self.manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: SOURCE_SESSION,
+            announced,
+            withdrawn,
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut self.manager);
+    }
+
+    /// Apply what the receiver got; I4 holds for every announcement.
+    fn observe(&mut self) -> Result<usize, TestCaseError> {
+        // The source and waiter never backpressure: only the receiver
+        // retries.
+        while self.source.try_recv().is_ok() {}
+        while self
+            .waiter
+            .as_mut()
+            .is_some_and(|waiter| waiter.try_recv().is_ok())
+        {}
+        let mut updates = 0;
+        while let Ok(update) = self.rx.try_recv() {
+            updates += 1;
+            if std::env::var("ORACLE_TRACE").is_ok() {
+                eprintln!(
+                    "  wire: announce {:?} withdraw {:?} eor {:?} markers {:?}",
+                    update
+                        .announce
+                        .iter()
+                        .map(|route| (route.prefix, route.path_id, Self::identity(route)))
+                        .collect::<Vec<_>>(),
+                    update.withdraw,
+                    update.end_of_rib,
+                    update.refresh_markers
+                );
+            }
+            for key in &update.withdraw {
+                self.wire.remove(key);
+            }
+            for route in update.announce.iter() {
+                let injection = Self::identity(route);
+                let resurrected =
+                    self.injections[injection].exempt && !self.injections[injection].live;
+                prop_assert!(
+                    !resurrected,
+                    "I4: removed exempt injection {injection} re-announced at {:?}",
+                    (route.prefix, route.path_id)
+                );
+                self.wire.insert((route.prefix, route.path_id), injection);
+            }
+        }
+        if self
+            .manager
+            .group_recovery_fallback(peer_v4(OBSERVER))
+            .is_some()
+        {
+            self.refused = true;
+        }
+        Ok(updates)
+    }
+
+    fn drain(&mut self) -> Checked {
+        for _ in 0..DRAIN_ROUNDS {
+            self.manager
+                .distribute_changes(&HashSet::new(), &HashSet::new());
+            if self.observe()? == 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// A fresh session's full dump of the current intent.
+    fn expected(&self) -> BTreeMap<(Prefix, u32), usize> {
+        let mut expected = BTreeMap::new();
+        for index in 0..PREFIXES {
+            if self.config.orf && self.deny & (1 << index) != 0 {
+                continue;
+            }
+            let mut paths: Vec<usize> = self
+                .local
+                .range((index, 0)..(index + 1, 0))
+                .map(|(_, &injection)| injection)
+                .chain(self.received.get(&index).copied())
+                .collect();
+            paths
+                .sort_by_key(|&injection| std::cmp::Reverse(self.injections[injection].preference));
+            if self.config.add_path {
+                for (rank, &injection) in paths.iter().take(ADD_PATH_MAX).enumerate() {
+                    expected.insert((prefix(index), u32::try_from(rank).unwrap() + 1), injection);
+                }
+            } else if let Some(&injection) = paths.first() {
+                expected.insert((prefix(index), 0), injection);
+            }
+        }
+        expected
+    }
+
+    /// Prefix to the exempt injections its wire rows carry.
+    fn exempt_rows(&self) -> BTreeMap<usize, BTreeSet<usize>> {
+        let mut rows = BTreeMap::<_, BTreeSet<_>>::new();
+        for &injection in self.wire.values() {
+            let row = &self.injections[injection];
+            if row.exempt {
+                rows.entry(row.prefix).or_default().insert(injection);
+            }
+        }
+        rows
+    }
+
+    /// A known open defect that explains `index` losing its exempt rows
+    /// during the hold, or `None`.
+    fn known_unblackhole(&self, index: usize, fallback: bool) -> Option<&'static str> {
+        // LAN-2689: with admitted proof, a dirty resync behind a
+        // replay-re-armed ORF gate withdraws the gated family's admitted keys.
+        if self.orf_gated && !fallback {
+            return allowed("LAN-2689");
+        }
+        // LAN-2692: under refused proof, an Add-Path
+        // receiver withdraws a removed exempt path while its exempt
+        // replacement still waits for admission.
+        let removed = self.blackholed[&index]
+            .iter()
+            .all(|&injection| !self.injections[injection].live);
+        if self.config.add_path && fallback && removed {
+            return allowed("LAN-2692");
+        }
+        None
+    }
+
+    /// I1 at every step of the hold; its liveness half after a clean drain.
+    fn check_hold(&mut self, drained: bool) -> Checked {
+        let wanted: BTreeSet<usize> = self
+            .expected()
+            .values()
+            .map(|&injection| &self.injections[injection])
+            .filter(|injection| injection.exempt)
+            .map(|injection| injection.prefix)
+            .collect();
+        let blackholed = self.exempt_rows();
+        let fallback = self
+            .manager
+            .group_recovery_fallback(peer_v4(OBSERVER))
+            .is_some();
+        for &index in self
+            .blackholed
+            .keys()
+            .filter(|index| wanted.contains(index))
+        {
+            prop_assert!(
+                blackholed.contains_key(&index)
+                    || self.known_unblackhole(index, fallback).is_some(),
+                "I1: {} lost its exempt row during the hold; wire {}",
+                prefix(index),
+                show(&self.wire)
+            );
+        }
+        self.blackholed = blackholed;
+        let settled = drained
+            && self.occupied.is_empty()
+            && !self.orf_gated
+            && self
+                .manager
+                .group_recovery_fallback(peer_v4(OBSERVER))
+                .is_none();
+        if settled {
+            for index in &wanted {
+                let live = self.blackholed.get(index).is_some_and(|rows| {
+                    rows.iter()
+                        .any(|&injection| self.injections[injection].live)
+                });
+                prop_assert!(
+                    live,
+                    "I1: settled hold does not carry {}'s live exempt row; wire {}",
+                    prefix(*index),
+                    show(&self.wire)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn release(&mut self) -> Checked {
+        if std::env::var("ORACLE_TRACE").is_ok() {
+            eprintln!("Release");
+        }
+        self.occupied.clear();
+        self.manager.handle_update(RibUpdate::EndOfRib {
+            peer: peer_v4(WAITER),
+            session_id: WAITER_SESSION,
+            afi: FAMILY.0,
+            safi: FAMILY.1,
+        });
+        self.held = false;
+        self.observe()?;
+        self.drain()?;
+        if self.orf_gated {
+            // The peer's refresh opens the re-armed gate.
+            self.push_orf(self.deny);
+            self.observe()?;
+            self.drain()?;
+        }
+        Ok(())
+    }
+
+    /// A known open defect that explains this stale extra row, or `None`.
+    /// Each allowance matches one ticket's exact signature; the invariant
+    /// itself is never weakened.
+    fn known_stale(
+        &self,
+        key: (Prefix, u32),
+        injection: usize,
+        expected: &BTreeMap<(Prefix, u32), usize>,
+    ) -> Option<&'static str> {
+        // LAN-2680: after a same-channel replay and refused proof (in
+        // either order) leave keys-only provenance, release leaves a
+        // surviving Add-Path path's old rank key, a duplicate of a live row
+        // the fresh dump also carries.
+        let duplicate = expected
+            .iter()
+            .any(|(&(prefix, _), &live)| prefix == key.0 && live == injection);
+        if self.config.add_path
+            && self.replayed
+            && self.refused
+            && key.1 > 1
+            && self.injections[injection].live
+            && duplicate
+        {
+            return allowed("LAN-2680");
+        }
+        // LAN-2690: a grouped receiver replayed during the hold never
+        // withdraws a row removed in that hold.
+        if self.config.grouped && self.replayed && !self.injections[injection].live {
+            return allowed("LAN-2690");
+        }
+        // LAN-2691: once a same-channel replay and a refused
+        // proof (or refused capture) meet in one hold, release never
+        // withdraws a row removed or ORF-denied during that hold.
+        let denied = self.config.orf && self.deny & (1 << prefix_index(key.0)) != 0;
+        if self.replayed && self.refused && (!self.injections[injection].live || denied) {
+            return allowed("LAN-2691");
+        }
+        None
+    }
+
+    fn check_converged(&mut self) -> Checked {
+        let expected = self.expected();
+        let wire: BTreeMap<_, _> = self
+            .wire
+            .iter()
+            .map(|(&key, &value)| (key, value))
+            .collect();
+        let missing = expected
+            .iter()
+            .any(|(key, value)| wire.get(key) != Some(value));
+        let mut extra = wire
+            .iter()
+            .filter(|(key, _)| !expected.contains_key(key))
+            .peekable();
+        let known = !missing
+            && extra.peek().is_some()
+            && extra
+                .all(|(&key, &injection)| self.known_stale(key, injection, &expected).is_some());
+        if known {
+            // The stale rows also skew the actual count until a refresh.
+            return Ok(());
+        }
+        prop_assert!(
+            wire == expected,
+            "I2: released wire {} differs from a fresh dump {}",
+            show(&wire),
+            show(&expected)
+        );
+        let actual = self
+            .manager
+            .actual_unicast_advertised_count(peer_v4(OBSERVER));
+        prop_assert!(
+            actual == wire.len(),
+            "I3: actual advertised count {actual} differs from {} wire keys",
+            wire.len()
+        );
+        Ok(())
+    }
+}
+
+fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
+    let mut harness = Harness::new(config);
+    harness.observe()?;
+    for op in setup {
+        harness.apply(op);
+        harness.observe()?;
+    }
+    harness.drain()?;
+    harness.waiter = Some(connect(&mut harness.manager, WAITER, 64, true, false));
+    harness.held = true;
+    prop_assert!(harness.manager.selection_deferred(FAMILY));
+    harness.observe()?;
+    harness.blackholed = harness.exempt_rows();
+    for op in hold {
+        if std::env::var("ORACLE_TRACE").is_ok() {
+            eprintln!(
+                "{op:?}: dirty={} fallback={:?} orf_pending={:?}",
+                harness.manager.dirty_peers.contains(&peer_v4(OBSERVER)),
+                harness.manager.group_recovery_fallback(peer_v4(OBSERVER)),
+                harness.manager.peer_orf_pending.get(&peer_v4(OBSERVER))
+            );
+        }
+        harness.apply(op);
+        harness.observe()?;
+        let drained = matches!(op, Op::Drain);
+        if drained {
+            harness.drain()?;
+        }
+        harness.check_hold(drained)?;
+    }
+    harness.release()?;
+    harness.check_converged()
+}
+
+/// `Some(tag)` unless `ORACLE_STRICT` disables this allowance: `1`
+/// disables every allowance, a comma-separated list only those tags.
+fn allowed(tag: &'static str) -> Option<&'static str> {
+    match std::env::var("ORACLE_STRICT") {
+        Err(_) => Some(tag),
+        Ok(strict) => {
+            (strict != "1" && !strict.split(',').any(|disabled| disabled == tag)).then_some(tag)
+        }
+    }
+}
+
+/// The panic's message.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(ToString::to_string))
+        .unwrap_or_default()
+}
+
+/// `run`, with a known daemon assertion allowed.
+fn checked(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(config, setup, hold)))
+        .unwrap_or_else(|panic| {
+            let message = panic_message(&*panic);
+            // LAN-2693: an Add-Path replay under a prefix limit
+            // re-inserts a duplicate prefix into an exactly reserved set.
+            if config.add_path
+                && config.limit
+                && message.contains("inventory grew while filling")
+                && allowed("LAN-2693").is_some()
+            {
+                return Ok(());
+            }
+            std::panic::resume_unwind(panic)
+        })
+}
+
+/// The failing invariant's message, or a panic's.
+fn failure(config: Config, setup: &[Op], hold: &[Op]) -> Option<String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        checked(config, setup, hold)
+    })) {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(panic) => Some(panic_message(&*panic)),
+    }
+}
+
+/// The failed invariant's label (`I1`..`I4`), or a panic's first clause.
+fn invariant(reason: &str) -> &str {
+    let reason = reason.strip_prefix("Case failed: ").unwrap_or(reason);
+    reason.split(':').next().unwrap_or_default()
+}
+
+/// Greedy one-op deletion to a fixpoint, keeping the same failing
+/// invariant: proptest's shrinker stops at the first deletion that passes.
+fn minimize(
+    config: Config,
+    mut setup: Vec<Op>,
+    mut hold: Vec<Op>,
+    label: &str,
+) -> (Vec<Op>, Vec<Op>) {
+    let same = |setup: &[Op], hold: &[Op]| {
+        failure(config, setup, hold).is_some_and(|message| invariant(&message) == label)
+    };
+    loop {
+        let before = setup.len() + hold.len();
+        let mut index = 0;
+        while index < hold.len() {
+            let mut fewer = hold.clone();
+            fewer.remove(index);
+            if same(&setup, &fewer) {
+                hold = fewer;
+            } else {
+                index += 1;
+            }
+        }
+        let mut index = 0;
+        while index < setup.len() {
+            let mut fewer = setup.clone();
+            fewer.remove(index);
+            if same(&fewer, &hold) {
+                setup = fewer;
+            } else {
+                index += 1;
+            }
+        }
+        if setup.len() + hold.len() == before {
+            return (setup, hold);
+        }
+    }
+}
+
+#[test]
+fn gr_hold_matches_a_fresh_session_model() {
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(128);
+    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
+        cases,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    });
+    let strategy = (
+        config_strategy(),
+        proptest::collection::vec(intent_strategy(), 0..6),
+        proptest::collection::vec(hold_strategy(), 1..40),
+    );
+    let Err(error) = runner.run(&strategy, |(config, setup, hold)| {
+        checked(config, &setup, &hold)
+    }) else {
+        return;
+    };
+    let proptest::test_runner::TestError::Fail(reason, (config, setup, hold)) = error else {
+        panic!("{error}");
+    };
+    let reason = reason.to_string();
+    let label = invariant(&reason).to_string();
+    let (setup, hold) = minimize(config, setup, hold, &label);
+    let reason = failure(config, &setup, &hold).unwrap_or(reason);
+    panic!("{reason}\nminimized: {config:#?}\nsetup: {setup:#?}\nhold: {hold:#?}");
+}
