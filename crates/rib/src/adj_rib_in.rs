@@ -1142,6 +1142,7 @@ impl AdjRibIn {
     }
 
     /// Remove all stale routes, returning their prefixes.
+    #[cfg(test)]
     pub fn sweep_stale(&mut self) -> Vec<Prefix> {
         let stale: Vec<(Prefix, u32)> = self
             .routes
@@ -1160,6 +1161,7 @@ impl AdjRibIn {
 
     /// Remove stale routes for a specific family, returning their prefixes.
     /// Used when a family was in GR but not in the peer's LLGR capability.
+    #[cfg(test)]
     pub fn sweep_stale_family(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
         self.sweep_stale_family_with_checkpoint(family, false, &mut || {})
     }
@@ -1342,6 +1344,7 @@ impl AdjRibIn {
     }
 
     /// Remove all LLGR-stale routes, returning their prefixes.
+    #[cfg(test)]
     pub fn sweep_llgr_stale(&mut self) -> Vec<Prefix> {
         let stale: Vec<(Prefix, u32)> = self
             .routes
@@ -1361,6 +1364,7 @@ impl AdjRibIn {
     /// Remove LLGR-stale routes for a specific family, returning their
     /// prefixes. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_family(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
         self.sweep_stale_family_with_checkpoint(family, true, &mut || {})
     }
@@ -1550,12 +1554,14 @@ impl AdjRibIn {
     }
 
     /// Remove all stale EVPN routes, returning their keys.
+    #[cfg(test)]
     pub fn sweep_stale_evpn(&mut self) -> Vec<EvpnRouteKey> {
         self.sweep_stale_family_evpn_with_checkpoint((Afi::L2Vpn, Safi::Evpn), false, &mut || {})
     }
 
     /// Remove stale EVPN routes if `family == (L2Vpn, Evpn)`. Used when a
     /// family was in GR but not in the peer's LLGR capability.
+    #[cfg(test)]
     pub fn sweep_stale_family_evpn(&mut self, family: (Afi, Safi)) -> Vec<EvpnRouteKey> {
         self.sweep_stale_family_evpn_with_checkpoint(family, false, &mut || {})
     }
@@ -1660,6 +1666,7 @@ impl AdjRibIn {
     }
 
     /// Remove all LLGR-stale EVPN routes, returning their keys.
+    #[cfg(test)]
     pub fn sweep_llgr_stale_evpn(&mut self) -> Vec<EvpnRouteKey> {
         self.sweep_stale_family_evpn_with_checkpoint((Afi::L2Vpn, Safi::Evpn), true, &mut || {})
     }
@@ -1667,6 +1674,7 @@ impl AdjRibIn {
     /// Remove LLGR-stale EVPN routes if `family == (L2Vpn, Evpn)`, returning
     /// their keys. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_family_evpn(&mut self, family: (Afi, Safi)) -> Vec<EvpnRouteKey> {
         if family != (Afi::L2Vpn, Safi::Evpn) {
             return Vec::new();
@@ -1845,6 +1853,7 @@ impl AdjRibIn {
     /// Remove all stale BGP-LS routes (both tuples), returning their keys.
     /// Timer-expiry purge (RFC 4724 §4.1: stale routes deleted when the
     /// restart timer expires or `EoR` sweeps).
+    #[cfg(test)]
     pub fn sweep_stale_bgpls(&mut self) -> Vec<BgpLsRouteKey> {
         let stale: Vec<BgpLsRouteKey> = self
             .bgpls_routes
@@ -1862,6 +1871,7 @@ impl AdjRibIn {
     /// Remove stale BGP-LS routes of the given family tuple, returning their
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
+    #[cfg(test)]
     pub fn sweep_stale_family_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
         self.sweep_stale_family_bgpls_with_checkpoint(family, false, &mut || {})
     }
@@ -1973,6 +1983,7 @@ impl AdjRibIn {
 
     /// Remove all LLGR-stale BGP-LS routes, returning their keys
     /// (RFC 9494 §4.3: LLGR timer expiry).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_bgpls(&mut self) -> Vec<BgpLsRouteKey> {
         let stale: Vec<BgpLsRouteKey> = self
             .bgpls_routes
@@ -1990,6 +2001,7 @@ impl AdjRibIn {
     /// Remove LLGR-stale BGP-LS routes of the given family tuple, returning
     /// their keys. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_family_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
         self.sweep_stale_family_bgpls_with_checkpoint(family, true, &mut || {})
     }
@@ -2231,6 +2243,7 @@ impl AdjRibIn {
     /// Remove all stale VPN routes (both tuples), returning their keys.
     /// Timer-expiry purge (RFC 4724 §4.1: stale routes deleted when the
     /// restart timer expires or `EoR` sweeps).
+    #[cfg(test)]
     pub fn sweep_stale_vpn(&mut self) -> Vec<VpnRibRouteKey> {
         let stale: Vec<VpnRibRouteKey> = self
             .vpn_routes
@@ -2247,6 +2260,7 @@ impl AdjRibIn {
     /// Remove stale VPN routes of the given family tuple, returning their
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
+    #[cfg(test)]
     pub fn sweep_stale_family_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
         self.sweep_stale_family_vpn_with_checkpoint(family, false, &mut || {})
     }
@@ -2357,6 +2371,7 @@ impl AdjRibIn {
 
     /// Remove all LLGR-stale VPN routes, returning their keys
     /// (RFC 9494 §4.3: LLGR timer expiry).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_vpn(&mut self) -> Vec<VpnRibRouteKey> {
         let stale: Vec<VpnRibRouteKey> = self
             .vpn_routes
@@ -2373,6 +2388,7 @@ impl AdjRibIn {
     /// Remove LLGR-stale VPN routes of the given family tuple, returning
     /// their keys. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_family_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
         self.sweep_stale_family_vpn_with_checkpoint(family, true, &mut || {})
     }
@@ -2589,6 +2605,7 @@ impl AdjRibIn {
     /// Remove all stale labeled routes (both tuples), returning their keys.
     /// Timer-expiry purge (RFC 4724 §4.1: stale routes deleted when the
     /// restart timer expires or `EoR` sweeps).
+    #[cfg(test)]
     pub fn sweep_stale_labeled(&mut self) -> Vec<LabeledRibRouteKey> {
         let stale: Vec<LabeledRibRouteKey> = self
             .labeled_routes
@@ -2605,6 +2622,7 @@ impl AdjRibIn {
     /// Remove stale labeled routes of the given family tuple, returning their
     /// keys. Used when a family was in GR but not in the peer's LLGR
     /// capability.
+    #[cfg(test)]
     pub fn sweep_stale_family_labeled(&mut self, family: (Afi, Safi)) -> Vec<LabeledRibRouteKey> {
         self.sweep_stale_family_labeled_with_checkpoint(family, false, &mut || {})
     }
@@ -2715,6 +2733,7 @@ impl AdjRibIn {
 
     /// Remove all LLGR-stale labeled routes, returning their keys
     /// (RFC 9494 §4.3: LLGR timer expiry).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_labeled(&mut self) -> Vec<LabeledRibRouteKey> {
         let stale: Vec<LabeledRibRouteKey> = self
             .labeled_routes
@@ -2731,6 +2750,7 @@ impl AdjRibIn {
     /// Remove LLGR-stale labeled routes of the given family tuple, returning
     /// their keys. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_family_labeled(
         &mut self,
         family: (Afi, Safi),
@@ -2786,6 +2806,7 @@ impl AdjRibIn {
     /// `sweep_stale_family_rtc` when the deadline fires. Dropping the
     /// locally-injected `LLGR_STALE` tags here keeps a later retention cycle
     /// from resurrecting a tag for a key this peer no longer advertises.
+    #[cfg(test)]
     pub fn withdraw_all_rtc(&mut self) -> Vec<RtcRibRouteKey> {
         let keys: Vec<_> = self.rtc_routes.keys().cloned().collect();
         self.rtc_routes.clear();
@@ -2906,12 +2927,14 @@ impl AdjRibIn {
     /// Remove all stale RTC routes, returning their keys. Timer-expiry purge
     /// (RFC 4724 §4.1: stale routes deleted when the restart timer expires or
     /// `EoR` sweeps).
+    #[cfg(test)]
     pub fn sweep_stale_rtc(&mut self) -> Vec<RtcRibRouteKey> {
         self.sweep_stale_family_rtc_with_checkpoint(RtcRibRouteKey::afi_safi(), false, &mut || {})
     }
 
     /// Remove stale RTC routes if `family == (Ipv4, RtConstrain)`. Used when
     /// a family was in GR but not in the peer's LLGR capability.
+    #[cfg(test)]
     pub fn sweep_stale_family_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
         self.sweep_stale_family_rtc_with_checkpoint(family, false, &mut || {})
     }
@@ -3017,6 +3040,7 @@ impl AdjRibIn {
 
     /// Remove all LLGR-stale RTC routes, returning their keys
     /// (RFC 9494 §4.3: LLGR timer expiry).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_rtc(&mut self) -> Vec<RtcRibRouteKey> {
         self.sweep_stale_family_rtc_with_checkpoint(RtcRibRouteKey::afi_safi(), true, &mut || {})
     }
@@ -3024,6 +3048,7 @@ impl AdjRibIn {
     /// Remove LLGR-stale RTC routes if `family == (Ipv4, RtConstrain)`,
     /// returning their keys. `EoR` during the LLGR phase deletes what was
     /// not re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_family_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
         if family != RtcRibRouteKey::afi_safi() {
             return Vec::new();
@@ -3133,6 +3158,7 @@ impl AdjRibIn {
     }
 
     /// Remove all stale `FlowSpec` routes, returning their rules.
+    #[cfg(test)]
     pub fn sweep_stale_flowspec(&mut self) -> Vec<FlowSpecKey> {
         let stale: Vec<FlowSpecRouteKey> = self
             .flowspec_routes
@@ -3182,6 +3208,7 @@ impl AdjRibIn {
     }
 
     /// Remove stale `FlowSpec` routes for a specific family, returning their rules.
+    #[cfg(test)]
     pub fn sweep_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
         self.sweep_stale_flowspec_family_with_checkpoint(family, false, &mut || {})
     }
@@ -3296,6 +3323,7 @@ impl AdjRibIn {
     }
 
     /// Remove all LLGR-stale `FlowSpec` routes, returning their rules.
+    #[cfg(test)]
     pub fn sweep_llgr_stale_flowspec(&mut self) -> Vec<FlowSpecKey> {
         let stale: Vec<FlowSpecRouteKey> = self
             .flowspec_routes
@@ -3318,6 +3346,7 @@ impl AdjRibIn {
     /// Remove LLGR-stale `FlowSpec` routes for a specific family, returning
     /// their rules. `EoR` during the LLGR phase deletes what was not
     /// re-advertised (RFC 4724 §4.1 via RFC 9494 §4.2).
+    #[cfg(test)]
     pub fn sweep_llgr_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
         self.sweep_stale_flowspec_family_with_checkpoint(family, true, &mut || {})
     }
