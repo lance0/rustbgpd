@@ -3410,6 +3410,10 @@ impl RibManager {
     ///
     /// Called ONLY from [`RibManager::set_rt_membership`] — the single
     /// Φ-write function (design risk 1).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one membership delta walk compares, stages and retires under the caller's owner"
+    )]
     pub(in crate::manager) fn apply_rtc_membership_delta_to_grouped_member(
         &mut self,
         peer: PeerId,
@@ -3418,7 +3422,14 @@ impl RibManager {
         new: &RtcMembership,
     ) {
         let readiness = self.replacement_readiness.clone();
-        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        let checkpoint = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "rtc_membership_delta", false);
+        };
+        // A large membership is compared entry by entry for every staged
+        // route, so each comparison yields too.
+        let mut matching = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "rtc_membership_match", false);
+        };
         let mut vpn_announce: Vec<VpnRibRoute> = Vec::new();
         let mut vpn_withdraw: Vec<VpnRibRouteKey> = Vec::new();
         let mut count_delta = [0i64; 2];
@@ -3444,7 +3455,10 @@ impl RibManager {
                     continue;
                 }
                 let rts = route.extended_communities();
-                match (old.matches_any(rts), new.matches_any(rts)) {
+                match (
+                    old.matches_any_with_checkpoint(rts, &mut matching),
+                    new.matches_any_with_checkpoint(rts, &mut matching),
+                ) {
                     (false, true) if !is_dirty => {
                         // Newly passing: announce the staged route
                         // verbatim; the per-peer restage would record a
