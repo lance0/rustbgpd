@@ -216,8 +216,6 @@ struct Harness {
     hold_starting: bool,
     /// Exempt injections the envelope between its phases re-announces.
     reannounced: Option<BTreeSet<usize>>,
-    /// A replay in the hold found the receiver in an update group.
-    grouped_replayed: bool,
     refused: bool,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
@@ -259,7 +257,6 @@ impl Harness {
             replayed: false,
             hold_starting: false,
             reannounced: None,
-            grouped_replayed: false,
             refused: false,
             blackholed: BTreeMap::new(),
         };
@@ -474,8 +471,6 @@ impl Harness {
             Op::Backpressure(false) => self.occupied.clear(),
             Op::Replay { refuse_capture } => {
                 self.replayed |= self.held;
-                self.grouped_replayed |=
-                    self.held && self.manager.grouped_member_of(peer_v4(OBSERVER)).is_some();
                 if refuse_capture {
                     self.manager
                         .pending_group_admitted
@@ -790,16 +785,16 @@ impl Harness {
         {
             return allowed("LAN-2680");
         }
-        // LAN-2690: a grouped receiver replayed during the hold never
-        // withdraws a row removed in that hold.
-        if self.grouped_replayed && !self.injections[injection].live {
-            return allowed("LAN-2690");
-        }
-        // LAN-2691: once a same-channel replay and a refused
-        // proof (or refused capture) meet in one hold, release never
-        // withdraws a row removed or ORF-denied during that hold.
+        // LAN-2691: once a same-channel replay and a refused proof (or
+        // refused capture) meet in one hold, release never withdraws a row a
+        // private receiver lost during that hold. Grouped receivers keep
+        // their admitted keys and converge.
         let denied = self.config.orf && self.deny & (1 << prefix_index(key.0)) != 0;
-        if self.replayed && self.refused && (!self.injections[injection].live || denied) {
+        if !self.config.grouped
+            && self.replayed
+            && self.refused
+            && (!self.injections[injection].live || denied)
+        {
             return allowed("LAN-2691");
         }
         None
@@ -830,18 +825,9 @@ impl Harness {
             show(&wire),
             show(&expected)
         );
-        // Each allowed defect's own count skew, per stale row: the daemon
-        // stops counting a row it failed to withdraw, except that a grouped
-        // receiver under a limit (LAN-2690) still counts it in its limiter
-        // inventory.
-        let stale = extra
-            .iter()
-            .filter(|&&(&key, &injection)| {
-                known
-                    && !(self.config.limit
-                        && self.known_stale(key, injection, &expected) == Some("LAN-2690"))
-            })
-            .count();
+        // Each allowed defect's own count skew: the daemon stops counting a
+        // stale row it failed to withdraw.
+        let stale = if known { extra.len() } else { 0 };
         let actual = self
             .manager
             .actual_unicast_advertised_count(peer_v4(OBSERVER));
@@ -1128,6 +1114,97 @@ fn i1_catches_an_unblackhole_between_an_envelopes_phases() {
         replaced(true, false).is_ok(),
         "a check after the whole envelope cannot see it"
     );
+}
+
+/// A grouped receiver replayed on its own channel during the hold keeps no
+/// private body; its admitted keys must still withdraw at release every
+/// row the hold removed (LAN-2690 and LAN-2691's grouped half). Each case
+/// fails without the release reconciliation (A to C) or without keeping a
+/// refused proof's keys (D); E needs neither.
+#[test]
+fn grouped_replay_in_the_hold_releases_exactly() {
+    let grouped = |per_client_best, limit| Config {
+        grouped: true,
+        add_path: false,
+        per_client_best,
+        orf: false,
+        limit,
+    };
+    let host = |blackhole| Op::Inject {
+        prefix: 0,
+        path: 0,
+        preference: 0,
+        blackhole,
+    };
+    let replay = Op::Replay {
+        refuse_capture: false,
+    };
+    let cases = [
+        (
+            "A: delete under backpressure, then replay",
+            grouped(false, false),
+            vec![host(false)],
+            vec![
+                Op::Backpressure(true),
+                Op::Delete { prefix: 0, path: 0 },
+                replay.clone(),
+            ],
+        ),
+        (
+            "B: replay, then a received withdrawal",
+            grouped(true, false),
+            vec![Op::Receive { prefix: 3 }],
+            vec![replay.clone(), Op::ReceiveWithdraw { prefix: 3 }],
+        ),
+        (
+            "C: delete under backpressure, then a refused-capture replay",
+            grouped(false, true),
+            vec![],
+            vec![
+                Op::Inject {
+                    prefix: 0,
+                    path: 1,
+                    preference: 2,
+                    blackhole: true,
+                },
+                Op::Backpressure(true),
+                Op::Delete { prefix: 0, path: 1 },
+                Op::Replay {
+                    refuse_capture: true,
+                },
+            ],
+        ),
+        (
+            "D: replay, a refused retry, then a received withdrawal",
+            grouped(true, false),
+            vec![Op::Receive { prefix: 3 }],
+            vec![
+                replay.clone(),
+                Op::Backpressure(true),
+                host(false),
+                Op::RefuseProof,
+                Op::ReceiveWithdraw { prefix: 3 },
+            ],
+        ),
+        (
+            "E: a refused retry without a replay (control)",
+            grouped(true, false),
+            vec![Op::Receive { prefix: 3 }],
+            vec![
+                Op::Backpressure(true),
+                host(false),
+                Op::RefuseProof,
+                Op::ReceiveWithdraw { prefix: 3 },
+            ],
+        ),
+    ];
+    let failed: Vec<_> = cases
+        .into_iter()
+        .filter_map(|(name, config, setup, hold)| {
+            failure(config, &setup, &hold).map(|reason| format!("{name}: {reason}"))
+        })
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 /// One envelope that announces an ordinary row over the last exempt row's

@@ -3007,7 +3007,10 @@ other storage need separate memory headroom.
 If a limit, allocation failure, or unavailable pre-commit proof prevents a
 complete proof, recovery preserves the legacy conservative withdrawal duties.
 It may withdraw a candidate the receiver never held, instead of leaving an
-owed withdrawal unsent. This fallback does not reset the session and does not
+owed withdrawal unsent. A proof that was complete before a refusal keeps its
+keys, without growing, until recovery completes: a grouped member has no
+private table, so those keys are how its release withdraws rows the group
+table no longer carries. They stay in the entry and byte gauges meanwhile. This fallback does not reset the session and does not
 change EVPN recovery. `bgp_update_group_recovery_fallback_total` records the
 bounded cause; `bgp_update_group_recovery_entries`,
 `bgp_update_group_recovery_bytes`, and `bgp_update_group_recovery_peak_bytes`

@@ -156,11 +156,14 @@ impl RibManager {
                         }),
                 );
             }
-            checkpoint(true);
-            keys.retain(|(prefix, path_id)| {
-                checkpoint(false);
-                admitted.contains(&ExactExportKey::Unicast(*prefix, *path_id))
-            });
+            // Only a complete proof narrows the conservative candidates.
+            if admitted.is_exact() {
+                checkpoint(true);
+                keys.retain(|(prefix, path_id)| {
+                    checkpoint(false);
+                    admitted.contains(&ExactExportKey::Unicast(*prefix, *path_id))
+                });
+            }
         }
         checkpoint(true);
         withdraw.extend(keys.into_iter().inspect(|_| checkpoint(false)));

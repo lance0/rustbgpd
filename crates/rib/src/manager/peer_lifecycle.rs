@@ -1075,6 +1075,7 @@ impl RibManager {
         }
         self.pending_extra_withdraws.remove(&peer);
         if !same_connection_replay {
+            self.grouped_replay_reconcile.remove(&peer);
             self.release_group_admitted_keys(peer);
         }
         self.remove_update_group_member(peer);
@@ -1157,6 +1158,11 @@ impl RibManager {
                     .is_some_and(|previous| previous.same_channel(&outbound_tx));
             if same_connection_replay {
                 let held = self.selection_receiver_held_families(peer);
+                // A grouped member's replay rejoins a group table that can lack
+                // its frozen rows; only its admitted keys still name them.
+                if held.into_iter().any(|held| held) && self.grouped_member_of(peer).is_some() {
+                    self.grouped_replay_reconcile.insert(peer);
+                }
                 if held.into_iter().any(|held| held) {
                     // A same-channel replay keeps OLD on the wire while its
                     // private bodies are retired. Transfer its limited prefix
@@ -3120,6 +3126,19 @@ impl RibManager {
             self.seed_initial_group_admitted_counts(peer);
         }
         if self.private_unicast_admission_incomplete(peer) {
+            self.mark_selection_partial_recovery(peer);
+        }
+        // A grouped member holds no private body. After a same-channel replay
+        // its admitted keys are the only record of rows the group table may
+        // lack, so its release resync withdraws whatever the table dropped.
+        if self.grouped_replay_reconcile.remove(&peer)
+            && self.grouped_member_of(peer).is_some()
+            && self.retain_initial_group_admitted(peer)
+            && self
+                .pending_group_admitted
+                .withdrawal_candidates(&peer)
+                .is_some()
+        {
             self.mark_selection_partial_recovery(peer);
         }
         let mut eor_families: Vec<_> = sendable

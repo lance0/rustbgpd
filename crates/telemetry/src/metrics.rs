@@ -2026,7 +2026,7 @@ impl BgpMetrics {
 
         let update_group_recovery_entries = IntGauge::new(
             "bgp_update_group_recovery_entries",
-            "Unicast/VPN admitted keys currently retained by transient update-group recovery, including captures in progress.",
+            "Unicast/VPN admitted keys currently retained by transient update-group recovery, including captures in progress and refused proofs kept as withdrawal candidates.",
         ).expect("valid metric definition");
         let update_group_recovery_bytes = IntGauge::new(
             "bgp_update_group_recovery_bytes",

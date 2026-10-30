@@ -9043,7 +9043,7 @@ impl RibManager {
                         && !(group_resync_assembles
                             && self
                                 .pending_group_admitted
-                                .get(&peer)
+                                .withdrawal_candidates(&peer)
                                 .is_some_and(|admitted| {
                                     admitted.iter_with_checkpoint(|_| checkpoint()).any(|key| {
                                         matches!(key, crate::update::ExactExportKey::Unicast(..))
@@ -9179,7 +9179,7 @@ impl RibManager {
                                     self.pending_extra_withdraws
                                         .get(&peer)
                                         .map(|extras| &extras.unicast),
-                                    self.pending_group_admitted.get(&peer),
+                                    self.pending_group_admitted.withdrawal_candidates(&peer),
                                     &mut unicast.announce,
                                     &mut unicast.withdraw,
                                     &mut unicast.next_hop_override,

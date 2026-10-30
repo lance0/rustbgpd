@@ -1187,6 +1187,9 @@ pub struct RibManager {
     /// intersects these with the member's actual admitted-key proof. Cleared
     /// on resync success.
     pending_extra_withdraws: HashMap<PeerId, update_groups::ExtraWithdraws>,
+    /// Grouped members re-registered on their own channel during a selection
+    /// hold. Their next initial table reconciles retained admitted keys.
+    grouped_replay_reconcile: HashSet<PeerId>,
     /// Actual admitted unicast/VPN keys while a member's shared desired view
     /// can advance without delivery. Exact capacity charge is capped at
     /// 64 MiB per peer and 512 MiB per daemon (provisional qualification
@@ -2728,6 +2731,7 @@ impl RibManager {
             group_ribs: HashMap::new(),
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
+            grouped_replay_reconcile: HashSet::new(),
             pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
             evpn_recovery_reset: None,

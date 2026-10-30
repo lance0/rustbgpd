@@ -246,9 +246,17 @@ pub(in crate::manager) struct AdmittedKeyView<'a> {
     words: &'a [u64],
     sparse: &'a [Key],
     masked: usize,
+    exact: bool,
 }
 
 impl<'a> AdmittedKeyView<'a> {
+    /// A complete proof. A refused proof's retained keys are not: rows
+    /// admitted after the refusal are missing, so they only add withdrawal
+    /// candidates and never filter the conservative ones.
+    pub(in crate::manager) fn is_exact(self) -> bool {
+        self.exact
+    }
+
     pub(in crate::manager) fn len(self) -> usize {
         self.masked + self.sparse.len()
     }
@@ -369,6 +377,7 @@ impl AdmittedKeys {
             words: &[],
             sparse: &self.0,
             masked: 0,
+            exact: true,
         }
     }
 }
@@ -389,6 +398,9 @@ struct Record {
     snapshot: Option<SnapshotHandle>,
     words: Words,
     masked: usize,
+    /// A refused complete proof kept its keys, without growth, as
+    /// withdrawal candidates until the record retires.
+    retained: bool,
 }
 
 impl Record {
@@ -508,6 +520,25 @@ impl AdmittedRecovery {
         self.get(peer).is_some()
     }
 
+    /// Every key `peer` may still hold on the wire: its complete proof, or
+    /// the keys a refused complete proof retained. Only withdrawal decisions
+    /// may use a retained set; it is not a proof for new admissions.
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
+    )]
+    pub(in crate::manager) fn withdrawal_candidates(
+        &self,
+        peer: &PeerId,
+    ) -> Option<AdmittedKeyView<'_>> {
+        let record = &self.records[self.index(*peer).ok()?];
+        match record.state {
+            State::Complete => self.view(record),
+            State::Failed(_) if record.retained => self.view(record),
+            State::Capturing | State::Failed(_) => None,
+        }
+    }
+
     #[expect(
         clippy::trivially_copy_pass_by_ref,
         reason = "map-shaped accessor keeps the borrowed-key signature its callers share with HashMap"
@@ -517,6 +548,10 @@ impl AdmittedRecovery {
         if record.state != State::Complete {
             return None;
         }
+        self.view(record)
+    }
+
+    fn view<'a>(&'a self, record: &'a Record) -> Option<AdmittedKeyView<'a>> {
         let universe = match record.snapshot {
             Some(handle) => self
                 .snapshots
@@ -530,6 +565,7 @@ impl AdmittedRecovery {
             words: &record.words,
             sparse: &record.keys.0,
             masked: record.masked,
+            exact: record.state == State::Complete,
         })
     }
 
@@ -958,14 +994,15 @@ impl AdmittedRecovery {
             self.optional_share_attempts += 1;
         }
         let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
+        // Checked first: a refused proof can retain keys, but never shares.
+        if matches!(self.records[index].state, State::Failed(_)) {
+            return Err(self.missing_proof(peer));
+        }
         if self.records[index].masked != 0 || !self.records[index].keys.0.is_empty() {
             return Ok(self.records[index].snapshot);
         }
         if self.records[index].snapshot.is_none() && count == 0 {
             return Ok(None);
-        }
-        if matches!(self.records[index].state, State::Failed(_)) {
-            return Err(self.missing_proof(peer));
         }
         if slot_source.is_some()
             && self.records[index].snapshot.is_some_and(|handle| {
@@ -1489,6 +1526,10 @@ impl AdmittedRecovery {
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<(), Failure> {
         let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
+        // A refused proof never grows, even when it retained its keys.
+        if let State::Failed(error) = self.records[index].state {
+            return Err(error);
+        }
         if let Err(error) = self.grow_keys(index, count, checkpoint) {
             return Err(self.fail(index, error, checkpoint));
         }
@@ -1649,6 +1690,7 @@ impl AdmittedRecovery {
                 snapshot: None,
                 words: Words::new(),
                 masked: 0,
+                retained: false,
             },
         );
         checkpoint(true);
@@ -1755,7 +1797,15 @@ impl AdmittedRecovery {
     }
 
     fn fail(&mut self, index: usize, error: Failure, checkpoint: &mut impl FnMut(bool)) -> Failure {
-        self.free_keys(index, checkpoint);
+        // A complete proof that cannot grow still names every key the peer
+        // may hold. A grouped member has no private body, so keep it, without
+        // growth, as withdrawal candidates; its bytes were already admitted.
+        // A failed capture never completed and frees as before.
+        if self.records[index].state == State::Complete {
+            self.records[index].retained = true;
+        } else {
+            self.free_keys(index, checkpoint);
+        }
         self.records[index].state = State::Failed(error);
         error
     }
@@ -2319,6 +2369,76 @@ mod tests {
         }
     }
 
+    /// The keys a refused complete proof kept, which never prove admission.
+    fn retained(ledger: &AdmittedRecovery, peer: PeerId) -> AdmittedKeys {
+        let view = ledger
+            .withdrawal_candidates(&peer)
+            .expect("a refused complete proof keeps its keys");
+        assert!(!view.is_exact());
+        view.iter().collect()
+    }
+
+    #[test]
+    fn refused_complete_proof_keeps_its_keys_without_growth_until_retirement() {
+        let mut ledger = AdmittedRecovery::new();
+        capture(&mut ledger, peer(1), &[key(1), key(2)]);
+        let (bytes, capacity) = (ledger.bytes(), ledger.records[0].keys.0.capacity());
+        let peak = ledger.peak_bytes();
+        ledger.fail_next_allocation_for_test();
+        let error = ledger
+            .reserve_admitted(peer(1), (3..=40).map(key))
+            .unwrap_err();
+        assert_eq!(error.cause, FailureCause::AllocationFailure);
+        let kept: AdmittedKeys = [1, 2]
+            .map(|n| ExactExportKey::from(key(n)))
+            .into_iter()
+            .collect();
+        for _ in 0..3 {
+            assert_eq!(
+                ledger.reserve_admitted(peer(1), (3..=40).map(key)),
+                Err(error)
+            );
+            assert_eq!(
+                ledger.apply_admitted(peer(1), (3..=40).map(key), [key(1)].into_iter()),
+                Err(error)
+            );
+            assert_eq!(ledger.push_capture(peer(1), key(9)), Err(error));
+            assert_eq!(
+                ledger.reserve_capture_with_checkpoint(peer(1), 64, &mut |_| {}),
+                Err(error)
+            );
+            assert_eq!(retained(&ledger, peer(1)), kept);
+            assert_eq!(ledger.bytes(), bytes);
+            assert_eq!(ledger.records[0].keys.0.capacity(), capacity);
+        }
+        assert_eq!(ledger.peak_bytes(), peak.max(error.attempted_daemon_bytes));
+        assert!(ledger.remove(&peer(1)));
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
+
+    #[test]
+    fn refusal_reports_no_proof_and_a_failed_capture_still_frees() {
+        let mut ledger = AdmittedRecovery::new();
+        capture(&mut ledger, peer(1), &[key(1)]);
+        ledger.fail_next_allocation_for_test();
+        ledger
+            .reserve_admitted(peer(1), (2..=20).map(key))
+            .unwrap_err();
+        assert!(ledger.get(&peer(1)).is_none());
+        assert!(!ledger.contains_key(&peer(1)));
+        assert!(ledger.owned_proof(&peer(1)).is_none());
+        assert_eq!(ledger.keys().count(), 0);
+        assert!(ledger.contains_record(peer(1)));
+        assert_eq!(retained(&ledger, peer(1)).view().len(), 1);
+
+        assert!(ledger.begin_capture(peer(2)).unwrap());
+        ledger.push_capture(peer(2), key(1)).unwrap();
+        ledger.fail_next_allocation_for_test();
+        ledger.push_capture(peer(2), key(2)).unwrap_err();
+        assert!(ledger.withdrawal_candidates(&peer(2)).is_none());
+        assert_eq!(ledger.entries(), 1, "only peer 1's retained key remains");
+    }
+
     fn capture(ledger: &mut AdmittedRecovery, peer: PeerId, keys: &[Key]) {
         assert!(ledger.begin_capture(peer).unwrap());
         for &key in keys {
@@ -2354,6 +2474,7 @@ mod tests {
             words: &words,
             sparse: &sparse,
             masked: 2,
+            exact: true,
         };
         let mut visits = 0;
         assert_eq!(view.unicast_prefix_paths(v4, &mut |_| visits += 1), 2);
@@ -2511,7 +2632,16 @@ mod tests {
         assert_eq!(error.cause, FailureCause::AllocationFailure);
         assert!(!ledger.fail_next_allocation);
         assert!(ledger.get(&peer(1)).is_none());
-        assert_eq!(ledger.entries(), 0);
+        // The refused complete proof keeps its keys, without growth.
+        assert_eq!(
+            retained(&ledger, peer(1)),
+            [2, 3]
+                .map(|n| ExactExportKey::from(key(n)))
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(ledger.entries(), 2);
+        assert_eq!(ledger.bytes(), charged);
     }
 
     #[test]
@@ -2702,16 +2832,15 @@ mod tests {
         for withdrawals in [[key(2), key(1)], [key(1), key(1)], [key(1), key(3)]] {
             let mut ledger = AdmittedRecovery::new();
             capture(&mut ledger, peer(1), &[key(1), key(2)]);
+            let before = (ledger.owned_proof(&peer(1)).unwrap(), ledger.bytes());
             let error = ledger
                 .apply_admitted(peer(1), [].into_iter(), withdrawals.into_iter())
                 .unwrap_err();
             assert_eq!(error.cause, FailureCause::MissingProof);
             assert!(ledger.get(&peer(1)).is_none());
-            assert_eq!(ledger.entries(), 0);
-            assert_eq!(
-                ledger.bytes(),
-                size_of::<AdmittedRecovery>() + size_of::<Record>()
-            );
+            // Validation fails before any mutation: the keys stay intact.
+            assert_eq!((retained(&ledger, peer(1)), ledger.bytes()), before);
+            assert_eq!(ledger.entries(), 2);
             assert_eq!(ledger.begin_capture(peer(1)), Err(error));
         }
     }
@@ -2729,8 +2858,13 @@ mod tests {
         assert_eq!(error.cause, FailureCause::MissingProof);
         assert!(ledger.fail_next_allocation);
         assert_eq!(ledger.peak_bytes(), peak);
-        assert_eq!(ledger.entries(), 0);
         assert!(ledger.get(&peer(1)).is_none());
+        // The refusal keeps what the commit had already applied: key 1 was
+        // withdrawn and its first re-announce recorded before overflow.
+        assert_eq!(
+            retained(&ledger, peer(1)),
+            [ExactExportKey::from(key(1))].into_iter().collect()
+        );
         assert_eq!(ledger.begin_capture(peer(1)), Err(error));
     }
 
@@ -3033,6 +3167,16 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.cause, FailureCause::MissingProof);
         assert!(ledger.get(&peer(1)).is_none());
+        // The retained keys keep their shared universe until retirement.
+        assert_eq!(
+            retained(&ledger, peer(1)),
+            [key(2), key(3), vpn]
+                .map(ExactExportKey::from)
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(ledger.snapshots.len(), 1);
+        assert!(ledger.remove(&peer(1)));
         assert!(ledger.snapshots.is_empty());
     }
 
@@ -3133,6 +3277,7 @@ mod tests {
                 )
                 .unwrap();
             let other = ledger.owned_proof(&peer(2)).unwrap();
+            let own = ledger.owned_proof(&peer(1)).unwrap();
             ledger.fail_next_allocation_for_test();
             let error = ledger
                 .apply_admitted(peer(1), [key(7)].into_iter(), withdrawals.into_iter())
@@ -3146,9 +3291,11 @@ mod tests {
                 ledger.get(&peer(1)).is_none(),
                 "a partial proof must never be published"
             );
+            assert_eq!(retained(&ledger, peer(1)), own);
             assert_eq!(ledger.begin_capture(peer(1)), Err(error));
             assert_eq!(ledger.owned_proof(&peer(2)).unwrap(), other);
-            assert_eq!(ledger.snapshots[0].references, 1);
+            // Both records still reference the shared universe.
+            assert_eq!(ledger.snapshots[0].references, 2);
         }
     }
 
@@ -3169,6 +3316,7 @@ mod tests {
                 .apply_admitted(peer(1), [key(1)].into_iter(), [].into_iter())
                 .unwrap();
             let other = ledger.owned_proof(&peer(2)).unwrap();
+            let own = ledger.owned_proof(&peer(1)).unwrap();
             if cause == FailureCause::AllocationFailure {
                 ledger.fail_next_allocation_for_test();
             } else {
@@ -3197,9 +3345,10 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.cause, cause);
             assert!(ledger.get(&peer(1)).is_none());
+            assert_eq!(retained(&ledger, peer(1)), own);
             assert_eq!(ledger.begin_capture(peer(1)), Err(error));
             assert_eq!(ledger.owned_proof(&peer(2)).unwrap(), other);
-            assert_eq!(ledger.snapshots[0].references, 1);
+            assert_eq!(ledger.snapshots[0].references, 2);
         }
     }
 
