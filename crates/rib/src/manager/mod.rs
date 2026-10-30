@@ -1187,6 +1187,16 @@ pub struct RibManager {
     /// intersects these with the member's actual admitted-key proof. Cleared
     /// on resync success.
     pending_extra_withdraws: HashMap<PeerId, update_groups::ExtraWithdraws>,
+    /// Exempt (RTBH or host) unicast keys a grouped member missed the
+    /// withdrawal of while dirty. Its group table no longer names them.
+    /// Cleared when the member syncs and at session end.
+    dirty_exempt_withdraws: HashMap<PeerId, HashSet<(Prefix, u32)>>,
+    /// Exempt unicast keys an ended session of a GR-capable peer may still
+    /// hold as stale (RFC 4724 §4.2). The peer drops stale routes only at
+    /// our End-of-RIB, which a selection hold defers until release, so the
+    /// next session withdraws the ones it does not advertise. Bounded by
+    /// the exempt rows; dropped once no hold is active.
+    helper_stale_exempt: HashMap<PeerId, HelperStaleExempt>,
     /// Actual admitted unicast/VPN keys while a member's shared desired view
     /// can advance without delivery. Exact capacity charge is capped at
     /// 64 MiB per peer and 512 MiB per daemon (provisional qualification
@@ -1925,6 +1935,14 @@ pub(super) struct LiveSessionRecord {
     selection_initial_admitted_valid: bool,
     /// The neighbor's export-policy totals, installed with the registration.
     export_policy_counters: crate::update::ExportPolicyCounters,
+}
+
+/// Exempt keys a GR-capable peer may hold stale from an ended session.
+#[derive(Debug)]
+struct HelperStaleExempt {
+    /// The ended session's writer. Its withdrawals belong to a later one.
+    ended: mpsc::WeakSender<OutboundRouteUpdate>,
+    keys: HashSet<(Prefix, u32)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2728,6 +2746,8 @@ impl RibManager {
             group_ribs: HashMap::new(),
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
+            dirty_exempt_withdraws: HashMap::new(),
+            helper_stale_exempt: HashMap::new(),
             pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
             evpn_recovery_reset: None,
@@ -3774,6 +3794,10 @@ impl RibManager {
             self.replacement_checkpoint(false);
             !self.selection_partial_caught_up(peer)
         }) || !self.pending_inbound_refresh.is_empty()
+            || self.helper_stale_exempt.keys().any(|&peer| {
+                self.replacement_checkpoint(false);
+                self.helper_stale_exempt_runnable(peer)
+            })
             || (self.evpn_feed_receipt_count != 0
                 && self.live_sessions.keys().any(|&peer| {
                     self.replacement_checkpoint(false);
@@ -3822,6 +3846,7 @@ impl RibManager {
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
         let recovered = self.drain_outbound_limit_recovery();
         self.retry_pending_inbound_refresh_bounded();
+        self.flush_helper_stale_exempt();
         self.retry_evpn_feed_markers_bounded();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.

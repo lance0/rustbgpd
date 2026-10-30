@@ -113,6 +113,30 @@ impl PriorGroupSlots {
     }
 }
 
+impl GroupDelta {
+    /// Whether the row a withdrawal delta removes was exempt from the
+    /// selection hold: a local host route or a local BLACKHOLE route.
+    pub(in crate::manager) fn withdrawn_exempt(&self) -> bool {
+        if let Some(prior) = &self.prior {
+            return prior
+                .local_source
+                .is_some_and(|source| source.deferral_exempt);
+        }
+        self.old_source == Some(PeerId::LOCAL)
+            && (match self.prefix {
+                Prefix::V4(prefix) => prefix.len == 32,
+                Prefix::V6(prefix) => prefix.len == 128,
+            } || self.prior_source_attrs.as_ref().is_some_and(|attrs| {
+                attrs
+                    .iter()
+                    .find_map(PathAttribute::communities)
+                    .is_some_and(|communities| {
+                        communities.contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+                    })
+            }))
+    }
+}
+
 pub(super) fn capture_prior_source_attrs(
     group: &GroupRibOut,
     prefix: Prefix,

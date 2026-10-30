@@ -8160,6 +8160,7 @@ impl RibManager {
         } else {
             super::with_executor_handoff(|| pass(self, true));
         }
+        self.flush_helper_stale_exempt();
     }
 
     /// Whether shared staging refreshes a per-client-best group's denial

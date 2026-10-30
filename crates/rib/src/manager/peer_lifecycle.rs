@@ -223,6 +223,7 @@ impl RibManager {
         }
         // The active session went down. Prune it; if another live session
         // remains the registration fails over to it.
+        self.carry_helper_stale_exempt(peer, session_id);
         if let Some(selection) = self.selection_deferral.as_mut() {
             selection.session_down(peer, session_id, &self.metrics);
         }
@@ -844,6 +845,136 @@ impl RibManager {
         let _ = peer.rebind(endpoint);
     }
 
+    /// RFC 4724 §4.2: a peer whose OPEN carried a Graceful Restart
+    /// capability keeps our routes stale after a clean session end and
+    /// drops them only at our End-of-RIB. Record the exempt keys the ending
+    /// session may hold, so the next session can withdraw deleted ones
+    /// while a selection hold defers that End-of-RIB.
+    fn carry_helper_stale_exempt(&mut self, peer: PeerId, session_id: u64) {
+        let missed = self.dirty_exempt_withdraws.remove(&peer);
+        let helper = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| {
+                sessions
+                    .iter()
+                    .find(|record| record.session_id == session_id)
+            })
+            .and_then(|record| record.gr_context.as_ref())
+            .is_some_and(|context| context.peer_gr_helper);
+        if !helper {
+            return;
+        }
+        let mut keys = missed.unwrap_or_default();
+        let table = match self.grouped_member_of(peer) {
+            Some(gid) => self.group_ribs.get(&gid).map(|group| &group.table),
+            None => self.adj_ribs_out.get(&peer),
+        };
+        if let Some(table) = table {
+            keys.extend(
+                table
+                    .local_export_sources()
+                    .filter(|(_, source)| source.deferral_exempt)
+                    .map(|(key, _)| *key),
+            );
+        }
+        let Some(ended) = self.outbound_peers.get(&peer).map(mpsc::Sender::downgrade) else {
+            return;
+        };
+        if !keys.is_empty() {
+            let carried =
+                self.helper_stale_exempt
+                    .entry(peer)
+                    .or_insert_with(|| super::HelperStaleExempt {
+                        ended: ended.clone(),
+                        keys: HashSet::new(),
+                    });
+            carried.ended = ended;
+            carried.keys.extend(keys);
+        }
+    }
+
+    /// Whether the current session holds this unicast key.
+    fn advertises_unicast_key(&self, peer: PeerId, prefix: Prefix, path_id: u32) -> bool {
+        match self.grouped_member_of(peer) {
+            Some(gid) => self.pending_group_admitted.get(&peer).map_or_else(
+                || {
+                    self.group_ribs
+                        .get(&gid)
+                        .is_some_and(|group| group.adv_entry(peer, &prefix, path_id).is_some())
+                },
+                |admitted| admitted.contains(&ExactExportKey::Unicast(prefix, path_id)),
+            ),
+            None => self
+                .adj_ribs_out
+                .get(&peer)
+                .is_some_and(|rib| rib.get(&prefix, path_id).is_some()),
+        }
+    }
+
+    /// Withdraw the carried stale exempt keys a caught-up session does not
+    /// advertise. Its live exempt rows are already on the wire, so no prefix
+    /// loses its last exempt row early; a key the peer no longer holds makes
+    /// the withdrawal a no-op. End-of-RIB is never brought forward. Once
+    /// the hold releases, that End-of-RIB purges the rest.
+    pub(super) fn flush_helper_stale_exempt(&mut self) {
+        if self.helper_stale_exempt.is_empty() {
+            return;
+        }
+        if !self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
+        {
+            self.helper_stale_exempt.clear();
+            return;
+        }
+        let ready: Vec<PeerId> = self
+            .helper_stale_exempt
+            .keys()
+            .copied()
+            .filter(|&peer| self.helper_stale_exempt_runnable(peer))
+            .collect();
+        for peer in ready {
+            let withdraw: Vec<(Prefix, u32)> = self.helper_stale_exempt[&peer]
+                .keys
+                .iter()
+                .copied()
+                .filter(|&(prefix, path_id)| {
+                    self.selection_deferred(prefix_family(&prefix))
+                        && !self.advertises_unicast_key(peer, prefix, path_id)
+                })
+                .collect();
+            let update = OutboundRouteUpdate {
+                withdraw,
+                ..OutboundRouteUpdate::default()
+            };
+            // A full writer keeps the set for the next tick.
+            if update.withdraw.is_empty()
+                || !matches!(
+                    self.outbound_peers[&peer].try_send(update),
+                    Err(TrySendError::Full(_))
+                )
+            {
+                self.helper_stale_exempt.remove(&peer);
+            }
+        }
+    }
+
+    /// A later session is registered, has sent its table and can take the
+    /// withdrawals now.
+    pub(super) fn helper_stale_exempt_runnable(&self, peer: PeerId) -> bool {
+        self.outbound_peers.get(&peer).is_some_and(|current| {
+            self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
+                !carried
+                    .ended
+                    .upgrade()
+                    .is_some_and(|ended| ended.same_channel(current))
+            })
+        }) && !self.dirty_peers.contains(&peer)
+            && !self.pending_initial_registrations.contains(&peer)
+    }
+
     /// Clear the per-session outbound state shared by the `PeerDown` and
     /// graceful-restart teardown paths. Keeping ONE list prevents the two
     /// cleanup sites from drifting — the GR path historically missed maps
@@ -1047,6 +1178,7 @@ impl RibManager {
             });
         }
         self.pending_extra_withdraws.remove(&peer);
+        self.dirty_exempt_withdraws.remove(&peer);
         self.release_group_admitted_keys(peer);
         self.remove_update_group_member(peer);
         // The extra-withdraw drop above mutates residue even for a peer

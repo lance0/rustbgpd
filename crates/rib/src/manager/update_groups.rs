@@ -2715,6 +2715,21 @@ impl RibManager {
             let withdrawn: Vec<(Prefix, u32)> = stage.withdrawn_keys(checkpoint).collect();
             group.tombstones.extend(withdrawn);
         }
+        // The committed table no longer names a withdrawn row's provenance;
+        // keep the exempt ones a GR helper may still hold after a flap.
+        let exempt: Vec<(Prefix, u32)> = stage
+            .deltas
+            .iter()
+            .inspect(|_| checkpoint())
+            .filter(|delta| delta.new.is_none() && delta.withdrawn_exempt())
+            .map(|delta| (delta.prefix, delta.path_id))
+            .collect();
+        if !exempt.is_empty() {
+            self.dirty_exempt_withdraws
+                .entry(peer)
+                .or_default()
+                .extend(exempt);
+        }
         // A source-flip member-scoped withdraw (this member is the delta's
         // new source) keeps the key IN the table, invisible to tombstones.
         let lost: Vec<(Prefix, u32)> = stage.member_scoped_withdraws(peer, checkpoint).collect();
@@ -3326,6 +3341,7 @@ impl RibManager {
             super::retire_hash_set(&mut extras.unicast, &mut checkpoint);
             super::retire_hash_set(&mut extras.vpn, &mut checkpoint);
         }
+        self.dirty_exempt_withdraws.remove(&peer);
         // A completed resync leaves the member advertising exactly the
         // Φ-filtered table — the seam where the incremental per-member
         // VPN counters (which may have drifted across the dirty window)
