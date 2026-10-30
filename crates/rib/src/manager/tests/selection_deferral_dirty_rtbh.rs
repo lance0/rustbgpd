@@ -3245,15 +3245,16 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
     assert!(!manager.dirty_peers.contains(&observer));
 }
 
-/// A withdrawal that only moves a live RTBH path to another Add-Path rank
-/// is not a removal: refused proof must not salvage it while the matching
-/// announcement waits.
-#[test]
+/// Refused proof while a deleted RTBH path's key is re-announced for its
+/// surviving sibling. With Add-Path the sibling only moves rank: withdraw
+/// the deleted path's key and keep the sibling's old key. With one path per
+/// prefix the replacement has no other key, so the deleted path stays: the
+/// prefix must never lose its blackhole.
 #[expect(
     clippy::too_many_lines,
-    reason = "one Add-Path transcript covers pre-hold admission, refused proof, the rank move and release"
+    reason = "one transcript covers pre-hold admission, refused proof, the replacement and release"
 )]
-fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
+fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
@@ -3265,13 +3266,18 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
             add_path_send_families,
             add_path_send_max,
             sendable_families,
+            export_policy,
             ..
         } = &mut up
         {
-            *per_client_best = true;
             *sendable_families = vec![FAMILY];
-            *add_path_send_families = vec![FAMILY];
-            *add_path_send_max = 2;
+            if add_path {
+                *per_client_best = true;
+                *add_path_send_families = vec![FAMILY];
+                *add_path_send_max = 2;
+            } else {
+                *export_policy = Some(private_policy(None));
+            }
         }
         up
     };
@@ -3288,6 +3294,7 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
     let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
     let prefix = Prefix::V4(host);
+    let first = u32::from(add_path);
     // Path 17 ranks first on local preference; path 23 second.
     for (path_id, preference) in [(17, 200), (23, 100)] {
         let mut route = make_route_with_lp(host, SOURCE, preference);
@@ -3317,21 +3324,40 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     });
     drain_route_chunks(&mut manager);
     apply_wire(&mut rx, &mut wire);
-    assert!(wire.contains_key(&(ordinary, 1)));
-    assert_eq!(wire[&(prefix, 1)].local_pref(), 200);
-    assert_eq!(wire[&(prefix, 2)].local_pref(), 100);
+    assert!(wire.contains_key(&(ordinary, first)));
+    assert_eq!(wire[&(prefix, first)].local_pref(), 200);
+    assert_eq!(
+        wire.get(&(prefix, 2)).map(Route::local_pref),
+        add_path.then_some(100)
+    );
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    let writer = manager.outbound_peers[&observer].clone();
+    // A backpressured same-channel replay retires the private bodies and
+    // keeps only the admitted keys' local provenance.
+    let replay_blocked: Vec<_> = if keys_only {
+        std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect()
+    } else {
+        Vec::new()
+    };
     manager.handle_update(registration(tx));
+    if keys_only {
+        let private = &manager.adj_ribs_out[&observer];
+        assert!(private.path_ids_for_prefix(&prefix).is_empty());
+        assert!(private.local_export_source(&prefix, first).is_some());
+        if add_path {
+            assert!(private.local_export_source(&prefix, 2).is_some());
+        }
+    }
     apply_wire(&mut rx, &mut wire);
     // A new RTBH waits behind a full writer, so the retry must reserve proof.
     let pending = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32));
-    let writer = manager.outbound_peers[&observer].clone();
     let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
     inject_host(
         &mut manager,
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
     );
     drop(occupied);
+    drop(replay_blocked);
     assert!(apply_wire(&mut rx, &mut wire).is_empty());
     manager
         .pending_group_admitted
@@ -3340,6 +3366,8 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     assert!(manager.group_recovery_fallback(observer).is_some());
     assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    let before = wire.len();
+    assert_eq!(manager.actual_unicast_advertised_count(observer), before);
 
     let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::WithdrawInjected {
@@ -3354,16 +3382,35 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(manager.selection_deferred(FAMILY));
     assert!(
-        updates
-            .iter()
-            .all(|update| update.withdraw.is_empty() && update.announce.is_empty()),
-        "path 23 moving from rank 2 to rank 1 needs the refused admission"
+        updates.iter().all(|update| update.announce.is_empty()),
+        "re-announcing path 23 needs the refused admission"
     );
-    assert_eq!(
-        wire.get(&(prefix, 2)).map(Route::local_pref),
-        Some(100),
-        "the still-injected RTBH path stays advertised"
-    );
+    let withdrawn: Vec<_> = updates
+        .iter()
+        .flat_map(|update| &update.withdraw)
+        .copied()
+        .collect();
+    if add_path {
+        assert_eq!(withdrawn, [(prefix, 1)], "the deleted rank-1 path leaves");
+        assert_eq!(
+            wire.get(&(prefix, 2)).map(Route::local_pref),
+            Some(100),
+            "the surviving RTBH path keeps its old rank"
+        );
+        assert_eq!(
+            manager.actual_unicast_advertised_count(observer),
+            before - 1
+        );
+    } else {
+        assert_eq!(withdrawn, [], "the replacement has no other key");
+        assert_eq!(
+            wire.get(&(prefix, 0)).map(Route::local_pref),
+            Some(200),
+            "the prefix stays blackholed until the replacement is admitted"
+        );
+        assert_eq!(manager.actual_unicast_advertised_count(observer), before);
+    }
+    assert!(wire.keys().any(|key| key.0 == prefix));
 
     manager.handle_update(RibUpdate::EndOfRib {
         peer: peer_v4(WAITER),
@@ -3375,9 +3422,156 @@ fn refused_proof_keeps_an_rtbh_path_that_only_moved_add_path_rank() {
         manager.distribute_changes(&HashSet::new(), &HashSet::new());
         apply_wire(&mut rx, &mut wire);
     }
-    assert_eq!(
-        wire.keys().copied().collect::<HashSet<_>>(),
-        HashSet::from([(prefix, 1), (pending, 1), (ordinary, 1)])
+    assert_eq!(wire[&(prefix, first)].local_pref(), 100);
+    assert!(
+        wire.values().all(|route| route.local_pref() != 200),
+        "the deleted path never returns"
     );
-    assert_eq!(wire[&(prefix, 1)].local_pref(), 100);
+    let expected = HashSet::from([(prefix, first), (pending, first), (ordinary, first)]);
+    if keys_only && add_path {
+        // Release after a keys-only replay does not yet withdraw the
+        // surviving path's old rank-2 key, a duplicate of the live route
+        // tracked separately; every expected key is present.
+        assert!(expected.iter().all(|key| wire.contains_key(key)));
+        return;
+    }
+    assert_eq!(wire.keys().copied().collect::<HashSet<_>>(), expected);
+    assert_eq!(
+        manager.actual_unicast_advertised_count(observer),
+        wire.len()
+    );
+    assert!(!manager.dirty_peers.contains(&observer));
+}
+
+#[test]
+fn refused_proof_withdraws_a_deleted_add_path_rtbh_and_keeps_its_moved_sibling() {
+    assert_refused_proof_rtbh_replacement(true, false);
+}
+
+#[test]
+fn refused_proof_keys_only_replay_withdraws_a_deleted_add_path_rtbh() {
+    assert_refused_proof_rtbh_replacement(true, true);
+}
+
+#[test]
+fn refused_proof_keys_only_replay_keeps_a_single_best_prefix_blackholed() {
+    assert_refused_proof_rtbh_replacement(false, true);
+}
+
+#[test]
+fn refused_proof_keeps_a_single_best_prefix_blackholed_across_rtbh_replacement() {
+    assert_refused_proof_rtbh_replacement(false, false);
+}
+
+/// The refused-proof replacement salvage is linear in the batch: deleting
+/// rank 1 of `siblings` Add-Path RTBH paths re-ranks every other path, and
+/// each re-announcement must not rescan the prefix's siblings.
+fn refused_replacement_salvage_visits(siblings: u32) -> usize {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(256);
+    let registration = |tx| {
+        let mut up = super::lifecycle::test_peer_up(observer, 82, tx);
+        if let RibUpdate::PeerUp {
+            per_client_best,
+            add_path_send_families,
+            add_path_send_max,
+            sendable_families,
+            ..
+        } = &mut up
+        {
+            *per_client_best = true;
+            *sendable_families = vec![FAMILY];
+            *add_path_send_families = vec![FAMILY];
+            *add_path_send_max = siblings;
+        }
+        up
+    };
+    manager.handle_update(registration(tx.clone()));
+    let mut wire = std::collections::HashMap::new();
+    apply_wire(&mut rx, &mut wire);
+    super::outbound_prefix_limits::prepare(
+        &mut manager,
+        1,
+        super::outbound_prefix_limits::limit_config(&[(observer, Some(8), None)], &[]),
+    )
+    .unwrap();
+    super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
+    let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
+    let prefix = Prefix::V4(host);
+    for rank in 0..siblings {
+        let mut route = make_route_with_lp(host, SOURCE, 1000 - rank);
+        set_peer(&mut route, crate::PeerId::LOCAL);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        route.path_id = 100 + rank;
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route, reply });
+        result.try_recv().unwrap().unwrap();
+    }
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 81,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            SOURCE,
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    apply_wire(&mut rx, &mut wire);
+    assert_eq!(
+        wire.keys().filter(|key| key.0 == prefix).count(),
+        siblings as usize
+    );
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    manager.handle_update(registration(tx));
+    apply_wire(&mut rx, &mut wire);
+    let writer = manager.outbound_peers[&observer].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    inject_host(
+        &mut manager,
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
+    );
+    drop(occupied);
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    assert!(manager.group_recovery_fallback(observer).is_some());
+    assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    manager.refused_replacement_salvage_visits = 0;
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix,
+        path_id: 100,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    assert!(result.try_recv().unwrap().unwrap().removed);
+    let withdrawn: Vec<_> = apply_wire(&mut rx, &mut wire)
+        .iter()
+        .flat_map(|update| update.withdraw.clone())
+        .collect();
+    assert_eq!(withdrawn, [(prefix, 1)], "the deleted rank-1 path leaves");
+    manager.refused_replacement_salvage_visits
+}
+
+#[test]
+fn refused_replacement_salvage_work_is_linear_in_add_path_siblings() {
+    for siblings in [4, 16, 64] {
+        let visits = refused_replacement_salvage_visits(siblings);
+        let bound = 3 * siblings as usize + 8;
+        assert!(
+            visits <= bound,
+            "{siblings} siblings cost {visits} salvage visits; bound {bound}"
+        );
+    }
 }

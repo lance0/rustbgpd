@@ -3423,8 +3423,11 @@ that pending reason while its family is held. A row the peer's Adj-RIB-Out
 already held before the hold stays frozen there and reports `COMMITTED`
 until the injection changes. `ExplainAdvertisedRoute` explains that frozen
 row in every export mode, with a `selection_deferred_frozen` step. Once the
-injection would export differently, or not at all, explain stops at
-`selection_deferred`: the peer keeps the admitted row until release. Another
+injection would export differently, or not at all (including through an ORF
+installed during the hold), explain stops at `selection_deferred`: the peer
+keeps the admitted row until release. That is the one deciding stop; its
+detail names the gate that would apply after release. A grouped
+route-server client is compared in its own control-scrubbed form. Another
 eligible local path
 can still out-select an RTBH route, and policy or admission can withhold or
 delay export. The family's End-of-RIB remains held until release selection

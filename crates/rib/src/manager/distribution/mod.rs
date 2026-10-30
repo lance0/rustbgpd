@@ -3429,14 +3429,12 @@ impl RibManager {
                 // outbound path ID moved rather than left: withdrawing its
                 // old key while the announcement is refused would drop it.
                 let mut moved = HashSet::new();
-                if !batch.withdraw.is_empty() {
-                    for route in batch.unicast.announce.iter() {
-                        checkpoint();
-                        if let Some(source) =
-                            self.exported_local_source(peer, route, &batch.local_sources)
-                        {
-                            moved.insert((route.prefix, source.path_id));
-                        }
+                for route in batch.unicast.announce.iter() {
+                    checkpoint();
+                    if let Some(source) =
+                        self.exported_local_source(peer, route, &batch.local_sources)
+                    {
+                        moved.insert((route.prefix, source.path_id));
                     }
                 }
                 self.replacement_checkpoint(true);
@@ -3454,6 +3452,69 @@ impl RibManager {
                     {
                         withdraw.push((prefix, path_id));
                     }
+                }
+                // A refused announcement can also implicitly replace a
+                // departing exempt source's key, as when a deleted Add-Path
+                // rank-1 RTBH path is re-ranked by its sibling. Withdraw that
+                // key only while the replacing exempt source provably keeps
+                // its own admitted key, so the prefix never loses its
+                // blackhole. Provenance, not the prefix index, proves it: a
+                // keys-only replay retires bodies but keeps provenance.
+                #[cfg(test)]
+                let mut visits = 0;
+                if let Some(rib) = self.adj_ribs_out.get(&peer) {
+                    let mut departures = Vec::new();
+                    for route in batch.unicast.announce.iter() {
+                        checkpoint();
+                        #[cfg(test)]
+                        {
+                            visits += 1;
+                        }
+                        let (prefix, path_id) = (route.prefix, route.path_id);
+                        let departing =
+                            rib.local_export_source(&prefix, path_id)
+                                .is_some_and(|old| {
+                                    old.deferral_exempt && !moved.contains(&(prefix, old.path_id))
+                                });
+                        if !departing {
+                            continue;
+                        }
+                        if let Some(new) =
+                            self.exported_local_source(peer, route, &batch.local_sources)
+                        {
+                            departures.push((prefix, path_id, new.path_id));
+                        }
+                    }
+                    if !departures.is_empty() {
+                        let mut prefixes: HashSet<_> =
+                            departures.iter().map(|&(prefix, _, _)| prefix).collect();
+                        let mut held = HashSet::new();
+                        for (&(prefix, _), source) in rib.local_export_sources() {
+                            checkpoint();
+                            #[cfg(test)]
+                            {
+                                visits += 1;
+                            }
+                            if source.deferral_exempt && prefixes.contains(&prefix) {
+                                held.insert((prefix, source.path_id));
+                            }
+                        }
+                        for &(prefix, path_id, replacement) in &departures {
+                            checkpoint();
+                            if held.contains(&(prefix, replacement))
+                                && seen.insert((prefix, path_id))
+                            {
+                                withdraw.push((prefix, path_id));
+                            }
+                        }
+                        super::retire_hash_set(&mut held, &mut || checkpoint());
+                        super::retire_hash_set(&mut prefixes, &mut || checkpoint());
+                    }
+                    super::retire_vec(&mut departures, &mut || checkpoint());
+                }
+                #[cfg(test)]
+                {
+                    self.refused_replacement_salvage_visits += visits;
                 }
                 super::retire_hash_set(&mut moved, &mut || checkpoint());
                 super::retire_hash_set(&mut seen, &mut || checkpoint());

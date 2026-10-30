@@ -1208,6 +1208,11 @@ pub struct RibManager {
     /// cohort admission (LAN-1826): the per-turn work bound.
     #[cfg(test)]
     join_cohort_tag_scans: usize,
+    /// Refused-proof implicit-replacement salvage: announcements examined
+    /// plus admitted local sources indexed. Linear in the batch, never a
+    /// per-announcement rescan of a prefix's Add-Path siblings.
+    #[cfg(test)]
+    refused_replacement_salvage_visits: usize,
     /// Full-table dataset re-evaluation scans by group: an empty target set
     /// must run none.
     #[cfg(test)]
@@ -2725,6 +2730,8 @@ impl RibManager {
             full_pass_path: FullPassPath::Group,
             #[cfg(test)]
             join_cohort_tag_scans: 0,
+            #[cfg(test)]
+            refused_replacement_salvage_visits: 0,
             #[cfg(test)]
             dataset_full_table_scans: 0,
             #[cfg(test)]

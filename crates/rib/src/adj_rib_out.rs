@@ -456,6 +456,14 @@ impl AdjRibOut {
         self.local_export_sources = sources;
     }
 
+    /// Every admitted key's original local provenance. It survives a
+    /// keys-only replay that retires the route bodies and prefix index.
+    pub(crate) fn local_export_sources(
+        &self,
+    ) -> impl Iterator<Item = (&(Prefix, u32), &LocalExportSource)> {
+        self.local_export_sources.iter()
+    }
+
     pub(crate) fn local_export_source(
         &self,
         prefix: &Prefix,

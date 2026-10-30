@@ -2987,20 +2987,40 @@ impl RibManager {
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
         let initial = self.initial_group_admitted(peer);
+        // The shared row precedes route-server control; the member's wire
+        // form is the emit seams' per-target suppression and rewrite of it.
+        let rs_control = self
+            .peer_rs_control
+            .get(&peer)
+            .copied()
+            .zip(self.peer_asn.get(&peer).copied());
         for staged in group.table.iter_prefix(prefix) {
             let Some(entry) = group.adv_entry_post_backstop(peer, prefix, staged.path_id) else {
                 continue;
             };
             let route = entry.route;
+            let (communities, large_communities) =
+                group.source_control_for_route(route, entry.source_attrs);
             if initial.is_some_and(|admitted| {
                 !admitted.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
             }) || rejected.is_some_and(|keys| {
                 keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
             }) || limits.is_some_and(|limits| !limits.admits_grouped(&route.prefix))
+                || distribution::rs_control::rs_control_suppressed(
+                    communities,
+                    large_communities,
+                    rs_control,
+                )
             {
                 continue;
             }
-            view.insert_with_next_hop(route.clone(), entry.nh.cloned(), &mut || {});
+            let mut member_route = route.clone();
+            distribution::rs_control::rs_control_route_rewrite(
+                &mut member_route,
+                large_communities,
+                rs_control,
+            );
+            view.insert_with_next_hop(member_route, entry.nh.cloned(), &mut || {});
             view.set_local_export_source((route.prefix, route.path_id), entry.local_source);
         }
         Some(view)
@@ -3030,6 +3050,27 @@ impl RibManager {
             peer: LOCAL_PEER,
             path_id,
         })
+    }
+
+    /// Whether `source` is a deferred non-RTBH local injection that `view`
+    /// still holds from before the hold.
+    fn frozen_local_row(
+        &self,
+        prefix: Prefix,
+        source: crate::update::RouteSourceIdentity,
+        view: Option<&AdjRibOut>,
+    ) -> bool {
+        source.peer == LOCAL_PEER
+            && self.selection_deferred(prefix_family(&prefix))
+            && self
+                .ribs
+                .get(&LOCAL_PEER)
+                .and_then(|rib| rib.get(&prefix, source.path_id))
+                .is_some_and(|route| !unicast_deferral_exempt(route))
+            && view.is_some_and(|view| {
+                view.local_source_outbound_path_id(&prefix, source.path_id)
+                    .is_some()
+            })
     }
 
     /// Explain the unicast export ladder for `(prefix, peer)`.
@@ -3120,6 +3161,18 @@ impl RibManager {
             None
         };
 
+        // Whether the scoped local source still holds a row admitted before
+        // the hold, decided before any export gate can return early.
+        let frozen = source.or(frozen_source).is_some_and(|scoped| {
+            self.frozen_local_row(
+                prefix,
+                scoped,
+                grouped_rib_out
+                    .as_ref()
+                    .or_else(|| self.adj_ribs_out.get(&peer)),
+            )
+        });
+
         // The RPC accepts a source only for Add-Path send; export readback
         // and a frozen row also scope the explain to one local source.
         if orr_ctx.is_some()
@@ -3161,7 +3214,9 @@ impl RibManager {
             explanation.source = source;
             explanation.update_group_id = member_of.map(|gid| gid as u64);
             let mut explanation = self.apply_unicast_export_overlays_to_explain(peer, explanation);
-            defer_frozen_export_change(&mut explanation);
+            if frozen {
+                defer_frozen_export_change(&mut explanation);
+            }
             return explanation;
         }
 
@@ -4559,38 +4614,56 @@ fn not_established_export(peer: PeerId, peer_interface: Option<Arc<str>>) -> Pee
 }
 
 /// A frozen source that would no longer export as admitted (changed body,
-/// policy deny, `NO_ADVERTISE`, ...) still leaves its admitted row on the
-/// peer's wire: the change itself is what selection deferral holds.
+/// ORF, policy deny, `NO_ADVERTISE`, ...) still leaves its admitted row on
+/// the peer's wire: the change itself is what selection deferral holds.
+/// `selection_deferred` becomes the one deciding stop; the stop the ladder
+/// reached is kept only as the detail of what would apply after release.
 fn defer_frozen_export_change(explanation: &mut crate::update::ExplainAdvertisedRoute) {
     use crate::update::ExplainDecision::{Advertise, NoBestRoute};
-    let frozen = explanation
-        .gates
-        .iter()
-        .any(|step| step.code == "selection_deferred_frozen");
-    if !frozen
-        || (explanation.decision == Advertise && explanation.already_advertised)
+    use crate::update::ExportGateVerdict::Stop;
+    if (explanation.decision == Advertise && explanation.already_advertised)
         || explanation
-            .reasons
+            .gates
             .iter()
-            .any(|reason| reason.code == "selection_deferred")
+            .any(|step| step.verdict == Stop && step.code == "selection_deferred")
     {
         return;
     }
     explanation.decision = NoBestRoute;
     explanation.already_advertised = false;
-    let message = "this source no longer exports as admitted; the peer keeps the admitted row \
-                   until graceful-restart selection deferral ends"
+    explanation.deny_validation.clear();
+    let mut message = "this source no longer exports as admitted; the peer keeps the admitted \
+                       row until graceful-restart selection deferral ends"
         .to_string();
+    // Nothing after a stop was evaluated; drop the stop and keep its verdict
+    // only as the hypothetical post-release outcome.
+    let first_stop = explanation
+        .gates
+        .iter()
+        .position(|step| step.verdict == Stop);
+    if let Some(stop) = first_stop.and_then(|at| explanation.gates.drain(at..).next()) {
+        message = format!(
+            "{message}; after release the {} gate would stop it ({}: {})",
+            stop.gate, stop.code, stop.detail
+        );
+        // The displaced stop is hypothetical now; unrelated diagnostics stay.
+        explanation
+            .reasons
+            .retain(|reason| reason.code != stop.code);
+    }
     explanation.gates.push(crate::update::ExportGateStep {
         gate: "adj_rib_out",
         code: "selection_deferred",
-        verdict: crate::update::ExportGateVerdict::Stop,
+        verdict: Stop,
         detail: message.clone(),
     });
-    explanation.reasons.push(crate::update::ExplainReason {
-        code: "selection_deferred",
-        message,
-    });
+    explanation.reasons.insert(
+        0,
+        crate::update::ExplainReason {
+            code: "selection_deferred",
+            message,
+        },
+    );
 }
 
 #[cfg(test)]
