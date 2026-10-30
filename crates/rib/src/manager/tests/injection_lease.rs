@@ -2510,3 +2510,122 @@ async fn legacy_entry_points_cannot_reach_a_guarded_owner() {
     assert_eq!(&*removal.tag.unwrap().owner, guarded_owner("ctl"));
     h.stop().await;
 }
+
+/// A local rule for `10.<hi>.<lo>.0/24`, one distinct key per `index`.
+fn numbered_rule(index: u16) -> FlowSpecRoute {
+    let [hi, lo] = index.to_be_bytes();
+    let mut route = local_rule();
+    route.rule.components = vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+        Ipv4Prefix::new(Ipv4Addr::new(10, hi, lo, 0), 24),
+    ))];
+    route
+}
+
+/// One unchanged re-add of rule 0, with `existing` local rules in place and
+/// a longer lease than the adds that created them: the selection
+/// checkpoints it passes (one per candidate row a recompute scans), the
+/// `FlowSpec` UPDATEs it sends toward a FlowSpec-capable peer, and the
+/// owner's remaining lease afterwards.
+fn unchanged_readd_cost(existing: u16, guarded: bool) -> (usize, usize, Duration) {
+    let mut manager = manager_for_keys();
+    let (out_tx, mut out_rx) = mpsc::channel(4096);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: TARGET,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    let (window, _) = manager.injection_leases().issue_window("ctl", 120).unwrap();
+    let add = |manager: &mut RibManager, index: u16, lease_seconds: u32| {
+        let (reply, mut rx) = oneshot::channel();
+        manager.handle_update(if guarded {
+            RibUpdate::InjectGuardedFlowSpec {
+                route: numbered_rule(index),
+                owner: "ctl".to_string(),
+                lease_seconds,
+                fence: GuardedFence {
+                    window,
+                    revision: NonZeroU64::new(1).unwrap(),
+                },
+                reply,
+            }
+        } else {
+            RibUpdate::InjectLeasedFlowSpec {
+                route: numbered_rule(index),
+                owner: "ctl".to_string(),
+                lease_seconds,
+                reply,
+            }
+        });
+        rx.try_recv().unwrap().unwrap().0
+    };
+    for index in 0..existing {
+        assert_eq!(add(&mut manager, index, 60), InjectOutcome::Created);
+    }
+    while out_rx.try_recv().is_ok() {}
+    let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |stage| {
+            if stage == "selection_flowspec" {
+                visits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }));
+    assert_eq!(add(&mut manager, 0, 100), InjectOutcome::Unchanged);
+    let mut updates = 0;
+    while let Ok(update) = out_rx.try_recv() {
+        updates += update.flowspec_announce.len() + update.flowspec_withdraw.len();
+    }
+    let owner = if guarded {
+        guarded_owner("ctl")
+    } else {
+        "ctl".to_string()
+    };
+    let remaining = manager.injection_leases().list(Some(&owner))[0].remaining;
+    (
+        visits.load(std::sync::atomic::Ordering::SeqCst),
+        updates,
+        remaining,
+    )
+}
+
+/// An unchanged leased or guarded `FlowSpec` re-add returns before the
+/// recompute: it does the same work with 1 or 1,000 existing rules (none),
+/// sends no UPDATE, and still extends the owner's lease. A controller
+/// reconciling N rules therefore pays O(N), not O(N^2).
+///
+/// Break-to-red: without the early return the re-add recomputes its key,
+/// and with validation disabled that recompute scans every `FlowSpec` row:
+/// 4 checkpoints with 1 rule, 1,003 with 1,000.
+#[tokio::test]
+async fn an_unchanged_flowspec_readd_does_constant_work_and_sends_nothing() {
+    for guarded in [false, true] {
+        let (small, small_updates, small_lease) = unchanged_readd_cost(1, guarded);
+        let (large, large_updates, large_lease) = unchanged_readd_cost(1000, guarded);
+        assert_eq!(
+            (small, large),
+            (0, 0),
+            "guarded={guarded}: the re-add's work grew with the table"
+        );
+        assert_eq!((small_updates, large_updates), (0, 0), "guarded={guarded}");
+        for lease in [small_lease, large_lease] {
+            assert!(
+                lease > Duration::from_secs(60),
+                "guarded={guarded}: the re-add extended the lease ({lease:?})"
+            );
+        }
+    }
+}
