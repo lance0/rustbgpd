@@ -2238,8 +2238,8 @@ impl RibManager {
             })
     }
 
-    /// Seed once at the exceptional initial replay, including a same-channel
-    /// replay's old admission. Ordinary sends never walk the proof universe.
+    /// Seed once at the exceptional initial replay. Ordinary sends never
+    /// walk the proof universe.
     pub(super) fn seed_initial_group_admitted_counts(&mut self, peer: PeerId) {
         if self.initial_group_admitted(peer).is_none() {
             return;

@@ -2,8 +2,7 @@
 //!
 //! Random operation sequences drive a real `RibManager` through the matrix
 //! of a selection hold, exempt local RTBH and host routes, Add-Path ranks,
-//! backpressured same-channel replays (keys-only private Adj-RIB-Out),
-//! refused recovery proof and an Address Prefix ORF. A tiny reference model
+//! backpressure, refused recovery proof and an Address Prefix ORF. A tiny reference model
 //! keeps the local and received intent; the receiver's wire is rebuilt from
 //! the updates it actually got. Every route carries a unique identity
 //! community, so a wire row names the exact injection it came from.
@@ -15,8 +14,7 @@
 //!   ORF gate, every such prefix carries a live exempt row.
 //! - I2, exact convergence: after release and drain, the wire equals a fresh
 //!   session's full dump, computed from the final intent alone.
-//! - I3: `actual_unicast_advertised_count` equals the wire key count, less
-//!   only the skew an allowed stale row is known to cause.
+//! - I3: `actual_unicast_advertised_count` equals the wire key count.
 //! - I4, no resurrection: a deleted or replaced exempt path is never
 //!   announced again.
 //!
@@ -29,7 +27,7 @@
 //!
 //! Known open defects are allowed only by their exact signature, each
 //! naming its ticket (`allowed`). `ORACLE_STRICT=1` disables every
-//! allowance and `ORACLE_STRICT=LAN-2680,...` only the listed ones, which
+//! allowance and `ORACLE_STRICT=LAN-2692,...` only the listed ones, which
 //! reproduces them. `PROPTEST_CASES` scales the case count for a deep run;
 //! `ORACLE_TRACE` prints each operation and wire update. A failure prints a
 //! sequence minimized by one-op deletion.
@@ -69,12 +67,6 @@ fn prefix(index: usize) -> Prefix {
         ([100, 64, 2, 0], 24),
     ][index];
     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(octets), len))
-}
-
-fn prefix_index(wire: Prefix) -> usize {
-    (0..PREFIXES)
-        .find(|&index| prefix(index) == wire)
-        .expect("only modelled prefixes reach the wire")
 }
 
 /// `prefix#path_id=injection`, sorted.
@@ -127,11 +119,6 @@ enum Op {
         deny: u8,
     },
     Backpressure(bool),
-    /// Same actor/channel re-registration; `refuse_capture` fails its
-    /// admitted-key capture.
-    Replay {
-        refuse_capture: bool,
-    },
     /// Free the writer; the receiver's dirty retry then fails its
     /// admission-proof allocation.
     RefuseProof,
@@ -178,7 +165,6 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         8 => intent_strategy(),
         2 => any::<bool>().prop_map(Op::Backpressure),
-        1 => any::<bool>().prop_map(|refuse_capture| Op::Replay { refuse_capture }),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
     ]
@@ -191,10 +177,6 @@ struct Injection {
     live: bool,
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the model tracks independent per-case history and gate flags"
-)]
 struct Harness {
     config: Config,
     manager: RibManager,
@@ -211,14 +193,10 @@ struct Harness {
     deny: u8,
     orf_gated: bool,
     held: bool,
-    replayed: bool,
     /// The receiver is taking the hold's first distribution.
     hold_starting: bool,
     /// Exempt injections the envelope between its phases re-announces.
     reannounced: Option<BTreeSet<usize>>,
-    /// A replay in the hold found the receiver in an update group.
-    grouped_replayed: bool,
-    refused: bool,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
 }
@@ -256,11 +234,8 @@ impl Harness {
             deny: 0,
             orf_gated: config.orf,
             held: false,
-            replayed: false,
             hold_starting: false,
             reannounced: None,
-            grouped_replayed: false,
-            refused: false,
             blackholed: BTreeMap::new(),
         };
         harness.register();
@@ -381,10 +356,6 @@ impl Harness {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one match keeps every operation's daemon call beside its model update"
-    )]
     fn apply(&mut self, op: &Op) {
         match *op {
             Op::Inject {
@@ -472,21 +443,6 @@ impl Harness {
                 }
             }
             Op::Backpressure(false) => self.occupied.clear(),
-            Op::Replay { refuse_capture } => {
-                self.replayed |= self.held;
-                self.grouped_replayed |=
-                    self.held && self.manager.grouped_member_of(peer_v4(OBSERVER)).is_some();
-                if refuse_capture {
-                    self.manager
-                        .pending_group_admitted
-                        .fail_next_allocation_for_test();
-                }
-                self.register();
-                // An unconsumed fault must not land on another peer later.
-                self.manager
-                    .pending_group_admitted
-                    .disarm_allocation_failure_for_test();
-            }
             Op::RefuseProof => {
                 // Freeing the writer starts the dirty retry that is refused.
                 self.occupied.clear();
@@ -567,13 +523,6 @@ impl Harness {
             self.reannounced = None;
             observed?;
         }
-        if self
-            .manager
-            .group_recovery_fallback(peer_v4(OBSERVER))
-            .is_some()
-        {
-            self.refused = true;
-        }
         Ok(updates)
     }
 
@@ -651,11 +600,6 @@ impl Harness {
     /// A known open defect that explains `index` losing its exempt rows
     /// during the hold, or `None`.
     fn known_unblackhole(&self, index: usize, fallback: bool) -> Option<&'static str> {
-        // LAN-2689: with admitted proof, a dirty resync behind a
-        // replay-re-armed ORF gate withdraws the gated family's admitted keys.
-        if self.orf_gated && !fallback {
-            return allowed("LAN-2689");
-        }
         // LAN-2692: under refused proof, an Add-Path
         // receiver withdraws a removed exempt path while its exempt
         // replacement still waits for admission.
@@ -765,46 +709,6 @@ impl Harness {
         Ok(())
     }
 
-    /// A known open defect that explains this stale extra row, or `None`.
-    /// Each allowance matches one ticket's exact signature; the invariant
-    /// itself is never weakened.
-    fn known_stale(
-        &self,
-        key: (Prefix, u32),
-        injection: usize,
-        expected: &BTreeMap<(Prefix, u32), usize>,
-    ) -> Option<&'static str> {
-        // LAN-2680: after a same-channel replay and refused proof (in
-        // either order) leave keys-only provenance, release leaves a
-        // surviving Add-Path path's old rank key, a duplicate of a live row
-        // the fresh dump also carries.
-        let duplicate = expected
-            .iter()
-            .any(|(&(prefix, _), &live)| prefix == key.0 && live == injection);
-        if self.config.add_path
-            && self.replayed
-            && self.refused
-            && key.1 > 1
-            && self.injections[injection].live
-            && duplicate
-        {
-            return allowed("LAN-2680");
-        }
-        // LAN-2690: a grouped receiver replayed during the hold never
-        // withdraws a row removed in that hold.
-        if self.grouped_replayed && !self.injections[injection].live {
-            return allowed("LAN-2690");
-        }
-        // LAN-2691: once a same-channel replay and a refused
-        // proof (or refused capture) meet in one hold, release never
-        // withdraws a row removed or ORF-denied during that hold.
-        let denied = self.config.orf && self.deny & (1 << prefix_index(key.0)) != 0;
-        if self.replayed && self.refused && (!self.injections[injection].live || denied) {
-            return allowed("LAN-2691");
-        }
-        None
-    }
-
     fn check_converged(&mut self) -> Checked {
         let expected = self.expected();
         let wire: BTreeMap<_, _> = self
@@ -812,43 +716,18 @@ impl Harness {
             .iter()
             .map(|(&key, &value)| (key, value))
             .collect();
-        let missing = expected
-            .iter()
-            .any(|(key, value)| wire.get(key) != Some(value));
-        let extra: Vec<_> = wire
-            .iter()
-            .filter(|(key, _)| !expected.contains_key(key))
-            .collect();
-        let known = !missing
-            && !extra.is_empty()
-            && extra
-                .iter()
-                .all(|&(&key, &injection)| self.known_stale(key, injection, &expected).is_some());
         prop_assert!(
-            known || wire == expected,
+            wire == expected,
             "I2: released wire {} differs from a fresh dump {}",
             show(&wire),
             show(&expected)
         );
-        // Each allowed defect's own count skew, per stale row: the daemon
-        // stops counting a row it failed to withdraw, except that a grouped
-        // receiver under a limit (LAN-2690) still counts it in its limiter
-        // inventory.
-        let stale = extra
-            .iter()
-            .filter(|&&(&key, &injection)| {
-                known
-                    && !(self.config.limit
-                        && self.known_stale(key, injection, &expected) == Some("LAN-2690"))
-            })
-            .count();
         let actual = self
             .manager
             .actual_unicast_advertised_count(peer_v4(OBSERVER));
         prop_assert!(
-            actual == wire.len() - stale,
-            "I3: actual advertised count {actual} differs from {} wire keys less {stale} \
-             allowed stale rows",
+            actual == wire.len(),
+            "I3: actual advertised count {actual} differs from {} wire keys",
             wire.len()
         );
         Ok(())

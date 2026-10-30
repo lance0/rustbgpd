@@ -413,51 +413,7 @@ impl AdjRibOut {
         }
     }
 
-    /// Move actual common-family admission without copying route bodies.
-    pub(crate) fn take_common_routes(&mut self) -> Self {
-        let mut retained = Self::new(self.peer);
-        std::mem::swap(&mut retained.routes, &mut self.routes);
-        std::mem::swap(
-            &mut retained.local_export_sources,
-            &mut self.local_export_sources,
-        );
-        std::mem::swap(
-            &mut retained.next_hop_overrides,
-            &mut self.next_hop_overrides,
-        );
-        std::mem::swap(&mut retained.self_next_hop, &mut self.self_next_hop);
-        std::mem::swap(
-            &mut retained.self_next_hop_count,
-            &mut self.self_next_hop_count,
-        );
-        std::mem::swap(&mut retained.prefix_path_ids, &mut self.prefix_path_ids);
-        std::mem::swap(&mut retained.vpn_routes, &mut self.vpn_routes);
-        std::mem::swap(&mut retained.vpn_key_path_ids, &mut self.vpn_key_path_ids);
-        std::mem::swap(&mut retained.vpn_keys, &mut self.vpn_keys);
-        std::mem::swap(&mut retained.vpn_key_log, &mut self.vpn_key_log);
-        std::mem::swap(
-            &mut retained.second_family.unicast,
-            &mut self.second_family.unicast,
-        );
-        std::mem::swap(&mut retained.second_family.vpn, &mut self.second_family.vpn);
-        retained
-    }
-
-    pub(crate) fn take_local_export_sources(
-        &mut self,
-    ) -> ShardedMap<(Prefix, u32), LocalExportSource> {
-        std::mem::take(&mut self.local_export_sources)
-    }
-
-    pub(crate) fn adopt_local_export_sources(
-        &mut self,
-        sources: ShardedMap<(Prefix, u32), LocalExportSource>,
-    ) {
-        self.local_export_sources = sources;
-    }
-
-    /// Every admitted key's original local provenance. It survives a
-    /// keys-only replay that retires the route bodies and prefix index.
+    /// Every admitted key's original local provenance.
     pub(crate) fn local_export_sources(
         &self,
     ) -> impl Iterator<Item = (&(Prefix, u32), &LocalExportSource)> {
@@ -1588,73 +1544,6 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
         }
-    }
-
-    #[test]
-    fn common_route_move_preserves_indexes_actions_and_provenance() {
-        let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
-        let mut rib = AdjRibOut::new(peer).with_vpn_key_log();
-        let v4 = prefix_a();
-        let v6 = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
-            "2001:db8::".parse().unwrap(),
-            32,
-        ));
-        let mut local = make_route(v4, 7);
-        local.peer = crate::PeerId::LOCAL;
-        local.origin_type = crate::route::RouteOrigin::Local;
-        AttrSet::edit(&mut local.attributes, |attrs| {
-            attrs.push(PathAttribute::Communities(vec![
-                rustbgpd_wire::COMMUNITY_BLACKHOLE,
-            ]));
-        });
-        let source = LocalExportSource::from_route(&local);
-        rib.insert_with_next_hop(local, Some(NextHopAction::Self_), &mut || {});
-        rib.set_local_export_source((v4, 7), source);
-        assert_eq!(rib.local_export_source(&v4, 7), source);
-        let specific = NextHopAction::Specific("2001:db8::1".parse().unwrap());
-        rib.insert_with_next_hop(make_route(v6, 2), Some(specific.clone()), &mut || {});
-        rib.insert(make_route(v6, 9));
-        let vpn4 = make_vpn_route(vpn_nlri([10, 1, 0, 0], 24, 100), 1);
-        let mut vpn6 = make_vpn_route(vpn_nlri([10, 2, 0, 0], 24, 200), 1);
-        vpn6.nlri.prefix = VpnPrefix::v6("2001:db8:2::".parse().unwrap(), 64).unwrap();
-        vpn6.path_id = 4;
-        let vpn4_key = vpn4.key();
-        let vpn6_key = vpn6.key();
-        rib.insert_vpn(vpn4);
-        rib.insert_vpn(vpn6);
-        let version = rib.vpn_key_version();
-        let flow = crate::test_support::make_flowspec_route("192.0.2.9".parse().unwrap());
-        rib.insert_flowspec(flow);
-        let mut retained = rib.take_common_routes();
-        assert_eq!(rib.family_lens().unicast, [0, 0]);
-        assert_eq!(rib.family_lens().vpn, [0, 0]);
-        assert_eq!(rib.flowspec_len(), 1);
-        assert_eq!(retained.flowspec_len(), 0);
-        assert_eq!(retained.family_lens().unicast, [1, 2]);
-        assert_eq!(retained.family_lens().vpn, [1, 1]);
-        assert_eq!(retained.unicast_prefix_count(Afi::Ipv6), 1);
-        assert_eq!(retained.path_ids_for_prefix(&v6).as_slice(), [2, 9]);
-        assert_eq!(
-            retained.next_hop_override(&v4, 7),
-            Some(&NextHopAction::Self_)
-        );
-        assert_eq!(retained.next_hop_override(&v6, 2), Some(&specific));
-        assert_eq!(
-            retained.local_export_source(&v4, 7),
-            Some(LocalExportSource {
-                path_id: 7,
-                deferral_exempt: true
-            })
-        );
-        assert_eq!(retained.vpn_path_ids_for_key(&vpn4_key.nlri_key), [0]);
-        assert_eq!(retained.vpn_path_ids_for_key(&vpn6_key.nlri_key), [4]);
-        assert_eq!(retained.vpn_key_version(), version);
-        assert!(retained.vpn_key_log_capacity().is_some());
-        rib.retire_with(&mut || {});
-        assert!(retained.withdraw(&v6, 2));
-        assert_eq!(retained.path_ids_for_prefix(&v6).as_slice(), [9]);
-        assert!(retained.remove_vpn(&vpn6_key));
-        assert_eq!(retained.family_lens().vpn, [1, 0]);
     }
 
     /// A batch whose keys all land in one nearly full shard must reserve

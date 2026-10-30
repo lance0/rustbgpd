@@ -336,29 +336,6 @@ impl RibManager {
         Some(count)
     }
 
-    /// Only an exact connection replay may move the fixed marker debt. Its
-    /// prior coverage and all operation-local seals expire on that replay.
-    pub(in crate::manager) fn take_evpn_feed_completion(
-        &mut self,
-        peer: PeerId,
-        session_id: u64,
-        outbound: &mpsc::Sender<OutboundRouteUpdate>,
-    ) -> Option<EvpnFeedCompletion> {
-        let mut completion = self
-            .live_sessions
-            .get_mut(&peer)?
-            .iter_mut()
-            .find(|record| {
-                record.session_id == session_id && record.outbound_tx.same_channel(outbound)
-            })?
-            .evpn_feed_completion
-            .take()?;
-        self.evpn_feed_receipt_count -= 1;
-        completion.complete = false;
-        completion.revision = self.next_evpn_table_stamp().unwrap_or(0);
-        Some(completion)
-    }
-
     pub(in crate::manager) fn evpn_feed_is_current(&self, peer: PeerId) -> bool {
         let Some(record) = self.evpn_completion_record(peer) else {
             return false;
@@ -971,28 +948,6 @@ impl RibManager {
             withdraw,
         })
     }
-    pub(in crate::manager) fn take_evpn_recovery_reset_receipt(
-        &mut self,
-        peer: PeerId,
-        session_id: u64,
-        outbound: &mpsc::Sender<OutboundRouteUpdate>,
-    ) -> (Option<ResetReceipt>, bool) {
-        self.live_sessions
-            .get_mut(&peer)
-            .and_then(|sessions| {
-                sessions
-                    .iter_mut()
-                    .find(|record| record.session_id == session_id)
-            })
-            .filter(|record| record.outbound_tx.same_channel(outbound))
-            .map_or((None, false), |record| {
-                (
-                    record.evpn_recovery_reset_receipt.take(),
-                    record.evpn_recovery_reset_retry_reported,
-                )
-            })
-    }
-
     pub(in crate::manager) fn evpn_grouped_member_of(&self, peer: PeerId) -> Option<usize> {
         let gid = self.grouped_member_of(peer)?;
         self.group_ribs.get(&gid)?.owns_evpn_routes().then_some(gid)
@@ -1069,22 +1024,8 @@ impl RibManager {
         }
     }
 
-    pub(in crate::manager) fn prepare_evpn_registration_replay(&mut self, peer: PeerId) {
-        let Some(handle) = self.evpn_recovery_handle(peer) else {
-            return;
-        };
-        if self.evpn_recovery.is_dormant(handle) {
-            if self.evpn_grouped_member_of(peer).is_some() {
-                self.capture_shared_evpn_admitted(peer);
-            } else {
-                // A settled former owner still has actual private OLD.
-                // Same-channel cleanup must capture it before dropping it.
-                self.capture_private_evpn_admitted(peer);
-            }
-        }
-    }
-
     /// Capture actual private admitted rows through an existing owner claim.
+    #[cfg(test)]
     pub(in crate::manager) fn capture_private_evpn_admitted(&mut self, peer: PeerId) -> bool {
         self.capture_evpn_admitted(peer, true, &[], None)
     }
@@ -1498,9 +1439,9 @@ impl RibManager {
     }
 
     pub(in crate::manager) fn evpn_advertised_resync_in_progress(&self, peer: PeerId) -> bool {
-        // A retained primary/reset handoff remains authoritative through an
-        // exact connection replay or a move to the private projection. A
-        // negotiated EVPN family in an ordinary unicast group does not.
+        // A retained primary/reset handoff remains authoritative through a
+        // move to the private projection. A negotiated EVPN family in an
+        // ordinary unicast group does not.
         self.evpn_recovery_reset_pending(peer)
             || self
                 .evpn_recovery_handle(peer)

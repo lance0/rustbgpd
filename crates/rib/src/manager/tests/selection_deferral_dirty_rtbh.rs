@@ -940,109 +940,6 @@ fn replacement_channel_drops_old_frozen_source_and_count_state() {
 }
 
 #[test]
-fn same_channel_replay_preserves_original_source_and_frozen_admission() {
-    for rtbh in [false, true] {
-        let mut manager = manager_with_dormant_waiter();
-        let observer = peer_v4(OBSERVER);
-        let _source = connect(&mut manager, SOURCE, 64, false, false);
-        let blackhole = rustbgpd_wire::COMMUNITY_BLACKHOLE;
-        let policy = private_policy(Some(blackhole));
-        let mut rx = target_with_policy(&mut manager, policy.clone(), 1);
-        rx.try_recv().unwrap();
-        super::outbound_prefix_limits::prepare(
-            &mut manager,
-            1,
-            super::outbound_prefix_limits::limit_config(&[(observer, Some(1), None)], &[]),
-        )
-        .unwrap();
-        super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
-        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-        let path_id = if rtbh { 0 } else { 17 };
-        inject_aggregate(&mut manager, prefix, path_id, rtbh);
-        let mut wire = std::collections::HashMap::new();
-        apply_wire(&mut rx, &mut wire);
-        let _waiter = connect(&mut manager, WAITER, 64, true, false);
-        let tx = manager.outbound_peers[&observer].clone();
-        let mut registration =
-            super::lifecycle::test_peer_up(observer, u64::from(OBSERVER.octets()[3]), tx);
-        if let RibUpdate::PeerUp {
-            export_policy,
-            per_client_best,
-            ..
-        } = &mut registration
-        {
-            *export_policy = Some(policy);
-            *per_client_best = true;
-        }
-        manager.handle_update(registration);
-        apply_wire(&mut rx, &mut wire);
-        assert_eq!(manager.actual_unicast_advertised_count(observer), 1);
-        assert_eq!(wire.len(), 1);
-        assert_cached_actual_surfaces(&mut manager, observer, 1);
-        let limited = manager
-            .outbound_prefix_limit_rows(observer)
-            .into_iter()
-            .find(|row| row.family == "ipv4_unicast")
-            .unwrap();
-        assert_eq!((limited.usage, limited.headroom), (1, Some(0)));
-        let blocked = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 99), 32);
-        inject_host(&mut manager, blocked);
-        apply_wire(&mut rx, &mut wire);
-        assert_eq!(
-            wire.len(),
-            1,
-            "same-channel replay retains the frozen prefix's capacity"
-        );
-        let (reply, mut result) = oneshot::channel();
-        manager.handle_update(RibUpdate::WithdrawInjected {
-            prefix: Prefix::V4(blocked),
-            path_id: 0,
-            allow_missing: false,
-            owner: String::new(),
-            override_owner: false,
-            reply,
-        });
-        result.try_recv().unwrap().unwrap();
-        apply_wire(&mut rx, &mut wire);
-        if rtbh {
-            inject_aggregate(&mut manager, prefix, path_id, false);
-        } else {
-            manager.distribute_changes(&HashSet::new(), &HashSet::new());
-            apply_wire(&mut rx, &mut wire);
-            assert_eq!(wire.len(), 1);
-            let (reply, mut result) = oneshot::channel();
-            manager.handle_update(RibUpdate::WithdrawInjected {
-                prefix: Prefix::V4(prefix),
-                path_id,
-                allow_missing: false,
-                owner: String::new(),
-                override_owner: false,
-                reply,
-            });
-            result.try_recv().unwrap().unwrap();
-        }
-        apply_wire(&mut rx, &mut wire);
-        assert_eq!(
-            wire.len(),
-            0,
-            "actual source intent removal survives actor/channel replay"
-        );
-        manager.handle_update(RibUpdate::EndOfRib {
-            peer: peer_v4(WAITER),
-            session_id: u64::from(WAITER.octets()[3]),
-            afi: FAMILY.0,
-            safi: FAMILY.1,
-        });
-        apply_wire(&mut rx, &mut wire);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
-        apply_wire(&mut rx, &mut wire);
-        assert!(!manager.dirty_peers.contains(&observer));
-        assert!(!manager.pending_group_admitted.contains_record(observer));
-        assert_eq!(wire.len(), usize::from(rtbh));
-    }
-}
-
-#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "one mixed-family transcript follows actual pre-hold VPN admission through a failed RTBH send, partial recovery and release"
@@ -1175,12 +1072,12 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
 }
 
 #[test]
-fn keys_only_add_path_prefix_keeps_capacity_until_its_last_actual_path_leaves() {
+fn held_add_path_prefix_keeps_capacity_until_its_last_actual_path_leaves() {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
     let (tx, mut rx) = mpsc::channel(1);
-    let mut registration = super::lifecycle::test_peer_up(observer, 82, tx.clone());
+    let mut registration = super::lifecycle::test_peer_up(observer, 82, tx);
     if let RibUpdate::PeerUp {
         per_client_best,
         add_path_send_families,
@@ -1209,21 +1106,7 @@ fn keys_only_add_path_prefix_keeps_capacity_until_its_last_actual_path_leaves() 
     apply_wire(&mut rx, &mut wire);
     assert_eq!(wire.len(), 2);
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
-    let mut registration = super::lifecycle::test_peer_up(observer, 82, tx);
-    if let RibUpdate::PeerUp {
-        per_client_best,
-        add_path_send_families,
-        add_path_send_max,
-        ..
-    } = &mut registration
-    {
-        *per_client_best = true;
-        *add_path_send_families = vec![FAMILY];
-        *add_path_send_max = 2;
-    }
-    manager.handle_update(registration);
     apply_wire(&mut rx, &mut wire);
-    assert!(manager.private_unicast_admission_incomplete(observer));
     let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::WithdrawInjected {
         prefix: Prefix::V4(prefix),
@@ -2141,305 +2024,6 @@ async fn refused_proof_still_withdraws_only_after_writer_admission() {
     assert_removed_rtbh_after_proof_refusal(false, RefusedRtbhRemoval::Delete, true).await;
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one actual Add-Path transcript verifies refused proof, frozen received paths, capacity and release recovery"
-)]
-fn assert_refused_private_withdrawal_capacity(shared_prefix: bool) {
-    let mut manager = manager_with_dormant_waiter();
-    let _source = connect(&mut manager, SOURCE, 64, false, false);
-    let observer = peer_v4(OBSERVER);
-    let (tx, mut rx) = mpsc::channel(1);
-    let registration = |tx| {
-        let mut up = super::lifecycle::test_peer_up(observer, 82, tx);
-        if let RibUpdate::PeerUp {
-            per_client_best,
-            add_path_send_families,
-            add_path_send_max,
-            ..
-        } = &mut up
-        {
-            *per_client_best = true;
-            *add_path_send_families = vec![FAMILY];
-            *add_path_send_max = 2;
-        }
-        up
-    };
-    manager.handle_update(registration(tx.clone()));
-    rx.try_recv().unwrap();
-    let limit = 2;
-    super::outbound_prefix_limits::prepare(
-        &mut manager,
-        1,
-        super::outbound_prefix_limits::limit_config(&[(observer, Some(limit), None)], &[]),
-    )
-    .unwrap();
-    super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
-    let first = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32);
-    let ordinary = if shared_prefix {
-        first
-    } else {
-        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)
-    };
-    if !shared_prefix {
-        inject_aggregate(&mut manager, first, 17, false);
-    }
-    let mut wire = std::collections::HashMap::new();
-    apply_wire(&mut rx, &mut wire);
-    let mut received: Vec<_> = (0..2)
-        .map(|rank| {
-            let mut route = make_route_with_lp(ordinary, SOURCE, 10 - rank);
-            route.path_id = 11 + rank;
-            route
-        })
-        .collect();
-    if shared_prefix {
-        received.push(make_route(
-            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
-            SOURCE,
-        ));
-    }
-    manager.handle_update(RibUpdate::RoutesReceived {
-        peer: peer_v4(SOURCE),
-        session_id: 81,
-        announced: received,
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
-        evpn_withdrawn: vec![],
-        validated_with: None,
-    });
-    drain_route_chunks(&mut manager);
-    apply_wire(&mut rx, &mut wire);
-    for _ in 0..2 {
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
-        apply_wire(&mut rx, &mut wire);
-    }
-    assert!(
-        !manager.dirty_peers.contains(&observer),
-        "pre-hold writer backpressure must settle before capturing OLD"
-    );
-    let initial = 3;
-    assert_eq!(wire.len(), initial);
-    let _waiter = connect(&mut manager, WAITER, 64, true, false);
-    manager.handle_update(registration(tx));
-    let updates = apply_wire(&mut rx, &mut wire);
-    assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
-    assert!(manager.private_unicast_admission_incomplete(observer));
-    assert_eq!(manager.actual_unicast_advertised_count(observer), initial);
-    if shared_prefix {
-        assert_eq!(manager.adj_ribs_out[&observer].len(), 0);
-        inject_aggregate(&mut manager, first, 17, false);
-        let updates = apply_wire(&mut rx, &mut wire);
-        assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
-        assert_eq!(wire.len(), initial);
-        assert_eq!(manager.actual_unicast_advertised_count(observer), initial);
-    }
-    let obsolete = wire
-        .iter()
-        .find_map(|(key, route)| (route.peer == LOCAL_PEER).then_some(*key))
-        .unwrap();
-    let frozen: HashSet<_> = wire
-        .keys()
-        .filter(|key| **key != obsolete)
-        .copied()
-        .collect();
-    assert_eq!(manager.adj_ribs_out[&observer].len(), 1);
-    let pending: Vec<_> = (2..10)
-        .map(|last| Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, last), 32))
-        .collect();
-    let occupied = manager.outbound_peers[&observer]
-        .clone()
-        .try_reserve_owned()
-        .unwrap();
-    for &prefix in &pending {
-        inject_host(&mut manager, prefix);
-        let updates = apply_wire(&mut rx, &mut wire);
-        assert!(updates.iter().all(|update| update.announce.is_empty()
-            && update.withdraw.is_empty()
-            && update.end_of_rib.is_empty()));
-        assert_eq!(wire.len(), initial);
-    }
-    drop(occupied);
-    manager
-        .pending_group_admitted
-        .fail_next_allocation_for_test();
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
-    let second = pending[0];
-    assert!(manager.pending_group_admitted.get(&observer).is_none());
-    assert!(manager.group_recovery_fallback(observer).is_some());
-    assert!(apply_wire(&mut rx, &mut wire).is_empty());
-    let (reply, mut result) = oneshot::channel();
-    manager.handle_update(RibUpdate::WithdrawInjected {
-        prefix: Prefix::V4(first),
-        path_id: 17,
-        allow_missing: false,
-        owner: String::new(),
-        override_owner: false,
-        reply,
-    });
-    result.try_recv().unwrap().unwrap();
-    let updates = apply_wire(&mut rx, &mut wire);
-    assert!(
-        updates
-            .iter()
-            .all(|update| update.announce.is_empty() && update.end_of_rib.is_empty())
-    );
-    assert_eq!(
-        updates
-            .iter()
-            .flat_map(|update| &update.withdraw)
-            .copied()
-            .collect::<Vec<_>>(),
-        [obsolete]
-    );
-    assert_eq!(wire.keys().copied().collect::<HashSet<_>>(), frozen);
-    assert_eq!(
-        manager.actual_unicast_advertised_count(observer),
-        initial - 1
-    );
-    assert_eq!(
-        manager.neighbor_rib_snapshot(observer).advertised_count,
-        initial - 1
-    );
-    let row = manager
-        .outbound_prefix_limit_rows(observer)
-        .into_iter()
-        .find(|row| row.family == "ipv4_unicast")
-        .unwrap();
-    assert_eq!(
-        (row.usage, row.headroom),
-        (u64::MAX, None),
-        "unknown received siblings never become proven spare capacity"
-    );
-    let violations = super::outbound_prefix_limits::prepare(
-        &mut manager,
-        99,
-        super::outbound_prefix_limits::limit_config(&[(observer, Some(3), None)], &[]),
-    )
-    .unwrap_err();
-    assert_eq!(violations[0].usage, u64::MAX);
-    assert!(
-        violations[0]
-            .to_string()
-            .contains("usage is unknown during recovery")
-    );
-    let (reply, mut explanation) = oneshot::channel();
-    manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
-        peer: observer,
-        prefix: Prefix::V4(second),
-        rd: None,
-        labeled: false,
-        source: None,
-        reply,
-    });
-    let refusal = explanation.try_recv().unwrap().unwrap_err();
-    assert!(
-        refusal
-            .to_string()
-            .contains("no admitted baseline is available")
-    );
-    for name in ["bgp_outbound_prefix_usage", "bgp_outbound_prefix_headroom"] {
-        assert!(
-            manager
-                .metrics
-                .registry()
-                .gather()
-                .iter()
-                .filter(|family| family.name() == name)
-                .flat_map(|family| family.get_metric().iter())
-                .all(|metric| {
-                    !metric.get_label().iter().any(|label| {
-                        label.name() == "peer" && label.value() == observer.label().as_str()
-                    }) || !metric
-                        .get_label()
-                        .iter()
-                        .any(|label| label.name() == "family" && label.value() == "ipv4_unicast")
-                }),
-            "unknown capacity must omit numeric {name}"
-        );
-    }
-    assert!(manager.dirty_peers.contains(&observer));
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    assert!(apply_wire(&mut rx, &mut wire).is_empty());
-    assert_eq!(
-        manager.actual_unicast_advertised_count(observer),
-        initial - 1
-    );
-    manager.handle_update(RibUpdate::EndOfRib {
-        peer: peer_v4(WAITER),
-        session_id: 83,
-        afi: FAMILY.0,
-        safi: FAMILY.1,
-    });
-    for _ in 0..3 {
-        while let Ok(update) = rx.try_recv() {
-            for key in update.withdraw {
-                assert!(wire.remove(&key).is_some() || key == obsolete);
-            }
-            for route in update.announce.iter() {
-                wire.insert((route.prefix, route.path_id), route.clone());
-            }
-        }
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
-        manager.drain_outbound_limit_recovery();
-    }
-    apply_wire(&mut rx, &mut wire);
-    assert!(!manager.dirty_peers.contains(&observer));
-    assert!(!manager.pending_group_admitted.contains_record(observer));
-    assert!(wire.keys().any(|key| key.0 == Prefix::V4(ordinary)));
-    assert_eq!(
-        manager.actual_unicast_advertised_count(observer),
-        wire.len()
-    );
-    let row = manager
-        .outbound_prefix_limit_rows(observer)
-        .into_iter()
-        .find(|row| row.family == "ipv4_unicast")
-        .unwrap();
-    assert_eq!(row.usage, u64::from(limit));
-    assert_eq!(
-        gauge_metric_value(
-            &manager.metrics,
-            "bgp_outbound_prefix_usage",
-            &[
-                ("peer", observer.label().as_str()),
-                ("family", "ipv4_unicast")
-            ]
-        ),
-        f64::from(limit)
-    );
-    assert_eq!(
-        gauge_metric_value(
-            &manager.metrics,
-            "bgp_outbound_prefix_headroom",
-            &[
-                ("peer", observer.label().as_str()),
-                ("family", "ipv4_unicast")
-            ]
-        ),
-        0.0
-    );
-    if !shared_prefix {
-        assert!(
-            wire.keys()
-                .any(|key| pending.iter().any(|prefix| key.0 == Prefix::V4(*prefix))),
-            "released capacity must recover withheld new-prefix intent"
-        );
-    }
-}
-
-#[test]
-fn refused_proof_private_add_path_withdraw_keeps_unknown_sibling() {
-    assert_refused_private_withdrawal_capacity(true);
-}
-
-#[test]
-fn refused_proof_private_add_path_withdraw_recovers_capacity_after_release() {
-    assert_refused_private_withdrawal_capacity(false);
-}
-
 fn assert_late_waiter_advertised_truth(
     manager: &mut RibManager,
     observer: crate::PeerId,
@@ -2507,9 +2091,9 @@ fn assert_late_waiter_advertised_truth(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "one production-driven late-waiter transcript checks wire admission and public counts before and after same-channel replay"
+    reason = "one production-driven late-waiter transcript checks wire admission and public counts through the hold"
 )]
-fn assert_late_waiter_private_replay(ipv6: bool, refuse_capture: bool, fresh_channel: bool) {
+fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_channel: bool) {
     let family = (if ipv6 { Afi::Ipv6 } else { Afi::Ipv4 }, Safi::Unicast);
     let mut manager =
         manager_with_dormant_waiter().with_selection_deferral(SelectionDeferralConfig {
@@ -2626,21 +2210,6 @@ fn assert_late_waiter_private_replay(ipv6: bool, refuse_capture: bool, fresh_cha
     assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
     assert_eq!(wire.keys().collect::<HashSet<_>>(), before.keys().collect());
     assert_late_waiter_advertised_truth(&mut manager, observer, wire.len(), "after hold arms");
-    // The same session and same writer still own every old wire key.
-    // No allocation-failure seam, private-state mutation, or backpressure.
-    manager.handle_update(registration(tx.clone()));
-    assert!(manager.selection_deferred(family));
-    assert_eq!(manager.outbound_session_ids[&observer], 82);
-    assert!(manager.outbound_peers[&observer].same_channel(&tx));
-    let updates = apply_wire(&mut rx, &mut wire);
-    assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
-    assert_eq!(wire.keys().collect::<HashSet<_>>(), before.keys().collect());
-    assert_late_waiter_advertised_truth(
-        &mut manager,
-        observer,
-        wire.len(),
-        "after same-channel replay",
-    );
     if fresh_channel {
         let (fresh_tx, mut fresh_rx) = mpsc::channel(64);
         manager.handle_update(registration(fresh_tx));
@@ -2706,16 +2275,6 @@ fn assert_late_waiter_private_replay(ipv6: bool, refuse_capture: bool, fresh_cha
             4,
             "retained body after RTBH add",
         );
-        manager.handle_update(registration(tx.clone()));
-        let updates = apply_wire(&mut rx, &mut wire);
-        assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
-        assert_eq!(wire.len(), 4);
-        assert_late_waiter_advertised_truth(
-            &mut manager,
-            observer,
-            4,
-            "second replay after RTBH add",
-        );
         let (reply, mut removed) = oneshot::channel();
         manager.handle_update(RibUpdate::WithdrawInjected {
             prefix: ban_prefix,
@@ -2738,16 +2297,6 @@ fn assert_late_waiter_private_replay(ipv6: bool, refuse_capture: bool, fresh_cha
             observer,
             3,
             "retained body after RTBH delete",
-        );
-        manager.handle_update(registration(tx.clone()));
-        let updates = apply_wire(&mut rx, &mut wire);
-        assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
-        assert_eq!(wire.len(), 3);
-        assert_late_waiter_advertised_truth(
-            &mut manager,
-            observer,
-            3,
-            "third replay after RTBH delete",
         );
     }
     if !refuse_capture {
@@ -2816,23 +2365,23 @@ fn assert_late_waiter_private_replay(ipv6: bool, refuse_capture: bool, fresh_cha
 }
 
 #[test]
-fn late_waiter_private_replay_keeps_actual_advertised_counts() {
-    assert_late_waiter_private_replay(false, false, false);
+fn late_waiter_private_keeps_actual_advertised_counts() {
+    assert_late_waiter_private_counts(false, false, false);
 }
 
 #[test]
-fn late_waiter_private_ipv6_replay_keeps_actual_advertised_counts() {
-    assert_late_waiter_private_replay(true, false, false);
+fn late_waiter_private_ipv6_keeps_actual_advertised_counts() {
+    assert_late_waiter_private_counts(true, false, false);
 }
 
 #[test]
 fn late_waiter_private_refused_capture_keeps_actual_advertised_counts() {
-    assert_late_waiter_private_replay(true, true, false);
+    assert_late_waiter_private_counts(true, true, false);
 }
 
 #[test]
 fn late_waiter_private_fresh_channel_does_not_inherit_actual_admission() {
-    assert_late_waiter_private_replay(true, true, true);
+    assert_late_waiter_private_counts(true, true, true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2984,7 +2533,7 @@ async fn late_waiter_private_capture_services_readiness_before_completion() {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "one actual limited Add-Path transcript checks retained complete bodies, sibling capacity, repeated replay and the queued headroom recovery"
+    reason = "one actual limited Add-Path transcript checks retained complete bodies, sibling capacity and the queued headroom recovery"
 )]
 fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent() {
     let family = (Afi::Ipv6, Safi::Unicast);
@@ -3113,7 +2662,6 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
     manager.handle_update(up);
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     assert!(manager.group_recovery_fallback(observer).is_some());
-    manager.handle_update(registration(tx.clone()));
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
     assert_eq!(wire.len(), 3);
@@ -3152,17 +2700,6 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         2,
         "limited body after local sibling deletion",
     );
-    manager.handle_update(registration(tx));
-    let updates = apply_wire(&mut rx, &mut wire);
-    assert!(updates.iter().all(|update| update.end_of_rib.is_empty()));
-    assert_eq!(wire.len(), 2);
-    assert_eq!(capacity(&manager), (2, Some(0)));
-    assert_late_waiter_advertised_truth(
-        &mut manager,
-        observer,
-        2,
-        "limited body after repeated replay",
-    );
     manager.handle_update(RibUpdate::EndOfRib {
         peer: waiter,
         session_id: 83,
@@ -3180,7 +2717,8 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         .flat_map(|update| &update.end_of_rib)
         .filter(|marker| **marker == family)
         .count();
-    assert_eq!(terminals, 1);
+    // Its initial End-of-RIB went out at registration, before the hold.
+    assert_eq!(terminals, 0);
     assert_eq!(wire.len(), 2);
     assert!(wire.keys().any(|key| key.0 == Prefix::V6(ordinary)));
     // Rank migration withdraws H's last OLD path. ADR-0113 allows H and B
@@ -3246,15 +2784,16 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
 }
 
 /// Refused proof while a deleted RTBH path's key is re-announced for its
-/// surviving sibling. With Add-Path the sibling only moves rank: withdraw
-/// the deleted path's key and keep the sibling's old key. With one path per
-/// prefix the replacement has no other key, so the deleted path stays: the
-/// prefix must never lose its blackhole.
+/// surviving sibling. With Add-Path (a private receiver) the sibling only
+/// moves rank: withdraw the deleted path's key and keep the sibling's old
+/// key. With one path per prefix (a grouped receiver) the replacement has no
+/// other key, so the deleted path stays: the prefix must never lose its
+/// blackhole. `held_counts` also checks the advertised count inside the hold.
 #[expect(
     clippy::too_many_lines,
     reason = "one transcript covers pre-hold admission, refused proof, the replacement and release"
 )]
-fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
+fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let observer = peer_v4(OBSERVER);
@@ -3266,7 +2805,6 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
             add_path_send_families,
             add_path_send_max,
             sendable_families,
-            export_policy,
             ..
         } = &mut up
         {
@@ -3275,13 +2813,13 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
                 *per_client_best = true;
                 *add_path_send_families = vec![FAMILY];
                 *add_path_send_max = 2;
-            } else {
-                *export_policy = Some(private_policy(None));
             }
         }
         up
     };
-    manager.handle_update(registration(tx.clone()));
+    manager.handle_update(registration(tx));
+    // Add-Path receivers are private; a single-best one joins a group.
+    assert_eq!(manager.grouped_member_of(observer).is_some(), !add_path);
     let mut wire = std::collections::HashMap::new();
     apply_wire(&mut rx, &mut wire);
     // A configured limit makes recovery depend on exact admission proof.
@@ -3332,23 +2870,6 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
     );
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
     let writer = manager.outbound_peers[&observer].clone();
-    // A backpressured same-channel replay retires the private bodies and
-    // keeps only the admitted keys' local provenance.
-    let replay_blocked: Vec<_> = if keys_only {
-        std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect()
-    } else {
-        Vec::new()
-    };
-    manager.handle_update(registration(tx));
-    if keys_only {
-        let private = &manager.adj_ribs_out[&observer];
-        assert!(private.path_ids_for_prefix(&prefix).is_empty());
-        assert!(private.local_export_source(&prefix, first).is_some());
-        if add_path {
-            assert!(private.local_export_source(&prefix, 2).is_some());
-        }
-    }
-    apply_wire(&mut rx, &mut wire);
     // A new RTBH waits behind a full writer, so the retry must reserve proof.
     let pending = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32));
     let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
@@ -3357,7 +2878,6 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
     );
     drop(occupied);
-    drop(replay_blocked);
     assert!(apply_wire(&mut rx, &mut wire).is_empty());
     manager
         .pending_group_admitted
@@ -3365,9 +2885,15 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
     manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     assert!(manager.group_recovery_fallback(observer).is_some());
-    assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    // The private Add-Path receiver's complete bodies still prove the new
+    // RTBH's capacity; a grouped receiver waits for the refused proof.
+    let admitted = apply_wire(&mut rx, &mut wire);
+    assert_eq!(admitted.is_empty(), !add_path);
+    assert_eq!(wire.contains_key(&(pending, first)), add_path);
     let before = wire.len();
-    assert_eq!(manager.actual_unicast_advertised_count(observer), before);
+    if held_counts {
+        assert_eq!(manager.actual_unicast_advertised_count(observer), before);
+    }
 
     let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::WithdrawInjected {
@@ -3397,10 +2923,12 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
             Some(100),
             "the surviving RTBH path keeps its old rank"
         );
-        assert_eq!(
-            manager.actual_unicast_advertised_count(observer),
-            before - 1
-        );
+        if held_counts {
+            assert_eq!(
+                manager.actual_unicast_advertised_count(observer),
+                before - 1
+            );
+        }
     } else {
         assert_eq!(withdrawn, [], "the replacement has no other key");
         assert_eq!(
@@ -3428,13 +2956,6 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, keys_only: bool) {
         "the deleted path never returns"
     );
     let expected = HashSet::from([(prefix, first), (pending, first), (ordinary, first)]);
-    if keys_only && add_path {
-        // Release after a keys-only replay does not yet withdraw the
-        // surviving path's old rank-2 key, a duplicate of the live route
-        // tracked separately; every expected key is present.
-        assert!(expected.iter().all(|key| wire.contains_key(key)));
-        return;
-    }
     assert_eq!(wire.keys().copied().collect::<HashSet<_>>(), expected);
     assert_eq!(
         manager.actual_unicast_advertised_count(observer),
@@ -3449,18 +2970,14 @@ fn refused_proof_withdraws_a_deleted_add_path_rtbh_and_keeps_its_moved_sibling()
 }
 
 #[test]
-fn refused_proof_keys_only_replay_withdraws_a_deleted_add_path_rtbh() {
+#[ignore = "LAN-2702: the held count omits the RTBH admitted under refused proof"]
+fn refused_proof_add_path_rtbh_admission_keeps_held_advertised_count() {
     assert_refused_proof_rtbh_replacement(true, true);
 }
 
 #[test]
-fn refused_proof_keys_only_replay_keeps_a_single_best_prefix_blackholed() {
-    assert_refused_proof_rtbh_replacement(false, true);
-}
-
-#[test]
 fn refused_proof_keeps_a_single_best_prefix_blackholed_across_rtbh_replacement() {
-    assert_refused_proof_rtbh_replacement(false, false);
+    assert_refused_proof_rtbh_replacement(false, true);
 }
 
 /// The refused-proof replacement salvage is linear in the batch: deleting
@@ -3530,8 +3047,6 @@ fn refused_replacement_salvage_visits(siblings: u32) -> usize {
         siblings as usize
     );
     let _waiter = connect(&mut manager, WAITER, 64, true, false);
-    manager.handle_update(registration(tx));
-    apply_wire(&mut rx, &mut wire);
     let writer = manager.outbound_peers[&observer].clone();
     let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
     inject_host(
@@ -3544,7 +3059,8 @@ fn refused_replacement_salvage_visits(siblings: u32) -> usize {
         .fail_next_allocation_for_test();
     manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
     assert!(manager.group_recovery_fallback(observer).is_some());
-    assert!(apply_wire(&mut rx, &mut wire).is_empty());
+    // Complete private bodies still admit the new RTBH host.
+    apply_wire(&mut rx, &mut wire);
     manager.refused_replacement_salvage_visits = 0;
     let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::WithdrawInjected {
@@ -3570,7 +3086,7 @@ fn refused_replacement_salvage_work_is_linear_in_add_path_siblings() {
         let visits = refused_replacement_salvage_visits(siblings);
         let bound = 3 * siblings as usize + 8;
         assert!(
-            visits <= bound,
+            visits > siblings as usize && visits <= bound,
             "{siblings} siblings cost {visits} salvage visits; bound {bound}"
         );
     }

@@ -3459,7 +3459,7 @@ impl RibManager {
                 // key only while the replacing exempt source provably keeps
                 // its own admitted key, so the prefix never loses its
                 // blackhole. Provenance, not the prefix index, proves it: a
-                // keys-only replay retires bodies but keeps provenance.
+                // keys-only handoff retires bodies but keeps provenance.
                 #[cfg(test)]
                 let mut visits = 0;
                 if let Some(rib) = self.adj_ribs_out.get(&peer) {
