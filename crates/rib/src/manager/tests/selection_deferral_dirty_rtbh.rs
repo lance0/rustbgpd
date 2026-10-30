@@ -2980,9 +2980,13 @@ fn refused_proof_keeps_a_single_best_prefix_blackholed_across_rtbh_replacement()
     assert_refused_proof_rtbh_replacement(false, true);
 }
 
-/// The refused-proof replacement salvage is linear in the batch: deleting
-/// rank 1 of `siblings` Add-Path RTBH paths re-ranks every other path, and
-/// each re-announcement must not rescan the prefix's siblings.
+/// The refused-proof replacement salvage is linear in the batch: replacing
+/// all `siblings` Add-Path RTBH sources at once re-announces every sibling
+/// key, and each re-announcement must not rescan the prefix's siblings.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript covers setup, refused proof and the batched replacement"
+)]
 fn refused_replacement_salvage_visits(siblings: u32) -> usize {
     let mut manager = manager_with_dormant_waiter();
     let _source = connect(&mut manager, SOURCE, 64, false, false);
@@ -3061,22 +3065,44 @@ fn refused_replacement_salvage_visits(siblings: u32) -> usize {
     assert!(manager.group_recovery_fallback(observer).is_some());
     // Complete private bodies still admit the new RTBH host.
     apply_wire(&mut rx, &mut wire);
+    let before: Vec<_> = wire.keys().filter(|key| key.0 == prefix).copied().collect();
+    // One backpressured batch replaces every RTBH source: each new source
+    // takes over its predecessor's key in place, so the refused batch
+    // re-announces every sibling key over a departing exempt row.
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    for rank in 0..siblings {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix,
+            path_id: 100 + rank,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(result.try_recv().unwrap().unwrap().removed);
+        let mut route = make_route_with_lp(host, SOURCE, 1000 - rank);
+        set_peer(&mut route, crate::PeerId::LOCAL);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        route.path_id = 200 + rank;
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route, reply });
+        result.try_recv().unwrap().unwrap();
+    }
+    drop(occupied);
     manager.refused_replacement_salvage_visits = 0;
-    let (reply, mut result) = oneshot::channel();
-    manager.handle_update(RibUpdate::WithdrawInjected {
-        prefix,
-        path_id: 100,
-        allow_missing: false,
-        owner: String::new(),
-        override_owner: false,
-        reply,
-    });
-    assert!(result.try_recv().unwrap().unwrap().removed);
-    let withdrawn: Vec<_> = apply_wire(&mut rx, &mut wire)
-        .iter()
-        .flat_map(|update| update.withdraw.clone())
-        .collect();
-    assert_eq!(withdrawn, [(prefix, 1)], "the deleted rank-1 path leaves");
+    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    assert!(manager.group_recovery_fallback(observer).is_some());
+    let updates = apply_wire(&mut rx, &mut wire);
+    assert!(
+        updates.iter().all(|update| update.withdraw.is_empty()),
+        "no RTBH key leaves while its replacement waits for admission"
+    );
+    let mut after: Vec<_> = wire.keys().filter(|key| key.0 == prefix).copied().collect();
+    let mut before = before;
+    before.sort_unstable();
+    after.sort_unstable();
+    assert_eq!(after, before, "every sibling key keeps a blackhole");
     manager.refused_replacement_salvage_visits
 }
 

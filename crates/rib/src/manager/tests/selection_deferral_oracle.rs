@@ -193,10 +193,6 @@ struct Harness {
     deny: u8,
     orf_gated: bool,
     held: bool,
-    /// The receiver is taking the hold's first distribution.
-    hold_starting: bool,
-    /// Exempt injections the envelope between its phases re-announces.
-    reannounced: Option<BTreeSet<usize>>,
     /// Prefix to the exempt injections on its wire rows at the last check.
     blackholed: BTreeMap<usize, BTreeSet<usize>>,
 }
@@ -234,8 +230,6 @@ impl Harness {
             deny: 0,
             orf_gated: config.orf,
             held: false,
-            hold_starting: false,
-            reannounced: None,
             blackholed: BTreeMap::new(),
         };
         harness.register();
@@ -511,17 +505,7 @@ impl Harness {
             // state after the withdrawals and after every announcement: one
             // UPDATE per announcement is stricter than the wire, and exempt
             // and ordinary rows never share attributes.
-            self.reannounced = self.held.then(|| {
-                update
-                    .announce
-                    .iter()
-                    .map(Self::identity)
-                    .filter(|&injection| self.injections[injection].exempt)
-                    .collect()
-            });
-            let observed = self.apply_announcements(&update);
-            self.reannounced = None;
-            observed?;
+            self.apply_announcements(&update)?;
         }
         Ok(updates)
     }
@@ -608,17 +592,6 @@ impl Harness {
             .all(|&injection| !self.injections[injection].live);
         if self.config.add_path && fallback && removed {
             return allowed("LAN-2692");
-        }
-        // LAN-2698: at the hold's start an Add-Path receiver re-ranks an
-        // exempt path above a frozen ordinary one, withdrawing its old key
-        // in the envelope's withdraw phase before announcing the new one.
-        let restored = self.reannounced.as_ref().is_some_and(|reannounced| {
-            self.blackholed[&index]
-                .iter()
-                .all(|injection| reannounced.contains(injection))
-        });
-        if self.config.add_path && self.hold_starting && restored {
-            return allowed("LAN-2698");
         }
         None
     }
@@ -754,9 +727,7 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     harness.waiter = Some(connect(&mut harness.manager, WAITER, 64, true, false));
     harness.held = true;
     prop_assert!(harness.manager.selection_deferred(FAMILY));
-    harness.hold_starting = true;
     harness.observe()?;
-    harness.hold_starting = false;
     for op in hold {
         if std::env::var("ORACLE_TRACE").is_ok() {
             eprintln!(
@@ -1068,4 +1039,66 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
         swapped(false).is_ok(),
         "a check after all announcements cannot see it"
     );
+}
+
+/// The minimized hold-start case, checked between each envelope's phases
+/// with every allowance off: a frozen ordinary path at `#1` and an exempt
+/// RTBH path at `#2` keep their keys when the hold starts, so the prefix
+/// never loses its blackhole.
+#[test]
+fn hold_start_keeps_add_path_rtbh_key_between_phases() {
+    for (per_client_best, limit) in [(false, false), (true, false), (false, true), (true, true)] {
+        let config = Config {
+            grouped: false,
+            add_path: true,
+            per_client_best,
+            orf: false,
+            limit,
+        };
+        let setup = [
+            Op::Inject {
+                prefix: 2,
+                path: 1,
+                preference: 2,
+                blackhole: false,
+            },
+            Op::Inject {
+                prefix: 2,
+                path: 0,
+                preference: 0,
+                blackhole: true,
+            },
+        ];
+        if let Some(reason) = failure(config, &setup, &[]) {
+            panic!("{config:?}: {reason}");
+        }
+    }
+    // A source promoted to RTBH while a demoted one leaves, in one
+    // backpressured pass, takes over the leaving RTBH row's key, so the swap
+    // is one in-place replacement.
+    let config = Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: true,
+        limit: false,
+    };
+    let inject = |prefix, path, preference, blackhole| Op::Inject {
+        prefix,
+        path,
+        preference,
+        blackhole,
+    };
+    let hold = [
+        inject(2, 1, 0, true),
+        Op::Backpressure(true),
+        inject(2, 0, 0, true),
+        inject(2, 1, 0, false),
+        Op::Backpressure(false),
+        Op::Drain,
+        Op::Orf { deny: 8 },
+    ];
+    if let Some(reason) = failure(config, &[inject(2, 0, 0, false)], &hold) {
+        panic!("rtbh swap: {reason}");
+    }
 }

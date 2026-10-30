@@ -1338,9 +1338,15 @@ impl RibManager {
 
             let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string)
                 || ConditionalGate::requires_as_path_string(conditional);
+            // Live staging keeps Add-Path keys during a hold; mirror it.
+            let mut hold_keys = (local_only && add_path_send_max > 0 && frozen_path_id.is_none())
+                .then_some(rib_out)
+                .flatten()
+                .map(|out| HoldAddPathKeys::new(ribs, out, &prefix, &ranked, &mut || {}));
             let mut rank = 1_u32;
             let mut rank_memo = super::ExportMemo::default();
             let mut selected_rank = None;
+            let mut permitted = Vec::new();
             for candidate in ranked {
                 let candidate_aspath = if needs_as_path_string {
                     candidate
@@ -1387,16 +1393,38 @@ impl RibManager {
                 if super::no_advertise_export_suppressed(candidate_modified.communities()) {
                     continue;
                 }
+                if hold_keys.is_some() {
+                    permitted.push(candidate);
+                    continue;
+                }
                 if candidate.peer == source.peer && candidate.path_id == source.path_id {
                     selected_rank = Some(rank);
                     break;
                 }
                 rank += 1;
             }
+            if let Some(keys) = hold_keys.as_mut() {
+                // Live staging plans keys over the staged set.
+                let limit = add_path_send_max as usize;
+                let staged = permitted.len().min(limit);
+                let assigned = keys.assign_all(&permitted[..staged], limit, &mut || {});
+                if let Some(index) = permitted
+                    .iter()
+                    .position(|route| route.peer == source.peer && route.path_id == source.path_id)
+                {
+                    rank = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                    selected_rank = Some(assigned.get(index).copied().unwrap_or(rank));
+                }
+            }
             let outbound_rank = frozen_path_id
                 .or(selected_rank)
                 .expect("selected source passed the same eligibility and policy gates");
-            if outbound_rank > add_path_send_max {
+            let position = if frozen_path_id.is_some() {
+                outbound_rank
+            } else {
+                rank
+            };
+            if position > add_path_send_max {
                 explain.decision = ExplainDecision::Deny;
                 let message = format!(
                     "source is eligible at outbound rank {outbound_rank}, beyond this peer's \
@@ -2148,9 +2176,15 @@ impl RibManager {
             }),
         }
 
-        // Walk candidates, evaluate export policy, assign path_ids 1..N
+        // Walk candidates, evaluate export policy, assign path_ids 1..N.
+        // During a selection hold, positional ranks would move the exempt
+        // rows already on this peer's wire and overwrite its frozen rows:
+        // keys stay put instead (see `HoldAddPathKeys`).
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string)
             || ConditionalGate::requires_as_path_string(conditional);
+        let mut hold_keys = (local_only && !stage_path_id_zero)
+            .then(|| HoldAddPathKeys::new(ribs, rib_out, prefix, &candidates, checkpoint));
+        let mut hold_staged = Vec::new();
         let mut next_rank: u32 = 1;
         let limit = if send_max == u32::MAX {
             usize::MAX
@@ -2243,32 +2277,31 @@ impl RibManager {
                 );
                 super::rs_control::apply_rs_control_egress(&mut modified, rs_asn, prepend);
             }
-            modified.path_id = if stage_path_id_zero { 0 } else { next_rank };
-
-            // Only announce if different from what's already in AdjRibOut.
-            // `force` mode bypasses the equality check — see
-            // `distribute_single_best_prefix` for the GShut rationale.
-            let changed = force
-                || rib_out.local_export_source(prefix, modified.path_id)
-                    != crate::adj_rib_out::LocalExportSource::from_route(candidate)
-                || rib_out
-                    .get(prefix, modified.path_id)
-                    .is_none_or(|existing| {
-                        !unicast_routes_equal(
-                            existing,
-                            rib_out.next_hop_override(prefix, modified.path_id),
-                            &modified,
-                            nh_action.as_ref(),
-                        )
-                    });
-            if changed {
-                checkpoint();
-                out.record_local_source(candidate, modified.path_id);
-                out.next_hop_override.push(nh_action);
-                out.announce.push(modified);
+            if hold_keys.is_some() {
+                // Keys are planned once the staged set is known.
+                hold_staged.push((*candidate, modified, nh_action));
+            } else {
+                modified.path_id = if stage_path_id_zero { 0 } else { next_rank };
+                stage_multipath_row(
+                    rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
+                );
             }
 
             next_rank += 1;
+        }
+        if let Some(keys) = hold_keys.as_mut() {
+            let routes: Vec<_> = hold_staged
+                .iter()
+                .map(|(candidate, _, _)| *candidate)
+                .collect();
+            let assigned = keys.assign_all(&routes, limit, checkpoint);
+            for ((candidate, mut modified, nh_action), key) in hold_staged.into_iter().zip(assigned)
+            {
+                modified.path_id = key;
+                stage_multipath_row(
+                    rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
+                );
+            }
         }
 
         if stage_path_id_zero {
@@ -2281,6 +2314,15 @@ impl RibManager {
             for path_id in rib_out.path_ids_for_prefix(prefix) {
                 checkpoint();
                 if path_id != 0 || !staged_winner {
+                    out.withdraw.push((*prefix, path_id));
+                }
+            }
+        } else if let Some(keys) = hold_keys {
+            // Withdraw only keys the hold no longer explains: a frozen row
+            // stays, as does every key this pass assigned.
+            for path_id in rib_out.path_ids_for_prefix(prefix) {
+                checkpoint();
+                if keys.withdrawable(path_id) {
                     out.withdraw.push((*prefix, path_id));
                 }
             }
@@ -3317,5 +3359,204 @@ pub(in crate::manager) fn lease_rejection(
             LeaseConflict::WindowNotLive,
             "the mutation window is not live for this owner".to_string(),
         ),
+    }
+}
+
+/// Outbound Add-Path keys for one prefix while selection is deferred.
+///
+/// The hold's candidate set holds only exempt local paths, but the peer's
+/// wire still carries the rows admitted before the hold, and the transport
+/// sends an envelope's withdraw-phase UPDATE before its announce-phase
+/// UPDATE. Positional ranks would move an exempt row to another key (a
+/// withdrawal before its re-announcement) and overwrite frozen rows. The
+/// plan instead keeps every key that can stay and lands each change as an
+/// in-place replacement where it can:
+///
+/// - an exempt row already on the wire keeps its key;
+/// - a newly exempt source first takes over a departing exempt row's key,
+///   so the old blackhole stays until the new one replaces it; then its
+///   own ordinary row's key; then a key a departed ordinary row frees; then
+///   the lowest unused key while the wire stays within the send limit;
+///   and at the limit it replaces a frozen row in place;
+/// - a frozen row (received, or an ordinary injection still present) keeps
+///   its key otherwise.
+///
+/// Only rows that carry no blackhole, or whose blackhole intent left, are
+/// ever withdrawn.
+///
+/// Why frozen rows keep their keys: the hold preserves what each session
+/// already admitted, and an RTBH path on its own key is already effective,
+/// because RFC 7911 path identifiers only distinguish paths and the peer
+/// selects by attributes. Renumbering would only churn the peer and drop a
+/// valid path it is waiting on. The one exception is the send budget: when
+/// a new RTBH path finds no other key within the limit, it replaces a frozen
+/// row in place, since a blackhole outranks a frozen path.
+pub(in crate::manager) struct HoldAddPathKeys {
+    /// Exempt rows on the wire whose source is still a candidate.
+    held_exempt: HashMap<u32, u32>,
+    /// Ordinary rows on the wire whose source became an exempt candidate.
+    held_ordinary: HashMap<u32, u32>,
+    /// Exempt rows whose source left (deleted, demoted or not staged).
+    departing_exempt: std::collections::BTreeSet<u32>,
+    /// Keys of rows that carry no blackhole and are leaving.
+    free: std::collections::BTreeSet<u32>,
+    frozen: HashSet<u32>,
+    occupied: HashSet<u32>,
+    assigned: HashSet<u32>,
+    next: u32,
+}
+
+impl HoldAddPathKeys {
+    pub(in crate::manager) fn new(
+        ribs: &HashMap<PeerId, AdjRibIn>,
+        rib_out: &AdjRibOut,
+        prefix: &Prefix,
+        candidates: &[&crate::route::Route],
+        checkpoint: &mut impl FnMut(),
+    ) -> Self {
+        let claimed: HashSet<u32> = candidates
+            .iter()
+            .filter(|route| route.peer == LOCAL_PEER)
+            .map(|route| route.path_id)
+            .collect();
+        let local = ribs.get(&LOCAL_PEER);
+        let mut keys = Self {
+            held_exempt: HashMap::new(),
+            held_ordinary: HashMap::new(),
+            departing_exempt: std::collections::BTreeSet::new(),
+            free: std::collections::BTreeSet::new(),
+            frozen: HashSet::new(),
+            occupied: HashSet::new(),
+            assigned: HashSet::new(),
+            next: 1,
+        };
+        for path_id in rib_out.path_ids_for_prefix(prefix) {
+            checkpoint();
+            keys.occupied.insert(path_id);
+            match rib_out.local_export_source(prefix, path_id) {
+                Some(source) if claimed.contains(&source.path_id) => {
+                    if source.deferral_exempt {
+                        keys.held_exempt.insert(source.path_id, path_id);
+                    } else {
+                        keys.held_ordinary.insert(source.path_id, path_id);
+                    }
+                }
+                Some(source) if source.deferral_exempt => {
+                    keys.departing_exempt.insert(path_id);
+                }
+                Some(source) => {
+                    if local.is_some_and(|rib| rib.get(prefix, source.path_id).is_some()) {
+                        keys.frozen.insert(path_id);
+                    } else {
+                        keys.free.insert(path_id);
+                    }
+                }
+                None => {
+                    keys.frozen.insert(path_id);
+                }
+            }
+        }
+        keys
+    }
+
+    /// Keys for the staged candidates, in rank order; see the type's plan.
+    pub(in crate::manager) fn assign_all(
+        &mut self,
+        staged: &[&crate::route::Route],
+        limit: usize,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<u32> {
+        let mut keys = vec![0; staged.len()];
+        let mut changing = Vec::new();
+        for (index, route) in staged.iter().enumerate() {
+            checkpoint();
+            let held = (route.peer == LOCAL_PEER)
+                .then(|| self.held_exempt.remove(&route.path_id))
+                .flatten();
+            match held {
+                Some(key) => {
+                    self.assigned.insert(key);
+                    keys[index] = key;
+                }
+                None => changing.push(index),
+            }
+        }
+        // An exempt row whose source is not staged this pass is leaving too.
+        self.departing_exempt
+            .extend(self.held_exempt.drain().map(|(_, key)| key));
+        for index in changing {
+            checkpoint();
+            let route = staged[index];
+            let own = (route.peer == LOCAL_PEER)
+                .then(|| self.held_ordinary.remove(&route.path_id))
+                .flatten();
+            let key = if let Some(key) = self.departing_exempt.pop_first() {
+                // The source's own ordinary row, if any, leaves instead.
+                self.free.extend(own);
+                key
+            } else if let Some(key) = own {
+                key
+            } else if let Some(key) = self.free.pop_first() {
+                key
+            } else if self.assigned.len() + self.frozen.len() >= limit
+                && let Some(key) = self.frozen.iter().max().copied()
+            {
+                self.frozen.remove(&key);
+                key
+            } else {
+                while self.occupied.contains(&self.next) {
+                    checkpoint();
+                    self.next += 1;
+                }
+                self.next
+            };
+            self.occupied.insert(key);
+            self.assigned.insert(key);
+            keys[index] = key;
+        }
+        keys
+    }
+
+    /// Whether the residue pass withdraws this wire key.
+    pub(in crate::manager) fn withdrawable(&self, path_id: u32) -> bool {
+        !self.assigned.contains(&path_id) && !self.frozen.contains(&path_id)
+    }
+}
+
+/// Stage one Add-Path or per-client-best row when it differs from what the
+/// Adj-RIB-Out holds at its key. `force` bypasses the equality check — see
+/// `distribute_single_best_prefix` for the `GShut` rationale.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one staged row with its key, policy action and diff target"
+)]
+fn stage_multipath_row(
+    rib_out: &AdjRibOut,
+    prefix: &Prefix,
+    candidate: &crate::route::Route,
+    modified: crate::route::Route,
+    nh_action: Option<rustbgpd_policy::NextHopAction>,
+    force: bool,
+    out: &mut UnicastDistributionResult,
+    checkpoint: &mut impl FnMut(),
+) {
+    let changed = force
+        || rib_out.local_export_source(prefix, modified.path_id)
+            != crate::adj_rib_out::LocalExportSource::from_route(candidate)
+        || rib_out
+            .get(prefix, modified.path_id)
+            .is_none_or(|existing| {
+                !unicast_routes_equal(
+                    existing,
+                    rib_out.next_hop_override(prefix, modified.path_id),
+                    &modified,
+                    nh_action.as_ref(),
+                )
+            });
+    if changed {
+        checkpoint();
+        out.record_local_source(candidate, modified.path_id);
+        out.next_hop_override.push(nh_action);
+        out.announce.push(modified);
     }
 }
