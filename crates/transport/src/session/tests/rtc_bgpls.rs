@@ -84,6 +84,7 @@ async fn oversized_bgpls_output_tears_down_session() {
     )
     .expect("oversize-for-peer fixture still fits BGP-LS NLRI length");
     session.send_route_update(OutboundRouteUpdate {
+        exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -546,6 +547,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         path_id: 0,
     };
     session.send_route_update(OutboundRouteUpdate {
+        exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -608,6 +610,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         "local default must be emitted with the session-local address, got {seen_next_hops:?}"
     );
     session.send_route_update(OutboundRouteUpdate {
+        exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,

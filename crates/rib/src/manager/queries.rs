@@ -3798,20 +3798,17 @@ impl RibManager {
                     }
                     permitted.push(cand);
                 }
-                // Rank picks the paths; their keys follow live staging.
-                let keys = self.adj_ribs_out.get(&peer_addr).map_or_else(
-                    || (1..=u32::try_from(permitted.len()).unwrap_or(u32::MAX)).collect(),
-                    |rib_out| {
-                        distribution::AddPathKeys::new(
-                            rib_out,
-                            &prefix,
-                            self.selection_deferred(family),
-                            &self.ribs,
-                            &mut || {},
-                        )
-                        .assign_all(&permitted, limit, &mut || {})
-                    },
-                );
+                // Rank picks the paths; their keys follow live staging, on
+                // an empty wire before the peer's first commit.
+                let empty = AdjRibOut::new(peer_addr);
+                let keys = distribution::AddPathKeys::new(
+                    self.adj_ribs_out.get(&peer_addr).unwrap_or(&empty),
+                    &prefix,
+                    self.selection_deferred(family),
+                    &self.ribs,
+                    &mut || {},
+                )
+                .assign_all(&permitted, limit, &mut || {});
                 for (cand, key) in permitted.into_iter().zip(keys) {
                     if self
                         .peer_unexportable

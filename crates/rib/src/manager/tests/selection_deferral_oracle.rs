@@ -31,9 +31,11 @@
 //! Each case fixes one receiver configuration (private or grouped,
 //! single-best or Add-Path, per-client-best, ORF, prefix limit, and whether
 //! its first session arrives inside the hold), builds a pre-hold table,
-//! starts the hold, runs the operations, then releases and drains. Received routes stay on their own prefixes, so the model never
-//! ranks a received path against a local one. Not modelled: IPv6, LLGR,
-//! leases, export policy edits, a second hold, more than one receiver.
+//! starts the hold, runs the operations, then releases and drains. The
+//! receiver's session may flap before and during the hold. The source peer
+//! sends several Add-Path paths per prefix, on prefixes that also carry
+//! local paths. Not modelled: IPv6, LLGR, leases, export policy edits, a
+//! second hold, more than one receiver.
 //!
 //! Known open defects are allowed only by their exact signature, each
 //! naming its ticket (`allowed`). `ORACLE_STRICT=1` disables every
@@ -120,11 +122,16 @@ enum Op {
         prefix: usize,
         path: usize,
     },
+    /// Receive or replace one of the source peer's Add-Path paths on any
+    /// prefix, beside local paths; preference picks its rank.
     Receive {
         prefix: usize,
+        path: usize,
+        preference: u32,
     },
     ReceiveWithdraw {
         prefix: usize,
+        path: usize,
     },
     /// Replace the receiver's ORF with one denying the masked prefixes.
     Orf {
@@ -186,9 +193,37 @@ fn intent_strategy() -> impl Strategy<Value = Op> {
         ),
         2 => (0..LOCAL_PREFIXES, 0..PATH_IDS.len())
             .prop_map(|(prefix, path)| Op::Delete { prefix, path }),
-        1 => (LOCAL_PREFIXES..PREFIXES).prop_map(|prefix| Op::Receive { prefix }),
-        1 => (LOCAL_PREFIXES..PREFIXES).prop_map(|prefix| Op::ReceiveWithdraw { prefix }),
+        2 => (0..PREFIXES, 0..PATH_IDS.len(), 0u32..3).prop_map(|(prefix, path, preference)| {
+            Op::Receive {
+                prefix,
+                path,
+                preference,
+            }
+        }),
+        1 => (0..PREFIXES, 0..PATH_IDS.len())
+            .prop_map(|(prefix, path)| Op::ReceiveWithdraw { prefix, path }),
         1 => (0u8..1 << PREFIXES).prop_map(|deny| Op::Orf { deny }),
+    ]
+}
+
+fn reconnect_strategy() -> impl Strategy<Value = Op> {
+    (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+        |(notification, helper, gr_families, writer_full)| Op::Reconnect {
+            notification,
+            // Families come only inside a GR capability.
+            helper: helper || gr_families,
+            gr_families,
+            writer_full,
+        },
+    )
+}
+
+/// Before the hold: intent, and session flaps whose GR helper keeps our
+/// rows as stale across the reconnect.
+fn setup_strategy() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        6 => intent_strategy(),
+        1 => reconnect_strategy(),
     ]
 }
 
@@ -198,15 +233,7 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
         2 => any::<bool>().prop_map(Op::Backpressure),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
-        2 => (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
-            |(notification, helper, gr_families, writer_full)| Op::Reconnect {
-                notification,
-                // Families come only inside a GR capability.
-                helper: helper || gr_families,
-                gr_families,
-                writer_full,
-            }
-        ),
+        2 => reconnect_strategy(),
     ]
 }
 
@@ -235,7 +262,7 @@ struct Harness {
     wire: HashMap<(Prefix, u32), usize>,
     injections: Vec<Injection>,
     local: BTreeMap<(usize, usize), usize>,
-    received: BTreeMap<usize, usize>,
+    received: BTreeMap<(usize, usize), usize>,
     deny: u8,
     orf_gated: bool,
     held: bool,
@@ -256,6 +283,9 @@ struct Harness {
     /// I1 per UPDATE; the checker's own tests clear it for a control that
     /// checks only after the channel.
     per_update_i1: bool,
+    /// The check runs right after our End-of-RIB purged a GR helper's
+    /// stale rows.
+    eor_purge: bool,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -298,6 +328,7 @@ impl Harness {
             gr_families: true,
             registered: false,
             per_update_i1: true,
+            eor_purge: false,
         };
         if !config.late {
             harness.establish();
@@ -556,8 +587,9 @@ impl Harness {
                 preference,
                 blackhole,
             } => {
-                // Unique per path and variant, so ranks never tie.
-                let preference = 100 + u32::try_from(path).unwrap() + 3 * preference;
+                // Unique per path and variant, and even, so ranks never tie
+                // with each other or with a received path.
+                let preference = 100 + 2 * (u32::try_from(path).unwrap() + 3 * preference);
                 let exempt = index < 2 || blackhole;
                 let injection = self.new_injection(index, preference, exempt);
                 let Prefix::V4(v4) = prefix(index) else {
@@ -605,24 +637,34 @@ impl Harness {
                 }
                 self.retire(old);
             }
-            Op::Receive { prefix: index } => {
-                let injection = self.new_injection(index, 100, false);
+            Op::Receive {
+                prefix: index,
+                path,
+                preference,
+            } => {
+                // Odd, so a received path never ties a local one.
+                let preference = 101 + 2 * (u32::try_from(path).unwrap() + 3 * preference);
+                let injection = self.new_injection(index, preference, false);
                 let Prefix::V4(v4) = prefix(index) else {
                     unreachable!()
                 };
-                let mut route = make_route_with_lp(v4, SOURCE, 100);
+                let mut route = make_route_with_lp(v4, SOURCE, preference);
+                route.path_id = PATH_IDS[path];
                 AttrSet::edit(&mut route.attributes, |attributes| {
                     attributes.push(PathAttribute::Communities(vec![
                         (IDENTITY_ASN << 16) | u32::try_from(injection).unwrap(),
                     ]));
                 });
                 self.receive(vec![route], vec![]);
-                let old = self.received.insert(index, injection);
+                let old = self.received.insert((index, path), injection);
                 self.retire(old);
             }
-            Op::ReceiveWithdraw { prefix: index } => {
-                self.receive(vec![], vec![(prefix(index), 0)]);
-                let old = self.received.remove(&index);
+            Op::ReceiveWithdraw {
+                prefix: index,
+                path,
+            } => {
+                self.receive(vec![], vec![(prefix(index), PATH_IDS[path])]);
+                let old = self.received.remove(&(index, path));
                 self.retire(old);
             }
             Op::Orf { deny } => {
@@ -653,8 +695,10 @@ impl Harness {
                     .pending_group_admitted
                     .disarm_allocation_failure_for_test();
             }
-            Op::Drain => {}
-            Op::Reconnect { .. } => self.reconnect(op),
+            Op::Reconnect { .. } if self.registered => self.reconnect(op),
+            // A receiver whose first session is still to come has none to
+            // flap.
+            Op::Drain | Op::Reconnect { .. } => {}
         }
     }
 
@@ -704,11 +748,13 @@ impl Harness {
                 self.stale.remove(key);
             }
             // The transport sends an envelope's withdrawals as their own
-            // UPDATEs before its announcements, and splits announcements with
-            // different attributes into separate UPDATEs. Check the peer's
-            // state after the withdrawals and after every announcement: one
-            // UPDATE per announcement is stricter than the wire, and exempt
-            // and ordinary rows never share attributes.
+            // UPDATEs before its announcements, then the leading blackholing
+            // rows (`exempt_announce`) in slices of their own, then the rest.
+            // Within each part it groups rows by attributes, slices them by
+            // an adaptive budget, and sends body NLRI before MP_REACH, so any
+            // order is possible: apply each part's ordinary rows before its
+            // blackholing ones, the worst order, and check the peer's state
+            // after the withdrawals and after every announcement.
             self.apply_announcements(&update)?;
             // Our End-of-RIB ends a GR helper's retention: it purges every
             // stale row this session did not re-announce.
@@ -716,22 +762,38 @@ impl Harness {
                 for key in std::mem::take(&mut self.stale) {
                     self.wire.remove(&key);
                 }
-                if self.held {
-                    self.check_blackholed()?;
+                if self.per_update_i1 {
+                    self.eor_purge = true;
+                    let checked = self.check_blackholed();
+                    self.eor_purge = false;
+                    checked?;
                 }
             }
         }
         Ok(updates)
     }
 
-    /// I4 for every announcement; I1 after the withdrawals and after each
-    /// announcement.
+    /// I4 for every announcement; I1 and I6 after the withdrawals and after
+    /// each announcement, in the worst order the transport may send them.
     fn apply_announcements(&mut self, update: &OutboundRouteUpdate) -> Checked {
+        /// One part's rows, ordinary before blackholing.
+        fn worst(part: &[Route]) -> Vec<&Route> {
+            let (exempt, ordinary): (Vec<&Route>, Vec<&Route>) = part.iter().partition(|route| {
+                route
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+                    || crate::manager::helpers::unicast_deferral_exempt(route)
+            });
+            ordinary.into_iter().chain(exempt).collect()
+        }
         self.check_send_limit()?;
         if self.per_update_i1 {
             self.check_blackholed()?;
         }
-        for route in update.announce.iter() {
+        let (lead, rest) = update
+            .announce
+            .split_at(update.exempt_announce.min(update.announce.len()));
+        for route in worst(lead).into_iter().chain(worst(rest)) {
             let injection = Self::identity(route);
             let resurrected = self.injections[injection].exempt && !self.injections[injection].live;
             prop_assert!(
@@ -795,7 +857,11 @@ impl Harness {
                 .local
                 .range((index, 0)..(index + 1, 0))
                 .map(|(_, &injection)| injection)
-                .chain(self.received.get(&index).copied())
+                .chain(
+                    self.received
+                        .range((index, 0)..(index + 1, 0))
+                        .map(|(_, &injection)| injection),
+                )
                 .collect();
             paths
                 .sort_by_key(|&injection| std::cmp::Reverse(self.injections[injection].preference));
@@ -833,6 +899,12 @@ impl Harness {
             .all(|&injection| !self.injections[injection].live);
         if self.config.add_path && fallback && removed {
             return allowed("LAN-2692");
+        }
+        // LAN-2724: outside the hold, an ORF-gated session sends its initial
+        // End-of-RIB ahead of the gated table, so a GR helper purges the
+        // stale rows it kept across the flap before they are re-sent.
+        if self.config.orf && self.eor_purge && !self.held {
+            return allowed("LAN-2724");
         }
         None
     }
@@ -1169,7 +1241,7 @@ fn gr_hold_matches_a_fresh_session_model() {
     });
     let strategy = (
         config_strategy(),
-        proptest::collection::vec(intent_strategy(), 0..6),
+        proptest::collection::vec(setup_strategy(), 0..8),
         proptest::collection::vec(hold_strategy(), 1..40),
     );
     let Err(error) = runner.run(&strategy, |(config, setup, hold)| {
@@ -1398,7 +1470,11 @@ fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
             preference: 0,
             blackhole: false,
         },
-        Op::Receive { prefix: 3 },
+        Op::Receive {
+            prefix: 3,
+            path: 0,
+            preference: 0,
+        },
     ];
     let delete = Op::Delete { prefix: 0, path: 0 };
     let plain = vec![
@@ -1814,5 +1890,92 @@ fn add_path_new_rtbh_takes_over_a_demoted_rtbh_key() {
         if let Some(reason) = failure(config, &setup, &hold) {
             panic!("{config:?}: {reason}");
         }
+    }
+}
+
+fn add_path_config() -> Config {
+    Config {
+        grouped: false,
+        add_path: true,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    }
+}
+
+/// A GR helper keeps `#1` (ordinary) and `#2` (RTBH) as stale across a
+/// reconnect outside the hold. The new session's dump plans keys on an
+/// empty table and puts the RTBH path at `#1`, the ordinary one at `#2`:
+/// if the ordinary row went first, `#2` would replace the stale RTBH row
+/// while `#1` still held the stale ordinary row, so the dump sends every
+/// blackholing row before any ordinary one.
+#[test]
+fn gr_reconnect_dump_sends_rtbh_rows_first() {
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: false,
+        },
+        Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: true,
+        },
+        Op::Reconnect {
+            notification: false,
+            helper: true,
+            gr_families: true,
+            writer_full: false,
+        },
+    ];
+    if let Some(reason) = failure(add_path_config(), &setup, &[]) {
+        panic!("{reason}");
+    }
+}
+
+/// An RTBH path added during the hold takes a fresh key beside the frozen
+/// ordinary row and keeps it at release, though it now ranks first:
+/// renumbering by rank would swap the two rows' keys at release.
+#[test]
+fn hold_added_rtbh_keeps_its_key_at_release() {
+    let setup = [Op::Inject {
+        prefix: 2,
+        path: 0,
+        preference: 0,
+        blackhole: false,
+    }];
+    let hold = [Op::Inject {
+        prefix: 2,
+        path: 1,
+        preference: 2,
+        blackhole: true,
+    }];
+    if let Some(reason) = failure(add_path_config(), &setup, &hold) {
+        panic!("{reason}");
+    }
+}
+
+/// Two received paths of one peer fill the send limit before the hold; an
+/// RTBH path added during it replaces a frozen received row in place.
+#[test]
+fn hold_rtbh_displaces_a_frozen_received_row_at_the_limit() {
+    let receive = |path| Op::Receive {
+        prefix: 2,
+        path,
+        preference: 0,
+    };
+    let setup = [receive(0), receive(1)];
+    let hold = [Op::Inject {
+        prefix: 2,
+        path: 0,
+        preference: 2,
+        blackhole: true,
+    }];
+    if let Some(reason) = failure(add_path_config(), &setup, &hold) {
+        panic!("{reason}");
     }
 }

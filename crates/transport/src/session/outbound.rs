@@ -346,7 +346,16 @@ impl PendingOutbound {
                 }
                 OutboundPhase::Withdraw => payload!(withdraw),
                 OutboundPhase::Announce => {
-                    let end = payload!(announce);
+                    // Blackholing rows lead the envelope and go out in slices
+                    // of their own, so no slice mixes them with ordinary rows
+                    // that its attribute groups could send first.
+                    let exempt = self.update.exempt_announce;
+                    let end = if self.offset < exempt {
+                        (self.offset + budget).min(exempt)
+                    } else {
+                        (self.offset + budget).min(self.update.announce.len())
+                    };
+                    slice.announce = self.update.announce[self.offset..end].to_vec().into();
                     let overrides_end = end.min(self.update.next_hop_override.len());
                     if self.offset < overrides_end {
                         slice.next_hop_override = self.update.next_hop_override
@@ -2761,6 +2770,66 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
+
+    /// Blackholing rows lead the envelope and fill slices of their own:
+    /// no announce slice mixes them with ordinary rows, and each slice's
+    /// next-hop overrides stay aligned with its routes.
+    #[test]
+    fn exempt_rows_fill_announce_slices_of_their_own() {
+        let routes: Vec<Route> = (1..=5)
+            .map(|path_id| {
+                let mut route = super::super::tests::make_route(100);
+                route.path_id = path_id;
+                route
+            })
+            .collect();
+        let overrides = (1..=5u32)
+            .map(|path_id| {
+                (path_id % 2 == 0).then(|| {
+                    rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(
+                        192,
+                        0,
+                        2,
+                        u8::try_from(path_id).unwrap(),
+                    )))
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut pending = PendingOutbound {
+            update: OutboundRouteUpdate {
+                announce: Arc::new(routes),
+                next_hop_override: Arc::new(overrides.clone()),
+                exempt_announce: 2,
+                ..OutboundRouteUpdate::default()
+            },
+            shared: None,
+            requests: Vec::new(),
+            phase: ANNOUNCE_PHASE,
+            offset: 0,
+            capacity_blocked: false,
+            slice_routes: 3,
+            evpn_announce: Vec::new().into_iter(),
+            vpn_announce: Vec::new().into_iter(),
+            labeled_announce: Vec::new().into_iter(),
+            announce: Vec::new().into_iter(),
+            dropped_ipv6_next_hops: DroppedIpv6NextHops::default(),
+            test_slice_cost: None,
+        };
+        let mut sliced = Vec::new();
+        while let Some(slice) = pending.next_slice(3) {
+            if slice.announce.is_empty() {
+                continue;
+            }
+            let path_ids: Vec<u32> = slice.announce.iter().map(|route| route.path_id).collect();
+            let aligned: Vec<_> = path_ids
+                .iter()
+                .map(|&path_id| overrides[usize::try_from(path_id).unwrap() - 1].clone())
+                .collect();
+            assert_eq!(slice.next_hop_override.to_vec(), aligned);
+            sliced.push(path_ids);
+        }
+        assert_eq!(sliced, [vec![1, 2], vec![3, 4, 5]]);
+    }
 
     fn make_test_session() -> PeerSession {
         let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));

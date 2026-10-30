@@ -1338,11 +1338,19 @@ impl RibManager {
 
             let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string)
                 || ConditionalGate::requires_as_path_string(conditional);
-            // Live staging plans stable Add-Path keys; mirror it.
-            let mut add_path_keys = (add_path_send_max > 0 && frozen_path_id.is_none())
-                .then_some(rib_out)
-                .flatten()
-                .map(|out| AddPathKeys::new(out, &prefix, local_only, ribs, &mut || {}));
+            // Live staging plans stable Add-Path keys, on an empty wire
+            // before the peer's first commit; mirror it.
+            let empty = AdjRibOut::new(target_peer);
+            let mut add_path_keys =
+                (add_path_send_max > 0 && frozen_path_id.is_none()).then(|| {
+                    AddPathKeys::new(
+                        rib_out.unwrap_or(&empty),
+                        &prefix,
+                        local_only,
+                        ribs,
+                        &mut || {},
+                    )
+                });
             let mut rank = 1_u32;
             let mut rank_memo = super::ExportMemo::default();
             let mut selected_rank = None;
@@ -3623,7 +3631,12 @@ impl AddPathKeys {
         // Exempt candidates first, so a departing RTBH key goes to a new
         // RTBH path before any ordinary path could take it; rank order
         // within each class.
-        changing.sort_by_key(|&(index, _)| (!unicast_deferral_exempt(staged[index]), index));
+        // A demoted path then reclaims its own RTBH key before any new
+        // ordinary path could take it from the departing pool.
+        changing.sort_by_key(|&(index, own)| {
+            let exempt = unicast_deferral_exempt(staged[index]);
+            (!exempt, exempt || own.is_none(), index)
+        });
         // A changing path's own row stays until it is planned, so it is
         // reserved against the send limit.
         let mut reserved = changing.iter().filter(|(_, own)| own.is_some()).count();

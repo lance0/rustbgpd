@@ -1202,6 +1202,13 @@ pub struct OutboundRouteUpdate {
     /// fanout whose exact-export preflight retained the identical announce
     /// inventory. `None` = ordinary per-session encode.
     pub shared_group_encode: Option<Arc<SharedGroupEncode>>,
+    /// How many leading `announce` rows blackhole their prefix (deferral
+    /// exempt or carrying BLACKHOLE). An Add-Path receiver's envelope lists
+    /// them first and transport sends them in slices of their own, before
+    /// any ordinary row, so a peer still holding an RTBH path never sees an
+    /// ordinary row replace it ahead of the RTBH path's own announcement.
+    /// `0` = no ordering requirement.
+    pub exempt_announce: usize,
 }
 
 /// Aggregate route-policy evaluation counters for one neighbor.

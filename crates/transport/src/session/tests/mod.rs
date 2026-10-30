@@ -853,7 +853,7 @@ fn smet_update(routes: Vec<EvpnRoute>) -> UpdateMessage {
     UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body)
 }
 
-fn make_route(local_pref: u32) -> Route {
+pub(super) fn make_route(local_pref: u32) -> Route {
     Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -1224,6 +1224,7 @@ async fn export_policy_totals_survive_a_session_reset() {
 /// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.
 fn empty_outbound_update() -> OutboundRouteUpdate {
     OutboundRouteUpdate {
+        exempt_announce: 0,
         replay: None,
         exact_export_snapshot: None,
         announce_source_exclusion: None,

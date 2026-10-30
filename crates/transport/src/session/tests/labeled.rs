@@ -20,6 +20,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
     let route = make_labeled_rib_route(4093);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -71,6 +72,7 @@ async fn send_route_update_emits_labeled_reach_and_unreach() {
         "MPLS label stack must round-trip verbatim"
     );
     session.send_route_update(OutboundRouteUpdate {
+        exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
@@ -139,6 +141,7 @@ async fn send_route_update_emits_labeled_add_path_reach_and_unreach() {
     route.path_id = 2;
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        exempt_announce: 0,
         replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,

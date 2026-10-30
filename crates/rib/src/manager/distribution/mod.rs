@@ -1171,12 +1171,114 @@ fn reconcile_exact_export_overlay(
     decision
 }
 
+/// Stable-partition `announce`, with its index-aligned `next_hop_override`,
+/// so the rows `exempt` selects come first; returns how many there are.
+fn exempt_first(
+    announce: &mut Arc<Vec<crate::route::Route>>,
+    next_hop_override: &mut Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
+    exempt: impl Fn(&crate::route::Route) -> bool,
+    checkpoint: &mut impl FnMut(),
+) -> usize {
+    let flags: Vec<bool> = announce
+        .iter()
+        .map(|route| {
+            checkpoint();
+            exempt(route)
+        })
+        .collect();
+    let count = flags.iter().filter(|&&flag| flag).count();
+    #[cfg(debug_assertions)]
+    {
+        let mut keys = HashSet::with_capacity(announce.len());
+        for route in announce.iter() {
+            debug_assert!(
+                keys.insert((route.prefix, route.path_id)),
+                "an envelope announces {} path {} twice",
+                route.prefix,
+                route.path_id
+            );
+        }
+    }
+    // Nothing to move when the blackholing rows already lead.
+    if flags.iter().skip(count).all(|&flag| !flag) {
+        return count;
+    }
+    let routes = std::mem::take(Arc::make_mut(announce));
+    let overrides = std::mem::take(Arc::make_mut(next_hop_override));
+    let aligned = overrides.len() == routes.len();
+    debug_assert!(
+        aligned || overrides.is_empty(),
+        "next-hop overrides are index-aligned with the announcements"
+    );
+    let mut overrides = overrides.into_iter();
+    let (mut first, mut rest) = (Vec::with_capacity(routes.len()), Vec::new());
+    let (mut first_nh, mut rest_nh) = (Vec::new(), Vec::new());
+    for (route, flag) in routes.into_iter().zip(flags) {
+        checkpoint();
+        let action = if aligned { overrides.next() } else { None };
+        if flag {
+            first.push(route);
+            first_nh.extend(action);
+        } else {
+            rest.push(route);
+            rest_nh.extend(action);
+        }
+    }
+    first.append(&mut rest);
+    first_nh.append(&mut rest_nh);
+    *Arc::make_mut(announce) = first;
+    *Arc::make_mut(next_hop_override) = first_nh;
+    count
+}
+
 #[inline(never)]
 fn enqueue_outbound_update(
     permit: tokio::sync::mpsc::Permit<'_, OutboundRouteUpdate>,
     update: OutboundRouteUpdate,
 ) {
     permit.send(update);
+}
+
+#[cfg(test)]
+mod exempt_first_tests {
+    use super::*;
+
+    /// The selected rows move to the front in their own order, the rest
+    /// keep theirs, and each next-hop override moves with its route.
+    #[test]
+    fn exempt_rows_lead_with_their_next_hop_overrides() {
+        let prefix = |n| {
+            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                Ipv4Addr::new(198, 51, 100, n),
+                32,
+            ))
+        };
+        let mut announce = Arc::new(
+            (1..=5)
+                .map(|n| crate::test_support::make_route_with_path_id(prefix(n), u32::from(n)))
+                .collect::<Vec<_>>(),
+        );
+        let action = |n: u8| {
+            Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(
+                Ipv4Addr::new(192, 0, 2, n),
+            )))
+        };
+        let mut overrides = Arc::new((1..=5).map(action).collect::<Vec<_>>());
+        let count = exempt_first(
+            &mut announce,
+            &mut overrides,
+            |route| route.path_id % 2 == 0,
+            &mut || {},
+        );
+        assert_eq!(count, 2);
+        let order: Vec<u32> = announce.iter().map(|route| route.path_id).collect();
+        assert_eq!(order, [2, 4, 1, 3, 5]);
+        let moved: Vec<_> = order
+            .iter()
+            .map(|&path_id| action(u8::try_from(path_id).unwrap()))
+            .collect();
+        assert_eq!(*overrides, moved);
+    }
 }
 
 #[cfg(test)]
@@ -5209,6 +5311,31 @@ impl RibManager {
             // Continue its existing resync; marker-only refusals never enter here.
             self.mark_outbound_dirty_inner(peer, false);
         }
+        // An Add-Path receiver may still hold an RTBH path at a key another
+        // row now takes (a reconnect, a GR helper's stale rows): send every
+        // blackholing row before any ordinary one.
+        let exempt_announce = if announce_source_exclusion.is_none()
+            && shared_group_encode.is_none()
+            && self.grouped_member_of(peer).is_none()
+            && announce.iter().any(|route| route.path_id != 0)
+        {
+            exempt_first(
+                &mut announce,
+                &mut next_hop_override,
+                |route| {
+                    crate::manager::helpers::unicast_deferral_exempt(route)
+                        || route
+                            .communities()
+                            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+                        || local_sources
+                            .get(&(route.prefix, route.path_id))
+                            .is_some_and(|source| source.deferral_exempt)
+                },
+                &mut || checkpoint(),
+            )
+        } else {
+            0
+        };
         enqueue_outbound_update(
             permit,
             OutboundRouteUpdate {
@@ -5235,6 +5362,7 @@ impl RibManager {
                 otc_blocked,
                 request_refresh_all_negotiated: false,
                 shared_group_encode,
+                exempt_announce,
             },
         );
         if let Some(count) = staged_evpn_count {
