@@ -125,11 +125,13 @@ enum Op {
         path: usize,
     },
     /// Receive or replace one of the source peer's Add-Path paths on any
-    /// prefix, beside local paths; preference picks its rank.
+    /// prefix, beside local paths; preference picks its rank, and
+    /// `blackhole` tags it with BLACKHOLE.
     Receive {
         prefix: usize,
         path: usize,
         preference: u32,
+        blackhole: bool,
     },
     ReceiveWithdraw {
         prefix: usize,
@@ -139,6 +141,19 @@ enum Op {
     Orf {
         deny: u8,
     },
+    /// Toggle an export-policy BLACKHOLE tag on the current local (or
+    /// received) path at `(prefix, path)`, matched by prefix and
+    /// `LOCAL_PREF`; `exclusive` instead makes it the prefix's only tagged
+    /// path, in one policy replacement. Private receivers only.
+    Tag {
+        prefix: usize,
+        path: usize,
+        received: bool,
+        exclusive: bool,
+    },
+    /// Free the writer and run the receiver's dirty resync now, so every
+    /// change held behind backpressure lands in one pass.
+    Resync,
     Backpressure(bool),
     /// Free the writer; the receiver's dirty retry then fails its
     /// admission-proof allocation.
@@ -251,16 +266,25 @@ fn intent_strategy() -> impl Strategy<Value = Op> {
         ),
         2 => (0..LOCAL_PREFIXES, 0..PATH_IDS.len())
             .prop_map(|(prefix, path)| Op::Delete { prefix, path }),
-        2 => (0..PREFIXES, 0..PATH_IDS.len(), 0u32..3).prop_map(|(prefix, path, preference)| {
-            Op::Receive {
+        2 => (0..PREFIXES, 0..PATH_IDS.len(), 0u32..3, any::<bool>()).prop_map(
+            |(prefix, path, preference, blackhole)| Op::Receive {
                 prefix,
                 path,
                 preference,
+                blackhole,
             }
-        }),
+        ),
         1 => (0..PREFIXES, 0..PATH_IDS.len())
             .prop_map(|(prefix, path)| Op::ReceiveWithdraw { prefix, path }),
         1 => (0u8..1 << PREFIXES).prop_map(|deny| Op::Orf { deny }),
+        1 => (0..PREFIXES, 0..PATH_IDS.len(), any::<bool>(), any::<bool>()).prop_map(
+            |(prefix, path, received, exclusive)| Op::Tag {
+                prefix,
+                path,
+                received,
+                exclusive,
+            }
+        ),
     ]
 }
 
@@ -276,11 +300,14 @@ fn reconnect_strategy() -> impl Strategy<Value = Op> {
     )
 }
 
-/// Before the hold: intent, and session flaps whose GR helper keeps our
-/// rows as stale across the reconnect.
+/// Before the hold: intent, backpressure that coalesces several changes
+/// into one pass, and session flaps whose GR helper keeps our rows as stale
+/// across the reconnect.
 fn setup_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         6 => intent_strategy(),
+        1 => any::<bool>().prop_map(Op::Backpressure),
+        1 => Just(Op::Resync),
         1 => reconnect_strategy(),
     ]
 }
@@ -291,6 +318,7 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
         2 => any::<bool>().prop_map(Op::Backpressure),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
+        1 => Just(Op::Resync),
         2 => (
             prop_oneof![
                 Just(RegroupKind::Slow),
@@ -304,10 +332,17 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
     ]
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one independent property of the modelled path"
+)]
 struct Injection {
     prefix: usize,
     preference: u32,
     exempt: bool,
+    /// Exempt, or a received path carrying BLACKHOLE: its row blackholes
+    /// the prefix.
+    blackholing: bool,
     live: bool,
     /// The operator deleted it (a replacement only retires it).
     deleted: bool,
@@ -362,6 +397,10 @@ struct Harness {
     /// The receiver's configured export policy has peer context; a new
     /// session registers with it.
     peer_policy: bool,
+    /// Export-policy BLACKHOLE tags, by prefix and `LOCAL_PREF`.
+    tags: BTreeSet<(usize, u32)>,
+    /// Whether each key's row, as last announced, carried BLACKHOLE.
+    wire_tag: HashMap<(Prefix, u32), bool>,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -408,6 +447,8 @@ impl Harness {
             awaiting_first_eor: false,
             session_announced: false,
             peer_policy: false,
+            tags: BTreeSet::new(),
+            wire_tag: HashMap::new(),
         };
         if !config.late {
             harness.establish();
@@ -569,9 +610,7 @@ impl Harness {
         {
             *sendable_families = vec![FAMILY];
             *per_client_best = self.config.per_client_best;
-            if !self.config.grouped || self.peer_policy {
-                *export_policy = Some(private_policy(None));
-            }
+            *export_policy = self.export_policy();
             if self.config.add_path {
                 *add_path_send_families = vec![FAMILY];
                 *add_path_send_max = u32::try_from(ADD_PATH_MAX).unwrap();
@@ -640,11 +679,18 @@ impl Harness {
             .expect("every modelled route carries its identity")
     }
 
-    fn new_injection(&mut self, prefix: usize, preference: u32, exempt: bool) -> usize {
+    fn new_injection(
+        &mut self,
+        prefix: usize,
+        preference: u32,
+        exempt: bool,
+        blackholing: bool,
+    ) -> usize {
         self.injections.push(Injection {
             prefix,
             preference,
             exempt,
+            blackholing,
             live: true,
             deleted: false,
         });
@@ -673,7 +719,7 @@ impl Harness {
                 // with each other or with a received path.
                 let preference = 100 + 2 * (u32::try_from(path).unwrap() + 3 * preference);
                 let exempt = index < 2 || blackhole;
-                let injection = self.new_injection(index, preference, exempt);
+                let injection = self.new_injection(index, preference, exempt, exempt);
                 let Prefix::V4(v4) = prefix(index) else {
                     unreachable!()
                 };
@@ -723,19 +769,23 @@ impl Harness {
                 prefix: index,
                 path,
                 preference,
+                blackhole,
             } => {
                 // Odd, so a received path never ties a local one.
                 let preference = 101 + 2 * (u32::try_from(path).unwrap() + 3 * preference);
-                let injection = self.new_injection(index, preference, false);
+                let injection = self.new_injection(index, preference, false, blackhole);
                 let Prefix::V4(v4) = prefix(index) else {
                     unreachable!()
                 };
                 let mut route = make_route_with_lp(v4, SOURCE, preference);
                 route.path_id = PATH_IDS[path];
+                let mut communities =
+                    vec![(IDENTITY_ASN << 16) | u32::try_from(injection).unwrap()];
+                if blackhole {
+                    communities.push(rustbgpd_wire::COMMUNITY_BLACKHOLE);
+                }
                 AttrSet::edit(&mut route.attributes, |attributes| {
-                    attributes.push(PathAttribute::Communities(vec![
-                        (IDENTITY_ASN << 16) | u32::try_from(injection).unwrap(),
-                    ]));
+                    attributes.push(PathAttribute::Communities(communities));
                 });
                 self.receive(vec![route], vec![]);
                 let old = self.received.insert((index, path), injection);
@@ -777,12 +827,87 @@ impl Harness {
                     .pending_group_admitted
                     .disarm_allocation_failure_for_test();
             }
+            Op::Tag {
+                prefix: index,
+                path,
+                received,
+                exclusive,
+            } => self.tag(index, path, received, exclusive),
+            Op::Resync => {
+                self.occupied.clear();
+                self.manager.distribute_changes_to_targets(
+                    &HashSet::new(),
+                    &HashSet::from([peer_v4(OBSERVER)]),
+                );
+            }
             Op::Reconnect { .. } if self.registered => self.reconnect(op),
             // A receiver whose first session is still to come has none to
             // flap.
             Op::Drain | Op::Reconnect { .. } => {}
             Op::Regroup { kind, on } => self.regroup(kind, on),
         }
+    }
+
+    /// Tag the current path at `(index, path)` with BLACKHOLE through the
+    /// receiver's export policy; a grouped receiver keeps its group policy.
+    fn tag(&mut self, index: usize, path: usize, received: bool, exclusive: bool) {
+        if self.config.grouped || !self.registered {
+            return;
+        }
+        let paths = if received {
+            &self.received
+        } else {
+            &self.local
+        };
+        let Some(&injection) = paths.get(&(index, path)) else {
+            return;
+        };
+        let tag = (index, self.injections[injection].preference);
+        if exclusive {
+            self.tags.retain(|&(tagged, _)| tagged != index);
+            self.tags.insert(tag);
+        } else if !self.tags.remove(&tag) {
+            self.tags.insert(tag);
+        }
+        let export_policy = self.export_policy();
+        let (reply, mut response) = oneshot::channel();
+        self.manager
+            .handle_update(RibUpdate::ReplacePeerExportPolicy {
+                peer: peer_v4(OBSERVER),
+                export_policy,
+                reply,
+            });
+        response.try_recv().unwrap().unwrap();
+    }
+
+    /// The receiver's export policy: peer context keeps a private receiver
+    /// out of update groups, and each tag adds BLACKHOLE to its path.
+    fn export_policy(&self) -> Option<rustbgpd_policy::PolicyChain> {
+        if self.config.grouped && !self.peer_policy {
+            return None;
+        }
+        let mut chain =
+            deny_prefixes_chain(&[Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))]);
+        let template = chain.policies[0].policy.entries[0].clone();
+        let mut private = template.clone();
+        private.prefix = None;
+        private.match_neighbor_set = Some(rustbgpd_policy::NeighborSetMatch {
+            addresses: vec![],
+            remote_asns: vec![u32::MAX],
+            peer_groups: vec![],
+        });
+        let mut entries = vec![private];
+        for &(index, local_pref) in &self.tags {
+            let mut tag = template.clone();
+            tag.prefix = Some(prefix(index));
+            tag.match_local_pref_ge = Some(local_pref);
+            tag.match_local_pref_le = Some(local_pref);
+            tag.action = rustbgpd_policy::PolicyAction::Permit;
+            tag.modifications.communities_add = vec![rustbgpd_wire::COMMUNITY_BLACKHOLE];
+            entries.push(tag);
+        }
+        chain.policies[0].policy.entries = entries;
+        Some(rustbgpd_policy::PolicyChain::from_named(chain.policies))
     }
 
     /// Only a grouped receiver has a group to leave; a private one already
@@ -804,7 +929,7 @@ impl Harness {
                 self.manager
                     .handle_update(RibUpdate::ReplacePeerExportPolicy {
                         peer: observer,
-                        export_policy: on.then(|| private_policy(None)),
+                        export_policy: self.export_policy(),
                         reply,
                     });
                 response.try_recv().unwrap().unwrap();
@@ -926,6 +1051,12 @@ impl Harness {
             );
             let key = (route.prefix, route.path_id);
             self.wire.insert(key, injection);
+            self.wire_tag.insert(
+                key,
+                route
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE),
+            );
             self.stale.remove(&key);
             self.check_send_limit()?;
             if self.per_update_i1 {
@@ -999,12 +1130,13 @@ impl Harness {
         expected
     }
 
-    /// Prefix to the exempt injections its wire rows carry.
+    /// Prefix to the injections its blackholing wire rows carry: exempt,
+    /// or carrying BLACKHOLE as sent, after export policy.
     fn exempt_rows(&self) -> BTreeMap<usize, BTreeSet<usize>> {
         let mut rows = BTreeMap::<_, BTreeSet<_>>::new();
-        for &injection in self.wire.values() {
+        for (key, &injection) in &self.wire {
             let row = &self.injections[injection];
-            if row.exempt {
+            if row.exempt || self.wire_tag.get(key).copied().unwrap_or(false) {
                 rows.entry(row.prefix).or_default().insert(injection);
             }
         }
@@ -1051,7 +1183,13 @@ impl Harness {
         self.expected()
             .values()
             .map(|&injection| &self.injections[injection])
-            .filter(|injection| injection.exempt)
+            .filter(|injection| {
+                injection.exempt
+                    || injection.blackholing
+                    || self
+                        .tags
+                        .contains(&(injection.prefix, injection.preference))
+            })
             .map(|injection| injection.prefix)
             .collect()
     }
@@ -1551,7 +1689,7 @@ fn i1_catches_an_unblackhole_between_an_envelopes_announcements() {
         assert_eq!(harness.wire.get(&(aggregate, 1)), Some(&0));
         harness.blackholed = harness.exempt_rows();
         // A live ordinary row the seeded envelope moves onto key 1.
-        let ordinary = harness.new_injection(2, 120, false);
+        let ordinary = harness.new_injection(2, 120, false, false);
         let Prefix::V4(v4) = aggregate else {
             unreachable!()
         };
@@ -1611,6 +1749,7 @@ fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
             prefix: 3,
             path: 0,
             preference: 0,
+            blackhole: false,
         },
     ];
     let delete = Op::Delete { prefix: 0, path: 0 };
@@ -1726,12 +1865,12 @@ fn i5_flags_obsolete_rtbh_rows_beyond_the_last() {
         late: false,
     });
     for path in [1, 2] {
-        let obsolete = harness.new_injection(0, 0, true);
+        let obsolete = harness.new_injection(0, 0, true, true);
         harness.injections[obsolete].live = false;
         harness.injections[obsolete].deleted = true;
         harness.wire.insert((prefix(0), path), obsolete);
     }
-    let pending = harness.new_injection(0, 1, true);
+    let pending = harness.new_injection(0, 1, true, true);
     harness.local.insert((0, 2), pending);
     assert!(harness.check_deleted_blackholes().is_err());
     harness.wire.remove(&(prefix(0), 2));
@@ -2191,6 +2330,7 @@ fn hold_rtbh_displaces_a_frozen_received_row_at_the_limit() {
         prefix: 2,
         path,
         preference: 0,
+        blackhole: false,
     };
     let setup = [receive(0), receive(1)];
     let hold = [Op::Inject {
@@ -2202,4 +2342,205 @@ fn hold_rtbh_displaces_a_frozen_received_row_at_the_limit() {
     if let Some(reason) = failure(add_path_config(), &setup, &hold) {
         panic!("{reason}");
     }
+}
+
+/// Outside a hold, one pass deletes a local RTBH path at `#1` while the
+/// received path at `#2` gains BLACKHOLE. The received path must take over
+/// `#1` in place, its old `#2` leaving, rather than keep `#2` while the
+/// withdraw phase removes `#1`, the prefix's last blackhole, before the new
+/// blackhole is announced.
+#[test]
+fn received_path_gaining_blackhole_takes_over_a_deleted_rtbh_key() {
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: true,
+        },
+        Op::Receive {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Backpressure(true),
+        Op::Delete { prefix: 2, path: 0 },
+        Op::Receive {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: true,
+        },
+        Op::Backpressure(false),
+        Op::Drain,
+    ];
+    if let Some(reason) = failure(add_path_config(), &setup, &[]) {
+        panic!("{reason}");
+    }
+}
+
+/// One pass (a dirty resync after backpressure) deletes a local RTBH path at
+/// `#1` while export policy starts tagging the local ordinary path at `#2`
+/// with BLACKHOLE: the tagged path takes over `#1` in place.
+#[test]
+fn policy_tagged_path_takes_over_a_deleted_rtbh_key() {
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: true,
+        },
+        Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Backpressure(true),
+        Op::Delete { prefix: 2, path: 0 },
+        Op::Tag {
+            prefix: 2,
+            path: 1,
+            received: false,
+            exclusive: false,
+        },
+        Op::Resync,
+    ];
+    if let Some(reason) = failure(add_path_config(), &setup, &[]) {
+        panic!("{reason}");
+    }
+}
+
+/// One export-policy replacement drops the BLACKHOLE tag of the path at
+/// `#1` and tags the path at `#2`: the newly tagged path takes over `#1` in
+/// place, so the untagged path never replaces the prefix's last blackhole
+/// first.
+#[test]
+fn policy_retag_moves_the_blackhole_key_in_place() {
+    let setup = [
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 2,
+            blackhole: false,
+        },
+        Op::Inject {
+            prefix: 2,
+            path: 1,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Tag {
+            prefix: 2,
+            path: 0,
+            received: false,
+            exclusive: false,
+        },
+        Op::Tag {
+            prefix: 2,
+            path: 1,
+            received: false,
+            exclusive: true,
+        },
+    ];
+    if let Some(reason) = failure(add_path_config(), &setup, &[]) {
+        panic!("{reason}");
+    }
+}
+
+/// One distribution window: peer P1 withdraws its BLACKHOLE path at `#1`
+/// while peer P2's path at `#2` gains BLACKHOLE. After the withdraw phase
+/// the receiver must still hold a blackhole for the prefix.
+#[test]
+fn received_blackhole_moves_between_peers_in_one_window() {
+    let (updates, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    super::distribution_window::untimed_window(&mut manager);
+    let (first, second) = (Ipv4Addr::new(192, 0, 2, 91), Ipv4Addr::new(192, 0, 2, 92));
+    let _first = connect(&mut manager, first, 64, false, false);
+    let _second = connect(&mut manager, second, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut up = super::lifecycle::test_peer_up(observer, OBSERVER_SESSION, tx);
+    if let RibUpdate::PeerUp {
+        export_policy,
+        add_path_send_families,
+        add_path_send_max,
+        sendable_families,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![FAMILY];
+        *export_policy = Some(private_policy(None));
+        *add_path_send_families = vec![FAMILY];
+        *add_path_send_max = u32::try_from(ADD_PATH_MAX).unwrap();
+    }
+    manager.handle_update(up);
+    let Prefix::V4(v4) = prefix(2) else {
+        unreachable!()
+    };
+    let path = |from: Ipv4Addr, preference: u32, blackhole: bool| {
+        let mut route = make_route_with_lp(v4, from, preference);
+        if blackhole {
+            AttrSet::edit(&mut route.attributes, |attributes| {
+                attributes.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_BLACKHOLE,
+                ]));
+            });
+        }
+        route
+    };
+    let received = |from: Ipv4Addr, announced: Vec<Route>, withdrawn| RibUpdate::RoutesReceived {
+        peer: peer_v4(from),
+        session_id: u64::from(from.octets()[3]),
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    let blackhole = |route: &Route| {
+        route
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+    };
+    let mut wire = HashMap::new();
+    manager.handle_update(received(first, vec![path(first, 200, true)], vec![]));
+    drain_route_chunks(&mut manager);
+    manager.handle_update(received(second, vec![path(second, 100, false)], vec![]));
+    drain_route_chunks(&mut manager);
+    while let Ok(update) = rx.try_recv() {
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, blackhole(route));
+        }
+    }
+    assert_eq!(wire, HashMap::from([(1, true), (2, false)]));
+    // The second update is already queued when the first settles, so the
+    // distribution window admits it and both land in one pass.
+    updates
+        .try_send(received(second, vec![path(second, 100, true)], vec![]))
+        .unwrap();
+    manager.handle_update(received(first, vec![], vec![(prefix(2), 0)]));
+    drain_route_chunks(&mut manager);
+    assert!(
+        updates.capacity() == updates.max_capacity(),
+        "the window took the queued update"
+    );
+    while let Ok(update) = rx.try_recv() {
+        for key in &update.withdraw {
+            wire.remove(&key.1);
+        }
+        assert!(
+            wire.values().any(|&blackholed| blackholed),
+            "the withdraw phase left the prefix without a blackhole: {wire:?}"
+        );
+        for route in update.announce.iter() {
+            wire.insert(route.path_id, blackhole(route));
+        }
+    }
+    assert_eq!(wire, HashMap::from([(1, true)]));
 }

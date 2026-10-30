@@ -7,4 +7,6 @@
   left a window with no blackhole for that prefix. Each Add-Path update now
   also sends its blackholing rows before any ordinary row, so a receiver
   that kept our routes across a session flap never sees an ordinary path
-  replace its RTBH path first.
+  replace its RTBH path first. A path that starts carrying BLACKHOLE (a
+  received update or export policy) in the same pass as an RTBH path is
+  deleted takes over that path's ID in place.

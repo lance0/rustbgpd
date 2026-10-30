@@ -3739,7 +3739,7 @@ impl RibManager {
 
                 let needs_as_path_string =
                     export_pol.is_some_and(PolicyChain::requires_as_path_string);
-                let mut permitted: Vec<&crate::route::Route> = Vec::new();
+                let mut permitted: Vec<(&crate::route::Route, bool)> = Vec::new();
                 let mut export_memo = distribution::ExportMemo::default();
                 for cand in &filtered {
                     if permitted.len() >= limit {
@@ -3796,7 +3796,7 @@ impl RibManager {
                     if distribution::no_advertise_export_suppressed(modified.communities()) {
                         continue;
                     }
-                    permitted.push(cand);
+                    permitted.push((*cand, distribution::blackholing(cand, &modified)));
                 }
                 // Rank picks the paths; their keys follow live staging, on
                 // an empty wire before the peer's first commit.
@@ -3809,7 +3809,7 @@ impl RibManager {
                     &mut || {},
                 )
                 .assign_all(&permitted, limit, &mut || {});
-                for (cand, key) in permitted.into_iter().zip(keys) {
+                for ((cand, _), key) in permitted.into_iter().zip(keys) {
                     if self
                         .peer_unexportable
                         .get(&peer_addr)

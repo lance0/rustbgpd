@@ -2031,3 +2031,94 @@ fn late_private_arm(size: usize) -> Work {
 fn private_late_gr_capture_work_is_linear() {
     assert_linear("private late-GR capture", &[ALL, ""], late_private_arm);
 }
+
+/// Demoting every local RTBH path of one Add-Path prefix in one pass, ranks
+/// unchanged, reclaims each path's own key from the departing pool in
+/// ascending order. Each reclaim must cost a constant number of steps, not
+/// a shift of the pool behind it.
+fn add_path_rtbh_demotion(size: usize) -> Work {
+    let count = size * ROUTES;
+    let (_tx, mut manager) = manager();
+    let target = member(3);
+    let (outbound_tx, mut receiver) = mpsc::channel(16);
+    let mut up = test_peer_up(target, 1, outbound_tx);
+    if let RibUpdate::PeerUp {
+        add_path_send_families,
+        add_path_send_max,
+        ..
+    } = &mut up
+    {
+        *add_path_send_families = vec![(Afi::Ipv4, Safi::Unicast)];
+        *add_path_send_max = u32::MAX;
+    }
+    manager.handle_update(up);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 24);
+    let route = |index: usize, blackhole: bool| {
+        let mut route = deferred_local_unicast(prefix);
+        route.path_id = u32::try_from(index).unwrap();
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.retain(|attr| !matches!(attr, PathAttribute::Communities(_)));
+            if blackhole {
+                attrs.push(PathAttribute::Communities(vec![
+                    rustbgpd_wire::COMMUNITY_BLACKHOLE,
+                ]));
+            }
+            attrs.push(PathAttribute::LocalPref(
+                1000 - u32::try_from(index).unwrap(),
+            ));
+        });
+        route
+    };
+    let mut wire = BTreeMap::new();
+    let apply = |receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
+                 wire: &mut BTreeMap<u32, bool>| {
+        let mut withdrawn = 0;
+        while let Ok(update) = receiver.try_recv() {
+            withdrawn += update.withdraw.len();
+            for key in &update.withdraw {
+                wire.remove(&key.1);
+            }
+            for route in update.announce.iter() {
+                wire.insert(
+                    route.path_id,
+                    route
+                        .communities()
+                        .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE),
+                );
+            }
+        }
+        withdrawn
+    };
+    for index in 0..count {
+        inject_deferred_unicast(&mut manager, route(index, true));
+        apply(&mut receiver, &mut wire);
+    }
+    let keys: Vec<u32> = (1..=u32::try_from(count).unwrap()).collect();
+    assert_eq!(wire.keys().copied().collect::<Vec<_>>(), keys);
+    assert!(wire.values().all(|&blackhole| blackhole));
+    // A full writer holds every demotion for one dirty resync.
+    let writer = manager.outbound_peers[&target].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    for index in 0..count {
+        inject_deferred_unicast(&mut manager, route(index, false));
+    }
+    drop(occupied);
+    let work = checkpoints_in(|| {
+        manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([target]));
+    });
+    let withdrawn = apply(&mut receiver, &mut wire);
+    assert_eq!(withdrawn, 0, "every demoted path keeps its own key");
+    assert_eq!(wire.keys().copied().collect::<Vec<_>>(), keys);
+    assert!(wire.values().all(|&blackhole| !blackhole));
+    eprintln!("add-path rtbh demotion size {size}: {work:?}");
+    work
+}
+
+#[test]
+fn add_path_rtbh_demotion_work_is_linear() {
+    assert_linear(
+        "Add-Path RTBH demotion reclaiming own keys in one pass",
+        &[ALL],
+        add_path_rtbh_demotion,
+    );
+}
