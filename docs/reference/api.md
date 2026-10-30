@@ -3421,9 +3421,10 @@ completion markers remain held. See the
 RTBH injection bypasses `selection_deferred`; other injected unicast reports
 that pending reason while its family is held. A row the peer's Adj-RIB-Out
 already held before the hold stays frozen there and reports `COMMITTED`
-until the injection changes; `ExplainAdvertisedRoute` shows that frozen row,
-with the `selection_deferred_frozen` step for a source-scoped Add-Path
-explain. Another eligible local path
+until the injection changes. `ExplainAdvertisedRoute` explains that frozen
+row in every export mode, with a `selection_deferred_frozen` step; after the
+injection changes it stops at `selection_deferred` because the peer keeps the
+admitted row until release. Another eligible local path
 can still out-select an RTBH route, and policy or admission can withhold or
 delay export. The family's End-of-RIB remains held until release selection
 is sent and all existing completion gates allow it. `MarkReplayComplete` releases

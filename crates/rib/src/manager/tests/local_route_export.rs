@@ -3529,6 +3529,23 @@ fn advertise_policy_dataset_swapped_while_a_page_evaluates_invalidates_the_page(
     assert!(query(&mut manager, v4_prefix(), 0, None, 2).is_ok());
 }
 
+fn source_less_explain(
+    manager: &mut RibManager,
+    peer: PeerId,
+    prefix: Prefix,
+) -> crate::update::ExplainAdvertisedRoute {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+        peer,
+        prefix,
+        rd: None,
+        labeled: false,
+        source: None,
+        reply,
+    });
+    response.try_recv().unwrap().unwrap()
+}
+
 fn connect_restart_waiter(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {
     let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
@@ -3616,49 +3633,35 @@ fn frozen_ordinary_injection_reads_back_committed_during_selection_deferral() {
                 (RouteExportDisposition::Pending, "selection_deferred"),
                 "{mode:?}: never admitted to the late session"
             );
-            if matches!(
-                mode,
-                DeferredUnicastMode::Single | DeferredUnicastMode::AddPath
-            ) {
-                let explanation = deferred_unicast_explain(
+            // Every mode explains the frozen row at its admitted path ID,
+            // with and without a source (Add-Path takes one).
+            let mut explanations = vec![source_less_explain(&mut manager, observer, prefix)];
+            if add_path {
+                explanations.push(deferred_unicast_explain(
                     &mut manager,
                     observer,
                     prefix,
                     mode,
                     (LOCAL_PEER, 23),
-                );
+                ));
+            }
+            for explanation in explanations {
                 assert_eq!(
                     (
                         explanation.decision,
                         explanation.already_advertised,
                         explanation.route_peer,
                         explanation.route_path_id,
+                        explanation.path_id,
                     ),
                     (
                         crate::update::ExplainDecision::Advertise,
                         true,
                         Some(LOCAL_PEER),
-                        Some(23)
+                        Some(23),
+                        outbound_path_id,
                     ),
                     "{mode:?}: explain shows the frozen row: {explanation:?}"
-                );
-            }
-            if add_path {
-                // Without a source, Add-Path explains the frozen Loc-RIB best.
-                let (reply, mut response) = oneshot::channel();
-                manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
-                    peer: observer,
-                    prefix,
-                    rd: None,
-                    labeled: false,
-                    source: None,
-                    reply,
-                });
-                let explanation = response.try_recv().unwrap().unwrap();
-                assert_eq!(
-                    (explanation.route_peer, explanation.route_path_id),
-                    (Some(LOCAL_PEER), Some(23)),
-                    "{explanation:?}"
                 );
             }
         }
@@ -3700,6 +3703,26 @@ fn frozen_ordinary_injection_reads_back_committed_during_selection_deferral() {
             (RouteExportDisposition::Pending, "selection_deferred"),
             "{mode:?}: replaced attributes are not committed"
         );
+        let explanation = source_less_explain(&mut manager, observer, prefixes[0]);
+        assert_eq!(
+            (explanation.decision, explanation.already_advertised),
+            (crate::update::ExplainDecision::NoBestRoute, false),
+            "{mode:?}: the replacement is deferred, not staged: {explanation:?}"
+        );
+        assert!(
+            explanation
+                .reasons
+                .iter()
+                .any(|reason| reason.code == "selection_deferred"),
+            "{mode:?}: {explanation:?}"
+        );
+        assert!(
+            explanation
+                .gates
+                .iter()
+                .all(|step| step.code != "staged_announce"),
+            "{mode:?}: {explanation:?}"
+        );
         assert!(
             deferred_unicast_drain(&mut observer_rx)
                 .iter()
@@ -3721,6 +3744,7 @@ fn late_session_gets_only_the_rtbh_path_beside_a_frozen_ordinary_path() {
         (DeferredUnicastMode::AddPath, false),
         (DeferredUnicastMode::Single, true),
         (DeferredUnicastMode::GroupedPerClient, true),
+        (DeferredUnicastMode::PrivatePerClient, true),
     ] {
         let mut manager = restart_unicast_manager(false);
         let observer = PeerId::from_addr(v4(4));
@@ -3770,12 +3794,45 @@ fn late_session_gets_only_the_rtbh_path_beside_a_frozen_ordinary_path() {
             (RouteExportDisposition::Pending, "selection_deferred"),
             "{mode:?}"
         );
-        if deny_local {
-            // The joiner replays the observer's group table.
-            assert!(manager.grouped_member_of(late).is_some());
+        if !deny_local {
+            continue;
+        }
+        // The RTBH sibling wins selection but this receiver's policy denies
+        // it, so the ordinary row stays frozen on the observer's wire.
+        let frozen = row(&page, observer);
+        if manager.grouped_member_of(observer).is_some() {
+            // The joiner replays the observer's group table, which no longer
+            // holds the ordinary row: readback cannot prove the frozen copy.
             assert_eq!(
                 manager.grouped_member_of(late),
                 manager.grouped_member_of(observer)
+            );
+            assert_eq!(
+                frozen.disposition,
+                RouteExportDisposition::Pending,
+                "{mode:?}: never COMMITTED without the admitted row"
+            );
+        } else {
+            assert_eq!(
+                frozen.disposition,
+                RouteExportDisposition::Committed,
+                "{mode:?}"
+            );
+            let explanation = source_less_explain(&mut manager, observer, prefix);
+            assert_eq!(
+                (
+                    explanation.decision,
+                    explanation.already_advertised,
+                    explanation.route_peer,
+                    explanation.route_path_id,
+                ),
+                (
+                    crate::update::ExplainDecision::Advertise,
+                    true,
+                    Some(LOCAL_PEER),
+                    Some(23)
+                ),
+                "{mode:?}: explain the frozen row, not the denied RTBH: {explanation:?}"
             );
         }
     }

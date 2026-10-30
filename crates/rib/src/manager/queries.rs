@@ -3005,6 +3005,33 @@ impl RibManager {
         }
         Some(view)
     }
+    /// During a hold the deferred candidate set omits a non-RTBH local row
+    /// that a peer still holds from before the hold. The source of that
+    /// frozen row: the Loc-RIB best for Add-Path, otherwise the advertised row.
+    fn frozen_local_explain_source(
+        &self,
+        prefix: Prefix,
+        add_path: bool,
+        view: Option<&AdjRibOut>,
+    ) -> Option<crate::update::RouteSourceIdentity> {
+        let view = view?;
+        let path_id = if add_path {
+            let best = self.loc_rib.get(&prefix)?;
+            (best.peer == LOCAL_PEER
+                && view
+                    .local_source_outbound_path_id(&prefix, best.path_id)
+                    .is_some())
+            .then_some(best.path_id)?
+        } else {
+            view.local_export_source(&prefix, 0)?.path_id
+        };
+        let route = self.ribs.get(&LOCAL_PEER)?.get(&prefix, path_id)?;
+        (!unicast_deferral_exempt(route)).then_some(crate::update::RouteSourceIdentity {
+            peer: LOCAL_PEER,
+            path_id,
+        })
+    }
+
     /// Explain the unicast export ladder for `(prefix, peer)`.
     ///
     /// Truthfulness mechanism: for the single-best shapes — per-peer
@@ -3081,10 +3108,26 @@ impl RibManager {
             .get(&peer)
             .map(|encoder| encoder.snapshot());
         let grouped_rib_out = self.grouped_unicast_explain_view(peer, &prefix);
+        let frozen_source = if source.is_none() && self.selection_deferred(family) {
+            self.frozen_local_explain_source(
+                prefix,
+                add_path_send_max > 0,
+                grouped_rib_out
+                    .as_ref()
+                    .or_else(|| self.adj_ribs_out.get(&peer)),
+            )
+        } else {
+            None
+        };
 
         // The RPC accepts a source only for Add-Path send; export readback
-        // also scopes a deferred local source to find its frozen row.
-        if orr_ctx.is_some() || add_path_send_max > 0 || per_client_best || source.is_some() {
+        // and a frozen row also scope the explain to one local source.
+        if orr_ctx.is_some()
+            || add_path_send_max > 0
+            || per_client_best
+            || source.is_some()
+            || frozen_source.is_some()
+        {
             let mut explanation = Self::explain_single_best_prefix(
                 &self.loc_rib,
                 &self.ribs,
@@ -3112,9 +3155,10 @@ impl RibManager {
                 self.export_policy_for(peer),
                 orr_ctx,
                 per_client_best,
-                source,
+                source.or(frozen_source),
                 snapshot.as_deref(),
             );
+            explanation.source = source;
             explanation.update_group_id = member_of.map(|gid| gid as u64);
             return self.apply_unicast_export_overlays_to_explain(peer, explanation);
         }

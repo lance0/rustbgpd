@@ -981,15 +981,10 @@ impl RibManager {
             );
             winner
         } else {
-            let Some(best) = loc_rib.get(&prefix).filter(|best| {
-                !local_only
-                    || unicast_deferral_exempt(best)
-                    || (best.peer == PeerId::LOCAL
-                        && rib_out.is_some_and(|out| {
-                            out.local_source_outbound_path_id(&prefix, best.path_id)
-                                .is_some()
-                        }))
-            }) else {
+            let Some(best) = loc_rib
+                .get(&prefix)
+                .filter(|best| !local_only || unicast_deferral_exempt(best))
+            else {
                 gate(
                     &mut explain.gates,
                     "best_route",
@@ -1517,6 +1512,24 @@ impl RibManager {
                      sync; remote acceptance is not observable"
                         .to_string(),
                 );
+            } else if frozen_path_id.is_some() {
+                // The peer keeps the admitted row; live staging cannot send
+                // this changed source until selection resumes.
+                explain.decision = ExplainDecision::NoBestRoute;
+                let message = "source changed since its frozen advertisement; the peer keeps \
+                               the admitted row until graceful-restart selection deferral ends"
+                    .to_string();
+                gate(
+                    &mut explain.gates,
+                    "adj_rib_out",
+                    "selection_deferred",
+                    Stop,
+                    message.clone(),
+                );
+                explain.reasons.push(ExplainReason {
+                    code: "selection_deferred",
+                    message,
+                });
             } else if existing.is_some() {
                 gate(
                     &mut explain.gates,
@@ -2528,20 +2541,10 @@ impl RibManager {
         let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
 
         checkpoint();
-        // Live staging withdraws a frozen non-RTBH local row and the
-        // deferral recovery filter then holds that withdrawal; an explain dry
-        // run reports the net result, the row still in the Adj-RIB-Out.
-        let explaining = matches!(target, super::ExportTarget::Explain { .. });
-        let Some(best) = loc_rib.get(prefix).filter(|best| {
-            !local_only
-                || unicast_deferral_exempt(best)
-                || (explaining
-                    && best.peer == PeerId::LOCAL
-                    && rib_out
-                        .local_export_source(prefix, 0)
-                        .map(|source| source.path_id)
-                        == Some(best.path_id))
-        }) else {
+        let Some(best) = loc_rib
+            .get(prefix)
+            .filter(|best| !local_only || unicast_deferral_exempt(best))
+        else {
             target.gate("best_route", "no_best_route", Stop, || {
                 "no best route exists for this prefix".to_string()
             });
