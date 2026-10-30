@@ -126,14 +126,18 @@ enum Op {
     RefuseProof,
     Drain,
     /// The receiver's session ends and re-establishes on a new channel and
-    /// session id, as the transport does: `PeerGracefulRestart` when the
-    /// peer was GR-capable (`graceful`), else `PeerDown`; then the staged
-    /// session context and `PeerUp`. `helper` peers retain our routes as
-    /// stale until our End-of-RIB; `writer_full` backpressures the new
-    /// channel before its initial table.
+    /// session id, as the transport does. The dying session decides what
+    /// happens to it: a clean end (`notification` false) toward a peer whose
+    /// OPEN listed GR families reaches the RIB as `PeerGracefulRestart`,
+    /// otherwise as `PeerDown`; and a peer whose OPEN carried any GR
+    /// capability keeps our routes as stale after a clean end (RFC 4724
+    /// 4.2), until our End-of-RIB on the new session. `helper` and
+    /// `gr_families` describe the new session's OPEN; `writer_full` fills
+    /// the new channel before its initial table.
     Reconnect {
-        graceful: bool,
+        notification: bool,
         helper: bool,
+        gr_families: bool,
         writer_full: bool,
     },
 }
@@ -184,10 +188,12 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
         2 => any::<bool>().prop_map(Op::Backpressure),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
-        2 => (any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
-            |(graceful, helper, writer_full)| Op::Reconnect {
-                graceful,
-                helper,
+        2 => (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+            |(notification, helper, gr_families, writer_full)| Op::Reconnect {
+                notification,
+                // Families come only inside a GR capability.
+                helper: helper || gr_families,
+                gr_families,
                 writer_full,
             }
         ),
@@ -233,8 +239,11 @@ struct Harness {
     /// Keys a GR helper retains as stale from a previous session until our
     /// End-of-RIB on the current one.
     stale: HashSet<(Prefix, u32)>,
-    /// The current session negotiated helper retention.
+    /// The current session's peer OPEN carried a GR capability: it keeps
+    /// our routes as stale when the session ends cleanly.
     helper: bool,
+    /// The current session's peer OPEN listed GR families.
+    gr_families: bool,
     /// The receiver has an established session.
     registered: bool,
 }
@@ -278,6 +287,7 @@ impl Harness {
             session: OBSERVER_SESSION,
             stale: HashSet::new(),
             helper: true,
+            gr_families: true,
             registered: false,
         };
         if !config.late {
@@ -315,7 +325,11 @@ impl Harness {
                 session_id,
                 peer_restart_state: false,
                 peer_gr_helper: self.helper,
-                peer_gr_families: vec![FAMILY],
+                peer_gr_families: if self.gr_families {
+                    vec![FAMILY]
+                } else {
+                    vec![]
+                },
                 peer_enhanced_refresh: true,
                 peer_llgr_families: vec![],
                 local_llgr_stale_time: 0,
@@ -353,9 +367,20 @@ impl Harness {
 
     /// A production session flap: the old channel and its queued updates
     /// die, a new channel and session id register.
-    fn reconnect(&mut self, graceful: bool, helper: bool, writer_full: bool) {
+    fn reconnect(&mut self, flap: &Op) {
+        let &Op::Reconnect {
+            notification,
+            helper,
+            gr_families,
+            writer_full,
+        } = flap
+        else {
+            unreachable!("only a Reconnect flaps the session")
+        };
         let observer = peer_v4(OBSERVER);
-        if graceful {
+        // `fsm.rs`: GR retention of the peer's routes needs its GR families
+        // and an end that is not a NOTIFICATION teardown.
+        if self.gr_families && !notification {
             self.manager.handle_update(RibUpdate::PeerGracefulRestart {
                 peer: observer,
                 session_id: self.session,
@@ -375,16 +400,20 @@ impl Harness {
         // The transport discards the dying session's queued updates.
         self.occupied.clear();
         while self.rx.try_recv().is_ok() {}
-        if self.helper {
-            // A GR helper keeps our routes as stale until our End-of-RIB.
+        if self.helper && !notification {
+            // RFC 4724 4.2: a peer that advertised the GR capability keeps
+            // our routes as stale after the session ends, and deletes them
+            // at our End-of-RIB on the new session.
             self.stale = self.wire.keys().copied().collect();
         } else {
-            // A session reset drops our routes: no blackhole survives it.
+            // A NOTIFICATION, or a peer without GR, drops our routes: no
+            // blackhole survives the reset.
             self.wire.clear();
             self.stale.clear();
             self.blackholed.clear();
         }
         self.helper = helper;
+        self.gr_families = gr_families;
         let (tx, rx) = mpsc::channel(4);
         self.tx = tx;
         self.rx = rx;
@@ -606,11 +635,7 @@ impl Harness {
                     .disarm_allocation_failure_for_test();
             }
             Op::Drain => {}
-            Op::Reconnect {
-                graceful,
-                helper,
-                writer_full,
-            } => self.reconnect(graceful, helper, writer_full),
+            Op::Reconnect { .. } => self.reconnect(op),
         }
     }
 
@@ -826,7 +851,13 @@ impl Harness {
 
     /// A known open defect that explains a deleted exempt row still on the
     /// wire after a drain in the hold, or `None`.
-    fn known_stale_blackhole(&self) -> Option<&'static str> {
+    fn known_stale_blackhole(&self, key: (Prefix, u32)) -> Option<&'static str> {
+        // LAN-2703: a GR helper keeps a row from the session that ended as
+        // stale until our End-of-RIB, which the hold defers to release; a
+        // row deleted before the new session re-sent it is never withdrawn.
+        if self.stale.contains(&key) {
+            return allowed("LAN-2703");
+        }
         // LAN-2701: under refused proof, a private receiver keeps a deleted
         // RTBH until release when the refused retry itself admitted it, or
         // when it holds the Add-Path key an unadmitted exempt path would take.
@@ -854,7 +885,7 @@ impl Harness {
             });
             let last_blackhole = wanted.contains(&row.prefix) && !replaced;
             prop_assert!(
-                last_blackhole || self.known_stale_blackhole().is_some(),
+                last_blackhole || self.known_stale_blackhole((prefix_key, path_id)).is_some(),
                 "I5: deleted exempt injection {injection} still on the wire at {prefix_key}#{path_id} \
                  after a drain in the hold; wire {}",
                 show(&self.wire)
@@ -1315,11 +1346,12 @@ fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
         Op::Backpressure(false),
         Op::Drain,
     ];
-    let reconnected = |helper| {
+    let reconnected = |notification| {
         vec![
             Op::Reconnect {
-                graceful: true,
-                helper,
+                notification,
+                helper: true,
+                gr_families: true,
                 writer_full: false,
             },
             Op::Drain,
@@ -1330,17 +1362,17 @@ fn deleted_rtbh_leaves_the_wire_inside_the_hold() {
     let cases = [
         ("private", config(false), plain.clone()),
         ("grouped", config(true), plain),
-        ("private, reconnected", config(false), reconnected(false)),
-        ("grouped, reconnected", config(true), reconnected(false)),
+        ("private, reset", config(false), reconnected(true)),
+        ("grouped, reset", config(true), reconnected(true)),
         (
-            "private, reconnected to a GR helper",
+            "private, flapped toward a GR helper",
             config(false),
-            reconnected(true),
+            reconnected(false),
         ),
         (
-            "grouped, reconnected to a GR helper",
+            "grouped, flapped toward a GR helper",
             config(true),
-            reconnected(true),
+            reconnected(false),
         ),
     ];
     let failed: Vec<_> = cases
