@@ -571,7 +571,7 @@ impl RibManager {
                 });
             if held && source.peer == PeerId::LOCAL {
                 frozen_path_id = rib_out
-                    .and_then(|out| out.local_source_outbound_path_id(&prefix, source.path_id));
+                    .and_then(|out| out.frozen_local_outbound_path_id(&prefix, source.path_id));
             }
             if held && frozen_path_id.is_none() {
                 let message = "source awaits graceful-restart selection deferral".to_string();
