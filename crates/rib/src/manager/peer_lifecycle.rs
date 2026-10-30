@@ -911,11 +911,13 @@ impl RibManager {
                     .entry(peer)
                     .or_insert_with(|| super::HelperStaleExempt {
                         ended: ended.clone(),
-                        keys: HashSet::new(),
+                        keys: std::collections::BTreeSet::new(),
                         settled: false,
+                        orf_blocked: Vec::new(),
                     });
             carried.ended = ended;
             carried.settled = false;
+            carried.orf_blocked.clear();
             let room = super::HELPER_STALE_EXEMPT_LIMIT.saturating_sub(carried.keys.len());
             carried.keys.extend(keys.into_iter().take(room));
         }
@@ -942,15 +944,22 @@ impl RibManager {
             .remove(&super::HoldWithdrawOwner::Peer(peer));
     }
 
-    /// Whether the prefix still has any candidate route, selected or held
-    /// back by the hold. A GR helper's stale row there may be the right
-    /// one, so the flush leaves it for our End-of-RIB.
-    fn desires_unicast_prefix(&self, prefix: Prefix) -> bool {
-        self.loc_rib.get(&prefix).is_some()
-            || self
-                .ribs
-                .values()
-                .any(|rib| rib.iter_prefix(&prefix).next().is_some())
+    /// Whether the prefix still has a candidate route this peer could be
+    /// sent, selected or held back by the hold. A GR helper's stale row
+    /// there may be the right one, so the flush leaves it for our
+    /// End-of-RIB. The peer's own routes never count: split horizon never
+    /// sends a route back to its source.
+    fn desires_unicast_prefix(&self, peer: PeerId, prefix: Prefix) -> bool {
+        self.loc_rib
+            .get(&prefix)
+            .is_some_and(|best| best.peer != peer)
+            || self.unicast_prefix_peers.peers(&prefix).any(|source| {
+                source != peer
+                    && self
+                        .ribs
+                        .get(&source)
+                        .is_some_and(|rib| rib.iter_prefix(&prefix).next().is_some())
+            })
     }
 
     /// The carried keys this peer can withdraw now: not in a family whose
@@ -985,7 +994,7 @@ impl RibManager {
     /// loses its last exempt row early; a key the peer no longer holds makes
     /// the withdrawal a no-op. End-of-RIB is never brought forward. Once
     /// the hold releases, that End-of-RIB purges the rest.
-    pub(super) fn flush_helper_stale_exempt(&mut self) {
+    pub(super) fn flush_helper_stale_exempt(&mut self, changed: &HashSet<Prefix>) {
         if self.helper_stale_exempt.is_empty() {
             return;
         }
@@ -1009,14 +1018,50 @@ impl RibManager {
             let Some(encoder) = self.peer_export_encoders.get(&peer) else {
                 continue;
             };
+            let carried = &self.helper_stale_exempt[&peer];
+            // A settled set re-checks only the keys a change can release:
+            // all of them once an ORF gate it waited on opens, else those
+            // whose prefix this pass changed.
+            let rescan = !carried.settled
+                || carried.orf_blocked.iter().any(|family| {
+                    !self
+                        .peer_orf_pending
+                        .get(&peer)
+                        .is_some_and(|gated| gated.contains(family))
+                });
+            let candidates: Vec<(Prefix, u32)> = if rescan {
+                carried.keys.iter().copied().collect()
+            } else if changed.len() < carried.keys.len() {
+                changed
+                    .iter()
+                    .flat_map(|&prefix| carried.keys.range((prefix, 0)..=(prefix, u32::MAX)))
+                    .copied()
+                    .collect()
+            } else {
+                carried
+                    .keys
+                    .iter()
+                    .filter(|(prefix, _)| changed.contains(prefix))
+                    .copied()
+                    .collect()
+            };
+            if candidates.is_empty() {
+                continue;
+            }
+            let mut orf_blocked = if rescan {
+                Vec::new()
+            } else {
+                carried.orf_blocked.clone()
+            };
             let add_path = self.peer_add_path_send_families.get(&peer);
             // Keys follow the current session's Add-Path mode: without it,
             // every path of the ended session is the prefix's one key. A key
             // the session advertises is its own now. One whose prefix still
             // has a route, or whose family an ORF gate holds, waits.
             let mut withdraw = std::collections::BTreeSet::new();
-            let mut waiting = HashSet::new();
-            for &key in &self.helper_stale_exempt[&peer].keys {
+            let mut done = Vec::new();
+            for key in candidates {
+                self.replacement_checkpoint_at("helper_stale_exempt", false);
                 let (prefix, path_id) = key;
                 let family = prefix_family(&prefix);
                 let keyed = add_path.is_some_and(|families| families.contains(&family));
@@ -1024,12 +1069,14 @@ impl RibManager {
                 if !self.selection_deferred(family)
                     || self.advertises_unicast_key(peer, prefix, path_id)
                 {
-                    continue;
-                }
-                if self.helper_stale_flushable(peer, key) && !self.desires_unicast_prefix(prefix) {
+                    done.push(key);
+                } else if !self.helper_stale_flushable(peer, key) {
+                    if !orf_blocked.contains(&family) {
+                        orf_blocked.push(family);
+                    }
+                } else if !self.desires_unicast_prefix(peer, prefix) {
                     withdraw.insert((prefix, path_id));
-                } else {
-                    waiting.insert(key);
+                    done.push(key);
                 }
             }
             let update = OutboundRouteUpdate {
@@ -1044,11 +1091,17 @@ impl RibManager {
                     Err(TrySendError::Full(_))
                 )
             {
-                if waiting.is_empty() {
+                let Some(carried) = self.helper_stale_exempt.get_mut(&peer) else {
+                    continue;
+                };
+                for key in &done {
+                    carried.keys.remove(key);
+                }
+                if carried.keys.is_empty() {
                     self.helper_stale_exempt.remove(&peer);
-                } else if let Some(carried) = self.helper_stale_exempt.get_mut(&peer) {
-                    carried.keys = waiting;
+                } else {
                     carried.settled = true;
+                    carried.orf_blocked = orf_blocked;
                 }
             }
         }
@@ -1068,10 +1121,13 @@ impl RibManager {
             })
         }) && (!self.dirty_peers.contains(&peer) || self.selection_partial_caught_up(peer))
             && !self.pending_initial_registrations.contains(&peer)
+            // The first and last keys name every family present.
             && self.helper_stale_exempt.get(&peer).is_some_and(|carried| {
                 carried
                     .keys
-                    .iter()
+                    .first()
+                    .into_iter()
+                    .chain(carried.keys.last())
                     .any(|&key| self.helper_stale_flushable(peer, key))
             })
     }

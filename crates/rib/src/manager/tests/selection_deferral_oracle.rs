@@ -1692,21 +1692,20 @@ fn stale_ordinary_row_survives_an_over_carried_rtbh_key() {
         Op::Backpressure(false),
         Op::Drain,
     ];
-    let mut failed = Vec::new();
-    for grouped in [true, false] {
-        let config = Config {
-            grouped,
-            add_path: false,
-            per_client_best: false,
-            orf: false,
-            limit: false,
-            late: false,
-        };
-        if let Some(reason) = failure(config, &setup, &hold) {
-            failed.push(format!("grouped={grouped}: {reason}"));
-        }
+    // Grouped only: behind a full writer a private Adj-RIB-Out keeps the
+    // aggregate, so the RTBH key is never carried. The private form is
+    // `private_helper_keeps_its_stale_ordinary_row_under_a_dropped_rtbh`.
+    let config = Config {
+        grouped: true,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    if let Some(reason) = failure(config, &setup, &hold) {
+        panic!("{reason}");
     }
-    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 /// A carried RTBH key whose prefix still has another route waits; once

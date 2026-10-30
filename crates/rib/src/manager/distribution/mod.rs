@@ -8048,7 +8048,7 @@ impl RibManager {
             HashMap::new(),
             None,
         );
-        self.flush_helper_stale_exempt();
+        self.flush_helper_stale_exempt(all_affected);
     }
 
     /// [`Self::distribute_changes`] for the resync tick's sliced pass, which
@@ -8078,7 +8078,7 @@ impl RibManager {
             HashMap::new(),
             None,
         );
-        self.flush_helper_stale_exempt();
+        self.flush_helper_stale_exempt(all_affected);
     }
 
     /// [`Self::distribute_changes`] restricted to `targets`: other clean
@@ -8098,7 +8098,7 @@ impl RibManager {
             HashMap::new(),
             Some(targets),
         );
-        self.flush_helper_stale_exempt();
+        self.flush_helper_stale_exempt(changed);
     }
 
     pub(super) fn distribute_changes_after_advertised_page_advance(
@@ -8114,7 +8114,7 @@ impl RibManager {
             HashMap::new(),
             None,
         );
-        self.flush_helper_stale_exempt();
+        self.flush_helper_stale_exempt(all_affected);
     }
 
     pub(in crate::manager) fn distribute_changes_with_evpn_feeds(
@@ -8130,7 +8130,7 @@ impl RibManager {
             feeds,
             None,
         );
-        self.flush_helper_stale_exempt();
+        self.flush_helper_stale_exempt(&HashSet::new());
     }
 
     /// Whether a clean member has rejection-inventory work in `scope`:

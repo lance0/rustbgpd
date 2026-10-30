@@ -1957,11 +1957,16 @@ enum HoldWithdrawOwner {
 struct HelperStaleExempt {
     /// The ended session's writer. Its withdrawals belong to a later one.
     ended: mpsc::WeakSender<OutboundRouteUpdate>,
-    keys: HashSet<(Prefix, u32)>,
+    /// Ordered so a flush can look up one prefix's keys, and so the first
+    /// and last keys name every unicast family present (IPv4 sorts first).
+    keys: BTreeSet<(Prefix, u32)>,
     /// The last flush withdrew everything it could: each remaining key waits
-    /// for a route change or an ORF gate, which runs the next flush, so the
-    /// resync timer need not.
+    /// for a route change on its prefix or for an ORF gate in `orf_blocked`,
+    /// and a later flush re-checks only those, so neither the resync timer
+    /// nor an unrelated distribution pass walks the set again.
     settled: bool,
+    /// Families whose waiting keys an ORF gate held at the last flush.
+    orf_blocked: Vec<(Afi, Safi)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3865,7 +3870,7 @@ impl RibManager {
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
         let recovered = self.drain_outbound_limit_recovery();
         self.retry_pending_inbound_refresh_bounded();
-        self.flush_helper_stale_exempt();
+        self.flush_helper_stale_exempt(&HashSet::new());
         self.retry_evpn_feed_markers_bounded();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
