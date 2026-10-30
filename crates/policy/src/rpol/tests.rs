@@ -1076,6 +1076,135 @@ test same-rt-other-encoding {
     assert!(failures[0].contains("to be removed"), "{failures:?}");
 }
 
+/// Standard communities in the RFC 1997 well-known range, by name where
+/// `.rpol` has one: `NOPEER`, `ACCEPT_OWN`, `LLGR_STALE` and `NO_LLGR`
+/// numerically, with both ends of the range (`GRACEFUL_SHUTDOWN` is
+/// `65535:0`).
+const WELL_KNOWN_FIXTURE: &str = "NO_EXPORT, NO_ADVERTISE, NO_EXPORT_SUBCONFED, BLACKHOLE, \
+     GRACEFUL_SHUTDOWN, 65535:65284, 65535:1, 65535:6, 65535:7, 65535:65535";
+
+/// `remove community *` keeps every well-known standard community, so the
+/// replace idiom `remove community *; add community X` cannot strip
+/// `NO_EXPORT`; an explicit removal, including the loop form, still strips
+/// one. Values just below the range are ordinary communities and are
+/// scrubbed.
+#[test]
+fn strip_all_keeps_well_known_communities_unless_named() {
+    use std::fmt::Write as _;
+
+    let policies = "
+policy replace { term t { remove community *; add community 65000:1; accept } }
+policy scrub { term t { remove community *; accept } }
+policy scrub-and-no-export { term t { remove community *; remove community NO_EXPORT; accept } }
+policy empty { term t { for c in route.communities { remove community c } accept } }
+";
+    let mut source = format!(
+        "{policies}
+test replace-keeps-no-export {{
+    route {{ communities [NO_EXPORT, 65000:9] }}
+    expect replace == accept with only community 65000:1, removes community 65000:9,
+        not removed community NO_EXPORT
+}}
+test explicit-removal-strips {{
+    route {{ communities [NO_EXPORT, NO_ADVERTISE, 65000:9] }}
+    expect scrub-and-no-export == accept with removes community NO_EXPORT,
+        not removed community NO_ADVERTISE, removes community *
+}}
+test loop-removes-everything {{
+    route {{ communities [NO_EXPORT, GRACEFUL_SHUTDOWN, 65000:9] }}
+    expect empty == accept with only removes community NO_EXPORT,
+        removes community GRACEFUL_SHUTDOWN, removes community 65000:9
+}}
+test edges-are-ordinary {{
+    route {{ communities [65534:65535, 0:0, {WELL_KNOWN_FIXTURE}] }}
+    expect scrub == accept with only removes community 65534:65535, removes community 0:0
+}}
+"
+    );
+    for (i, value) in WELL_KNOWN_FIXTURE.split(", ").enumerate() {
+        let _ = writeln!(
+            source,
+            "test keeps-{i} {{ route {{ communities [{value}, 65000:9] }} \
+             expect scrub == accept with only removes community *, not removed community {value} }}"
+        );
+    }
+    assert_eq!(failures_of(&source), Vec::<String>::new());
+
+    // Live evaluation and apply: the replace idiom leaves NO_EXPORT on the
+    // route, and the explicit form takes it off.
+    let ctx = route_ctx(
+        v4(10, 0, 0, 0, 24),
+        &[rustbgpd_wire::COMMUNITY_NO_EXPORT, 0xFDE8_0009],
+        RpkiValidation::NotFound,
+    );
+    let applied = |name: &str| {
+        let policy = policies
+            .lines()
+            .find(|line| line.starts_with(&format!("policy {name} ")))
+            .expect("policy source");
+        let result = compile_ok(policy).evaluate(&ctx);
+        assert_eq!(result.action, PolicyAction::Permit);
+        let mut attrs = vec![rustbgpd_wire::PathAttribute::Communities(
+            ctx.communities.to_vec(),
+        )];
+        crate::engine::apply_modifications(&mut attrs, &result.modifications);
+        attrs
+    };
+    assert_eq!(
+        applied("replace"),
+        vec![rustbgpd_wire::PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_EXPORT,
+            0xFDE8_0001
+        ])]
+    );
+    assert_eq!(applied("scrub-and-no-export"), Vec::new());
+}
+
+/// `removes community *` asserts the scrub's own contract: a fixture that
+/// carries only well-known values has nothing for it to remove, and an
+/// unasserted explicit removal of one still fails `with only`.
+#[test]
+fn removes_standard_wildcard_assertion_skips_well_known_values() {
+    let source = "
+policy scrub { term t { remove community *; accept } }
+policy scrub-and-no-export { term t { remove community *; remove community NO_EXPORT; accept } }
+test only-well-known {
+    route { communities [NO_EXPORT] }
+    expect scrub == accept with removes community *
+}
+test unasserted-explicit {
+    route { communities [NO_EXPORT, 65000:9] }
+    expect scrub-and-no-export == accept with only removes community *
+}
+";
+    let failures = failures_of(source);
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert!(
+        failures[0].starts_with("only-well-known:") && failures[0].contains("carries no community"),
+        "{failures:?}"
+    );
+    assert!(
+        failures[1].starts_with("unasserted-explicit:"),
+        "{failures:?}"
+    );
+}
+
+/// Large and extended communities have no well-known class: their strip-all
+/// forms remove values whose administrator is 65535 like any other.
+#[test]
+fn large_and_ext_strip_all_have_no_well_known_exemption() {
+    let source = "
+policy scrub { term t { remove large-community *:*:*; remove ext-community *; accept } }
+test all-gone {
+    route { large-communities [65535:65281:0, 4294967295:4294967295:4294967295, 65000:1:1];
+            ext-communities [RT:65535:65281, RT:65000:1] }
+    expect scrub == accept with only removes large-community *:*:*, removes ext-community *,
+        removes large-community 65535:65281:0, removes ext-community RT:65535:65281
+}
+";
+    assert_eq!(failures_of(source), Vec::<String>::new());
+}
+
 #[test]
 fn strip_all_and_count_syntax_is_exact() {
     for bad in [

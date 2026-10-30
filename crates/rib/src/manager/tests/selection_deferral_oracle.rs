@@ -4,7 +4,9 @@
 //! of a selection hold, exempt local RTBH and host routes, Add-Path ranks,
 //! backpressure, refused recovery proof, an Address Prefix ORF and the
 //! receiver's session flaps (a new channel and session id, with RFC 4724
-//! stale retention at a GR-capable peer). A tiny reference model
+//! stale retention at a GR-capable peer), and a grouped receiver's moves
+//! to the per-peer path through slow-peer isolation, a peer-context export
+//! policy or a conditional-advertisement attachment. A tiny reference model
 //! keeps the local and received intent; the receiver's wire is rebuilt from
 //! the updates it actually got. Every route carries a unique identity
 //! community, so a wire row names the exact injection it came from.
@@ -157,6 +159,62 @@ enum Op {
         gr_families: bool,
         writer_full: bool,
     },
+    /// Move a grouped receiver onto the per-peer path (`on`) or back,
+    /// through a production trigger. Exports are unchanged.
+    Regroup {
+        kind: RegroupKind,
+        on: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RegroupKind {
+    /// The transport's slow-peer isolation flag (`PeerSlowState`).
+    Slow,
+    /// An export policy with peer context (`ReplacePeerExportPolicy`).
+    PeerPolicy,
+    /// A conditional advertisement attached to the receiver, controlling
+    /// only a prefix outside the model.
+    Conditional,
+}
+
+/// A conditional advertisement that controls and observes only prefixes
+/// outside the model, attached to `attached` when given.
+fn unrelated_conditional(attached: Option<PeerId>) -> crate::ConditionalAdvertisementSet {
+    let policy = rustbgpd_policy::rpol::RpolFile::parse(
+        "policy unrelated { term t { if route.prefix == 192.0.2.250/32 { accept } } \
+         term rest { reject } }",
+    )
+    .expect("clean rpol")
+    .compile_policy(
+        "unrelated",
+        &[],
+        &mut rustbgpd_policy::sets::SetStore::new(),
+    )
+    .expect("policy exists");
+    let name: std::sync::Arc<str> = std::sync::Arc::from("unrelated");
+    crate::ConditionalAdvertisementSet {
+        definitions: vec![crate::ConditionalAdvertisement {
+            name: name.clone(),
+            advertise_policy: rustbgpd_policy::PolicyChain::from_named(vec![
+                rustbgpd_policy::NamedPolicy::from_rpol(
+                    "unrelated".to_string(),
+                    std::sync::Arc::new(policy),
+                ),
+            ]),
+            advertise_if: crate::ConditionalAdvertiseIf::Present,
+            condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(Prefix::V4(
+                Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 251), 32),
+            ))],
+            condition_policy: None,
+            settle_time: Duration::ZERO,
+            retiring: false,
+        }],
+        attachments: attached
+            .into_iter()
+            .map(|peer| (peer.addr().into(), vec![name.clone()]))
+            .collect(),
+    }
 }
 
 fn config_strategy() -> impl Strategy<Value = Config> {
@@ -233,6 +291,15 @@ fn hold_strategy() -> impl Strategy<Value = Op> {
         2 => any::<bool>().prop_map(Op::Backpressure),
         2 => Just(Op::RefuseProof),
         2 => Just(Op::Drain),
+        2 => (
+            prop_oneof![
+                Just(RegroupKind::Slow),
+                Just(RegroupKind::PeerPolicy),
+                Just(RegroupKind::Conditional),
+            ],
+            any::<bool>()
+        )
+            .prop_map(|(kind, on)| Op::Regroup { kind, on }),
         2 => reconnect_strategy(),
     ]
 }
@@ -292,6 +359,9 @@ struct Harness {
     awaiting_first_eor: bool,
     /// The current session has announced a unicast route.
     session_announced: bool,
+    /// The receiver's configured export policy has peer context; a new
+    /// session registers with it.
+    peer_policy: bool,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -337,6 +407,7 @@ impl Harness {
             early_eor_purge: false,
             awaiting_first_eor: false,
             session_announced: false,
+            peer_policy: false,
         };
         if !config.late {
             harness.establish();
@@ -498,7 +569,7 @@ impl Harness {
         {
             *sendable_families = vec![FAMILY];
             *per_client_best = self.config.per_client_best;
-            if !self.config.grouped {
+            if !self.config.grouped || self.peer_policy {
                 *export_policy = Some(private_policy(None));
             }
             if self.config.add_path {
@@ -710,6 +781,44 @@ impl Harness {
             // A receiver whose first session is still to come has none to
             // flap.
             Op::Drain | Op::Reconnect { .. } => {}
+            Op::Regroup { kind, on } => self.regroup(kind, on),
+        }
+    }
+
+    /// Only a grouped receiver has a group to leave; a private one already
+    /// takes the per-peer path.
+    fn regroup(&mut self, kind: RegroupKind, on: bool) {
+        if !self.config.grouped || !self.registered {
+            return;
+        }
+        let observer = peer_v4(OBSERVER);
+        match kind {
+            RegroupKind::Slow => self.manager.handle_update(RibUpdate::PeerSlowState {
+                peer: observer,
+                session_id: self.session,
+                slow: on,
+            }),
+            RegroupKind::PeerPolicy => {
+                self.peer_policy = on;
+                let (reply, mut response) = oneshot::channel();
+                self.manager
+                    .handle_update(RibUpdate::ReplacePeerExportPolicy {
+                        peer: observer,
+                        export_policy: on.then(|| private_policy(None)),
+                        reply,
+                    });
+                response.try_recv().unwrap().unwrap();
+            }
+            RegroupKind::Conditional => {
+                let (reply, mut capture) = oneshot::channel();
+                self.manager
+                    .handle_update(RibUpdate::InstallConditionalAdvertisements {
+                        set: unrelated_conditional(on.then_some(observer)),
+                        swapping_datasets: vec![],
+                        reply,
+                    });
+                capture.try_recv().unwrap();
+            }
         }
     }
 
@@ -1627,6 +1736,93 @@ fn i5_flags_obsolete_rtbh_rows_beyond_the_last() {
     assert!(harness.check_deleted_blackholes().is_err());
     harness.wire.remove(&(prefix(0), 2));
     assert!(harness.check_deleted_blackholes().is_ok());
+}
+
+/// Each `Regroup` trigger really moves a grouped receiver onto the per-peer
+/// path and back, so the op cannot pass vacuously.
+#[test]
+fn regroup_triggers_move_a_grouped_receiver() {
+    let config = Config {
+        grouped: true,
+        add_path: false,
+        per_client_best: false,
+        orf: false,
+        limit: false,
+        late: false,
+    };
+    for kind in [
+        RegroupKind::Slow,
+        RegroupKind::PeerPolicy,
+        RegroupKind::Conditional,
+    ] {
+        let mut harness = Harness::new(config);
+        let observer = peer_v4(OBSERVER);
+        assert!(harness.manager.grouped_member_of(observer).is_some());
+        harness.apply(&Op::Regroup { kind, on: true });
+        assert!(
+            harness.manager.grouped_member_of(observer).is_none(),
+            "{kind:?} on leaves the group"
+        );
+        harness.apply(&Op::Regroup { kind, on: false });
+        assert!(
+            harness.manager.grouped_member_of(observer).is_some(),
+            "{kind:?} off rejoins a group"
+        );
+    }
+}
+
+/// A grouped receiver that leaves its group while dirty still owes the
+/// withdrawal of a row deleted behind its full writer. Red proof: dropping
+/// the leaver's owed withdrawals in `recompute_update_group` fails every
+/// trigger here.
+#[test]
+fn regroup_leaver_keeps_its_owed_withdrawals() {
+    let setup = vec![
+        Op::Inject {
+            prefix: 0,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Inject {
+            prefix: 2,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+    ];
+    let mut failed = Vec::new();
+    for per_client_best in [false, true] {
+        let config = Config {
+            grouped: true,
+            add_path: false,
+            per_client_best,
+            orf: false,
+            limit: false,
+            late: false,
+        };
+        for kind in [
+            RegroupKind::Slow,
+            RegroupKind::PeerPolicy,
+            RegroupKind::Conditional,
+        ] {
+            for prefix in [0, 2] {
+                let hold = [
+                    Op::Backpressure(true),
+                    Op::Delete { prefix, path: 0 },
+                    Op::Regroup { kind, on: true },
+                    Op::Backpressure(false),
+                    Op::Drain,
+                ];
+                if let Some(reason) = failure(config, &setup, &hold) {
+                    failed.push(format!(
+                        "pcb={per_client_best} {kind:?} prefix {prefix}: {reason}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 /// I5 under refused proof: an RTBH the refused retry itself admitted, then

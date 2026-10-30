@@ -810,15 +810,27 @@ pub enum TermAction {
         global_admin: u32,
     },
     /// Scan the arrived route's communities of each listed attribute once
-    /// and stage a concrete removal for every value. `.rpol` `remove
-    /// community *`, `remove large-community *:*:*` and `remove
-    /// ext-community *`; adjacent forms share one action, so their guard is
-    /// evaluated once. Route-only, with the same bounded scan as
-    /// [`RemoveLargeCommunityAdmin`](Self::RemoveLargeCommunityAdmin).
+    /// and stage a concrete removal for every value, except that standard
+    /// communities in the RFC 1997 well-known range (`0xFFFF0000`–`0xFFFFFFFF`)
+    /// are kept. `.rpol` `remove community *`, `remove large-community
+    /// *:*:*` and `remove ext-community *`; adjacent forms share one action,
+    /// so their guard is evaluated once. Route-only, with the same bounded
+    /// scan as [`RemoveLargeCommunityAdmin`](Self::RemoveLargeCommunityAdmin).
     RemoveAllCommunities {
         /// The community attributes to clear.
         attributes: CommunityAttributes,
     },
+}
+
+/// Whether a standard community is in the well-known range reserved by
+/// RFC 1997, `0xFFFF0000`–`0xFFFFFFFF` (the IANA "BGP Well-known
+/// Communities" registry): `NO_EXPORT`, `NO_ADVERTISE`,
+/// `NO_EXPORT_SUBCONFED`, `NOPEER`, `BLACKHOLE`, `GRACEFUL_SHUTDOWN` and
+/// the rest. `remove community *` keeps these; only an explicit removal
+/// strips one.
+#[must_use]
+pub(crate) const fn is_well_known_community(value: u32) -> bool {
+    value >> 16 == 0xFFFF
 }
 
 /// A community attribute, for actions that address one as a whole.
